@@ -15,6 +15,7 @@ import os
 import tempfile
 import threading
 import time
+import unicodedata
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, Iterable, List, Optional
@@ -273,6 +274,64 @@ def _entry_hash(entry_type: str, entries: List[Dict], chunking_mode: str) -> str
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+_IDENTITY_HASH_VERSION = "raw-name-v1"
+
+
+def _entry_identity_hash(entry_type: str, entries: List[Dict], chunking_mode: str) -> str:
+    """Hash the stable identities of a refinement category.
+
+    Full entry dictionaries are deliberately unsuitable for deciding whether a
+    completed refinement must run again.  The glossary writers sort rows, drop
+    internal fields, and may harmonize translated aliases after refinement.
+    Those persistence-only changes must not turn completed API work back into
+    pending work.  Raw/source names are the durable identities: a newly added or
+    removed source term changes this hash, while a manual translation or
+    description edit does not get overwritten by another refinement run.
+    """
+
+    identities = set()
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        raw_name = unicodedata.normalize(
+            "NFC", str(entry.get("raw_name", "") or "")
+        ).strip().casefold()
+        if not raw_name:
+            # Malformed legacy rows are uncommon, but keep them distinguishable
+            # so adding/removing one still invalidates the completed category.
+            raw_name = unicodedata.normalize(
+                "NFC", str(entry.get("translated_name", "") or "")
+            ).strip().casefold()
+        identities.add(raw_name)
+
+    payload = {
+        "version": _IDENTITY_HASH_VERSION,
+        "entry_type": unicodedata.normalize("NFC", str(entry_type or "")).strip().casefold(),
+        "chunking_mode": str(chunking_mode or "").strip().casefold(),
+        "raw_names": sorted(identities),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _legacy_completed_count_matches(type_progress: Dict, entries: List[Dict], output_path: Optional[str]) -> bool:
+    """Safely migrate completed rows written before identity hashes existed."""
+
+    if not isinstance(type_progress, dict) or type_progress.get("status") != "completed":
+        return False
+    if type_progress.get("input_identity_hash") or type_progress.get("output_identity_hash"):
+        return False
+    try:
+        if int(type_progress.get("entry_count_after")) != len(entries or []):
+            return False
+    except (TypeError, ValueError):
+        return False
+
+    recorded_output = os.path.basename(str(type_progress.get("output_file") or ""))
+    requested_output = os.path.basename(str(output_path or ""))
+    return not recorded_output or not requested_output or recorded_output == requested_output
 
 
 def _atomic_replace_file(src: str, dst: str, atomic_replace_fn: Optional[Callable[[str, str], None]] = None) -> None:
@@ -697,14 +756,25 @@ def refine_glossary_entries(
         for entry_type, entries in entries_by_type.items()
         if entries
     }
+    type_identity_hashes = {
+        entry_type: _entry_identity_hash(entry_type, entries, hash_mode)
+        for entry_type, entries in entries_by_type.items()
+    }
     pending_types = []
 
     for entry_type in selected_types:
         entries = entries_by_type.get(entry_type) or []
         type_key = type_keys[entry_type]
         type_hash = type_hashes.get(entry_type) or _entry_hash(entry_type, entries, hash_mode)
+        type_identity_hash = type_identity_hashes[entry_type]
         type_progress = progress.get(type_key, {})
         if isinstance(type_progress, dict) and type_progress.get("status") == "completed":
+            completed_identity_hashes = {
+                str(type_progress.get("input_identity_hash") or ""),
+                str(type_progress.get("output_identity_hash") or ""),
+            }
+            if type_identity_hash in completed_identity_hashes:
+                continue
             # A completed type can appear in either shape on the next run:
             # the original pre-refinement input or the refined output loaded
             # back from glossary.csv/json. Accept both hashes so completed
@@ -715,6 +785,27 @@ def refine_glossary_entries(
                 str(type_progress.get("output_hash") or ""),
             }
             if type_hash in completed_hashes:
+                migration_update = {
+                    "identity_hash_version": _IDENTITY_HASH_VERSION,
+                    "input_identity_hash": type_identity_hash,
+                    "output_identity_hash": type_identity_hash,
+                }
+                update_refinement_progress(progress_file, type_key, migration_update, atomic_replace_fn=atomic_replace_fn)
+                progress[type_key] = dict(type_progress, **migration_update)
+                continue
+            if _legacy_completed_count_matches(type_progress, entries, output_path):
+                # Older versions hashed the complete dictionaries.  The saved
+                # glossary's normal sorting/field cleanup made those hashes
+                # impossible to reproduce, even when the category was unchanged.
+                # A matching completed output count is the one-time migration
+                # signal; all future runs use the stable identity hash above.
+                migration_update = {
+                    "identity_hash_version": _IDENTITY_HASH_VERSION,
+                    "input_identity_hash": type_identity_hash,
+                    "output_identity_hash": type_identity_hash,
+                }
+                update_refinement_progress(progress_file, type_key, migration_update, atomic_replace_fn=atomic_replace_fn)
+                progress[type_key] = dict(type_progress, **migration_update)
                 continue
         if not entries:
             no_entries_update = {
@@ -722,6 +813,9 @@ def refine_glossary_entries(
                 "status": "completed",
                 "input_hash": type_hash,
                 "output_hash": type_hash,
+                "identity_hash_version": _IDENTITY_HASH_VERSION,
+                "input_identity_hash": type_identity_hash,
+                "output_identity_hash": type_identity_hash,
                 "chunking_mode": canonical_mode,
                 "payload_delimiter": payload_delimiter_name,
                 "entry_count_before": 0,
@@ -738,6 +832,8 @@ def refine_glossary_entries(
             "entry_type": entry_type,
             "status": "not_refined",
             "input_hash": type_hash,
+            "identity_hash_version": _IDENTITY_HASH_VERSION,
+            "input_identity_hash": type_identity_hash,
             "chunking_mode": canonical_mode,
             "payload_delimiter": payload_delimiter_name,
             "entry_count_before": len(entries),
@@ -759,11 +855,14 @@ def refine_glossary_entries(
         e for entry_type in selected_types for e in entries_by_type.get(entry_type, [])
     ]
     broad_input_hash = _entry_hash("all selected entry types", all_selected_entries, hash_mode)
+    broad_input_identity_hash = _entry_identity_hash("all selected entry types", all_selected_entries, hash_mode)
     if send_all_types:
         broad_placeholder = {
             "entry_type": "all selected entry types",
             "status": "not_refined",
             "input_hash": broad_input_hash,
+            "identity_hash_version": _IDENTITY_HASH_VERSION,
+            "input_identity_hash": broad_input_identity_hash,
             "chunking_mode": canonical_mode,
             "payload_delimiter": payload_delimiter_name,
             "entry_count_before": len(all_selected_entries),
@@ -891,6 +990,8 @@ def refine_glossary_entries(
                 "entry_type": "all selected entry types",
                 "status": "in_progress",
                 "input_hash": broad_input_hash,
+                "identity_hash_version": _IDENTITY_HASH_VERSION,
+                "input_identity_hash": broad_input_identity_hash,
                 "chunking_mode": canonical_mode,
                 "payload_delimiter": payload_delimiter_name,
                 "entry_count_before": len(entries),
@@ -907,6 +1008,8 @@ def refine_glossary_entries(
                 "entry_type": selected_type,
                 "status": "in_progress",
                 "input_hash": type_hashes.get(selected_type) or _entry_hash(selected_type, type_entries, hash_mode),
+                "identity_hash_version": _IDENTITY_HASH_VERSION,
+                "input_identity_hash": type_identity_hashes[selected_type],
                 "chunking_mode": canonical_mode,
                 "payload_delimiter": payload_delimiter_name,
                 "entry_count_before": len(type_entries),
@@ -1284,6 +1387,9 @@ def refine_glossary_entries(
                     "status": "completed",
                     "input_hash": broad_input_hash,
                     "output_hash": _entry_hash("all selected entry types", refined_entries, hash_mode),
+                    "identity_hash_version": _IDENTITY_HASH_VERSION,
+                    "input_identity_hash": broad_input_identity_hash,
+                    "output_identity_hash": _entry_identity_hash("all selected entry types", refined_entries, hash_mode),
                     "entry_count_before": len(entries),
                     "entry_count_after": len(refined_entries),
                     "completed_chunks": total_chunks,
@@ -1307,6 +1413,9 @@ def refine_glossary_entries(
                     "status": "completed",
                     "input_hash": type_hashes.get(selected_type) or _entry_hash(selected_type, original_type_entries, hash_mode),
                     "output_hash": _entry_hash(selected_type, refined_type_entries, hash_mode),
+                    "identity_hash_version": _IDENTITY_HASH_VERSION,
+                    "input_identity_hash": type_identity_hashes[selected_type],
+                    "output_identity_hash": _entry_identity_hash(selected_type, refined_type_entries, hash_mode),
                     "entry_count_before": len(original_type_entries),
                     "entry_count_after": len(refined_type_entries),
                     "completed_chunks": per_type_total_chunks.get(selected_type, 0),

@@ -7,6 +7,45 @@ from extract_glossary_from_epub import (
     parse_api_response,
     skip_duplicate_entries,
 )
+from glossary_refinement import load_refinement_progress, refine_glossary_entries
+
+
+class _RefinementTestSplitter:
+    @staticmethod
+    def count_tokens(text):
+        return len(str(text or ""))
+
+    @staticmethod
+    def split_chapter(text, available_tokens, filename=None):
+        return [(text, 1, 1)]
+
+
+def _enable_refinement(monkeypatch):
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_ENABLED", "1")
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_TYPE_MODE", "all")
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", "separate")
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_SKIP_DEDUPE", "1")
+    monkeypatch.setenv("GLOSSARY_CUSTOM_FIELDS", json.dumps(["description"]))
+
+
+def _run_test_refinement(entries, progress_file, parsed_entries, send_fn):
+    return refine_glossary_entries(
+        entries,
+        client=None,
+        temp=0.1,
+        mtoks=4096,
+        check_stop=lambda: False,
+        chapter_splitter=_RefinementTestSplitter(),
+        available_tokens=100000,
+        chunk_timeout=None,
+        parse_response_fn=lambda _response: [dict(entry) for entry in parsed_entries],
+        dedupe_fn=lambda value: value,
+        custom_entry_types_fn=lambda: {"character": {"enabled": True}},
+        send_fn=send_fn,
+        progress_file=str(progress_file),
+        output_path=str(progress_file.parent / "glossary.csv"),
+        log=lambda _message: None,
+    )
 
 
 def _set_glossary_env(monkeypatch):
@@ -90,6 +129,118 @@ def test_dedup_keeps_later_description_when_description_is_active(monkeypatch):
 
     assert len(result) == 1
     assert result[0]["description"] == "A device created by Damian."
+
+
+def test_completed_refinement_uses_stable_identities_and_only_reopens_for_new_entries(
+    tmp_path,
+    monkeypatch,
+):
+    _enable_refinement(monkeypatch)
+    progress_file = tmp_path / "glossary_progress.json"
+    calls = []
+    parsed_entries = [
+        {
+            "type": "character",
+            "raw_name": "Alice",
+            "translated_name": "Alicia",
+            "description": "Refined description",
+        },
+        {
+            "type": "character",
+            "raw_name": "Bob",
+            "translated_name": "Robert",
+        },
+    ]
+
+    def send_fn(*_args, **_kwargs):
+        calls.append("sent")
+        return "ignored", "stop", None
+
+    initial = [
+        {"type": "character", "raw_name": "Alice", "translated_name": "Alice"},
+        {"type": "character", "raw_name": "Bob", "translated_name": "Bob"},
+    ]
+    _run_test_refinement(initial, progress_file, parsed_entries, send_fn)
+    assert calls == ["sent"]
+
+    # Simulate the normal save/reload path: reordered rows, changed translated
+    # fields, and persistence-only internal metadata.  This used to invalidate
+    # the completed full-dictionary hash and resend the entire category.
+    persisted_shape = [
+        {
+            "translated_name": "Robert",
+            "raw_name": "Bob",
+            "type": "character",
+            "description": "Manually edited",
+        },
+        {
+            "type": "character",
+            "raw_name": "Alice",
+            "translated_name": "Alicia",
+            "_gender_tracker_source": "save-only metadata",
+        },
+    ]
+    skipped = _run_test_refinement(persisted_shape, progress_file, parsed_entries, send_fn)
+
+    assert calls == ["sent"]
+    assert skipped == persisted_shape
+
+    # A genuinely new raw/source entry changes the identity set and reopens
+    # only this category for refinement.
+    parsed_entries.append(
+        {"type": "character", "raw_name": "Carol", "translated_name": "Carol"}
+    )
+    _run_test_refinement(
+        persisted_shape
+        + [{"type": "character", "raw_name": "Carol", "translated_name": "Carol"}],
+        progress_file,
+        parsed_entries,
+        send_fn,
+    )
+
+    assert calls == ["sent", "sent"]
+    completed = load_refinement_progress(str(progress_file))["type::character"]
+    assert completed["status"] == "completed"
+    assert completed["identity_hash_version"] == "raw-name-v1"
+    assert completed["input_identity_hash"]
+    assert completed["output_identity_hash"]
+
+
+def test_legacy_completed_refinement_is_migrated_without_resending(tmp_path, monkeypatch):
+    _enable_refinement(monkeypatch)
+    progress_file = tmp_path / "glossary_progress.json"
+    progress_file.write_text(
+        json.dumps(
+            {
+                "refinement": {
+                    "type::character": {
+                        "entry_type": "character",
+                        "status": "completed",
+                        "input_hash": "old-full-dictionary-input-hash",
+                        "output_hash": "old-full-dictionary-output-hash",
+                        "entry_count_after": 2,
+                        "output_file": "glossary.csv",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    entries = [
+        {"type": "character", "raw_name": "Alice", "translated_name": "Alicia"},
+        {"type": "character", "raw_name": "Bob", "translated_name": "Robert"},
+    ]
+
+    def unexpected_send(*_args, **_kwargs):
+        raise AssertionError("completed legacy refinement was resent")
+
+    result = _run_test_refinement(entries, progress_file, entries, unexpected_send)
+
+    assert result == entries
+    migrated = load_refinement_progress(str(progress_file))["type::character"]
+    assert migrated["status"] == "completed"
+    assert migrated["identity_hash_version"] == "raw-name-v1"
+    assert migrated["input_identity_hash"] == migrated["output_identity_hash"]
 
 
 def test_glossary_extracts_only_dialogue_from_nested_subtitle_zip(tmp_path):
