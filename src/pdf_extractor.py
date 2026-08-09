@@ -14,6 +14,7 @@ import subprocess
 import shutil
 import glob
 import html as html_module
+import hashlib
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 
@@ -499,6 +500,16 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str) -> Dict[int, List[Di
     - 'width': Image width
     - 'height': Image height
     """
+    # Use the modern one-scan, content-addressed extractor.  Keeping the
+    # original implementation below gives frozen/partial installations a
+    # conservative fallback if the new module cannot be imported.
+    try:
+        from pdf_fast_extractor import extract_pdf_images_deduplicated
+
+        return extract_pdf_images_deduplicated(pdf_path, output_dir)
+    except ImportError:
+        pass
+
     try:
         import fitz
         
@@ -1095,6 +1106,16 @@ def build_pdf_toc_section_plan(toc_entries, total_pages: int) -> List[Dict]:
     for section_num, section in enumerate(plan, start=1):
         section["num"] = section_num
         section["page_count"] = section["end_page"] - section["start_page"] + 1
+        stable_source = "\0".join(
+            [
+                " ".join(str(section.get("title") or "").casefold().split()),
+                str(section["start_page"]),
+                str(section["end_page"]),
+            ]
+        )
+        section["section_id"] = hashlib.sha256(
+            stable_source.encode("utf-8")
+        ).hexdigest()[:20]
     return plan
 
 
@@ -1558,7 +1579,24 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
         print(f"📄 Extracting PDF with formatting: {os.path.basename(pdf_path)}")
         
         # Determine render mode early
-        render_mode = os.getenv("PDF_RENDER_MODE", "absolute").lower()  # pdf2htmlex | absolute | xhtml | html | semantic | image
+        render_mode = os.getenv("PDF_RENDER_MODE", "fast_semantic").lower()
+
+        # Keep the modern implementation isolated from this legacy function.
+        # This makes the old XHTML route an actual fallback instead of mixing
+        # old and new behavior inside the same extraction loop.
+        if render_mode in ("fast_semantic", "fast_layout"):
+            from pdf_fast_extractor import extract_pdf_fast
+
+            return extract_pdf_fast(
+                pdf_path,
+                output_dir,
+                mode=render_mode,
+                extract_images=extract_images,
+                page_by_page=page_by_page,
+            )
+
+        if render_mode in ("legacy_layout", "legacy_xhtml"):
+            render_mode = "xhtml"
 
         # Extract embedded images – strategy depends on render mode:
         # - absolute/semantic: need actual image files on disk → full extraction

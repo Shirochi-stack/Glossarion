@@ -29,7 +29,7 @@ class TextFileProcessor:
         self.chapter_splitter = ChapterSplitter(model_name=model_name)
         
         # Check settings for PDFs
-        self.pdf_render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()  # absolute, semantic, xhtml, html
+        self.pdf_render_mode = os.getenv("PDF_RENDER_MODE", "fast_semantic").lower()
         self.pdf_extract_images = os.getenv("PDF_EXTRACT_IMAGES", "1") == "1"
         self.pdf_generate_css = os.getenv("PDF_GENERATE_CSS", "1") == "1"
         self.pdf_use_toc_sections = os.getenv("PDF_USE_TOC_SECTIONS", "1") == "1"
@@ -159,6 +159,8 @@ class TextFileProcessor:
                     'pdf_toc_level': section.get('level'),
                     'pdf_start_page': section.get('start_page'),
                     'pdf_end_page': section.get('end_page'),
+                    'pdf_section_id': section.get('section_id'),
+                    'pdf_section_title': section.get('title'),
                     'allow_token_splitting': is_toc_section,
                 })
         else:
@@ -295,8 +297,8 @@ class TextFileProcessor:
                         # Wrap HTML chunks with full document structure
                         content_to_write = chunk_content
                         if file_ext == '.html':
-                            _render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()
-                            if (_render_mode in ("xhtml", "html", "pdf2htmlex", "absolute") and self.file_path.lower().endswith('.pdf')):
+                            _render_mode = os.getenv("PDF_RENDER_MODE", "fast_semantic").lower()
+                            if (_render_mode in ("fast_semantic", "fast_layout", "legacy_layout", "xhtml", "html", "pdf2htmlex", "absolute") and self.file_path.lower().endswith('.pdf')):
                                 # Write the MuPDF page HTML as-is to preserve layout/styles
                                 content_to_write = chunk_content
                             else:
@@ -337,6 +339,7 @@ class TextFileProcessor:
                     for key in (
                         'pdf_toc_section', 'pdf_toc_level',
                         'pdf_start_page', 'pdf_end_page',
+                        'pdf_section_id', 'pdf_section_title',
                     ):
                         if chapter_data.get(key) is not None:
                             chunk_dict[key] = chapter_data[key]
@@ -360,8 +363,8 @@ class TextFileProcessor:
                     # Wrap HTML files with full document structure
                     content_to_write = chapter_content
                     if file_ext == '.html':
-                        _render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()
-                        if (_render_mode in ("xhtml", "html", "pdf2htmlex", "absolute") and self.file_path.lower().endswith('.pdf')):
+                        _render_mode = os.getenv("PDF_RENDER_MODE", "fast_semantic").lower()
+                        if (_render_mode in ("fast_semantic", "fast_layout", "legacy_layout", "xhtml", "html", "pdf2htmlex", "absolute") and self.file_path.lower().endswith('.pdf')):
                             # Write MuPDF page HTML as-is to preserve layout/styles
                             content_to_write = chapter_content
                         else:
@@ -396,6 +399,7 @@ class TextFileProcessor:
                 for key in (
                     'pdf_toc_section', 'pdf_toc_level',
                     'pdf_start_page', 'pdf_end_page',
+                    'pdf_section_id', 'pdf_section_title',
                 ):
                     if chapter_data.get(key) is not None:
                         chapter_dict[key] = chapter_data[key]

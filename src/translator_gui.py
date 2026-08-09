@@ -13150,10 +13150,10 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self._modules_loaded = self._modules_loading = False
         self.stop_requested = False
-        self.translation_thread = self.glossary_thread = self.qa_thread = self.epub_thread = None
+        self.translation_thread = self.glossary_thread = self.qa_thread = self.epub_thread = self.pdf_thread = None
         self.qa_thread = None
         # Futures for executor-based tasks
-        self.translation_future = self.glossary_future = self.qa_future = self.epub_future = None
+        self.translation_future = self.glossary_future = self.qa_future = self.epub_future = self.pdf_future = None
         # Shared executor for background tasks
         self.executor = None
         self._executor_workers = None
@@ -13859,7 +13859,18 @@ Text to analyze:
         
         # PDF settings
         self.pdf_output_format_var = self.config.get('pdf_output_format', 'pdf')
-        self.pdf_render_mode_var = self.config.get('pdf_render_mode', 'xhtml')
+        _stored_pdf_render_mode = self.config.get('pdf_render_mode', 'fast_semantic')
+        if (
+            str(_stored_pdf_render_mode).lower() in ('xhtml', 'html')
+            and not self.config.get('pdf_fast_engine_migrated', False)
+        ):
+            # XHTML was the historical default. Migrate it once so existing
+            # installations receive the new default while preserving an
+            # explicit Legacy Layout choice made afterward.
+            _stored_pdf_render_mode = 'fast_semantic'
+            self.config['pdf_render_mode'] = 'fast_semantic'
+            self.config['pdf_fast_engine_migrated'] = True
+        self.pdf_render_mode_var = _stored_pdf_render_mode
         self.pdf_use_toc_sections_var = self.config.get('pdf_use_toc_sections', True)
         self.pdf_async_page_threshold_var = str(self.config.get('pdf_async_page_threshold', '100'))
         
@@ -24565,12 +24576,17 @@ Recent translations to summarize:
         base_name = os.path.splitext(os.path.basename(input_file))[0]
         override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
         if override_dir:
-            return os.path.join(os.path.abspath(override_dir), base_name)
-        relative_output = base_name
-        helper_output = os.path.join(self._get_output_base_dir(input_file), base_name)
-        if os.path.exists(relative_output) or not os.path.exists(helper_output):
-            return relative_output
-        return helper_output
+            default_output = os.path.join(os.path.abspath(override_dir), base_name)
+        else:
+            relative_output = base_name
+            helper_output = os.path.join(self._get_output_base_dir(input_file), base_name)
+            default_output = (
+                relative_output
+                if os.path.exists(relative_output) or not os.path.exists(helper_output)
+                else helper_output
+            )
+        from output_workspace import resolve_source_aware_workspace
+        return resolve_source_aware_workspace(input_file, default_output)
 
     def _resolve_open_output_folder_for_file(self, file_path: str) -> str:
         """Return the output folder path used by the Open Output Folder button."""
@@ -31849,11 +31865,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.append_log("❌ Error: Please enter your API key.")
                 return False
 
-            # Determine output directory and save source EPUB path
-            if file_path.lower().endswith('.epub'):
+            # ``source_epub.txt`` is the legacy source pointer used by all
+            # EPUB/PDF/TXT workspaces. Persist it before translation so a
+            # same-named input of another format is routed to ``_<FORMAT>``.
+            from output_workspace import (
+                resolve_source_aware_workspace,
+                source_format_label,
+                write_workspace_source_reference,
+            )
+            source_format = source_format_label(file_path)
+            output_dir = None
+            if source_format:
                 base_name = os.path.splitext(os.path.basename(file_path))[0]
-                
-                # Check for output directory override
                 metadata_roots = (
                     getattr(self, '_metadata_output_roots', {}) or {}
                     if getattr(self, '_metadata_only_run', False)
@@ -31862,35 +31885,25 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 metadata_root = metadata_roots.get(
                     os.path.normcase(os.path.abspath(file_path))
                 )
-                override_dir = (
-                    metadata_root
-                    or os.environ.get('OUTPUT_DIRECTORY')
-                    or self.config.get('output_directory')
-                )
-                if override_dir:
-                    # If absolute, use as is. If relative, join with CWD (or file dir?)
-                    # TransateKRtoEN treats it as root, so we should too.
-                    # It creates a subdir 'base_name' inside it if it's a root.
-                    # Wait, TransateKRtoEN logic: out = os.path.join(output_root, file_base)
-                    
-                    # So here we should expect the same:
-                    output_dir = os.path.join(override_dir, base_name)
+                if metadata_root:
+                    output_dir = resolve_source_aware_workspace(
+                        file_path, os.path.join(metadata_root, base_name)
+                    )
                 else:
-                    output_dir = base_name  # Relative to CWD (default)
-                
-                # Save source EPUB path for EPUB converter
-                source_epub_file = os.path.join(output_dir, 'source_epub.txt')
+                    output_dir = self._resolve_translation_output_dir(file_path)
                 try:
-                    os.makedirs(output_dir, exist_ok=True)  # Ensure output dir exists
-                    with open(source_epub_file, 'w', encoding='utf-8') as f:
-                        f.write(file_path)
-                    self.append_log(f"📚 Saved source EPUB reference for chapter ordering")
+                    write_workspace_source_reference(output_dir, file_path)
+                    self.append_log(
+                        f"📚 Saved {source_format} source reference in "
+                        f"{os.path.basename(os.path.normpath(output_dir))}"
+                    )
                 except Exception as e:
-                    self.append_log(f"⚠️ Could not save source EPUB reference: {e}")
-                
+                    self.append_log(f"⚠️ Could not save source reference: {e}")
+
+            if file_path.lower().endswith('.epub'):
                 # Set EPUB_PATH in environment for immediate use
                 os.environ['EPUB_PATH'] = file_path
-                
+
                 # Rename existing output files to match current retain-source-extension toggle
                 # This must run before translation starts so the progress tracker sees correct filenames
                 try:
@@ -33025,7 +33038,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'PDF_PAGE_NUMBERS': '1' if self.config.get('pdf_page_numbers', True) else '0',
             'PDF_PAGE_NUMBER_ALIGNMENT': self.config.get('pdf_page_number_alignment', 'center'),
             'PDF_OUTPUT_FORMAT': self.pdf_output_format_var if hasattr(self, 'pdf_output_format_var') else 'pdf',
-            'PDF_RENDER_MODE': self.pdf_render_mode_var if hasattr(self, 'pdf_render_mode_var') else 'xhtml',
+            'PDF_RENDER_MODE': self.pdf_render_mode_var if hasattr(self, 'pdf_render_mode_var') else 'fast_semantic',
             'PDF_USE_TOC_SECTIONS': '1' if getattr(self, 'pdf_use_toc_sections_var', True) else '0',
             'PDF_ASYNC_PAGE_THRESHOLD': str(self.pdf_async_page_threshold_var) if hasattr(self, 'pdf_async_page_threshold_var') else '100',
             'PDF_RENDER_BATCH_SIZE': str(self.config.get('pdf_render_batch_size', 50)),
@@ -34809,6 +34822,72 @@ Important rules:
             self.append_log(f"❌ Error extracting glossary from {os.path.basename(file_path)}: {e}")
             return False
         
+    def pdf_converter(self, folder=None):
+       """Compile translated response files in a PDF workspace off the UI thread."""
+       if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
+           self.append_log("⚠️ Cannot compile PDF while translation is in progress.")
+           QMessageBox.warning(self, "Process Running", "Please wait for translation to complete before compiling the PDF.")
+           return
+       if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
+           self.append_log("⚠️ Cannot compile PDF while glossary extraction is in progress.")
+           QMessageBox.warning(self, "Process Running", "Please wait for glossary extraction to complete before compiling the PDF.")
+           return
+       epub_future = getattr(self, 'epub_future', None)
+       epub_thread = getattr(self, 'epub_thread', None)
+       if ((epub_future is not None and not epub_future.done())
+               or (epub_thread is not None and epub_thread.is_alive())):
+           QMessageBox.warning(self, "Process Running", "Please wait for EPUB compilation to complete.")
+           return
+       pdf_future = getattr(self, 'pdf_future', None)
+       pdf_thread = getattr(self, 'pdf_thread', None)
+       if ((pdf_future is not None and not pdf_future.done())
+               or (pdf_thread is not None and pdf_thread.is_alive())):
+           self.append_log("ℹ️ PDF compilation is already running.")
+           return
+       if not (isinstance(folder, str) and folder and os.path.isdir(folder)):
+           folder = QFileDialog.getExistingDirectory(
+               self, "Select PDF translation output folder")
+           if not folder:
+               return
+
+       self.pdf_folder = folder
+       self.stop_requested = False
+       self.append_log(f"📄 Compiling PDF from: {folder}")
+       self._ensure_executor()
+       if self.executor:
+           self.pdf_future = self.executor.submit(self.run_pdf_converter_direct)
+       else:
+           self.pdf_thread = threading.Thread(
+               target=self.run_pdf_converter_direct, daemon=True)
+           self.pdf_thread.start()
+       self.update_run_button()
+
+    def run_pdf_converter_direct(self):
+        """Run workspace PDF compilation without blocking the Library."""
+        try:
+            from pdf_workspace_compiler import compile_pdf_workspace
+
+            compiled_path = compile_pdf_workspace(
+                self.pdf_folder, log_callback=self.append_log)
+            if compiled_path and os.path.isfile(compiled_path):
+                QTimer.singleShot(
+                    0,
+                    lambda p=compiled_path: QMessageBox.information(
+                        self, "PDF Compilation Success", f"Created: {p}"),
+                )
+        except Exception as exc:
+            self.append_log(f"❌ PDF Compiler error: {exc}")
+            QTimer.singleShot(
+                0,
+                lambda message=str(exc): QMessageBox.critical(
+                    self, "PDF Compilation Failed", f"Error: {message}"),
+            )
+        finally:
+            self.pdf_thread = None
+            self.pdf_future = None
+            self.stop_requested = False
+            self.thread_complete_signal.emit()
+
     def epub_converter(self, folder=None):
        """Start EPUB converter in a separate thread.
 
@@ -35181,7 +35260,11 @@ Important rules:
            (hasattr(self, 'epub_thread') and self.epub_thread and self.epub_thread.is_alive()) or
            (hasattr(self, 'epub_future') and self.epub_future and not self.epub_future.done())
        )
-       return translation_running or glossary_running or qa_running or epub_running
+       pdf_running = (
+           (hasattr(self, 'pdf_thread') and self.pdf_thread and self.pdf_thread.is_alive()) or
+           (hasattr(self, 'pdf_future') and self.pdf_future and not self.pdf_future.done())
+       )
+       return translation_running or glossary_running or qa_running or epub_running or pdf_running
 
     def update_run_button(self):
        """Switch Run↔Stop depending on whether a process is active."""
@@ -43274,7 +43357,7 @@ Important rules:
                 
                 # PDF settings
                 ('pdf_output_format', ['pdf_output_format_var'], 'pdf', str),
-                ('pdf_render_mode', ['pdf_render_mode_var'], 'xhtml', str),
+                ('pdf_render_mode', ['pdf_render_mode_var'], 'fast_semantic', str),
                 ('pdf_use_toc_sections', ['pdf_use_toc_sections_var'], True, bool),
                 ('pdf_async_page_threshold', ['pdf_async_page_threshold_var'], '100', str),
             ]
@@ -44632,6 +44715,7 @@ Important rules:
                 getattr(self, 'translation_future', None) and not self.translation_future.done(),
                 getattr(self, 'glossary_future', None) and not self.glossary_future.done(),
                 getattr(self, 'epub_future', None) and not self.epub_future.done(),
+                getattr(self, 'pdf_future', None) and not self.pdf_future.done(),
                 getattr(self, 'qa_future', None) and not self.qa_future.done(),
             ])
             if getattr(self, 'executor', None) and active:

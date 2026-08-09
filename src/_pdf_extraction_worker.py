@@ -12,7 +12,7 @@ Config JSON:
     {
         "pdf_path": "/path/to/file.pdf",
         "output_dir": "/path/to/output",
-        "render_mode": "xhtml",
+        "render_mode": "fast_semantic",
         "use_toc_sections": true,
         "extract_images": true,
         "generate_css": true,
@@ -99,7 +99,7 @@ def _run_pdf_extraction_inner(config_path):
 
     pdf_path = config.get("pdf_path", "")
     output_dir = config.get("output_dir", "")
-    render_mode = config.get("render_mode", "xhtml").lower()
+    render_mode = config.get("render_mode", "fast_semantic").lower()
     extract_images = config.get("extract_images", True)
     generate_css = config.get("generate_css", True)
     html2text_enabled = config.get("html2text", False)

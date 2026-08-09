@@ -3250,7 +3250,15 @@ class FileUtilities:
         if chapter.get("pdf_toc_section"):
             if actual_num is None:
                 actual_num = chapter.get("actual_chapter_num", chapter.get("num", 0))
-            if isinstance(actual_num, float):
+            section_id = str(chapter.get("pdf_section_id") or "").strip()
+            if section_id:
+                section_stem = f"pdf_section_{section_id}"
+                if chapter.get("is_chunk"):
+                    chunk_info = chapter.get("chunk_info") or {}
+                    chunk_index = chunk_info.get("chunk_idx")
+                    if chunk_index is not None:
+                        section_stem = f"{section_stem}_{chunk_index}"
+            elif isinstance(actual_num, float):
                 major = int(actual_num)
                 minor = int(round((actual_num - major) * 10))
                 section_stem = f"pdf_section_{major}_{minor}"
@@ -3957,6 +3965,14 @@ class ProgressManager:
                 "subtitle_source_batch_num", actual_num
             )
             return f"subtitle:{progress_name or 'subtitle'}:{local_batch}"
+
+        if chapter_obj and chapter_obj.get("pdf_toc_section"):
+            section_id = str(chapter_obj.get("pdf_section_id") or "").strip()
+            if section_id:
+                stable_key = f"pdf:{section_id}"
+                if chapter_obj.get("is_chunk"):
+                    stable_key = f"{stable_key}:{actual_num}"
+                return stable_key
 
         spine_pos = None
         if chapter_obj:
@@ -4715,9 +4731,12 @@ class ProgressManager:
                 chapter_info['title'] = chapter_info['pdf_toc_title']
                 for pdf_key in (
                     'pdf_toc_level', 'pdf_start_page', 'pdf_end_page',
+                    'pdf_section_id', 'pdf_section_title',
                 ):
                     if chapter_obj.get(pdf_key) is not None:
                         chapter_info[pdf_key] = chapter_obj[pdf_key]
+                if chapter_obj.get('pdf_section_id'):
+                    chapter_info['pdf_progress_key'] = chapter_key
             if chapter_obj.get("subtitle_batch"):
                 chapter_info["subtitle_progress_key"] = chapter_key
                 subtitle_source = (
@@ -5236,9 +5255,12 @@ class ProgressManager:
             merged_info['title'] = merged_info['pdf_toc_title']
             for pdf_key in (
                 'pdf_toc_level', 'pdf_start_page', 'pdf_end_page',
+                'pdf_section_id', 'pdf_section_title',
             ):
                 if chapter_obj.get(pdf_key) is not None:
                     merged_info[pdf_key] = chapter_obj[pdf_key]
+            if chapter_obj.get('pdf_section_id'):
+                merged_info['pdf_progress_key'] = chapter_key
         
         self.prog["chapters"][chapter_key] = merged_info
     
@@ -5635,6 +5657,7 @@ class ProgressManager:
         expected_numbers = set()
         expected_hashes_by_output = {}
         expected_hashes_by_number = {}
+        expected_pdf_sections = {}
         for chapter in chapters or []:
             try:
                 actual_num = (
@@ -5658,6 +5681,16 @@ class ProgressManager:
                 expected_hashes_by_output.setdefault(normalized_output, set()).add(
                     str(chapter.get("content_hash") or "")
                 )
+            section_id = str(chapter.get("pdf_section_id") or "").strip()
+            if chapter.get("pdf_toc_section") and section_id:
+                expected_pdf_sections[section_id] = {
+                    "actual_num": actual_num,
+                    "content_hash": str(chapter.get("content_hash") or ""),
+                    "pdf_toc_level": chapter.get("pdf_toc_level"),
+                    "pdf_start_page": chapter.get("pdf_start_page"),
+                    "pdf_end_page": chapter.get("pdf_end_page"),
+                    "pdf_section_title": chapter.get("pdf_section_title") or chapter.get("title"),
+                }
 
         removed = 0
         removed_number_keys = set()
@@ -5672,11 +5705,16 @@ class ProgressManager:
             number_key = str(actual_num) if actual_num is not None else ""
             number_matches = bool(number_key and number_key in expected_numbers)
             output_matches = bool(normalized_output and normalized_output in expected_outputs)
+            entry_section_id = str(entry.get("pdf_section_id") or "").strip()
+            current_section = expected_pdf_sections.get(entry_section_id)
+            stable_section_matches = bool(current_section)
             expected_hashes = set()
             if number_matches:
                 expected_hashes.update(expected_hashes_by_number.get(number_key, set()))
             if output_matches:
                 expected_hashes.update(expected_hashes_by_output.get(normalized_output, set()))
+            if current_section and current_section.get("content_hash"):
+                expected_hashes.add(current_section["content_hash"])
             expected_hashes.discard("")
             stored_hash = str(entry.get("content_hash") or "")
             hash_matches = (
@@ -5684,7 +5722,18 @@ class ProgressManager:
                 or not expected_hashes
                 or stored_hash in expected_hashes
             )
-            if (not number_matches and not output_matches) or not hash_matches:
+            if stable_section_matches and hash_matches:
+                entry["actual_num"] = current_section.get("actual_num")
+                entry["chapter_num"] = current_section.get("actual_num")
+                for pdf_key in (
+                    "pdf_toc_level", "pdf_start_page", "pdf_end_page",
+                    "pdf_section_title",
+                ):
+                    if current_section.get(pdf_key) is not None:
+                        entry[pdf_key] = current_section[pdf_key]
+                entry["pdf_progress_key"] = f"pdf:{entry_section_id}"
+                continue
+            if (not number_matches and not output_matches and not stable_section_matches) or not hash_matches:
                 progress_chapters.pop(progress_key, None)
                 removed += 1
                 if number_key:
@@ -5737,8 +5786,13 @@ class ProgressManager:
             subtitle_progress_key = chapter_info.get(
                 "subtitle_progress_key"
             )
+            pdf_progress_key = chapter_info.get("pdf_progress_key")
+            if not pdf_progress_key and chapter_info.get("pdf_section_id"):
+                pdf_progress_key = f"pdf:{chapter_info['pdf_section_id']}"
             norm = (
-                subtitle_progress_key
+                pdf_progress_key
+                if pdf_progress_key
+                else subtitle_progress_key
                 if subtitle_progress_key
                 else old_key if is_metadata else _normalize_out(out)
             )
@@ -5769,7 +5823,11 @@ class ProgressManager:
             actual_num = chapter_info.get("actual_num")
             key_candidate = None
             # Prefer numeric key when available
-            if chapter_info.get("subtitle_progress_key"):
+            if chapter_info.get("pdf_progress_key"):
+                key_candidate = str(chapter_info["pdf_progress_key"])
+            elif chapter_info.get("pdf_section_id"):
+                key_candidate = f"pdf:{chapter_info['pdf_section_id']}"
+            elif chapter_info.get("subtitle_progress_key"):
                 key_candidate = str(chapter_info["subtitle_progress_key"])
             elif chapter_info.get("special_type") == "metadata":
                 key_candidate = chapter_info.get("metadata_progress_key") or norm
@@ -14370,6 +14428,21 @@ def prepare_pdf_images_for_vision_ocr(input_path, output_dir, check_stop_fn=None
     os.makedirs(images_dir, exist_ok=True)
     image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 
+    # Reuse the exact content-addressed assets produced by either fast PDF
+    # mode.  This avoids a second full document image pass on repeat runs.
+    try:
+        from pdf_fast_extractor import cached_pdf_image_paths
+
+        cached_fast_images = cached_pdf_image_paths(input_path, output_dir)
+        if cached_fast_images:
+            print(
+                f"📄 Vision OCR PDF: reusing {len(cached_fast_images)} "
+                "image(s) from the fast extraction manifest"
+            )
+            return len(cached_fast_images)
+    except Exception as cache_error:
+        print(f"⚠️ Vision OCR PDF: fast image cache check failed: {cache_error}")
+
     def _pdf_page_count():
         try:
             import fitz
@@ -16459,6 +16532,10 @@ def _postprocess_output_candidates(input_path: str, file_base: str, current_out:
         if path and path not in candidates:
             candidates.append(path)
 
+    # The translation stage has already resolved same-stem source-format
+    # collisions. Keep that exact workspace ahead of reconstructed legacy
+    # candidates such as ``<root>/<unsuffixed stem>``.
+    _add(current_out)
     override_root = (os.getenv("OUTPUT_DIRECTORY") or os.getenv("OUTPUT_DIR") or "").strip()
     if override_root:
         if file_base:
@@ -16554,6 +16631,8 @@ def _resolve_postprocess_output_dir(input_path: str, file_base: str, current_out
     scored = []
     for candidate in _postprocess_output_candidates(input_path, file_base, current_out):
         score = _score_postprocess_output_dir(candidate, chapters, input_path, file_base)
+        if os.path.abspath(candidate) == os.path.abspath(current_out):
+            score += 100000
         scored.append((score, candidate))
         if score > best_score:
             best_score = score
@@ -21293,8 +21372,33 @@ def main(log_callback=None, stop_callback=None):
     # Only on macOS — on Windows this would change the output dir and break progress tracking.
     if sys.platform == 'darwin' and not os.path.isabs(out):
         out = os.path.join(os.path.dirname(os.path.abspath(input_path)), out)
+    from output_workspace import resolve_source_aware_workspace
+    unresolved_out = out
+    out = resolve_source_aware_workspace(input_path, unresolved_out)
+    if os.path.normcase(os.path.abspath(out)) != os.path.normcase(
+        os.path.abspath(unresolved_out)
+    ):
+        print(
+            f"📁 Same-name source format collision detected; "
+            f"using separate workspace: {out}"
+        )
     os.makedirs(out, exist_ok=True)
     print(f"[DEBUG] Created output folder → {out}")
+
+    # ``source_epub.txt`` is retained as the compatibility filename, but it
+    # records EPUB, PDF, and TXT inputs. The next same-stem run can therefore
+    # select a format-specific workspace before touching existing output.
+    try:
+        from output_workspace import (
+            source_format_label,
+            write_workspace_source_reference,
+        )
+        source_kind = source_format_label(input_path)
+        if source_kind:
+            write_workspace_source_reference(out, input_path)
+            print(f"📚 {source_kind} source workspace → {out}")
+    except Exception as source_ref_exc:
+        print(f"⚠️ Could not save source workspace reference: {source_ref_exc}")
 
     metadata_only = os.getenv("METADATA_ONLY", "0") == "1"
     preserve_pdf_ocr_images = (
@@ -21555,9 +21659,18 @@ def main(log_callback=None, stop_callback=None):
             except Exception:
                 _pdf_page_count = _pdf_page_threshold + 1  # Assume large if can't check
             
-            use_async = (os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1" 
-                        and log_callback 
+            _pdf_render_mode = os.getenv("PDF_RENDER_MODE", "fast_semantic").lower()
+            use_async = (os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1"
+                        and log_callback
                         and _pdf_page_count >= _pdf_page_threshold)
+
+            # Fast PDF extraction owns the one page-range process pool.  Do
+            # not wrap it in the legacy one-job ProcessPoolExecutor, which
+            # would create nested executors and duplicate document handles.
+            if _pdf_render_mode in ("fast_semantic", "fast_layout"):
+                if use_async:
+                    print("Fast PDF engine is managing its own bookmark-aware worker pool")
+                use_async = False
             
             if use_async:
                 print(f"🚀 Using ProcessPoolExecutor for PDF extraction ({_pdf_page_count} pages, prevents GUI lag)...")
@@ -21574,7 +21687,7 @@ def main(log_callback=None, stop_callback=None):
                 _pdf_ext_config = {
                     "pdf_path": input_path,
                     "output_dir": out,
-                    "render_mode": os.getenv("PDF_RENDER_MODE", "xhtml").lower(),
+                    "render_mode": os.getenv("PDF_RENDER_MODE", "fast_semantic").lower(),
                     "use_toc_sections": os.getenv("PDF_USE_TOC_SECTIONS", "1") == "1",
                     "extract_images": os.getenv("PDF_EXTRACT_IMAGES", "1") == "1",
                     "generate_css": os.getenv("PDF_GENERATE_CSS", "1") == "1",
@@ -21720,7 +21833,7 @@ def main(log_callback=None, stop_callback=None):
                     
                     if _is_page_list and isinstance(_content, list):
                         # Content is list of [page_num, html] pairs
-                        render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()
+                        render_mode = os.getenv("PDF_RENDER_MODE", "fast_semantic").lower()
                         raw_chapters = []
                         for item in _content:
                             page_num = item[0] if isinstance(item, list) else item
@@ -21739,6 +21852,8 @@ def main(log_callback=None, stop_callback=None):
                                 'pdf_toc_level': section.get('level'),
                                 'pdf_start_page': section.get('start_page'),
                                 'pdf_end_page': section.get('end_page'),
+                                'pdf_section_id': section.get('section_id'),
+                                'pdf_section_title': section.get('title'),
                                 'allow_token_splitting': is_toc_section,
                             })
                         # Process chapters for splitting (reuse txt_processor's logic)
@@ -26435,7 +26550,7 @@ def main(log_callback=None, stop_callback=None):
                         chapter_body = c["body"]
 
                         # If render mode is image and there's essentially no text, skip text translation
-                        render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()
+                        render_mode = os.getenv("PDF_RENDER_MODE", "fast_semantic").lower()
                         stripped_text_len = len(soup_clean.get_text(strip=True))
                         if render_mode == "image" and image_translations and stripped_text_len < 20:
                             print("🖼️ Image-rendered page with no meaningful text — skipping text translation.")

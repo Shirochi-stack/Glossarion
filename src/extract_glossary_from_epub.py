@@ -6759,7 +6759,7 @@ def _extract_pdf_chapters_for_glossary(pdf_path, check_stop=None):
     tmp_dir = tempfile.mkdtemp(prefix="glossarion_pdf_extract_")
     previous_render_mode = os.environ.get("PDF_RENDER_MODE")
     if not previous_render_mode:
-        os.environ["PDF_RENDER_MODE"] = "xhtml"
+        os.environ["PDF_RENDER_MODE"] = "fast_semantic"
 
     try:
         from pdf_extractor import extract_pdf_with_formatting

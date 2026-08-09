@@ -11087,7 +11087,7 @@ def _create_processing_options_section(self, parent):
     
     # Initialize PDF render mode variable
     if not hasattr(self, 'pdf_render_mode_var'):
-        self.pdf_render_mode_var = self.config.get('pdf_render_mode', 'xhtml')
+        self.pdf_render_mode_var = self.config.get('pdf_render_mode', 'fast_semantic')
     
     # PDF Render Mode toggle
     pdf_render_row = QWidget()
@@ -11098,8 +11098,17 @@ def _create_processing_options_section(self, parent):
     pdf_render_h.addWidget(pdf_render_label)
     
     pdf_render_combo = QComboBox()
-    pdf_render_combo.addItems(["absolute", "semantic", "xhtml", "html", "image"])
-    pdf_render_combo.setFixedWidth(100)
+    pdf_render_options = [
+        ("Fast Semantic", "fast_semantic"),
+        ("Fast Layout", "fast_layout"),
+        ("Legacy Layout", "legacy_layout"),
+        ("Page Images", "image"),
+        ("Fixed Layout", "absolute"),
+        ("Legacy Semantic", "semantic"),
+    ]
+    for option_label, option_value in pdf_render_options:
+        pdf_render_combo.addItem(option_label, option_value)
+    pdf_render_combo.setFixedWidth(180)
     pdf_render_combo.setStyleSheet("""
         QComboBox::down-arrow {
             image: none;
@@ -11112,27 +11121,36 @@ def _create_processing_options_section(self, parent):
     self._disable_combobox_mousewheel(pdf_render_combo)
     try:
         render_val = self.pdf_render_mode_var
-        idx = pdf_render_combo.findText(render_val)
+        render_lookup = {
+            "xhtml": "legacy_layout",
+            "html": "legacy_layout",
+            "legacy_xhtml": "legacy_layout",
+        }.get(str(render_val).lower(), str(render_val).lower())
+        idx = pdf_render_combo.findData(render_lookup)
         if idx >= 0:
             pdf_render_combo.setCurrentIndex(idx)
     except Exception:
         pass
-    def _on_pdf_render_changed(text):
+    def _on_pdf_render_changed(index):
         try:
-            self.pdf_render_mode_var = text
+            selected = pdf_render_combo.itemData(index)
+            self.pdf_render_mode_var = selected or "fast_semantic"
+            self.config['pdf_render_mode'] = self.pdf_render_mode_var
+            os.environ['PDF_RENDER_MODE'] = self.pdf_render_mode_var
         except Exception:
             pass
-    pdf_render_combo.currentTextChanged.connect(_on_pdf_render_changed)
+    pdf_render_combo.currentIndexChanged.connect(_on_pdf_render_changed)
     pdf_render_h.addWidget(pdf_render_combo)
     pdf_render_h.addStretch()
     section_v.addWidget(pdf_render_row)
     
     pdf_render_desc = QLabel(
         "PDF extraction mode:\n"
-        "• absolute: Fixed positioning (perfect layout, smaller payloads)\n"
-        "• semantic: Semantic HTML (better text flow, larger payloads)\n"
-        "• xhtml/html: MuPDF native rendering (1:1 layout)\n"
-        "• image: Render each page as a raster image (no text extraction)"
+        "• Fast Semantic: Reading-oriented text, bookmark-aware and fastest (default)\n"
+        "• Fast Layout: Layout-preserving XHTML with deduplicated external images\n"
+        "• Legacy Layout: Previous MuPDF XHTML behavior for compatibility\n"
+        "• Page Images: Render every page as an image (no text extraction)\n"
+        "Page artifacts are cached, so updated bookmarks can reuse unchanged pages."
     )
     pdf_render_desc.setStyleSheet("color: gray; font-size: 10pt;")
     pdf_render_desc.setContentsMargins(20, 0, 0, 10)

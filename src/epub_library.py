@@ -1280,22 +1280,47 @@ def _find_translator_gui(widget):
 
 
 def _epub_converter_running(gui) -> bool:
-    """True while the main GUI's EPUB converter worker is active."""
+    """True while the main GUI's EPUB or PDF compiler worker is active."""
     if gui is None:
         return False
-    fut = getattr(gui, "epub_future", None)
-    try:
-        if fut is not None and not fut.done():
-            return True
-    except Exception:
-        pass
-    th = getattr(gui, "epub_thread", None)
-    try:
-        if th is not None and th.is_alive():
-            return True
-    except Exception:
-        pass
+    for future_name in ("epub_future", "pdf_future"):
+        fut = getattr(gui, future_name, None)
+        try:
+            if fut is not None and not fut.done():
+                return True
+        except Exception:
+            pass
+    for thread_name in ("epub_thread", "pdf_thread"):
+        th = getattr(gui, thread_name, None)
+        try:
+            if th is not None and th.is_alive():
+                return True
+        except Exception:
+            pass
     return False
+
+
+def _workspace_compile_kind(book: dict | None, folder: str) -> str:
+    """Return the compiled format appropriate for an output workspace."""
+    try:
+        from output_workspace import workspace_source_format
+
+        recorded = workspace_source_format(folder)
+    except Exception:
+        recorded = ""
+    if recorded == "PDF":
+        return "pdf"
+    if recorded == "EPUB":
+        return "epub"
+    book = book or {}
+    for value in (
+        book.get("workspace_kind"),
+        book.get("compiled_output_kind"),
+        book.get("type"),
+    ):
+        if str(value or "").lower() == "pdf":
+            return "pdf"
+    return "epub"
 
 
 def _mark_chapter_pending_for_retranslation(output_folder: str,
@@ -9813,6 +9838,28 @@ class EpubLibraryDialog(QDialog):
         self._set_cards_compiling(folder, True)
         self._watch_compile_for_folder(folder, gui)
 
+    def _compile_pdf_for_folder(self, folder: str):
+        """Rebuild the translated PDF for a PDF output workspace."""
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.warning(
+                self, "Compile PDF",
+                "Could not resolve this card's output folder.")
+            return
+        gui = _find_translator_gui(self)
+        if gui is None or not hasattr(gui, "pdf_converter"):
+            QMessageBox.warning(
+                self, "Compile PDF",
+                "The main translator window is not available.")
+            return
+        try:
+            gui.pdf_converter(folder=folder)
+        except Exception as exc:
+            QMessageBox.warning(self, "Compile PDF",
+                                f"Could not start the PDF compiler:\n{exc}")
+            return
+        self._set_cards_compiling(folder, True)
+        self._watch_compile_for_folder(folder, gui)
+
     def _translate_metadata_for_books(self, books: list[dict]) -> bool:
         """Run the normal metadata phase for every resolvable selected EPUB."""
         entries: list[tuple[dict, str, str]] = []
@@ -12131,12 +12178,23 @@ class EpubLibraryDialog(QDialog):
             compile_folder = _resolve_book_output_folder(book)
         if compile_folder and os.path.isfile(os.path.join(
                 compile_folder, "translation_progress.json")):
-            compile_action = menu.addAction("\U0001f4d8  Compile EPUB")
-            compile_action.setToolTip(
-                f"Build the output EPUB from this workspace's translated "
-                f"chapters:\n{compile_folder}")
-            compile_action.triggered.connect(
-                lambda *_a, f=compile_folder: self._compile_epub_for_folder(f))
+            compile_kind = _workspace_compile_kind(book, compile_folder)
+            if compile_kind == "pdf":
+                compile_action = menu.addAction("\U0001f4c4  Compile PDF")
+                compile_action.setToolTip(
+                    "Build the output PDF from this workspace's translated "
+                    f"sections:\n{compile_folder}")
+                compile_action.triggered.connect(
+                    lambda *_a, f=compile_folder:
+                    self._compile_pdf_for_folder(f))
+            else:
+                compile_action = menu.addAction("\U0001f4d8  Compile EPUB")
+                compile_action.setToolTip(
+                    "Build the output EPUB from this workspace's translated "
+                    f"chapters:\n{compile_folder}")
+                compile_action.triggered.connect(
+                    lambda *_a, f=compile_folder:
+                    self._compile_epub_for_folder(f))
         # Reveal the raw source file \u2014 identical to the Book Details
         # \U0001f517 button. Resolves the same way (raw_source_path, then
         # origins lookup for Library/Translated entries, then book path).
@@ -15432,12 +15490,26 @@ class BookDetailsDialog(QDialog):
         # book's output workspace. Single-chapter Translate actions (context
         # menu / reader) intentionally never compile, so this is the way to
         # build the output EPUB when you're ready.
-        self._compile_epub_btn = QPushButton("\U0001f4d8  Compile EPUB")
+        try:
+            _out_folder = _resolve_book_output_folder(self._book)
+        except Exception:
+            _out_folder = ""
+        self._compile_output_kind = _workspace_compile_kind(
+            self._book, _out_folder)
+        compile_text = (
+            "\U0001f4c4  Compile PDF"
+            if self._compile_output_kind == "pdf"
+            else "\U0001f4d8  Compile EPUB"
+        )
+        self._compile_epub_btn = QPushButton(compile_text)
         self._compile_epub_btn.setCursor(Qt.PointingHandCursor)
         self._compile_epub_btn.setToolTip(
             "Build the output EPUB from this book's translated chapters.\n"
             "Single-chapter Translate runs skip the converter phase — use\n"
             "this button when you want the compiled EPUB.")
+        if self._compile_output_kind == "pdf":
+            self._compile_epub_btn.setToolTip(
+                "Build the output PDF from this book's translated sections.")
         self._compile_epub_btn.setStyleSheet("""
             QPushButton { background: #2a2a3e; color: #e0e0e0;
                 border: 1px solid #3a3a5e; border-radius: 6px;
@@ -15446,7 +15518,6 @@ class BookDetailsDialog(QDialog):
         """)
         self._compile_epub_btn.clicked.connect(self._on_compile_epub_clicked)
         try:
-            _out_folder = _resolve_book_output_folder(self._book)
             self._compile_epub_btn.setVisible(
                 bool(_out_folder and os.path.isdir(_out_folder)))
         except Exception:
@@ -16709,30 +16780,33 @@ class BookDetailsDialog(QDialog):
         self._open_reader(initial_chapter=idx)
 
     def _on_compile_epub_clicked(self):
-        """Run the EPUB converter on this book's output workspace."""
+        """Run the compiler appropriate for this book's output workspace."""
         try:
             out_folder = _resolve_book_output_folder(self._book)
         except Exception:
             out_folder = ""
+        compile_kind = _workspace_compile_kind(self._book, out_folder)
+        label = "PDF" if compile_kind == "pdf" else "EPUB"
         if not out_folder or not os.path.isdir(out_folder):
             QMessageBox.warning(
-                self, "Compile EPUB",
+                self, f"Compile {label}",
                 "Could not resolve this book's output folder.\n"
                 "Run a translation first so a workspace exists.")
             return
         gui = _find_translator_gui(self)
-        if gui is None or not hasattr(gui, "epub_converter"):
+        converter_name = (
+            "pdf_converter" if compile_kind == "pdf" else "epub_converter")
+        if gui is None or not hasattr(gui, converter_name):
             QMessageBox.warning(
-                self, "Compile EPUB",
+                self, f"Compile {label}",
                 "The main translator window is not available.")
             return
         try:
-            # epub_converter() handles its own busy-state guards
-            # (translation / glossary / converter already running).
-            gui.epub_converter(folder=out_folder)
+            getattr(gui, converter_name)(folder=out_folder)
         except Exception as exc:
-            QMessageBox.warning(self, "Compile EPUB",
-                                f"Could not start the EPUB converter:\n{exc}")
+            QMessageBox.warning(
+                self, f"Compile {label}",
+                f"Could not start the {label} compiler:\n{exc}")
             return
         # Animate immediately for instant click feedback; the poll ends the
         # animation quickly if a guard rejected the start (worker never ran).
@@ -16906,23 +16980,9 @@ class BookDetailsDialog(QDialog):
         )
 
     def _compile_epub_running(self) -> bool:
-        """True while the main GUI's EPUB converter worker is active."""
+        """True while the main GUI's EPUB or PDF compiler is active."""
         gui = _find_translator_gui(self)
-        if gui is None:
-            return False
-        fut = getattr(gui, "epub_future", None)
-        try:
-            if fut is not None and not fut.done():
-                return True
-        except Exception:
-            pass
-        th = getattr(gui, "epub_thread", None)
-        try:
-            if th is not None and th.is_alive():
-                return True
-        except Exception:
-            pass
-        return False
+        return _epub_converter_running(gui)
 
     def _compile_spin_frames(self) -> list:
         """Build (and cache) pre-rendered high-DPI spinner frames.
@@ -17027,7 +17087,12 @@ class BookDetailsDialog(QDialog):
             btn.setIconSize(QSize(18, 18))
         else:
             dots = step % 4
-            btn.setText("\U0001f4d8  Compiling" + "." * dots + " " * (3 - dots))
+            icon = (
+                "\U0001f4c4"
+                if getattr(self, "_compile_output_kind", "epub") == "pdf"
+                else "\U0001f4d8"
+            )
+            btn.setText(f"{icon}  Compiling" + "." * dots + " " * (3 - dots))
 
     def _compile_anim_poll(self):
         if self._compile_epub_running():

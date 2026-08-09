@@ -1413,7 +1413,7 @@ async def translate(
             sys.stderr.write(f"[CONFIG] Enabling PDF formatting extraction (font size, alignment, etc.)\n")
             sys.stderr.flush()
             # Force XHTML render mode for better PDF extraction quality
-            os.environ['PDF_RENDER_MODE'] = 'xhtml'
+            os.environ['PDF_RENDER_MODE'] = 'fast_semantic'
             sys.stderr.write(f"[CONFIG] Using XHTML render mode for PDF\n")
             sys.stderr.flush()
             # The pdf_extractor.generate_css_from_pdf() function will automatically
@@ -2384,7 +2384,7 @@ async def extract(
             sys.stderr.write(f"[CONFIG] Enabling PDF formatting extraction (font size, alignment, etc.)\n")
             sys.stderr.flush()
             # Force XHTML render mode for better PDF extraction quality
-            os.environ['PDF_RENDER_MODE'] = 'xhtml'
+            os.environ['PDF_RENDER_MODE'] = 'fast_semantic'
             sys.stderr.write(f"[CONFIG] Using XHTML render mode for PDF\n")
             sys.stderr.flush()
             # The pdf_extractor.generate_css_from_pdf() function will automatically

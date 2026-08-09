@@ -120,5 +120,8 @@ tests/**
 !tests/test_metadata_subjects.py
 !tests/test_epub_library_search.py
 !tests/test_pdf_toc_extraction.py
+!tests/test_pdf_fast_extractor.py
+!tests/test_output_workspace_routing.py
+!tests/test_pdf_workspace_compiler.py
 junktests/
 warp.md
