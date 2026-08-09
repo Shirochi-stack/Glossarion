@@ -320,3 +320,90 @@ def test_pdf_toc_setting_is_defaulted_exported_and_persisted():
     assert "('pdf_use_toc_sections', ['pdf_use_toc_sections_var'], True, bool)" in gui_source
     assert "Use PDF table of contents for sections" in settings_source
     assert "legacy page-by-page extraction" in settings_source
+
+
+def test_progress_manager_seeds_bookmark_rows_and_hides_source_sidecar(tmp_path):
+    from Retranslation_GUI import RetranslationMixin, _is_progress_sidecar_entry
+
+    pdf_path = tmp_path / "outlined.pdf"
+    pdf_path.write_bytes(b"%PDF synthetic outline fixture")
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "source_epub.txt").write_text(
+        str(pdf_path), encoding="utf-8"
+    )
+    prog = {
+        "chapters": {
+            "special_source_epub": {
+                "actual_num": 0,
+                "output_file": "source_epub.txt",
+                "status": "completed",
+                "original_basename": "source_epub.txt",
+            }
+        },
+        "chapter_chunks": {},
+    }
+
+    mixin = object.__new__(RetranslationMixin)
+    mixin.config = {"pdf_use_toc_sections": True}
+    mixin.pdf_use_toc_sections_var = True
+    mixin._is_special_file = lambda _name: False
+    mixin._pdf_outline_progress_plan = lambda _path: [
+        {
+            "num": 1, "title": "Opening", "level": 1,
+            "start_page": 1, "end_page": 2,
+        },
+        {
+            "num": 2, "title": "Middle", "level": 1,
+            "start_page": 3, "end_page": 4,
+        },
+        {
+            "num": 3, "title": "Ending", "level": 1,
+            "start_page": 5, "end_page": 6,
+        },
+    ]
+
+    assert mixin._seed_pdf_outline_progress_entries(
+        str(pdf_path), str(output_dir), prog
+    )
+    bookmark_rows = [
+        entry
+        for entry in prog["chapters"].values()
+        if entry.get("pdf_toc_section")
+    ]
+    assert [entry["pdf_toc_title"] for entry in bookmark_rows] == [
+        "Opening", "Middle", "Ending"
+    ]
+    assert [
+        (entry["pdf_start_page"], entry["pdf_end_page"])
+        for entry in bookmark_rows
+    ] == [(1, 2), (3, 4), (5, 6)]
+    assert all(entry["status"] == "not_translated" for entry in bookmark_rows)
+    assert _is_progress_sidecar_entry(
+        prog["chapters"]["special_source_epub"]
+    )
+
+    data = {
+        "prog": prog,
+        "output_dir": str(output_dir),
+        "file_path": str(pdf_path),
+        "show_special_files_state": True,
+    }
+    mixin._rebuild_chapter_display_info(data)
+    assert len(data["chapter_display_info"]) == 3
+    assert all(
+        row["output_file"] != "source_epub.txt"
+        for row in data["chapter_display_info"]
+    )
+
+    display, status = mixin._progress_list_display_text(
+        data["chapter_display_info"][0],
+        {"show_model_info_state": False},
+        20,
+        25,
+    )
+    assert status == "not_translated"
+    assert "Opening" in display
+    assert "Pages 1-2" in display
+    assert "Chapter" not in display

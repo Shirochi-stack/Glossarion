@@ -4707,6 +4707,17 @@ class ProgressManager:
                 chapter_info["original_basename"] = chapter_obj['original_basename']
             elif chapter_obj.get('original_filename'):
                 chapter_info["original_basename"] = os.path.basename(chapter_obj['original_filename'])
+            if chapter_obj.get('pdf_toc_section'):
+                chapter_info['pdf_toc_section'] = True
+                chapter_info['pdf_toc_title'] = str(
+                    chapter_obj.get('title') or f"Section {actual_num}"
+                )
+                chapter_info['title'] = chapter_info['pdf_toc_title']
+                for pdf_key in (
+                    'pdf_toc_level', 'pdf_start_page', 'pdf_end_page',
+                ):
+                    if chapter_obj.get(pdf_key) is not None:
+                        chapter_info[pdf_key] = chapter_obj[pdf_key]
             if chapter_obj.get("subtitle_batch"):
                 chapter_info["subtitle_progress_key"] = chapter_key
                 subtitle_source = (
@@ -5217,6 +5228,17 @@ class ProgressManager:
             merged_info["original_basename"] = chapter_obj['original_basename']
         elif chapter_obj and 'filename' in chapter_obj:
             merged_info["original_basename"] = chapter_obj['filename']
+        if chapter_obj and chapter_obj.get('pdf_toc_section'):
+            merged_info['pdf_toc_section'] = True
+            merged_info['pdf_toc_title'] = str(
+                chapter_obj.get('title') or f"Section {actual_num}"
+            )
+            merged_info['title'] = merged_info['pdf_toc_title']
+            for pdf_key in (
+                'pdf_toc_level', 'pdf_start_page', 'pdf_end_page',
+            ):
+                if chapter_obj.get(pdf_key) is not None:
+                    merged_info[pdf_key] = chapter_obj[pdf_key]
         
         self.prog["chapters"][chapter_key] = merged_info
     
@@ -5543,6 +5565,11 @@ class ProgressManager:
                 or chapter_info.get("subtitle_output_file")
             ):
                 continue
+
+            # PDF outline rows are deliberately created before page content is
+            # extracted, so their expected output does not exist yet.
+            if chapter_info.get("pdf_outline_seed"):
+                continue
             
             # QA_FAILED / FAILED / IN_PROGRESS / PENDING FIX:
             # Don't delete entries that are meant to be visible in the retranslation UI
@@ -5652,7 +5679,11 @@ class ProgressManager:
                 expected_hashes.update(expected_hashes_by_output.get(normalized_output, set()))
             expected_hashes.discard("")
             stored_hash = str(entry.get("content_hash") or "")
-            hash_matches = not expected_hashes or stored_hash in expected_hashes
+            hash_matches = (
+                bool(entry.get("pdf_outline_seed") and (number_matches or output_matches))
+                or not expected_hashes
+                or stored_hash in expected_hashes
+            )
             if (not number_matches and not output_matches) or not hash_matches:
                 progress_chapters.pop(progress_key, None)
                 removed += 1

@@ -61,11 +61,29 @@ from translation_artifacts import (
 
 _IS_MACOS = (sys.platform == 'darwin')
 _MACHINE_TRANSLATION_DIR = "Machine_Translation"
+_PROGRESS_SIDECAR_FILENAMES = frozenset({"source_epub.txt"})
 _RAW_FOREIGN_TEXT_QA_RE = re.compile(
     r"(?:^|[^a-z])(?:korean|japanese|chinese|hebrew|arabic|syriac|thai|cyrillic)"
     r"_text_found_\d+_chars_",
     re.IGNORECASE,
 )
+
+
+def _is_progress_sidecar_entry(entry=None, output_file=None):
+    """Return whether a progress row points at an internal workspace sidecar."""
+    entry = entry if isinstance(entry, dict) else {}
+    candidates = (
+        output_file,
+        entry.get("output_file"),
+        entry.get("original_basename"),
+        entry.get("filename"),
+    )
+    return any(
+        os.path.basename(str(candidate or "")).casefold()
+        in _PROGRESS_SIDECAR_FILENAMES
+        for candidate in candidates
+        if candidate
+    )
 
 
 def _progress_entry_has_raw_foreign_text_qa(entry):
@@ -10700,6 +10718,161 @@ class RetranslationMixin:
             return True
         return extension == '.zip' and self._zip_is_subtitle_archive(file_path)
 
+    def _pdf_outline_progress_plan(self, file_path):
+        """Read and cache PDF bookmark ranges without extracting page content."""
+        pdf_path = os.path.abspath(str(file_path or ''))
+        if not pdf_path.lower().endswith('.pdf') or not os.path.isfile(pdf_path):
+            return []
+
+        setting = getattr(self, 'pdf_use_toc_sections_var', None)
+        if setting is None and isinstance(getattr(self, 'config', None), dict):
+            setting = self.config.get('pdf_use_toc_sections', True)
+        if isinstance(setting, str):
+            setting = setting.strip().lower() not in ('0', 'false', 'no', 'off')
+        if setting is False:
+            return []
+
+        try:
+            stat = os.stat(pdf_path)
+            signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return []
+
+        cache = getattr(self, '_pdf_outline_progress_cache', None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._pdf_outline_progress_cache = cache
+        cached = cache.get(pdf_path)
+        if cached and cached[0] == signature:
+            return [dict(section) for section in cached[1]]
+
+        try:
+            from pdf_extractor import extract_pdf_toc_section_plan
+            plan = extract_pdf_toc_section_plan(pdf_path)
+        except Exception as exc:
+            print(f"Warning: Could not read PDF bookmarks for Progress Manager: {exc}")
+            plan = []
+
+        normalized = [dict(section) for section in plan if isinstance(section, dict)]
+        if len(cache) >= 32 and pdf_path not in cache:
+            cache.clear()
+        cache[pdf_path] = (signature, normalized)
+        return [dict(section) for section in normalized]
+
+    def _seed_pdf_outline_progress_entries(self, file_path, output_dir, prog):
+        """Seed one Progress Manager row per PDF bookmark section."""
+        if not output_dir or not isinstance(prog, dict):
+            return False
+        sections = self._pdf_outline_progress_plan(file_path)
+        if not sections:
+            return False
+
+        chapters = prog.setdefault('chapters', {})
+        if not isinstance(chapters, dict):
+            chapters = {}
+            prog['chapters'] = chapters
+
+        retain = (
+            os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1'
+            or bool((getattr(self, 'config', {}) or {}).get('retain_source_extension', False))
+        )
+        output_dir = os.path.abspath(str(output_dir))
+        source_file = os.path.abspath(str(file_path))
+        now = time.time()
+        changed = False
+
+        def _norm(value):
+            return _normalize_progress_match_name(value).casefold()
+
+        def _set(entry, key, value):
+            nonlocal changed
+            if entry.get(key) != value:
+                entry[key] = value
+                changed = True
+
+        for section in sections:
+            try:
+                section_num = int(section.get('num'))
+                start_page = int(section.get('start_page'))
+                end_page = int(section.get('end_page'))
+            except (TypeError, ValueError):
+                continue
+            title = str(section.get('title') or f'Section {section_num}').strip()
+            level = int(section.get('level') or 0)
+            section_stem = f'pdf_section_{section_num}'
+            expected_output = (
+                f'{section_stem}.html'
+                if retain
+                else f'response_{section_stem}.html'
+            )
+
+            exact = []
+            chunks = []
+            for key, entry in list(chapters.items()):
+                if not isinstance(entry, dict):
+                    continue
+                normalized_output = _norm(entry.get('output_file'))
+                if normalized_output == section_stem:
+                    exact.append((key, entry))
+                elif normalized_output.startswith(f'{section_stem}_'):
+                    chunks.append((key, entry))
+
+            # Once a large bookmark section has real chunk rows, retire its
+            # provisional one-row outline seed instead of displaying both.
+            if chunks:
+                for key, entry in exact:
+                    if entry.get('pdf_outline_seed'):
+                        chapters.pop(key, None)
+                        changed = True
+                matching = chunks
+            else:
+                matching = exact
+
+            if not matching:
+                progress_key = f'pdf:outline:{section_num}'
+                output_path = os.path.join(output_dir, expected_output)
+                chapters[progress_key] = {
+                    'actual_num': section_num,
+                    'chapter_num': section_num,
+                    'content_hash': '',
+                    'output_file': expected_output,
+                    'status': 'completed' if os.path.isfile(output_path) else 'not_translated',
+                    'last_updated': now,
+                    'original_basename': f'{section_stem}.html',
+                    'source_file': source_file,
+                    'title': title,
+                    'pdf_toc_title': title,
+                    'pdf_toc_section': True,
+                    'pdf_toc_level': level,
+                    'pdf_start_page': start_page,
+                    'pdf_end_page': end_page,
+                    'pdf_outline_seed': True,
+                }
+                changed = True
+                continue
+
+            for _key, entry in matching:
+                _set(entry, 'pdf_toc_section', True)
+                _set(entry, 'pdf_toc_title', title)
+                if not str(entry.get('title') or '').strip():
+                    _set(entry, 'title', title)
+                _set(entry, 'pdf_toc_level', level)
+                _set(entry, 'pdf_start_page', start_page)
+                _set(entry, 'pdf_end_page', end_page)
+                if entry.get('pdf_outline_seed'):
+                    output_value = entry.get('output_file') or expected_output
+                    output_path = (
+                        output_value
+                        if os.path.isabs(str(output_value))
+                        else os.path.join(output_dir, str(output_value))
+                    )
+                    desired_status = (
+                        'completed' if os.path.isfile(output_path) else 'not_translated'
+                    )
+                    _set(entry, 'status', desired_status)
+
+        return changed
+
     def _seed_subtitle_zip_progress_entries(self, file_path, output_dir, prog):
         """Seed one Not Translated row per subtitle ZIP member for the PM."""
         archive_path = os.path.abspath(str(file_path or ''))
@@ -12688,6 +12861,7 @@ class RetranslationMixin:
                     and (source_has_translated or not f.lower().endswith("_translated.html"))
                     and f != "translation_progress.json"
                     and f.lower() not in ("glossary.csv", "metadata.json", "styles.css", "rolling_summary.txt")
+                    and f.casefold() not in _PROGRESS_SIDECAR_FILENAMES
                     and not f.lower().endswith(".epub")
                     and not f.lower().endswith(".cache")
                 ]
@@ -12792,6 +12966,13 @@ class RetranslationMixin:
             # Module still importing elsewhere — skip cleanup now; the 2s
             # auto-refresh will run it once the module is ready.
             print("⏳ TransateKRtoEN still loading — deferring progress cleanup to next refresh")
+
+        if self._seed_pdf_outline_progress_entries(file_path, output_dir, prog):
+            try:
+                with open(progress_file, 'w', encoding='utf-8') as f:
+                    json.dump(prog, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"Warning: Could not save PDF bookmark progress entries: {e}")
 
         if self._ensure_metadata_progress_entry(prog, output_dir, file_path):
             try:
@@ -13420,7 +13601,10 @@ class RetranslationMixin:
         else:
             # Fallback to original logic if no OPF
             # Known non-chapter files that should never appear in the progress list
-            _non_chapter_files = {"glossary.csv", "metadata.json", "styles.css", "rolling_summary.txt"}
+            _non_chapter_files = {
+                "glossary.csv", "metadata.json", "styles.css",
+                "rolling_summary.txt", "source_epub.txt",
+            }
             _source_has_translated = "_translated" in os.path.basename(file_path).lower()
             files_to_entries = {}
             for chapter_key, chapter_info in prog.get("chapters", {}).items():
@@ -13428,7 +13612,10 @@ class RetranslationMixin:
                 status = chapter_info.get("status", "")
                 
                 # Skip known non-chapter files
-                if output_file and output_file.lower() in _non_chapter_files:
+                if (
+                    (output_file and output_file.lower() in _non_chapter_files)
+                    or _is_progress_sidecar_entry(chapter_info, output_file)
+                ):
                     continue
                 # Skip combined _translated output files (unless source itself has _translated)
                 if output_file and not _source_has_translated and any(
@@ -13621,7 +13808,18 @@ class RetranslationMixin:
         title_layout = QHBoxLayout(title_row)
         title_layout.setContentsMargins(0, 0, 0, 0)
         
-        title_text = "Chapters from content.opf (in reading order):" if spine_chapters else "Select chapters to retranslate:"
+        if spine_chapters:
+            title_text = "Chapters from content.opf (in reading order):"
+        elif (
+            str(file_path).lower().endswith('.pdf')
+            and any(
+                (row.get('info') or {}).get('pdf_toc_section')
+                for row in chapter_display_info
+            )
+        ):
+            title_text = "PDF bookmark sections:"
+        else:
+            title_text = "Select chapters to retranslate:"
         title_label = QLabel(title_text)
         title_font = QFont('Arial', 12 if not tab_frame else 11)
         title_font.setBold(True)
@@ -19855,6 +20053,7 @@ class RetranslationMixin:
                             and not f.lower().endswith("_translated.txt")
                             and f != "translation_progress.json"
                             and f.lower() not in ("glossary.csv", "metadata.json", "styles.css", "rolling_summary.txt")
+                            and f.casefold() not in _PROGRESS_SIDECAR_FILENAMES
                             and not f.lower().endswith(".epub")
                             and not f.lower().endswith(".cache")
                         ]
@@ -19990,6 +20189,12 @@ class RetranslationMixin:
                         _write_progress_json_safely(data['progress_file'], data['prog'])
 
             if self._reconcile_tts_audio_files(data) and not _read_only_tick:
+                _write_progress_json_safely(data['progress_file'], data['prog'])
+
+            pdf_outline_changed = self._seed_pdf_outline_progress_entries(
+                data.get('file_path'), data.get('output_dir'), data['prog']
+            )
+            if pdf_outline_changed and not _read_only_tick:
                 _write_progress_json_safely(data['progress_file'], data['prog'])
 
             if (
@@ -20436,7 +20641,10 @@ class RetranslationMixin:
         show_special = data.get('show_special_files_state', False)
         
         # Known non-chapter files that should never appear in the progress list
-        _non_chapter_files = {"glossary.csv", "metadata.json", "styles.css", "rolling_summary.txt"}
+        _non_chapter_files = {
+            "glossary.csv", "metadata.json", "styles.css",
+            "rolling_summary.txt", "source_epub.txt",
+        }
         _source_has_translated = "_translated" in os.path.basename(file_path).lower()
         files_to_entries = {}
         for chapter_key, chapter_info in prog.get("chapters", {}).items():
@@ -20444,7 +20652,10 @@ class RetranslationMixin:
             status = chapter_info.get("status", "")
             
             # Skip known non-chapter files
-            if output_file and output_file.lower() in _non_chapter_files:
+            if (
+                (output_file and output_file.lower() in _non_chapter_files)
+                or _is_progress_sidecar_entry(chapter_info, output_file)
+            ):
                 continue
             # Skip combined _translated output files (unless source itself has _translated)
             if output_file and not _source_has_translated and any(
@@ -21352,6 +21563,44 @@ class RetranslationMixin:
             display = (
                 f"{artifact_label} | {icon} {status_label:11s} | "
                 f"{output_file} -> {output_display}"
+            )
+        elif info.get('pdf_toc_section') or chapter_info.get('pdf_toc_section'):
+            section_title = str(
+                info.get('pdf_toc_title')
+                or chapter_info.get('pdf_toc_title')
+                or chapter_info.get('title')
+                or f"Section {chapter_num}"
+            ).strip()
+            start_page = (
+                info.get('pdf_start_page')
+                if info.get('pdf_start_page') is not None
+                else chapter_info.get('pdf_start_page')
+            )
+            end_page = (
+                info.get('pdf_end_page')
+                if info.get('pdf_end_page') is not None
+                else chapter_info.get('pdf_end_page')
+            )
+            if start_page is not None and end_page is not None:
+                page_label = (
+                    f"Page {start_page}"
+                    if str(start_page) == str(end_page)
+                    else f"Pages {start_page}-{end_page}"
+                )
+            else:
+                page_label = "Pages unknown"
+            try:
+                numeric_num = float(chapter_num)
+                section_label = (
+                    f"{int(numeric_num):03d}"
+                    if numeric_num.is_integer()
+                    else f"{numeric_num:05.1f}"
+                )
+            except (TypeError, ValueError):
+                section_label = str(chapter_num)
+            display = (
+                f"[{section_label}] {section_title} | {icon} {status_label:14s} | "
+                f"{page_label} | {output_display}"
             )
         elif info.get('pdf_ocr'):
             display = f"PDF OCR | {icon} {status_label:18s} | {output_display}"
