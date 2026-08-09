@@ -334,6 +334,51 @@ def _bookmark_jobs(toc_entries: Sequence[Sequence], total_pages: int, chunk_page
     return jobs, starts
 
 
+def _fast_pdf_worker_count(total_pages: int, job_count: int) -> int:
+    """Return the bounded number of bookmark jobs to run concurrently.
+
+    ``EXTRACTION_WORKERS`` remains the user-facing control. When it is not
+    present, use half the available logical CPUs up to eight. The old engine
+    silently capped every request at four workers, which made a configured
+    8-worker pool still run only four jobs. ``PDF_FAST_MAX_WORKERS`` is an
+    optional expert safety cap; by default PDF extraction uses at most eight
+    processes to avoid excessive document/image memory duplication.
+    """
+    if total_pages < 8 or job_count <= 1:
+        return 1
+    try:
+        cpu_count = max(1, int(os.cpu_count() or 1))
+    except (TypeError, ValueError):
+        cpu_count = 1
+    automatic = min(8, max(2, cpu_count // 2))
+    try:
+        requested = int(
+            str(os.environ.get("EXTRACTION_WORKERS", automatic)).strip()
+        )
+    except (TypeError, ValueError):
+        requested = automatic
+    try:
+        safety_cap = int(
+            str(
+                os.environ.get(
+                    "PDF_FAST_MAX_WORKERS",
+                    min(8, cpu_count),
+                )
+            ).strip()
+        )
+    except (TypeError, ValueError):
+        safety_cap = min(8, cpu_count)
+    return max(
+        1,
+        min(
+            int(job_count),
+            max(1, requested),
+            cpu_count,
+            max(1, safety_cap),
+        ),
+    )
+
+
 def _image_occurrences(page) -> List[Dict]:
     """Return displayed image placements without decoding every image hash.
 
@@ -956,13 +1001,7 @@ def _extract_pdf_fast_impl(
     jobs, section_titles = _bookmark_jobs(toc_entries, total_pages, chunk_pages)
     if progress_monitor:
         progress_monitor.configure(total_pages, len(jobs), "extracting pages")
-    try:
-        requested_workers = int(os.environ.get("EXTRACTION_WORKERS", "2"))
-    except ValueError:
-        requested_workers = 2
-    worker_count = max(1, min(4, requested_workers, len(jobs) or 1))
-    if total_pages < 8:
-        worker_count = 1
+    worker_count = _fast_pdf_worker_count(total_pages, len(jobs))
 
     xref_map_dir = cache_root / "xref_maps" / source_hash[:24]
     tasks = []
@@ -990,6 +1029,11 @@ def _extract_pdf_fast_impl(
         f"Fast PDF extraction: {total_pages} pages, {len(jobs)} bookmark-aware job(s), "
         f"{worker_count} worker(s), mode={mode}"
     )
+    if worker_count > 1:
+        print(
+            f"Fast PDF scheduler: running up to {worker_count} bookmark jobs "
+            "concurrently"
+        )
     extracted_entries = []
 
     def _record_job_result(result, start_page, end_page):

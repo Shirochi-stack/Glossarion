@@ -4355,7 +4355,7 @@ def _create_response_handling_section(self, parent):
     
     # Store reference to description label for enable/disable
     self.parallel_desc_label = QLabel(
-        "Speed up EPUB extraction, reader loading, reader search, and glossary editor output-file updates using multiple threads.\n"
+        "Speed up PDF/EPUB extraction, reader loading, reader search, and glossary editor output-file updates using multiple workers.\n"
         f"Recommended: 4-8 workers; detected CPU cores: {parallel_cpu_cores} (set to 1 to disable)"
     )
     self.parallel_desc_label.setStyleSheet("color: gray; font-size: 10pt;")

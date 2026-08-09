@@ -13437,7 +13437,10 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         # Initialize the variables with default values
         self.enable_parallel_extraction_var = self.config.get('enable_parallel_extraction', True)
-        self.extraction_workers_var = self.config.get('extraction_workers', 2)
+        self.extraction_workers_var = self.config.get(
+            'extraction_workers',
+            min(8, max(2, (os.cpu_count() or 4) // 2)),
+        )
         # GUI yield toggle - disabled by default for maximum speed
         self.enable_gui_yield_var = self.config.get('enable_gui_yield', True)
         # Thread pool extraction toggle - faster on Windows

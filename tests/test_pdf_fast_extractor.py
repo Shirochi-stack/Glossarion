@@ -7,6 +7,7 @@ import pytest
 from pdf_extractor import build_pdf_toc_section_plan, group_pdf_pages_by_toc
 from pdf_fast_extractor import (
     PDFExtractionCancelled,
+    _fast_pdf_worker_count,
     extract_pdf_fast,
     extract_pdf_page_range_for_reader,
 )
@@ -226,6 +227,24 @@ def test_parallel_page_range_pool_returns_pages_in_source_order(tmp_path, monkey
     assert [page_number for page_number, _ in pages] == list(range(1, 10))
     assert len(images_by_page) == 9
     assert len(list((output_dir / "images").glob("pdfimg_*"))) == 1
+
+
+def test_fast_pdf_worker_count_uses_configured_parallel_capacity(monkeypatch):
+    import pdf_fast_extractor as fast_extractor
+
+    monkeypatch.setattr(fast_extractor.os, "cpu_count", lambda: 16)
+    monkeypatch.delenv("EXTRACTION_WORKERS", raising=False)
+    monkeypatch.delenv("PDF_FAST_MAX_WORKERS", raising=False)
+    assert _fast_pdf_worker_count(816, 68) == 8
+
+    monkeypatch.setenv("EXTRACTION_WORKERS", "6")
+    assert _fast_pdf_worker_count(816, 68) == 6
+
+    monkeypatch.setenv("EXTRACTION_WORKERS", "12")
+    monkeypatch.setenv("PDF_FAST_MAX_WORKERS", "10")
+    assert _fast_pdf_worker_count(816, 68) == 10
+
+    assert _fast_pdf_worker_count(7, 7) == 1
 
 
 def test_fast_extractor_reports_job_progress(tmp_path, monkeypatch, capsys):
