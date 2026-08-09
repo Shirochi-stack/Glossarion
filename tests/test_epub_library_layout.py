@@ -19,6 +19,7 @@ from epub_library import (
     EpubReaderDialog,
     SIZE_NORMAL,
     _FlowLayout,
+    _BookDetailsLoader,
     _OverlayMergeThread,
     _configure_epub_reader_web_settings,
     _merge_manual_metadata_edits,
@@ -128,6 +129,123 @@ def test_library_angle_wheel_scroll_uses_accumulated_animation(qapp):
     finally:
         dialog.close()
         qapp.processEvents()
+
+
+def test_reader_accepts_translated_pdf_html_workspace(qapp, tmp_path, monkeypatch):
+    workspace = tmp_path / "Translated PDF"
+    workspace.mkdir()
+    source = tmp_path / "Raw.pdf"
+    source.write_bytes(b"placeholder")
+    (workspace / "source_epub.txt").write_text(str(source), encoding="utf-8")
+    (workspace / "response_pdf_section_1.html").write_text(
+        "<html><body><p>translated</p></body></html>",
+        encoding="utf-8",
+    )
+    (workspace / "translation_progress.json").write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "pdf:outline:1": {
+                        "actual_num": 1,
+                        "output_file": "response_pdf_section_1.html",
+                        "original_basename": "pdf_section_1.html",
+                        "pdf_toc_section": True,
+                        "pdf_toc_title": "Opening",
+                        "pdf_start_page": 1,
+                        "pdf_end_page": 2,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        epub_library,
+        "_epub_reader_webengine_is_warmed",
+        lambda: False,
+    )
+
+    dialog = EpubReaderDialog(
+        str(source),
+        config={},
+        workspace_dir=str(workspace),
+        initial_show_raw=False,
+    )
+
+    assert dialog._workspace_mode is True
+    assert dialog._workspace_has_raw is True
+    assert dialog._workspace_manifest["entries"][0]["title"] == "Opening"
+    assert dialog._workspace_manifest["entries"][0]["filename"] == \
+        "response_pdf_section_1.html"
+    try:
+        dialog.show()
+        _pump_events(qapp, timeout=1.2)
+        assert len(dialog._chapters_overlaid) == 1
+        assert "translated" in dialog._chapters_overlaid[0][1]
+        assert dialog._chapter_filenames == ["response_pdf_section_1.html"]
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_pdf_book_details_uses_bookmark_entries_not_workspace_artifacts(
+        qapp, tmp_path):
+    workspace = tmp_path / "PDF details"
+    workspace.mkdir()
+    source = tmp_path / "Raw.pdf"
+    source.write_bytes(b"placeholder")
+    response = workspace / "response_pdf_section_1.html"
+    response.write_text("<html><body>translated</body></html>", encoding="utf-8")
+    progress_path = workspace / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "special_image_rename_map": {
+                        "actual_num": 0,
+                        "output_file": "image_rename_map.json",
+                        "original_basename": "image_rename_map.json",
+                        "status": "completed",
+                        "auto_discovered": True,
+                    },
+                    "pdf:outline:1": {
+                        "actual_num": 1,
+                        "output_file": response.name,
+                        "original_basename": "pdf_section_1.html",
+                        "status": "completed",
+                        "pdf_toc_section": True,
+                        "pdf_toc_title": "Opening",
+                        "pdf_start_page": 1,
+                        "pdf_end_page": 4,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload = {}
+    loader = _BookDetailsLoader(
+        {
+            "name": "PDF details",
+            "path": str(source),
+            "type": "pdf",
+            "output_folder": str(workspace),
+            "progress_file": str(progress_path),
+            "raw_source_path": str(source),
+            "compiled_output_kind": "pdf",
+        },
+        {},
+    )
+    loader.done.connect(lambda result: payload.update(result))
+
+    loader.run()
+
+    chapters = payload["chapters_info"]
+    assert len(chapters) == 1
+    assert chapters[0]["raw_title"] == "Opening"
+    assert chapters[0]["output_file"] == response.name
+    assert chapters[0]["pdf_start_page"] == 1
+    assert chapters[0]["pdf_end_page"] == 4
 
 
 def test_library_pagination_only_builds_current_card_page(qapp):

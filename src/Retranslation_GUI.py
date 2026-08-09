@@ -19205,6 +19205,78 @@ class RetranslationMixin:
             if not _progress_item_is_html(display_info):
                 return
 
+            # PDF translations are ordered HTML workspaces too.  They do not
+            # have (and should not need) a source EPUB zip; the integrated
+            # reader consumes response_*.html directly and lazily extracts
+            # only the selected raw bookmark range when Raw is requested.
+            workspace_source = ""
+            try:
+                from output_workspace import read_workspace_source_path
+
+                workspace_source = read_workspace_source_path(data['output_dir'])
+            except Exception:
+                workspace_source = ""
+            if workspace_source and not os.path.isabs(workspace_source):
+                workspace_source = os.path.abspath(os.path.join(
+                    data['output_dir'], workspace_source
+                ))
+            if not workspace_source:
+                candidate = str(data.get('file_path') or "")
+                if candidate.lower().endswith(".pdf"):
+                    workspace_source = candidate
+            if (workspace_source.lower().endswith(".pdf")
+                    and os.path.isfile(workspace_source)):
+                parent_dialog = data.get('dialog') or self
+                try:
+                    from epub_library import EpubReaderDialog
+
+                    progress_entry = display_info.get('info', {}) or {}
+                    initial_filename = os.path.basename(str(
+                        display_info.get('output_file')
+                        or progress_entry.get('output_file')
+                        or output_path
+                    ))
+                    reader = EpubReaderDialog(
+                        workspace_source,
+                        config=getattr(self, 'config', {}) or {},
+                        parent=parent_dialog,
+                        initial_chapter_filename=initial_filename,
+                        workspace_dir=data['output_dir'],
+                        initial_show_raw=False,
+                        window_title=(
+                            f"{os.path.basename(data['output_dir'])} (Translated)"
+                        ),
+                    )
+                    reader.setModal(False)
+                    reader.setAttribute(Qt.WA_DeleteOnClose)
+                    active_readers = getattr(
+                        parent_dialog,
+                        '_progress_epub_readers',
+                        None,
+                    )
+                    if not isinstance(active_readers, list):
+                        active_readers = []
+                        parent_dialog._progress_epub_readers = active_readers
+                    active_readers.append(reader)
+
+                    def _forget_pdf_reader(
+                            *_args, _reader=reader, _readers=active_readers):
+                        try:
+                            _readers.remove(_reader)
+                        except ValueError:
+                            pass
+
+                    reader.destroyed.connect(_forget_pdf_reader)
+                    reader.show()
+                except Exception as exc:
+                    self._show_message(
+                        'error',
+                        "Open Failed",
+                        str(exc),
+                        parent=parent_dialog,
+                    )
+                return
+
             source_epubs = _source_epub_candidates()
             if not source_epubs:
                 self._show_message(

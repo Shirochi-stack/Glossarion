@@ -23,6 +23,7 @@ import html
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -55,7 +56,9 @@ def _load_json(path: Path, default=None):
 
 def _atomic_write_json(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
     with temporary.open("w", encoding="utf-8") as stream:
         json.dump(value, stream, ensure_ascii=False, separators=(",", ":"))
     try:
@@ -585,6 +588,79 @@ def _load_results(cache_root: Path, page_entries: Dict[str, Dict], total_pages: 
         if page_images:
             images_by_page[page_number - 1] = page_images
     return pages, images_by_page
+
+
+def extract_pdf_page_range_for_reader(
+    pdf_path: str,
+    output_dir: str,
+    *,
+    start_page: int,
+    end_page: int,
+    mode: str = "fast_semantic",
+    extract_images: bool = True,
+    section_title: str = "",
+):
+    """Extract one inclusive 1-based PDF range for the HTML reader.
+
+    Unlike :func:`extract_pdf_fast`, this never scans unrelated pages and does
+    not rewrite the full-document manifest.  It still uses the same page
+    signature and image-deduplication caches, so a range extracted during the
+    original translation is normally an immediate cache hit.
+    """
+    if mode not in FAST_MODES:
+        raise ValueError(f"Unsupported fast PDF mode: {mode}")
+    import fitz
+
+    output_path = Path(output_dir)
+    images_dir = output_path / "images"
+    cache_root = output_path / ".pdf_extraction_cache"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    cache_root.mkdir(parents=True, exist_ok=True)
+
+    with fitz.open(pdf_path) as doc:
+        total_pages = len(doc)
+    start = max(1, int(start_page))
+    end = min(total_pages, int(end_page))
+    if start > end:
+        raise ValueError(
+            f"PDF page range {start_page}-{end_page} is outside a {total_pages}-page document"
+        )
+
+    manifest_path = cache_root / f"manifest_{mode}.json"
+    previous = _load_json(manifest_path, {}) or {}
+    previous_pages = previous.get("pages") if isinstance(previous, dict) else {}
+    previous_pages = previous_pages if isinstance(previous_pages, dict) else {}
+    relevant_prior = {
+        str(page_number): previous_pages.get(str(page_number), {})
+        for page_number in range(start, end + 1)
+    }
+    stat = os.stat(pdf_path)
+    source_token = hashlib.sha256(
+        f"{os.path.abspath(pdf_path)}\0{stat.st_size}\0{stat.st_mtime_ns}".encode(
+            "utf-8", "replace"
+        )
+    ).hexdigest()[:24]
+    task = (
+        pdf_path,
+        start - 1,
+        end,
+        mode,
+        bool(extract_images),
+        str(images_dir),
+        str(cache_root),
+        str(cache_root / "xref_maps" / source_token),
+        relevant_prior,
+        {str(start - 1): str(section_title or "")},
+    )
+    extracted = _extract_page_range(task)
+    page_items = []
+    for item in sorted(extracted, key=lambda value: int(value["page_number"])):
+        cache_file = cache_root / str(item.get("cache_file") or "")
+        result = _load_json(cache_file, {}) or {}
+        if not result.get("page_number"):
+            raise RuntimeError(f"Missing cached PDF page {item.get('page_number')}")
+        page_items.append((int(result["page_number"]), str(result.get("html") or "")))
+    return page_items
 
 
 def extract_pdf_fast(

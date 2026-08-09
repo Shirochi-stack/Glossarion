@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 
 from pdf_extractor import build_pdf_toc_section_plan, group_pdf_pages_by_toc
-from pdf_fast_extractor import extract_pdf_fast
+from pdf_fast_extractor import extract_pdf_fast, extract_pdf_page_range_for_reader
+from workspace_reader import (
+    build_workspace_reader_manifest,
+    ensure_pdf_raw_section,
+)
 from _pdf_extraction_worker import run_pdf_extraction
 from TransateKRtoEN import FileUtilities, ProgressManager
 
@@ -323,3 +327,126 @@ def test_pdf_progress_uses_stable_section_id_across_display_number_changes(tmp_p
     assert manager.prog["chapters"][f"pdf:{section_id}"]["actual_num"] == 3
     manager.migrate_to_content_hash([current_chapter])
     assert f"pdf:{section_id}" in manager.prog["chapters"]
+
+
+def test_workspace_reader_manifest_orders_pdf_entries_and_hides_sidecars(tmp_path):
+    workspace = tmp_path / "Book"
+    workspace.mkdir()
+    source = tmp_path / "Book.pdf"
+    source.write_bytes(b"pdf placeholder")
+    (workspace / "source_epub.txt").write_text(str(source), encoding="utf-8")
+    (workspace / "response_two.html").write_text("<p>two</p>", encoding="utf-8")
+    (workspace / "response_ten.html").write_text("<p>ten</p>", encoding="utf-8")
+    (workspace / "translation_progress.json").write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "pdf:outline:10": {
+                        "actual_num": 10,
+                        "output_file": "response_ten.html",
+                        "original_basename": "pdf_section_10.html",
+                        "pdf_toc_section": True,
+                        "pdf_toc_title": "Chapter Ten",
+                        "pdf_start_page": 20,
+                        "pdf_end_page": 24,
+                    },
+                    "special_source_epub": {
+                        "actual_num": 0,
+                        "output_file": "source_epub.txt",
+                        "original_basename": "source_epub.txt",
+                    },
+                    "pdf:outline:2": {
+                        "actual_num": 2,
+                        "output_file": "response_two.html",
+                        "original_basename": "pdf_section_2.html",
+                        "pdf_toc_section": True,
+                        "pdf_toc_title": "Chapter Two",
+                        "pdf_start_page": 3,
+                        "pdf_end_page": 7,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = build_workspace_reader_manifest(str(workspace))
+
+    assert manifest["source_format"] == "pdf"
+    assert [entry["title"] for entry in manifest["entries"]] == [
+        "Chapter Two",
+        "Chapter Ten",
+    ]
+    assert manifest["entries"][0]["filename"] == "response_two.html"
+    assert manifest["entries"][0]["pdf_start_page"] == 3
+    assert manifest["entries"][0]["pdf_end_page"] == 7
+
+
+def test_pdf_reader_raw_cache_extracts_only_requested_range_and_invalidates(
+        tmp_path, monkeypatch):
+    workspace = tmp_path / "Book"
+    workspace.mkdir()
+    source = tmp_path / "Book.pdf"
+    source.write_bytes(b"first version")
+    manifest = {
+        "workspace": str(workspace),
+        "source_path": str(source),
+        "source_format": "pdf",
+    }
+    entry = {
+        "key": "pdf:outline:8",
+        "title": "Chapter Eight",
+        "pdf_start_page": 41,
+        "pdf_end_page": 52,
+    }
+    calls = []
+
+    def fake_extract(_source, _workspace, **kwargs):
+        calls.append(kwargs)
+        return [
+            (page, f"<html><body><p>raw page {page}</p></body></html>")
+            for page in range(kwargs["start_page"], kwargs["end_page"] + 1)
+        ]
+
+    monkeypatch.setattr(
+        "pdf_fast_extractor.extract_pdf_page_range_for_reader",
+        fake_extract,
+    )
+
+    first = ensure_pdf_raw_section(manifest, entry, extract_images=False)
+    second = ensure_pdf_raw_section(manifest, entry, extract_images=False)
+
+    assert first == second
+    assert len(calls) == 1
+    assert calls[0]["start_page"] == 41
+    assert calls[0]["end_page"] == 52
+    assert "raw page 41" in Path(first).read_text(encoding="utf-8")
+    assert "raw page 52" in Path(first).read_text(encoding="utf-8")
+
+    source.write_bytes(b"updated PDF version with an added bookmark")
+    ensure_pdf_raw_section(manifest, entry, extract_images=False)
+    assert len(calls) == 2
+
+
+def test_reader_page_range_extractor_never_walks_unrequested_pdf_pages(
+        tmp_path):
+    pdf_path = tmp_path / "range.pdf"
+    output_dir = tmp_path / "output"
+    _make_image_pdf(pdf_path, page_count=6)
+
+    pages = extract_pdf_page_range_for_reader(
+        str(pdf_path),
+        str(output_dir),
+        start_page=2,
+        end_page=3,
+        mode="fast_semantic",
+        extract_images=False,
+        section_title="Middle",
+    )
+
+    assert [page_number for page_number, _html in pages] == [2, 3]
+    page_cache = output_dir / ".pdf_extraction_cache" / "pages" / "fast_semantic"
+    assert not (page_cache / "page_000001.json").exists()
+    assert (page_cache / "page_000002.json").is_file()
+    assert (page_cache / "page_000003.json").is_file()
+    assert not (page_cache / "page_000004.json").exists()

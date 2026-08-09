@@ -19,6 +19,17 @@ from pdf_extractor import (
 )
 
 
+def test_progress_manager_routes_pdf_html_entries_to_workspace_reader():
+    source = Path(__file__).resolve().parents[1] / "src" / "Retranslation_GUI.py"
+    text = source.read_text(encoding="utf-8")
+    pdf_branch = text.index('workspace_source.lower().endswith(".pdf")')
+    epub_gate = text.index("source_epubs = _source_epub_candidates()", pdf_branch)
+    constructor = text.index("workspace_dir=data['output_dir']", pdf_branch)
+
+    assert pdf_branch < constructor < epub_gate
+    assert "initial_show_raw=False" in text[pdf_branch:epub_gate]
+
+
 class _FakeBookmarkPage:
     def __init__(self, anchors=None, bookmarks=None):
         self.anchors = anchors or {}

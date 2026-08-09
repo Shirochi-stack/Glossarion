@@ -11915,9 +11915,33 @@ class EpubLibraryDialog(QDialog):
         self._reset_library_scroll_position("comp")
         self._refresh_view()
 
+    @staticmethod
+    def _card_has_reader_workspace(book) -> bool:
+        folder = book.get("output_folder") or _resolve_book_output_folder(book)
+        return bool(
+            folder
+            and os.path.isdir(folder)
+            and os.path.isfile(os.path.join(folder, "translation_progress.json"))
+        )
+
+    def _open_card_file_direct(self, book) -> None:
+        """Open the concrete card file, bypassing Book Details."""
+        try:
+            from PySide6.QtGui import QDesktopServices
+
+            path = str(book.get("path") or "")
+            if not path or not os.path.isfile(path):
+                raise FileNotFoundError(path or "No file path is available")
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+                raise OSError(f"The system could not open {path}")
+        except Exception as exc:
+            logger.error("Could not open file: %s\n%s", exc, traceback.format_exc())
+            QMessageBox.warning(self, "Error", f"Could not open file:\n{exc}")
+
     def _on_card_clicked(self, book):
         file_type = book.get("type", "epub")
-        if file_type in ("pdf", "txt"):
+        if file_type == "txt" or (
+                file_type == "pdf" and not self._card_has_reader_workspace(book)):
             # Open with best available editor/viewer (cross-platform)
             try:
                 path = book["path"]
@@ -11952,8 +11976,8 @@ class EpubLibraryDialog(QDialog):
                 logger.error("Could not open file: %s\n%s", exc, traceback.format_exc())
                 QMessageBox.warning(self, "Error", f"Could not open file:\n{exc}")
             return
-        # EPUB: open the web-like book details page instead of jumping directly
-        # into the reader. Users who want the old "straight to reader" behavior
+        # EPUB or translated PDF workspace: open the web-like Book Details page
+        # instead of jumping into the reader. Users who want the direct behavior
         # can use the "Open in Reader" context menu action.
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -11977,10 +12001,28 @@ class EpubLibraryDialog(QDialog):
             QMessageBox.warning(self, "Error", f"Could not open book details:\n{exc}\n\nDetails:\n{tb}")
 
     def _open_reader_direct(self, book):
-        """Bypass the details page and open the reader for an EPUB card."""
+        """Bypass the details page and open the integrated HTML reader."""
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             QApplication.processEvents()
+            workspace = book.get("output_folder") or _resolve_book_output_folder(book)
+            if workspace and self._card_has_reader_workspace(book):
+                source = book.get("raw_source_path") or _read_source_epub_pointer(workspace) or ""
+                if source.lower().endswith(".pdf") and os.path.isfile(source):
+                    reader = EpubReaderDialog(
+                        source,
+                        config=self._config,
+                        parent=self,
+                        workspace_dir=workspace,
+                        initial_show_raw=False,
+                        window_title=f"{book.get('name') or os.path.basename(workspace)} (Translated)",
+                    )
+                    QApplication.restoreOverrideCursor()
+                    reader.setModal(False)
+                    reader.setAttribute(Qt.WA_DeleteOnClose)
+                    self._active_reader = reader
+                    reader.show()
+                    return
             # When the card carries a distinct raw source (Completed-tab
             # EPUB that was organized alongside its Library/Raw pair, or
             # an in-progress promotion) pass it as the reader's alt so
@@ -12078,14 +12120,33 @@ class EpubLibraryDialog(QDialog):
                 reader_action.triggered.connect(
                     lambda: self._open_reader_direct({"path": out_epub, "type": "epub"})
                 )
+            if (raw_src and raw_src.lower().endswith(".pdf")
+                    and os.path.isfile(raw_src)
+                    and self._card_has_reader_workspace(book)):
+                pdf_reader_action = menu.addAction(
+                    "\U0001f4d6  Open in EPUB reader"
+                )
+                pdf_reader_action.triggered.connect(
+                    lambda: self._open_reader_direct(book)
+                )
         elif file_type == "epub":
             details_action = menu.addAction("\U0001f4d1  Open Book Details")
             details_action.triggered.connect(lambda: self._on_card_clicked(book))
             reader_action = menu.addAction("\U0001f4d6  Open in Reader")
             reader_action.triggered.connect(lambda: self._open_reader_direct(book))
+        elif file_type == "pdf" and self._card_has_reader_workspace(book):
+            details_action = menu.addAction("\U0001f4d1  Open Book Details")
+            details_action.triggered.connect(lambda: self._on_card_clicked(book))
+            reader_action = menu.addAction("\U0001f4d6  Open in EPUB reader")
+            reader_action.triggered.connect(lambda: self._open_reader_direct(book))
+            open_action = menu.addAction("\U0001f4c2  Open File")
+            open_action.triggered.connect(lambda: self._open_card_file_direct(book))
         else:
             open_action = menu.addAction("\U0001f4c2  Open File")
-            open_action.triggered.connect(lambda: self._on_card_clicked(book))
+            if file_type == "txt":
+                open_action.triggered.connect(lambda: self._on_card_clicked(book))
+            else:
+                open_action.triggered.connect(lambda: self._open_card_file_direct(book))
         # "Load for translation" — pushes the card's raw source into the
         # translator's input field (moved out of the Import EPUB button).
         # When multiple cards are selected, the label becomes
@@ -14150,6 +14211,7 @@ class _BookDetailsLoader(QThread):
             source_is_epub = (bool(source_epub)
                               and source_epub.lower().endswith(".epub")
                               and os.path.isfile(source_epub))
+            source_is_pdf = bool(source_epub) and source_epub.lower().endswith(".pdf")
 
             # ---- Phase 1: Fast metadata + cover (no per-chapter HTML) ----
             # Skips the BeautifulSoup pass over every spine chapter so the
@@ -14218,6 +14280,7 @@ class _BookDetailsLoader(QThread):
                 if (isinstance(info, dict)
                     and not _is_progress_sidecar_entry(key, info))
             }
+            prog_key_by_id = {id(info): str(key) for key, info in prog_chapters.items()}
             # Build lookup by normalized basename (no extension, no response_ prefix).
             def _norm(name: str) -> str:
                 base = os.path.basename(name or "")
@@ -14303,9 +14366,25 @@ class _BookDetailsLoader(QThread):
                     if not isinstance(info, dict):
                         continue
                     ob = info.get("original_basename") or info.get("output_file") or key
-                    title = ob
-                    title = os.path.splitext(os.path.basename(title))[0]
-                    title = title.replace("_", " ").replace("-", " ").strip() or title
+                    if source_is_pdf and not info.get("pdf_toc_section"):
+                        output_ext = os.path.splitext(str(
+                            info.get("output_file") or ""
+                        ))[1].lower()
+                        original_ext = os.path.splitext(str(
+                            info.get("original_basename") or ""
+                        ))[1].lower()
+                        if not ({output_ext, original_ext}
+                                & {".html", ".htm", ".xhtml"}):
+                            continue
+                    title = (
+                        info.get("pdf_toc_title")
+                        or info.get("pdf_section_title")
+                        or info.get("title")
+                        or ob
+                    )
+                    if title == ob:
+                        title = os.path.splitext(os.path.basename(title))[0]
+                        title = title.replace("_", " ").replace("-", " ").strip() or title
                     synth.append({
                         "href": ob,
                         "filename": os.path.basename(ob),
@@ -14377,7 +14456,7 @@ class _BookDetailsLoader(QThread):
                     status = "pending" if has_progress_context else ""
                 if is_gallery:
                     status = ""
-                return {
+                resolved = {
                     "index": idx,
                     "filename": filename,
                     "raw_title": raw_title,
@@ -14387,6 +14466,19 @@ class _BookDetailsLoader(QThread):
                     "is_special": is_special,
                     "is_gallery": is_gallery,
                 }
+                if match:
+                    resolved["progress_key"] = prog_key_by_id.get(id(match), "")
+                    resolved["output_file"] = output_file
+                    for pdf_key in (
+                        "pdf_toc_section",
+                        "pdf_toc_title",
+                        "pdf_section_id",
+                        "pdf_start_page",
+                        "pdf_end_page",
+                    ):
+                        if match.get(pdf_key) is not None:
+                            resolved[pdf_key] = match.get(pdf_key)
+                return resolved
 
             chapters_info = []
             if chapters:
@@ -16069,6 +16161,12 @@ class BookDetailsDialog(QDialog):
 
         # In-progress strip + reader-entry-point relabeling
         has_translated = any(c.get("translated_path") for c in self._chapters_info)
+        raw_source = str(self._book.get("raw_source_path") or "")
+        is_pdf_workspace = bool(
+            raw_source.lower().endswith(".pdf")
+            or str(self._book.get("workspace_kind") or "").lower() == "pdf"
+            or str(self._book.get("compiled_output_kind") or "").lower() == "pdf"
+        )
         if self._book.get("is_in_progress"):
             self._update_progress_strip()
             # When any chapter has been translated, the primary reader shows
@@ -16076,6 +16174,17 @@ class BookDetailsDialog(QDialog):
             # secondary "Read raw source" button remains for the raw view.
             if has_translated:
                 self._start_btn.setText("\U0001f4d6  Read translated")
+                self._raw_btn.show()
+            else:
+                self._start_btn.setText("\U0001f4d6  Read raw source")
+                self._raw_btn.hide()
+        elif is_pdf_workspace:
+            self._progress_strip.hide()
+            if has_translated:
+                self._start_btn.setText("\U0001f4d6  Read translated")
+                self._raw_btn.setToolTip(
+                    "Read raw bookmarked PDF sections (extracted and cached on demand)"
+                )
                 self._raw_btn.show()
             else:
                 self._start_btn.setText("\U0001f4d6  Read raw source")
@@ -17596,6 +17705,61 @@ class BookDetailsDialog(QDialog):
             book_path = self._book.get("path", "") or ""
             raw_source = self._book.get("raw_source_path", "") or ""
             compiled = self._book.get("compiled_output_path", "") or ""
+            output_folder = (
+                self._book.get("output_folder")
+                or _resolve_book_output_folder(self._book)
+                or ""
+            )
+            if output_folder and not raw_source:
+                pointed_source = _read_source_epub_pointer(output_folder) or ""
+                if pointed_source and os.path.isfile(pointed_source):
+                    raw_source = pointed_source
+
+            # A translated PDF workspace already has the same ordered HTML
+            # chapter model the reader needs.  Use it directly instead of
+            # falling through to the system PDF viewer.  Raw mode is supplied
+            # by the reader's lazy bookmark-range cache, so opening this dialog
+            # never extracts the whole PDF again.
+            if (output_folder and os.path.isdir(output_folder)
+                    and raw_source.lower().endswith(".pdf")
+                    and os.path.isfile(raw_source)
+                    and os.path.isfile(os.path.join(
+                        output_folder, "translation_progress.json"))):
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                QApplication.processEvents()
+                initial_filename = None
+                if (isinstance(initial_chapter, int)
+                        and 0 <= initial_chapter < len(self._chapters_info)):
+                    info = self._chapters_info[initial_chapter] or {}
+                    initial_filename = (
+                        info.get("output_file")
+                        or info.get("filename")
+                        or None
+                    )
+                has_translated = any(
+                    c.get("translated_path") for c in self._chapters_info
+                )
+                title = (
+                    self._metadata_json.get("title")
+                    or self._details.get("title")
+                    or self._book.get("name")
+                )
+                reader = EpubReaderDialog(
+                    raw_source,
+                    config=self._config,
+                    parent=self,
+                    initial_chapter=initial_chapter,
+                    initial_chapter_filename=initial_filename,
+                    window_title=(f"{title} (Translated)" if title else None),
+                    workspace_dir=output_folder,
+                    initial_show_raw=bool(raw_only or not has_translated),
+                )
+                QApplication.restoreOverrideCursor()
+                reader.setModal(False)
+                reader.setAttribute(Qt.WA_DeleteOnClose)
+                self._active_reader = reader
+                reader.show()
+                return
 
             def _is_epub_file(p: str) -> bool:
                 return bool(p) and p.lower().endswith(".epub") and os.path.isfile(p)
@@ -18397,6 +18561,125 @@ class _OverlayMergeThread(QThread):
             self.done.emit(overlaid, images, overlay_applied)
 
 
+def _workspace_reader_placeholder(title: str, message: str) -> str:
+    """Return a small reader-safe placeholder document."""
+    import html as _html
+
+    return (
+        '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>'
+        '<div style="max-width:48em;margin:4em auto;text-align:center;opacity:.72">'
+        f'<h2>{_html.escape(str(title or "Section"))}</h2>'
+        f'<p>{_html.escape(str(message or ""))}</p>'
+        '</div></body></html>'
+    )
+
+
+class _WorkspaceReaderLoaderThread(QThread):
+    """Load translated HTML chapter files without requiring an EPUB zip."""
+
+    done = Signal(object, object, list)
+    error = Signal(str)
+
+    def __init__(self, manifest: dict, parent=None):
+        super().__init__(parent)
+        self.setObjectName("WorkspaceReaderLoaderThread")
+        self._manifest = dict(manifest or {})
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        self.requestInterruption()
+
+    def _should_stop(self) -> bool:
+        try:
+            return self._cancelled or self.isInterruptionRequested()
+        except RuntimeError:
+            return True
+
+    def run(self):
+        raw_chapters = []
+        translated_chapters = []
+        filenames = []
+        try:
+            for entry in self._manifest.get("entries", []) or []:
+                if self._should_stop():
+                    return
+                title = str(entry.get("title") or entry.get("filename") or "Section")
+                filenames.append(str(entry.get("filename") or ""))
+                raw_chapters.append((
+                    title,
+                    _workspace_reader_placeholder(
+                        title,
+                        "Raw PDF pages are extracted and cached when this section is opened.",
+                    ),
+                ))
+                translated_path = str(entry.get("translated_path") or "")
+                translated_html = ""
+                if translated_path and os.path.isfile(translated_path):
+                    try:
+                        with open(translated_path, "rb") as stream:
+                            translated_html = stream.read().decode(
+                                "utf-8", errors="replace"
+                            )
+                    except OSError:
+                        translated_html = ""
+                if not translated_html:
+                    translated_html = _workspace_reader_placeholder(
+                        title,
+                        "This section has not been translated yet.",
+                    )
+                translated_chapters.append((title, translated_html))
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return
+        if not self._should_stop():
+            self.done.emit(raw_chapters, translated_chapters, filenames)
+
+
+class _PdfRawSectionLoaderThread(QThread):
+    """Materialize one raw bookmark range for a PDF workspace."""
+
+    done = Signal(int, str)
+    error = Signal(int, str)
+
+    def __init__(self, row: int, manifest: dict, entry: dict,
+                 mode: str, extract_images: bool, parent=None):
+        super().__init__(parent)
+        self.setObjectName("PdfRawSectionLoaderThread")
+        self._row = int(row)
+        self._manifest = dict(manifest or {})
+        self._entry = dict(entry or {})
+        self._mode = str(mode or "fast_semantic")
+        self._extract_images = bool(extract_images)
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        self.requestInterruption()
+
+    def run(self):
+        try:
+            if self._cancelled or self.isInterruptionRequested():
+                return
+            from workspace_reader import ensure_pdf_raw_section
+
+            html_path = ensure_pdf_raw_section(
+                self._manifest,
+                self._entry,
+                mode=self._mode,
+                extract_images=self._extract_images,
+            )
+            if self._cancelled or self.isInterruptionRequested():
+                return
+            with open(html_path, "r", encoding="utf-8", errors="replace") as stream:
+                content = stream.read()
+            if not self._cancelled and not self.isInterruptionRequested():
+                self.done.emit(self._row, content)
+        except Exception as exc:
+            if not self._cancelled:
+                self.error.emit(self._row, str(exc))
+
+
 class _EpubSearchThread(QThread):
     """Build the Search EPUB match list away from the Qt UI thread."""
     results_ready = Signal(int, str, object)
@@ -19183,10 +19466,30 @@ class EpubReaderDialog(QDialog):
                  show_special_files: bool | None = None,
                  alt_epub_path: str | None = None,
                  overlay_provider=None,
-                 auto_refresh_interval_ms: int = 3000):
+                 auto_refresh_interval_ms: int = 3000,
+                 workspace_dir: str | None = None,
+                 initial_show_raw: bool | None = None):
         super().__init__(parent)
-        self._epub_path = epub_path
         self._config = config or {}
+        self._workspace_manifest: dict = {}
+        self._workspace_mode = False
+        self._workspace_has_raw = False
+        if workspace_dir:
+            from workspace_reader import build_workspace_reader_manifest
+
+            self._workspace_manifest = build_workspace_reader_manifest(
+                workspace_dir,
+                source_path=epub_path or None,
+            )
+            self._workspace_mode = True
+            self._workspace_has_raw = (
+                self._workspace_manifest.get("source_format") == "pdf"
+            )
+            epub_path = (
+                self._workspace_manifest.get("source_path")
+                or self._workspace_manifest.get("workspace")
+            )
+        self._epub_path = str(epub_path or "")
         # Dual-path mode: when the caller passes ``alt_epub_path`` (the raw
         # source EPUB that pairs with the compiled one), the Show-raw pill
         # swaps ``_epub_path`` between the two and reloads. Used by the
@@ -19235,6 +19538,8 @@ class EpubReaderDialog(QDialog):
         #     compiled and raw EPUBs and reloads.
         # The pill is hidden when neither applies. Persisted in config.
         self._show_raw = bool(self._config.get('epub_reader_show_raw', False))
+        if initial_show_raw is not None:
+            self._show_raw = bool(initial_show_raw)
         # If we can satisfy the persisted "raw" state via the dual-path
         # alt (no overlay scenario), start the reader on the raw EPUB so
         # the user sees what they last chose.
@@ -19280,12 +19585,16 @@ class EpubReaderDialog(QDialog):
         # Extra image search directories (e.g. <output_folder>/images,
         # <output_folder>/translated_images) used to augment the EPUB's own
         # image table so translated chapters can resolve their assets.
-        self._extra_image_dirs: list[str] = list(extra_image_dirs or [])
+        workspace_image_dirs = self._workspace_manifest.get("image_dirs", []) or []
+        self._extra_image_dirs: list[str] = list(
+            extra_image_dirs or workspace_image_dirs
+        )
         # CSS directories from the translated output folder. In overlay mode
         # the active EPUB path still points at the raw source, so translated
         # Embedded CSS must be supplied explicitly.
+        workspace_css_dirs = self._workspace_manifest.get("css_dirs", []) or []
         self._translated_css_dirs: list[str] = [
-            str(p) for p in (translated_css_dirs or []) if p
+            str(p) for p in (translated_css_dirs or workspace_css_dirs) if p
         ]
         # Auto-refresh: when a ``overlay_provider`` callable is supplied
         # (typically :meth:`BookDetailsDialog._build_translated_overlay`)
@@ -19317,6 +19626,10 @@ class EpubReaderDialog(QDialog):
         self._cache_loader_thread: _EpubCacheLoaderThread | None = None
         self._loader_thread: _EpubLoaderThread | None = None
         self._overlay_thread: _OverlayMergeThread | None = None
+        self._workspace_loader_thread: _WorkspaceReaderLoaderThread | None = None
+        self._workspace_raw_thread: _PdfRawSectionLoaderThread | None = None
+        self._workspace_raw_ready: set[int] = set()
+        self._workspace_raw_pending_row: int | None = None
         # QWebEngineView starts a Chromium renderer the first time it is
         # constructed. On packaged builds that can take several seconds, so
         # keep it out of __init__: callers can show the lightweight loading
@@ -19354,7 +19667,11 @@ class EpubReaderDialog(QDialog):
         self._live_follow_stream = True
         self._live_scroll_guard = False
 
-        title_text = window_title or os.path.splitext(os.path.basename(epub_path))[0]
+        title_text = (
+            window_title
+            or self._workspace_manifest.get("title")
+            or os.path.splitext(os.path.basename(str(epub_path or "")))[0]
+        )
         self._window_title_text = title_text
         self.setWindowTitle(f"\U0001f4d6 {title_text}")
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
@@ -19706,7 +20023,10 @@ class EpubReaderDialog(QDialog):
         # _rotate_spinner()' not found`` on ``QTimer.timeout`` dispatch
         # even when the method exists and is ``@Slot()``-decorated.
         self._spin_timer.timeout.connect(lambda: self._rotate_spinner())
-        loading_text = QLabel("Loading EPUB\u2026")
+        loading_text = QLabel(
+            "Loading PDF sections\u2026"
+            if self._workspace_mode else "Loading EPUB\u2026"
+        )
         loading_text.setAlignment(Qt.AlignCenter)
         loading_text.setStyleSheet("color: #888; font-size: 11pt; padding-top: 8px;")
         loading_layout.addWidget(loading_text)
@@ -20008,6 +20328,26 @@ class EpubReaderDialog(QDialog):
             self._content_widget.hide()
             self._spin_angle = 0
             self._spin_timer.start()
+        if self._workspace_mode:
+            previous = getattr(self, "_workspace_loader_thread", None)
+            if previous is not None:
+                _stop_qthread_safely(
+                    previous,
+                    timeout_ms=250,
+                    signal_names=("done", "error"),
+                )
+            thread = _WorkspaceReaderLoaderThread(
+                self._workspace_manifest,
+                parent=self,
+            )
+            thread.done.connect(
+                lambda raw, translated, filenames:
+                    self._on_workspace_loaded(raw, translated, filenames)
+            )
+            thread.error.connect(lambda message: self._on_epub_error(message))
+            self._workspace_loader_thread = thread
+            thread.start()
+            return
         # Probe the cache in a worker thread so the pickle.load doesn't
         # freeze the spinner. The worker emits ``hit`` with the cached
         # data on success, or ``miss`` to fall through to the full
@@ -20027,6 +20367,21 @@ class EpubReaderDialog(QDialog):
         self._cache_loader_thread.hit.connect(self._on_cache_hit)
         self._cache_loader_thread.miss.connect(self._on_cache_miss)
         self._cache_loader_thread.start()
+
+    @Slot(object, object, list)
+    def _on_workspace_loaded(self, raw_chapters, translated_chapters,
+                             filenames):
+        """Install a translation-folder HTML manifest in the shared reader."""
+        if getattr(self, "_closing", False):
+            return
+        self._spin_timer.stop()
+        self._finalize_post_load(
+            list(raw_chapters or []),
+            list(translated_chapters or []),
+            {},
+            bool(self._workspace_has_raw),
+            list(filenames or []),
+        )
 
     @Slot(object, object, list)
     def _on_cache_hit(self, chapters, images, filenames):
@@ -20217,8 +20572,11 @@ class EpubReaderDialog(QDialog):
         # resolved raw source). Otherwise there's nothing to toggle
         # against and the pill stays hidden.
         has_dual_path = bool(getattr(self, "_raw_epub_alt_path", ""))
+        has_workspace_raw = bool(getattr(self, "_workspace_has_raw", False))
         if getattr(self, "_raw_btn", None) is not None:
-            self._raw_btn.setVisible(bool(overlay_applied) or has_dual_path)
+            self._raw_btn.setVisible(
+                bool(overlay_applied) or has_dual_path or has_workspace_raw
+            )
             # Sync the pill's checked state with the actually-rendered
             # flavor — this can diverge from the persisted default when
             # overlay mode couldn't satisfy the "raw" preference (no
@@ -20228,6 +20586,7 @@ class EpubReaderDialog(QDialog):
                 raw_alt = getattr(self, "_raw_epub_alt_path", "") or ""
                 currently_raw = bool(
                     (overlay_applied and self._show_raw)
+                    or (has_workspace_raw and self._show_raw)
                     or (has_dual_path and raw_alt
                         and os.path.normcase(os.path.abspath(
                             self._epub_path))
@@ -20235,7 +20594,7 @@ class EpubReaderDialog(QDialog):
                 )
             except Exception:
                 currently_raw = bool(
-                    overlay_applied and self._show_raw)
+                    (overlay_applied or has_workspace_raw) and self._show_raw)
             self._raw_btn.blockSignals(True)
             self._raw_btn.setChecked(currently_raw)
             self._raw_btn.blockSignals(False)
@@ -20337,7 +20696,7 @@ class EpubReaderDialog(QDialog):
             self._reader.setHtml(
                 "<div style='text-align:center; padding: 60px; color: #888;'>"
                 "<p style='font-size: 16pt;'>📭</p>"
-                "<p>No readable content found in this EPUB.</p></div>")
+                "<p>No readable content found for this book.</p></div>")
 
         # Kick off the auto-refresh timer now that the initial load has
         # finished. Only started once per dialog \u2014 subsequent finalize
@@ -20590,10 +20949,11 @@ class EpubReaderDialog(QDialog):
         self._loading_widget.hide()
         self._content_widget.show()
         self._reader_stack.setCurrentIndex(0)
+        source_label = "PDF workspace" if self._workspace_mode else "EPUB"
         self._reader.setHtml(
             f"<div style='text-align:center; padding: 60px; color: #ff6b6b;'>"
             f"<p style='font-size: 16pt;'>⚠️</p>"
-            f"<p>Failed to load EPUB:<br>{error_msg}</p></div>")
+            f"<p>Failed to load {source_label}:<br>{error_msg}</p></div>")
 
     # ── Theme / Font / Spacing ─────────────────────────────────────────────
 
@@ -21984,10 +22344,121 @@ class EpubReaderDialog(QDialog):
         self._chapter_page_cache.clear()
         self._render_current()
 
+    def _ensure_workspace_raw_chapter(self, row: int) -> bool:
+        """Start the one-section PDF raw cache on demand.
+
+        Returns ``True`` when the requested raw chapter is already available.
+        A different in-flight range is allowed to finish, after which the most
+        recently requested row is started.  At no point is the entire PDF
+        walked merely because the reader was opened or Raw was toggled.
+        """
+        if not (self._workspace_mode and self._workspace_has_raw):
+            return True
+        entries = self._workspace_manifest.get("entries", []) or []
+        if not (0 <= row < len(entries)):
+            return False
+        if row in self._workspace_raw_ready:
+            return True
+
+        running = getattr(self, "_workspace_raw_thread", None)
+        if running is not None:
+            try:
+                if running.isRunning():
+                    if getattr(running, "_row", None) != row:
+                        self._workspace_raw_pending_row = row
+                    return False
+            except RuntimeError:
+                pass
+
+        title = self._chapters_raw[row][0]
+        self._chapters_raw[row] = (
+            title,
+            _workspace_reader_placeholder(
+                title,
+                "Loading the raw bookmarked PDF pages...",
+            ),
+        )
+        mode = str(self._config.get("pdf_render_mode", "fast_semantic") or "")
+        if mode not in ("fast_semantic", "fast_layout"):
+            mode = "fast_semantic"
+        extract_images = str(os.environ.get("PDF_EXTRACT_IMAGES", "1")).strip().lower() \
+            not in ("0", "false", "no", "off")
+        thread = _PdfRawSectionLoaderThread(
+            row,
+            self._workspace_manifest,
+            entries[row],
+            mode,
+            extract_images,
+            parent=self,
+        )
+        thread.done.connect(
+            lambda loaded_row, content:
+                self._on_workspace_raw_loaded(loaded_row, content)
+        )
+        thread.error.connect(
+            lambda failed_row, message:
+                self._on_workspace_raw_error(failed_row, message)
+        )
+        self._workspace_raw_thread = thread
+        thread.start()
+        return False
+
+    @Slot(int, str)
+    def _on_workspace_raw_loaded(self, row: int, content: str) -> None:
+        if getattr(self, "_closing", False):
+            return
+        if 0 <= row < len(self._chapters_raw):
+            title = self._chapters_raw[row][0]
+            self._chapters_raw[row] = (title, str(content or ""))
+            self._workspace_raw_ready.add(row)
+        self._workspace_raw_thread = None
+        if self._show_raw and row == self._current_row:
+            self._chapters = self._chapters_raw
+            self._chapter_page_cache.pop(row, None)
+            self._loaded_chapter = -1
+            self._render_current()
+        pending = self._workspace_raw_pending_row
+        self._workspace_raw_pending_row = None
+        if (isinstance(pending, int)
+                and pending not in self._workspace_raw_ready
+                and self._show_raw):
+            QTimer.singleShot(0, lambda r=pending:
+                              self._ensure_workspace_raw_chapter(r))
+
+    @Slot(int, str)
+    def _on_workspace_raw_error(self, row: int, message: str) -> None:
+        if getattr(self, "_closing", False):
+            return
+        logger.warning("Could not load raw PDF section %s: %s", row, message)
+        if 0 <= row < len(self._chapters_raw):
+            title = self._chapters_raw[row][0]
+            self._chapters_raw[row] = (
+                title,
+                _workspace_reader_placeholder(
+                    title,
+                    f"Could not load this raw PDF section: {message}",
+                ),
+            )
+            self._workspace_raw_ready.add(row)
+        self._workspace_raw_thread = None
+        if self._show_raw and row == self._current_row:
+            self._chapters = self._chapters_raw
+            self._loaded_chapter = -1
+            self._render_current()
+        pending = self._workspace_raw_pending_row
+        self._workspace_raw_pending_row = None
+        if (isinstance(pending, int)
+                and pending not in self._workspace_raw_ready
+                and self._show_raw):
+            QTimer.singleShot(0, lambda r=pending:
+                              self._ensure_workspace_raw_chapter(r))
+
     def _render_current(self):
         """Re-render the current chapter in the active layout mode."""
         if not self._chapters:
             return
+        if self._workspace_mode and self._show_raw:
+            self._ensure_workspace_raw_chapter(self._current_row)
         self._apply_reader_style()  # refresh theme
         # Translate button only applies to not-yet-translated chapters.
         try:
@@ -22723,6 +23194,11 @@ class EpubReaderDialog(QDialog):
         btn = getattr(self, "_translate_btn", None)
         if btn is None:
             return
+        if self._workspace_mode:
+            # PDF workspace entries are translated through Progress Manager;
+            # the EPUB-spine single-chapter translator cannot address them.
+            btn.setVisible(False)
+            return
         if self._live_translate_active:
             btn.setVisible(True)
             return
@@ -23288,6 +23764,18 @@ class EpubReaderDialog(QDialog):
             signal_names=("hit", "miss"),
         )
         self._cache_loader_thread = None
+        _stop_qthread_safely(
+            getattr(self, "_workspace_loader_thread", None),
+            timeout_ms=1200,
+            signal_names=("done", "error"),
+        )
+        self._workspace_loader_thread = None
+        _stop_qthread_safely(
+            getattr(self, "_workspace_raw_thread", None),
+            timeout_ms=1200,
+            signal_names=("done", "error"),
+        )
+        self._workspace_raw_thread = None
         _persist_config_via_parent(self)
         super().closeEvent(event)
 
@@ -23693,12 +24181,12 @@ class EpubReaderDialog(QDialog):
                 self._translated_overlay
                 or self._raw_epub_alt_path
                 or self._translated_css_dirs
+                or self._workspace_mode
             )
         )
         translated_css_mode = bool(
             attach_css_enabled
-            and
-            self._translated_overlay
+            and (self._translated_overlay or self._workspace_mode)
             and not getattr(self, "_show_raw", False)
             and self._translated_css_dirs
         )
