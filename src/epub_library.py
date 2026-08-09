@@ -31,8 +31,8 @@ from PySide6.QtWidgets import (
     QStyle, QStyleOptionViewItem, QLayout, QFormLayout, QDialogButtonBox,
     QPlainTextEdit
 )
-from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPoint, QPointF, QUrl, QEventLoop, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform, QTextLayout, QTextOption, QPainter, QColor, QPen
+from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPoint, QPointF, QUrl, QEventLoop, QAbstractAnimation, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QImageReader, QMovie, QCursor, QShortcut, QKeySequence, QTransform, QTextLayout, QTextOption, QPainter, QColor, QPen
 
 from metadata_progress import is_metadata_progress_entry
 from translation_artifacts import is_translation_artifact_progress_entry
@@ -459,6 +459,93 @@ def _cached_scaled_pixmap(path: str, width: int, height: int) -> QPixmap | None:
         _SCALED_PIXMAP_CACHE, scaled_key, scaled,
         _SCALED_PIXMAP_CACHE_LIMIT)
     return scaled
+
+
+def _animated_image_reader(path: str) -> QImageReader | None:
+    """Return a reader only when *path* contains a genuinely animated image.
+
+    Detection is content-based rather than extension-based because EPUB cover
+    bytes are stored in Glossarion's legacy ``.jpg`` cache even when the
+    embedded resource is actually a GIF.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        reader = QImageReader(path)
+        if not reader.canRead() or not reader.supportsAnimation():
+            return None
+        # Some plugins report animation support for a single-frame resource.
+        # ``-1`` means the count is not cheaply known, so allow that through.
+        if reader.imageCount() == 1:
+            return None
+        return reader
+    except Exception:
+        return None
+
+
+def _build_cover_movie(
+    image_path: str,
+    parent: QLabel,
+    width: int,
+    height: int,
+) -> QMovie | None:
+    """Build a movie whose frames are smooth-scaled into a cover label.
+
+    ``QMovie.setScaledSize()`` delegates to the image plugin's inexpensive
+    scaler, which makes downscaled GIF covers visibly jagged/blurry. Keep the
+    decoder at native resolution and smooth-scale each decoded frame instead.
+    """
+    if width <= 0 or height <= 0:
+        return None
+    reader = _animated_image_reader(image_path)
+    if reader is None:
+        return None
+    movie = None
+    try:
+        movie = QMovie(image_path, reader.format(), parent)
+        if not movie.isValid():
+            movie.deleteLater()
+            return None
+        target_size = QSize(int(width), int(height))
+
+        def _paint_frame(_frame_number: int) -> None:
+            try:
+                frame = movie.currentImage()
+                if frame.isNull():
+                    return
+                scaled = frame.scaled(
+                    target_size,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+                parent.setPixmap(QPixmap.fromImage(scaled))
+                parent.setText("")
+            except RuntimeError:
+                # The label/movie can disappear together while a queued frame
+                # notification is still being delivered during dialog close.
+                pass
+
+        movie.frameChanged.connect(_paint_frame)
+        # Keep an explicit Python reference for the lifetime of the C++ movie.
+        movie._glossarion_frame_renderer = _paint_frame
+        return movie
+    except Exception:
+        if movie is not None:
+            movie.deleteLater()
+        logger.debug("Animated cover setup failed for %s: %s",
+                     image_path, traceback.format_exc())
+        return None
+
+
+def _dispose_cover_movie(movie: QMovie | None) -> None:
+    """Stop and release a movie that is no longer attached to a cover label."""
+    if movie is None:
+        return
+    try:
+        movie.stop()
+        movie.deleteLater()
+    except RuntimeError:
+        pass
 
 
 class _NoWheelComboBox(QComboBox):
@@ -914,6 +1001,93 @@ def _cover_cache_dir() -> str:
     d = os.path.join(tempfile.gettempdir(), "Glossarion_CoverCache")
     os.makedirs(d, exist_ok=True)
     return d
+
+
+_PDF_COVER_SCAN_PAGE_LIMIT = 5
+
+
+def _extract_pdf_cover(pdf_path: str) -> str | None:
+    """Extract and cache the first embedded image in *pdf_path*.
+
+    At most the first five pages are inspected in document order and only
+    image objects are decoded; the page itself is never rendered. This does
+    not invoke Glossarion's PDF text/chapter extraction pipeline or alter
+    translation progress entries.
+    """
+    pdf_path = os.path.abspath(str(pdf_path or ""))
+    if not pdf_path.lower().endswith(".pdf") or not os.path.isfile(pdf_path):
+        return None
+    try:
+        stat = os.stat(pdf_path)
+        identity = "\0".join((
+            "pdf-cover-first-image-v2",
+            os.path.normcase(pdf_path),
+            str(stat.st_size),
+            str(stat.st_mtime_ns),
+        ))
+        name_hash = hashlib.md5(identity.encode("utf-8")).hexdigest()[:16]
+        cache_dir = _cover_cache_dir()
+        os.makedirs(cache_dir, exist_ok=True)
+        cached = os.path.join(cache_dir, f"{name_hash}_pdf_image1.png")
+        if os.path.isfile(cached) and os.path.getsize(cached) > 0:
+            return cached
+
+        import fitz
+
+        pixmap = None
+        with fitz.open(pdf_path) as document:
+            if document.needs_pass or document.page_count < 1:
+                return None
+            seen_xrefs: set[int] = set()
+            page_limit = min(
+                int(document.page_count), _PDF_COVER_SCAN_PAGE_LIMIT)
+            for page_number in range(page_limit):
+                page = document.load_page(page_number)
+                for image_info in page.get_images(full=True):
+                    xref = int(image_info[0] or 0)
+                    if xref <= 0 or xref in seen_xrefs:
+                        continue
+                    seen_xrefs.add(xref)
+                    try:
+                        candidate = fitz.Pixmap(document, xref)
+                        if (candidate.width <= 0 or candidate.height <= 0
+                                or candidate.colorspace is None):
+                            continue
+                        # PNG cannot directly encode CMYK/DeviceN pixmaps.
+                        # Convert those while leaving RGB/gray pixels native.
+                        if candidate.n - int(candidate.alpha) > 3:
+                            candidate = fitz.Pixmap(fitz.csRGB, candidate)
+                        pixmap = candidate
+                        break
+                    except Exception:
+                        logger.debug(
+                            "Skipping unreadable PDF image xref %s in %s",
+                            xref, pdf_path,
+                        )
+                if pixmap is not None:
+                    break
+        if pixmap is None:
+            return None
+
+        fd, temporary = tempfile.mkstemp(
+            prefix=f"{name_hash}_", suffix=".png", dir=cache_dir)
+        os.close(fd)
+        try:
+            pixmap.save(temporary)
+            if os.path.getsize(temporary) <= 0:
+                return None
+            os.replace(temporary, cached)
+        finally:
+            try:
+                if os.path.exists(temporary):
+                    os.remove(temporary)
+            except OSError:
+                pass
+        return cached
+    except Exception as exc:
+        logger.debug("PDF cover rendering failed for %s: %s\n%s",
+                     pdf_path, exc, traceback.format_exc())
+        return None
 
 
 def _download_remote_cover_image(url: str) -> bytes | None:
@@ -1988,6 +2162,23 @@ def _is_gallery_filename(name: str) -> bool:
     return stem == "gallery"
 
 
+_PROGRESS_SIDECAR_FILENAMES = frozenset({"source_epub.txt"})
+
+
+def _is_progress_sidecar_entry(key, entry: dict | None = None) -> bool:
+    """Return True for workspace bookkeeping rows that are never chapters."""
+    entry = entry if isinstance(entry, dict) else {}
+    for value in (
+        key,
+        entry.get("original_basename"),
+        entry.get("output_file"),
+    ):
+        if (value and os.path.basename(str(value)).casefold()
+                in _PROGRESS_SIDECAR_FILENAMES):
+            return True
+    return False
+
+
 def _read_progress_summary(progress_file: str, exclude_special: bool = False,
                            config: dict | None = None) -> dict | None:
     """Return a lightweight summary of translation_progress.json or None on failure.
@@ -2028,6 +2219,8 @@ def _read_progress_summary(progress_file: str, exclude_special: bool = False,
     output_folder_ok = bool(output_folder) and os.path.isdir(output_folder)
     for key, ch in chapters.items():
         if not isinstance(ch, dict):
+            continue
+        if _is_progress_sidecar_entry(key, ch):
             continue
         name = (ch.get("original_basename")
                 or ch.get("output_file")
@@ -4659,8 +4852,8 @@ class _CoverLoader(QThread):
         self._file_type = file_type
         self._config = config or {}
         self._original_path = original_path
-        # For in-progress cards the output folder has no images yet, so the
-        # thumbnail must be pulled directly from the resolved raw source EPUB.
+        # For in-progress cards the output folder may have no images yet, so
+        # the thumbnail comes directly from the resolved raw EPUB/PDF source.
         self._raw_source_path = raw_source_path or ""
         self._cancelled = False
 
@@ -4695,6 +4888,11 @@ class _CoverLoader(QThread):
                     cover = _extract_cover(self._raw_source_path)
                     if self._should_stop():
                         return
+                elif (self._raw_source_path.lower().endswith(".pdf")
+                      and os.path.isfile(self._raw_source_path)):
+                    cover = _extract_pdf_cover(self._raw_source_path)
+                    if self._should_stop():
+                        return
             # Fallback 2: cover image sitting alongside the EPUB
             # (e.g. output folder with cover.jpg or images/ subfolder).
             if not cover:
@@ -4713,14 +4911,15 @@ class _CoverLoader(QThread):
         elif self._file_type == "in_progress":
             # For an in-progress card the "path" is the output folder itself.
             cover = None
-            # Primary source: the resolved raw EPUB in Library/Raw (or
+            # Primary source: the resolved raw EPUB/PDF in Library/Raw (or
             # wherever source_epub.txt points). This is the only way to
             # produce a real thumbnail for Not Started cards, whose output
             # folder is still empty.
-            if (self._raw_source_path
-                    and self._raw_source_path.lower().endswith(".epub")
-                    and os.path.isfile(self._raw_source_path)):
-                cover = _extract_cover(self._raw_source_path)
+            if self._raw_source_path and os.path.isfile(self._raw_source_path):
+                if self._raw_source_path.lower().endswith(".epub"):
+                    cover = _extract_cover(self._raw_source_path)
+                elif self._raw_source_path.lower().endswith(".pdf"):
+                    cover = _extract_pdf_cover(self._raw_source_path)
                 if self._should_stop():
                     return
             # Secondary: images the translator has produced in the output
@@ -4750,6 +4949,18 @@ class _CoverLoader(QThread):
                                        original_path=self._original_path)
             if self._should_stop():
                 return
+            if not cover:
+                for pdf_candidate in (
+                    self._file_path,
+                    self._raw_source_path,
+                    self._original_path,
+                ):
+                    if (pdf_candidate
+                            and str(pdf_candidate).lower().endswith(".pdf")
+                            and os.path.isfile(pdf_candidate)):
+                        cover = _extract_pdf_cover(pdf_candidate)
+                        if cover or self._should_stop():
+                            break
         if not self._should_stop():
             self.result_ready.emit(self._file_path, cover or "")
 
@@ -5073,6 +5284,7 @@ class _BookCard(QFrame):
             self._badge_pt = 7.0
             self._size_lbl_pt = 7.5
         self._has_cover = False
+        self._cover_movie = None
         self._selected = False
         self._hovered = False
         self._applied_style = ""
@@ -5547,9 +5759,24 @@ class _BookCard(QFrame):
 
     def set_cover(self, image_path: str):
         try:
+            movie = _build_cover_movie(
+                image_path,
+                self.cover_label,
+                self._card_w - 8,
+                self._cover_h,
+            )
+            if movie is not None:
+                _dispose_cover_movie(self._cover_movie)
+                self._cover_movie = movie
+                self.cover_label.setText("")
+                self._has_cover = True
+                movie.start()
+                return
             scaled = _cached_scaled_pixmap(
                 image_path, self._card_w - 8, self._cover_h)
             if scaled is not None and not scaled.isNull():
+                _dispose_cover_movie(self._cover_movie)
+                self._cover_movie = None
                 self.cover_label.setPixmap(scaled)
                 self.cover_label.setText("")
                 self._has_cover = True
@@ -6942,6 +7169,8 @@ class EpubLibraryDialog(QDialog):
     _CARD_HOVER_RECONCILE_MS = 50
     _CARD_HOVER_SETTLE_MS = 6000
     _GRID_SCROLLBAR_RESERVE = 8
+    _WHEEL_SCROLL_PIXELS = 110
+    _WHEEL_SCROLL_DURATION_MS = 145
 
     def __init__(self, config: dict | None = None, parent=None):
         super().__init__(parent)
@@ -6999,6 +7228,8 @@ class EpubLibraryDialog(QDialog):
         self._cover_apply_queue = deque()
         self._cover_apply_pending_paths: set[str] = set()
         self._cover_generation = 0
+        self._library_scroll_animations: dict[str, QPropertyAnimation] = {}
+        self._library_scroll_targets: dict[str, int] = {}
         self._hovered_card: _BookCard | None = None
         self._card_hover_reconcile_until = 0.0
         # Restore persisted settings
@@ -7247,6 +7478,63 @@ class EpubLibraryDialog(QDialog):
         elif delta_y < 0 and idx > 0:
             self._set_card_size(sizes[idx - 1])
 
+    def _library_scroll_area_for_event_object(self, obj):
+        """Return ``(key, area)`` when *obj* belongs to a card-grid scroller."""
+        for key, area, grid in (
+            ("ip", getattr(self, "_ip_scroll", None),
+             getattr(self, "_ip_grid_container", None)),
+            ("comp", getattr(self, "_comp_scroll", None),
+             getattr(self, "_comp_grid_container", None)),
+        ):
+            if area is None:
+                continue
+            try:
+                if obj is area or obj is area.viewport() or obj is grid:
+                    return key, area
+            except RuntimeError:
+                continue
+        return None, None
+
+    def _animate_library_scroll(
+        self, key: str, area: QScrollArea, delta_y: int
+    ) -> bool:
+        """Smooth one angle-wheel movement while accumulating rapid ticks."""
+        if not delta_y:
+            return False
+        bar = area.verticalScrollBar()
+        if bar.maximum() <= bar.minimum():
+            return False
+
+        animation = self._library_scroll_animations.get(key)
+        running = bool(
+            animation is not None
+            and animation.state() == QAbstractAnimation.Running
+        )
+        base_target = (
+            self._library_scroll_targets.get(key, bar.value())
+            if running else bar.value()
+        )
+        wheel_ticks = float(delta_y) / 120.0
+        movement = int(round(-wheel_ticks * self._WHEEL_SCROLL_PIXELS))
+        if movement == 0:
+            movement = -1 if delta_y > 0 else 1
+        target = max(bar.minimum(), min(bar.maximum(), base_target + movement))
+        if target == bar.value() and not running:
+            return True
+
+        if animation is None:
+            animation = QPropertyAnimation(bar, b"value", self)
+            animation.setEasingCurve(QEasingCurve.OutCubic)
+            self._library_scroll_animations[key] = animation
+        else:
+            animation.stop()
+        self._library_scroll_targets[key] = target
+        animation.setDuration(self._WHEEL_SCROLL_DURATION_MS)
+        animation.setStartValue(bar.value())
+        animation.setEndValue(target)
+        animation.start()
+        return True
+
     def eventFilter(self, obj, event):
         """Route Ctrl+Wheel on the grid scroll areas into the card zoom.
 
@@ -7303,13 +7591,34 @@ class EpubLibraryDialog(QDialog):
                     self._schedule_grid_reflow(tab_key)
         if event.type() in (QEvent.DragEnter, QEvent.DragMove, QEvent.Drop, QEvent.DragLeave):
             return self._handle_library_drop_filter_event(event)
-        if event.type() == QEvent.Wheel and (event.modifiers() & Qt.ControlModifier):
+        if event.type() == QEvent.Wheel:
+            if event.modifiers() & Qt.ControlModifier:
+                try:
+                    self._handle_ctrl_wheel(event.angleDelta().y())
+                except Exception:
+                    pass
+                event.accept()
+                return True
+            # High-resolution touchpads provide pixelDelta and already scroll
+            # fluidly through QScrollArea. Only animate coarse angle-wheel
+            # ticks; replacing pixel scrolling would make touchpads feel less
+            # direct and introduce needless latency.
             try:
-                self._handle_ctrl_wheel(event.angleDelta().y())
+                pixel_delta_y = event.pixelDelta().y()
             except Exception:
-                pass
-            event.accept()
-            return True
+                pixel_delta_y = 0
+            if not pixel_delta_y:
+                key, area = self._library_scroll_area_for_event_object(obj)
+                try:
+                    handled = bool(
+                        area is not None
+                        and self._animate_library_scroll(
+                            key, area, event.angleDelta().y()))
+                except Exception:
+                    handled = False
+                if handled:
+                    event.accept()
+                    return True
         return super().eventFilter(obj, event)
 
     def _make_sort_btn(self, text, tooltip, mode):
@@ -13365,7 +13674,16 @@ class _BookDetailsLoader(QThread):
 
             # Resolve each spine chapter to a translation status.
             chapters_info = []
-            prog_chapters = (prog or {}).get("chapters", {}) or {}
+            all_prog_chapters = (prog or {}).get("chapters", {}) or {}
+            # source_epub.txt is a durable workspace pointer, not readable
+            # content. It must not become a synthesized Book Details row when
+            # a TXT/PDF source has no EPUB spine to supply the chapter list.
+            prog_chapters = {
+                key: info
+                for key, info in all_prog_chapters.items()
+                if (isinstance(info, dict)
+                    and not _is_progress_sidecar_entry(key, info))
+            }
             # Build lookup by normalized basename (no extension, no response_ prefix).
             def _norm(name: str) -> str:
                 base = os.path.basename(name or "")
@@ -14407,6 +14725,7 @@ class BookDetailsDialog(QDialog):
         # This prevents the details page from flashing the fallback before the
         # background metadata loader emits its preview payload.
         self._current_cover_path = ""
+        self._cover_movie = None
         if not self._apply_cover_path(self._book.get("_cached_cover_path", "")):
             self._apply_halgakos_fallback()
         hero.addWidget(self._cover_lbl, 0, Qt.AlignTop)
@@ -14932,6 +15251,19 @@ class BookDetailsDialog(QDialog):
         if not cover_path:
             return False
         try:
+            movie = _build_cover_movie(
+                cover_path,
+                self._cover_lbl,
+                self._cover_lbl.width(),
+                self._cover_lbl.height(),
+            )
+            if movie is not None:
+                _dispose_cover_movie(self._cover_movie)
+                self._cover_movie = movie
+                self._cover_lbl.setText("")
+                self._current_cover_path = cover_path
+                movie.start()
+                return True
             pm = QPixmap(cover_path)
             if pm.isNull():
                 return False
@@ -14941,6 +15273,8 @@ class BookDetailsDialog(QDialog):
                 Qt.KeepAspectRatio,
                 Qt.SmoothTransformation,
             )
+            _dispose_cover_movie(self._cover_movie)
+            self._cover_movie = None
             self._cover_lbl.setPixmap(scaled)
             self._cover_lbl.setText("")
             self._current_cover_path = cover_path
@@ -14973,6 +15307,8 @@ class BookDetailsDialog(QDialog):
                         Qt.KeepAspectRatio,
                         Qt.SmoothTransformation,
                     )
+                    _dispose_cover_movie(self._cover_movie)
+                    self._cover_movie = None
                     self._cover_lbl.setPixmap(scaled)
                     self._cover_lbl.setText("")
                     applied = True
@@ -14980,6 +15316,8 @@ class BookDetailsDialog(QDialog):
                 logger.debug("Halgakos pixmap failed: %s",
                              traceback.format_exc())
         if not applied:
+            _dispose_cover_movie(self._cover_movie)
+            self._cover_movie = None
             self._cover_lbl.setPixmap(QPixmap())
             self._cover_lbl.setText("\U0001f4d6")
 

@@ -101,6 +101,35 @@ def test_resize_before_first_streamed_card_reflows_without_zoom(qapp):
         qapp.processEvents()
 
 
+def test_library_angle_wheel_scroll_uses_accumulated_animation(qapp):
+    dialog = _make_dialog(qapp, 700, 500)
+    try:
+        area = dialog._ip_scroll
+        area.widget().setMinimumHeight(2400)
+        qapp.processEvents()
+        bar = area.verticalScrollBar()
+        assert bar.maximum() > 300
+
+        assert dialog._animate_library_scroll("ip", area, -120)
+        first_target = dialog._library_scroll_targets["ip"]
+        assert first_target == dialog._WHEEL_SCROLL_PIXELS
+        assert (dialog._library_scroll_animations["ip"].state()
+                == epub_library.QAbstractAnimation.Running)
+        _pump_events(qapp, 0.05)
+        assert 0 < bar.value() < first_target
+
+        # A second tick while the first animation is running adds to its end
+        # target instead of discarding the remaining movement.
+        assert dialog._animate_library_scroll("ip", area, -120)
+        final_target = dialog._library_scroll_targets["ip"]
+        assert final_target == first_target + dialog._WHEEL_SCROLL_PIXELS
+        _pump_events(qapp, 0.25)
+        assert bar.value() == final_target
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
 def test_hidden_tab_uses_settled_visible_width(qapp):
     """Inactive-tab preloading must not trust Qt's default ~640 px width."""
     dialog = _make_dialog(qapp, 1200)
@@ -554,6 +583,188 @@ def test_remote_cover_page_is_downloaded_and_cached(tmp_path, monkeypatch):
     assert seen_urls == [remote_url]
     assert cover_path
     assert open(cover_path, "rb").read() == remote_bytes
+
+
+def test_pdf_cover_extracts_first_embedded_image_and_reuses_cache(tmp_path, monkeypatch):
+    fitz = pytest.importorskip("fitz")
+    Image = pytest.importorskip("PIL.Image")
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(epub_library, "_cover_cache_dir", lambda: str(cache_dir))
+    pdf_path = tmp_path / "source.pdf"
+    first_image = tmp_path / "first.png"
+    second_image = tmp_path / "second.png"
+    Image.new("RGB", (200, 300), "blue").save(first_image)
+    Image.new("RGB", (200, 300), "red").save(second_image)
+
+    with fitz.open() as document:
+        first = document.new_page(width=300, height=500)
+        first.insert_image(fitz.Rect(50, 80, 250, 380), filename=str(first_image))
+        second = document.new_page(width=300, height=500)
+        second.insert_image(fitz.Rect(50, 80, 250, 380), filename=str(second_image))
+        document.save(str(pdf_path))
+
+    first_result = epub_library._extract_pdf_cover(str(pdf_path))
+    second_result = epub_library._extract_pdf_cover(str(pdf_path))
+
+    assert first_result == second_result
+    assert first_result and os.path.isfile(first_result)
+    image = epub_library.QImage(first_result)
+    assert not image.isNull()
+    assert image.size() == epub_library.QSize(200, 300)
+    # The native first image is blue; a page screenshot would be 300x500 with
+    # white margins, while extracting the second image would make this red.
+    center = image.pixelColor(image.width() // 2, image.height() // 2)
+    assert center.blue() > center.red()
+
+
+def test_pdf_without_embedded_images_does_not_fall_back_to_page_screenshot(
+    tmp_path, monkeypatch
+):
+    fitz = pytest.importorskip("fitz")
+    monkeypatch.setattr(
+        epub_library, "_cover_cache_dir", lambda: str(tmp_path / "cache"))
+    pdf_path = tmp_path / "vector-only.pdf"
+    with fitz.open() as document:
+        page = document.new_page(width=300, height=500)
+        page.draw_rect(page.rect, fill=(0.1, 0.3, 0.8))
+        page.insert_text((40, 80), "NO IMAGE OBJECT")
+        document.save(str(pdf_path))
+
+    assert epub_library._extract_pdf_cover(str(pdf_path)) is None
+
+
+def test_pdf_cover_image_search_stops_after_first_five_pages(
+    tmp_path, monkeypatch
+):
+    fitz = pytest.importorskip("fitz")
+    Image = pytest.importorskip("PIL.Image")
+    monkeypatch.setattr(
+        epub_library, "_cover_cache_dir", lambda: str(tmp_path / "cache"))
+    late_image = tmp_path / "late-cover.png"
+    Image.new("RGB", (120, 180), "green").save(late_image)
+    pdf_path = tmp_path / "late-image.pdf"
+    with fitz.open() as document:
+        for page_number in range(6):
+            page = document.new_page(width=300, height=500)
+            if page_number == 5:
+                page.insert_image(
+                    fitz.Rect(50, 50, 170, 230), filename=str(late_image))
+        document.save(str(pdf_path))
+
+    assert epub_library._PDF_COVER_SCAN_PAGE_LIMIT == 5
+    assert epub_library._extract_pdf_cover(str(pdf_path)) is None
+
+
+def test_in_progress_pdf_uses_raw_source_first_image_as_cover(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    raw_pdf = tmp_path / "raw.pdf"
+    raw_pdf.write_bytes(b"%PDF-test")
+    rendered = str(tmp_path / "first-image.png")
+    seen = []
+    monkeypatch.setattr(
+        epub_library,
+        "_extract_pdf_cover",
+        lambda path: seen.append(path) or rendered,
+    )
+
+    loader = epub_library._CoverLoader(
+        str(workspace),
+        file_type="in_progress",
+        raw_source_path=str(raw_pdf),
+    )
+    results = []
+    loader.result_ready.connect(lambda path, cover: results.append((path, cover)))
+    loader.run()
+
+    assert seen == [str(raw_pdf)]
+    assert results == [(str(workspace), rendered)]
+
+
+def test_book_details_never_lists_source_epub_sidecar(qapp, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    raw_pdf = tmp_path / "raw.pdf"
+    raw_pdf.write_bytes(b"%PDF-test")
+    (workspace / "source_epub.txt").write_text(
+        str(raw_pdf), encoding="utf-8")
+    (workspace / "response_chapter_001.html").write_text(
+        "<h1>Chapter One</h1>", encoding="utf-8")
+    progress_file = workspace / "translation_progress.json"
+    progress_file.write_text(json.dumps({
+        "chapters": {
+            "special_source_epub": {
+                "actual_num": 0,
+                "original_basename": "source_epub.txt",
+                "output_file": "source_epub.txt",
+                "status": "completed",
+            },
+            "chapter_001": {
+                "actual_num": 1,
+                "original_basename": "chapter_001.xhtml",
+                "output_file": "response_chapter_001.html",
+                "status": "completed",
+            },
+        }
+    }), encoding="utf-8")
+
+    summary = epub_library._read_progress_summary(str(progress_file))
+    assert summary["total"] == 1
+    assert summary["completed"] == 1
+
+    loader = epub_library._BookDetailsLoader({
+        "path": str(workspace),
+        "type": "in_progress",
+        "output_folder": str(workspace),
+        "progress_file": str(progress_file),
+        "raw_source_path": str(raw_pdf),
+    })
+    payloads = []
+    loader.done.connect(payloads.append)
+    loader.run()
+
+    assert len(payloads) == 1
+    assert [row["filename"] for row in payloads[0]["chapters_info"]] == [
+        "chapter_001.xhtml"
+    ]
+
+
+def test_gif_cover_detection_uses_content_and_movie_advances(qapp, tmp_path):
+    Image = pytest.importorskip("PIL.Image")
+    disguised_gif = tmp_path / "legacy-cache-name.jpg"
+    frames = [
+        Image.new("RGB", (40, 60), "red"),
+        Image.new("RGB", (40, 60), "blue"),
+    ]
+    # The cache historically gives every EPUB cover a .jpg suffix. Explicitly
+    # encode GIF data under that name to verify content-based detection.
+    frames[0].save(
+        disguised_gif,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=40,
+        loop=0,
+    )
+    label = epub_library.QLabel()
+    movie = epub_library._build_cover_movie(
+        str(disguised_gif), label, 120, 180)
+
+    assert movie is not None
+    assert movie.isValid()
+    # The decoder remains at native size; our frame callback performs smooth
+    # scaling instead of QMovie's low-quality setScaledSize path.
+    assert not movie.scaledSize().isValid()
+    seen_frames = []
+    movie.frameChanged.connect(seen_frames.append)
+    movie.start()
+    _pump_events(qapp, 0.15)
+    assert movie.frameCount() == 2
+    assert 0 in seen_frames and 1 in seen_frames
+    assert movie.state() == epub_library.QMovie.Running
+    assert label.pixmap() is not None
+    assert label.pixmap().size() == epub_library.QSize(120, 180)
+    epub_library._dispose_cover_movie(movie)
 
 
 def test_other_settings_exposes_remote_image_download_toggle():
