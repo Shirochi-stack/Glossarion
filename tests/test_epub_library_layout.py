@@ -138,7 +138,8 @@ def test_reader_accepts_translated_pdf_html_workspace(qapp, tmp_path, monkeypatc
     source.write_bytes(b"placeholder")
     (workspace / "source_epub.txt").write_text(str(source), encoding="utf-8")
     (workspace / "response_pdf_section_1.html").write_text(
-        "<html><body><p>translated</p></body></html>",
+        "<html><body><h1>Abertura traduzida</h1>"
+        "<p>translated</p></body></html>",
         encoding="utf-8",
     )
     (workspace / "translation_progress.json").write_text(
@@ -182,7 +183,43 @@ def test_reader_accepts_translated_pdf_html_workspace(qapp, tmp_path, monkeypatc
         _pump_events(qapp, timeout=1.2)
         assert len(dialog._chapters_overlaid) == 1
         assert "translated" in dialog._chapters_overlaid[0][1]
+        assert dialog._chapters_overlaid[0][0] == "Abertura traduzida"
+        assert dialog._chapters_raw[0][0] == "Opening"
         assert dialog._chapter_filenames == ["response_pdf_section_1.html"]
+
+        scheduled = []
+
+        class _Signal:
+            def connect(self, callback):
+                self.callback = callback
+
+        class _RawThreadStub:
+            def __init__(self, *args, **kwargs):
+                self.done = _Signal()
+                self.error = _Signal()
+                self.started = False
+
+            def isRunning(self):
+                return self.started
+
+            def start(self):
+                self.started = True
+
+        monkeypatch.setattr(
+            epub_library, "_PdfRawSectionLoaderThread", _RawThreadStub)
+        monkeypatch.setattr(
+            epub_library.QTimer,
+            "singleShot",
+            lambda delay, callback: scheduled.append((delay, callback)),
+        )
+
+        assert dialog._ensure_workspace_raw_chapter(0) is False
+        raw_thread = dialog._workspace_raw_thread
+        assert raw_thread.started is False
+        assert "Loading raw PDF pages" in dialog._chapters_raw[0][1]
+        assert scheduled[0][0] == dialog._RAW_PDF_WORKER_PAINT_DELAY_MS
+        scheduled[0][1]()
+        assert raw_thread.started is True
     finally:
         dialog.close()
         qapp.processEvents()
@@ -528,6 +565,8 @@ def test_reader_html_reserves_extra_space_below_page_content():
         _translated_overlay = {}
         _raw_epub_alt_path = ""
         _translated_css_dirs = []
+        _workspace_mode = False
+        _show_raw = False
 
         @staticmethod
         def _get_theme():
@@ -556,6 +595,54 @@ def test_reader_html_reserves_extra_space_below_page_content():
     assert "function _pageCountFor(c)" in paginated
     assert "Math.ceil((c.scrollWidth + gap) / span)" in paginated
     assert "padding: 10px 20px 28px 20px" in scrolling
+
+
+def test_translated_pdf_workspace_normalizes_legacy_h3_body_weight():
+    class ReaderStub:
+        _font_family = "Embedded CSS"
+        _font_size = 14
+        _line_spacing = 1.8
+        _translated_overlay = {}
+        _raw_epub_alt_path = ""
+        _translated_css_dirs = []
+        _workspace_mode = True
+        _show_raw = False
+
+        @staticmethod
+        def _get_theme():
+            return {
+                "bg": "#111111",
+                "fg": "#eeeeee",
+                "heading": "#ffffff",
+                "link": "#88aaff",
+                "code_bg": "#222222",
+                "border": "#333333",
+            }
+
+        @staticmethod
+        def _get_embedded_css():
+            return "h3 { font-weight: bold; }"
+
+    expected = (
+        "body h3 { font-size: 1em; font-weight: normal !important; margin: 0.6em 0; "
+        "padding: 0; }"
+    )
+    paginated = EpubReaderDialog._wrap_html(
+        ReaderStub(), "<h3>Legacy PDF body</h3>", paginated=True
+    )
+    scrolling = EpubReaderDialog._wrap_html(
+        ReaderStub(), "<h3>Legacy PDF body</h3>", paginated=False
+    )
+
+    assert expected in paginated
+    assert expected in scrolling
+    assert paginated.index("font-weight: bold") < paginated.index(expected)
+
+    ReaderStub._show_raw = True
+    raw = EpubReaderDialog._wrap_html(
+        ReaderStub(), "<h3>Real source heading</h3>", paginated=True
+    )
+    assert expected not in raw
 
 
 def test_reader_recounts_pages_after_hidden_prime_is_revealed(monkeypatch):

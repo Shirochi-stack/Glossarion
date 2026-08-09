@@ -18618,12 +18618,19 @@ class _WorkspaceReaderLoaderThread(QThread):
                 ))
                 translated_path = str(entry.get("translated_path") or "")
                 translated_html = ""
+                translated_title = ""
                 if translated_path and os.path.isfile(translated_path):
                     try:
                         with open(translated_path, "rb") as stream:
                             translated_html = stream.read().decode(
                                 "utf-8", errors="replace"
                             )
+                        # Use the same translated-heading resolver as Book
+                        # Details so the reader sidebar and details list cannot
+                        # disagree. Raw mode keeps the source bookmark title.
+                        translated_title = _read_translated_chapter_title(
+                            translated_path
+                        )
                     except OSError:
                         translated_html = ""
                 if not translated_html:
@@ -18631,7 +18638,10 @@ class _WorkspaceReaderLoaderThread(QThread):
                         title,
                         "This section has not been translated yet.",
                     )
-                translated_chapters.append((title, translated_html))
+                translated_chapters.append((
+                    translated_title or title,
+                    translated_html,
+                ))
         except Exception as exc:
             self.error.emit(str(exc))
             return
@@ -19458,6 +19468,10 @@ class EpubReaderDialog(QDialog):
     """EPUB reader with chapter navigation, layout modes, and theme support."""
 
     _SEARCH_DEBOUNCE_MS = 650
+    # Let Chromium paint the raw-PDF placeholder before starting MuPDF work.
+    # Some image-heavy sections spend long stretches in native extraction;
+    # without this small handoff the UI can appear frozen on translated text.
+    _RAW_PDF_WORKER_PAINT_DELAY_MS = 120
 
     def __init__(self, epub_path: str, config: dict | None = None, parent=None,
                  initial_chapter: int | None = None,
@@ -22378,7 +22392,8 @@ class EpubReaderDialog(QDialog):
             title,
             _workspace_reader_placeholder(
                 title,
-                "Loading the raw bookmarked PDF pages...",
+                "Loading raw PDF pages for this bookmark... "
+                "Image-heavy sections may take a moment.",
             ),
         )
         mode = str(self._config.get("pdf_render_mode", "fast_semantic") or "")
@@ -22403,8 +22418,26 @@ class EpubReaderDialog(QDialog):
                 self._on_workspace_raw_error(failed_row, message)
         )
         self._workspace_raw_thread = thread
-        thread.start()
+        # Rendering the placeholder and starting MuPDF in the same event-loop
+        # turn can prevent the message from becoming visible until extraction
+        # has already finished. Give the web view one paint opportunity first.
+        QTimer.singleShot(
+            self._RAW_PDF_WORKER_PAINT_DELAY_MS,
+            lambda pending=thread: self._start_workspace_raw_thread(pending),
+        )
         return False
+
+    def _start_workspace_raw_thread(self, thread) -> None:
+        """Start the still-current delayed raw-PDF worker."""
+        if getattr(self, "_closing", False):
+            return
+        if thread is not getattr(self, "_workspace_raw_thread", None):
+            return
+        try:
+            if not thread.isRunning():
+                thread.start()
+        except RuntimeError:
+            pass
 
     @Slot(int, str)
     def _on_workspace_raw_loaded(self, row: int, content: str) -> None:
@@ -24378,6 +24411,17 @@ class EpubReaderDialog(QDialog):
         # 1pt = 1/72 inch, 1px = 1/96 inch → px = pt * 96/72.
         _font_px = int(round(self._font_size * 96 / 72))
         _has_embedded_css = bool(_use_embedded and _embedded_css_block)
+        # Older PDF extraction output used <h3> for every body text block.
+        # Browser defaults make those paragraphs bold even though the source
+        # PDF is regular weight. Scope the compatibility rule to translated
+        # PDF workspaces so real EPUB headings and raw PDF markup are intact.
+        _pdf_workspace_body_css = (
+            "body h3 { font-size: 1em; font-weight: normal !important; margin: 0.6em 0; "
+            "padding: 0; }"
+            if (getattr(self, "_workspace_mode", False)
+                and not getattr(self, "_show_raw", False))
+            else ""
+        )
         if paginated:
             _spread_pages = max(1, int(spread_pages or 1))
             return (
@@ -24406,6 +24450,7 @@ class EpubReaderDialog(QDialog):
                 f"#content > :first-child, #content > div:first-child > :first-child "
                 f"{{ break-before: avoid !important; page-break-before: avoid !important; }}"
                 f"h1, h2, h3, h4, h5, h6 {{ color: {t['heading']}; margin: 0; padding: 0; }}"
+                f"{_pdf_workspace_body_css}"
                 f"img {{ display: block; max-width: 100%; max-height: calc(100vh - 60px); "
                 f"height: auto; object-fit: contain; "
                 f"border-radius: 4px; margin: 12px auto; break-inside: avoid; }}"
@@ -24528,6 +24573,7 @@ class EpubReaderDialog(QDialog):
                 f"-webkit-text-size-adjust: 100%; "
                 f"padding: 10px 20px 28px 20px; margin: 0 auto; }}"
                 f"{_scroll_heading_css}"
+                f"{_pdf_workspace_body_css}"
                 f"img {{ display: block; max-width: 100%; height: auto; "
                 f"border-radius: 4px; margin: 12px auto; }}"
                 f"{_scroll_paragraph_css}"
