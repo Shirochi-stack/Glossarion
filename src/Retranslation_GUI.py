@@ -71,6 +71,10 @@ _RAW_FOREIGN_TEXT_QA_RE = re.compile(
     r"_text_found_\d+_chars_",
     re.IGNORECASE,
 )
+_LLM_TOKEN_QA_RE = re.compile(
+    r"(?:^|[^a-z0-9])llm[_\s-]*token[_\s-]*issue",
+    re.IGNORECASE,
+)
 
 
 def _is_progress_sidecar_entry(entry=None, output_file=None):
@@ -118,6 +122,187 @@ def _progress_entry_has_raw_foreign_text_qa(entry):
                 return True
         current = current.get('previous_progress_entry')
     return False
+
+
+def _qa_value_has_llm_token_issue(value):
+    """Return whether a progress QA value identifies an LLM-token issue."""
+    if isinstance(value, dict):
+        return any(
+            _qa_value_has_llm_token_issue(key)
+            or _qa_value_has_llm_token_issue(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple, set)):
+        return any(_qa_value_has_llm_token_issue(item) for item in value)
+    return bool(_LLM_TOKEN_QA_RE.search(str(value or "")))
+
+
+def _progress_entry_has_llm_token_qa(entry):
+    """Return whether an entry or its restorable snapshot has LLM-token QA."""
+    seen = set()
+    current = entry
+    while isinstance(current, dict) and id(current) not in seen:
+        seen.add(id(current))
+        for key in (
+            'qa_issues_found', 'qa_issues', 'qa_issue_previews',
+            'failure_reason', 'error_message',
+        ):
+            if _qa_value_has_llm_token_issue(current.get(key)):
+                return True
+        current = current.get('previous_progress_entry')
+    return False
+
+
+def _without_llm_token_qa(value):
+    """Remove only LLM-token issue values while preserving other QA details."""
+    if isinstance(value, list):
+        filtered = []
+        for item in value:
+            cleaned = _without_llm_token_qa(item)
+            if cleaned not in (None, "", [], (), {}, set()):
+                filtered.append(cleaned)
+        return filtered
+    if isinstance(value, tuple):
+        return tuple(_without_llm_token_qa(list(value)))
+    if isinstance(value, set):
+        return set(_without_llm_token_qa(list(value)))
+    if isinstance(value, dict):
+        filtered = {}
+        for key, item in value.items():
+            if _qa_value_has_llm_token_issue(key):
+                continue
+            cleaned = _without_llm_token_qa(item)
+            if cleaned not in (None, "", [], (), {}, set()):
+                filtered[key] = cleaned
+        return filtered
+    if _qa_value_has_llm_token_issue(value):
+        return None
+    return value
+
+
+def _clear_llm_token_qa_markers(entry):
+    """Clear resolved LLM-token QA markers and return ``(changed, remaining)``."""
+    if not isinstance(entry, dict):
+        return False, False
+
+    changed = False
+    for key in (
+        'qa_issues_found', 'qa_issue_previews', 'failure_reason',
+        'error_message', 'qa_issues',
+    ):
+        if key not in entry:
+            continue
+        original = entry.get(key)
+        filtered = _without_llm_token_qa(original)
+        if filtered != original:
+            changed = True
+        if filtered in (None, "", [], (), {}, set()):
+            entry.pop(key, None)
+        else:
+            entry[key] = filtered
+
+    previous = entry.get('previous_progress_entry')
+    previous_remaining = False
+    if isinstance(previous, dict):
+        previous_changed, previous_remaining = _clear_llm_token_qa_markers(
+            previous
+        )
+        changed = changed or previous_changed
+
+    remaining = previous_remaining or any(
+        bool(entry.get(key))
+        for key in (
+            'qa_issues_found', 'qa_issue_previews', 'failure_reason',
+            'error_message',
+        )
+    )
+    qa_flag = entry.get('qa_issues')
+    if not isinstance(qa_flag, bool):
+        remaining = remaining or bool(qa_flag)
+
+    if not remaining:
+        if entry.pop('qa_issues', None) is not None:
+            changed = True
+        if entry.pop('qa_timestamp', None) is not None:
+            changed = True
+        if str(entry.get('status') or '').lower() in {'qa_failed', 'failed'}:
+            entry['status'] = 'completed'
+            entry['last_updated'] = time.time()
+            changed = True
+    return changed, remaining
+
+
+def _repair_empty_attribute_qa_file(file_path):
+    """Apply the shared empty-attribute fixer and verify the issue is gone."""
+    from _empty_attr_fix import count_empty_attr_tags, fix_empty_attr_tags
+
+    raw_path = str(file_path or "").strip()
+    path = (
+        os.path.abspath(os.path.normpath(raw_path))
+        if raw_path else ""
+    )
+    if not path or not os.path.isfile(path):
+        return {
+            'resolved': False,
+            'changed': False,
+            'repaired': 0,
+            'remaining': 0,
+            'error': f"Output file not found: {path or file_path}",
+        }
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as handle:
+            original = handle.read()
+        before = count_empty_attr_tags(original)
+        if before == 0:
+            return {
+                'resolved': True,
+                'changed': False,
+                'repaired': 0,
+                'remaining': 0,
+                'error': '',
+            }
+
+        repaired_content = fix_empty_attr_tags(original)
+        remaining = count_empty_attr_tags(repaired_content)
+        if remaining:
+            return {
+                'resolved': False,
+                'changed': False,
+                'repaired': before - remaining,
+                'remaining': remaining,
+                'error': (
+                    f"{remaining} empty-attribute tag(s) remain after repair."
+                ),
+            }
+
+        temporary = (
+            f"{path}.{os.getpid()}.{threading.get_ident()}.llm-token-fix.tmp"
+        )
+        try:
+            with open(temporary, 'w', encoding='utf-8', newline='') as handle:
+                handle.write(repaired_content)
+            os.replace(temporary, path)
+        finally:
+            if os.path.isfile(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+        return {
+            'resolved': True,
+            'changed': repaired_content != original,
+            'repaired': before,
+            'remaining': 0,
+            'error': '',
+        }
+    except Exception as exc:
+        return {
+            'resolved': False,
+            'changed': False,
+            'repaired': 0,
+            'remaining': 0,
+            'error': str(exc),
+        }
 
 # --- Non-blocking access to TransateKRtoEN.ProgressManager ------------------
 # TransateKRtoEN is a very heavy import chain (tiktoken, ebooklib, bs4,
@@ -19632,6 +19817,124 @@ class RetranslationMixin:
             self._refresh_retranslation_data(data)
             self._show_message('info', "Audio Deleted", "Audio file deleted and TTS status reset to No TTS.", parent=data.get('dialog', self))
 
+        def _resolve_llm_token_qa_issue(display_info, output_path):
+            """Repair one output file and clear only its LLM-token QA markers."""
+            parent_dialog = data.get('dialog', self)
+            result = _repair_empty_attribute_qa_file(output_path)
+            if not result.get('resolved'):
+                message = result.get('error') or (
+                    "The empty-attribute repair did not remove the LLM token issue."
+                )
+                try:
+                    self.append_log(f"❌ LLM token QA issue was not resolved: {message}")
+                except Exception:
+                    pass
+                self._show_message(
+                    'error',
+                    "QA Issue Not Resolved",
+                    message,
+                    parent=parent_dialog,
+                )
+                return
+
+            chapters = data.get('prog', {}).get('chapters', {})
+            target_output = (
+                display_info.get('output_file')
+                or (display_info.get('info', {}) or {}).get('output_file')
+            )
+            target_norm = _normalize_filename(target_output)
+            progress_key = display_info.get('progress_key')
+            targets = []
+            seen_targets = set()
+
+            def _add_target(entry):
+                if isinstance(entry, dict) and id(entry) not in seen_targets:
+                    seen_targets.add(id(entry))
+                    targets.append(entry)
+
+            if progress_key and isinstance(chapters.get(progress_key), dict):
+                _add_target(chapters[progress_key])
+            if target_norm:
+                for entry in chapters.values():
+                    if (
+                        isinstance(entry, dict)
+                        and _normalize_filename(entry.get('output_file'))
+                        == target_norm
+                    ):
+                        _add_target(entry)
+            if not targets:
+                _add_target(display_info.get('info', {}))
+
+            remaining_other_qa = False
+            progress_changed = False
+            for target in targets:
+                changed, remaining = _clear_llm_token_qa_markers(target)
+                progress_changed = progress_changed or changed
+                remaining_other_qa = remaining_other_qa or remaining
+
+            try:
+                if progress_changed:
+                    progress_path = data['progress_file']
+                    temporary = (
+                        f"{progress_path}.{os.getpid()}."
+                        f"{threading.get_ident()}.llm-token-fix.tmp"
+                    )
+                    try:
+                        with open(temporary, 'w', encoding='utf-8') as handle:
+                            json.dump(
+                                data['prog'], handle, ensure_ascii=False, indent=2
+                            )
+                        os.replace(temporary, progress_path)
+                    finally:
+                        if os.path.isfile(temporary):
+                            try:
+                                os.remove(temporary)
+                            except OSError:
+                                pass
+            except Exception as exc:
+                message = (
+                    "The malformed tags were repaired, but the progress file "
+                    f"could not be updated:\n{exc}"
+                )
+                try:
+                    self.append_log(f"❌ LLM token QA progress update failed: {exc}")
+                except Exception:
+                    pass
+                self._show_message(
+                    'error',
+                    "QA Issue Not Fully Resolved",
+                    message,
+                    parent=parent_dialog,
+                )
+                return
+
+            self._refresh_retranslation_data(data)
+            repaired_count = int(result.get('repaired') or 0)
+            if repaired_count:
+                summary = (
+                    f"Repaired {repaired_count} empty-attribute LLM token "
+                    f"tag(s) in {os.path.basename(output_path)}."
+                )
+            else:
+                summary = (
+                    "No malformed empty-attribute tags remain; the stale "
+                    "LLM token QA mark was cleared."
+                )
+            if remaining_other_qa:
+                summary += "\n\nOther QA issues remain on this entry."
+            else:
+                summary += "\n\nThe QA issue has been resolved."
+            try:
+                self.append_log(f"✅ {summary.replace(chr(10), ' ')}")
+            except Exception:
+                pass
+            self._show_message(
+                'info',
+                "QA Issue Resolved",
+                summary,
+                parent=parent_dialog,
+            )
+
         def show_context_menu(pos):
             item = listbox.itemAt(pos)
             if not item:
@@ -19665,6 +19968,9 @@ class RetranslationMixin:
             has_missing_images = any('missing_images' in str(issue) for issue in qa_issues)
             has_raw_foreign_text_qa = (
                 _progress_entry_has_raw_foreign_text_qa(progress_entry)
+            )
+            has_llm_token_qa = _progress_entry_has_llm_token_qa(
+                progress_entry
             )
             
             # Fallback: Check item text directly as it definitely contains the issue if visible
@@ -19738,8 +20044,8 @@ class RetranslationMixin:
                         "📖 Open in EPUB reader"
                     )
                 act_retranslate = menu.addAction("🔁 Retranslate Selected")
-                if has_raw_foreign_text_qa:
-                    act_resolve_qa = menu.addAction("⚠️ resolve QA issue")
+                if has_raw_foreign_text_qa or has_llm_token_qa:
+                    act_resolve_qa = menu.addAction("⚠️ Resolve QA issue")
 
                 if has_missing_images:
                     act_insert_img = menu.addAction("🖼️ Insert Missing Image")
@@ -19804,9 +20110,15 @@ class RetranslationMixin:
             elif chosen == act_retranslate:
                 retranslate_selected()
             elif act_resolve_qa and chosen == act_resolve_qa:
-                self._start_single_progress_qa_resolution(
-                    data, display_info
-                )
+                if has_llm_token_qa:
+                    _resolve_llm_token_qa_issue(
+                        display_info,
+                        qa_file_path,
+                    )
+                else:
+                    self._start_single_progress_qa_resolution(
+                        data, display_info
+                    )
             elif act_insert_img and chosen == act_insert_img:
                 # IN-PLACE RESTORATION LOGIC using ContentProcessor
                 try:
