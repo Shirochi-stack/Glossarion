@@ -122,7 +122,7 @@ Do exactly this the first time. Don't touch anything not mentioned. You'll have 
 
 The top of the window is the control strip you'll use every time.
 
-- **Input File(s):** The book(s) or folder you want to translate. Click **🔍 Browse ▼** to pick a file or a whole folder. It shows **No file selected** until you choose something. The same menu also contains **📚 Raw + Translated EPUB Pair…**, a glossary-only tool for cross-checking an original EPUB against an existing translation (see Section 8.3).
+- **Input File(s):** The book(s) or folder you want to translate. Click **🔍 Browse ▼** to pick a file or a whole folder. It shows **No file selected** until you choose something. The same menu also contains **📚 Glossary Parallel EPUB Pair**, a glossary-only tool for cross-checking an original EPUB against an existing translation (see Section 8.3).
 - **Model:** The AI brain. **The Model box is NOT a fixed dropdown — it's a free text field.** You can pick a suggestion *or just type any model name yourself*. Any model a routing prefix supports will work if you type it in (e.g. `or/deepseek/deepseek-v4-flash:free`, `nd/moonshotai/kimi-k2-thinking`, `authnd/z-ai/glm-5.1`). Next to it:
   - **Manage Models** (gear/list button) — opens the **Model Manager**, where you add your own models, rearrange the list, create **custom prefixes**, and click **🌐 Poll Providers** to fetch current provider catalogs (see [Section 5](#keeping-the-model-list-current-provider-polling) and [Section 9](#9-local-ai--custom-endpoints--the-3-methods)).
   - **Right-click the Model box → 🌐 Refresh Online Models** — manually refresh every provider catalog Glossarion can safely access. Progress and detailed results appear in the bottom log; there is no popup.
@@ -386,7 +386,7 @@ This is the workflow many experienced users prefer, and the one you specifically
 
 ### 8.3 Cross-check a raw EPUB against an existing translation
 
-Use **📚 Raw + Translated EPUB Pair…** when you have both:
+Use **📚 Glossary Parallel EPUB Pair** when you have both:
 
 - the original, source-language EPUB; and
 - an existing translated EPUB whose established names and terminology you want to preserve.
@@ -397,7 +397,7 @@ Glossarion aligns their HTML chapters and sends each mapped raw/translated pair 
 
 **Step by step:**
 
-1. Open the **🔍 Browse ▼** menu beside **Input File(s)** and choose **📚 Raw + Translated EPUB Pair…**.
+1. Open the **🔍 Browse ▼** menu beside **Input File(s)** and choose **📚 Glossary Parallel EPUB Pair**.
 2. Drag the original EPUB onto **RAW EPUB** on the left, or click **Browse Raw EPUB…**.
 3. Drag the existing translation onto **TRANSLATED EPUB** on the right, or click **Browse Translated EPUB…**. The drop zones highlight while an EPUB is hovering over them. Large books are read in the background, so the window remains usable while files load.
 4. Review **HTML File Mapping** in the right-hand pane. Glossarion first matches exact filenames and positive chapter numbers. It then aligns the remaining positive-numbered files in reading order without letting unnumbered or zero-only (`000`, `0000`, etc.) files shift the real chapters. While **Auto Offset** is enabled, every unnumbered/zero-only raw file starts as **— Unmapped —** and every such translated file remains **translated unused**, even if their names match. You can still select one manually. Any inferred displacement is labeled **Auto offset**.

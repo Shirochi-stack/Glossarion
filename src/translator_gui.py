@@ -16503,7 +16503,7 @@ Recent translations to summarize:
         self.browse_menu.addAction("📄 Select Files", self.browse_files)
         self.browse_menu.addAction("📁 Select Folder", self.browse_folder)
         self.browse_menu.addAction(
-            "📚 Raw + Translated EPUB Pair…",
+            "📚 Glossary Parallel EPUB Pair",
             self.open_parallel_epub_pair_dialog,
         )
         self.browse_menu.addSeparator()
