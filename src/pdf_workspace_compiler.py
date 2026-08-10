@@ -463,6 +463,9 @@ def compile_pdf_workspace(
       color: transparent; font-size: 0; line-height: 0;
     }}
     .compiled-pdf-section {{ margin: 0; padding: 0; }}
+    .pdf-fast-semantic-page p:not(.pdf-align-center):not(.pdf-align-right) {{
+      text-align: left !important;
+    }}
   </style>
 </head>
 <body>

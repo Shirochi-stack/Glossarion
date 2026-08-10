@@ -9,6 +9,8 @@ from pdf_extractor import build_pdf_toc_section_plan, group_pdf_pages_by_toc
 from pdf_fast_extractor import (
     PDFExtractionCancelled,
     _fast_pdf_worker_count,
+    _semantic_page_html,
+    _text_alignment,
     apply_pdf_image_rename_logic,
     extract_pdf_fast,
     extract_pdf_page_range_for_reader,
@@ -156,6 +158,31 @@ def test_fast_pdf_images_receive_chapter_names_without_breaking_cache(
     apply_pdf_image_rename_logic([legacy_chapter], str(output_dir))
     assert "page_1_img_1.png" not in legacy_chapter["body"]
     assert "pdf_section_1_img_1.png" in legacy_chapter["body"]
+
+
+def test_fast_semantic_alignment_does_not_center_full_width_paragraphs():
+    assert _text_alignment([81.0, 70.0, 510.0, 101.0], 595.0) == "left"
+    assert _text_alignment([214.0, 112.0, 382.0, 145.0], 595.0) == "center"
+
+    class _Rect:
+        width = 595.0
+
+    class _Page:
+        rect = _Rect()
+
+        @staticmethod
+        def get_text(_kind, **_kwargs):
+            return [
+                (214.0, 112.0, 382.0, 145.0, "Chapter", 0, 0),
+                (81.0, 186.0, 510.0, 218.0, "Body paragraph", 1, 0),
+            ]
+
+    rendered = _semantic_page_html(_Page(), 1, [], "Chapter")
+    assert '<h1 style="text-align:center">Chapter</h1>' in rendered
+    assert (
+        '<p class="pdf-align-left" style="text-align:left">'
+        'Body paragraph</p>'
+    ) in rendered
 
 
 def test_text_processor_automatically_applies_pdf_image_rename_logic(

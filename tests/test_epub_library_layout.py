@@ -627,6 +627,10 @@ def test_translated_pdf_workspace_normalizes_legacy_h3_body_weight():
         "body h3 { font-size: 1em; font-weight: normal !important; margin: 0.6em 0; "
         "padding: 0; }"
     )
+    alignment_fix = (
+        ".pdf-fast-semantic-page p:not(.pdf-align-center):not(.pdf-align-right) { "
+        "text-align: left !important; }"
+    )
     paginated = EpubReaderDialog._wrap_html(
         ReaderStub(), "<h3>Legacy PDF body</h3>", paginated=True
     )
@@ -636,6 +640,8 @@ def test_translated_pdf_workspace_normalizes_legacy_h3_body_weight():
 
     assert expected in paginated
     assert expected in scrolling
+    assert alignment_fix in paginated
+    assert alignment_fix in scrolling
     assert paginated.index("font-weight: bold") < paginated.index(expected)
 
     ReaderStub._show_raw = True
@@ -643,6 +649,7 @@ def test_translated_pdf_workspace_normalizes_legacy_h3_body_weight():
         ReaderStub(), "<h3>Real source heading</h3>", paginated=True
     )
     assert expected not in raw
+    assert alignment_fix not in raw
 
 
 def test_reader_recounts_pages_after_hidden_prime_is_revealed(monkeypatch):

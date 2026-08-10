@@ -579,7 +579,15 @@ def _text_alignment(bbox: Sequence[float], page_width: float) -> str:
         return "left"
     left = float(bbox[0])
     right = page_width - float(bbox[2])
-    if abs(left - right) <= max(12.0, page_width * 0.04):
+    # A normal novel paragraph often fills the text column, which naturally
+    # leaves similar outer margins even though every line starts at the left
+    # edge.  Equal margins alone therefore do not mean centered text.  Require
+    # a materially inset block as well; this still recognizes centered titles
+    # while keeping full-width body paragraphs left aligned.
+    if (
+        min(left, right) >= page_width * 0.18
+        and abs(left - right) <= max(12.0, page_width * 0.04)
+    ):
         return "center"
     if right < page_width * 0.08 and left > page_width * 0.2:
         return "right"
@@ -661,7 +669,10 @@ def _semantic_page_html(page, page_number: int, images: List[Dict], section_titl
             parts.append(f'<h1 style="text-align:{alignment}">{escaped}</h1>')
             title_written = True
         else:
-            parts.append(f'<p style="text-align:{alignment}">{escaped}</p>')
+            parts.append(
+                f'<p class="pdf-align-{alignment}" '
+                f'style="text-align:{alignment}">{escaped}</p>'
+            )
     parts.extend(["</article>", "</body></html>"])
     return "\n".join(parts)
 

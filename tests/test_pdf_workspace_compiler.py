@@ -100,6 +100,13 @@ def test_compile_pdf_workspace_has_one_bookmark_per_response(tmp_path, monkeypat
     assert "First body." in page_text
     assert "Second body." in page_text
     assert "Body sentence heading" not in toc_titles
+    compiled_html = (workspace / "Novel_translated.html").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        ".pdf-fast-semantic-page p:not(.pdf-align-center):not(.pdf-align-right)"
+        in compiled_html
+    )
 
 
 def test_compile_pdf_repairs_legacy_page_images_from_only_requested_pages(

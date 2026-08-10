@@ -24418,6 +24418,8 @@ class EpubReaderDialog(QDialog):
         _pdf_workspace_body_css = (
             "body h3 { font-size: 1em; font-weight: normal !important; margin: 0.6em 0; "
             "padding: 0; }"
+            ".pdf-fast-semantic-page p:not(.pdf-align-center):not(.pdf-align-right) { "
+            "text-align: left !important; }"
             if (getattr(self, "_workspace_mode", False)
                 and not getattr(self, "_show_raw", False))
             else ""
