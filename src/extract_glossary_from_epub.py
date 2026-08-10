@@ -600,6 +600,23 @@ def _log_assistant_prompt_once():
             print(f"🤖 Assistant Prompt: {assistant_prompt}")
             _log_assistant_prompt_once._logged = True
 
+def _glossary_watchdog_request_label(context, chunk_idx=None, total_chunks=None):
+    """Return an explicit watchdog label for non-chapter glossary work."""
+    context_norm = str(context or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if context_norm != "glossary_refinement":
+        return None
+    label = "Glossary Refinement"
+    try:
+        chunk_num = int(chunk_idx) if chunk_idx is not None else None
+        chunk_total = int(total_chunks) if total_chunks is not None else None
+    except (TypeError, ValueError):
+        chunk_num = None
+        chunk_total = None
+    if chunk_num and chunk_total and chunk_total > 1:
+        label += f" (chunk {chunk_num}/{chunk_total})"
+    return label
+
+
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, chapter_idx=None, chapter_num=None, chunk_idx=None, total_chunks=None, merged_chapters=None, before_send_callback=None, context='glossary'):
     """Send API request with interrupt capability and optional timeout retry
     
@@ -620,7 +637,12 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     timeout_retry_count = 0
     
     # Format chapter context for logs
-    chapter_label = "API call"
+    watchdog_request_label = _glossary_watchdog_request_label(
+        context,
+        chunk_idx=chunk_idx,
+        total_chunks=total_chunks,
+    )
+    chapter_label = watchdog_request_label or "API call"
     if merged_chapters and len(merged_chapters) > 1:
         # Build merged label like "Merged 1-3"
         try:
@@ -786,6 +808,17 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         )
                 except Exception:
                     pass
+                # Refinement payloads contain glossary descriptions and titles
+                # that can mention arbitrary chapters.  Give the watchdog a
+                # deliberate non-chapter label before UnifiedClient inspects
+                # the messages, otherwise content such as "Chapter 29" is
+                # mistaken for request metadata.
+                if watchdog_request_label:
+                    try:
+                        if hasattr(client, '_get_thread_local_client'):
+                            client._get_thread_local_client().current_request_label = watchdog_request_label
+                    except Exception:
+                        pass
                 try:
                     if hasattr(client, '_get_thread_local_client'):
                         tls_for_local_cancel = client._get_thread_local_client()

@@ -43,6 +43,7 @@ from image_translator import ImageTranslator
 from unified_api_client import UnifiedClient, set_current_thread_actual_request_model
 from extract_glossary_from_epub import (
     _confirmed_merged_child_indices,
+    _glossary_watchdog_request_label,
     _glossary_is_hard_stop_requested,
     _graceful_stop_should_drain_after_result,
     _is_graceful_stop_skip_error,
@@ -100,6 +101,22 @@ def test_glossary_progress_reactivates_a_manually_removed_chapter(tmp_path):
     assert completed["completed"] == [0]
     assert completed["chapters"]["0"]["status"] == "completed"
     assert completed["manual_removed_indices"] == [1]
+
+
+def test_glossary_refinement_watchdog_label_is_not_taken_from_prompt_content():
+    prompt = "Refine this glossary entry whose description mentions Chapter 29."
+    label = _glossary_watchdog_request_label(
+        "glossary_refinement",
+        chunk_idx=1,
+        total_chunks=1,
+    )
+
+    assert "Chapter 29" in prompt
+    assert label == "Glossary Refinement"
+    assert _glossary_watchdog_request_label("glossary", 1, 1) is None
+    assert _glossary_watchdog_request_label("glossary_refinement", 2, 4) == (
+        "Glossary Refinement (chunk 2/4)"
+    )
 
 
 def test_remove_refinement_status_clears_current_and_restorable_state():
