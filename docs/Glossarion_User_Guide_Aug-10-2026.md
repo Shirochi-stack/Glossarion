@@ -404,6 +404,7 @@ Glossarion aligns their HTML chapters and sends each mapped raw/translated pair 
 5. Correct any questionable row with its **Translated HTML** dropdown. The mouse wheel scrolls the table without accidentally changing a dropdown; click the dropdown when you actually want to change it.
 6. Click **Use Mapped Pair**. The main window will show the two EPUB names and the number of mapped HTML files.
 7. Click **Extract Glossary** and use the normal glossary extraction settings.
+8. While extraction is running, **Progress Manager** remains available. It opens the original raw EPUB as the source, while **Glossary Progress** reads the paired extraction's progress and shows only mapped raw HTML files. Intentionally unmapped raw files and unused translated files remain skipped.
 
 **Mapping controls:**
 

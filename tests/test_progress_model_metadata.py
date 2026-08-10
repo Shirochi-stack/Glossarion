@@ -16,6 +16,7 @@ from Retranslation_GUI import (
     _clear_missing_image_qa_markers,
     _clear_refinement_progress_fields,
     _combine_glossary_progress_legend_stats,
+    _filter_glossary_source_chapter_map,
     _glossary_progress_filename_keys,
     _index_epub_html_members,
     _match_epub_html_member_basename,
@@ -1475,3 +1476,59 @@ def test_initial_spine_matching_has_no_directory_scan_inside_spine_loop():
                 per_spine_listdir_calls.append(node.lineno)
 
     assert per_spine_listdir_calls == []
+
+
+def test_parallel_glossary_progress_filters_raw_spine_to_mapped_files():
+    chapter_map = {
+        0: "0000_Information.xhtml",
+        1: "chapter0001.xhtml",
+        2: "chapter0002.xhtml",
+        3: "chapter0003.xhtml",
+    }
+    spine_map = {0: 1, 1: 2, 2: 3, 3: 4}
+
+    filtered, filtered_spine = _filter_glossary_source_chapter_map(
+        chapter_map,
+        spine_map,
+        ["chapter0001.xhtml", "chapter0003.xhtml"],
+    )
+
+    assert filtered == {0: "chapter0001.xhtml", 1: "chapter0003.xhtml"}
+    assert filtered_spine == {0: 2, 1: 4}
+
+
+def test_progress_manager_routes_parallel_pair_through_raw_epub(tmp_path):
+    raw_path = tmp_path / "raw.epub"
+    generated_path = tmp_path / "raw_parallel_epub_pair.epub"
+    raw_path.write_bytes(b"raw")
+    generated_path.write_bytes(b"paired")
+    cache_key = f"parallel::{raw_path}::{generated_path}"
+
+    gui = RetranslationMixin()
+    gui._parallel_epub_progress_manager_context = lambda: {
+        "raw_path": str(raw_path),
+        "generated_path": str(generated_path),
+        "raw_filenames": ["chapter0001.xhtml", "chapter0002.xhtml"],
+        "cache_key": cache_key,
+    }
+    opened = []
+    gui._show_retranslation_shell_then_build = lambda *args, **kwargs: opened.append(
+        (args, kwargs)
+    )
+
+    gui.force_retranslation()
+
+    assert opened == [
+        (
+            (str(raw_path),),
+            {
+                "show_special_files_state": False,
+                "cache_key": cache_key,
+                "glossary_progress_source_path": str(generated_path),
+                "glossary_progress_source_filenames": [
+                    "chapter0001.xhtml",
+                    "chapter0002.xhtml",
+                ],
+            },
+        )
+    ]

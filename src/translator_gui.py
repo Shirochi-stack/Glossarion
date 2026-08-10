@@ -28144,9 +28144,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     pass
             # Single-file cache
             if hasattr(self, 'entry_epub') and hasattr(self.entry_epub, 'text'):
+                parallel_context = self._parallel_epub_progress_manager_context()
                 p = self.entry_epub.text().strip()
-                if p:
-                    key = os.path.abspath(p)
+                key = (
+                    parallel_context.get("cache_key")
+                    if isinstance(parallel_context, dict)
+                    else (os.path.abspath(p) if p else "")
+                )
+                if key:
                     cache = getattr(self, '_retranslation_dialog_cache', None)
                     if isinstance(cache, dict) and key in cache and cache[key].get('dialog'):
                         dlg = cache[key]['dialog']
@@ -38499,6 +38504,29 @@ Important rules:
         except Exception:
             return selected[0] == generated_path
 
+    def _parallel_epub_progress_manager_context(self):
+        """Resolve the raw source and paired progress identity for Progress Manager."""
+
+        if not self._parallel_epub_pair_is_selected():
+            return None
+        state = getattr(self, "_parallel_epub_pair_source", None)
+        if not isinstance(state, dict):
+            return None
+        raw_path = str(state.get("raw_path") or "")
+        generated_path = str(state.get("generated_path") or "")
+        if not raw_path or not generated_path:
+            return None
+        return {
+            "raw_path": raw_path,
+            "generated_path": generated_path,
+            "raw_filenames": list(state.get("raw_filenames") or []),
+            "cache_key": (
+                "parallel-epub::"
+                f"{os.path.normcase(os.path.abspath(raw_path))}::"
+                f"{os.path.normcase(os.path.abspath(generated_path))}"
+            ),
+        }
+
     def _parallel_epub_system_prompt_for_file(self, file_path):
         state = getattr(self, "_parallel_epub_pair_source", None)
         if not isinstance(state, dict):
@@ -38611,6 +38639,10 @@ Important rules:
                 "system_prompt": result["system_prompt"],
                 "profile_name": result["profile_name"],
                 "pair_count": pair_count,
+                "raw_filenames": [
+                    str(pair.get("raw_filename") or "")
+                    for pair in result["pairs"]
+                ],
                 "generated_path": generated_path,
                 "temporary_directory": pair_temp_dir,
             }

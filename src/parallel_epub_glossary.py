@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from ebooklib import epub
-from PySide6.QtCore import QStringListModel, Qt, QTimer, Signal
+from PySide6.QtCore import QRect, QStringListModel, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -486,20 +486,42 @@ class _MappingComboDelegate(QStyledItemDelegate):
             option.rect.bottom() - 2,
         )
         if not self.arrow_icon.isNull():
-            pixmap = self.arrow_icon.pixmap(16, 16)
-            painter.drawPixmap(
-                divider_x + 5,
-                option.rect.center().y() - pixmap.height() // 2,
-                pixmap,
+            # QIcon.pixmap() may return a high-DPI backing pixmap whose
+            # physical height is larger than its rendered logical height.
+            # Center a logical target rect instead and let QIcon paint it.
+            self.arrow_icon.paint(
+                painter,
+                self._arrow_rect(option.rect, divider_x),
+                Qt.AlignCenter,
             )
         painter.restore()
+
+    @staticmethod
+    def _arrow_rect(cell_rect: QRect, divider_x: int) -> QRect:
+        """Return a DPI-independent icon rectangle centered in the table row."""
+
+        icon_size = min(16, max(1, cell_rect.height() - 2))
+        arrow_area_width = 24
+        x = divider_x + 1 + (arrow_area_width - icon_size) // 2
+        y = cell_rect.top() + (cell_rect.height() - icon_size) // 2
+        return QRect(x, y, icon_size, icon_size)
 
     def createEditor(self, parent, _option, _index):
         editor = QComboBox(parent)
         self.dialog._configure_mapping_combo(editor)
         editor.setModel(self.dialog._translated_mapping_model)
         editor.activated.connect(lambda _value: self._commit_and_close(editor))
+        QTimer.singleShot(0, lambda: self._show_popup(editor))
         return editor
+
+    @staticmethod
+    def _show_popup(editor):
+        """Open a newly installed combo editor on the initiating click."""
+
+        try:
+            editor.showPopup()
+        except RuntimeError:
+            pass
 
     def setEditorData(self, editor, index):
         translated_index = index.data(Qt.UserRole)
@@ -764,11 +786,8 @@ class ParallelEpubPairDialog(QDialog):
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self._mapping_delegate = _MappingComboDelegate(self)
         self.mapping_table.setItemDelegateForColumn(1, self._mapping_delegate)
-        self.mapping_table.setEditTriggers(
-            QAbstractItemView.CurrentChanged
-            | QAbstractItemView.SelectedClicked
-            | QAbstractItemView.EditKeyPressed
-        )
+        self.mapping_table.setEditTriggers(QAbstractItemView.EditKeyPressed)
+        self.mapping_table.cellClicked.connect(self._mapping_cell_clicked)
         mapping_layout.addWidget(self.mapping_table, 1)
         self.auto_offset_checkbox.toggled.connect(self._auto_offset_toggled)
 
@@ -1101,6 +1120,15 @@ class ParallelEpubPairDialog(QDialog):
             except Exception:
                 pass
         self._rebuild_mapping()
+
+    def _mapping_cell_clicked(self, row: int, column: int):
+        """Open a translated-file dropdown immediately on a single click."""
+
+        if column != 1 or self._mapping_building:
+            return
+        item = self.mapping_table.item(row, column)
+        if item is not None:
+            self.mapping_table.editItem(item)
 
     @staticmethod
     def _configure_mapping_combo(combo: QComboBox):
@@ -1478,6 +1506,7 @@ class ParallelEpubPairDialog(QDialog):
             translated = self.translated_chapters[item["translated_index"]]
             pairs.append(
                 {
+                    "raw_index": item["raw_index"],
                     "raw_filename": raw["filename"],
                     "raw_text": raw["text"],
                     "translated_filename": translated["filename"],

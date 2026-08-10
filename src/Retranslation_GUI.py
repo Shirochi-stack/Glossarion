@@ -655,6 +655,51 @@ def _glossary_progress_filename_keys(name):
     return {key for key in keys if key}
 
 
+def _filter_glossary_source_chapter_map(
+    chapter_map, spine_index_map, source_filenames
+):
+    """Restrict a raw EPUB chapter map to the mapped parallel-source files."""
+
+    requested = [str(name or "") for name in (source_filenames or []) if name]
+    if not requested:
+        return dict(chapter_map or {}), dict(spine_index_map or {})
+
+    chapter_map = dict(chapter_map or {})
+    spine_index_map = dict(spine_index_map or {})
+    key_to_indices = {}
+    for source_index, filename in sorted(chapter_map.items()):
+        for key in _glossary_progress_filename_keys(filename):
+            key_to_indices.setdefault(key, []).append(source_index)
+
+    used_indices = set()
+    filtered_map = {}
+    filtered_spine_map = {}
+    for mapped_index, requested_filename in enumerate(requested):
+        source_index = None
+        for key in _glossary_progress_filename_keys(requested_filename):
+            source_index = next(
+                (
+                    index
+                    for index in key_to_indices.get(key, [])
+                    if index not in used_indices
+                ),
+                None,
+            )
+            if source_index is not None:
+                break
+        if source_index is None:
+            filtered_map[mapped_index] = os.path.basename(requested_filename)
+            filtered_spine_map[mapped_index] = mapped_index + 1
+            continue
+        used_indices.add(source_index)
+        filtered_map[mapped_index] = chapter_map[source_index]
+        filtered_spine_map[mapped_index] = spine_index_map.get(
+            source_index, source_index + 1
+        )
+
+    return filtered_map, filtered_spine_map
+
+
 def _map_zero_based_glossary_progress_index(value, progress_data, filename_key_to_index):
     """Map an extraction-list index onto the full OPF progress-manager view."""
     try:
@@ -12843,9 +12888,12 @@ class RetranslationMixin:
         file_path,
         show_special_files_state=False,
         resolved_output_dir=None,
+        cache_key=None,
+        glossary_progress_source_path=None,
+        glossary_progress_source_filenames=None,
     ):
         dialog, dialog_layout, loading_widget, loading_label = self._create_retranslation_shell_dialog("Progress Manager")
-        file_key = os.path.abspath(file_path)
+        file_key = cache_key or os.path.abspath(file_path)
 
         def closeEvent(event):
             event.ignore()
@@ -12872,6 +12920,10 @@ class RetranslationMixin:
                     show_special_files_state=show_special_files_state,
                     _loading_label=loading_label,
                     resolved_output_dir=resolved_output_dir,
+                    glossary_progress_source_path=glossary_progress_source_path,
+                    glossary_progress_source_filenames=(
+                        glossary_progress_source_filenames
+                    ),
                 )
                 if not result:
                     dialog.hide()
@@ -13056,6 +13108,30 @@ class RetranslationMixin:
     def force_retranslation(self):
         """Force retranslation of specific chapters or images with improved display"""
 
+        parallel_context_getter = getattr(
+            self, "_parallel_epub_progress_manager_context", None
+        )
+        parallel_context = (
+            parallel_context_getter()
+            if callable(parallel_context_getter)
+            else None
+        )
+        if isinstance(parallel_context, dict):
+            raw_path = str(parallel_context.get("raw_path") or "")
+            if raw_path and os.path.isfile(raw_path):
+                self._show_retranslation_shell_then_build(
+                    raw_path,
+                    show_special_files_state=False,
+                    cache_key=parallel_context.get("cache_key"),
+                    glossary_progress_source_path=parallel_context.get(
+                        "generated_path"
+                    ),
+                    glossary_progress_source_filenames=parallel_context.get(
+                        "raw_filenames"
+                    ),
+                )
+                return
+
         subtitle_bundle_target = self._selected_subtitle_bundle_progress_target()
         if subtitle_bundle_target:
             self._open_subtitle_bundle_progress_manager(subtitle_bundle_target)
@@ -13200,6 +13276,8 @@ class RetranslationMixin:
         show_special_files_state=False,
         _loading_label=None,
         resolved_output_dir=None,
+        glossary_progress_source_path=None,
+        glossary_progress_source_filenames=None,
     ):
         """
         Shared logic for force retranslation of EPUB/text files with OPF support
@@ -13212,6 +13290,10 @@ class RetranslationMixin:
             show_special_files_state: Initial state for showing special files toggle
             _loading_label: Optional QLabel to update with progress messages during loading
             resolved_output_dir: Optional authoritative output directory
+            glossary_progress_source_path: Optional paired EPUB path whose
+                glossary progress/output files should be displayed.
+            glossary_progress_source_filenames: Optional mapped raw filenames
+                used to restrict and order the raw EPUB chapter list.
         
         Returns:
             dict: Contains all the UI elements and data for external access
@@ -14529,7 +14611,8 @@ class RetranslationMixin:
         def _find_glossary_progress_file():
             """Locate the glossary progress file for the current EPUB."""
             try:
-                base = os.path.splitext(os.path.basename(file_path))[0]
+                lookup_path = glossary_progress_source_path or file_path
+                base = os.path.splitext(os.path.basename(lookup_path))[0]
                 progress_name = f"{base}_glossary_progress.json"
                 for d in _glossary_progress_search_dirs(base):
                     if not os.path.isdir(d):
@@ -14568,7 +14651,17 @@ class RetranslationMixin:
         def _find_gp_for_file(fp):
             """Locate the glossary progress file for a given EPUB path."""
             try:
-                base = os.path.splitext(os.path.basename(fp))[0]
+                lookup_path = fp
+                try:
+                    if glossary_progress_source_path and (
+                        os.path.normcase(os.path.abspath(fp))
+                        == os.path.normcase(os.path.abspath(file_path))
+                    ):
+                        lookup_path = glossary_progress_source_path
+                except Exception:
+                    if str(fp) == str(file_path):
+                        lookup_path = glossary_progress_source_path or fp
+                base = os.path.splitext(os.path.basename(lookup_path))[0]
                 progress_name = f"{base}_glossary_progress.json"
                 for d in _glossary_progress_search_dirs(base):
                     if not os.path.isdir(d):
@@ -15330,7 +15423,18 @@ class RetranslationMixin:
                             ci += 1
                             if opf_pos % 200 == 0:
                                 _pump_loading_frame()
-                        return cmap, ci, spine_index_map
+                        filtered_map, filtered_spine_map = (
+                            _filter_glossary_source_chapter_map(
+                                cmap,
+                                spine_index_map,
+                                glossary_progress_source_filenames,
+                            )
+                        )
+                        return (
+                            filtered_map,
+                            len(filtered_map),
+                            filtered_spine_map,
+                        )
                 except Exception:
                     return cmap, 0, spine_index_map
             
@@ -17012,25 +17116,40 @@ class RetranslationMixin:
             
             def _find_glossary_file(_gp_dir=_gp_folder, _epub_path=fp):
                 """Find the glossary file (csv/json/txt) in the same directory as the progress file."""
-                import glob
-                base = os.path.splitext(os.path.basename(_epub_path))[0]
+                bases = []
+                for candidate_path in (
+                    _epub_path,
+                    glossary_progress_source_path,
+                ):
+                    base = os.path.splitext(os.path.basename(candidate_path or ""))[0]
+                    if base and base not in bases:
+                        bases.append(base)
+                progress_stem = os.path.splitext(os.path.basename(gp_path))[0]
+                if progress_stem.endswith("_glossary_progress"):
+                    progress_stem = progress_stem[: -len("_glossary_progress")]
+                if progress_stem and progress_stem not in bases:
+                    bases.append(progress_stem)
                 # Search priority: book-specific glossary > generic glossary
                 for ext in ['.csv', '.json', '.txt', '.md']:
-                    for pattern in [
-                        os.path.join(_gp_dir, f"{base}_glossary{ext}"),
-                        os.path.join(_gp_dir, f"{base}{ext}"),
-                        os.path.join(_gp_dir, f"glossary{ext}"),
-                    ]:
-                        if os.path.isfile(pattern):
-                            return pattern
+                    for base in bases:
+                        for pattern in [
+                            os.path.join(_gp_dir, f"{base}_glossary{ext}"),
+                            os.path.join(_gp_dir, f"{base}{ext}"),
+                        ]:
+                            if os.path.isfile(pattern):
+                                return pattern
+                    generic = os.path.join(_gp_dir, f"glossary{ext}")
+                    if os.path.isfile(generic):
+                        return generic
                 # Also check parent dir (if progress is in Glossary/ subfolder)
                 parent = os.path.dirname(_gp_dir)
                 if os.path.basename(_gp_dir).lower() == 'glossary':
                     for ext in ['.csv', '.json', '.txt', '.md']:
-                        for pattern in [
-                            os.path.join(parent, f"glossary{ext}"),
-                            os.path.join(parent, f"{base}_glossary{ext}"),
-                        ]:
+                        generic = os.path.join(parent, f"glossary{ext}")
+                        if os.path.isfile(generic):
+                            return generic
+                        for base in bases:
+                            pattern = os.path.join(parent, f"{base}_glossary{ext}")
                             if os.path.isfile(pattern):
                                 return pattern
                 return None

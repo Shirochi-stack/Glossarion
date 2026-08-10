@@ -6,12 +6,13 @@ import zipfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRect, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
     QDialogButtonBox,
     QMessageBox,
-    QStyleOptionViewItem,
+    QComboBox,
 )
 
 from extract_glossary_from_epub import (
@@ -660,15 +661,23 @@ def test_parallel_epub_mapping_combos_lock_wheel_use_icon_and_support_offsets():
         {"raw_index": 2, "translated_index": 2},
     ]
 
-    assert dialog.mapping_table.cellWidget(0, 1) is None
-    mapping_index = dialog.mapping_table.model().index(0, 1)
-    combo = dialog._mapping_delegate.createEditor(
+    dialog.show()
+    app.processEvents()
+    translated_item = dialog.mapping_table.item(0, 1)
+    translated_rect = dialog.mapping_table.visualItemRect(translated_item)
+    QTest.mouseClick(
         dialog.mapping_table.viewport(),
-        QStyleOptionViewItem(),
-        mapping_index,
+        Qt.LeftButton,
+        pos=translated_rect.center(),
     )
-    dialog._mapping_delegate.setEditorData(combo, mapping_index)
+    app.processEvents()
+    combo = next(
+        editor
+        for editor in dialog.mapping_table.findChildren(QComboBox)
+        if editor.objectName() == "parallelMappingCombo"
+    )
     assert combo.currentIndex() == 1
+    assert combo.view().isVisible()
 
     class WheelEvent:
         ignored = False
@@ -681,7 +690,12 @@ def test_parallel_epub_mapping_combos_lock_wheel_use_icon_and_support_offsets():
     assert wheel_event.ignored
     assert combo.objectName() == "parallelMappingCombo"
     assert "Halgakos.ico" in dialog.styleSheet()
-    combo.deleteLater()
+    icon_rect = dialog._mapping_delegate._arrow_rect(QRect(10, 40, 200, 38), 184)
+    assert icon_rect.size().width() == 16
+    assert icon_rect.center().y() == QRect(10, 40, 200, 38).center().y()
+    combo.hidePopup()
+    dialog._mapping_delegate._commit_and_close(combo)
+    app.processEvents()
 
     dialog._apply_mapping_offset(1)
     assert dialog._mapping_offset == 1
