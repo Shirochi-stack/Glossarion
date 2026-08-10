@@ -1422,6 +1422,12 @@ def _load_qa_scanner_settings_from_env():
         settings = {
             "foreign_char_threshold": _env_int("QA_FOREIGN_CHAR_THRESHOLD", 0),
             "target_language": os.getenv("QA_TARGET_LANGUAGE", "english"),
+            "whitelist_emoticon_patterns": _env_bool(
+                "QA_WHITELIST_EMOTICON_PATTERNS", False
+            ),
+            "emoticon_patterns_are_regex": _env_bool(
+                "QA_EMOTICON_PATTERNS_ARE_REGEX", False
+            ),
             "check_encoding_issues": _env_bool("QA_CHECK_ENCODING", False),
             "check_repetition": _env_bool("QA_CHECK_REPETITION", True),
             "check_translation_artifacts": _env_bool("QA_CHECK_ARTIFACTS", False),
@@ -1456,6 +1462,14 @@ def _load_qa_scanner_settings_from_env():
             "check_ai_truncation_detection": _env_bool("QA_CHECK_AI_TRUNCATION_DETECTION", False),
             "check_word_count_ratio": _env_bool("QA_CHECK_WORD_COUNT_RATIO", True),
         }
+        try:
+            emoticon_patterns_json = os.getenv("QA_EMOTICON_PATTERNS_JSON", "")
+            if emoticon_patterns_json:
+                parsed_patterns = json.loads(emoticon_patterns_json)
+                if isinstance(parsed_patterns, list):
+                    settings["emoticon_patterns"] = parsed_patterns
+        except Exception as exc:
+            print(f"Warning: failed to parse QA emoticon whitelist patterns: {exc}")
         try:
             artifact_patterns_json = os.getenv("QA_AI_ARTIFACT_PATTERNS_JSON", "")
             if artifact_patterns_json:

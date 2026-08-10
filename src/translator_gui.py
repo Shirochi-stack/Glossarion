@@ -109,6 +109,7 @@ from refinement_prompts import (
     DEFAULT_REFINEMENT_USER_PROMPT,
 )
 from language_options import TARGET_LANGUAGES
+from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS
 
 
 def _authnd_auto_token_limits():
@@ -43702,6 +43703,11 @@ Important rules:
             self.config.setdefault('glossary_auto_backup', True)
             self.config.setdefault('glossary_max_backups', 50)
             default_qa_settings = {'foreign_char_threshold': 0, 'excluded_characters': '', 'target_language': 'english', 'check_encoding_issues': False, 'check_repetition': True, 'check_translation_artifacts': True, 'check_glossary_leakage': True, 'min_file_length': 0, 'report_format': 'detailed', 'auto_save_report': True, 'check_word_count_ratio': True, 'check_multiple_headers': True, 'warn_name_mismatch': True, 'check_missing_html_tag': True, 'check_missing_beautifulsoup_tags': False, 'sdlxliff_tag_retention_threshold': 0.9, 'sdlxliff_tag_surplus_tolerance': 0.05, 'sdlxliff_min_source_paragraph_tags': 20, 'check_invalid_nesting': False, 'cache_enabled': True, 'cache_auto_size': False, 'cache_show_stats': False}
+            default_qa_settings.update({
+                'whitelist_emoticon_patterns': False,
+                'emoticon_patterns': list(DEFAULT_EMOTICON_PATTERNS),
+                'emoticon_patterns_are_regex': False,
+            })
             self.config.setdefault('qa_scanner_settings', default_qa_settings)
             self.config.setdefault('ai_hunter_config', {}).setdefault(
                 'ai_hunter_max_workers', max(1, (os.cpu_count() or 4) // 2))
@@ -44405,6 +44411,9 @@ Important rules:
                 ('QA_SCANNER_SETTINGS_JSON', self._get_qa_scanner_settings_json()),
                 ('QA_FOREIGN_CHAR_THRESHOLD', str(qa_settings.get('foreign_char_threshold', 0))),
                 ('QA_TARGET_LANGUAGE', qa_settings.get('target_language', 'english')),
+                ('QA_WHITELIST_EMOTICON_PATTERNS', '1' if qa_settings.get('whitelist_emoticon_patterns', False) else '0'),
+                ('QA_EMOTICON_PATTERNS_JSON', json.dumps(qa_settings.get('emoticon_patterns', DEFAULT_EMOTICON_PATTERNS), ensure_ascii=False)),
+                ('QA_EMOTICON_PATTERNS_ARE_REGEX', '1' if qa_settings.get('emoticon_patterns_are_regex', False) else '0'),
                 ('QA_CHECK_ENCODING', '1' if qa_settings.get('check_encoding_issues', False) else '0'),
                 ('QA_CHECK_REPETITION', '1' if qa_settings.get('check_repetition', True) else '0'),
                 ('QA_CHECK_ARTIFACTS', '1' if qa_settings.get('check_translation_artifacts', False) else '0'),

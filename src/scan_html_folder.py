@@ -49,6 +49,10 @@ from translation_artifacts import (
     translation_artifact_qa_text,
     translation_artifact_spec_for_filename,
 )
+from emoticon_patterns import (
+    DEFAULT_EMOTICON_PATTERNS,
+    mask_whitelisted_emoticons,
+)
 
 # Optional: psutil for process priority and CPU affinity control
 try:
@@ -1097,14 +1101,21 @@ def detect_non_english_content(text, qa_settings=None):
     
     Args:
         text: The text content to check
-        qa_settings: Dictionary with 'foreign_char_threshold', 'excluded_characters', 
-                    and 'target_language' keys
+        qa_settings: Dictionary with 'foreign_char_threshold', 'excluded_characters',
+                    'target_language', and optional emoticon-whitelist keys
     
     Returns:
         tuple: (has_issues, list_of_issues)
     """
     if qa_settings is None:
-        qa_settings = {'foreign_char_threshold': 0, 'excluded_characters': '', 'target_language': 'english'}
+        qa_settings = {
+            'foreign_char_threshold': 0,
+            'excluded_characters': '',
+            'whitelist_emoticon_patterns': False,
+            'emoticon_patterns': list(DEFAULT_EMOTICON_PATTERNS),
+            'emoticon_patterns_are_regex': False,
+            'target_language': 'english',
+        }
     
     # Get threshold, excluded characters, and target language
     threshold = qa_settings.get('foreign_char_threshold', 0)
@@ -1127,6 +1138,12 @@ def detect_non_english_content(text, qa_settings=None):
     
     issues = []
     filtered_text = filter_dash_lines(text)
+    if qa_settings.get('whitelist_emoticon_patterns', False):
+        filtered_text = mask_whitelisted_emoticons(
+            filtered_text,
+            qa_settings.get('emoticon_patterns', DEFAULT_EMOTICON_PATTERNS),
+            qa_settings.get('emoticon_patterns_are_regex', False),
+        )
     
     # LANGUAGE DETECTION FOR LATIN-BASED LANGUAGES
     # Map language codes to full names
@@ -8926,6 +8943,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         qa_settings = {
             'foreign_char_threshold': 0,
             'excluded_characters': '',
+            'whitelist_emoticon_patterns': False,
+            'emoticon_patterns': list(DEFAULT_EMOTICON_PATTERNS),
+            'emoticon_patterns_are_regex': False,
             'target_language': 'english',
             'check_encoding_issues': False,
             'check_repetition': True,
@@ -9502,6 +9522,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         pass
 
     log(f"   ✓ Foreign char threshold: {qa_settings.get('foreign_char_threshold', 0)}")
+    log(
+        "   ✓ Emoticon pattern whitelist: "
+        + ("ENABLED" if qa_settings.get('whitelist_emoticon_patterns', False) else "DISABLED")
+    )
     log(f"   ✓ Encoding issues check: {'ENABLED' if qa_settings.get('check_encoding_issues', True) else 'DISABLED'}")
     log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
     log(f"   ✓ Translation artifacts check: {'ENABLED' if qa_settings.get('check_translation_artifacts', False) else 'DISABLED'}")

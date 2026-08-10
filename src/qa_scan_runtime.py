@@ -5,6 +5,8 @@ import json
 import os
 import sys
 
+from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS
+
 
 CANONICAL_WORD_COUNT_MULTIPLIERS = {
     "english": 1.0,
@@ -99,6 +101,9 @@ def default_qa_scan_settings():
     return {
         "foreign_char_threshold": 0,
         "excluded_characters": "",
+        "whitelist_emoticon_patterns": False,
+        "emoticon_patterns": list(DEFAULT_EMOTICON_PATTERNS),
+        "emoticon_patterns_are_regex": False,
         "target_language": "english",
         "source_language": "auto",
         "check_encoding_issues": False,
@@ -232,6 +237,16 @@ def apply_qa_scan_env_from_settings(qa_settings):
     mappings = {
         "QA_FOREIGN_CHAR_THRESHOLD": str(settings.get("foreign_char_threshold", 0)),
         "QA_TARGET_LANGUAGE": str(settings.get("target_language", "english")),
+        "QA_WHITELIST_EMOTICON_PATTERNS": "1" if settings.get(
+            "whitelist_emoticon_patterns", False
+        ) else "0",
+        "QA_EMOTICON_PATTERNS_JSON": json.dumps(
+            settings.get("emoticon_patterns", DEFAULT_EMOTICON_PATTERNS),
+            ensure_ascii=False,
+        ),
+        "QA_EMOTICON_PATTERNS_ARE_REGEX": "1" if settings.get(
+            "emoticon_patterns_are_regex", False
+        ) else "0",
         "QA_CHECK_ENCODING": "1" if settings.get("check_encoding_issues", False) else "0",
         "QA_CHECK_REPETITION": "1" if settings.get("check_repetition", True) else "0",
         "QA_CHECK_ARTIFACTS": "1" if settings.get("check_translation_artifacts", False) else "0",

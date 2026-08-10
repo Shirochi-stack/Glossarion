@@ -19,6 +19,7 @@ import threading
 import traceback
 
 from language_options import TARGET_LANGUAGES
+from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS
 
 DEFAULT_AI_ARTIFACT_PATTERNS = [
     'Sure',
@@ -545,6 +546,9 @@ class QAScannerMixin:
                 qa_settings = {
                     'foreign_char_threshold': 0,
                     'excluded_characters': '',
+                    'whitelist_emoticon_patterns': False,
+                    'emoticon_patterns': list(DEFAULT_EMOTICON_PATTERNS),
+                    'emoticon_patterns_are_regex': False,
                     'target_language': 'english',
                     'source_language': 'auto',
                     'check_encoding_issues': False,
@@ -2905,6 +2909,205 @@ class QAScannerMixin:
             threshold_layout.addWidget(threshold_hint)
             threshold_layout.addStretch()
             foreign_layout.addWidget(threshold_widget)
+
+            # Whole-pattern whitelist for kaomoji and other mixed-script emoticons.
+            emoticon_whitelist_row = QWidget()
+            emoticon_whitelist_layout = QHBoxLayout(emoticon_whitelist_row)
+            emoticon_whitelist_layout.setContentsMargins(0, 4, 0, 10)
+            whitelist_emoticon_patterns_checkbox = self._create_styled_checkbox(
+                "Whitelist emoticon patterns"
+            )
+            whitelist_emoticon_patterns_checkbox.setChecked(
+                qa_settings.get('whitelist_emoticon_patterns', False)
+            )
+            whitelist_emoticon_patterns_checkbox.setToolTip(
+                "Ignore complete, listed emoticon patterns during foreign-character detection. "
+                "Individual Cyrillic, Korean, Japanese, and other script characters remain detectable elsewhere."
+            )
+            emoticon_whitelist_layout.addWidget(whitelist_emoticon_patterns_checkbox)
+            edit_emoticon_patterns_button = QPushButton("Edit phrases…")
+            edit_emoticon_patterns_button.setToolTip(
+                "View and edit complete emoticon patterns that should be ignored"
+            )
+            emoticon_whitelist_layout.addWidget(edit_emoticon_patterns_button)
+            emoticon_whitelist_layout.addStretch()
+            foreign_layout.addWidget(emoticon_whitelist_row)
+
+            emoticon_patterns_holder = [list(
+                qa_settings.get('emoticon_patterns', DEFAULT_EMOTICON_PATTERNS)
+            )]
+            emoticon_patterns_regex_holder = [bool(
+                qa_settings.get('emoticon_patterns_are_regex', False)
+            )]
+
+            def show_emoticon_patterns():
+                editor_dialog = getattr(self, '_qa_emoticon_patterns_dialog', None)
+                if editor_dialog is None:
+                    editor_dialog = QDialog(self)
+                    editor_dialog.setWindowTitle("Whitelisted Emoticon Patterns")
+                    editor_dialog.setModal(False)
+                    editor_dialog.setWindowModality(Qt.NonModal)
+                    editor_dialog.setMinimumSize(720, 520)
+                    editor_layout = QVBoxLayout(editor_dialog)
+                    help_label = QLabel(
+                        "Enter one complete emoticon per line. Literal entries are matched exactly, "
+                        "including capitalization and internal spacing. Only the full matched pattern "
+                        "is ignored; the same foreign characters elsewhere are still reported."
+                    )
+                    help_label.setWordWrap(True)
+                    editor_layout.addWidget(help_label)
+                    pattern_editor = QTextEdit()
+                    pattern_editor.setAcceptRichText(False)
+                    pattern_editor.setFont(QFont('Consolas', 11))
+                    pattern_editor.setPlaceholderText(
+                        "Example:\n¯\\_(ツ)_/¯\n(ㅠ_ㅠ)\nщ(ﾟДﾟщ)"
+                    )
+                    editor_layout.addWidget(pattern_editor)
+                    regex_checkbox = self._create_styled_checkbox(
+                        "Advanced: treat each line as a regular expression"
+                    )
+                    regex_checkbox.setToolTip(
+                        "Enable only if you are familiar with Python regular expressions."
+                    )
+                    editor_layout.addWidget(regex_checkbox)
+                    regex_example_label = QLabel(
+                        "Example:  [ㅠㅜ]{2,}\n"
+                        "Matches a run of two or more Korean crying characters."
+                    )
+                    regex_example_label.setWordWrap(True)
+                    regex_example_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                    regex_example_label.setStyleSheet(
+                        "color: #b8b8b8; padding: 6px 10px; "
+                        "background-color: #252525; border-radius: 4px;"
+                    )
+                    regex_example_label.setVisible(False)
+                    editor_layout.addWidget(regex_example_label)
+
+                    def toggle_regex_help(enabled):
+                        regex_example_label.setVisible(enabled)
+                        if enabled:
+                            pattern_editor.setPlaceholderText(
+                                "One Python regular expression per line\nExample: [ㅠㅜ]{2,}"
+                            )
+                        else:
+                            pattern_editor.setPlaceholderText(
+                                "Example:\n¯\\_(ツ)_/¯\n(ㅠ_ㅠ)\nщ(ﾟДﾟщ)"
+                            )
+
+                    regex_checkbox.toggled.connect(toggle_regex_help)
+                    status_label = QLabel("")
+                    editor_layout.addWidget(status_label)
+                    button_row = QHBoxLayout()
+                    restore_button = QPushButton("Restore Defaults")
+                    save_button = QPushButton("Save Phrases")
+                    close_button = QPushButton("Close")
+                    button_row.addWidget(restore_button)
+                    button_row.addStretch()
+                    button_row.addWidget(save_button)
+                    button_row.addWidget(close_button)
+                    editor_layout.addLayout(button_row)
+
+                    def save_patterns():
+                        patterns = [
+                            line.strip()
+                            for line in pattern_editor.toPlainText().splitlines()
+                            if line.strip()
+                        ]
+                        invalid = []
+                        if regex_checkbox.isChecked():
+                            for line_number, pattern in enumerate(patterns, 1):
+                                try:
+                                    re.compile(pattern)
+                                except re.error as exc:
+                                    invalid.append(f"Line {line_number}: {exc}")
+                        if invalid:
+                            status_label.setText("❌ " + invalid[0])
+                            QMessageBox.warning(
+                                editor_dialog,
+                                "Invalid Regular Expression",
+                                "The patterns were not saved:\n\n" + "\n".join(invalid),
+                            )
+                            return
+                        emoticon_patterns_holder[0] = patterns
+                        emoticon_patterns_regex_holder[0] = regex_checkbox.isChecked()
+                        qa_settings['emoticon_patterns'] = list(patterns)
+                        qa_settings['emoticon_patterns_are_regex'] = regex_checkbox.isChecked()
+                        scanner_settings = self.config.setdefault('qa_scanner_settings', {})
+                        scanner_settings['emoticon_patterns'] = list(patterns)
+                        scanner_settings['emoticon_patterns_are_regex'] = regex_checkbox.isChecked()
+                        noun = "advanced pattern" if regex_checkbox.isChecked() else "phrase"
+                        status_label.setText(f"✅ Saved {len(patterns)} {noun}(s)")
+                        try:
+                            self.save_config(show_message=False)
+                        except Exception as exc:
+                            status_label.setText(f"❌ Could not save configuration: {exc}")
+
+                    def restore_defaults():
+                        confirm_box = QMessageBox(editor_dialog)
+                        confirm_box.setIcon(QMessageBox.Question)
+                        confirm_box.setWindowTitle("Restore Default Emoticons?")
+                        confirm_box.setText(
+                            "Replace all emoticon patterns currently shown with the default list?"
+                        )
+                        confirm_box.setInformativeText(
+                            "Your saved patterns will not change until you click Save Phrases."
+                        )
+                        confirm_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                        confirm_box.setDefaultButton(QMessageBox.No)
+                        if confirm_box.exec() != QMessageBox.Yes:
+                            return
+                        pattern_editor.setPlainText("\n".join(DEFAULT_EMOTICON_PATTERNS))
+                        regex_checkbox.setChecked(False)
+                        status_label.setText(
+                            "Defaults loaded. Click Save Phrases to keep them."
+                        )
+
+                    restore_button.clicked.connect(restore_defaults)
+                    save_button.clicked.connect(save_patterns)
+                    close_button.clicked.connect(editor_dialog.close)
+
+                    def persist_geometry(_result):
+                        try:
+                            geometry_hex = bytes(
+                                editor_dialog.saveGeometry().toHex()
+                            ).decode('ascii')
+                            self.config['qa_emoticon_patterns_dialog_geometry'] = geometry_hex
+                            self.save_config(show_message=False)
+                        except Exception:
+                            pass
+
+                    editor_dialog.finished.connect(persist_geometry)
+                    editor_dialog._pattern_editor = pattern_editor
+                    editor_dialog._regex_checkbox = regex_checkbox
+                    editor_dialog._status_label = status_label
+                    self._qa_emoticon_patterns_dialog = editor_dialog
+
+                editor_dialog._pattern_editor.setPlainText(
+                    "\n".join(emoticon_patterns_holder[0])
+                )
+                editor_dialog._regex_checkbox.setChecked(
+                    emoticon_patterns_regex_holder[0]
+                )
+                editor_dialog._status_label.setText("")
+                geometry_hex = self.config.get(
+                    'qa_emoticon_patterns_dialog_geometry', ''
+                )
+                if geometry_hex and not getattr(
+                    editor_dialog, '_geometry_restored', False
+                ):
+                    try:
+                        from PySide6.QtCore import QByteArray
+                        editor_dialog.restoreGeometry(
+                            QByteArray.fromHex(geometry_hex.encode('ascii'))
+                        )
+                    except Exception:
+                        pass
+                    editor_dialog._geometry_restored = True
+                editor_dialog.show()
+                editor_dialog.raise_()
+                editor_dialog.activateWindow()
+
+            edit_emoticon_patterns_button.clicked.connect(show_emoticon_patterns)
 
             # Excluded characters
             excluded_label = QLabel("Additional characters to exclude from detection:")
@@ -5392,6 +5595,9 @@ class QAScannerMixin:
                     core_settings_to_save = {
                         'foreign_char_threshold': (threshold_spinbox, lambda x: x.value()),
                         'excluded_characters': (excluded_text, lambda x: x.toPlainText().strip()),
+                        'whitelist_emoticon_patterns': (whitelist_emoticon_patterns_checkbox, lambda x: x.isChecked()),
+                        'emoticon_patterns': (emoticon_patterns_holder, lambda x: list(x[0])),
+                        'emoticon_patterns_are_regex': (emoticon_patterns_regex_holder, lambda x: bool(x[0])),
                         'source_language': (source_lang_combo, lambda x: _normalize_source_language(x.currentText())),
                         'target_language': (target_language_combo, lambda x: _normalize_target_language(x.currentText())),
                         'check_encoding_issues': (check_encoding_checkbox, lambda x: x.isChecked()),
@@ -5639,6 +5845,9 @@ class QAScannerMixin:
                         qa_env_mappings = [
                             ('QA_FOREIGN_CHAR_THRESHOLD', str(qa_settings.get('foreign_char_threshold', 0))),
                             ('QA_TARGET_LANGUAGE', qa_settings.get('target_language', 'english')),
+                            ('QA_WHITELIST_EMOTICON_PATTERNS', '1' if qa_settings.get('whitelist_emoticon_patterns', False) else '0'),
+                            ('QA_EMOTICON_PATTERNS_JSON', json.dumps(qa_settings.get('emoticon_patterns', DEFAULT_EMOTICON_PATTERNS), ensure_ascii=False)),
+                            ('QA_EMOTICON_PATTERNS_ARE_REGEX', '1' if qa_settings.get('emoticon_patterns_are_regex', False) else '0'),
                             ('QA_CHECK_ENCODING', '1' if qa_settings.get('check_encoding_issues', False) else '0'),
                             ('QA_CHECK_REPETITION', '1' if qa_settings.get('check_repetition', True) else '0'),
                             ('QA_CHECK_ARTIFACTS', '1' if qa_settings.get('check_translation_artifacts', False) else '0'),
@@ -5791,6 +6000,7 @@ class QAScannerMixin:
                 simple = (
                     ('foreign_char_threshold', threshold_spinbox, 0),
                     ('excluded_characters', excluded_text, ''),
+                    ('whitelist_emoticon_patterns', whitelist_emoticon_patterns_checkbox, False),
                     ('target_language', target_language_combo, 'english'),
                     ('source_language', source_lang_combo, 'auto'),
                     ('check_encoding_issues', check_encoding_checkbox, False),
@@ -5859,6 +6069,13 @@ class QAScannerMixin:
                 )
                 ai_artifact_regex_holder[0] = bool(
                     s.get('ai_artifact_patterns_are_regex', False)
+                )
+
+                emoticon_patterns_holder[0] = list(
+                    s.get('emoticon_patterns', DEFAULT_EMOTICON_PATTERNS)
+                )
+                emoticon_patterns_regex_holder[0] = bool(
+                    s.get('emoticon_patterns_are_regex', False)
                 )
 
                 ai_thinking_preamble_patterns_holder[0] = list(
@@ -5973,6 +6190,9 @@ class QAScannerMixin:
                     threshold_spinbox.setValue(0)
                     source_lang_combo.setCurrentText('Auto')
                     target_language_combo.setCurrentText('English')
+                    whitelist_emoticon_patterns_checkbox.setChecked(False)
+                    emoticon_patterns_holder[0] = list(DEFAULT_EMOTICON_PATTERNS)
+                    emoticon_patterns_regex_holder[0] = False
 
                     # Detection defaults
                     check_encoding_checkbox.setChecked(False)

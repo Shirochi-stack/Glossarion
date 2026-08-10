@@ -6,6 +6,7 @@ import pytest
 
 import other_settings
 import Retranslation_GUI as retranslation_gui_module
+from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS, mask_whitelisted_emoticons
 
 from Retranslation_GUI import (
     RetranslationMixin,
@@ -23,7 +24,12 @@ from qa_scan_runtime import (
     default_qa_scan_settings,
     restore_env,
 )
-from scan_html_folder import detect_ai_artifacts, scan_html_folder, update_new_format_progress
+from scan_html_folder import (
+    detect_ai_artifacts,
+    detect_non_english_content,
+    scan_html_folder,
+    update_new_format_progress,
+)
 from translate_headers_standalone import load_translations_from_file
 from translator_gui import TranslatorGUI
 from translation_artifacts import (
@@ -155,6 +161,105 @@ def test_ai_artifact_phrases_are_forwarded_to_worker_environment():
             "Generated response:"
         ]
         assert os.environ["QA_AI_ARTIFACT_PATTERNS_ARE_REGEX"] == "1"
+    finally:
+        restore_env(previous)
+
+
+@pytest.mark.parametrize(
+    "text,expected_script",
+    (
+        ("A shrug ¯\\_(ツ)_/¯ in prose.", "Japanese_text_found"),
+        ("A crying face (ㅠ_ㅠ) in prose.", "Korean_text_found"),
+        ("An angry face щ(ﾟДﾟщ) in prose.", "Cyrillic_text_found"),
+    ),
+)
+def test_multiscript_emoticons_are_only_ignored_when_toggle_is_enabled(
+    text, expected_script
+):
+    settings = default_qa_scan_settings()
+
+    has_issue, issues = detect_non_english_content(text, settings)
+    assert has_issue is True
+    assert any(expected_script in issue for issue in issues)
+
+    settings["whitelist_emoticon_patterns"] = True
+    assert detect_non_english_content(text, settings) == (False, [])
+
+
+def test_emoticon_whitelist_only_masks_the_complete_pattern():
+    settings = default_qa_scan_settings()
+    settings["whitelist_emoticon_patterns"] = True
+
+    has_issue, issues = detect_non_english_content(
+        "Allowed face щ(ﾟДﾟщ), but this Д remains foreign.", settings
+    )
+
+    assert has_issue is True
+    assert any("Cyrillic_text_found_1_chars_[Д]" in issue for issue in issues)
+    assert not any("Japanese_text_found" in issue for issue in issues)
+
+
+def test_custom_literal_and_regex_emoticon_patterns_are_supported():
+    literal_settings = default_qa_scan_settings()
+    literal_settings.update(
+        {
+            "whitelist_emoticon_patterns": True,
+            "emoticon_patterns": ["(Я_Я)"],
+            "emoticon_patterns_are_regex": False,
+        }
+    )
+    assert detect_non_english_content("Custom face (Я_Я).", literal_settings) == (
+        False,
+        [],
+    )
+    assert detect_non_english_content("Different face (Ж_Ж).", literal_settings)[0] is True
+
+    regex_settings = default_qa_scan_settings()
+    regex_settings.update(
+        {
+            "whitelist_emoticon_patterns": True,
+            "emoticon_patterns": [r"[ㅠㅜ]{2,}"],
+            "emoticon_patterns_are_regex": True,
+        }
+    )
+    assert detect_non_english_content("Variable crying ㅠㅜㅠㅜㅠ.", regex_settings) == (
+        False,
+        [],
+    )
+
+
+def test_invalid_emoticon_regex_is_skipped_without_disabling_valid_entries():
+    text = mask_whitelisted_emoticons(
+        "Keep (ㅠ_ㅠ), still flag Ж.",
+        ["(", r"\(ㅠ_ㅠ\)"],
+        patterns_are_regex=True,
+    )
+
+    assert "ㅠ" not in text
+    assert "Ж" in text
+
+
+def test_emoticon_whitelist_defaults_and_worker_environment_are_persisted():
+    settings = default_qa_scan_settings()
+    assert settings["whitelist_emoticon_patterns"] is False
+    assert settings["emoticon_patterns"] == list(DEFAULT_EMOTICON_PATTERNS)
+    assert settings["emoticon_patterns_are_regex"] is False
+
+    settings.update(
+        {
+            "whitelist_emoticon_patterns": True,
+            "emoticon_patterns": ["(Я_Я)", "(ㅠ_ㅠ)"],
+            "emoticon_patterns_are_regex": True,
+        }
+    )
+    previous = apply_qa_scan_env_from_settings(settings)
+    try:
+        assert os.environ["QA_WHITELIST_EMOTICON_PATTERNS"] == "1"
+        assert json.loads(os.environ["QA_EMOTICON_PATTERNS_JSON"]) == [
+            "(Я_Я)",
+            "(ㅠ_ㅠ)",
+        ]
+        assert os.environ["QA_EMOTICON_PATTERNS_ARE_REGEX"] == "1"
     finally:
         restore_env(previous)
 
