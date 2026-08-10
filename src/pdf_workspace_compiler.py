@@ -400,10 +400,27 @@ def _keep_only_section_bookmarks(pdf_path: str, titles: list[str]) -> None:
     """Normalize the generated outline to exactly one entry per response."""
     import fitz
 
-    document = fitz.open(pdf_path)
     temp_path = f"{pdf_path}.outline.tmp"
     try:
+        if os.path.isfile(temp_path):
+            os.remove(temp_path)
+    except OSError:
+        pass
+    document = fitz.open(pdf_path)
+    try:
         generated = document.get_toc(simple=True) or []
+        if (
+            len(generated) == len(titles)
+            and all(
+                len(row) >= 3
+                and _outline_title_key(row[1]) == _outline_title_key(title)
+                for row, title in zip(generated, titles)
+            )
+        ):
+            # WeasyPrint already produced the exact requested outline. Avoid
+            # rewriting the PDF, which also lets compilation finish while the
+            # newly rendered document is open in an external viewer.
+            return
         cursor = 0
         cleaned = []
         for title in titles:
@@ -500,6 +517,10 @@ def compile_pdf_workspace(
       color: transparent; font-size: 0; line-height: 0;
     }}
     .compiled-pdf-section {{ margin: 0; padding: 0; }}
+    .compiled-pdf-section + .compiled-pdf-section {{
+      break-before: page;
+      page-break-before: always;
+    }}
     .pdf-fast-semantic-page p {{
       text-align: left !important;
     }}

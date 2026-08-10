@@ -107,6 +107,9 @@ def test_compile_pdf_workspace_has_one_bookmark_per_response(tmp_path, monkeypat
         encoding="utf-8"
     )
     assert ".pdf-fast-semantic-page p {" in compiled_html
+    assert ".compiled-pdf-section + .compiled-pdf-section {" in compiled_html
+    assert "break-before: page;" in compiled_html
+    assert "page-break-before: always;" in compiled_html
     compiled_soup = BeautifulSoup(compiled_html, "html.parser")
     first_body = compiled_soup.find("p", string="First body.")
     assert first_body["class"] == ["pdf-align-left"]
