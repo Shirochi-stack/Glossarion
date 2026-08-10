@@ -9632,6 +9632,15 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             existing_chapters_by_idx = {}
 
         manual_removed_set = set(manual_removed_indices)
+        # "Remove from progress" is a retry/reset action, not a permanent
+        # blacklist.  Once extraction actively starts one of those chapters
+        # again, the fresh status owns the row and the removal marker must be
+        # consumed.  Otherwise every subsequent in-progress/completed save is
+        # filtered out for the rest of the process session.
+        reactivated_indices = manual_removed_set & requested_in_progress_set
+        if reactivated_indices:
+            manual_removed_set -= reactivated_indices
+            manual_removed_indices = sorted(manual_removed_set)
         if manual_removed_set:
             if total_chapters:
                 all_chapters_removed = len(manual_removed_set) >= int(total_chapters)

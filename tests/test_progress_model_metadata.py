@@ -49,7 +49,9 @@ from extract_glossary_from_epub import (
     main as extract_glossary_main,
     make_glossary_progress_context,
     _restore_glossary_in_progress_file,
+    save_progress as save_glossary_progress,
 )
+import extract_glossary_from_epub as glossary_extractor
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +59,47 @@ def _clear_actual_request_metadata():
     set_current_thread_actual_request_model(None, None)
     yield
     set_current_thread_actual_request_model(None, None)
+
+
+def test_glossary_progress_reactivates_a_manually_removed_chapter(tmp_path):
+    progress_file = tmp_path / "book_glossary_progress.json"
+    progress_file.write_text(
+        json.dumps(
+            {
+                "chapters": {},
+                "completed": [],
+                "failed": [],
+                "merged_indices": [],
+                "in_progress": [],
+                "manual_removed_indices": [0, 1],
+                "manual_removed_session_id": glossary_extractor._GLOSSARY_PROGRESS_SESSION_ID,
+                "progress_session_id": glossary_extractor._GLOSSARY_PROGRESS_SESSION_ID,
+            }
+        ),
+        encoding="utf-8",
+    )
+    context = make_glossary_progress_context(
+        progress_file=str(progress_file),
+        output_file=str(tmp_path / "book_glossary.json"),
+        chapter_positions={0: 1, 1: 2},
+        chapter_numbers={0: 1, 1: 2},
+        chapter_filenames={0: "pair_0001.xhtml", 1: "pair_0002.xhtml"},
+        total_chapters=2,
+    )
+
+    save_glossary_progress([], [], [], failed=[], in_progress=[0], context=context)
+
+    active = json.loads(progress_file.read_text(encoding="utf-8"))
+    assert active["in_progress"] == [0]
+    assert active["chapters"]["0"]["status"] == "in_progress"
+    assert active["manual_removed_indices"] == [1]
+
+    save_glossary_progress([0], [], [], failed=[], in_progress=[], context=context)
+
+    completed = json.loads(progress_file.read_text(encoding="utf-8"))
+    assert completed["completed"] == [0]
+    assert completed["chapters"]["0"]["status"] == "completed"
+    assert completed["manual_removed_indices"] == [1]
 
 
 def test_remove_refinement_status_clears_current_and_restorable_state():
