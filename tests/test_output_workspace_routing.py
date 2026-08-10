@@ -3,7 +3,7 @@ from pathlib import Path
 
 from output_workspace import (
     read_workspace_source_path,
-    resolve_source_aware_workspace,
+    rename_input_for_workspace_collision,
     source_format_label,
     workspace_source_format,
     write_workspace_source_reference,
@@ -15,82 +15,60 @@ def test_source_format_labels_are_limited_to_collision_sensitive_inputs():
     assert source_format_label("Novel.PdF") == "PDF"
     assert source_format_label("Novel.txt") == "TXT"
     assert source_format_label("Novel.md") == ""
-    assert resolve_source_aware_workspace("Novel.pdf", "") == ""
+    assert rename_input_for_workspace_collision("Novel.pdf", "") == "Novel.pdf"
 
 
-def test_same_named_pdf_is_routed_away_from_existing_epub_workspace(tmp_path):
+def test_same_named_pdf_is_renamed_for_existing_epub_workspace(tmp_path):
     workspace = tmp_path / "Same Name"
     write_workspace_source_reference(workspace, tmp_path / "raw" / "Same Name.epub")
+    source = tmp_path / "Same Name.pdf"
+    source.write_bytes(b"updated pdf")
 
-    resolved = resolve_source_aware_workspace(
-        str(tmp_path / "updated" / "Same Name.pdf"), str(workspace)
-    )
+    renamed = rename_input_for_workspace_collision(str(source), str(workspace))
 
-    assert Path(resolved) == tmp_path / "Same Name_PDF"
+    assert Path(renamed) == tmp_path / "Same Name_PDF.pdf"
+    assert not source.exists()
+    assert Path(renamed).read_bytes() == b"updated pdf"
 
 
-def test_same_named_epub_is_routed_away_from_existing_pdf_workspace(tmp_path):
+def test_same_named_epub_is_renamed_for_existing_pdf_workspace(tmp_path):
     workspace = tmp_path / "Same Name"
     write_workspace_source_reference(workspace, tmp_path / "raw" / "Same Name.pdf")
+    source = tmp_path / "Same Name.epub"
+    source.write_bytes(b"updated epub")
 
-    resolved = resolve_source_aware_workspace(
-        str(tmp_path / "updated" / "Same Name.epub"), str(workspace)
-    )
+    renamed = rename_input_for_workspace_collision(str(source), str(workspace))
 
-    assert Path(resolved) == tmp_path / "Same Name_EPUB"
+    assert Path(renamed) == tmp_path / "Same Name_EPUB.epub"
+    assert not source.exists()
+    assert Path(renamed).read_bytes() == b"updated epub"
 
 
-def test_txt_gets_its_own_workspace_and_matching_updates_reuse_it(tmp_path):
+def test_matching_format_keeps_original_input_name(tmp_path):
     workspace = tmp_path / "Same Name"
-    write_workspace_source_reference(workspace, tmp_path / "Same Name.epub")
-    txt_workspace = Path(resolve_source_aware_workspace(
-        str(tmp_path / "Same Name.txt"), str(workspace)
-    ))
-    write_workspace_source_reference(txt_workspace, tmp_path / "Same Name.txt")
+    write_workspace_source_reference(workspace, tmp_path / "old" / "Same Name.txt")
+    source = tmp_path / "Same Name.txt"
+    source.write_text("updated", encoding="utf-8")
 
-    updated = resolve_source_aware_workspace(
-        str(tmp_path / "new location" / "Same Name.txt"), str(workspace)
-    )
+    unchanged = rename_input_for_workspace_collision(str(source), str(workspace))
 
-    assert txt_workspace == tmp_path / "Same Name_TXT"
-    assert Path(updated) == txt_workspace
+    assert Path(unchanged) == source
+    assert source.exists()
 
 
-def test_same_format_reuses_unsuffixed_workspace(tmp_path):
+def test_existing_renamed_source_is_never_overwritten(tmp_path):
     workspace = tmp_path / "Novel"
-    write_workspace_source_reference(workspace, tmp_path / "old" / "Novel.pdf")
-
-    resolved = resolve_source_aware_workspace(
-        str(tmp_path / "new" / "Novel.pdf"), str(workspace)
-    )
-
-    assert Path(resolved) == workspace
-
-
-def test_matching_format_specific_workspace_is_reused(tmp_path):
-    workspace = tmp_path / "Novel"
-    pdf_workspace = tmp_path / "Novel_PDF"
     write_workspace_source_reference(workspace, tmp_path / "Novel.epub")
-    write_workspace_source_reference(pdf_workspace, tmp_path / "Novel.pdf")
+    source = tmp_path / "Novel.pdf"
+    source.write_bytes(b"new")
+    existing = tmp_path / "Novel_PDF.pdf"
+    existing.write_bytes(b"old")
 
-    resolved = resolve_source_aware_workspace(
-        str(tmp_path / "updated" / "Novel.pdf"), str(workspace)
-    )
+    renamed = rename_input_for_workspace_collision(str(source), str(workspace))
 
-    assert Path(resolved) == pdf_workspace
-
-
-def test_conflicting_format_specific_workspace_uses_numbered_fallback(tmp_path):
-    workspace = tmp_path / "Novel"
-    pdf_workspace = tmp_path / "Novel_PDF"
-    write_workspace_source_reference(workspace, tmp_path / "Novel.epub")
-    write_workspace_source_reference(pdf_workspace, tmp_path / "Novel.txt")
-
-    resolved = resolve_source_aware_workspace(
-        str(tmp_path / "Novel.pdf"), str(workspace)
-    )
-
-    assert Path(resolved) == tmp_path / "Novel_PDF_2"
+    assert Path(renamed) == tmp_path / "Novel_PDF_2.pdf"
+    assert existing.read_bytes() == b"old"
+    assert Path(renamed).read_bytes() == b"new"
 
 
 def test_source_reference_is_absolute_and_reports_workspace_format(tmp_path):
@@ -105,11 +83,12 @@ def test_source_reference_is_absolute_and_reports_workspace_format(tmp_path):
     assert workspace_source_format(workspace) == "PDF"
 
 
-def test_gui_and_engine_both_use_shared_workspace_resolver():
+def test_gui_renames_at_selection_and_engine_uses_plain_stem_output():
     root = Path(__file__).resolve().parents[1]
     gui_source = (root / "src" / "translator_gui.py").read_text(encoding="utf-8")
     engine_source = (root / "src" / "TransateKRtoEN.py").read_text(encoding="utf-8")
 
-    assert "resolve_source_aware_workspace(input_file, default_output)" in gui_source
-    assert "out = resolve_source_aware_workspace(input_path, unresolved_out)" in engine_source
+    assert "self._rename_input_for_existing_workspace_collision(path)" in gui_source
+    assert "resolve_source_aware_workspace" not in gui_source
+    assert "resolve_source_aware_workspace" not in engine_source
     assert "write_workspace_source_reference(out, input_path)" in engine_source

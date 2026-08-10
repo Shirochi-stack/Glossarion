@@ -24621,8 +24621,32 @@ Recent translations to summarize:
                 if os.path.exists(relative_output) or not os.path.exists(helper_output)
                 else helper_output
             )
-        from output_workspace import resolve_source_aware_workspace
-        return resolve_source_aware_workspace(input_file, default_output)
+        return default_output
+
+    def _rename_input_for_existing_workspace_collision(self, input_file: str) -> str:
+        """Rename a selected EPUB/PDF/TXT whose workspace has another type."""
+        from output_workspace import (
+            rename_input_for_workspace_collision,
+            source_format_label,
+            workspace_source_format,
+        )
+
+        incoming_format = source_format_label(input_file)
+        if not incoming_format:
+            return input_file
+
+        # Resolve the unsuffixed workspace before changing the input stem. The
+        # renamed path then goes through the ordinary output-folder logic.
+        workspace = self._resolve_translation_output_dir(input_file)
+        existing_format = workspace_source_format(workspace)
+        renamed = rename_input_for_workspace_collision(input_file, workspace)
+        if renamed != input_file:
+            self.append_log(
+                f"📁 Renamed input to avoid {existing_format}/{incoming_format} "
+                f"workspace collision: {os.path.basename(input_file)} → "
+                f"{os.path.basename(renamed)}"
+            )
+        return renamed
 
     def _resolve_open_output_folder_for_file(self, file_path: str) -> str:
         """Return the output folder path used by the Open Output Folder button."""
@@ -31902,10 +31926,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 return False
 
             # ``source_epub.txt`` is the legacy source pointer used by all
-            # EPUB/PDF/TXT workspaces. Persist it before translation so a
-            # same-named input of another format is routed to ``_<FORMAT>``.
+            # EPUB/PDF/TXT workspaces. Format collisions have already been
+            # resolved by renaming the input in the common selection handler.
             from output_workspace import (
-                resolve_source_aware_workspace,
                 source_format_label,
                 write_workspace_source_reference,
             )
@@ -31922,9 +31945,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     os.path.normcase(os.path.abspath(file_path))
                 )
                 if metadata_root:
-                    output_dir = resolve_source_aware_workspace(
-                        file_path, os.path.join(metadata_root, base_name)
-                    )
+                    output_dir = os.path.join(metadata_root, base_name)
                 else:
                     output_dir = self._resolve_translation_output_dir(file_path)
                 try:
@@ -38787,6 +38808,25 @@ Important rules:
         if not paths:
             return
         paths = self._normalize_windows_input_filenames(paths)
+        renamed_paths = []
+        for path in paths:
+            try:
+                renamed_paths.append(
+                    self._rename_input_for_existing_workspace_collision(path)
+                )
+            except OSError as exc:
+                self.append_log(
+                    f"❌ Input was not added because it could not be renamed "
+                    f"away from a mismatched workspace: "
+                    f"{os.path.basename(path)} ({exc})"
+                )
+        if not renamed_paths:
+            self.selected_files = []
+            self.file_path = ""
+            self.entry_epub.clear()
+            self._update_entry_epub_tooltip()
+            return
+        paths = renamed_paths
         self._subtitle_zip_output_groups = {}
         
         # Initialize conversion tracking if not exists

@@ -1,9 +1,9 @@
-"""Resolve translation workspaces without mixing same-named source formats.
+"""Source-pointer helpers for EPUB, PDF, and TXT translation workspaces.
 
 ``source_epub.txt`` is a legacy filename, but it is the durable source pointer
-for EPUB, PDF, and TXT translation workspaces.  The helpers here keep that
-compatibility while ensuring that two inputs such as ``Novel.epub`` and
-``Novel.pdf`` cannot share one output directory.
+for all three formats. A same-stem format collision is resolved at input
+selection time by renaming the new source file, after which the application's
+ordinary stem-based output logic remains the single source of truth.
 """
 
 from __future__ import annotations
@@ -44,42 +44,53 @@ def workspace_source_format(workspace: str) -> str:
     return source_format_label(read_workspace_source_path(workspace))
 
 
-def resolve_source_aware_workspace(input_path: str, default_workspace: str) -> str:
-    """Return a collision-safe output directory for *input_path*.
+def rename_input_for_workspace_collision(input_path: str, workspace: str) -> str:
+    """Rename a selected source when *workspace* belongs to another format.
 
-    The normal unsuffixed directory remains the first choice.  If it already
-    records another supported source format, the input is routed to a sibling
-    named ``<stem>_<FORMAT>``.  An existing matching suffixed workspace is
-    reused, allowing subsequent runs of an updated PDF/EPUB/TXT to retain its
-    progress.  Numeric fallbacks only matter if a manually-created suffixed
-    folder itself points at a different format.
+    Selecting ``Novel.epub`` while the existing ``Novel`` workspace points to
+    ``Novel.pdf`` renames the source itself to ``Novel_EPUB.epub``. Normal
+    stem-based output creation will then naturally use ``Novel_EPUB``.
+
+    Existing files are never overwritten. A numbered suffix is used when the
+    preferred target already exists. Unsupported formats, missing sources,
+    matching workspaces, and already-suffixed names are left untouched.
     """
-    raw_workspace = str(default_workspace or "").strip()
-    if not raw_workspace:
-        return ""
-    workspace = os.path.normpath(raw_workspace)
-    incoming_format = source_format_label(input_path)
-    if not incoming_format:
-        return workspace
+    raw_input = str(input_path or "").strip()
+    raw_workspace = str(workspace or "").strip()
+    incoming_format = source_format_label(raw_input)
+    if not raw_input or not raw_workspace or not incoming_format:
+        return raw_input
 
-    existing_format = workspace_source_format(workspace)
+    source = os.path.abspath(os.path.expanduser(raw_input))
+    if not os.path.isfile(source):
+        return raw_input
+
+    existing_format = workspace_source_format(os.path.normpath(raw_workspace))
     if not existing_format or existing_format == incoming_format:
-        return workspace
+        return raw_input
 
-    parent = os.path.dirname(workspace)
-    leaf = os.path.basename(workspace)
+    parent = os.path.dirname(source)
+    stem, extension = os.path.splitext(os.path.basename(source))
     suffix = f"_{incoming_format}"
-    suffixed_leaf = leaf if leaf.casefold().endswith(suffix.casefold()) else f"{leaf}{suffix}"
-    suffixed = os.path.join(parent, suffixed_leaf) if parent else suffixed_leaf
+    if stem.casefold().endswith(suffix.casefold()):
+        return raw_input
 
-    candidate = suffixed
+    # Leave margin under the common Windows 255-character component limit.
+    max_stem_length = max(1, 240 - len(extension) - len(suffix))
+    target_stem = f"{stem[:max_stem_length]}{suffix}"
+    candidate = os.path.join(parent, f"{target_stem}{extension}")
     index = 2
     while os.path.exists(candidate):
-        candidate_format = workspace_source_format(candidate)
-        if not candidate_format or candidate_format == incoming_format:
-            return candidate
-        candidate = f"{suffixed}_{index}"
+        numbered_suffix = f"_{index}"
+        numbered_stem = target_stem[
+            : max(1, 240 - len(extension) - len(numbered_suffix))
+        ]
+        candidate = os.path.join(
+            parent, f"{numbered_stem}{numbered_suffix}{extension}"
+        )
         index += 1
+
+    os.rename(source, candidate)
     return candidate
 
 

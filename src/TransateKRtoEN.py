@@ -21555,22 +21555,12 @@ def main(log_callback=None, stop_callback=None):
     # Only on macOS — on Windows this would change the output dir and break progress tracking.
     if sys.platform == 'darwin' and not os.path.isabs(out):
         out = os.path.join(os.path.dirname(os.path.abspath(input_path)), out)
-    from output_workspace import resolve_source_aware_workspace
-    unresolved_out = out
-    out = resolve_source_aware_workspace(input_path, unresolved_out)
-    if os.path.normcase(os.path.abspath(out)) != os.path.normcase(
-        os.path.abspath(unresolved_out)
-    ):
-        print(
-            f"📁 Same-name source format collision detected; "
-            f"using separate workspace: {out}"
-        )
     os.makedirs(out, exist_ok=True)
     print(f"[DEBUG] Created output folder → {out}")
 
     # ``source_epub.txt`` is retained as the compatibility filename, but it
-    # records EPUB, PDF, and TXT inputs. The next same-stem run can therefore
-    # select a format-specific workspace before touching existing output.
+    # records EPUB, PDF, and TXT inputs. Input-selection collision handling has
+    # already made the filename stem unique before this output path is derived.
     try:
         from output_workspace import (
             source_format_label,
