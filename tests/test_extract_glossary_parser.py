@@ -1,11 +1,30 @@
 import json
+import os
+import threading
+import time
 import zipfile
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+
 from extract_glossary_from_epub import (
+    DEFAULT_GLOSSARY_PROMPT,
+    extract_chapters_from_epub,
     extract_chapters_from_subtitle,
     is_subtitle_glossary_source,
     parse_api_response,
     skip_duplicate_entries,
+)
+from parallel_epub_glossary import (
+    DEFAULT_PARALLEL_EPUB_WRAPPER_PROMPT,
+    PARALLEL_EPUB_SYSTEM_INSTRUCTIONS,
+    apply_parallel_epub_wrapper,
+    auto_map_epub_chapters,
+    default_parallel_epub_system_prompt,
+    ParallelEpubPairDialog,
+    write_parallel_epub,
 )
 from glossary_refinement import (
     load_refinement_progress,
@@ -342,3 +361,145 @@ def test_epub_shaped_zip_is_not_a_subtitle_glossary_source(tmp_path):
         epub_zip.writestr("OEBPS/media/captions.srt", "incidental")
 
     assert is_subtitle_glossary_source(str(archive)) is False
+
+
+def test_parallel_epub_prompt_prepends_pair_rules_to_canonical_prompt_verbatim():
+    assert default_parallel_epub_system_prompt() == (
+        f"{PARALLEL_EPUB_SYSTEM_INSTRUCTIONS}\n\n{DEFAULT_GLOSSARY_PROMPT}"
+    )
+
+
+def test_parallel_epub_auto_map_prefers_name_then_number_then_reading_order():
+    raw = [
+        ("raw prologue", "prologue.xhtml"),
+        ("raw two", "raw_chapter_02.xhtml"),
+        ("raw ending", "shared-ending.xhtml"),
+    ]
+    translated = [
+        ("translated ending", "shared-ending.xhtml"),
+        ("translated two", "translated_02.xhtml"),
+        ("translated opening", "opening.xhtml"),
+    ]
+
+    mapping = auto_map_epub_chapters(raw, translated)
+
+    assert [item["translated_index"] for item in mapping] == [2, 1, 0]
+    assert [item["strategy"] for item in mapping] == [
+        "Reading order",
+        "Chapter number",
+        "Exact filename",
+    ]
+
+
+def test_parallel_epub_wrapper_preserves_unrelated_braces():
+    result = apply_parallel_epub_wrapper(
+        "{raw_filename}\n{raw_text}\n{translated_filename}\n"
+        "{translated_text}\nKeep {custom_field}",
+        raw_text="原文",
+        translated_text="Translation",
+        raw_filename="raw.xhtml",
+        translated_filename="translated.xhtml",
+    )
+
+    assert result == (
+        "raw.xhtml\n原文\ntranslated.xhtml\nTranslation\nKeep {custom_field}"
+    )
+
+
+def test_parallel_epub_round_trips_through_shared_extractor(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRANSLATE_SPECIAL_FILES", "1")
+    output = tmp_path / "paired.epub"
+    write_parallel_epub(
+        str(output),
+        [
+            {
+                "raw_filename": "chapter-01.xhtml",
+                "raw_text": "原文 Alice",
+                "translated_filename": "chapter-01-en.xhtml",
+                "translated_text": "Translated Alice",
+            },
+            {
+                "raw_filename": "chapter-02.xhtml",
+                "raw_text": "原文 Bob",
+                "translated_filename": "chapter-02-en.xhtml",
+                "translated_text": "Translated Bob",
+            },
+        ],
+        DEFAULT_PARALLEL_EPUB_WRAPPER_PROMPT,
+    )
+
+    chapters = extract_chapters_from_epub(str(output), return_metadata=True)
+
+    assert [filename for _text, filename in chapters] == [
+        "pair_0001.xhtml",
+        "pair_0002.xhtml",
+    ]
+    assert "[RAW EPUB START — chapter-01.xhtml]" in chapters[0][0]
+    assert "原文 Alice" in chapters[0][0]
+    assert "[TRANSLATED EPUB START — chapter-01-en.xhtml]" in chapters[0][0]
+    assert "Translated Alice" in chapters[0][0]
+
+
+def test_parallel_epub_requires_both_text_placeholders(tmp_path):
+    pair = {
+        "raw_filename": "raw.xhtml",
+        "raw_text": "raw",
+        "translated_filename": "translated.xhtml",
+        "translated_text": "translated",
+    }
+
+    try:
+        write_parallel_epub(
+            str(tmp_path / "invalid.epub"),
+            [pair],
+            "Only {raw_text}",
+        )
+    except ValueError as exc:
+        assert "{raw_text} and {translated_text}" in str(exc)
+    else:
+        raise AssertionError("missing translated placeholder should be rejected")
+
+
+def test_parallel_epub_dialog_loads_in_background_and_shows_drop_feedback(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    source = tmp_path / "raw.epub"
+    source.write_bytes(b"")
+    release_loader = threading.Event()
+
+    def delayed_loader(_path):
+        release_loader.wait(timeout=2)
+        return [("raw text", "chapter-01.xhtml")]
+
+    dialog = ParallelEpubPairDialog(config={}, chapter_loader=delayed_loader)
+    assert dialog.content_splitter.orientation() == Qt.Horizontal
+    assert dialog.content_splitter.count() == 2
+    assert dialog.mapping_table.parentWidget() is dialog.mapping_panel
+    idle_style = dialog.raw_drop.styleSheet()
+    dialog.raw_drop.set_hovered(True)
+    assert "Release to load this EPUB" == dialog.raw_drop.hint_label.text()
+    assert "solid" in dialog.raw_drop.styleSheet()
+    assert dialog.raw_drop.styleSheet() != idle_style
+    dialog.raw_drop.set_hovered(False)
+
+    started = time.perf_counter()
+    dialog._load_epub("raw", str(source))
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.25
+    assert dialog._active_load is not None
+    assert "background" in dialog.raw_drop.count_label.text()
+
+    release_loader.set()
+    deadline = time.monotonic() + 3
+    while dialog._active_load is not None and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+
+    assert dialog._active_load is None
+    assert dialog.raw_path == str(source)
+    assert dialog.raw_chapters == [
+        {"text": "raw text", "filename": "chapter-01.xhtml"}
+    ]
+    assert "eligible HTML" in dialog.raw_drop.count_label.text()
+    dialog.deleteLater()
+    app.processEvents()

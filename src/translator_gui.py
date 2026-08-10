@@ -16422,6 +16422,10 @@ Recent translations to summarize:
         """)
         self.browse_menu.addAction("📄 Select Files", self.browse_files)
         self.browse_menu.addAction("📁 Select Folder", self.browse_folder)
+        self.browse_menu.addAction(
+            "📚 Raw + Translated EPUB Pair…",
+            self.open_parallel_epub_pair_dialog,
+        )
         self.browse_menu.addSeparator()
         self.browse_menu.addAction("🗑️ Clear Selection", self.clear_file_selection)
         
@@ -28847,6 +28851,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.append_log("⚠️ Cannot run translation while glossary extraction is in progress.")
             QMessageBox.warning(self, "Process Running", "Please wait for glossary extraction to complete before starting translation.")
             return
+
+        if self._parallel_epub_pair_is_selected():
+            self.append_log(
+                "ℹ️ Parallel EPUB Pair is a glossary-only source. Use Extract Glossary."
+            )
+            QMessageBox.information(
+                self,
+                "Glossary-only Source",
+                "Parallel EPUB Pair is prepared for cross-checked glossary extraction.\n\n"
+                "Click Extract Glossary instead of Run Translation.",
+            )
+            return
         
         if self.translation_thread and self.translation_thread.is_alive():
             self.stop_translation()
@@ -34595,7 +34611,10 @@ Important rules:
                     'BATCHING_MODE': glossary_batching_mode,
                     'BATCH_GROUP_SIZE': str(getattr(self, 'batch_group_size_var', '3')),
                     'CONSERVATIVE_BATCHING': "1" if glossary_batching_mode == 'conservative' else "0",
-                    'GLOSSARY_SYSTEM_PROMPT': self.manual_glossary_prompt,
+                    'GLOSSARY_SYSTEM_PROMPT': (
+                        self._parallel_epub_system_prompt_for_file(file_path)
+                        or self.manual_glossary_prompt
+                    ),
                     'CHAPTER_RANGE': self.chapter_range_entry.text().strip(),
                     'USE_SPINE_ORDER': '1' if (hasattr(self, 'use_spine_order_checkbox') and self.use_spine_order_checkbox.isChecked()) else '0',
                     'GLOSSARY_DISABLE_HONORIFICS_FILTER': '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0',
@@ -38363,6 +38382,204 @@ Important rules:
                 pass
             self._input_output_loading_dialog = None
 
+    def _load_parallel_epub_chapters(self, epub_path):
+        """Load pairable HTML through the canonical glossary EPUB extractor."""
+        from extract_glossary_from_epub import extract_chapters_from_epub
+
+        tracked_env = {
+            "TRANSLATE_SPECIAL_FILES": os.environ.get("TRANSLATE_SPECIAL_FILES"),
+            "SPECIAL_FILE_KEYWORDS": os.environ.get("SPECIAL_FILE_KEYWORDS"),
+            "SPECIAL_FILE_EXACT": os.environ.get("SPECIAL_FILE_EXACT"),
+        }
+        try:
+            os.environ["TRANSLATE_SPECIAL_FILES"] = (
+                "1" if bool(getattr(self, "translate_special_files_var", False)) else "0"
+            )
+            os.environ["SPECIAL_FILE_KEYWORDS"] = str(
+                getattr(self, "special_file_keywords_var", "") or ""
+            )
+            os.environ["SPECIAL_FILE_EXACT"] = str(
+                getattr(self, "special_file_exact_var", "") or ""
+            )
+            return extract_chapters_from_epub(epub_path, return_metadata=True)
+        finally:
+            for key, value in tracked_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def _parallel_epub_pair_is_selected(self):
+        state = getattr(self, "_parallel_epub_pair_source", None)
+        if not isinstance(state, dict):
+            return False
+        generated_path = str(state.get("generated_path") or "")
+        selected = list(getattr(self, "selected_files", []) or [])
+        if not generated_path or len(selected) != 1:
+            return False
+        try:
+            return os.path.normcase(os.path.abspath(selected[0])) == os.path.normcase(
+                os.path.abspath(generated_path)
+            )
+        except Exception:
+            return selected[0] == generated_path
+
+    def _parallel_epub_system_prompt_for_file(self, file_path):
+        state = getattr(self, "_parallel_epub_pair_source", None)
+        if not isinstance(state, dict):
+            return ""
+        generated_path = str(state.get("generated_path") or "")
+        try:
+            matches = os.path.normcase(os.path.abspath(file_path)) == os.path.normcase(
+                os.path.abspath(generated_path)
+            )
+        except Exception:
+            matches = str(file_path) == generated_path
+        return str(state.get("system_prompt") or "") if matches else ""
+
+    def _release_parallel_epub_pair_source(self):
+        """Release a prepared pair when the user moves to another input source."""
+        state = getattr(self, "_parallel_epub_pair_source", None)
+        self._parallel_epub_pair_source = None
+        if not isinstance(state, dict):
+            return
+        temp_dir = state.get("temporary_directory")
+        if temp_dir is None:
+            return
+        glossary_running = bool(
+            (getattr(self, "glossary_thread", None) and self.glossary_thread.is_alive())
+            or (
+                getattr(self, "glossary_future", None)
+                and not self.glossary_future.done()
+            )
+        )
+        if glossary_running:
+            retained = getattr(self, "_retained_parallel_epub_temp_dirs", None)
+            if not isinstance(retained, list):
+                retained = []
+                self._retained_parallel_epub_temp_dirs = retained
+            retained.append(temp_dir)
+            return
+        try:
+            temp_dir.cleanup()
+        except Exception:
+            pass
+
+    def open_parallel_epub_pair_dialog(self):
+        """Open the raw/translated EPUB mapper and prepare a glossary source."""
+        if (
+            (getattr(self, "translation_thread", None) and self.translation_thread.is_alive())
+            or (
+                getattr(self, "translation_future", None)
+                and not self.translation_future.done()
+            )
+            or (getattr(self, "glossary_thread", None) and self.glossary_thread.is_alive())
+            or (
+                getattr(self, "glossary_future", None)
+                and not self.glossary_future.done()
+            )
+        ):
+            QMessageBox.warning(
+                self,
+                "Process Running",
+                "Please wait for the current translation or glossary extraction to finish.",
+            )
+            return
+
+        try:
+            from parallel_epub_glossary import (
+                ParallelEpubPairDialog,
+                write_parallel_epub,
+            )
+
+            dialog = ParallelEpubPairDialog(
+                self,
+                config=self.config,
+                chapter_loader=self._load_parallel_epub_chapters,
+            )
+            if dialog.exec() != QDialog.Accepted or not dialog.result_data:
+                dialog.deleteLater()
+                return
+
+            result = dict(dialog.result_data)
+            dialog.result_data = None
+            dialog.deleteLater()
+            raw_path = result["raw_path"]
+            translated_path = result["translated_path"]
+            raw_stem = os.path.splitext(os.path.basename(raw_path))[0]
+            safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_stem).strip("._")
+            safe_stem = safe_stem or "raw_epub"
+            pair_temp_dir = tempfile.TemporaryDirectory(
+                prefix="glossarion_parallel_epub_"
+            )
+            generated_path = os.path.join(
+                pair_temp_dir.name,
+                f"{safe_stem}_parallel_epub_pair.epub",
+            )
+            try:
+                write_parallel_epub(
+                    generated_path,
+                    result["pairs"],
+                    result["wrapper_prompt"],
+                    title=raw_stem,
+                )
+            except Exception:
+                pair_temp_dir.cleanup()
+                raise
+
+            self._release_parallel_epub_pair_source()
+            pair_count = len(result["pairs"])
+            self._parallel_epub_pair_source = {
+                "raw_path": raw_path,
+                "translated_path": translated_path,
+                "system_prompt": result["system_prompt"],
+                "profile_name": result["profile_name"],
+                "pair_count": pair_count,
+                "generated_path": generated_path,
+                "temporary_directory": pair_temp_dir,
+            }
+            self.selected_files = [generated_path]
+            self.current_file_index = 0
+            self.file_path = generated_path
+            self.selected_epub_path = generated_path
+            self.selected_epub_files = [generated_path]
+            self._subtitle_zip_output_groups = {}
+            self.manual_glossary_map = {}
+            self.config["manual_glossary_map"] = {}
+            # A temporary generated path must never be restored on next launch.
+            self.config["last_input_files"] = []
+            self.config["last_epub_path"] = None
+
+            raw_name = os.path.basename(raw_path)
+            translated_name = os.path.basename(translated_path)
+            self.entry_epub.setText(
+                f"Parallel EPUB Pair: {raw_name} ↔ {translated_name} "
+                f"({pair_count} mapped HTML files; glossary only)"
+            )
+            self.entry_epub.setToolTip(
+                f"Raw EPUB: {raw_path}\nTranslated EPUB: {translated_path}\n"
+                f"Mapped HTML files: {pair_count}\n"
+                "Use Extract Glossary; this paired source is not a translation input."
+            )
+            if hasattr(self, "file_status_label"):
+                self.file_status_label.setText(
+                    f"Parallel EPUB Pair ready • {pair_count} mapped HTML file(s) • glossary extraction only"
+                )
+            self.save_config(show_message=False)
+            self.append_log(
+                f"📚 Parallel EPUB Pair ready: {raw_name} ↔ {translated_name}"
+            )
+            self.append_log(
+                f"🔗 Mapped {pair_count} HTML file pair(s). Click Extract Glossary to begin."
+            )
+        except Exception as exc:
+            self.append_log(f"❌ Could not prepare Parallel EPUB Pair: {exc}")
+            QMessageBox.critical(
+                self,
+                "Parallel EPUB Pair",
+                f"Could not prepare the paired EPUB source.\n\n{exc}",
+            )
+
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
         file_filter = (
@@ -38433,6 +38650,7 @@ Important rules:
 
     def clear_file_selection(self):
         """Clear all selected files"""
+        self._release_parallel_epub_pair_source()
         self.entry_epub.clear()
         self.entry_epub.setText("No file selected")
         self.entry_epub.setToolTip("")
@@ -38440,6 +38658,8 @@ Important rules:
         self.file_path = None
         self.current_file_index = 0
         self._subtitle_zip_output_groups = {}
+        if hasattr(self, 'file_status_label'):
+            self.file_status_label.setText("")
 
         # Clear any per-input glossary mapping
         try:
@@ -38822,6 +39042,7 @@ Important rules:
         """Common handler for file selection"""
         if not paths:
             return
+        self._release_parallel_epub_pair_source()
         paths = self._normalize_windows_input_filenames(paths)
         renamed_paths = []
         for path in paths:
@@ -39657,6 +39878,8 @@ Important rules:
                                     "Please wait for it to finish (or stop it) first.")
                 return False
 
+            self._release_parallel_epub_pair_source()
+
             epub_path = os.path.abspath(epub_path)
             # Mirror the "Load for translation" effect so the main window
             # reflects what's being translated.
@@ -39701,6 +39924,7 @@ Important rules:
         try:
             if not path or not os.path.isfile(path):
                 return
+            self._release_parallel_epub_pair_source()
             path = os.path.abspath(path)
             # Populate the EPUB entry text field if present.
             try:
@@ -39761,6 +39985,7 @@ Important rules:
                 valid.append(abs_p)
             if not valid:
                 return
+            self._release_parallel_epub_pair_source()
             if len(valid) == 1:
                 self._handle_library_import_epub(valid[0])
                 return
@@ -39829,6 +40054,15 @@ Important rules:
         """
         try:
             if not hasattr(self, 'entry_epub') or self.entry_epub is None:
+                return
+            if self._parallel_epub_pair_is_selected():
+                state = self._parallel_epub_pair_source
+                self.entry_epub.setToolTip(
+                    f"Raw EPUB: {state.get('raw_path', '')}\n"
+                    f"Translated EPUB: {state.get('translated_path', '')}\n"
+                    f"Mapped HTML files: {state.get('pair_count', 0)}\n"
+                    "Use Extract Glossary; this paired source is not a translation input."
+                )
                 return
             files = list(getattr(self, 'selected_files', []) or [])
             if not files:
