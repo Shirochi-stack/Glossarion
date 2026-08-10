@@ -15739,6 +15739,7 @@ Recent translations to summarize:
             ('disable_glossary_history_var', 'disable_glossary_history', True),
             ('translate_book_title_var', 'translate_book_title', True),
             ('skip_txt_title_translation_var', 'skip_txt_title_translation', True),
+            ('skip_pdf_title_translation_var', 'skip_pdf_title_translation', False),
             ('include_book_title_glossary_var', 'include_book_title_glossary', False),
             ('enable_auto_glossary_var', 'enable_auto_glossary', True),
             ('append_glossary_var', 'append_glossary', True),
@@ -32684,6 +32685,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'TRANSLATION_CHUNK_PROMPT': str(getattr(self, 'translation_chunk_prompt', self.config.get('translation_chunk_prompt', ''))),
             'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var else "0",
             'SKIP_TXT_TITLE_TRANSLATION': "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0",
+            'SKIP_PDF_TITLE_TRANSLATION': "1" if getattr(self, 'skip_pdf_title_translation_var', False) else "0",
             'SKIP_IMAGE_TITLE_TRANSLATION': "1" if getattr(self, 'skip_image_title_translation_var', True) else "0",
             'BOOK_TITLE_PROMPT': self.book_title_prompt,
             'BOOK_TITLE_SYSTEM_PROMPT': self.config.get('book_title_system_prompt', 
@@ -34876,10 +34878,78 @@ Important rules:
         try:
             from pdf_workspace_compiler import compile_pdf_workspace
 
+            # PDF compilation owns the same optional bookmark/header batch
+            # phase as EPUB compilation. Export the live settings because the
+            # Library can invoke this after a restart, when translation-run
+            # environment variables have not been populated yet.
+            os.environ['USE_TOC_NCX'] = '1' if getattr(
+                self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', True)
+            ) else '0'
+            os.environ['TRANSLATE_TOC_NCX'] = os.environ['USE_TOC_NCX']
+            os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if getattr(
+                self,
+                'batch_translate_headers_var',
+                self.config.get('batch_translate_headers', True),
+            ) else '0'
+            os.environ['HEADERS_PER_BATCH'] = str(
+                getattr(self, 'headers_per_batch_var', '-1')
+            )
+            os.environ['TOC_NCX_PER_BATCH'] = str(
+                getattr(self, 'toc_ncx_per_batch_var', '-1')
+            )
+            os.environ['UPDATE_HTML_HEADERS'] = '1' if getattr(
+                self, 'update_html_headers_var', True
+            ) else '0'
+            os.environ['SAVE_HEADER_TRANSLATIONS'] = '1' if getattr(
+                self, 'save_header_translations_var', True
+            ) else '0'
+            os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '1' if getattr(
+                self,
+                'skip_duplicate_toc_translation_var',
+                self.config.get('skip_duplicate_toc_translation', False),
+            ) else '0'
+            output_language = self.config.get('output_language', 'English')
+            os.environ['OUTPUT_LANGUAGE'] = output_language
+            os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
+            os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.text())
+            os.environ['BATCH_HEADER_SYSTEM_PROMPT'] = str(
+                self.config.get('batch_header_system_prompt', '') or ''
+            ).replace('{target_lang}', output_language)
+            os.environ['BATCH_HEADER_PROMPT'] = str(
+                self.config.get('batch_header_prompt', '') or ''
+            ).replace('{target_lang}', output_language)
+
+            pdf_api_client = None
+            if (
+                os.environ['USE_TOC_NCX'] == '1'
+                or os.environ['BATCH_TRANSLATE_HEADERS'] == '1'
+            ):
+                from unified_api_client import UnifiedClient
+
+                model = str(getattr(self, 'model_var', '') or '').strip()
+                api_key = self.api_key_entry.text().strip()
+                if model:
+                    os.environ['MODEL'] = model
+                if api_key:
+                    os.environ['API_KEY'] = api_key
+                needs_key = UnifiedClient._model_needs_api_key(model)
+                if model and (api_key or not needs_key):
+                    pdf_api_client = UnifiedClient(
+                        api_key=api_key or 'dummy-key-not-required',
+                        model=model,
+                        output_dir=self.pdf_folder,
+                    )
+                else:
+                    self.append_log(
+                        "⚠️ PDF bookmark/header translation skipped: "
+                        "the selected model/API key is not available"
+                    )
+
             compiled_path = compile_pdf_workspace(
                 self.pdf_folder,
                 log_callback=self.append_log,
                 stop_callback=lambda: bool(self.stop_requested),
+                api_client=pdf_api_client,
             )
             if compiled_path and os.path.isfile(compiled_path):
                 QTimer.singleShot(
@@ -35077,6 +35147,7 @@ Important rules:
             # Set book title translation settings
             os.environ['TRANSLATE_BOOK_TITLE'] = "1" if self.translate_book_title_var else "0"
             os.environ['SKIP_TXT_TITLE_TRANSLATION'] = "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0"
+            os.environ['SKIP_PDF_TITLE_TRANSLATION'] = "1" if getattr(self, 'skip_pdf_title_translation_var', False) else "0"
             # Replace {target_lang} variable in book title prompts with output language
             output_lang = self.config.get('output_language', 'English')
             self.append_log(f"[DEBUG] output_language from config: '{output_lang}'")
@@ -43004,6 +43075,7 @@ Important rules:
                 ('include_source_in_history', ['include_source_in_history_var'], False, bool),
                 ('translate_book_title', ['translate_book_title_var'], False, bool),
                 ('skip_txt_title_translation', ['skip_txt_title_translation_var'], False, bool),
+                ('skip_pdf_title_translation', ['skip_pdf_title_translation_var'], False, bool),
                 ('skip_image_title_translation', ['skip_image_title_translation_var'], True, bool),
                 ('emergency_paragraph_restore', ['emergency_restore_var'], False, bool),
                 ('emergency_image_restore', ['emergency_image_restore_var'], False, bool),
@@ -44418,6 +44490,7 @@ Important rules:
                 # Book title handling
                 ('TRANSLATE_BOOK_TITLE', '1' if getattr(self, 'translate_book_title_var', True) else '0'),
                 ('SKIP_TXT_TITLE_TRANSLATION', '1' if getattr(self, 'skip_txt_title_translation_var', True) else '0'),
+                ('SKIP_PDF_TITLE_TRANSLATION', '1' if getattr(self, 'skip_pdf_title_translation_var', False) else '0'),
                 ('SKIP_IMAGE_TITLE_TRANSLATION', '1' if getattr(self, 'skip_image_title_translation_var', True) else '0'),
                 ('BOOK_TITLE_PROMPT', getattr(self, 'book_title_prompt', '')),
                 ('GLOSSARY_INCLUDE_BOOK_TITLE', '1' if getattr(self, 'include_book_title_glossary_var', True) else '0'),

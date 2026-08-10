@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -46,6 +47,24 @@ def test_ai_artifact_check_defaults_off():
     settings = default_qa_scan_settings()
 
     assert settings["check_ai_artifacts"] is False
+
+
+def test_pdf_title_skip_setting_is_persisted_and_defaults_off():
+    root = Path(__file__).resolve().parents[1]
+    settings_source = (root / "src" / "other_settings.py").read_text(
+        encoding="utf-8"
+    )
+    gui_source = (root / "src" / "translator_gui.py").read_text(
+        encoding="utf-8"
+    )
+    translator_source = (root / "src" / "TransateKRtoEN.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"Skip .pdf book title translation"' in settings_source
+    assert "self.config.get('skip_pdf_title_translation', False)" in settings_source
+    assert "'SKIP_PDF_TITLE_TRANSLATION'" in gui_source
+    assert "os.getenv('SKIP_PDF_TITLE_TRANSLATION', '0')" in translator_source
 
 
 def test_valid_html_doctype_is_not_an_ai_artifact():
@@ -257,6 +276,42 @@ def test_progress_rows_follow_toc_and_header_translation_toggles(tmp_path):
     assert [row["status"] for row in rows] == ["completed", "skipped"]
     assert gui._progress_entry_needs_special_visibility(rows[0]) is False
     assert gui._progress_entry_needs_special_visibility(rows[1]) is True
+
+
+def test_pdf_progress_rows_include_toc_and_header_artifacts(tmp_path):
+    output_dir = tmp_path / "book_PDF"
+    output_dir.mkdir()
+    (output_dir / "TOC.txt").write_text(
+        "Original: 원본\nTranslated: Contents\n", encoding="utf-8"
+    )
+    (output_dir / "translated_headers.txt").write_text(
+        "Original: 제목\nTranslated: Chapter\n", encoding="utf-8"
+    )
+    gui = RetranslationMixin()
+    gui.config = {
+        "use_toc_ncx": True,
+        "batch_translate_headers": True,
+    }
+    prog = {"chapters": {}, "version": "2.1"}
+
+    assert gui._ensure_translation_artifact_progress_entries(
+        prog, str(output_dir), str(tmp_path / "book.pdf")
+    ) is True
+
+    rows = []
+    gui._append_translation_artifact_display_info(
+        {
+            "file_path": str(tmp_path / "book.pdf"),
+            "output_dir": str(output_dir),
+            "prog": prog,
+        },
+        rows,
+    )
+    assert [row["output_file"] for row in rows] == [
+        "TOC.txt",
+        "translated_headers.txt",
+    ]
+    assert [row["status"] for row in rows] == ["completed", "completed"]
 
 
 def test_artifact_in_progress_is_preserved_before_cache_file_exists(tmp_path):

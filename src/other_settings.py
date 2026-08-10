@@ -7414,6 +7414,41 @@ def _create_prompt_management_section(self, parent):
     skip_txt_title_cb.toggled.connect(_on_skip_txt_title_toggle)
     section_v.addWidget(skip_txt_title_cb)
 
+    # PDF titles are translated by default, but users can opt out independently
+    # from EPUB metadata and plain-text filename handling.
+    if not hasattr(self, 'skip_pdf_title_translation_var'):
+        self.skip_pdf_title_translation_var = bool(
+            self.config.get('skip_pdf_title_translation', False)
+        )
+        if 'skip_pdf_title_translation' not in self.config:
+            self.config['skip_pdf_title_translation'] = False
+    skip_pdf_title_cb = self._create_styled_checkbox(
+        "Skip .pdf book title translation"
+    )
+    skip_pdf_title_cb.setToolTip(
+        "When enabled, the source PDF filename/title is kept unchanged.\n"
+        "Bookmark and HTML header translation settings remain independent."
+    )
+    try:
+        skip_pdf_title_cb.setChecked(
+            bool(self.skip_pdf_title_translation_var)
+        )
+    except Exception:
+        pass
+
+    def _on_skip_pdf_title_toggle(checked):
+        try:
+            self.skip_pdf_title_translation_var = bool(checked)
+            self.config['skip_pdf_title_translation'] = bool(checked)
+            os.environ['SKIP_PDF_TITLE_TRANSLATION'] = (
+                '1' if checked else '0'
+            )
+        except Exception:
+            pass
+
+    skip_pdf_title_cb.toggled.connect(_on_skip_pdf_title_toggle)
+    section_v.addWidget(skip_pdf_title_cb)
+
     # Skip image title translation (manga/image output filenames)
     if not hasattr(self, 'skip_image_title_translation_var'):
         # Default to enabled
@@ -7495,11 +7530,13 @@ def _create_prompt_management_section(self, parent):
     else:
         self.translate_toc_ncx_var = self.use_toc_ncx_var
 
-    use_toc_cb = self._create_styled_checkbox("Use && Translate toc.ncx")
+    use_toc_cb = self._create_styled_checkbox(
+        "Use && Translate TOC / PDF bookmarks"
+    )
     use_toc_cb.setToolTip(
-        "Use the toc.ncx from the source EPUB to build the Table of Contents,\n"
-        "and translate all entries via one API call (cached to TOC.txt).\n"
-        "This preserves the original TOC structure while translating labels."
+        "For EPUB, translate the source toc.ncx/navigation labels.\n"
+        "For PDF, translate the sidebar bookmark titles.\n"
+        "Both use the configured batches and cache results in TOC.txt."
     )
     try:
         use_toc_cb.setChecked(bool(self.use_toc_ncx_var))
@@ -7730,6 +7767,7 @@ def _create_prompt_management_section(self, parent):
         pass
     batch_toggle_cb.setToolTip(
         "Translate chapter headers in batches instead of per file.\n"
+        "For PDFs, headers are the h1-h6 elements in each extracted HTML section.\n"
         "Uses the settings below for batching and output."
     )
     
@@ -8049,7 +8087,8 @@ def _create_prompt_management_section(self, parent):
             msg_box.setWindowTitle("Translate Headers")
             msg_box.setText("Start standalone header translation?")
             msg_box.setInformativeText(
-                "This will translate chapter headers using content.opf-based exact matching."
+                "EPUB headers use content.opf-based exact matching. PDF headers "
+                "use the extracted bookmark-section HTML files."
             )
             msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             msg_box.setDefaultButton(QMessageBox.Yes)
@@ -8104,7 +8143,7 @@ def _create_prompt_management_section(self, parent):
     
     # Description for the buttons
     button_desc = QLabel(
-        "Standalone mode: Translates chapter headers using exact content.opf mapping."
+        "Standalone mode: EPUB uses content.opf mapping; PDF uses extracted h1-h6 headers."
     )
     button_desc.setStyleSheet("color: gray; font-size: 10pt;")
     button_desc.setContentsMargins(20, 2, 0, 10)

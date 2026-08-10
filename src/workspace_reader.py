@@ -67,9 +67,11 @@ def _is_reader_entry(key: str, entry: dict) -> bool:
 
 def _display_title(entry: dict, fallback: str) -> str:
     for field in (
+        "pdf_toc_title_translated",
+        "translated_title",
+        "pdf_section_title_translated",
         "pdf_toc_title",
         "pdf_section_title",
-        "translated_title",
         "title",
     ):
         value = " ".join(str(entry.get(field) or "").split())

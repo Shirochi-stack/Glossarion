@@ -9,6 +9,7 @@ from output_workspace import write_workspace_source_reference
 from pdf_workspace_compiler import (
     _workspace_response_entries,
     compile_pdf_workspace,
+    translate_pdf_workspace_artifacts,
 )
 
 
@@ -58,6 +59,188 @@ def test_workspace_responses_follow_progress_order_not_lexical_order(tmp_path):
         "response_pdf_section_10.html",
     ]
     assert [title for _path, title in entries] == ["Chapter Two", "Chapter Ten"]
+
+
+def test_workspace_responses_prefer_translated_pdf_bookmark_titles(tmp_path):
+    workspace = _make_pdf_workspace(tmp_path)
+    progress_path = workspace / "translation_progress.json"
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    progress["chapters"]["pdf:first"][
+        "pdf_toc_title_translated"
+    ] = "Translated Chapter Two"
+    progress_path.write_text(json.dumps(progress), encoding="utf-8")
+
+    entries = _workspace_response_entries(str(workspace))
+
+    assert entries[0][1] == "Translated Chapter Two"
+
+
+def test_pdf_bookmarks_and_html_headers_use_shared_batch_translation(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = tmp_path / "Book_PDF"
+    workspace.mkdir()
+    response_one = workspace / "response_pdf_section_1.html"
+    response_two = workspace / "response_pdf_section_2.html"
+    response_one.write_text(
+        "<html><body><h1>첫 장</h1><p>Body one.</p></body></html>",
+        encoding="utf-8",
+    )
+    response_two.write_text(
+        "<html><body><h1>둘째 장</h1><h2>소제목</h2><p>Body two.</p></body></html>",
+        encoding="utf-8",
+    )
+    progress_path = workspace / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "version": "2.1",
+                "chapters": {
+                    "pdf:one": {
+                        "actual_num": 1,
+                        "status": "completed",
+                        "output_file": response_one.name,
+                        "pdf_toc_section": True,
+                        "pdf_section_id": "one",
+                        "pdf_toc_title": "첫 장",
+                    },
+                    "pdf:two": {
+                        "actual_num": 2,
+                        "status": "completed",
+                        "output_file": response_two.name,
+                        "pdf_toc_section": True,
+                        "pdf_section_id": "two",
+                        "pdf_toc_title": "둘째 장",
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    chapters = [
+        {
+            "num": 1,
+            "title": "첫 장",
+            "body": "<html><body><h1>첫 장</h1></body></html>",
+            "pdf_toc_section": True,
+            "pdf_section_id": "one",
+            "pdf_toc_title": "첫 장",
+        },
+        {
+            "num": 2,
+            "title": "둘째 장",
+            "body": (
+                "<html><body><h1>둘째 장</h1>"
+                "<h2>소제목</h2></body></html>"
+            ),
+            "pdf_toc_section": True,
+            "pdf_section_id": "two",
+            "pdf_toc_title": "둘째 장",
+        },
+    ]
+    calls = []
+
+    def fake_translate(self, headers, batch_size=None, translation_type="header"):
+        calls.append((translation_type, batch_size, dict(headers)))
+        return {
+            number: f"EN:{source}"
+            for number, source in headers.items()
+        }
+
+    from metadata_batch_translator import BatchHeaderTranslator
+
+    monkeypatch.setattr(
+        BatchHeaderTranslator, "translate_headers_batch", fake_translate
+    )
+    monkeypatch.setenv("USE_TOC_NCX", "1")
+    monkeypatch.setenv("BATCH_TRANSLATE_HEADERS", "1")
+    monkeypatch.setenv("TOC_NCX_PER_BATCH", "7")
+    monkeypatch.setenv("HEADERS_PER_BATCH", "5")
+
+    class FakeClient:
+        model = "test-model"
+        output_dir = str(workspace)
+
+    result = translate_pdf_workspace_artifacts(
+        chapters,
+        str(workspace),
+        FakeClient(),
+    )
+
+    assert result == {"toc": 2, "headers": 3}
+    assert [(kind, size) for kind, size, _headers in calls] == [
+        ("toc", 7),
+        ("headers", 5),
+    ]
+    assert (workspace / "TOC.txt").is_file()
+    assert (workspace / "translated_headers.txt").is_file()
+    first_soup = BeautifulSoup(
+        response_one.read_text(encoding="utf-8"), "html.parser"
+    )
+    second_soup = BeautifulSoup(
+        response_two.read_text(encoding="utf-8"), "html.parser"
+    )
+    assert first_soup.h1.get_text(strip=True) == "EN:첫 장"
+    assert [
+        node.get_text(strip=True)
+        for node in second_soup.find_all(["h1", "h2"])
+    ] == ["EN:둘째 장", "EN:소제목"]
+    saved_progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert saved_progress["chapters"]["pdf:one"][
+        "pdf_toc_title_translated"
+    ] == "EN:첫 장"
+    assert "__translation_artifact__:toc" in saved_progress["chapters"]
+    assert "__translation_artifact__:headers" in saved_progress["chapters"]
+
+    # Simulate an updated source PDF that inserted one bookmark. Existing
+    # labels must be matched by source text rather than their shifted numeric
+    # positions, so only the new bookmark reaches the API. Its identical h1 is
+    # then reused from the freshly updated TOC cache.
+    response_new = workspace / "response_pdf_section_15.html"
+    response_new.write_text(
+        "<html><body><h1>새 장</h1><p>New body.</p></body></html>",
+        encoding="utf-8",
+    )
+    saved_progress["chapters"]["pdf:new"] = {
+        "actual_num": 1.5,
+        "status": "completed",
+        "output_file": response_new.name,
+        "pdf_toc_section": True,
+        "pdf_section_id": "new",
+        "pdf_toc_title": "새 장",
+    }
+    progress_path.write_text(
+        json.dumps(saved_progress, ensure_ascii=False), encoding="utf-8"
+    )
+    updated_chapters = [
+        chapters[0],
+        {
+            "num": 1.5,
+            "title": "새 장",
+            "body": "<html><body><h1>새 장</h1></body></html>",
+            "pdf_toc_section": True,
+            "pdf_section_id": "new",
+            "pdf_toc_title": "새 장",
+        },
+        chapters[1],
+    ]
+    calls.clear()
+
+    updated_result = translate_pdf_workspace_artifacts(
+        updated_chapters,
+        str(workspace),
+        FakeClient(),
+    )
+
+    assert updated_result == {"toc": 3, "headers": 4}
+    assert len(calls) == 1
+    assert calls[0][0:2] == ("toc", 7)
+    assert list(calls[0][2].values()) == ["새 장"]
+    assert BeautifulSoup(
+        response_new.read_text(encoding="utf-8"), "html.parser"
+    ).h1.get_text(strip=True) == "EN:새 장"
 
 
 def test_compile_pdf_workspace_has_one_bookmark_per_response(tmp_path, monkeypatch):
@@ -202,6 +385,9 @@ def test_library_compile_action_is_pdf_aware():
     assert 'converter_name = (' in library_source
     assert '"pdf_converter" if compile_kind == "pdf"' in library_source
     assert "def pdf_converter(self, folder=None):" in gui_source
+    assert "api_client=pdf_api_client" in gui_source
+    assert "'USE_TOC_NCX'" in gui_source
+    assert "'BATCH_TRANSLATE_HEADERS'" in gui_source
 
 
 def test_new_runtime_modules_are_packaged_in_all_desktop_specs():

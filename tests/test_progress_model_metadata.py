@@ -402,6 +402,54 @@ def test_progress_update_bookkeeping_can_ignore_stale_thread_model(tmp_path):
     assert entry["key_identifier"] == "MAIN KEY (gemini-3.1-flash-lite)"
 
 
+def test_completed_progress_uses_configured_model_when_request_thread_metadata_is_missing(
+    tmp_path,
+    monkeypatch,
+):
+    progress = ProgressManager(str(tmp_path))
+    monkeypatch.setenv("MODEL", "authgpt/gpt-5.6-luna")
+
+    progress.update(
+        0,
+        1,
+        "hash-1",
+        "response_chapter_001.html",
+        status="completed",
+    )
+    progress.save()
+
+    saved = json.loads((tmp_path / "translation_progress.json").read_text(
+        encoding="utf-8"
+    ))
+    assert saved["chapters"]["1"]["model_name"] == (
+        "authgpt/gpt-5.6-luna"
+    )
+
+
+def test_completed_metadata_progress_uses_configured_model_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    progress = ProgressManager(str(tmp_path))
+    progress.prog["chapters"][progress.METADATA_PROGRESS_KEY] = {
+        "status": "in_progress",
+        "output_file": "metadata.json",
+        "special_type": "metadata",
+        "metadata_progress_key": progress.METADATA_PROGRESS_KEY,
+    }
+    monkeypatch.setenv("MODEL", "authgpt/gpt-5.6-luna")
+
+    progress.update_metadata_status(
+        "completed",
+        str(tmp_path / "metadata.json"),
+        key=progress.METADATA_PROGRESS_KEY,
+    )
+
+    assert progress.prog["chapters"][progress.METADATA_PROGRESS_KEY][
+        "model_name"
+    ] == "authgpt/gpt-5.6-luna"
+
+
 def test_vision_ocr_progress_replaces_stale_model_with_active_request(tmp_path):
     progress = ProgressManager(str(tmp_path))
     progress.prog["chapters"]["251"] = {

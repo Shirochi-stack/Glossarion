@@ -1,4 +1,4 @@
-"""Shared handling for translated non-HTML EPUB workspace artifacts."""
+"""Shared handling for translated EPUB/PDF workspace artifacts."""
 
 from __future__ import annotations
 

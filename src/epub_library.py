@@ -14380,7 +14380,10 @@ class _BookDetailsLoader(QThread):
                                 & {".html", ".htm", ".xhtml"}):
                             continue
                     title = (
-                        info.get("pdf_toc_title")
+                        info.get("pdf_toc_title_translated")
+                        or info.get("translated_title")
+                        or info.get("pdf_section_title_translated")
+                        or info.get("pdf_toc_title")
                         or info.get("pdf_section_title")
                         or info.get("title")
                         or ob
@@ -14475,6 +14478,9 @@ class _BookDetailsLoader(QThread):
                     for pdf_key in (
                         "pdf_toc_section",
                         "pdf_toc_title",
+                        "pdf_toc_title_original",
+                        "pdf_toc_title_translated",
+                        "pdf_section_title_translated",
                         "pdf_section_id",
                         "pdf_start_page",
                         "pdf_end_page",

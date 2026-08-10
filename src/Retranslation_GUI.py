@@ -10608,8 +10608,18 @@ class RetranslationMixin:
 
     def _metadata_progress_tracking_enabled(self, file_path=None):
         """Whether metadata.json should participate in translation progress."""
-        if file_path and not str(file_path).lower().endswith('.epub'):
+        source_path = str(file_path or '').lower()
+        if file_path and not source_path.endswith(('.epub', '.pdf')):
             return False
+        if source_path.endswith('.pdf'):
+            if hasattr(self, 'skip_pdf_title_translation_var'):
+                if bool(getattr(self, 'skip_pdf_title_translation_var')):
+                    return False
+            config = getattr(self, 'config', {})
+            if isinstance(config, dict) and bool(
+                config.get('skip_pdf_title_translation', False)
+            ):
+                return False
         if hasattr(self, 'translate_book_title_var'):
             return bool(getattr(self, 'translate_book_title_var'))
         config = getattr(self, 'config', {})
@@ -10619,7 +10629,7 @@ class RetranslationMixin:
         self, kind, file_path=None
     ):
         """Whether one generated translation artifact participates in progress."""
-        if file_path and not str(file_path).lower().endswith('.epub'):
+        if file_path and not str(file_path).lower().endswith(('.epub', '.pdf')):
             return False
         spec = translation_artifact_spec_for_kind(kind)
         if not spec:
@@ -11876,10 +11886,8 @@ class RetranslationMixin:
         if self._progress_view_is_subtitle(data):
             return
         file_path = str(data.get('file_path') or '')
-        # metadata.json is an EPUB artifact. Raw ZIP, TXT, PDF, subtitle, and
-        # other direct-file progress views must not synthesize a metadata row
-        # that their translation workflow can never create.
-        if not file_path.lower().endswith('.epub'):
+        # EPUB metadata and the PDF book-title phase share metadata.json.
+        if not file_path.lower().endswith(('.epub', '.pdf')):
             return
         metadata_enabled = self._metadata_progress_tracking_enabled(file_path)
         prog = data.get('prog') or {}
@@ -11939,7 +11947,7 @@ class RetranslationMixin:
         if self._progress_view_is_subtitle(data):
             return
         file_path = str(data.get('file_path') or '')
-        if not file_path.lower().endswith('.epub'):
+        if not file_path.lower().endswith(('.epub', '.pdf')):
             return
 
         prog = data.get('prog') or {}
@@ -21751,7 +21759,11 @@ class RetranslationMixin:
             )
         elif info.get('pdf_toc_section') or chapter_info.get('pdf_toc_section'):
             section_title = str(
-                info.get('pdf_toc_title')
+                info.get('pdf_toc_title_translated')
+                or info.get('translated_title')
+                or chapter_info.get('pdf_toc_title_translated')
+                or chapter_info.get('translated_title')
+                or info.get('pdf_toc_title')
                 or chapter_info.get('pdf_toc_title')
                 or chapter_info.get('title')
                 or f"Section {chapter_num}"

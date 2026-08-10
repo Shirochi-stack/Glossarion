@@ -9,7 +9,7 @@ import re
 import threading
 import time
 import unicodedata
-from typing import Callable
+from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
 from bs4 import BeautifulSoup
@@ -77,7 +77,10 @@ def _workspace_response_entries(folder: str) -> list[tuple[str, str]]:
                 continue
             seen.add(normalized)
             title = str(
-                info.get("pdf_section_title")
+                info.get("pdf_toc_title_translated")
+                or info.get("translated_title")
+                or info.get("pdf_section_title_translated")
+                or info.get("pdf_section_title")
                 or info.get("pdf_toc_title")
                 or info.get("title")
                 or f"Section {info.get('actual_num') or key}"
@@ -109,6 +112,503 @@ def _workspace_response_entries(folder: str) -> list[tuple[str, str]]:
         (path, f"Section {index}")
         for index, path in enumerate(fallback, 1)
     ]
+
+
+def _load_translation_cache_by_source(path: str) -> dict[str, str]:
+    """Load successful cache entries keyed by their exact source text."""
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        from translate_headers_standalone import load_translations_from_file
+
+        originals, translated, _outputs = load_translations_from_file(
+            path, log_callback=lambda _message: None
+        )
+    except Exception:
+        return {}
+    result = {}
+    for number, original in originals.items():
+        source = str(original or "").strip()
+        value = str(translated.get(number) or "").strip()
+        if source and value:
+            result[source] = value
+    return result
+
+
+def load_pdf_workspace_artifact_chapters(output_dir: str) -> list[dict]:
+    """Reconstruct lightweight PDF chapters for standalone/compile phases."""
+    progress_path = os.path.join(output_dir, "translation_progress.json")
+    try:
+        with open(progress_path, "r", encoding="utf-8") as handle:
+            progress = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return []
+    items = list((progress.get("chapters") or {}).items())
+    items.sort(
+        key=lambda item: _numeric_order(
+            item[1].get("actual_num") if isinstance(item[1], dict) else None,
+            10 ** 9,
+        )
+    )
+    chapters = []
+    for _key, entry in items:
+        if not isinstance(entry, dict) or not entry.get("pdf_toc_section"):
+            continue
+        number = entry.get("actual_num")
+        try:
+            number_token = str(int(float(number)))
+        except (TypeError, ValueError):
+            number_token = str(number)
+        raw_path = os.path.join(
+            output_dir, "word_count", f"pdf_section_{number_token}.html"
+        )
+        try:
+            with open(raw_path, "r", encoding="utf-8", errors="replace") as handle:
+                raw_body = handle.read()
+        except OSError:
+            raw_body = ""
+        chapters.append({
+            "num": number,
+            "title": entry.get("pdf_toc_title") or entry.get("title"),
+            "body": raw_body,
+            "pdf_toc_section": True,
+            "pdf_toc_title": entry.get("pdf_toc_title"),
+            "pdf_section_title": entry.get("pdf_section_title"),
+            "pdf_section_id": entry.get("pdf_section_id"),
+        })
+    return chapters
+
+
+def _pdf_artifact_records(
+    chapters: list[dict],
+    output_dir: str,
+    progress: dict,
+) -> tuple[list[dict], list[dict]]:
+    """Build bookmark and h1-h6 records in stable PDF reading order."""
+    progress_chapters = (
+        progress.get("chapters", {}) if isinstance(progress, dict) else {}
+    )
+    progress_by_section = {}
+    progress_by_number = {}
+    if isinstance(progress_chapters, dict):
+        for progress_key, entry in progress_chapters.items():
+            if not isinstance(entry, dict):
+                continue
+            section_id = str(entry.get("pdf_section_id") or "").strip()
+            if section_id:
+                progress_by_section[section_id] = (progress_key, entry)
+            number = entry.get("actual_num", entry.get("chapter_num"))
+            if number is not None:
+                progress_by_number[str(number)] = (progress_key, entry)
+
+    bookmark_records = []
+    header_records = []
+    seen_sections = set()
+    ordered = sorted(
+        enumerate(chapters or []),
+        key=lambda item: _numeric_order(item[1].get("num"), item[0]),
+    )
+    for fallback_index, chapter in ordered:
+        if not isinstance(chapter, dict):
+            continue
+        section_id = str(chapter.get("pdf_section_id") or "").strip()
+        section_key = section_id or str(chapter.get("num", fallback_index + 1))
+        # Token splitting can produce several chunks for one bookmark. TOC and
+        # header artifacts remain one workload per original bookmark section.
+        if section_key in seen_sections:
+            continue
+        seen_sections.add(section_key)
+
+        progress_pair = progress_by_section.get(section_id)
+        if not progress_pair:
+            progress_pair = progress_by_number.get(str(chapter.get("num")))
+        progress_key, progress_entry = progress_pair or (None, {})
+        output_file = str(progress_entry.get("output_file") or "").strip()
+        output_path = (
+            output_file
+            if os.path.isabs(output_file)
+            else os.path.join(output_dir, output_file)
+        ) if output_file else ""
+
+        source_title = str(
+            chapter.get("pdf_section_title")
+            or chapter.get("pdf_toc_title")
+            or chapter.get("title")
+            or progress_entry.get("pdf_section_title")
+            or progress_entry.get("pdf_toc_title")
+            or progress_entry.get("title")
+            or ""
+        ).strip()
+        is_bookmark = bool(
+            chapter.get("pdf_toc_section")
+            or progress_entry.get("pdf_toc_section")
+            or section_id
+        )
+        if is_bookmark and source_title:
+            bookmark_records.append({
+                "source": source_title,
+                "chapter": chapter,
+                "progress_key": progress_key,
+                "progress_entry": progress_entry,
+                "output_file": output_file,
+            })
+
+        # Prefer the immutable extraction copy. The in-memory chapter body can
+        # be altered by image cleanup, request merging, or multipass handling
+        # before this post-translation phase runs.
+        number = chapter.get("num", fallback_index + 1)
+        try:
+            number_token = str(int(float(number)))
+        except (TypeError, ValueError):
+            number_token = str(number)
+        raw_path = os.path.join(
+            output_dir, "word_count", f"pdf_section_{number_token}.html"
+        )
+        try:
+            with open(raw_path, "r", encoding="utf-8", errors="replace") as handle:
+                raw_html = handle.read()
+        except OSError:
+            raw_html = str(chapter.get("body") or chapter.get("content") or "")
+        if not raw_html:
+            continue
+        raw_soup = BeautifulSoup(raw_html, "html.parser")
+        for tag_index, heading in enumerate(
+            raw_soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
+        ):
+            source = heading.get_text(" ", strip=True)
+            if not source:
+                continue
+            header_records.append({
+                "source": source,
+                "tag_index": tag_index,
+                "tag_name": heading.name,
+                "output_file": output_file,
+                "output_path": output_path,
+                "section_key": section_key,
+            })
+    return bookmark_records, header_records
+
+
+def _translate_pdf_artifact_workload(
+    *,
+    kind: str,
+    records: list[dict],
+    output_dir: str,
+    translator,
+    batch_size: int,
+    log_callback: LogCallback | None,
+    save_cache: bool = True,
+) -> dict[int, str]:
+    """Translate one PDF TOC/header workload with cache and cross-cache reuse."""
+    if not records:
+        return {}
+    filename = "TOC.txt" if kind == "toc" else "translated_headers.txt"
+    other_filename = (
+        "translated_headers.txt" if kind == "toc" else "TOC.txt"
+    )
+    cache_path = os.path.join(output_dir, filename)
+    own_cache = _load_translation_cache_by_source(cache_path)
+    other_cache = _load_translation_cache_by_source(
+        os.path.join(output_dir, other_filename)
+    )
+    originals = {
+        index: str(record.get("source") or "").strip()
+        for index, record in enumerate(records, 1)
+    }
+    translated = {}
+    remaining = {}
+    for number, source in originals.items():
+        cached = own_cache.get(source) or other_cache.get(source)
+        if cached:
+            translated[number] = cached
+        else:
+            remaining[number] = source
+
+    reused = len(translated)
+    if reused:
+        _log(
+            log_callback,
+            f"♻️ PDF {kind}: reused {reused}/{len(originals)} cached translation(s)",
+        )
+
+    # The TOC duplicate option is a request-level optimization. Preserve every
+    # bookmark record in TOC.txt while sending repeated source labels only once.
+    duplicate_groups = {}
+    request_entries = dict(remaining)
+    if kind == "toc" and os.getenv(
+        "SKIP_DUPLICATE_TOC_TRANSLATION", "0"
+    ) == "1":
+        request_entries = {}
+        first_by_source = {}
+        for number, source in remaining.items():
+            if source in first_by_source:
+                duplicate_groups.setdefault(first_by_source[source], []).append(number)
+            else:
+                first_by_source[source] = number
+                request_entries[number] = source
+
+    if request_entries:
+        api_translated = translator.translate_headers_batch(
+            request_entries,
+            batch_size=batch_size,
+            translation_type=kind,
+        ) or {}
+        translated.update(api_translated)
+        for first_number, duplicate_numbers in duplicate_groups.items():
+            value = translated.get(first_number)
+            if value:
+                for duplicate_number in duplicate_numbers:
+                    translated[duplicate_number] = value
+
+    current_titles = {
+        index: {"filename": record.get("output_file") or ""}
+        for index, record in enumerate(records, 1)
+    }
+    if save_cache:
+        translator._save_translations_to_file(
+            originals, translated, cache_path, current_titles
+        )
+    try:
+        from translation_artifacts import update_translation_artifact_progress
+
+        actual_model = getattr(translator, "_last_batch_actual_model", None)
+        if not actual_model:
+            getter = getattr(
+                translator.client, "get_last_actual_request_model", None
+            )
+            if callable(getter):
+                try:
+                    actual_model = getter()
+                except Exception:
+                    actual_model = None
+        if save_cache:
+            update_translation_artifact_progress(
+                output_dir,
+                kind,
+                "completed" if len(translated) == len(originals) else "failed",
+                model_name=(
+                    actual_model or getattr(translator.client, "model", None)
+                ),
+                error_message=(
+                    None
+                    if len(translated) == len(originals)
+                    else f"{len(originals) - len(translated)} entry translation(s) failed"
+                ),
+            )
+    except Exception:
+        pass
+    return translated
+
+
+def translate_pdf_workspace_artifacts(
+    chapters: list[dict],
+    output_dir: str,
+    api_client,
+    *,
+    progress_manager=None,
+    log_callback: LogCallback | None = None,
+    stop_callback: Callable[[], bool] | None = None,
+    config: dict[str, Any] | None = None,
+    use_toc: bool | None = None,
+    use_headers: bool | None = None,
+    update_html_headers: bool | None = None,
+    save_header_translations: bool | None = None,
+) -> dict[str, int]:
+    """Batch-translate PDF bookmarks and extracted HTML h1-h6 elements.
+
+    This is the PDF counterpart of the EPUB ``toc.ncx`` and chapter-header
+    phases. It uses the same BatchHeaderTranslator, prompt settings, batch
+    limits, TOC.txt/translated_headers.txt cache formats, and progress rows.
+    """
+    if use_toc is None:
+        use_toc = os.getenv("USE_TOC_NCX", "1") == "1"
+    if use_headers is None:
+        use_headers = os.getenv("BATCH_TRANSLATE_HEADERS", "0") == "1"
+    if update_html_headers is None:
+        update_html_headers = os.getenv("UPDATE_HTML_HEADERS", "1") == "1"
+    if save_header_translations is None:
+        save_header_translations = (
+            os.getenv("SAVE_HEADER_TRANSLATIONS", "1") == "1"
+        )
+    if not use_toc and not use_headers:
+        return {"toc": 0, "headers": 0}
+    if stop_callback and stop_callback():
+        raise PDFCompilationCancelled("PDF artifact translation stopped by user")
+
+    if progress_manager is not None:
+        progress = progress_manager.prog
+        try:
+            progress_manager.save()
+        except Exception:
+            pass
+    else:
+        try:
+            with open(
+                os.path.join(output_dir, "translation_progress.json"),
+                "r",
+                encoding="utf-8",
+            ) as handle:
+                progress = json.load(handle)
+        except (OSError, ValueError, TypeError):
+            progress = {"chapters": {}}
+
+    bookmark_records, header_records = _pdf_artifact_records(
+        chapters, output_dir, progress
+    )
+    if not bookmark_records and not header_records:
+        _log(log_callback, "ℹ️ PDF contains no bookmark/header artifacts to translate")
+        return {"toc": 0, "headers": 0}
+
+    from metadata_batch_translator import BatchHeaderTranslator
+
+    translator_config = dict(config or {})
+    translator_config["output_dir"] = os.path.abspath(output_dir)
+    translator = BatchHeaderTranslator(
+        api_client,
+        translator_config,
+        stop_check_fn=stop_callback,
+    )
+    result = {"toc": 0, "headers": 0}
+
+    toc_translated = {}
+    if use_toc and bookmark_records:
+        if stop_callback and stop_callback():
+            raise PDFCompilationCancelled("PDF bookmark translation stopped by user")
+        _log(
+            log_callback,
+            f"📑 Translating {len(bookmark_records)} PDF bookmark title(s) in batches…",
+        )
+        try:
+            toc_batch_size = int(os.getenv("TOC_NCX_PER_BATCH", "-1"))
+        except (TypeError, ValueError):
+            toc_batch_size = -1
+        toc_translated = _translate_pdf_artifact_workload(
+            kind="toc",
+            records=bookmark_records,
+            output_dir=output_dir,
+            translator=translator,
+            batch_size=toc_batch_size,
+            log_callback=log_callback,
+        )
+        if stop_callback and stop_callback():
+            raise PDFCompilationCancelled("PDF bookmark translation stopped by user")
+        for index, record in enumerate(bookmark_records, 1):
+            translated_title = toc_translated.get(index)
+            if not translated_title:
+                continue
+            chapter = record.get("chapter")
+            if isinstance(chapter, dict):
+                chapter["pdf_toc_title_original"] = record["source"]
+                chapter["pdf_toc_title_translated"] = translated_title
+                chapter["translated_title"] = translated_title
+                chapter["title"] = translated_title
+            entry = record.get("progress_entry")
+            if isinstance(entry, dict):
+                entry["pdf_toc_title_original"] = record["source"]
+                entry["pdf_toc_title_translated"] = translated_title
+                entry["translated_title"] = translated_title
+        result["toc"] = len(toc_translated)
+
+    header_translated = {}
+    if use_headers and header_records:
+        if stop_callback and stop_callback():
+            raise PDFCompilationCancelled("PDF header translation stopped by user")
+        _log(
+            log_callback,
+            f"🔤 Translating {len(header_records)} PDF HTML header(s) in batches…",
+        )
+        try:
+            header_batch_size = int(os.getenv("HEADERS_PER_BATCH", "-1"))
+        except (TypeError, ValueError):
+            header_batch_size = -1
+        header_translated = _translate_pdf_artifact_workload(
+            kind="headers",
+            records=header_records,
+            output_dir=output_dir,
+            translator=translator,
+            batch_size=header_batch_size,
+            log_callback=log_callback,
+            save_cache=bool(save_header_translations),
+        )
+        if stop_callback and stop_callback():
+            raise PDFCompilationCancelled("PDF header translation stopped by user")
+        records_by_file = {}
+        if update_html_headers:
+            for index, record in enumerate(header_records, 1):
+                if index in header_translated and record.get("output_path"):
+                    records_by_file.setdefault(record["output_path"], []).append(
+                        (record, header_translated[index])
+                    )
+        updated_files = 0
+        for path, replacements in records_by_file.items():
+            if stop_callback and stop_callback():
+                raise PDFCompilationCancelled("PDF header translation stopped by user")
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                    soup = BeautifulSoup(handle.read(), "html.parser")
+            except OSError:
+                continue
+            headings = soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
+            changed = False
+            for record, translated_title in replacements:
+                tag_index = int(record.get("tag_index") or 0)
+                if tag_index < len(headings):
+                    headings[tag_index].clear()
+                    headings[tag_index].append(translated_title)
+                    changed = True
+                elif tag_index == 0:
+                    container = soup.body if soup.body is not None else soup
+                    new_heading = soup.new_tag(record.get("tag_name") or "h1")
+                    new_heading.string = translated_title
+                    container.insert(0, new_heading)
+                    changed = True
+            if changed:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(str(soup))
+                updated_files += 1
+        _log(
+            log_callback,
+            f"✅ Applied translated PDF headers to {updated_files} HTML file(s)",
+        )
+        result["headers"] = len(header_translated)
+
+    # BatchHeaderTranslator updates artifact rows atomically on disk. Merge
+    # those rows back into the live ProgressManager before its next save.
+    if progress_manager is not None:
+        try:
+            with open(
+                os.path.join(output_dir, "translation_progress.json"),
+                "r",
+                encoding="utf-8",
+            ) as handle:
+                disk_progress = json.load(handle)
+            disk_chapters = disk_progress.get("chapters", {})
+            for key, entry in disk_chapters.items():
+                if str(key).startswith("__translation_artifact__"):
+                    progress_manager.prog.setdefault("chapters", {})[key] = entry
+        except (OSError, ValueError, TypeError):
+            pass
+        progress_manager.save()
+    else:
+        # Standalone header/TOC runs do not own a live ProgressManager. Merge
+        # atomically-written artifact rows into the document whose PDF entries
+        # received translated bookmark fields, then persist the combined view.
+        progress_path = os.path.join(output_dir, "translation_progress.json")
+        try:
+            with open(progress_path, "r", encoding="utf-8") as handle:
+                disk_progress = json.load(handle)
+            disk_chapters = disk_progress.get("chapters", {})
+            progress_chapters = progress.setdefault("chapters", {})
+            for key, entry in disk_chapters.items():
+                if str(key).startswith("__translation_artifact__"):
+                    progress_chapters[key] = entry
+            temp_path = f"{progress_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(progress, handle, ensure_ascii=False, indent=2)
+            os.replace(temp_path, progress_path)
+        except (OSError, ValueError, TypeError):
+            pass
+    return result
 
 
 def _fragment_body(content: str) -> str:
@@ -450,10 +950,24 @@ def compile_pdf_workspace(
     folder: str,
     log_callback: LogCallback | None = None,
     stop_callback: Callable[[], bool] | None = None,
+    api_client=None,
 ) -> str:
     """Build a translated PDF from the current response HTML files."""
     if not folder or not os.path.isdir(folder):
         raise ValueError("PDF output workspace does not exist.")
+    if api_client is not None and (
+        os.getenv("USE_TOC_NCX", "1") == "1"
+        or os.getenv("BATCH_TRANSLATE_HEADERS", "0") == "1"
+    ):
+        artifact_chapters = load_pdf_workspace_artifact_chapters(folder)
+        if artifact_chapters:
+            translate_pdf_workspace_artifacts(
+                artifact_chapters,
+                folder,
+                api_client,
+                log_callback=log_callback,
+                stop_callback=stop_callback,
+            )
     entries = _workspace_response_entries(folder)
     if not entries:
         raise ValueError("No translated response HTML files were found.")

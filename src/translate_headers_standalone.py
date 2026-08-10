@@ -1413,15 +1413,17 @@ def run_translate_headers_gui(gui_instance):
         # Re-attach GUI logging handlers to reclaim logs from manga integration
         _attach_logging_handlers(gui_instance)
         
-        # Get EPUB files - check if multiple files are selected first
+        # Get EPUB/PDF files - check if multiple files are selected first
         epub_files = []
         
         # Try to get multiple selected files from the GUI (if available)
         if hasattr(gui_instance, 'selected_files') and gui_instance.selected_files:
-            # Filter for only EPUB files
-            epub_files = [f for f in gui_instance.selected_files if f.lower().endswith('.epub')]
+            epub_files = [
+                f for f in gui_instance.selected_files
+                if f.lower().endswith(('.epub', '.pdf'))
+            ]
             if epub_files:
-                gui_instance.append_log(f"📚 Found {len(epub_files)} EPUB file(s) in selection")
+                gui_instance.append_log(f"📚 Found {len(epub_files)} EPUB/PDF file(s) in selection")
         
         # Fallback to single EPUB path
         if not epub_files:
@@ -1430,16 +1432,16 @@ def run_translate_headers_gui(gui_instance):
                 QMessageBox.critical(
                     None, 
                     "Error", 
-                    "No EPUB file selected or file does not exist."
+                    "No EPUB or PDF file selected, or the file does not exist."
                 )
                 return
             
             # Check if epub_path is a directory containing multiple EPUBs
             if os.path.isdir(epub_path):
-                # Process all EPUBs in the directory
-                gui_instance.append_log(f"📁 Scanning directory for EPUB files: {epub_path}")
+                # Process all EPUBs/PDFs in the directory
+                gui_instance.append_log(f"📁 Scanning directory for EPUB/PDF files: {epub_path}")
                 for file in os.listdir(epub_path):
-                    if file.lower().endswith('.epub'):
+                    if file.lower().endswith(('.epub', '.pdf')):
                         full_path = os.path.join(epub_path, file)
                         epub_files.append(full_path)
                 
@@ -1447,11 +1449,11 @@ def run_translate_headers_gui(gui_instance):
                     QMessageBox.critical(
                         None,
                         "Error",
-                        f"No EPUB files found in directory: {epub_path}"
+                        f"No EPUB or PDF files found in directory: {epub_path}"
                     )
                     return
                 
-                gui_instance.append_log(f"📚 Found {len(epub_files)} EPUB file(s) to process")
+                gui_instance.append_log(f"📚 Found {len(epub_files)} EPUB/PDF file(s) to process")
             else:
                 # Single EPUB file
                 epub_files = [epub_path]
@@ -1487,7 +1489,7 @@ def run_translate_headers_gui(gui_instance):
         successful = 0
         failed = 0
         
-        gui_instance.append_log(f"📊 Will process {total_files} EPUB file(s)")
+        gui_instance.append_log(f"📊 Will process {total_files} EPUB/PDF file(s)")
         
         for idx, current_epub in enumerate(epub_files, 1):
             # Check if stop was requested before starting a new EPUB
@@ -1497,7 +1499,8 @@ def run_translate_headers_gui(gui_instance):
                 break
             
             gui_instance.append_log(f"\n{'='*60}")
-            gui_instance.append_log(f"📄 Processing EPUB {idx}/{total_files}: {os.path.basename(current_epub)}")
+            source_kind = "PDF" if current_epub.lower().endswith('.pdf') else "EPUB"
+            gui_instance.append_log(f"📄 Processing {source_kind} {idx}/{total_files}: {os.path.basename(current_epub)}")
             gui_instance.append_log(f"{'='*60}")
             
             # Get output directory for this EPUB
@@ -1512,10 +1515,20 @@ def run_translate_headers_gui(gui_instance):
                 os.path.join(script_dir, epub_base),         # src directory (where output typically goes)
                 os.path.join(current_dir, 'src', epub_base), # src subdirectory from current dir
             ]
+            if current_epub.lower().endswith('.pdf'):
+                candidates = [
+                    os.path.join(current_dir, f"{epub_base}_PDF"),
+                    os.path.join(script_dir, f"{epub_base}_PDF"),
+                    os.path.join(current_dir, 'src', f"{epub_base}_PDF"),
+                ] + candidates
             
             # Add output directory override if configured (matches QA scanner behavior)
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or gui_instance.config.get('output_directory')
             if override_dir:
+                if current_epub.lower().endswith('.pdf'):
+                    candidates.insert(
+                        0, os.path.join(override_dir, f"{epub_base}_PDF")
+                    )
                 candidates.insert(0, os.path.join(override_dir, epub_base))
                 gui_instance.append_log(f"🔍 Checking override directory: {override_dir}")
             
@@ -1549,6 +1562,49 @@ def run_translate_headers_gui(gui_instance):
                     QApplication.processEvents()
                 except Exception:
                     pass
+                continue
+
+            # PDF standalone mode uses the extracted bookmark-section source
+            # HTML instead of content.opf. The translation engine, prompts,
+            # batching, cache format, stop handling, and progress artifact are
+            # the same as the EPUB path below.
+            if current_epub.lower().endswith('.pdf'):
+                try:
+                    from pdf_workspace_compiler import (
+                        load_pdf_workspace_artifact_chapters,
+                        translate_pdf_workspace_artifacts,
+                    )
+                    pdf_chapters = load_pdf_workspace_artifact_chapters(
+                        output_dir
+                    )
+                    result = translate_pdf_workspace_artifacts(
+                        pdf_chapters,
+                        output_dir,
+                        gui_instance.api_client,
+                        log_callback=gui_instance.append_log,
+                        stop_callback=lambda: bool(
+                            getattr(
+                                gui_instance,
+                                '_headers_stop_requested',
+                                False,
+                            )
+                        ),
+                        config=config,
+                        use_toc=False,
+                        use_headers=True,
+                        update_html_headers=bool(update_html),
+                        save_header_translations=bool(save_to_file),
+                    )
+                    successful += 1
+                    gui_instance.append_log(
+                        f"âœ… PDF headers complete: "
+                        f"{result.get('headers', 0)} translated"
+                    )
+                except Exception as pdf_header_error:
+                    failed += 1
+                    gui_instance.append_log(
+                        f"âŒ PDF header translation failed: {pdf_header_error}"
+                    )
                 continue
             
             # Check if translated_headers.txt already exists

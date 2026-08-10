@@ -3818,6 +3818,13 @@ class ProgressManager:
                 existing,
                 prefer_thread=status in ("in_progress", "completed", "failed", "error"),
             )
+            if (
+                status in ("completed", "failed", "error")
+                and not self._clean_model_name(entry.get("model_name"))
+            ):
+                configured_model = self._clean_model_name(os.getenv("MODEL"))
+                if configured_model:
+                    entry["model_name"] = configured_model
             if error:
                 entry["failure_reason"] = str(error)
                 entry["error_message"] = str(error)
@@ -4667,6 +4674,19 @@ class ProgressManager:
             existing_info,
             prefer_thread=bool(prefer_thread_model),
         )
+        # A normal translation can dispatch the concrete API request on a
+        # helper thread. In that case its thread-local actual-model metadata is
+        # unavailable when the coordinator writes the terminal chapter row.
+        # Persist the configured request model as a terminal fallback instead
+        # of leaving successfully translated entries as ``model unknown``.
+        # Whenever actual routing metadata is available above, it still wins.
+        if (
+            status in ("completed", "failed", "qa_failed", "error")
+            and not self._clean_model_name(chapter_info.get("model_name"))
+        ):
+            configured_model = self._clean_model_name(os.getenv("MODEL"))
+            if configured_model:
+                chapter_info["model_name"] = configured_model
         if isinstance(existing_info, dict) and isinstance(existing_info.get("ocr_progress"), dict):
             chapter_info["ocr_progress"] = existing_info["ocr_progress"]
 
@@ -21629,7 +21649,6 @@ def main(log_callback=None, stop_callback=None):
     metadata_progress_enabled = (
         config.TRANSLATE_BOOK_TITLE
         and not is_text_file
-        and not is_pdf_file
         and config.OUTPUT_MODE != "image"
     )
     _metadata_path_before_extraction = os.path.join(out, "metadata.json")
@@ -22554,8 +22573,14 @@ def main(log_callback=None, stop_callback=None):
         ('.csv', '.json', '.md', '.sdlxliff', '.srt', '.ass', '.lrc')
     )
     is_txt = input_path.lower().endswith(('.txt',))
+    is_pdf_title = input_path.lower().endswith(('.pdf',))
     skip_txt_title = os.getenv('SKIP_TXT_TITLE_TRANSLATION', '1') == '1'
-    title_translation_allowed = not _non_book_ext and not (is_txt and skip_txt_title)
+    skip_pdf_title = os.getenv('SKIP_PDF_TITLE_TRANSLATION', '0') == '1'
+    title_translation_allowed = (
+        not _non_book_ext
+        and not (is_txt and skip_txt_title)
+        and not (is_pdf_title and skip_pdf_title)
+    )
     title_selected = bool(translate_metadata_fields.get('title', True))
     metadata_plan = []
     metadata_phase_by_field = {}
@@ -28573,6 +28598,59 @@ def main(log_callback=None, stop_callback=None):
                 progress_manager.save()
             except Exception:
                 pass
+
+    # PDF bookmark titles and extracted h1-h6 headers use the same batch
+    # translator, prompts, cache files, retry/progress rows, and batch limits as
+    # EPUB TOC/header translation. Run this after chapter/multipass output is on
+    # disk so translated headers can be applied deterministically to the final
+    # response HTML without being overwritten by the chapter request.
+    if (
+        is_pdf_file
+        and config.OUTPUT_MODE not in ("refinement", "audio", "image", "video")
+        and os.environ.get('TRANSLATION_CANCELLED') != '1'
+        and os.environ.get('GRACEFUL_STOP') != '1'
+        and not check_stop()
+        and (
+            os.getenv('USE_TOC_NCX', '1') == '1'
+            or os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
+        )
+    ):
+        try:
+            from pdf_workspace_compiler import translate_pdf_workspace_artifacts
+
+            artifact_config = {
+                'headers_per_batch': int(
+                    os.getenv('HEADERS_PER_BATCH', '-1') or '-1'
+                ),
+                'batch_header_system_prompt': os.getenv(
+                    'BATCH_HEADER_SYSTEM_PROMPT', ''
+                ),
+                'batch_header_prompt': os.getenv('BATCH_HEADER_PROMPT', ''),
+                'output_language': os.getenv('OUTPUT_LANGUAGE', 'English'),
+                'temperature': config.TEMP,
+                'max_tokens': config.MAX_OUTPUT_TOKENS,
+            }
+            artifact_result = translate_pdf_workspace_artifacts(
+                chapters,
+                out,
+                client,
+                progress_manager=progress_manager,
+                log_callback=log_callback,
+                stop_callback=check_stop,
+                config=artifact_config,
+            )
+            print(
+                "✅ PDF navigation translation complete: "
+                f"{artifact_result.get('toc', 0)} bookmark(s), "
+                f"{artifact_result.get('headers', 0)} HTML header(s)"
+            )
+        except Exception as artifact_exc:
+            if artifact_exc.__class__.__name__ in (
+                'PDFCompilationCancelled', 'MetadataTranslationCancelled'
+            ):
+                print("⏹️ PDF bookmark/header translation stopped by user")
+                return
+            print(f"⚠️ PDF bookmark/header batch translation failed: {artifact_exc}")
 
     if is_subtitle_file:
         try:
