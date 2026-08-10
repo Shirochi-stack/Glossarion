@@ -236,7 +236,26 @@ def test_insert_missing_image_context_action_uses_targeted_qa_cleanup():
     assert "Images restored and QA flags cleared." not in action_block
 
 
-def test_emergency_image_restore_places_leading_image_below_first_header():
+def test_emergency_image_restore_corrects_nearby_header_estimation_error():
+    long_translated_title = "Translated chapter title " * 8
+    source = (
+        '<html><body><h1>A</h1><p><img src="cover.jpg"/></p>'
+        '<p>Source body.</p></body></html>'
+    )
+    translated = (
+        f'<html><body><h1>{long_translated_title}</h1>'
+        '<p>Translated body.</p></body></html>'
+    )
+
+    restored = ContentProcessor.emergency_restore_images(
+        translated, source, verbose=False
+    )
+
+    assert restored.index('</h1>') < restored.index('<img')
+    assert restored.index('<img') < restored.index('Translated body.')
+
+
+def test_emergency_image_restore_preserves_author_image_above_first_header():
     source = (
         '<html><body><p><img src="cover.jpg"/></p>'
         '<h1>Chapter title</h1><p>Source body.</p></body></html>'
@@ -250,8 +269,7 @@ def test_emergency_image_restore_places_leading_image_below_first_header():
         translated, source, verbose=False
     )
 
-    assert restored.index('</h1>') < restored.index('<img')
-    assert restored.index('<img') < restored.index('Translated body.')
+    assert restored.index('<img') < restored.index('<h1>')
 
 
 def test_emergency_image_restore_can_insert_before_second_header():
@@ -273,12 +291,11 @@ def test_emergency_image_restore_can_insert_before_second_header():
     assert restored.index('<img') < restored.index('<h2>')
 
 
-def test_emergency_image_restore_does_not_relocate_more_than_100_characters():
+def test_emergency_image_restore_respects_source_position_when_estimate_is_far():
     preface = "A" * 240
     source = (
-        '<html><body><p><img src="cover.jpg"/></p>'
-        f'<p>{preface}</p><h1>Chapter title</h1>'
-        '<p>Source body.</p></body></html>'
+        '<html><body><h1>Chapter title</h1>'
+        '<p><img src="cover.jpg"/></p><p>Source body.</p></body></html>'
     )
     translated = (
         f'<html><body><p>{preface}</p><h1>Chapter title</h1>'
@@ -289,8 +306,7 @@ def test_emergency_image_restore_does_not_relocate_more_than_100_characters():
         translated, source, verbose=False
     )
 
-    assert restored.index('<img') < restored.index('<h1>')
-    assert restored.index('<h1>') - restored.index('<img') > 100
+    assert restored.index('</h1>') < restored.index('<img')
 
 
 def test_repair_empty_attribute_qa_file_uses_shared_llm_token_fix(tmp_path):

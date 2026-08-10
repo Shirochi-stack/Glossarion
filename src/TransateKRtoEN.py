@@ -6628,6 +6628,11 @@ class ContentProcessor:
                 text_str,
                 re.IGNORECASE | re.DOTALL,
             )
+            source_first_heading_match = re.search(
+                r'<(?P<tag>h[1-6])\b[^>]*>.*?</(?P=tag)\s*>',
+                source_str,
+                re.IGNORECASE | re.DOTALL,
+            )
             first_heading_end = (
                 first_heading_match.end() if first_heading_match else None
             )
@@ -6635,7 +6640,14 @@ class ContentProcessor:
                 first_heading_match.start() if first_heading_match else None
             )
             first_heading_insert_cursor = first_heading_end
-            first_heading_relocation_limit = 100
+            source_first_heading_end = (
+                source_first_heading_match.end()
+                if source_first_heading_match else None
+            )
+            source_first_heading_start = (
+                source_first_heading_match.start()
+                if source_first_heading_match else None
+            )
             
             for tag_name, attr, orig_src, new_src, orig_tag in missing:
                 filename = os.path.basename(orig_src)
@@ -6691,17 +6703,35 @@ class ContentProcessor:
                     elif forward_found:
                         insert_pos = forward_pos
 
-                    # Keep nearby images from landing above or inside the first
-                    # heading. The adjustment is limited to 100 characters so
-                    # genuinely earlier images retain their estimated position.
-                    # A later image may still appear before h2/h3/etc.
+                    # Preserve the image's actual ordering around the source's
+                    # first heading. The proportional estimate still determines
+                    # its position everywhere else, including around later
+                    # headings.
                     moved_below_first_heading = False
+                    source_image_is_above_first_heading = (
+                        source_first_heading_start is not None
+                        and source_pos < source_first_heading_start
+                    )
+                    source_image_is_below_first_heading = (
+                        source_first_heading_end is not None
+                        and source_pos >= source_first_heading_end
+                    )
                     if (
-                        first_heading_end is not None
+                        source_image_is_above_first_heading
                         and first_heading_start is not None
+                        and insert_pos >= first_heading_start
+                    ):
+                        # Preserve explicit source ordering. Positional scaling
+                        # can otherwise place a cover image inside/below h1.
+                        insert_pos = first_heading_start
+                        log(
+                            "      ↳ Preserved source image placement above "
+                            "the first header tag"
+                        )
+                    elif (
+                        first_heading_end is not None
+                        and source_image_is_below_first_heading
                         and insert_pos < first_heading_end
-                        and max(0, first_heading_start - insert_pos)
-                        <= first_heading_relocation_limit
                     ):
                         insert_pos = max(
                             first_heading_end,
@@ -6733,7 +6763,18 @@ class ContentProcessor:
                     else:
                         img_html = f'<p><img src="{new_src}"/></p>'
                     
+                    inserted_before_first_heading = (
+                        first_heading_start is not None
+                        and insert_pos <= first_heading_start
+                        and not moved_below_first_heading
+                    )
                     text_str = text_str[:insert_pos] + img_html + text_str[insert_pos:]
+                    if inserted_before_first_heading:
+                        shift = len(img_html)
+                        first_heading_start += shift
+                        first_heading_end += shift
+                        if first_heading_insert_cursor is not None:
+                            first_heading_insert_cursor += shift
                     if moved_below_first_heading:
                         first_heading_insert_cursor = insert_pos + len(img_html)
                     inserted_count += 1
