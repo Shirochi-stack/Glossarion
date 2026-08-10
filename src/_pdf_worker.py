@@ -269,16 +269,16 @@ def run_pdf_generation(config_path):
         'toc_numbers': os.environ.get('PDF_TOC_PAGE_NUMBERS', '1') == '1',
     }
 
-    # Determine PDF output path
-    # Import FileUtils for sanitize_filename
+    # Determine PDF output path. Keep this dependency lightweight: importing
+    # the full EPUB converter here adds roughly nine seconds of startup time
+    # before any PDF rendering begins.
     try:
-        from epub_converter import FileUtils
+        from pdf_output_naming import safe_pdf_output_stem
         book_title = metadata.get('title', os.path.basename(output_dir))
-        safe_title = FileUtils.sanitize_filename_for_windows_path(
+        safe_title = safe_pdf_output_stem(
             book_title,
             output_dir,
             extension=".pdf",
-            allow_unicode=True,
         )
     except Exception:
         book_title = metadata.get('title', os.path.basename(output_dir))

@@ -6,6 +6,7 @@ import fitz
 from bs4 import BeautifulSoup
 
 from output_workspace import write_workspace_source_reference
+from pdf_output_naming import safe_pdf_output_stem
 from pdf_workspace_compiler import (
     _rapid_render_worker_count,
     _normalize_workspace_pdf_section_filenames,
@@ -54,6 +55,17 @@ def test_rapid_workspace_removes_only_redundant_job_leading_page_breaks():
     ) for _index, content, _orders in jobs)
     assert sum(content.count("page-break-before: always")
                for _index, content, _orders in jobs) == 2
+
+
+def test_pdf_worker_output_name_is_lightweight_and_path_bounded(tmp_path):
+    stem = safe_pdf_output_stem("A" * 400, tmp_path, extension=".pdf")
+
+    assert len(str(tmp_path / f"{stem}.pdf")) <= 259
+    worker_source = (Path(__file__).parents[1] / "src" / "_pdf_worker.py").read_text(
+        encoding="utf-8"
+    )
+    assert "from pdf_output_naming import safe_pdf_output_stem" in worker_source
+    assert "from epub_converter import FileUtils" not in worker_source
 
 
 def test_long_centered_source_heading_is_restored_without_retranslation(

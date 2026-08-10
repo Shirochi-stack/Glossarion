@@ -18,6 +18,7 @@ _WHITESPACE = re.compile(r"\s+")
 _UNDERSCORES = re.compile(r"_+")
 _WINDOWS_RESERVED = {
     "con", "prn", "aux", "nul",
+    "conin$", "conout$",
     *(f"com{number}" for number in range(1, 10)),
     *(f"lpt{number}" for number in range(1, 10)),
 }
@@ -72,6 +73,29 @@ def safe_pdf_book_filename_stem(value, fallback="translated", max_units=180):
         title = f"_{title}"
     title = _truncate_utf16(title, max(24, int(max_units))).rstrip(" .")
     return title or fallback
+
+
+def safe_pdf_output_stem(
+    value,
+    output_dir,
+    extension=".pdf",
+    fallback="file",
+    max_path=259,
+):
+    """Return a safe PDF stem without importing the heavyweight EPUB compiler."""
+    extension = str(extension or "")
+    if extension and not extension.startswith("."):
+        extension = f".{extension}"
+    absolute_directory = os.path.abspath(str(output_dir or "."))
+    extension_units = len(extension.encode("utf-16-le")) // 2
+    directory_units = len(absolute_directory.encode("utf-16-le")) // 2
+    component_budget = max(1, 255 - extension_units)
+    path_budget = max(1, int(max_path) - directory_units - 1 - extension_units)
+    return safe_pdf_book_filename_stem(
+        value,
+        fallback=fallback,
+        max_units=min(component_budget, path_budget),
+    )
 
 
 def readable_pdf_section_filename(chapter, actual_num=None, retain=False):
