@@ -22,6 +22,7 @@ from Retranslation_GUI import (
     _match_epub_html_member_basename,
     _map_zero_based_glossary_progress_index,
     _normalize_progress_match_name,
+    _parallel_glossary_progress_filename_aliases,
     _persist_progress_manager_source_link,
     _progress_entry_has_llm_token_qa,
     _progress_entry_has_missing_image_qa,
@@ -1495,6 +1496,29 @@ def test_parallel_glossary_progress_filters_raw_spine_to_mapped_files():
 
     assert filtered == {0: "chapter0001.xhtml", 1: "chapter0003.xhtml"}
     assert filtered_spine == {0: 2, 1: 4}
+
+
+def test_parallel_glossary_progress_maps_generated_pair_names_to_raw_rows():
+    aliases = _parallel_glossary_progress_filename_aliases(
+        ["chapter0001.xhtml", "chapter0003.xhtml"]
+    )
+    progress_data = {
+        "indexing": "chapter_index_zero_based",
+        "chapter_filenames": {
+            "0": "pair_0001.xhtml",
+            "1": "pair_0002.xhtml",
+        },
+    }
+
+    assert aliases["pair_0001.xhtml"] == 0
+    assert aliases["pair_0001"] == 0
+    assert aliases["pair_0002.xhtml"] == 1
+    assert (
+        _map_zero_based_glossary_progress_index(0, progress_data, aliases) == 0
+    )
+    assert (
+        _map_zero_based_glossary_progress_index(1, progress_data, aliases) == 1
+    )
 
 
 def test_progress_manager_routes_parallel_pair_through_raw_epub(tmp_path):

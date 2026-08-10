@@ -92,3 +92,29 @@ def test_gui_renames_at_selection_and_engine_uses_plain_stem_output():
     assert "resolve_source_aware_workspace" not in gui_source
     assert "resolve_source_aware_workspace" not in engine_source
     assert "write_workspace_source_reference(out, input_path)" in engine_source
+
+
+def test_parallel_pair_open_output_creates_and_opens_raw_glossary_folder(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.delenv("OUTPUT_DIRECTORY", raising=False)
+    from translator_gui import TranslatorGUI
+
+    output_root = tmp_path / "configured output"
+    raw_path = tmp_path / "books" / "Raw Novel.epub"
+    gui = TranslatorGUI.__new__(TranslatorGUI)
+    gui.config = {"output_directory": str(output_root)}
+    gui._parallel_epub_pair_source = {"raw_path": str(raw_path)}
+    gui._parallel_epub_pair_is_selected = lambda: True
+    opened = []
+    logs = []
+    gui._open_folder_in_file_manager = opened.append
+    gui.append_log = logs.append
+
+    TranslatorGUI.open_output_folder(gui)
+
+    expected = output_root / "Glossary" / "Raw Novel"
+    assert expected.is_dir()
+    assert opened == [str(expected.resolve())]
+    assert "Parallel EPUB Pair glossary folder" in logs[-1]

@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
 
 
 DEFAULT_PARALLEL_EPUB_PROFILE = "Parallel EPUB Glossary"
+PARALLEL_EPUB_SELECTION_CONFIG_KEY = "parallel_epub_pair_selection"
 
 DEFAULT_PARALLEL_EPUB_WRAPPER_PROMPT = """\
 [RAW EPUB START — {raw_filename}]
@@ -63,9 +64,21 @@ PARALLEL_EPUB_SYSTEM_INSTRUCTIONS = """\
 PAIR-SPECIFIC INSTRUCTIONS:
 - You are cross-checking aligned HTML chapters from a raw/source-language EPUB and an existing translated EPUB.
 - Every user input contains one or more mapped raw/translated chapter pairs. Treat each RAW EPUB section as the authority for raw_name and its matching TRANSLATED EPUB section as the authority for established translated_name spellings.
-- Cross-check both sections before creating each entry. When the translated section contains the matching name or term, copy its established rendering exactly; only translate or transliterate it yourself when no usable rendering exists there.
+- Cross-check both sections before creating each entry. Only output an entry when its matching established rendering is present in the translated section, and copy that rendering exactly. If the translated section does not provide a verifiable matching rendering, skip the entry entirely; never invent one yourself.
 - Use the paired context to recover entries that one edition makes implicit, but never invent an entry or translation unsupported by either section.
 - The pair-specific rules above take priority if the general glossary rules below would otherwise make you ignore the supplied translated edition."""
+
+
+def parallel_epub_working_filename(raw_path: str) -> str:
+    """Keep the raw EPUB basename so glossary output uses its normal folder."""
+
+    source_name = os.path.basename(str(raw_path or "").strip())
+    stem, extension = os.path.splitext(source_name)
+    if not stem:
+        stem = "raw_epub"
+    if extension.lower() != ".epub":
+        return f"{stem}.epub"
+    return source_name
 
 
 def default_parallel_epub_system_prompt() -> str:
@@ -91,6 +104,131 @@ def chapter_text(chapter) -> str:
     if isinstance(chapter, (tuple, list)) and chapter:
         return str(chapter[0] or "")
     return str(chapter or "")
+
+
+def compact_parallel_epub_selection(result: dict) -> dict:
+    """Return the persistent, text-free representation of a mapped pair."""
+
+    mappings = []
+    for ordinal, pair in enumerate(result.get("pairs") or []):
+        if not isinstance(pair, dict):
+            continue
+        raw_filename = str(pair.get("raw_filename") or "")
+        translated_filename = str(pair.get("translated_filename") or "")
+        if not raw_filename or not translated_filename:
+            continue
+        try:
+            raw_index = int(pair.get("raw_index", ordinal))
+        except (TypeError, ValueError):
+            raw_index = ordinal
+        try:
+            translated_index = int(pair.get("translated_index", ordinal))
+        except (TypeError, ValueError):
+            translated_index = ordinal
+        mappings.append(
+            {
+                "raw_index": raw_index,
+                "translated_index": translated_index,
+                "raw_filename": raw_filename,
+                "translated_filename": translated_filename,
+            }
+        )
+
+    return {
+        "version": 1,
+        "raw_path": os.path.abspath(str(result.get("raw_path") or "")),
+        "translated_path": os.path.abspath(
+            str(result.get("translated_path") or "")
+        ),
+        "mapping": mappings,
+        "wrapper_prompt": str(result.get("wrapper_prompt") or ""),
+        "system_prompt": str(result.get("system_prompt") or ""),
+        "profile_name": str(
+            result.get("profile_name") or DEFAULT_PARALLEL_EPUB_PROFILE
+        ),
+    }
+
+
+def restore_parallel_epub_pairs(
+    raw_chapters: Sequence,
+    translated_chapters: Sequence,
+    stored_mapping: Sequence,
+) -> tuple[List[Dict[str, object]], int]:
+    """Reattach saved filename mappings to freshly extracted chapter text.
+
+    Stored indexes are used only when the filename at that index still agrees.
+    Filename lookup is the fallback, so a harmless EPUB reading-order change does
+    not destroy the saved mapping. Missing or duplicate references are skipped
+    and returned as the second value.
+    """
+
+    raw_used = set()
+    translated_used = set()
+
+    def resolve_index(chapters, saved_index, saved_filename, used):
+        expected = str(saved_filename or "")
+        expected_key = expected.replace("\\", "/").casefold()
+        try:
+            candidate = int(saved_index)
+        except (TypeError, ValueError):
+            candidate = -1
+        if (
+            0 <= candidate < len(chapters)
+            and candidate not in used
+            and chapter_filename(chapters[candidate])
+            .replace("\\", "/")
+            .casefold()
+            == expected_key
+        ):
+            return candidate
+        for index, chapter in enumerate(chapters):
+            if index in used:
+                continue
+            if (
+                chapter_filename(chapter).replace("\\", "/").casefold()
+                == expected_key
+            ):
+                return index
+        return None
+
+    restored = []
+    skipped = 0
+    for entry in stored_mapping or []:
+        if not isinstance(entry, dict):
+            skipped += 1
+            continue
+        raw_index = resolve_index(
+            raw_chapters,
+            entry.get("raw_index"),
+            entry.get("raw_filename"),
+            raw_used,
+        )
+        translated_index = resolve_index(
+            translated_chapters,
+            entry.get("translated_index"),
+            entry.get("translated_filename"),
+            translated_used,
+        )
+        if raw_index is None or translated_index is None:
+            skipped += 1
+            continue
+        raw_used.add(raw_index)
+        translated_used.add(translated_index)
+        restored.append(
+            {
+                "raw_index": raw_index,
+                "translated_index": translated_index,
+                "raw_filename": chapter_filename(raw_chapters[raw_index]),
+                "raw_text": chapter_text(raw_chapters[raw_index]),
+                "translated_filename": chapter_filename(
+                    translated_chapters[translated_index]
+                ),
+                "translated_text": chapter_text(
+                    translated_chapters[translated_index]
+                ),
+            }
+        )
+    return restored, skipped
 
 
 def _normalized_member_stem(filename: str) -> str:
@@ -1507,6 +1645,7 @@ class ParallelEpubPairDialog(QDialog):
             pairs.append(
                 {
                     "raw_index": item["raw_index"],
+                    "translated_index": item["translated_index"],
                     "raw_filename": raw["filename"],
                     "raw_text": raw["text"],
                     "translated_filename": translated["filename"],

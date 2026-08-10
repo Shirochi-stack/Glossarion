@@ -700,6 +700,19 @@ def _filter_glossary_source_chapter_map(
     return filtered_map, filtered_spine_map
 
 
+def _parallel_glossary_progress_filename_aliases(source_filenames):
+    """Map generated pair_NNNN chapter names onto displayed raw rows."""
+
+    aliases = {}
+    for mapped_index, source_filename in enumerate(source_filenames or []):
+        if not source_filename:
+            continue
+        generated_filename = f"pair_{mapped_index + 1:04d}.xhtml"
+        for key in _glossary_progress_filename_keys(generated_filename):
+            aliases[key] = mapped_index
+    return aliases
+
+
 def _map_zero_based_glossary_progress_index(value, progress_data, filename_key_to_index):
     """Map an extraction-list index onto the full OPF progress-manager view."""
     try:
@@ -14976,6 +14989,17 @@ class RetranslationMixin:
                         fk_to_ci.setdefault(key, ci)
                     if lookup_idx and lookup_idx % 200 == 0:
                         _pump_loading_frame()
+                # Parallel extraction runs against a temporary EPUB whose
+                # chapters are named pair_0001.xhtml, pair_0002.xhtml, etc.
+                # The Progress Manager intentionally displays the mapped raw
+                # filenames instead, so bridge those two identities by their
+                # stable mapped order. This lets both structured chapter
+                # entries and top-level completed/in-progress arrays resolve.
+                fk_to_ci.update(
+                    _parallel_glossary_progress_filename_aliases(
+                        glossary_progress_source_filenames
+                    )
+                )
                 panel_state['_fk_to_ci'] = fk_to_ci
                 # actual_num (from filename) -> list of chapter indices
                 anum_to_ci = {}

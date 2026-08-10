@@ -28,8 +28,11 @@ from parallel_epub_glossary import (
     PARALLEL_EPUB_SYSTEM_INSTRUCTIONS,
     apply_parallel_epub_wrapper,
     auto_map_epub_chapters,
+    compact_parallel_epub_selection,
     default_parallel_epub_system_prompt,
+    parallel_epub_working_filename,
     ParallelEpubPairDialog,
+    restore_parallel_epub_pairs,
     write_parallel_epub,
 )
 from glossary_refinement import (
@@ -375,6 +378,15 @@ def test_parallel_epub_prompt_prepends_pair_rules_to_canonical_prompt_verbatim()
     )
 
 
+def test_parallel_epub_prompt_requires_verified_translated_renderings():
+    prompt = default_parallel_epub_system_prompt()
+
+    assert "only translate or transliterate it yourself" not in prompt
+    assert "skip the entry entirely" in prompt
+    assert "never invent one yourself" in prompt
+    assert "never translate, transliterate, normalize, improve" not in prompt
+
+
 def test_parallel_epub_auto_map_prefers_name_then_number_then_reading_order():
     raw = [
         ("raw prologue", "prologue.xhtml"),
@@ -513,6 +525,98 @@ def test_parallel_epub_wrapper_preserves_unrelated_braces():
     assert result == (
         "raw.xhtml\n原文\ntranslated.xhtml\nTranslation\nKeep {custom_field}"
     )
+
+
+def test_parallel_epub_working_filename_preserves_raw_epub_name():
+    assert parallel_epub_working_filename(
+        "C:/Books/source-novel.epub"
+    ) == "source-novel.epub"
+    assert parallel_epub_working_filename("raw novel") == "raw novel.epub"
+
+
+def test_parallel_epub_persistent_selection_excludes_extracted_text(tmp_path):
+    result = {
+        "raw_path": str(tmp_path / "raw.epub"),
+        "translated_path": str(tmp_path / "translated.epub"),
+        "wrapper_prompt": "{raw_text}\n{translated_text}",
+        "system_prompt": "Cross-check both editions.",
+        "profile_name": "Pair profile",
+        "pairs": [
+            {
+                "raw_index": 4,
+                "translated_index": 7,
+                "raw_filename": "Text/chapter0005.xhtml",
+                "raw_text": "large raw chapter that must not enter config",
+                "translated_filename": "Text/0005_Chapter.xhtml",
+                "translated_text": "large translated chapter that must not enter config",
+            }
+        ],
+    }
+
+    saved = compact_parallel_epub_selection(result)
+
+    assert saved["raw_path"] == os.path.abspath(result["raw_path"])
+    assert saved["translated_path"] == os.path.abspath(result["translated_path"])
+    assert saved["mapping"] == [
+        {
+            "raw_index": 4,
+            "translated_index": 7,
+            "raw_filename": "Text/chapter0005.xhtml",
+            "translated_filename": "Text/0005_Chapter.xhtml",
+        }
+    ]
+    serialized = json.dumps(saved)
+    assert "large raw chapter" not in serialized
+    assert "large translated chapter" not in serialized
+
+
+def test_parallel_epub_saved_mapping_restores_by_filename_after_reordering():
+    raw_chapters = [
+        ("raw chapter two", "Text/chapter0002.xhtml"),
+        ("raw chapter one", "Text/chapter0001.xhtml"),
+    ]
+    translated_chapters = [
+        ("translated chapter one", "Text/0001_Chapter.xhtml"),
+        ("translated chapter two", "Text/0002_Chapter.xhtml"),
+    ]
+    stored_mapping = [
+        {
+            "raw_index": 0,
+            "translated_index": 0,
+            "raw_filename": "Text/chapter0001.xhtml",
+            "translated_filename": "Text/0001_Chapter.xhtml",
+        },
+        {
+            "raw_index": 1,
+            "translated_index": 1,
+            "raw_filename": "Text/chapter0002.xhtml",
+            "translated_filename": "Text/0002_Chapter.xhtml",
+        },
+        {
+            "raw_index": 2,
+            "translated_index": 2,
+            "raw_filename": "Text/deleted.xhtml",
+            "translated_filename": "Text/deleted.xhtml",
+        },
+    ]
+
+    restored, skipped = restore_parallel_epub_pairs(
+        raw_chapters, translated_chapters, stored_mapping
+    )
+
+    assert skipped == 1
+    assert [pair["raw_filename"] for pair in restored] == [
+        "Text/chapter0001.xhtml",
+        "Text/chapter0002.xhtml",
+    ]
+    assert [pair["raw_text"] for pair in restored] == [
+        "raw chapter one",
+        "raw chapter two",
+    ]
+    assert [pair["translated_text"] for pair in restored] == [
+        "translated chapter one",
+        "translated chapter two",
+    ]
 
 
 def test_parallel_epub_round_trips_through_shared_extractor(tmp_path, monkeypatch):

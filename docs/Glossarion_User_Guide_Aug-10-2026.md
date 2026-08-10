@@ -404,7 +404,11 @@ Glossarion aligns their HTML chapters and sends each mapped raw/translated pair 
 5. Correct any questionable row with its **Translated HTML** dropdown. The mouse wheel scrolls the table without accidentally changing a dropdown; click the dropdown when you actually want to change it.
 6. Click **Use Mapped Pair**. The main window will show the two EPUB names and the number of mapped HTML files.
 7. Click **Extract Glossary** and use the normal glossary extraction settings.
-8. While extraction is running, **Progress Manager** remains available. It opens the original raw EPUB as the source, while **Glossary Progress** reads the paired extraction's progress and shows only mapped raw HTML files. Intentionally unmapped raw files and unused translated files remain skipped.
+8. While extraction is running, **Progress Manager** remains available. It opens the original raw EPUB as the source, while **Glossary Progress** reads the paired extraction's progress and shows only mapped raw HTML files. Intentionally unmapped raw files and unused translated files remain skipped. Glossary files and progress use the same normal `Glossary/<raw EPUB name>/` subfolder that a regular extraction from the raw EPUB would use; no `_parallel_epub_pair` output folder is created.
+
+After **Use Mapped Pair**, Glossarion saves the two real EPUB paths and the filename-to-filename mapping in `config.json`. On the next launch it restores the pair in the background and recreates the temporary working EPUB. Extracted chapter text and temporary file paths are not stored in the config. If either source EPUB was moved or deleted, the log explains why the saved pair could not be restored.
+
+While a Parallel EPUB Pair is selected, the main **Open Output Folder** button opens `Glossary/<raw EPUB name>/`. Glossarion creates that book-specific glossary folder first if it does not exist, and respects the configured output-directory override.
 
 **Mapping controls:**
 
@@ -434,7 +438,7 @@ Before continuing, the confirmation dialog reports three separate values: mapped
 **Prompts and profiles:**
 
 - **Pair Wrapper Prompt** controls how each raw/translated chapter pair is labeled. Its available placeholders are `{raw_text}`, `{translated_text}`, `{raw_filename}`, and `{translated_filename}`. Keep both text placeholders or Glossarion will refuse to continue.
-- **Parallel EPUB Glossary System Prompt** controls the extraction instructions. Its default profile starts with pair-specific cross-checking rules and then includes the normal **Extract Glossary from EPUB** system prompt.
+- **Parallel EPUB Glossary System Prompt** controls the extraction instructions. Its default profile starts with pair-specific cross-checking rules and then includes the normal **Extract Glossary from EPUB** system prompt. It only permits entries whose established rendering can be verified in the translated EPUB; missing renderings are skipped, and the AI is told never to invent one itself.
 - Use **+ New Profile**, **Save Profile**, and **Reset Profile** to maintain specialized pair-extraction instructions without changing the ordinary glossary prompt.
 
 ### 8.4 Auto-Mapping vs. Auto-Fill (don't mix these up)
