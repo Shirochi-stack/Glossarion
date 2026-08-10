@@ -36,6 +36,7 @@ from scan_html_folder import (
     extract_epub_quotation_info,
     extract_html_word_counts,
     generate_reports,
+    has_repeating_sentences,
     process_html_file_batch,
     run_ai_truncation_check,
     scan_html_folder,
@@ -277,6 +278,84 @@ def test_qa_scan_cross_references_standalone_html_source_end_to_end(tmp_path, mo
     assert word_count_check["found_match"] is True
     assert word_count_check["original_file"] == source_path.name
     assert word_count_check["ratio"] == 1.0
+
+
+def test_repetition_check_allows_same_repetition_count_in_cjk_source():
+    source_sentence = "これは作者が意図して何度も繰り返している十分に長い原文の一文です"
+    translated_sentence = (
+        "This is an intentionally repeated translated sentence with enough "
+        "content to qualify for repetition checking"
+    )
+
+    source_text = "。".join([source_sentence] * 10) + "。"
+    translated_text = ". ".join([translated_sentence] * 10) + "."
+
+    assert has_repeating_sentences(translated_text, source_text=source_text) is False
+
+
+def test_repetition_check_flags_repetition_beyond_source_count():
+    source_sentence = "これは作者が意図して何度も繰り返している十分に長い原文の一文です"
+    translated_sentence = (
+        "This is an intentionally repeated translated sentence with enough "
+        "content to qualify for repetition checking"
+    )
+
+    source_text = "。".join([source_sentence] * 10) + "。"
+    translated_text = ". ".join([translated_sentence] * 11) + "."
+
+    assert has_repeating_sentences(translated_text, source_text=source_text) is True
+
+
+def test_qa_scan_uses_standalone_source_html_for_repetition_allowance(tmp_path):
+    source_sentence = "これは作者が意図して何度も繰り返している十分に長い原文の一文です。"
+    translated_sentence = (
+        "This is an intentionally repeated translated sentence with enough "
+        "content to qualify for repetition checking."
+    )
+    source_path = tmp_path / "chapter0003.html"
+    source_path.write_text(
+        "<html><body>" + "".join(f"<p>{source_sentence}</p>" for _ in range(10)) + "</body></html>",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "translated"
+    output_dir.mkdir()
+    (output_dir / "response_chapter0003.xhtml").write_text(
+        "<html><body>" + "".join(f"<p>{translated_sentence}</p>" for _ in range(10)) + "</body></html>",
+        encoding="utf-8",
+    )
+    settings = default_qa_scan_settings()
+    settings.update({
+        "check_repetition": True,
+        "check_word_count_ratio": False,
+        "check_missing_images": False,
+        "check_punctuation_mismatch": False,
+        "check_quotation_mismatch": False,
+        "check_silent_truncation": False,
+        "check_ai_truncation_detection": False,
+        "check_multiple_headers": False,
+        "check_translation_artifacts": False,
+        "check_glossary_leakage": False,
+        "use_thread_executor": True,
+    })
+
+    scan_html_folder(
+        str(output_dir),
+        log=lambda _message: None,
+        mode="quick-scan",
+        qa_settings=settings,
+        epub_path=str(source_path),
+    )
+
+    report_path = (
+        output_dir
+        / f"{output_dir.name}_Scan Report"
+        / "validation_results.json"
+    )
+    results = json.loads(report_path.read_text(encoding="utf-8"))
+    translated_result = next(
+        row for row in results if row["filename"] == "response_chapter0003.xhtml"
+    )
+    assert "excessive_repetition" not in translated_result["issues"]
 
 
 def test_html_entity_decoder_basic_entities():

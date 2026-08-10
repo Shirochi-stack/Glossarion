@@ -1060,20 +1060,79 @@ def has_no_spacing_or_linebreaks(text, space_threshold=0.01, min_text_length=100
     # A single-line file with proper spacing is valid
     return space_ratio < space_threshold and newline_count == 0
 
-def has_repeating_sentences(text, min_repeats=10):
+def _repeating_sentence_counts(text, min_repeats=10, min_sentence_length=50,
+                               ignore_reporting_verbs=False):
+    """Return repetition counts for each sentence that crosses the threshold."""
+    if not isinstance(text, str) or not text:
+        return []
+
     filtered_text = filter_dash_lines(text)
-    sentences = [s.strip() for s in re.split(r'[.!?]+', filtered_text) 
-                 if s.strip() and len(s.strip()) > 20]
-    
+    # Include CJK sentence terminators so Japanese/Chinese source chapters can
+    # provide the same repetition allowance as an English translation.
+    sentences = []
+    for sentence in re.split(r'[.!?\u3002\uff01\uff1f]+', filtered_text):
+        normalized = re.sub(r'\s+', ' ', sentence).strip()
+        if len(normalized) >= min_sentence_length:
+            sentences.append(normalized)
+
     if len(sentences) < min_repeats:
+        return []
+
+    counts = []
+    for sentence, count in Counter(sentences).items():
+        if count < min_repeats:
+            continue
+        if ignore_reporting_verbs and any(
+                pattern in sentence.lower()
+                for pattern in ('said', 'asked', 'replied', 'thought')):
+            continue
+        counts.append(count)
+    return sorted(counts, reverse=True)
+
+
+def has_repeating_sentences(text, min_repeats=10, source_text=None):
+    """Detect excessive translated repetition relative to the source chapter.
+
+    Each qualifying repeated sentence in the source can account for one
+    repeated sentence in the translation with an equal or lower count. This
+    keeps intentional author repetition from being reported while still
+    catching repetition introduced (or amplified) by the translation.
+
+    If no matching source text is available, the original translation-only
+    behavior is retained.
+    """
+    translated_counts = _repeating_sentence_counts(
+        text,
+        min_repeats=min_repeats,
+        min_sentence_length=51,
+        ignore_reporting_verbs=True,
+    )
+    if not translated_counts:
         return False
-    
-    counter = Counter(sentences)
-    
-    for sent, count in counter.items():
-        if count >= min_repeats and len(sent) > 50:
-            if not any(pattern in sent.lower() for pattern in ['said', 'asked', 'replied', 'thought']):
-                return True
+    if not source_text:
+        return True
+
+    # Source-language sentences, especially CJK sentences, are often much
+    # shorter than their translated equivalents, so keep the historical
+    # 20-character floor for source allowances.
+    source_counts = _repeating_sentence_counts(
+        source_text,
+        min_repeats=min_repeats,
+        min_sentence_length=21,
+    )
+    unmatched_source_counts = list(source_counts)
+    for translated_count in translated_counts:
+        matching_index = next(
+            (
+                index
+                for index, source_count in enumerate(unmatched_source_counts)
+                if source_count >= translated_count
+            ),
+            None,
+        )
+        if matching_index is None:
+            return True
+        unmatched_source_counts.pop(matching_index)
     return False
 
 def is_korean_separator_pattern(text, excluded_chars=None):
@@ -5757,7 +5816,7 @@ def extract_html_word_counts(html_path, log=print, min_file_length=0):
 def extract_epub_html_content(epub_path, log=print):
     """Extract raw HTML content for each chapter from the original EPUB using spine order.
     
-    Used by silent truncation detection to compare source paragraphs with translated output.
+    Used by source-aware QA checks to compare source chapters with translated output.
     Follows the same spine-order pattern as extract_epub_word_counts / extract_epub_image_info.
     
     Returns:
@@ -5782,7 +5841,7 @@ def extract_epub_html_content(epub_path, log=print):
                     'filename': os.path.basename(file_path),
                 }
             except Exception as e:
-                log(f"⚠️ Could not read HTML file {file_path} for truncation detection: {e}")
+                log(f"⚠️ Could not read source HTML file {file_path}: {e}")
 
         return fallback_contents
 
@@ -5802,7 +5861,7 @@ def extract_epub_html_content(epub_path, log=print):
                     break
 
             if not content_opf_data:
-                log("⚠️ Could not find content.opf for truncation detection")
+                log("⚠️ Could not find content.opf while extracting source HTML")
                 return _fallback_extract_html_files(zf)
 
             soup_opf = BeautifulSoup(content_opf_data, 'xml')
@@ -5859,7 +5918,7 @@ def extract_epub_html_content(epub_path, log=print):
         return html_contents
 
     except Exception as e:
-        log(f"⚠️ Error extracting EPUB HTML content for truncation detection: {e}")
+        log(f"⚠️ Error extracting source HTML content from EPUB: {e}")
         return {}
 
 
@@ -9254,16 +9313,17 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         else:
             log("   No source chapters available for quotation comparison")
     
-    # Extract HTML content from EPUB if silent truncation check OR AI truncation is enabled
+    # Extract source HTML when a source-aware check needs chapter content.
     check_truncation = qa_settings.get('check_silent_truncation', False)
     check_ai_truncation = qa_settings.get('check_ai_truncation_detection', False)
-    _need_source_html = check_truncation or check_ai_truncation
+    check_repetition = qa_settings.get('check_repetition', True)
+    _need_source_html = check_truncation or check_ai_truncation or check_repetition
     if _need_source_html:
         if text_file_mode:
             # For text file mode, extract from word_count folder
             word_count_folder = os.path.join(folder_path, 'word_count')
             if os.path.exists(word_count_folder):
-                log(f"🔍 Extracting source HTML content from word_count folder for truncation detection")
+                log(f"🔍 Extracting source HTML content from word_count folder for source comparison")
                 chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]
                 for chunk_file in chunk_files:
                     chunk_path = os.path.join(word_count_folder, chunk_file)
@@ -9274,11 +9334,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                                 'filename': chunk_file
                             }
                     except Exception as e:
-                        log(f"   ⚠️ Could not read {chunk_file} for truncation detection: {e}")
+                        log(f"   ⚠️ Could not read {chunk_file} for source comparison: {e}")
                 if original_html_content:
                     log(f"   Loaded HTML content for {len(original_html_content)} source chunks")
             else:
-                log("   ⚠️ No word_count folder found for truncation detection in text mode")
+                log("   ⚠️ No word_count folder found for source comparison in text mode")
         elif standalone_html_source and os.path.exists(epub_path):
             try:
                 with open(epub_path, 'r', encoding='utf-8', errors='ignore') as source_file:
@@ -9289,21 +9349,22 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         'filename': os.path.basename(epub_path),
                     }
                 }
-                log("🔍 Loaded standalone HTML source for truncation detection")
+                log("🔍 Loaded standalone HTML source for source comparison")
             except Exception as exc:
-                log(f"   ⚠️ Could not read standalone HTML source for truncation detection: {exc}")
+                log(f"   ⚠️ Could not read standalone HTML source for source comparison: {exc}")
         elif epub_path and os.path.exists(epub_path):
-            truncation_source_epub_path = source_text_epub_path
+            html_source_epub_path = source_text_epub_path
             if check_ai_truncation:
                 truncation_qa_settings = dict(qa_settings)
                 truncation_qa_settings['_qa_context'] = 'qa_truncation'
-                truncation_source_epub_path = _resolve_vision_ocr_qa_source_epub(epub_path, truncation_qa_settings)
-            log(f"🔍 Extracting source HTML content from EPUB for truncation detection: {os.path.basename(truncation_source_epub_path)}")
-            original_html_content = extract_epub_html_content(truncation_source_epub_path, log)
+                html_source_epub_path = _resolve_vision_ocr_qa_source_epub(epub_path, truncation_qa_settings)
+            log(f"🔍 Extracting source HTML content from EPUB for source comparison: {os.path.basename(html_source_epub_path)}")
+            original_html_content = extract_epub_html_content(html_source_epub_path, log)
         else:
-            log("⚠️ Truncation check(s) enabled but no source file provided - skipping")
-            check_truncation = False
-            check_ai_truncation = False
+            if check_truncation or check_ai_truncation:
+                log("⚠️ Truncation check(s) enabled but no source file provided - skipping")
+                check_truncation = False
+                check_ai_truncation = False
 
     if _need_source_word_counts:
         if text_file_mode:
@@ -9983,6 +10044,24 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     
     # Process results and check for additional issues
     log("\n📊 Checking for other issues...")
+
+    # Build the source lookup once. Repetition is language-independent here:
+    # only each repeated sentence's occurrence count is compared, because the
+    # source and translated sentence text naturally cannot be equal.
+    source_repetition_text_by_basename = {}
+    if check_repetition and original_html_content:
+        for source_info in original_html_content.values():
+            if not isinstance(source_info, dict):
+                continue
+            source_filename = os.path.basename(str(source_info.get('filename', ''))).lower()
+            source_basename = _strip_html_like_extensions(source_filename)
+            if source_basename.startswith('response_'):
+                source_basename = source_basename[9:]
+            source_html = source_info.get('html')
+            if source_basename and source_html:
+                source_repetition_text_by_basename[source_basename] = (
+                    _visible_text_for_quotation_check(source_html)
+                )
     
     # Group files by duplicate group
     groups = {}
@@ -10066,8 +10145,16 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 issues.append("no_spacing_or_linebreaks")
         
         # Repetitive content
-        if qa_settings.get('check_repetition', True):
-            if has_repeating_sentences(raw_text):
+        if check_repetition:
+            translated_basename = _strip_html_like_extensions(
+                os.path.basename(result['filename']).lower()
+            )
+            if translated_basename.startswith('response_'):
+                translated_basename = translated_basename[9:]
+            matched_source_text = source_repetition_text_by_basename.get(
+                translated_basename
+            )
+            if has_repeating_sentences(raw_text, source_text=matched_source_text):
                 issues.append("excessive_repetition")
         
         # Translation artifacts
