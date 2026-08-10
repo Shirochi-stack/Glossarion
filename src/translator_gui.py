@@ -554,6 +554,72 @@ def _get_disabled_halgakos_icon_path(icon_path: str) -> str:
     except Exception:
         return icon_path.replace('\\', '/')
 
+
+_MODEL_POPUP_STYLE = """
+    QAbstractItemView {
+        background-color: #2d2d2d;
+        alternate-background-color: #333333;
+        color: #f0f0f0;
+        border: 1px solid #4a5568;
+        outline: 0;
+        padding: 2px;
+        selection-background-color: #5a9fd4;
+        selection-color: white;
+    }
+    QAbstractItemView::item {
+        min-height: 28px;
+        padding: 4px 8px;
+        background-color: #2d2d2d;
+        color: #f0f0f0;
+    }
+    QAbstractItemView::item:hover {
+        background-color: #3d5268;
+        color: white;
+    }
+    QAbstractItemView::item:selected {
+        background-color: #5a9fd4;
+        color: white;
+    }
+    QScrollBar:vertical {
+        background: #242424;
+        width: 12px;
+        margin: 0;
+    }
+    QScrollBar::handle:vertical {
+        background: #586273;
+        min-height: 24px;
+        border-radius: 5px;
+    }
+    QScrollBar::handle:vertical:hover { background: #6b7890; }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+"""
+
+
+def _style_model_popup_view(view):
+    """Force model picker views dark, including top-level Linux completers."""
+    if view is None:
+        return
+    try:
+        from PySide6.QtGui import QPalette
+
+        palette = view.palette()
+        palette.setColor(QPalette.Base, QColor("#2d2d2d"))
+        palette.setColor(QPalette.AlternateBase, QColor("#333333"))
+        palette.setColor(QPalette.Text, QColor("#f0f0f0"))
+        palette.setColor(QPalette.Window, QColor("#2d2d2d"))
+        palette.setColor(QPalette.WindowText, QColor("#f0f0f0"))
+        palette.setColor(QPalette.Highlight, QColor("#5a9fd4"))
+        palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+        view.setPalette(palette)
+        view.setAutoFillBackground(True)
+        view.setStyleSheet(_MODEL_POPUP_STYLE)
+        viewport = view.viewport()
+        if viewport is not None:
+            viewport.setPalette(palette)
+            viewport.setAutoFillBackground(True)
+    except RuntimeError:
+        pass
+
 from model_options import (
     STATIC_ONLY_PROVIDER_PREFIXES,
     due_provider_catalog_for_model,
@@ -20571,11 +20637,16 @@ Recent translations to summarize:
         proxy.setSourceModel(source)
         proxy.sort(0)
 
-        completer = QCompleter()
+        completer = QCompleter(self.model_combo)
         completer.setModel(proxy)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setFilterMode(Qt.MatchContains)
+        completer_popup = completer.popup()
+        completer_popup.setObjectName("modelCompleterPopup")
+        _style_model_popup_view(completer_popup)
         self.model_combo.setCompleter(completer)
+        self.model_combo.view().setObjectName("modelComboPopup")
+        _style_model_popup_view(self.model_combo.view())
 
         # Re-sort proxy whenever the user types
         self.model_combo.lineEdit().textEdited.connect(proxy.set_search_text)
@@ -20645,6 +20716,8 @@ Recent translations to summarize:
                 top: 1px;
             }}
         """)
+        self.model_combo.view().setObjectName("modelComboPopup")
+        _style_model_popup_view(self.model_combo.view())
         self.frame.addWidget(self.model_combo, 1, 1, 1, 1)  # row, col, rowspan, colspan
         
         # Manage Models (cog) button overlaid on the left inside the combo

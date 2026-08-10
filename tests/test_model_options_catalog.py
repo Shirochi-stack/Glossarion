@@ -984,6 +984,19 @@ def test_gui_catalog_refresh_waits_until_model_typing_finishes(monkeypatch):
     harness._model_all_values = list(old_models)
     harness.setup_model_combobox_bindings()
 
+    completer_popup = combo.completer().popup()
+    combo_popup = combo.view()
+    qt_gui = pytest.importorskip("PySide6.QtGui")
+    assert completer_popup.objectName() == "modelCompleterPopup"
+    assert combo_popup.objectName() == "modelComboPopup"
+    assert "background-color: #2d2d2d" in completer_popup.styleSheet()
+    assert "background-color: #2d2d2d" in combo_popup.styleSheet()
+    assert (
+        completer_popup.palette().color(qt_gui.QPalette.Base).name()
+        == "#2d2d2d"
+    )
+    assert completer_popup.palette().color(qt_gui.QPalette.Text).name() == "#f0f0f0"
+
     window.show()
     window.activateWindow()
     editor = combo.lineEdit()
