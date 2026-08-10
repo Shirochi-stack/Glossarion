@@ -7,7 +7,12 @@ import zipfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QDialogButtonBox, QMessageBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialogButtonBox,
+    QMessageBox,
+    QStyleOptionViewItem,
+)
 
 from extract_glossary_from_epub import (
     DEFAULT_GLOSSARY_PROMPT,
@@ -638,12 +643,15 @@ def test_parallel_epub_mapping_combos_lock_wheel_use_icon_and_support_offsets():
     dialog._apply_loaded_epub(
         "translated", "translated.epub", translated_chapters
     )
+    assert dialog._mapping_building
+    assert dialog.use_pair_button.text() == "Mapping..."
     deadline = time.monotonic() + 3
     while dialog._mapping_building and time.monotonic() < deadline:
         app.processEvents()
         time.sleep(0.01)
 
     assert not dialog._mapping_building
+    assert dialog.use_pair_button.text() == "Use Mapped Pair"
     assert dialog.offset_down_button.text() == "\N{MINUS SIGN} Offset"
     assert dialog.offset_up_button.text() == "+ Offset"
     assert dialog._selected_mapping() == [
@@ -652,7 +660,15 @@ def test_parallel_epub_mapping_combos_lock_wheel_use_icon_and_support_offsets():
         {"raw_index": 2, "translated_index": 2},
     ]
 
-    combo = dialog.mapping_table.cellWidget(0, 1)
+    assert dialog.mapping_table.cellWidget(0, 1) is None
+    mapping_index = dialog.mapping_table.model().index(0, 1)
+    combo = dialog._mapping_delegate.createEditor(
+        dialog.mapping_table.viewport(),
+        QStyleOptionViewItem(),
+        mapping_index,
+    )
+    dialog._mapping_delegate.setEditorData(combo, mapping_index)
+    assert combo.currentIndex() == 1
 
     class WheelEvent:
         ignored = False
@@ -665,6 +681,7 @@ def test_parallel_epub_mapping_combos_lock_wheel_use_icon_and_support_offsets():
     assert wheel_event.ignored
     assert combo.objectName() == "parallelMappingCombo"
     assert "Halgakos.ico" in dialog.styleSheet()
+    combo.deleteLater()
 
     dialog._apply_mapping_offset(1)
     assert dialog._mapping_offset == 1

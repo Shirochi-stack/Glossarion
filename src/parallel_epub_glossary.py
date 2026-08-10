@@ -19,7 +19,9 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from ebooklib import epub
 from PySide6.QtCore import QStringListModel, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -36,6 +38,8 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSplitter,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -459,6 +463,71 @@ class _EpubDropZone(QFrame):
         self._refresh_visuals()
 
 
+class _MappingComboDelegate(QStyledItemDelegate):
+    """Paint lightweight dropdown cells and create one combo only while editing."""
+
+    def __init__(self, dialog):
+        super().__init__(dialog.mapping_table)
+        self.dialog = dialog
+        icon_path = Path(__file__).with_name("Halgakos.ico")
+        self.arrow_icon = QIcon(str(icon_path)) if icon_path.is_file() else QIcon()
+
+    def paint(self, painter, option, index):
+        text_option = QStyleOptionViewItem(option)
+        text_option.rect.adjust(0, 0, -26, 0)
+        super().paint(painter, text_option, index)
+        painter.save()
+        divider_x = option.rect.right() - 25
+        painter.setPen(QColor("#4a5568"))
+        painter.drawLine(
+            divider_x,
+            option.rect.top() + 2,
+            divider_x,
+            option.rect.bottom() - 2,
+        )
+        if not self.arrow_icon.isNull():
+            pixmap = self.arrow_icon.pixmap(16, 16)
+            painter.drawPixmap(
+                divider_x + 5,
+                option.rect.center().y() - pixmap.height() // 2,
+                pixmap,
+            )
+        painter.restore()
+
+    def createEditor(self, parent, _option, _index):
+        editor = QComboBox(parent)
+        self.dialog._configure_mapping_combo(editor)
+        editor.setModel(self.dialog._translated_mapping_model)
+        editor.activated.connect(lambda _value: self._commit_and_close(editor))
+        return editor
+
+    def setEditorData(self, editor, index):
+        translated_index = index.data(Qt.UserRole)
+        try:
+            translated_index = int(translated_index)
+        except (TypeError, ValueError):
+            translated_index = -1
+        editor.setCurrentIndex(translated_index + 1)
+
+    def setModelData(self, editor, model, index):
+        translated_index = editor.currentIndex() - 1
+        model.setData(index, translated_index, Qt.UserRole)
+        model.setData(
+            index,
+            self.dialog._translated_mapping_label(translated_index),
+            Qt.DisplayRole,
+        )
+        self.dialog._mapping_changed(index.row())
+
+    @staticmethod
+    def updateEditorGeometry(editor, option, _index):
+        editor.setGeometry(option.rect)
+
+    def _commit_and_close(self, editor):
+        self.commitData.emit(editor)
+        self.closeEditor.emit(editor)
+
+
 class ParallelEpubPairDialog(QDialog):
     """Map a raw EPUB's HTML documents to an existing translated EPUB."""
 
@@ -693,6 +762,13 @@ class ParallelEpubPairDialog(QDialog):
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self._mapping_delegate = _MappingComboDelegate(self)
+        self.mapping_table.setItemDelegateForColumn(1, self._mapping_delegate)
+        self.mapping_table.setEditTriggers(
+            QAbstractItemView.CurrentChanged
+            | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.EditKeyPressed
+        )
         mapping_layout.addWidget(self.mapping_table, 1)
         self.auto_offset_checkbox.toggled.connect(self._auto_offset_toggled)
 
@@ -917,6 +993,9 @@ class ParallelEpubPairDialog(QDialog):
         loading = self._active_load is not None or bool(self._pending_loads)
         ready = bool(self.raw_chapters and self.translated_chapters)
         available = ready and not loading and not self._mapping_building
+        self.use_pair_button.setText(
+            "Mapping..." if self._mapping_building else "Use Mapped Pair"
+        )
         self.use_pair_button.setEnabled(available)
         self.auto_map_button.setEnabled(available)
         self.offset_down_button.setEnabled(available)
@@ -946,6 +1025,12 @@ class ParallelEpubPairDialog(QDialog):
             + [chapter["filename"] for chapter in self.translated_chapters]
         )
         self.mapping_table.setRowCount(len(self.raw_chapters))
+        # ResizeToContents recalculates the Match column after every inserted
+        # row and makes large mappings needlessly slow. Freeze it throughout
+        # population and perform one content-based resize after the last row.
+        self.mapping_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.Fixed
+        )
         self.mapping_table.setUpdatesEnabled(True)
         self._mapping_building = True
         self.mapping_status.setText(
@@ -958,7 +1043,7 @@ class ParallelEpubPairDialog(QDialog):
         )
 
     def _populate_mapping_rows(self, build_serial: int, start_row: int):
-        """Build mapping widgets in short slices so the dialog keeps repainting."""
+        """Build lightweight mapping rows in short repaint-friendly slices."""
 
         if build_serial != self._mapping_build_serial:
             return
@@ -973,18 +1058,16 @@ class ParallelEpubPairDialog(QDialog):
             raw_item.setToolTip(raw["filename"])
             self.mapping_table.setItem(row, 0, raw_item)
 
-            combo = QComboBox()
-            self._configure_mapping_combo(combo)
-            # Every row shares one model. Creating a full copy of every
-            # translated filename in every combo is O(n²) and was another
-            # source of visible stalls for books with many HTML files.
-            combo.setModel(self._translated_mapping_model)
             mapped_index = self._auto_mapping[row]["translated_index"]
-            combo.setCurrentIndex(0 if mapped_index is None else int(mapped_index) + 1)
-            combo.currentIndexChanged.connect(
-                lambda _index, mapped_row=row: self._mapping_changed(mapped_row)
+            mapped_index = -1 if mapped_index is None else int(mapped_index)
+            translated_item = QTableWidgetItem(
+                self._translated_mapping_label(mapped_index)
             )
-            self.mapping_table.setCellWidget(row, 1, combo)
+            translated_item.setData(Qt.UserRole, mapped_index)
+            translated_item.setToolTip(
+                "Click to choose a translated HTML file."
+            )
+            self.mapping_table.setItem(row, 1, translated_item)
 
             strategy_item = QTableWidgetItem(str(self._auto_mapping[row]["strategy"]))
             strategy_item.setFlags(strategy_item.flags() & ~Qt.ItemIsEditable)
@@ -1000,6 +1083,9 @@ class ParallelEpubPairDialog(QDialog):
                 ),
             )
             return
+        self.mapping_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeToContents
+        )
         self._mapping_building = False
         self._update_mapping_status()
         self._refresh_load_controls()
@@ -1028,6 +1114,11 @@ class ParallelEpubPairDialog(QDialog):
             "Click to select a translated HTML file; the mouse wheel scrolls the table."
         )
 
+    def _translated_mapping_label(self, translated_index: int) -> str:
+        if 0 <= translated_index < len(self.translated_chapters):
+            return str(self.translated_chapters[translated_index]["filename"])
+        return "— Unmapped —"
+
     def _apply_mapping_offset(self, delta: int):
         """Shift every automatic translated index, keeping overflow unmapped."""
 
@@ -1038,8 +1129,8 @@ class ParallelEpubPairDialog(QDialog):
         # Offset direction follows what the user sees in the raw-row table:
         # +1 moves the existing assignments down one raw row, so each row must
         # select the translated index that was previously one row above it.
-        # Suspend table painting for the whole batch; repainting hundreds of
-        # persistent combo boxes one by one made a simple offset visibly slow.
+        # Suspend table painting for the whole batch so hundreds of mapping
+        # cells can be updated with a single final repaint.
         header = self.mapping_table.horizontalHeader()
         self.mapping_table.setUpdatesEnabled(False)
         # The Match column normally sizes itself to its contents. Temporarily
@@ -1048,8 +1139,8 @@ class ParallelEpubPairDialog(QDialog):
         header.setSectionResizeMode(2, QHeaderView.Fixed)
         try:
             for row, automatic in enumerate(self._auto_mapping):
-                combo = self.mapping_table.cellWidget(row, 1)
-                if combo is None:
+                translated_item = self.mapping_table.item(row, 1)
+                if translated_item is None:
                     continue
                 base_index = automatic.get("translated_index")
                 shifted_index = (
@@ -1058,14 +1149,15 @@ class ParallelEpubPairDialog(QDialog):
                     else int(base_index) - self._mapping_offset
                 )
                 if shifted_index is None or not 0 <= shifted_index < translated_count:
-                    combo_index = 0
+                    translated_index = -1
                     strategy = f"Offset {self._mapping_offset:+d} (unmapped)"
                 else:
-                    combo_index = shifted_index + 1
+                    translated_index = shifted_index
                     strategy = f"Offset {self._mapping_offset:+d}"
-                signals_were_blocked = combo.blockSignals(True)
-                combo.setCurrentIndex(combo_index)
-                combo.blockSignals(signals_were_blocked)
+                translated_item.setData(Qt.UserRole, translated_index)
+                translated_item.setText(
+                    self._translated_mapping_label(translated_index)
+                )
                 strategy_item = self.mapping_table.item(row, 2)
                 if strategy_item is not None:
                     if self._mapping_offset:
@@ -1119,7 +1211,7 @@ class ParallelEpubPairDialog(QDialog):
         menu.exec(self.mapping_table.viewport().mapToGlobal(position))
 
     def _set_rows_unmapped(self, rows: Iterable[int]):
-        """Set several mapping combos to Unmapped in one repaint-safe batch."""
+        """Set several mapping cells to Unmapped in one repaint-safe batch."""
 
         valid_rows = sorted(
             {
@@ -1135,12 +1227,11 @@ class ParallelEpubPairDialog(QDialog):
         header.setSectionResizeMode(2, QHeaderView.Fixed)
         try:
             for row in valid_rows:
-                combo = self.mapping_table.cellWidget(row, 1)
-                if combo is None:
+                translated_item = self.mapping_table.item(row, 1)
+                if translated_item is None:
                     continue
-                signals_were_blocked = combo.blockSignals(True)
-                combo.setCurrentIndex(0)
-                combo.blockSignals(signals_were_blocked)
+                translated_item.setData(Qt.UserRole, -1)
+                translated_item.setText(self._translated_mapping_label(-1))
                 strategy_item = self.mapping_table.item(row, 2)
                 if strategy_item is not None:
                     strategy_item.setText("Manual — Unmapped")
@@ -1153,8 +1244,16 @@ class ParallelEpubPairDialog(QDialog):
     def _selected_mapping(self) -> List[Dict[str, int]]:
         selected = []
         for row in range(self.mapping_table.rowCount()):
-            combo = self.mapping_table.cellWidget(row, 1)
-            translated_index = combo.currentIndex() - 1 if combo is not None else -1
+            translated_item = self.mapping_table.item(row, 1)
+            translated_index = (
+                translated_item.data(Qt.UserRole)
+                if translated_item is not None
+                else -1
+            )
+            try:
+                translated_index = int(translated_index)
+            except (TypeError, ValueError):
+                translated_index = -1
             if translated_index >= 0:
                 selected.append({"raw_index": row, "translated_index": translated_index})
         return selected

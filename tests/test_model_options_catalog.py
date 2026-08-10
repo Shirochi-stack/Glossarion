@@ -991,11 +991,24 @@ def test_gui_catalog_refresh_waits_until_model_typing_finishes(monkeypatch):
     assert combo_popup.objectName() == "modelComboPopup"
     assert "background-color: #2d2d2d" in completer_popup.styleSheet()
     assert "background-color: #2d2d2d" in combo_popup.styleSheet()
+    assert "QAbstractItemView::item {\n        min-height" not in (
+        completer_popup.styleSheet()
+    )
+    assert "padding: 0px 4px" in completer_popup.styleSheet()
+    assert "min-height: 28px" not in completer_popup.styleSheet()
+    assert "selection-background-color: #3d3d3d" in (
+        completer_popup.styleSheet()
+    )
+    assert "background-color: #3d5268" not in completer_popup.styleSheet()
     assert (
         completer_popup.palette().color(qt_gui.QPalette.Base).name()
         == "#2d2d2d"
     )
     assert completer_popup.palette().color(qt_gui.QPalette.Text).name() == "#f0f0f0"
+    assert (
+        completer_popup.palette().color(qt_gui.QPalette.Highlight).name()
+        == "#3d3d3d"
+    )
 
     window.show()
     window.activateWindow()

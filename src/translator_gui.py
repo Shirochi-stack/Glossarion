@@ -563,21 +563,20 @@ _MODEL_POPUP_STYLE = """
         border: 1px solid #4a5568;
         outline: 0;
         padding: 2px;
-        selection-background-color: #5a9fd4;
+        selection-background-color: #3d3d3d;
         selection-color: white;
     }
     QAbstractItemView::item {
-        min-height: 28px;
-        padding: 4px 8px;
+        padding: 0px 4px;
         background-color: #2d2d2d;
         color: #f0f0f0;
     }
     QAbstractItemView::item:hover {
-        background-color: #3d5268;
+        background-color: #3d3d3d;
         color: white;
     }
     QAbstractItemView::item:selected {
-        background-color: #5a9fd4;
+        background-color: #3d3d3d;
         color: white;
     }
     QScrollBar:vertical {
@@ -608,7 +607,7 @@ def _style_model_popup_view(view):
         palette.setColor(QPalette.Text, QColor("#f0f0f0"))
         palette.setColor(QPalette.Window, QColor("#2d2d2d"))
         palette.setColor(QPalette.WindowText, QColor("#f0f0f0"))
-        palette.setColor(QPalette.Highlight, QColor("#5a9fd4"))
+        palette.setColor(QPalette.Highlight, QColor("#3d3d3d"))
         palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
         view.setPalette(palette)
         view.setAutoFillBackground(True)
