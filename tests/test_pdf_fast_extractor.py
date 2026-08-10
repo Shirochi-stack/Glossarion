@@ -191,6 +191,42 @@ def test_fast_semantic_alignment_does_not_center_full_width_paragraphs():
     assert '<p class="pdf-align-center"' not in rendered
 
 
+def test_fast_semantic_matches_bookmark_title_across_pdf_line_wrap_spaces():
+    class _Rect:
+        width = 595.0
+
+    class _Page:
+        rect = _Rect()
+
+        @staticmethod
+        def get_text(_kind, **_kwargs):
+            return [
+                (
+                    150.0,
+                    112.0,
+                    445.0,
+                    145.0,
+                    "결혼 전에 관계를 가지는 건 옳지 않으 니까.",
+                    0,
+                    0,
+                ),
+                (81.0, 186.0, 510.0, 218.0, "본문 문장입니다.", 1, 0),
+            ]
+
+    rendered = _semantic_page_html(
+        _Page(),
+        310,
+        [],
+        "결혼 전에 관계를 가지는 건 옳지 않으니까.",
+    )
+
+    assert (
+        '<h1 style="text-align:center">'
+        '결혼 전에 관계를 가지는 건 옳지 않으 니까.</h1>'
+    ) in rendered
+    assert '<p class="pdf-align-left"' in rendered
+
+
 def test_text_processor_automatically_applies_pdf_image_rename_logic(
         tmp_path, monkeypatch):
     pdf_path = tmp_path / "book.pdf"
@@ -768,9 +804,18 @@ def test_pdf_reader_raw_cache_extracts_only_requested_range_and_invalidates(
     assert "raw page 41" in Path(first).read_text(encoding="utf-8")
     assert "raw page 52" in Path(first).read_text(encoding="utf-8")
 
-    source.write_bytes(b"updated PDF version with an added bookmark")
+    metadata_path = next(
+        (workspace / ".pdf_reader_cache" / "fast_semantic").glob("section_*.json")
+    )
+    stale_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    stale_metadata["version"] = 1
+    metadata_path.write_text(json.dumps(stale_metadata), encoding="utf-8")
     ensure_pdf_raw_section(manifest, entry, extract_images=False)
     assert len(calls) == 2
+
+    source.write_bytes(b"updated PDF version with an added bookmark")
+    ensure_pdf_raw_section(manifest, entry, extract_images=False)
+    assert len(calls) == 3
 
 
 def test_reader_page_range_extractor_never_walks_unrequested_pdf_pages(

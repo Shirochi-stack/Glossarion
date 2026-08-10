@@ -1426,6 +1426,9 @@ def _load_qa_scanner_settings_from_env():
             "check_repetition": _env_bool("QA_CHECK_REPETITION", True),
             "check_translation_artifacts": _env_bool("QA_CHECK_ARTIFACTS", False),
             "check_ai_artifacts": _env_bool("QA_CHECK_AI_ARTIFACTS", False),
+            "ai_artifact_patterns_are_regex": _env_bool(
+                "QA_AI_ARTIFACT_PATTERNS_ARE_REGEX", False
+            ),
             "check_ai_thinking_preamble": _env_bool("QA_CHECK_AI_THINKING_PREAMBLE", False),
             "ai_thinking_preamble_patterns_are_regex": _env_bool(
                 "QA_AI_THINKING_PREAMBLE_PATTERNS_ARE_REGEX", False
@@ -1453,6 +1456,14 @@ def _load_qa_scanner_settings_from_env():
             "check_ai_truncation_detection": _env_bool("QA_CHECK_AI_TRUNCATION_DETECTION", False),
             "check_word_count_ratio": _env_bool("QA_CHECK_WORD_COUNT_RATIO", True),
         }
+        try:
+            artifact_patterns_json = os.getenv("QA_AI_ARTIFACT_PATTERNS_JSON", "")
+            if artifact_patterns_json:
+                parsed_patterns = json.loads(artifact_patterns_json)
+                if isinstance(parsed_patterns, list):
+                    settings["ai_artifact_patterns"] = parsed_patterns
+        except Exception as exc:
+            print(f"Warning: failed to parse QA AI artifact phrases: {exc}")
         try:
             patterns_json = os.getenv("QA_AI_THINKING_PREAMBLE_PATTERNS_JSON", "")
             if patterns_json:

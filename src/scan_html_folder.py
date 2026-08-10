@@ -337,11 +337,38 @@ TRANSLATION_ARTIFACTS = {
     # BeautifulSoup. The shared implementation lives in ``_empty_attr_fix``.
 }
 
-# AI artifact detection patterns (mirrors ContentProcessor.clean_ai_artifacts)
+# User-editable phrases checked at the start of the first non-empty line.
+# Structural patterns, thinking tags and JSON detection remain separate so the
+# phrase editor can be useful without exposing implementation regexes.
+DEFAULT_AI_ARTIFACT_PATTERNS = (
+    'Sure',
+    'Okay',
+    'Understood',
+    'Of course',
+    'Got it',
+    'Alright',
+    'Certainly',
+    "Here's",
+    'Here is',
+    "I'll translate",
+    'I will translate',
+    'Let me translate',
+    'System:',
+    'Assistant:',
+    'AI:',
+    'User:',
+    'Human:',
+    'Model:',
+    'Translation note',
+    'Note',
+    "Here's the translation",
+    "I've translated",
+)
+
+# Non-phrase structural patterns that should always be recognized while the
+# main AI-artifact check is enabled. A normal HTML doctype is intentionally
+# absent: it is document markup, not an AI artifact.
 AI_ARTIFACT_FIRSTLINE_PATTERNS = [
-    re.compile(r'^(?:Sure|Okay|Understood|Of course|Got it|Alright|Certainly|Here\'s|Here is)\b', re.IGNORECASE),
-    # "I'll translate" / "Let me translate" — unambiguously AI preface
-    re.compile(r'^(?:I\'ll|I will|Let me)\s+translate\b', re.IGNORECASE),
     # "I'll help/assist" ONLY when followed by translation-specific context.
     # Bare "I'll help you ..." is far too common in normal prose / dialogue /
     # chapter titles (e.g. "I'll Help You ...") and must NOT be flagged.
@@ -353,9 +380,7 @@ AI_ARTIFACT_FIRSTLINE_PATTERNS = [
         r')\b',
         re.IGNORECASE
     ),
-    re.compile(r'^(?:System|Assistant|AI|User|Human|Model)\s*:', re.IGNORECASE),
     re.compile(r'^\[PART\s+\d+/\d+\]', re.IGNORECASE),
-    re.compile(r'^(?:Translation note|Note|Here\'s the translation|I\'ve translated)\b', re.IGNORECASE),
     re.compile(r'^Translated\\s*[:;]\\s*$', re.IGNORECASE),
     re.compile(r'^(?:I\s+couldn\'t|I\s+couldn’t|I\s+could\s+not|I\s+can\'t|I\s+can’t)\s+translate\b', re.IGNORECASE),
     re.compile(r'^(?:Please\s+provide|Please\s+paste)\s+.*\btranslate\b', re.IGNORECASE),
@@ -364,7 +389,6 @@ AI_ARTIFACT_FIRSTLINE_PATTERNS = [
     re.compile(r'^(?:I\s+couldn\'t|I\s+can\'t)\s+translate.*\bimage\b', re.IGNORECASE),
     re.compile(r'^Please\s+paste\s+the\s+\w+\s+text\b', re.IGNORECASE),
     re.compile(r'^```(?:html|xml|text)?\s*$', re.IGNORECASE),
-    re.compile(r'^<!DOCTYPE', re.IGNORECASE),
 ]
 
 AI_SINGLE_WORD_HEADERS = {
@@ -1295,6 +1319,8 @@ DEFAULT_AI_THINKING_PREAMBLE_PATTERNS = (
 
 def detect_ai_artifacts(
     text,
+    ai_artifact_patterns=None,
+    ai_artifact_patterns_are_regex=False,
     check_ai_thinking_preamble=False,
     ai_thinking_preamble_patterns=None,
     ai_thinking_preamble_patterns_are_regex=False,
@@ -1325,15 +1351,53 @@ def detect_ai_artifacts(
             if word_count > 6 and not re.search(r'\b(translation|translate|here\'s|here is|i\'ll|i will|let me)\b', first_line, re.IGNORECASE):
                 # Looks like regular narrative, not an AI preface
                 first_line = ""
-        for pattern in AI_ARTIFACT_FIRSTLINE_PATTERNS:
-            if pattern.search(first_line):
-                artifacts_found.append({
-                    'type': 'ai_artifact_leading_line',
-                    'count': 1,
-                    'examples': [first_line],
-                    'severity': 'medium'
-                })
+        artifact_patterns = ai_artifact_patterns
+        if artifact_patterns is None:
+            artifact_patterns = DEFAULT_AI_ARTIFACT_PATTERNS
+        if isinstance(artifact_patterns, str):
+            artifact_patterns = artifact_patterns.splitlines()
+
+        matched_leading_artifact = False
+        for pattern in artifact_patterns:
+            pattern = str(pattern).strip()
+            if not pattern:
+                continue
+            try:
+                if ai_artifact_patterns_are_regex:
+                    matched_leading_artifact = re.match(
+                        pattern, first_line, re.IGNORECASE
+                    ) is not None
+                else:
+                    folded_line = first_line.casefold()
+                    folded_pattern = pattern.casefold()
+                    matched_leading_artifact = folded_line.startswith(folded_pattern)
+                    if (
+                        matched_leading_artifact
+                        and folded_pattern[-1].isalnum()
+                        and len(folded_line) > len(folded_pattern)
+                        and folded_line[len(folded_pattern)].isalnum()
+                    ):
+                        matched_leading_artifact = False
+            except re.error:
+                # Invalid expressions should not abort a scan when a config was
+                # edited manually; the GUI validates expressions before save.
+                continue
+            if matched_leading_artifact:
                 break
+
+        if not matched_leading_artifact:
+            matched_leading_artifact = any(
+                pattern.search(first_line)
+                for pattern in AI_ARTIFACT_FIRSTLINE_PATTERNS
+            )
+
+        if matched_leading_artifact:
+            artifacts_found.append({
+                'type': 'ai_artifact_leading_line',
+                'count': 1,
+                'examples': [first_line],
+                'severity': 'medium'
+            })
 
         if first_line.lower() in AI_SINGLE_WORD_HEADERS:
             artifacts_found.append({
@@ -7926,6 +7990,10 @@ def process_html_file_batch(args):
         if check_ai_artifacts:
             ai_artifacts = detect_ai_artifacts(
                 raw_text,
+                ai_artifact_patterns=qa_settings.get('ai_artifact_patterns'),
+                ai_artifact_patterns_are_regex=qa_settings.get(
+                    'ai_artifact_patterns_are_regex', False
+                ),
                 check_ai_thinking_preamble=qa_settings.get(
                     'check_ai_thinking_preamble', False
                 ),
@@ -8862,6 +8930,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_encoding_issues': False,
             'check_repetition': True,
             'check_translation_artifacts': True,
+            'check_ai_artifacts': False,
+            'ai_artifact_patterns': list(DEFAULT_AI_ARTIFACT_PATTERNS),
+            'ai_artifact_patterns_are_regex': False,
             'check_glossary_leakage': True,
             'check_missing_images': True,
             'min_file_length': 0,

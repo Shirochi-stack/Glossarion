@@ -19,6 +19,31 @@ import traceback
 
 from language_options import TARGET_LANGUAGES
 
+DEFAULT_AI_ARTIFACT_PATTERNS = [
+    'Sure',
+    'Okay',
+    'Understood',
+    'Of course',
+    'Got it',
+    'Alright',
+    'Certainly',
+    "Here's",
+    'Here is',
+    "I'll translate",
+    'I will translate',
+    'Let me translate',
+    'System:',
+    'Assistant:',
+    'AI:',
+    'User:',
+    'Human:',
+    'Model:',
+    'Translation note',
+    'Note',
+    "Here's the translation",
+    "I've translated",
+]
+
 DEFAULT_AI_THINKING_PREAMBLE_PATTERNS = [
     'The user wants a ',
     'The user wants me to ',
@@ -515,7 +540,9 @@ class QAScannerMixin:
                     'check_encoding_issues': False,
                     'check_repetition': True,
                     'check_translation_artifacts': True,
-                    'check_ai_artifacts': True,
+                    'check_ai_artifacts': False,
+                    'ai_artifact_patterns': list(DEFAULT_AI_ARTIFACT_PATTERNS),
+                    'ai_artifact_patterns_are_regex': False,
                     'check_ai_thinking_preamble': False,
                     'ai_thinking_preamble_patterns': list(DEFAULT_AI_THINKING_PREAMBLE_PATTERNS),
                     'ai_thinking_preamble_patterns_are_regex': False,
@@ -2909,11 +2936,211 @@ class QAScannerMixin:
             check_artifacts_checkbox.setChecked(qa_settings.get('check_translation_artifacts', True))
             detection_layout.addWidget(check_artifacts_checkbox)
 
-            # Separate toggle for AI artifacts
-            check_ai_artifacts_checkbox = self._create_styled_checkbox("Check for AI artifacts (\"Sure, here’s…\", thinking tags, JSON)")
-            check_ai_artifacts_checkbox.setChecked(qa_settings.get('check_ai_artifacts', True))
-            check_ai_artifacts_checkbox.setContentsMargins(20, 0, 0, 0)
-            detection_layout.addWidget(check_ai_artifacts_checkbox)
+            # Separate toggle and editable leading-phrase list for AI artifacts.
+            ai_artifact_row = QWidget()
+            ai_artifact_layout = QHBoxLayout(ai_artifact_row)
+            ai_artifact_layout.setContentsMargins(20, 0, 0, 0)
+            check_ai_artifacts_checkbox = self._create_styled_checkbox(
+                "Check for AI artifacts (\"Sure, here’s…\", thinking tags, JSON)"
+            )
+            check_ai_artifacts_checkbox.setChecked(
+                qa_settings.get('check_ai_artifacts', False)
+            )
+            ai_artifact_layout.addWidget(check_ai_artifacts_checkbox)
+            edit_ai_artifact_button = QPushButton("Edit phrases…")
+            edit_ai_artifact_button.setToolTip(
+                "View and edit leading phrases that should be flagged"
+            )
+            ai_artifact_layout.addWidget(edit_ai_artifact_button)
+            ai_artifact_layout.addStretch()
+            detection_layout.addWidget(ai_artifact_row)
+
+            ai_artifact_patterns_holder = [list(
+                qa_settings.get(
+                    'ai_artifact_patterns',
+                    DEFAULT_AI_ARTIFACT_PATTERNS,
+                )
+            )]
+            ai_artifact_regex_holder = [bool(
+                qa_settings.get('ai_artifact_patterns_are_regex', False)
+            )]
+
+            def show_ai_artifact_patterns():
+                editor_dialog = getattr(self, '_qa_ai_artifact_patterns_dialog', None)
+                if editor_dialog is None:
+                    editor_dialog = QDialog(self)
+                    editor_dialog.setWindowTitle("AI Artifact Phrases")
+                    editor_dialog.setModal(False)
+                    editor_dialog.setWindowModality(Qt.NonModal)
+                    editor_dialog.setMinimumSize(620, 340)
+                    editor_layout = QVBoxLayout(editor_dialog)
+                    help_label = QLabel(
+                        "Enter one phrase per line. If the first non-empty line starts with any "
+                        "phrase, the scanner will flag it. Capitalization does not matter. "
+                        "Thinking tags, JSON, and code fences are checked separately."
+                    )
+                    help_label.setWordWrap(True)
+                    editor_layout.addWidget(help_label)
+                    pattern_editor = QTextEdit()
+                    pattern_editor.setAcceptRichText(False)
+                    pattern_editor.setPlaceholderText(
+                        "Example:\nSure\nHere's the translation\nI'll translate"
+                    )
+                    editor_layout.addWidget(pattern_editor)
+                    regex_checkbox = self._create_styled_checkbox(
+                        "Advanced: treat each line as a regular expression"
+                    )
+                    regex_checkbox.setToolTip(
+                        "Enable only if you are familiar with Python regular expressions."
+                    )
+                    editor_layout.addWidget(regex_checkbox)
+                    regex_example_label = QLabel(
+                        "Example:  (Sure|Okay)[,:]?\\s+here\\s+is\n"
+                        "Patterns are matched against the beginning of the first non-empty line."
+                    )
+                    regex_example_label.setWordWrap(True)
+                    regex_example_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                    regex_example_label.setStyleSheet(
+                        "color: #b8b8b8; padding: 6px 10px; "
+                        "background-color: #252525; border-radius: 4px;"
+                    )
+                    regex_example_label.setVisible(False)
+                    editor_layout.addWidget(regex_example_label)
+
+                    def toggle_regex_help(enabled):
+                        regex_example_label.setVisible(enabled)
+                        if enabled:
+                            pattern_editor.setPlaceholderText(
+                                "One Python regular expression per line\n"
+                                "Example: (Sure|Okay)[,:]?\\s+here\\s+is"
+                            )
+                        else:
+                            pattern_editor.setPlaceholderText(
+                                "Example:\nSure\nHere's the translation\nI'll translate"
+                            )
+
+                    regex_checkbox.toggled.connect(toggle_regex_help)
+                    status_label = QLabel("")
+                    editor_layout.addWidget(status_label)
+                    button_row = QHBoxLayout()
+                    restore_button = QPushButton("Restore Defaults")
+                    save_button = QPushButton("Save Phrases")
+                    close_button = QPushButton("Close")
+                    button_row.addWidget(restore_button)
+                    button_row.addStretch()
+                    button_row.addWidget(save_button)
+                    button_row.addWidget(close_button)
+                    editor_layout.addLayout(button_row)
+
+                    def save_patterns():
+                        patterns = [
+                            line.strip() for line in pattern_editor.toPlainText().splitlines()
+                            if line.strip()
+                        ]
+                        invalid = []
+                        if regex_checkbox.isChecked():
+                            for line_number, pattern in enumerate(patterns, 1):
+                                try:
+                                    re.compile(pattern, re.IGNORECASE)
+                                except re.error as exc:
+                                    invalid.append(f"Line {line_number}: {exc}")
+                        if invalid:
+                            status_label.setText("❌ " + invalid[0])
+                            QMessageBox.warning(
+                                editor_dialog,
+                                "Invalid Regular Expression",
+                                "The patterns were not saved:\n\n" + "\n".join(invalid),
+                            )
+                            return
+                        ai_artifact_patterns_holder[0] = patterns
+                        ai_artifact_regex_holder[0] = regex_checkbox.isChecked()
+                        qa_settings['ai_artifact_patterns'] = list(patterns)
+                        qa_settings['ai_artifact_patterns_are_regex'] = (
+                            regex_checkbox.isChecked()
+                        )
+                        scanner_settings = self.config.setdefault(
+                            'qa_scanner_settings', {}
+                        )
+                        scanner_settings['ai_artifact_patterns'] = list(patterns)
+                        scanner_settings['ai_artifact_patterns_are_regex'] = (
+                            regex_checkbox.isChecked()
+                        )
+                        noun = "advanced pattern" if regex_checkbox.isChecked() else "phrase"
+                        status_label.setText(f"✅ Saved {len(patterns)} {noun}(s)")
+                        try:
+                            self.save_config(show_message=False)
+                        except Exception as exc:
+                            status_label.setText(f"❌ Could not save configuration: {exc}")
+
+                    def restore_defaults():
+                        confirm_box = QMessageBox(editor_dialog)
+                        confirm_box.setIcon(QMessageBox.Question)
+                        confirm_box.setWindowTitle("Restore Default Phrases?")
+                        confirm_box.setText(
+                            "Replace all phrases currently shown with the default list?"
+                        )
+                        confirm_box.setInformativeText(
+                            "Your saved phrases will not change until you click Save Phrases."
+                        )
+                        confirm_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                        confirm_box.setDefaultButton(QMessageBox.No)
+                        result = confirm_box.exec()
+                        if result != QMessageBox.Yes:
+                            return
+                        pattern_editor.setPlainText(
+                            "\n".join(DEFAULT_AI_ARTIFACT_PATTERNS)
+                        )
+                        regex_checkbox.setChecked(False)
+                        status_label.setText(
+                            "Defaults loaded. Click Save Phrases to keep them."
+                        )
+
+                    restore_button.clicked.connect(restore_defaults)
+                    save_button.clicked.connect(save_patterns)
+                    close_button.clicked.connect(editor_dialog.close)
+
+                    def persist_geometry(_result):
+                        try:
+                            geometry_hex = bytes(
+                                editor_dialog.saveGeometry().toHex()
+                            ).decode('ascii')
+                            self.config[
+                                'qa_ai_artifact_patterns_dialog_geometry'
+                            ] = geometry_hex
+                            self.save_config(show_message=False)
+                        except Exception:
+                            pass
+
+                    editor_dialog.finished.connect(persist_geometry)
+                    editor_dialog._pattern_editor = pattern_editor
+                    editor_dialog._regex_checkbox = regex_checkbox
+                    editor_dialog._status_label = status_label
+                    self._qa_ai_artifact_patterns_dialog = editor_dialog
+
+                editor_dialog._pattern_editor.setPlainText(
+                    "\n".join(ai_artifact_patterns_holder[0])
+                )
+                editor_dialog._regex_checkbox.setChecked(ai_artifact_regex_holder[0])
+                editor_dialog._status_label.setText("")
+                geometry_hex = self.config.get(
+                    'qa_ai_artifact_patterns_dialog_geometry', ''
+                )
+                if geometry_hex and not getattr(
+                    editor_dialog, '_geometry_restored', False
+                ):
+                    try:
+                        from PySide6.QtCore import QByteArray
+                        editor_dialog.restoreGeometry(
+                            QByteArray.fromHex(geometry_hex.encode('ascii'))
+                        )
+                    except Exception:
+                        pass
+                    editor_dialog._geometry_restored = True
+                editor_dialog.show()
+                editor_dialog.raise_()
+                editor_dialog.activateWindow()
+
+            edit_ai_artifact_button.clicked.connect(show_ai_artifact_patterns)
 
             ai_thinking_preamble_row = QWidget()
             ai_thinking_preamble_layout = QHBoxLayout(ai_thinking_preamble_row)
@@ -5156,6 +5383,8 @@ class QAScannerMixin:
                         'check_repetition': (check_repetition_checkbox, lambda x: x.isChecked()),
                         'check_translation_artifacts': (check_artifacts_checkbox, lambda x: x.isChecked()),
                         'check_ai_artifacts': (check_ai_artifacts_checkbox, lambda x: x.isChecked()),
+                        'ai_artifact_patterns': (ai_artifact_patterns_holder, lambda x: list(x[0])),
+                        'ai_artifact_patterns_are_regex': (ai_artifact_regex_holder, lambda x: bool(x[0])),
                         'check_ai_thinking_preamble': (check_ai_thinking_preamble_checkbox, lambda x: x.isChecked()),
                         'ai_thinking_preamble_patterns': (ai_thinking_preamble_patterns_holder, lambda x: list(x[0])),
                         'ai_thinking_preamble_patterns_are_regex': (ai_thinking_preamble_regex_holder, lambda x: bool(x[0])),
@@ -5399,6 +5628,8 @@ class QAScannerMixin:
                             ('QA_CHECK_REPETITION', '1' if qa_settings.get('check_repetition', True) else '0'),
                             ('QA_CHECK_ARTIFACTS', '1' if qa_settings.get('check_translation_artifacts', False) else '0'),
                             ('QA_CHECK_AI_ARTIFACTS', '1' if qa_settings.get('check_ai_artifacts', False) else '0'),
+                            ('QA_AI_ARTIFACT_PATTERNS_JSON', json.dumps(qa_settings.get('ai_artifact_patterns', DEFAULT_AI_ARTIFACT_PATTERNS))),
+                            ('QA_AI_ARTIFACT_PATTERNS_ARE_REGEX', '1' if qa_settings.get('ai_artifact_patterns_are_regex', False) else '0'),
                             ('QA_CHECK_AI_THINKING_PREAMBLE', '1' if qa_settings.get('check_ai_thinking_preamble', False) else '0'),
                             ('QA_AI_THINKING_PREAMBLE_PATTERNS_JSON', json.dumps(qa_settings.get('ai_thinking_preamble_patterns', DEFAULT_AI_THINKING_PREAMBLE_PATTERNS))),
                             ('QA_AI_THINKING_PREAMBLE_PATTERNS_ARE_REGEX', '1' if qa_settings.get('ai_thinking_preamble_patterns_are_regex', False) else '0'),
@@ -5550,7 +5781,7 @@ class QAScannerMixin:
                     ('check_encoding_issues', check_encoding_checkbox, False),
                     ('check_repetition', check_repetition_checkbox, True),
                     ('check_translation_artifacts', check_artifacts_checkbox, True),
-                    ('check_ai_artifacts', check_ai_artifacts_checkbox, True),
+                    ('check_ai_artifacts', check_ai_artifacts_checkbox, False),
                     ('check_ai_thinking_preamble', check_ai_thinking_preamble_checkbox, False),
                     ('check_punctuation_mismatch', check_punctuation_checkbox, False),
                     ('punctuation_loss_threshold', punct_threshold_spinbox, 49),
@@ -5604,6 +5835,16 @@ class QAScannerMixin:
                 )
                 for key, widget, default in simple:
                     _apply(lambda k=key, w=widget, d=default: _set_value(w, s.get(k, d)))
+
+                ai_artifact_patterns_holder[0] = list(
+                    s.get(
+                        'ai_artifact_patterns',
+                        DEFAULT_AI_ARTIFACT_PATTERNS,
+                    )
+                )
+                ai_artifact_regex_holder[0] = bool(
+                    s.get('ai_artifact_patterns_are_regex', False)
+                )
 
                 ai_thinking_preamble_patterns_holder[0] = list(
                     s.get(
@@ -5722,7 +5963,11 @@ class QAScannerMixin:
                     check_encoding_checkbox.setChecked(False)
                     check_repetition_checkbox.setChecked(True)
                     check_artifacts_checkbox.setChecked(True)
-                    check_ai_artifacts_checkbox.setChecked(True)
+                    check_ai_artifacts_checkbox.setChecked(False)
+                    ai_artifact_patterns_holder[0] = list(
+                        DEFAULT_AI_ARTIFACT_PATTERNS
+                    )
+                    ai_artifact_regex_holder[0] = False
                     check_ai_thinking_preamble_checkbox.setChecked(False)
                     ai_thinking_preamble_patterns_holder[0] = list(
                         DEFAULT_AI_THINKING_PREAMBLE_PATTERNS

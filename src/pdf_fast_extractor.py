@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 
-FAST_EXTRACTOR_VERSION = 2
+FAST_EXTRACTOR_VERSION = 3
 FAST_MODES = {"fast_semantic", "fast_layout"}
 
 _PDF_HASH_IMAGE_RE = re.compile(
@@ -594,6 +594,11 @@ def _text_alignment(bbox: Sequence[float], page_width: float) -> str:
     return "left"
 
 
+def _semantic_title_key(value: str) -> str:
+    """Normalize PDF line-wrap whitespace for bookmark-title matching."""
+    return re.sub(r"\s+", "", str(value or "").casefold())
+
+
 def _semantic_page_html(page, page_number: int, images: List[Dict], section_title: str) -> str:
     import fitz
 
@@ -637,7 +642,7 @@ def _semantic_page_html(page, page_number: int, images: List[Dict], section_titl
         )
     events.sort(key=lambda item: (item[0], item[1], item[2], item[3] != "text"))
 
-    title_normalized = " ".join((section_title or "").casefold().split())
+    title_key = _semantic_title_key(section_title)
     title_written = False
     parts = [
         '<!DOCTYPE html><html><head><meta charset="utf-8">',
@@ -658,12 +663,12 @@ def _semantic_page_html(page, page_number: int, images: List[Dict], section_titl
 
         text_value = str(value.get("text") or "")
         escaped = html.escape(text_value)
-        normalized = " ".join(text_value.casefold().split())
+        text_key = _semantic_title_key(text_value)
         alignment = _text_alignment(value.get("bbox") or [], float(page.rect.width))
         is_title = bool(
             not title_written
-            and title_normalized
-            and (normalized == title_normalized or title_normalized in normalized)
+            and title_key
+            and (text_key == title_key or title_key in text_key)
         )
         if is_title:
             parts.append(f'<h1 style="text-align:{alignment}">{escaped}</h1>')
@@ -759,6 +764,8 @@ def _cache_entry_is_usable(cache_root: Path, entry: Dict) -> bool:
     if not cache_file.is_file():
         return False
     result = _load_json(cache_file, {}) or {}
+    if result.get("extractor_version") != FAST_EXTRACTOR_VERSION:
+        return False
     for image_info in result.get("images") or []:
         path = image_info.get("path")
         if path and not os.path.isfile(path):
@@ -837,6 +844,7 @@ def _extract_page_range(args):
             cache_path = _page_cache_path(cache_root, mode, page_number)
             page_result = {
                 "page_number": page_number,
+                "extractor_version": FAST_EXTRACTOR_VERSION,
                 "signature": signature,
                 "html": page_html,
                 "images": images,

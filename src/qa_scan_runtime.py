@@ -27,6 +27,31 @@ CANONICAL_WORD_COUNT_MULTIPLIERS = {
     "other": 1.0,
 }
 
+DEFAULT_AI_ARTIFACT_PATTERNS = [
+    'Sure',
+    'Okay',
+    'Understood',
+    'Of course',
+    'Got it',
+    'Alright',
+    'Certainly',
+    "Here's",
+    'Here is',
+    "I'll translate",
+    'I will translate',
+    'Let me translate',
+    'System:',
+    'Assistant:',
+    'AI:',
+    'User:',
+    'Human:',
+    'Model:',
+    'Translation note',
+    'Note',
+    "Here's the translation",
+    "I've translated",
+]
+
 
 def normalize_target_language(display_text):
     if not display_text:
@@ -79,7 +104,9 @@ def default_qa_scan_settings():
         "check_encoding_issues": False,
         "check_repetition": True,
         "check_translation_artifacts": True,
-        "check_ai_artifacts": True,
+        "check_ai_artifacts": False,
+        "ai_artifact_patterns": list(DEFAULT_AI_ARTIFACT_PATTERNS),
+        "ai_artifact_patterns_are_regex": False,
         "check_ai_thinking_preamble": False,
         "ai_thinking_preamble_patterns": list(DEFAULT_AI_THINKING_PREAMBLE_PATTERNS),
         "ai_thinking_preamble_patterns_are_regex": False,
@@ -209,6 +236,12 @@ def apply_qa_scan_env_from_settings(qa_settings):
         "QA_CHECK_REPETITION": "1" if settings.get("check_repetition", True) else "0",
         "QA_CHECK_ARTIFACTS": "1" if settings.get("check_translation_artifacts", False) else "0",
         "QA_CHECK_AI_ARTIFACTS": "1" if settings.get("check_ai_artifacts", False) else "0",
+        "QA_AI_ARTIFACT_PATTERNS_JSON": json.dumps(
+            settings.get("ai_artifact_patterns", DEFAULT_AI_ARTIFACT_PATTERNS)
+        ),
+        "QA_AI_ARTIFACT_PATTERNS_ARE_REGEX": "1" if settings.get(
+            "ai_artifact_patterns_are_regex", False
+        ) else "0",
         "QA_CHECK_AI_THINKING_PREAMBLE": "1" if settings.get("check_ai_thinking_preamble", False) else "0",
         "QA_AI_THINKING_PREAMBLE_PATTERNS_JSON": json.dumps(
             settings.get("ai_thinking_preamble_patterns", DEFAULT_AI_THINKING_PREAMBLE_PATTERNS)

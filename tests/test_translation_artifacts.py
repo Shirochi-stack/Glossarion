@@ -17,8 +17,12 @@ from TransateKRtoEN import (
     _partial_b_target_request_matches,
     _partial_refinement_target_fragment,
 )
-from qa_scan_runtime import default_qa_scan_settings
-from scan_html_folder import scan_html_folder, update_new_format_progress
+from qa_scan_runtime import (
+    apply_qa_scan_env_from_settings,
+    default_qa_scan_settings,
+    restore_env,
+)
+from scan_html_folder import detect_ai_artifacts, scan_html_folder, update_new_format_progress
 from translate_headers_standalone import load_translations_from_file
 from translator_gui import TranslatorGUI
 from translation_artifacts import (
@@ -36,6 +40,55 @@ from translation_artifacts import (
 
 def _contains_cjk(text):
     return any("\u3400" <= char <= "\u9fff" for char in str(text))
+
+
+def test_ai_artifact_check_defaults_off():
+    settings = default_qa_scan_settings()
+
+    assert settings["check_ai_artifacts"] is False
+
+
+def test_valid_html_doctype_is_not_an_ai_artifact():
+    artifacts = detect_ai_artifacts(
+        "<!DOCTYPE html>\n<html><body><p>Normal output.</p></body></html>"
+    )
+
+    assert not any(item["type"] == "ai_artifact_leading_line" for item in artifacts)
+
+
+def test_ai_artifact_leading_phrases_are_customizable():
+    disabled_default = detect_ai_artifacts(
+        "Sure, here is the translation.",
+        ai_artifact_patterns=[],
+    )
+    custom_phrase = detect_ai_artifacts(
+        "Generated response: translated text",
+        ai_artifact_patterns=["Generated response:"],
+    )
+
+    assert not any(
+        item["type"] == "ai_artifact_leading_line"
+        for item in disabled_default
+    )
+    assert any(
+        item["type"] == "ai_artifact_leading_line"
+        for item in custom_phrase
+    )
+
+
+def test_ai_artifact_phrases_are_forwarded_to_worker_environment():
+    settings = default_qa_scan_settings()
+    settings["ai_artifact_patterns"] = ["Generated response:"]
+    settings["ai_artifact_patterns_are_regex"] = True
+
+    previous = apply_qa_scan_env_from_settings(settings)
+    try:
+        assert json.loads(os.environ["QA_AI_ARTIFACT_PATTERNS_JSON"]) == [
+            "Generated response:"
+        ]
+        assert os.environ["QA_AI_ARTIFACT_PATTERNS_ARE_REGEX"] == "1"
+    finally:
+        restore_env(previous)
 
 
 def test_artifact_qa_text_ignores_intentional_source_values():

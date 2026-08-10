@@ -211,7 +211,7 @@ def ensure_pdf_raw_section(
     meta_path = cache_dir / f"section_{section_key}.json"
     source_stat = os.stat(source)
     expected = {
-        "version": 1,
+        "version": 2,
         "source_path": os.path.normcase(source),
         "source_size": int(source_stat.st_size),
         "source_mtime_ns": int(source_stat.st_mtime_ns),
