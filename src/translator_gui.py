@@ -567,6 +567,7 @@ _MODEL_POPUP_STYLE = """
         selection-color: white;
     }
     QAbstractItemView::item {
+        height: 14px;
         padding: 0px 4px;
         background-color: #2d2d2d;
         color: #f0f0f0;
