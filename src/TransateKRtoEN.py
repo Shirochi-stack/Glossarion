@@ -6623,6 +6623,19 @@ class ContentProcessor:
             source_str = str(original_html)
             text_str = str(text)
             inserted_count = 0
+            first_heading_match = re.search(
+                r'<(?P<tag>h[1-6])\b[^>]*>.*?</(?P=tag)\s*>',
+                text_str,
+                re.IGNORECASE | re.DOTALL,
+            )
+            first_heading_end = (
+                first_heading_match.end() if first_heading_match else None
+            )
+            first_heading_start = (
+                first_heading_match.start() if first_heading_match else None
+            )
+            first_heading_insert_cursor = first_heading_end
+            first_heading_relocation_limit = 100
             
             for tag_name, attr, orig_src, new_src, orig_tag in missing:
                 filename = os.path.basename(orig_src)
@@ -6677,6 +6690,28 @@ class ContentProcessor:
                         insert_pos = backward_pos + 1
                     elif forward_found:
                         insert_pos = forward_pos
+
+                    # Keep nearby images from landing above or inside the first
+                    # heading. The adjustment is limited to 100 characters so
+                    # genuinely earlier images retain their estimated position.
+                    # A later image may still appear before h2/h3/etc.
+                    moved_below_first_heading = False
+                    if (
+                        first_heading_end is not None
+                        and first_heading_start is not None
+                        and insert_pos < first_heading_end
+                        and max(0, first_heading_start - insert_pos)
+                        <= first_heading_relocation_limit
+                    ):
+                        insert_pos = max(
+                            first_heading_end,
+                            first_heading_insert_cursor or first_heading_end,
+                        )
+                        moved_below_first_heading = True
+                        log(
+                            "      ↳ Adjusted insertion below the first "
+                            "header tag"
+                        )
                     
                     # Build the tag HTML using NEW (renamed) src
                     if tag_name == 'img':
@@ -6699,6 +6734,8 @@ class ContentProcessor:
                         img_html = f'<p><img src="{new_src}"/></p>'
                     
                     text_str = text_str[:insert_pos] + img_html + text_str[insert_pos:]
+                    if moved_below_first_heading:
+                        first_heading_insert_cursor = insert_pos + len(img_html)
                     inserted_count += 1
                     log(f"      ✅ Inserted {tag_name} at position {insert_pos} (src: {new_src})")
                 else:

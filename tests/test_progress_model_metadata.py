@@ -32,7 +32,11 @@ from Retranslation_GUI import (
     _snapshot_progress_output_dir,
     _select_progress_entry_for_display,
 )
-from TransateKRtoEN import ProgressManager, _vision_ocr_header_markdown
+from TransateKRtoEN import (
+    ContentProcessor,
+    ProgressManager,
+    _vision_ocr_header_markdown,
+)
 from image_translator import ImageTranslator
 from unified_api_client import UnifiedClient, set_current_thread_actual_request_model
 from extract_glossary_from_epub import (
@@ -230,6 +234,63 @@ def test_insert_missing_image_context_action_uses_targeted_qa_cleanup():
     assert "_clear_missing_image_qa_markers(target)" in action_block
     assert "Other QA issues remain." in action_block
     assert "Images restored and QA flags cleared." not in action_block
+
+
+def test_emergency_image_restore_places_leading_image_below_first_header():
+    source = (
+        '<html><body><p><img src="cover.jpg"/></p>'
+        '<h1>Chapter title</h1><p>Source body.</p></body></html>'
+    )
+    translated = (
+        '<html><body><h1>Chapter title</h1>'
+        '<p>Translated body.</p></body></html>'
+    )
+
+    restored = ContentProcessor.emergency_restore_images(
+        translated, source, verbose=False
+    )
+
+    assert restored.index('</h1>') < restored.index('<img')
+    assert restored.index('<img') < restored.index('Translated body.')
+
+
+def test_emergency_image_restore_can_insert_before_second_header():
+    source = (
+        '<html><body><h1>Book title</h1><p>Introduction.</p>'
+        '<p><img src="scene.jpg"/></p>'
+        '<h2>Section title</h2><p>Source body.</p></body></html>'
+    )
+    translated = (
+        '<html><body><h1>Book title</h1><p>Translated introduction.</p>'
+        '<h2>Section title</h2><p>Translated body.</p></body></html>'
+    )
+
+    restored = ContentProcessor.emergency_restore_images(
+        translated, source, verbose=False
+    )
+
+    assert restored.index('</h1>') < restored.index('<img')
+    assert restored.index('<img') < restored.index('<h2>')
+
+
+def test_emergency_image_restore_does_not_relocate_more_than_100_characters():
+    preface = "A" * 240
+    source = (
+        '<html><body><p><img src="cover.jpg"/></p>'
+        f'<p>{preface}</p><h1>Chapter title</h1>'
+        '<p>Source body.</p></body></html>'
+    )
+    translated = (
+        f'<html><body><p>{preface}</p><h1>Chapter title</h1>'
+        '<p>Translated body.</p></body></html>'
+    )
+
+    restored = ContentProcessor.emergency_restore_images(
+        translated, source, verbose=False
+    )
+
+    assert restored.index('<img') < restored.index('<h1>')
+    assert restored.index('<h1>') - restored.index('<img') > 100
 
 
 def test_repair_empty_attribute_qa_file_uses_shared_llm_token_fix(tmp_path):
