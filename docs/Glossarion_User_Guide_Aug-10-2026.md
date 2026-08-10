@@ -1,6 +1,6 @@
 # 📚 Glossarion — The Complete, Monkey-Proof User Guide
 
-**Version 9.6.9 · Updated August 1, 2026**
+**Version 9.6.9 · Updated August 10, 2026**
 
 This guide explains **every button, box, and toggle** in Glossarion in plain English. You do **not** need to know anything about coding, AI, or computers beyond clicking, typing, and dragging files. If you can use a web browser, you can use this guide.
 
@@ -122,7 +122,7 @@ Do exactly this the first time. Don't touch anything not mentioned. You'll have 
 
 The top of the window is the control strip you'll use every time.
 
-- **Input File(s):** The book(s) or folder you want to translate. Click **🔍 Browse ▼** to pick a file or a whole folder. It shows **No file selected** until you choose something.
+- **Input File(s):** The book(s) or folder you want to translate. Click **🔍 Browse ▼** to pick a file or a whole folder. It shows **No file selected** until you choose something. The same menu also contains **📚 Raw + Translated EPUB Pair…**, a glossary-only tool for cross-checking an original EPUB against an existing translation (see Section 8.3).
 - **Model:** The AI brain. **The Model box is NOT a fixed dropdown — it's a free text field.** You can pick a suggestion *or just type any model name yourself*. Any model a routing prefix supports will work if you type it in (e.g. `or/deepseek/deepseek-v4-flash:free`, `nd/moonshotai/kimi-k2-thinking`, `authnd/z-ai/glm-5.1`). Next to it:
   - **Manage Models** (gear/list button) — opens the **Model Manager**, where you add your own models, rearrange the list, create **custom prefixes**, and click **🌐 Poll Providers** to fetch current provider catalogs (see [Section 5](#keeping-the-model-list-current-provider-polling) and [Section 9](#9-local-ai--custom-endpoints--the-3-methods)).
   - **Right-click the Model box → 🌐 Refresh Online Models** — manually refresh every provider catalog Glossarion can safely access. Progress and detailed results appear in the bottom log; there is no popup.
@@ -373,7 +373,7 @@ This is the workflow many experienced users prefer, and the one you specifically
 **Step by step:**
 
 1. **Set Glossary Mode to `Off`.** Counter-intuitive, but remember: `Off` means *"don't auto-extract during translation, but DO keep Auto-Mapping turned on."* That second half is the important part.
-2. **Build the glossary yourself first.** Click **Extract Glossary** (or open the **Glossary Manager**). This scans your book *now* and produces a glossary file. Review and clean it (fix any wrong romanizations, merge duplicates, delete junk). See 8.4 for the manager.
+2. **Build the glossary yourself first.** Click **Extract Glossary** (or open the **Glossary Manager**). This scans your book *now* and produces a glossary file. Review and clean it (fix any wrong romanizations, merge duplicates, delete junk). See 8.5 for the manager.
 3. **Name the glossary so it matches your book.** Auto-Mapping pairs files by name. If your book is `MyNovel.epub`, name the glossary something like `MyNovel_glossary.csv`. Glossarion creates these names for you automatically when you extract, so usually you don't have to rename anything.
 4. **Make sure "Append Glossary to System Prompt" is on.** This is what actually *sends* the glossary to the AI: *"Send the current glossary to the model with every request. Improves consistency across chapters."* When this is on **and** Auto-Mapping is on, Glossarion **auto-fills the glossary for you if none is loaded.**
 5. **Press Run Translation.** Because Mode is `Off`, Glossarion does **not** waste money re-extracting names mid-translation. Because Auto-Mapping is on, it **finds and attaches your prepared glossary by filename automatically.** Best of both worlds.
@@ -384,13 +384,60 @@ This is the workflow many experienced users prefer, and the one you specifically
 
 > **To force one exact file instead of auto-matching:** set Mode to **`Manual Glossary Only`**, open the editor, browse to your glossary, and click **Load Glossary**. *(The Load Glossary button only takes effect in Manual Glossary Only mode.)* When active, that glossary is also copied into the book's output folder as `glossary.csv`.
 
-### 8.3 Auto-Mapping vs. Auto-Fill (don't mix these up)
+### 8.3 Cross-check a raw EPUB against an existing translation
+
+Use **📚 Raw + Translated EPUB Pair…** when you have both:
+
+- the original, source-language EPUB; and
+- an existing translated EPUB whose established names and terminology you want to preserve.
+
+Glossarion aligns their HTML chapters and sends each mapped raw/translated pair through the normal **Extract Glossary** pipeline. The raw side supplies the original spellings; the translated side helps the AI copy the translator's established renderings instead of inventing new ones. This is especially useful when continuing an unfinished translation or rebuilding an incomplete glossary.
+
+> **This is glossary extraction only.** It does not combine the two books and it is not a translation input. After preparing the pair, use **Extract Glossary**, not **Run Translation**.
+
+**Step by step:**
+
+1. Open the **🔍 Browse ▼** menu beside **Input File(s)** and choose **📚 Raw + Translated EPUB Pair…**.
+2. Drag the original EPUB onto **RAW EPUB** on the left, or click **Browse Raw EPUB…**.
+3. Drag the existing translation onto **TRANSLATED EPUB** on the right, or click **Browse Translated EPUB…**. The drop zones highlight while an EPUB is hovering over them. Large books are read in the background, so the window remains usable while files load.
+4. Review **HTML File Mapping** in the right-hand pane. Glossarion first matches exact filenames, then chapter numbers, then remaining files by reading order.
+5. Correct any questionable row with its **Translated HTML** dropdown. The mouse wheel scrolls the table without accidentally changing a dropdown; click the dropdown when you actually want to change it.
+6. Click **Use Mapped Pair**. The main window will show the two EPUB names and the number of mapped HTML files.
+7. Click **Extract Glossary** and use the normal glossary extraction settings.
+
+**Mapping controls:**
+
+| Control | What it does |
+|---------|--------------|
+| **Auto-map Again** | Discards manual/offset changes and rebuilds the automatic map from offset zero. |
+| **− Offset** | Moves every automatic mapped entry one raw row up per click. |
+| **+ Offset** | Moves every automatic mapped entry one raw row down per click. |
+| **Translated HTML dropdown** | Manually chooses a translated file for one raw file, or sets the row to **— Unmapped —**. |
+
+The offset is cumulative and shown beside the mapping count. For example, pressing **+ Offset** twice applies `+2`. A shifted match that falls before the first or after the last translated file becomes unmapped instead of wrapping around to the wrong chapter.
+
+**What is included and skipped:**
+
+- Files matching the **special-file substring** or **exact-match** patterns in **Other Settings** are removed before mapping on both sides. This keeps title pages, navigation, copyright pages, glossaries, and other configured non-chapter files out of the request.
+- A raw row set to **— Unmapped —** is skipped. Glossarion asks for confirmation if any raw HTML files remain unmatched.
+- A translated HTML file that no raw row uses is also skipped; the status line reports it as **translated unused**.
+- Only the displayed mapped pairs enter the temporary paired EPUB. Duplicate use of one translated file is blocked.
+
+> **✅ Check the first and last few rows before extracting.** EPUB editions often contain different front matter, so a one-step **− Offset** or **+ Offset** may fix the whole book. Use individual dropdowns for isolated differences.
+
+**Prompts and profiles:**
+
+- **Pair Wrapper Prompt** controls how each raw/translated chapter pair is labeled. Its available placeholders are `{raw_text}`, `{translated_text}`, `{raw_filename}`, and `{translated_filename}`. Keep both text placeholders or Glossarion will refuse to continue.
+- **Parallel EPUB Glossary System Prompt** controls the extraction instructions. Its default profile starts with pair-specific cross-checking rules and then includes the normal **Extract Glossary from EPUB** system prompt.
+- Use **+ New Profile**, **Save Profile**, and **Reset Profile** to maintain specialized pair-extraction instructions without changing the ordinary glossary prompt.
+
+### 8.4 Auto-Mapping vs. Auto-Fill (don't mix these up)
 
 - **Auto-Mapping** = automatically choosing *which glossary file* goes with *which book*, by filename. Controlled by the modes above.
 - **Auto-Fill / Map Glossaries to EPUBs** = the button you click to do that matching manually if you didn't let it happen automatically.
 - **Fuzzy** = allow *close* name matches, not just exact ones.
 
-### 8.4 The Glossary Manager (three tabs)
+### 8.5 The Glossary Manager (three tabs)
 
 Open it with **Glossary Manager** / **Extract Glossary**.
 
@@ -873,7 +920,7 @@ You do **not** need Glossarion's local proxy, port `3000`, or an API key when us
 | **Polling uses a static fallback** | The catalog needs credentials, is offline, rejected the request, or has no pollable endpoint | Read the detailed polling lines in the bottom log. The built-in list remains available, and you can still type a valid model ID manually. |
 | **xAI polling reports exhausted credits / spending limit** | xAI blocks its authenticated metadata endpoint when the team has no spending capacity | Polling itself did not run a model or consume translation tokens. Continue with Glossarion's static xAI list, or change the xAI team's billing limit if you require its live catalog. |
 | **Names keep changing between chapters** | No glossary, or it isn't being sent | Build a glossary and turn on **Append Glossary to System Prompt** (Section 8). |
-| **A character's gender/pronouns flip mid-book** | Gender tracker is off | Turn **Include Gender Context** on and keep the `*_gender_tracker.json` sidecar (Section 8.4). |
+| **A character's gender/pronouns flip mid-book** | Gender tracker is off | Turn **Include Gender Context** on and keep the `*_gender_tracker.json` sidecar (Section 8.5). |
 | **EPUB won't build** | Missing/broken files in the folder | Run **Validate EPUB Structure** in Other Settings (Section 12). |
 | **`authnd/` model won't work** | Using a `Lite`/`TurboLite` build | Those builds drop the EPUB Library and `authnd/` routing — use the standard `L_Glossarion` build (Section 2). |
 | **`antigravity/...` model won't launch** | Node/npm or Bun is not installed, login is unfinished, or port `3000` is busy | Install **Node.js LTS** or **Bun**, finish **🔐 Antigravity Login**, and check [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
@@ -920,4 +967,4 @@ You do **not** need Glossarion's local proxy, port `3000`, or an API key when us
 
 ---
 
-*Made with 🌸 for the translation community. This guide reflects Glossarion v9.6.9 as of August 1, 2026 and is built directly from the in-app tooltips and the program's own code. If a button looks different from this guide, hover it — the live tooltip is always the final word.*
+*Made with 🌸 for the translation community. This guide reflects Glossarion v9.6.9 as of August 10, 2026 and is built directly from the in-app tooltips and the program's own code. If a button looks different from this guide, hover it — the live tooltip is always the final word.*

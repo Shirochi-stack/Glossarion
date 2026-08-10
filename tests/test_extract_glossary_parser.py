@@ -468,9 +468,16 @@ def test_parallel_epub_dialog_loads_in_background_and_shows_drop_feedback(tmp_pa
 
     def delayed_loader(_path):
         release_loader.wait(timeout=2)
-        return [("raw text", "chapter-01.xhtml")]
+        return [
+            ("raw text", "chapter-01.xhtml"),
+            ("title text", "title.xhtml"),
+        ]
 
-    dialog = ParallelEpubPairDialog(config={}, chapter_loader=delayed_loader)
+    dialog = ParallelEpubPairDialog(
+        config={},
+        chapter_loader=delayed_loader,
+        special_file_predicate=lambda filename: "title" in filename.casefold(),
+    )
     assert dialog.content_splitter.orientation() == Qt.Horizontal
     assert dialog.content_splitter.count() == 2
     assert dialog.mapping_table.parentWidget() is dialog.mapping_panel
@@ -501,5 +508,70 @@ def test_parallel_epub_dialog_loads_in_background_and_shows_drop_feedback(tmp_pa
         {"text": "raw text", "filename": "chapter-01.xhtml"}
     ]
     assert "eligible HTML" in dialog.raw_drop.count_label.text()
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_parallel_epub_mapping_combos_lock_wheel_use_icon_and_support_offsets():
+    app = QApplication.instance() or QApplication([])
+    dialog = ParallelEpubPairDialog(config={})
+    assert dialog.profile_combo.objectName() == "parallelPromptProfileCombo"
+    assert "QComboBox#parallelPromptProfileCombo::down-arrow" in dialog.styleSheet()
+    raw_chapters = [
+        {"text": f"raw {index}", "filename": f"chapter-{index:02d}.xhtml"}
+        for index in range(1, 4)
+    ]
+    translated_chapters = [
+        {"text": f"translated {index}", "filename": f"chapter-{index:02d}.xhtml"}
+        for index in range(1, 4)
+    ]
+    dialog._apply_loaded_epub("raw", "raw.epub", raw_chapters)
+    dialog._apply_loaded_epub(
+        "translated", "translated.epub", translated_chapters
+    )
+    deadline = time.monotonic() + 3
+    while dialog._mapping_building and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+
+    assert not dialog._mapping_building
+    assert dialog.offset_down_button.text() == "\N{MINUS SIGN} Offset"
+    assert dialog.offset_up_button.text() == "+ Offset"
+    assert dialog._selected_mapping() == [
+        {"raw_index": 0, "translated_index": 0},
+        {"raw_index": 1, "translated_index": 1},
+        {"raw_index": 2, "translated_index": 2},
+    ]
+
+    combo = dialog.mapping_table.cellWidget(0, 1)
+
+    class WheelEvent:
+        ignored = False
+
+        def ignore(self):
+            self.ignored = True
+
+    wheel_event = WheelEvent()
+    combo.wheelEvent(wheel_event)
+    assert wheel_event.ignored
+    assert combo.objectName() == "parallelMappingCombo"
+    assert "Halgakos.ico" in dialog.styleSheet()
+
+    dialog._apply_mapping_offset(1)
+    assert dialog._mapping_offset == 1
+    assert dialog._selected_mapping() == [
+        {"raw_index": 1, "translated_index": 0},
+        {"raw_index": 2, "translated_index": 1},
+    ]
+    assert "offset +1" in dialog.mapping_status.text()
+
+    dialog._apply_mapping_offset(-1)
+    assert dialog._mapping_offset == 0
+    assert dialog._selected_mapping() == [
+        {"raw_index": 0, "translated_index": 0},
+        {"raw_index": 1, "translated_index": 1},
+        {"raw_index": 2, "translated_index": 2},
+    ]
+    assert "offset" not in dialog.mapping_status.text()
     dialog.deleteLater()
     app.processEvents()

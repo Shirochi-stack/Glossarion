@@ -12,12 +12,13 @@ import html
 import os
 import re
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from ebooklib import epub
-from PySide6.QtCore import QStringListModel, Qt, Signal
+from PySide6.QtCore import QStringListModel, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -379,6 +380,7 @@ class ParallelEpubPairDialog(QDialog):
         *,
         config: Optional[dict] = None,
         chapter_loader: Optional[Callable[[str], Sequence]] = None,
+        special_file_predicate: Optional[Callable[[str], bool]] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Parallel EPUB Pair")
@@ -386,11 +388,15 @@ class ParallelEpubPairDialog(QDialog):
         self.setMinimumSize(1050, 700)
         self.config = config if isinstance(config, dict) else {}
         self.chapter_loader = chapter_loader or self._default_chapter_loader
+        self.special_file_predicate = special_file_predicate
         self.raw_path = ""
         self.translated_path = ""
         self.raw_chapters: List[Dict[str, str]] = []
         self.translated_chapters: List[Dict[str, str]] = []
         self._auto_mapping: List[Dict[str, object]] = []
+        self._mapping_offset = 0
+        self._mapping_build_serial = 0
+        self._mapping_building = False
         self._loaded_profile = ""
         self.result_data: Optional[dict] = None
         self._load_serial = 0
@@ -415,6 +421,7 @@ class ParallelEpubPairDialog(QDialog):
             active = DEFAULT_PARALLEL_EPUB_PROFILE
         self.profile_combo.setCurrentText(active)
         self._load_profile(active)
+        self._refresh_load_controls()
 
     @staticmethod
     def _default_chapter_loader(path: str) -> Sequence:
@@ -423,6 +430,30 @@ class ParallelEpubPairDialog(QDialog):
         return extract_chapters_from_epub(path, return_metadata=True)
 
     def _build_ui(self):
+        mapping_combo_style = ""
+        icon_path = Path(__file__).with_name("Halgakos.ico")
+        if icon_path.is_file():
+            icon_url = str(icon_path).replace("\\", "/")
+            mapping_combo_style = f"""
+                QComboBox#parallelMappingCombo,
+                QComboBox#parallelPromptProfileCombo {{ padding-right: 4px; }}
+                QComboBox#parallelMappingCombo::drop-down,
+                QComboBox#parallelPromptProfileCombo::drop-down {{
+                    subcontrol-origin: padding;
+                    subcontrol-position: top right;
+                    width: 18px;
+                    border-left: 1px solid #4a5568;
+                }}
+                QComboBox#parallelMappingCombo::down-arrow,
+                QComboBox#parallelPromptProfileCombo::down-arrow {{
+                    image: url({icon_url});
+                    width: 16px;
+                    height: 16px;
+                    border: none;
+                }}
+                QComboBox#parallelMappingCombo::down-arrow:on,
+                QComboBox#parallelPromptProfileCombo::down-arrow:on {{ top: 1px; }}
+            """
         self.setStyleSheet(
             "QDialog { background: #1f1f1f; color: white; }"
             "QGroupBox { border: 1px solid #49515e; border-radius: 6px; "
@@ -434,6 +465,7 @@ class ParallelEpubPairDialog(QDialog):
             "border: 0; border-right: 1px solid #4b5360; }"
             "QPushButton { padding: 6px 12px; border-radius: 4px; background: #3b424d; color: white; }"
             "QPushButton:hover { background: #4a5361; }"
+            + mapping_combo_style
         )
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 12)
@@ -526,6 +558,20 @@ class ParallelEpubPairDialog(QDialog):
         self.auto_map_button = QPushButton("Auto-map Again")
         self.auto_map_button.clicked.connect(self._rebuild_mapping)
         mapping_header.addWidget(self.auto_map_button)
+        self.offset_down_button = QPushButton("\N{MINUS SIGN} Offset")
+        self.offset_down_button.setToolTip(
+            "Move every automatic mapped entry one raw row up."
+        )
+        self.offset_down_button.clicked.connect(
+            lambda: self._apply_mapping_offset(-1)
+        )
+        mapping_header.addWidget(self.offset_down_button)
+        self.offset_up_button = QPushButton("+ Offset")
+        self.offset_up_button.setToolTip(
+            "Move every automatic mapped entry one raw row down."
+        )
+        self.offset_up_button.clicked.connect(lambda: self._apply_mapping_offset(1))
+        mapping_header.addWidget(self.offset_up_button)
         mapping_layout.addLayout(mapping_header)
 
         self.mapping_table = QTableWidget(0, 3)
@@ -546,6 +592,11 @@ class ParallelEpubPairDialog(QDialog):
         profile_row = QHBoxLayout()
         profile_row.addWidget(QLabel("Profile:"))
         self.profile_combo = QComboBox()
+        self.profile_combo.setObjectName("parallelPromptProfileCombo")
+        self.profile_combo.wheelEvent = lambda event: event.ignore()
+        self.profile_combo.setToolTip(
+            "Click to choose a prompt profile; the mouse wheel will not change it."
+        )
         self.profile_combo.addItems(list(self.profiles))
         self.profile_combo.currentTextChanged.connect(self._load_profile)
         profile_row.addWidget(self.profile_combo, 1)
@@ -624,13 +675,18 @@ class ParallelEpubPairDialog(QDialog):
             try:
                 extracted = list(self.chapter_loader(path) or [])
                 for index, item in enumerate(extracted, start=1):
+                    filename = chapter_filename(item) or f"HTML {index}"
+                    if self.special_file_predicate and self.special_file_predicate(
+                        filename
+                    ):
+                        continue
                     text = chapter_text(item)
                     if not text.strip():
                         continue
                     chapters.append(
                         {
                             "text": text,
-                            "filename": chapter_filename(item) or f"HTML {index}",
+                            "filename": filename,
                         }
                     )
                 if not chapters:
@@ -697,10 +753,17 @@ class ParallelEpubPairDialog(QDialog):
     def _refresh_load_controls(self):
         loading = self._active_load is not None or bool(self._pending_loads)
         ready = bool(self.raw_chapters and self.translated_chapters)
-        self.use_pair_button.setEnabled(ready and not loading)
-        self.auto_map_button.setEnabled(ready and not loading)
+        available = ready and not loading and not self._mapping_building
+        self.use_pair_button.setEnabled(available)
+        self.auto_map_button.setEnabled(available)
+        self.offset_down_button.setEnabled(available)
+        self.offset_up_button.setEnabled(available)
 
     def _rebuild_mapping(self):
+        self._mapping_build_serial += 1
+        build_serial = self._mapping_build_serial
+        self._mapping_building = False
+        self._mapping_offset = 0
         self.mapping_table.setUpdatesEnabled(False)
         self.mapping_table.setRowCount(0)
         if not self.raw_chapters or not self.translated_chapters:
@@ -717,13 +780,35 @@ class ParallelEpubPairDialog(QDialog):
             + [chapter["filename"] for chapter in self.translated_chapters]
         )
         self.mapping_table.setRowCount(len(self.raw_chapters))
-        for row, raw in enumerate(self.raw_chapters):
+        self.mapping_table.setUpdatesEnabled(True)
+        self._mapping_building = True
+        self.mapping_status.setText(
+            f"Building HTML mapping… 0/{len(self.raw_chapters)}"
+        )
+        self.mapping_status.setStyleSheet("color: #62a9e8;")
+        self._refresh_load_controls()
+        QTimer.singleShot(
+            0, lambda: self._populate_mapping_rows(build_serial, start_row=0)
+        )
+
+    def _populate_mapping_rows(self, build_serial: int, start_row: int):
+        """Build mapping widgets in short slices so the dialog keeps repainting."""
+
+        if build_serial != self._mapping_build_serial:
+            return
+        deadline = time.perf_counter() + 0.012
+        row = start_row
+        total = len(self.raw_chapters)
+        self.mapping_table.setUpdatesEnabled(False)
+        while row < total and time.perf_counter() < deadline:
+            raw = self.raw_chapters[row]
             raw_item = QTableWidgetItem(raw["filename"])
             raw_item.setFlags(raw_item.flags() & ~Qt.ItemIsEditable)
             raw_item.setToolTip(raw["filename"])
             self.mapping_table.setItem(row, 0, raw_item)
 
             combo = QComboBox()
+            self._configure_mapping_combo(combo)
             # Every row shares one model. Creating a full copy of every
             # translated filename in every combo is O(n²) and was another
             # source of visible stalls for books with many HTML files.
@@ -738,9 +823,84 @@ class ParallelEpubPairDialog(QDialog):
             strategy_item = QTableWidgetItem(str(self._auto_mapping[row]["strategy"]))
             strategy_item.setFlags(strategy_item.flags() & ~Qt.ItemIsEditable)
             self.mapping_table.setItem(row, 2, strategy_item)
+            row += 1
         self.mapping_table.setUpdatesEnabled(True)
+        if row < total:
+            self.mapping_status.setText(f"Building HTML mapping… {row}/{total}")
+            QTimer.singleShot(
+                0,
+                lambda next_row=row: self._populate_mapping_rows(
+                    build_serial, next_row
+                ),
+            )
+            return
+        self._mapping_building = False
         self._update_mapping_status()
         self._refresh_load_controls()
+
+    @staticmethod
+    def _configure_mapping_combo(combo: QComboBox):
+        """Apply Glossarion's mapping-combo wheel lock and arrow treatment."""
+
+        # Ignoring the wheel event lets the containing mapping table continue
+        # scrolling without silently changing the selected translated file.
+        combo.setObjectName("parallelMappingCombo")
+        combo.wheelEvent = lambda event: event.ignore()
+        combo.setToolTip(
+            "Click to select a translated HTML file; the mouse wheel scrolls the table."
+        )
+
+    def _apply_mapping_offset(self, delta: int):
+        """Shift every automatic translated index, keeping overflow unmapped."""
+
+        if not self._auto_mapping or not self.translated_chapters:
+            return
+        self._mapping_offset += int(delta)
+        translated_count = len(self.translated_chapters)
+        # Offset direction follows what the user sees in the raw-row table:
+        # +1 moves the existing assignments down one raw row, so each row must
+        # select the translated index that was previously one row above it.
+        # Suspend table painting for the whole batch; repainting hundreds of
+        # persistent combo boxes one by one made a simple offset visibly slow.
+        header = self.mapping_table.horizontalHeader()
+        self.mapping_table.setUpdatesEnabled(False)
+        # The Match column normally sizes itself to its contents. Temporarily
+        # freeze it so changing every row does not trigger hundreds of full
+        # column-width recalculations.
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        try:
+            for row, automatic in enumerate(self._auto_mapping):
+                combo = self.mapping_table.cellWidget(row, 1)
+                if combo is None:
+                    continue
+                base_index = automatic.get("translated_index")
+                shifted_index = (
+                    None
+                    if base_index is None
+                    else int(base_index) - self._mapping_offset
+                )
+                if shifted_index is None or not 0 <= shifted_index < translated_count:
+                    combo_index = 0
+                    strategy = f"Offset {self._mapping_offset:+d} (unmapped)"
+                else:
+                    combo_index = shifted_index + 1
+                    strategy = f"Offset {self._mapping_offset:+d}"
+                signals_were_blocked = combo.blockSignals(True)
+                combo.setCurrentIndex(combo_index)
+                combo.blockSignals(signals_were_blocked)
+                strategy_item = self.mapping_table.item(row, 2)
+                if strategy_item is not None:
+                    if self._mapping_offset:
+                        strategy_item.setText(strategy)
+                    else:
+                        strategy_item.setText(
+                            str(automatic.get("strategy") or "Unmatched")
+                        )
+        finally:
+            header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+            self.mapping_table.setUpdatesEnabled(True)
+            self.mapping_table.viewport().update()
+        self._update_mapping_status()
 
     def _mapping_changed(self, row: int):
         item = self.mapping_table.item(row, 2)
@@ -764,6 +924,8 @@ class ParallelEpubPairDialog(QDialog):
         unmatched_raw = len(self.raw_chapters) - len(mapping)
         unused_translated = len(self.translated_chapters) - len(set(used))
         parts = [f"{len(mapping)} mapped"]
+        if self._mapping_offset:
+            parts.append(f"offset {self._mapping_offset:+d}")
         if unmatched_raw:
             parts.append(f"{unmatched_raw} raw unmatched")
         if unused_translated:

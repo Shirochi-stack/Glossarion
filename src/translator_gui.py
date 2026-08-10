@@ -38392,9 +38392,11 @@ Important rules:
             "SPECIAL_FILE_EXACT": os.environ.get("SPECIAL_FILE_EXACT"),
         }
         try:
-            os.environ["TRANSLATE_SPECIAL_FILES"] = (
-                "1" if bool(getattr(self, "translate_special_files_var", False)) else "0"
-            )
+            # Parallel chapter mapping is intentionally limited to normal
+            # reading content. The configured special-file rules still come
+            # from Other Settings, but its ordinary translation toggle must
+            # not reintroduce title pages, navigation, glossaries, and so on.
+            os.environ["TRANSLATE_SPECIAL_FILES"] = "0"
             os.environ["SPECIAL_FILE_KEYWORDS"] = str(
                 getattr(self, "special_file_keywords_var", "") or ""
             )
@@ -38496,6 +38498,7 @@ Important rules:
                 self,
                 config=self.config,
                 chapter_loader=self._load_parallel_epub_chapters,
+                special_file_predicate=self._is_special_file,
             )
             if dialog.exec() != QDialog.Accepted or not dialog.result_data:
                 dialog.deleteLater()

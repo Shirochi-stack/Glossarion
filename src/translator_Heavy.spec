@@ -273,6 +273,7 @@ app_files = [
     ('manga_ocr_io.py', '.'),
     # Core GUI
     ('translator_gui.py', '.'),
+    ('parallel_epub_glossary.py', '.'),
     ('metadata_translation_worker.py', '.'),
     ('language_options.py', '.'),
     ('metadata_progress.py', '.'),
@@ -454,6 +455,7 @@ app_modules = [
     'translation_artifacts',
     'refinement_prompts',
     'extract_glossary_from_epub',
+    'parallel_epub_glossary',
     'glossary_usage',
     'glossary_refinement',
     'extract_glossary_from_txt',
