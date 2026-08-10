@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from Retranslation_GUI import (
     RetranslationMixin,
     _clear_llm_token_qa_markers,
+    _clear_missing_image_qa_markers,
     _clear_refinement_progress_fields,
     _combine_glossary_progress_legend_stats,
     _glossary_progress_filename_keys,
@@ -22,6 +23,7 @@ from Retranslation_GUI import (
     _normalize_progress_match_name,
     _persist_progress_manager_source_link,
     _progress_entry_has_llm_token_qa,
+    _progress_entry_has_missing_image_qa,
     _progress_path_signature,
     _progress_entry_model_for_display,
     _progress_entry_refined_for_display,
@@ -145,6 +147,89 @@ def test_llm_token_qa_detection_and_marker_cleanup_preserve_other_issues():
     assert entry["status"] == "completed"
     assert "qa_issues_found" not in entry
     assert "qa_timestamp" not in entry
+
+
+def test_missing_image_marker_cleanup_preserves_unrelated_qa_issues():
+    entry = {
+        "status": "qa_failed",
+        "qa_issues": True,
+        "qa_issues_found": [
+            "missing_images_5_lost_(0/5)",
+            "unwrapped_text_content_2_found",
+            {"type": "Japanese_text_found_2_chars", "count": 2},
+        ],
+        "qa_issue_previews": {
+            "missing_images_5_lost_(0/5)": ["cover.jpg"],
+            "unwrapped_text_content_2_found": [
+                "The prose discusses missing images but is a different issue."
+            ],
+        },
+        "failure_reason": "Independent refinement failure",
+        "error_message": "Independent API error",
+        "qa_timestamp": 123.0,
+    }
+
+    assert _progress_entry_has_missing_image_qa(entry) is True
+    changed, remaining = _clear_missing_image_qa_markers(entry)
+
+    assert changed is True
+    assert remaining is True
+    assert entry["status"] == "qa_failed"
+    assert entry["qa_issues"] is True
+    assert entry["qa_issues_found"] == [
+        "unwrapped_text_content_2_found",
+        {"type": "Japanese_text_found_2_chars", "count": 2},
+    ]
+    assert entry["qa_issue_previews"] == {
+        "unwrapped_text_content_2_found": [
+            "The prose discusses missing images but is a different issue."
+        ]
+    }
+    assert entry["failure_reason"] == "Independent refinement failure"
+    assert entry["error_message"] == "Independent API error"
+    assert entry["qa_timestamp"] == 123.0
+
+
+def test_missing_image_marker_cleanup_completes_entry_when_it_was_only_issue():
+    entry = {
+        "status": "qa_failed",
+        "qa_issues": True,
+        "qa_issues_found": [
+            {"type": "missing_images", "count": 5, "missing": ["cover.jpg"]}
+        ],
+        "qa_issue_previews": {
+            "missing_images_5_lost_(0/5)": ["cover.jpg"]
+        },
+        "qa_timestamp": 123.0,
+    }
+
+    changed, remaining = _clear_missing_image_qa_markers(entry)
+
+    assert changed is True
+    assert remaining is False
+    assert entry["status"] == "completed"
+    assert "qa_issues" not in entry
+    assert "qa_issues_found" not in entry
+    assert "qa_issue_previews" not in entry
+    assert "qa_timestamp" not in entry
+
+
+def test_insert_missing_image_context_action_uses_targeted_qa_cleanup():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "Retranslation_GUI.py"
+    ).read_text(encoding="utf-8")
+    start = source.index("            elif act_insert_img and chosen == act_insert_img:")
+    end = source.index(
+        "            elif act_restore_in_progress and chosen == act_restore_in_progress:",
+        start,
+    )
+    action_block = source[start:end]
+
+    assert "_clear_missing_image_qa_markers(target)" in action_block
+    assert "Other QA issues remain." in action_block
+    assert "Images restored and QA flags cleared." not in action_block
 
 
 def test_repair_empty_attribute_qa_file_uses_shared_llm_token_fix(tmp_path):

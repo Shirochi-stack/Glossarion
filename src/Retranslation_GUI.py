@@ -75,6 +75,10 @@ _LLM_TOKEN_QA_RE = re.compile(
     r"(?:^|[^a-z0-9])llm[_\s-]*token[_\s-]*issue",
     re.IGNORECASE,
 )
+_MISSING_IMAGE_QA_RE = re.compile(
+    r"(?:^|[^a-z0-9])missing[_\s-]*images?(?=$|[^a-z0-9])",
+    re.IGNORECASE,
+)
 
 
 def _is_progress_sidecar_entry(entry=None, output_file=None):
@@ -205,6 +209,147 @@ def _clear_llm_token_qa_markers(entry):
     previous_remaining = False
     if isinstance(previous, dict):
         previous_changed, previous_remaining = _clear_llm_token_qa_markers(
+            previous
+        )
+        changed = changed or previous_changed
+
+    remaining = previous_remaining or any(
+        bool(entry.get(key))
+        for key in (
+            'qa_issues_found', 'qa_issue_previews', 'failure_reason',
+            'error_message',
+        )
+    )
+    qa_flag = entry.get('qa_issues')
+    if not isinstance(qa_flag, bool):
+        remaining = remaining or bool(qa_flag)
+
+    if not remaining:
+        if entry.pop('qa_issues', None) is not None:
+            changed = True
+        if entry.pop('qa_timestamp', None) is not None:
+            changed = True
+        if str(entry.get('status') or '').lower() in {'qa_failed', 'failed'}:
+            entry['status'] = 'completed'
+            entry['last_updated'] = time.time()
+            changed = True
+    return changed, remaining
+
+
+def _qa_value_has_missing_image_issue(value):
+    """Return whether a structured QA value identifies missing images."""
+    if isinstance(value, dict):
+        return any(
+            _qa_value_has_missing_image_issue(key)
+            or _qa_value_has_missing_image_issue(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple, set)):
+        return any(_qa_value_has_missing_image_issue(item) for item in value)
+    return bool(_MISSING_IMAGE_QA_RE.search(str(value or "")))
+
+
+def _progress_entry_has_missing_image_qa(entry):
+    """Return whether an entry or restorable snapshot has missing-image QA."""
+    seen = set()
+    current = entry
+    while isinstance(current, dict) and id(current) not in seen:
+        seen.add(id(current))
+        for key in (
+            'qa_issues_found', 'qa_issues', 'qa_issue_previews',
+            'failure_reason', 'error_message',
+        ):
+            if _qa_value_has_missing_image_issue(current.get(key)):
+                return True
+        current = current.get('previous_progress_entry')
+    return False
+
+
+def _qa_scalar_is_missing_image_issue(value):
+    """Return whether one scalar starts with a missing-image issue marker."""
+    if isinstance(value, (dict, list, tuple, set)):
+        return False
+    return bool(_MISSING_IMAGE_QA_RE.match(str(value or "").strip()))
+
+
+def _qa_mapping_is_missing_image_issue(value):
+    """Identify a structured issue by its code/type fields, not its preview."""
+    if not isinstance(value, dict):
+        return False
+    identity_keys = {'type', 'issue', 'issue_type', 'code', 'name'}
+    return any(
+        str(key).strip().lower() in identity_keys
+        and _qa_scalar_is_missing_image_issue(item)
+        for key, item in value.items()
+    )
+
+
+def _without_missing_image_qa(value):
+    """Remove complete missing-image issue values while preserving others."""
+    if isinstance(value, list):
+        filtered = []
+        for item in value:
+            if (
+                _qa_scalar_is_missing_image_issue(item)
+                or _qa_mapping_is_missing_image_issue(item)
+            ):
+                continue
+            cleaned = (
+                _without_missing_image_qa(item)
+                if isinstance(item, (dict, list, tuple, set))
+                else item
+            )
+            if cleaned not in (None, "", [], (), {}, set()):
+                filtered.append(cleaned)
+        return filtered
+    if isinstance(value, tuple):
+        return tuple(_without_missing_image_qa(list(value)))
+    if isinstance(value, set):
+        return set(_without_missing_image_qa(list(value)))
+    if isinstance(value, dict):
+        if _qa_mapping_is_missing_image_issue(value):
+            return None
+        filtered = {}
+        for key, item in value.items():
+            if _qa_scalar_is_missing_image_issue(key):
+                continue
+            cleaned = (
+                _without_missing_image_qa(item)
+                if isinstance(item, (dict, list, tuple, set))
+                else item
+            )
+            if cleaned not in (None, "", [], (), {}, set()):
+                filtered[key] = cleaned
+        return filtered
+    if _qa_scalar_is_missing_image_issue(value):
+        return None
+    return value
+
+
+def _clear_missing_image_qa_markers(entry):
+    """Clear only missing-image QA markers; return ``(changed, remaining)``."""
+    if not isinstance(entry, dict):
+        return False, False
+
+    changed = False
+    for key in ('qa_issues_found', 'qa_issue_previews', 'qa_issues'):
+        if key not in entry:
+            continue
+        original = entry.get(key)
+        filtered = _without_missing_image_qa(original)
+        if filtered != original:
+            changed = True
+        if filtered in (None, "", [], (), {}, set()):
+            entry.pop(key, None)
+        else:
+            entry[key] = filtered
+
+    # Error fields can represent independent translation failures. Never
+    # remove them merely because a missing-image marker was also present.
+    previous = entry.get('previous_progress_entry')
+    previous_remaining = False
+    if isinstance(previous, dict):
+        previous_changed, previous_remaining = _clear_missing_image_qa_markers(
             previous
         )
         changed = changed or previous_changed
@@ -20041,7 +20186,9 @@ class RetranslationMixin:
             if not isinstance(qa_issues, list):
                 qa_issues = []
                 
-            has_missing_images = any('missing_images' in str(issue) for issue in qa_issues)
+            has_missing_images = _progress_entry_has_missing_image_qa(
+                progress_entry
+            )
             has_raw_foreign_text_qa = (
                 _progress_entry_has_raw_foreign_text_qa(progress_entry)
             )
@@ -20256,25 +20403,56 @@ class RetranslationMixin:
                                 with open(output_path, 'w', encoding='utf-8') as f:
                                     f.write(restored_html)
                                     
-                                # 5. Update Progress (Clear QA flags)
-                                found_key = None
-                                target_out = display_info.get('output_file')
-                                
-                                if target_out:
-                                    for k, v in data['prog'].get('chapters', {}).items():
-                                        if v.get('output_file') == target_out:
-                                            found_key = k
-                                            break
-                                
-                                if found_key:
-                                    real_entry = data['prog']['chapters'][found_key]
-                                    real_entry['status'] = 'completed'
-                                    for key in ['qa_issues', 'qa_issues_found', 'qa_timestamp', 'failure_reason', 'error_message']:
-                                        real_entry.pop(key, None)
-                                else:
-                                    progress_entry['status'] = 'completed'
-                                    for key in ['qa_issues', 'qa_issues_found', 'qa_timestamp', 'failure_reason', 'error_message']:
-                                        progress_entry.pop(key, None)
+                                # 5. Clear only the resolved missing-image QA
+                                # marker. Other QA failures must remain intact.
+                                chapters = data['prog'].get('chapters', {})
+                                target_out = (
+                                    display_info.get('output_file')
+                                    or progress_entry.get('output_file')
+                                )
+                                target_identity = str(target_out or '').replace(
+                                    '\\', '/'
+                                ).casefold()
+                                progress_key = display_info.get('progress_key')
+                                targets = []
+                                seen_targets = set()
+
+                                def _add_image_qa_target(entry):
+                                    if (
+                                        isinstance(entry, dict)
+                                        and id(entry) not in seen_targets
+                                    ):
+                                        seen_targets.add(id(entry))
+                                        targets.append(entry)
+
+                                if (
+                                    progress_key
+                                    and isinstance(chapters.get(progress_key), dict)
+                                ):
+                                    _add_image_qa_target(chapters[progress_key])
+                                if target_identity:
+                                    for entry in chapters.values():
+                                        if (
+                                            isinstance(entry, dict)
+                                            and str(
+                                                entry.get('output_file') or ''
+                                            ).replace('\\', '/').casefold()
+                                            == target_identity
+                                        ):
+                                            _add_image_qa_target(entry)
+                                if not targets:
+                                    _add_image_qa_target(progress_entry)
+
+                                progress_changed = False
+                                remaining_other_qa = False
+                                for target in targets:
+                                    changed, remaining = (
+                                        _clear_missing_image_qa_markers(target)
+                                    )
+                                    progress_changed = progress_changed or changed
+                                    remaining_other_qa = (
+                                        remaining_other_qa or remaining
+                                    )
                                 
                                 # Save progress
                                 with open(data['progress_file'], 'w', encoding='utf-8') as f:
@@ -20282,7 +20460,22 @@ class RetranslationMixin:
                                     
                                 # 6. Refresh
                                 self._refresh_retranslation_data(data)
-                                self._show_message('info', "Success", "Images restored and QA flags cleared.")
+                                if progress_changed and remaining_other_qa:
+                                    message = (
+                                        "Images restored and the missing-image QA issue "
+                                        "was cleared. Other QA issues remain."
+                                    )
+                                elif progress_changed:
+                                    message = (
+                                        "Images restored and the missing-image QA issue "
+                                        "was cleared."
+                                    )
+                                else:
+                                    message = (
+                                        "Images restored. No stored missing-image QA "
+                                        "marker was found to clear."
+                                    )
+                                self._show_message('info', "Success", message)
                             else:
                                 self._show_message('info', "Info", "No missing images could be automatically restored.")
                         else:
