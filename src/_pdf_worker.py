@@ -46,6 +46,115 @@ def info(msg):
     print(f"[INFO] {msg}", flush=True)
 
 
+def _merge_rapid_pdf_shards(
+    prefix_documents,
+    render_results,
+    pdf_path,
+    chapters_order,
+    chapter_page_map,
+    settings,
+):
+    """Merge process-rendered bookmark shards without re-laying out HTML."""
+    import fitz
+
+    merge_started = time.time()
+    merged = fitz.open()
+    temporary_path = f"{pdf_path}.rapid.tmp.pdf"
+    try:
+        if os.path.isfile(temporary_path):
+            os.remove(temporary_path)
+
+        prefix_pages = 0
+        for document_index, document in enumerate(prefix_documents, 1):
+            source = fitz.open(
+                stream=document.write_pdf(),
+                filetype="pdf",
+            )
+            try:
+                merged.insert_pdf(source, links=True, annots=True)
+                prefix_pages += source.page_count
+            finally:
+                source.close()
+            log(f"  📎 Merged prefix document {document_index}/"
+                f"{len(prefix_documents)} ({prefix_pages} prefix page(s))")
+
+        chapter_pages = 0
+        for position, result in enumerate(render_results, 1):
+            source = fitz.open(result["path"])
+            try:
+                merged.insert_pdf(source, links=True, annots=True)
+                chapter_pages += source.page_count
+            finally:
+                source.close()
+            log(f"  📎 Merged bookmark render job {position}/"
+                f"{len(render_results)}: {chapter_pages} chapter page(s)")
+
+        if settings.get('page_numbers') and chapter_pages:
+            alignment = str(settings.get('page_number_alignment') or 'center')
+            align_code = {
+                'left': fitz.TEXT_ALIGN_LEFT,
+                'center': fitz.TEXT_ALIGN_CENTER,
+                'right': fitz.TEXT_ALIGN_RIGHT,
+            }.get(alignment, fitz.TEXT_ALIGN_CENTER)
+            log(f"  🔢 Adding {chapter_pages} continuous page number(s), "
+                f"alignment={alignment}")
+            for local_index in range(chapter_pages):
+                page = merged[prefix_pages + local_index]
+                rect = page.rect
+                footer = fitz.Rect(
+                    rect.x0 + 15,
+                    rect.y1 - 28,
+                    rect.x1 - 15,
+                    rect.y1 - 10,
+                )
+                page.insert_textbox(
+                    footer,
+                    str(local_index + 1),
+                    fontsize=10,
+                    fontname="helv",
+                    color=(0.35, 0.35, 0.35),
+                    fill_opacity=0.55,
+                    align=align_code,
+                    overlay=True,
+                )
+
+        outline = []
+        seen_sources = set()
+        for source_filename, chapter_number, title in chapters_order:
+            source_key = str(source_filename or '')
+            if source_key in seen_sources or not str(title or '').strip():
+                continue
+            seen_sources.add(source_key)
+            page_number = int(chapter_page_map.get(chapter_number, 1) or 1)
+            page_number = max(1, min(page_number, merged.page_count))
+            outline.append([1, str(title).strip(), page_number])
+        if outline:
+            merged.set_toc(outline)
+            log(f"  🔖 Added {len(outline)} bookmark outline entries")
+
+        log(f"  💾 Saving merged rapid PDF ({merged.page_count} total page(s))")
+        merged.save(
+            temporary_path,
+            garbage=3,
+            deflate=False,
+            use_objstms=1,
+        )
+    except BaseException:
+        try:
+            if os.path.isfile(temporary_path):
+                os.remove(temporary_path)
+        except OSError:
+            pass
+        raise
+    finally:
+        merged.close()
+
+    os.replace(temporary_path, pdf_path)
+    elapsed = time.time() - merge_started
+    log(f"  ✅ Rapid merge and write complete in {elapsed:.1f}s")
+    return prefix_pages + chapter_pages
+
+
 
 
 
@@ -443,8 +552,10 @@ def run_pdf_generation(config_path):
 
     alignment = settings['page_number_alignment']
     page_position = f'@bottom-{alignment}' if alignment != 'center' else '@bottom-center'
+    page_number_style = ""
     if settings['page_numbers']:
-        styles += f" @page {{ {page_position} {{ content: counter(page); color: rgba(0,0,0,0.4); font-size: 10pt; }} }} "
+        page_number_style = f" @page {{ {page_position} {{ content: counter(page); color: rgba(0,0,0,0.4); font-size: 10pt; }} }} "
+        styles += page_number_style
 
     _dedup_enabled = os.environ.get('DEDUPLICATE_TOC', '0') == '1'
     _dedup_use_translated = os.environ.get('DEDUPLICATE_TOC_USE_TRANSLATED', '0') == '1'
@@ -602,19 +713,103 @@ def run_pdf_generation(config_path):
 
 
 
-    # --- Render in batches ---
+    # --- Render bookmark sections ---
     BATCH_SIZE = int(os.environ.get('PDF_RENDER_BATCH_SIZE', '50'))
-    if all_chapters_parts:
+    rapid_workspace_compiler = (
+        os.environ.get('PDF_USE_RAPID_WORKSPACE_COMPILER', '1') == '1'
+    )
+    rapid_render_bundle = None
+    rapid_temp_dir = ""
+    if all_chapters_parts and rapid_workspace_compiler and settings['toc']:
+        log("  ⚠️ Rapid process renderer currently defers to the standard path "
+            "when a generated clickable TOC is enabled")
+        rapid_workspace_compiler = False
+
+    if all_chapters_parts and rapid_workspace_compiler:
+        try:
+            from pdf_fast_extractor import resolve_pdf_extraction_workers
+            from pdf_workspace_compiler import (
+                build_bookmark_render_jobs,
+                render_workspace_bookmarks_rapid,
+            )
+
+            requested_setting = os.environ.get('PDF_EXTRACTION_WORKERS', 'auto')
+            resolved_workers = min(
+                len(all_chapters_parts),
+                resolve_pdf_extraction_workers(requested_setting),
+            )
+            log("  🧭 PDF compiler engine: Rapid Workspace Compiler "
+                "(bookmark-aware process renderer)")
+            log(f"  🧠 Worker plan: PDF_EXTRACTION_WORKERS={requested_setting} "
+                f"→ {resolved_workers} of {os.cpu_count() or 1} CPU core(s)")
+            bookmark_jobs = build_bookmark_render_jobs(
+                all_chapters_parts,
+                chapters_order,
+                resolved_workers,
+            )
+            rapid_styles = styles.replace(page_number_style, "")
+            render_jobs = [
+                (
+                    shard_index,
+                    f"<html><head><style>{rapid_styles}</style></head>"
+                    f"<body>{content}</body></html>",
+                    shard_order,
+                )
+                for shard_index, content, shard_order in bookmark_jobs
+            ]
+            write_kwargs = {}
+            if compression_enabled:
+                write_kwargs = {
+                    'jpeg_quality': int(
+                        os.environ.get('IMAGE_COMPRESSION_QUALITY', '80')
+                    ),
+                    'optimize_images': True,
+                }
+            rapid_render_bundle = render_workspace_bookmarks_rapid(
+                render_jobs,
+                output_dir,
+                log_callback=log,
+                max_workers=resolved_workers,
+                write_kwargs=write_kwargs,
+            )
+            rapid_temp_dir = rapid_render_bundle.get('temp_dir', '')
+
+            log("  🧭 Phase 2/3: indexing bookmark anchors from rendered jobs")
+            _page_offset = current_page
+            shard_orders = {item[0]: item[2] for item in bookmark_jobs}
+            for result in rapid_render_bundle['results']:
+                shard_order = shard_orders[result['index']]
+                anchor_pages = result.get('anchor_pages', {})
+                for html_file, chapter_num, _title in shard_order:
+                    local_page = int(
+                        anchor_pages.get(
+                            str(chapter_num),
+                            anchor_pages.get(str(html_file), 0),
+                        ) or 0
+                    )
+                    page_number = _page_offset + local_page + 1
+                    chapter_page_map[html_file] = page_number
+                    chapter_page_map[chapter_num] = page_number
+                _page_offset += int(result['pages'])
+                current_page += int(result['pages'])
+                log(f"  🔖 Indexed render job {result['index'] + 1}/"
+                    f"{len(rapid_render_bundle['results'])}: "
+                    f"{result['chapters']} bookmark section(s), "
+                    f"{result['pages']} page(s)")
+            log(f"  ✅ Rapid render and indexing complete: "
+                f"{current_page} total page(s)")
+        except BaseException as exc:
+            log(f"  ⚠️ Rapid workspace rendering failed: "
+                f"{type(exc).__name__}: {exc}")
+            log("  ↩ Falling back to the unchanged standard sequential compiler")
+            rapid_render_bundle = None
+            if rapid_temp_dir:
+                import shutil
+                shutil.rmtree(rapid_temp_dir, ignore_errors=True)
+
+    if all_chapters_parts and not rapid_render_bundle:
         num_batches = (len(all_chapters_parts) + BATCH_SIZE - 1) // BATCH_SIZE
-        rapid_workspace_compiler = (
-            os.environ.get('PDF_USE_RAPID_WORKSPACE_COMPILER', '1') == '1'
-        )
-        engine_name = (
-            "Rapid Workspace Compiler"
-            if rapid_workspace_compiler
-            else "standard sequential compiler"
-        )
-        log(f"  🧭 PDF compiler engine: {engine_name}")
+        log("  🧭 PDF compiler engine: standard sequential compiler")
         log(f"  📦 Render plan: {len(all_chapters_parts)} chapters, "
             f"{num_batches} batch(es), batch size={BATCH_SIZE}")
         _render_start = time.time()
@@ -626,108 +821,51 @@ def run_pdf_generation(config_path):
                     break
                 elapsed = time.time() - _render_start
                 log(f"  ⏳ Rendering... ({elapsed:.0f}s elapsed)")
+
         _render_hb = threading.Thread(target=_render_heartbeat, daemon=True)
         _render_hb.start()
-
-        batch_jobs = []
+        _page_offset = 0
         for batch_idx in range(num_batches):
             batch_start = batch_idx * BATCH_SIZE
             batch_end = min(batch_start + BATCH_SIZE, len(all_chapters_parts))
             batch_parts = all_chapters_parts[batch_start:batch_end]
             batch_order = chapters_order[batch_start:batch_end]
-            batch_html = f"<html><head><style>{styles}</style></head><body>{''.join(batch_parts)}</body></html>"
-            batch_jobs.append(
-                (batch_idx, batch_start, batch_end, batch_html, batch_order)
+            batch_html = (
+                f"<html><head><style>{styles}</style></head>"
+                f"<body>{''.join(batch_parts)}</body></html>"
             )
-
-        rendered_batches = []
-        if rapid_workspace_compiler:
+            batch_started = time.time()
+            log(f"  ▶ Standard render batch {batch_idx+1}/{num_batches} "
+                f"(chapters {batch_start+1}-{batch_end})")
             try:
-                from pdf_workspace_compiler import render_workspace_batches_rapid
-
-                requested_workers = os.environ.get(
-                    'PDF_RAPID_RENDER_WORKERS',
-                    os.environ.get('EXTRACTION_WORKERS', 'auto'),
-                )
-                log(f"  ⚡ Phase 1/3: dispatching independent render batches "
-                    f"(requested workers={requested_workers})")
-                rapid_documents = render_workspace_batches_rapid(
-                    [(job[0], job[3]) for job in batch_jobs],
-                    output_dir,
-                    log_callback=log,
-                )
-                rendered_batches = list(zip(batch_jobs, rapid_documents))
-            except BaseException as exc:
-                log(f"  ⚠️ Rapid workspace rendering failed: {type(exc).__name__}: {exc}")
-                log("  ↩ Falling back to the standard sequential compiler for this PDF")
-                rendered_batches = []
-
-        if not rendered_batches:
-            log("  📄 Phase 1/3: rendering batches sequentially")
-            for job in batch_jobs:
-                batch_idx, batch_start, batch_end, batch_html, batch_order = job
-                batch_started = time.time()
-                log(f"  ▶ Standard render batch {batch_idx+1}/{num_batches} "
-                    f"(chapters {batch_start+1}-{batch_end})")
-                try:
-                    batch_doc = WeasyHTML(
-                        string=batch_html,
-                        base_url=output_dir,
-                    ).render()
-                    rendered_batches.append((job, batch_doc))
-                    elapsed = time.time() - batch_started
-                    log(f"  ✅ Standard render batch {batch_idx+1}/{num_batches}: "
-                        f"{len(batch_doc.pages)} page(s) in {elapsed:.1f}s")
-                except Exception as e:
-                    log(f"  ⚠️ Failed to render batch {batch_idx+1}: {e}")
-
-        log("  🧭 Phase 2/3: indexing chapter anchors and PDF bookmarks")
-        _page_offset = 0  # cumulative page count across chapter batches
-        for job, batch_doc in rendered_batches:
-            batch_idx, batch_start, batch_end, batch_html, batch_order = job
-            try:
+                batch_doc = WeasyHTML(
+                    string=batch_html,
+                    base_url=output_dir,
+                ).render()
                 documents.append(batch_doc)
-
-                # Source markup may contain hundreds of CSS-generated outline
-                # entries. Replace all of them with the compiler-owned chapter
-                # anchors: at most one bookmark for each source HTML file.
-                replace_with_chapter_bookmarks(
-                    batch_doc.pages, batch_order)
-
-                # Resolve page numbers for this batch
-                for _pidx, _pg in enumerate(batch_doc.pages):
-                    for _aid in _pg.anchors:
-                        if _aid not in chapter_page_map:
-                            pass  # just track anchors below
-                for _html_file, _chap_num, _bm_title in batch_order:
-                    _found = False
-                    for _pidx, _pg in enumerate(batch_doc.pages):
-                        if f'chapter-{_chap_num}' in _pg.anchors:
-                            _pg_num = _page_offset + _pidx + 1
-                            chapter_page_map[_html_file] = _pg_num
-                            chapter_page_map[_chap_num] = _pg_num
-                            _found = True
+                replace_with_chapter_bookmarks(batch_doc.pages, batch_order)
+                for html_file, chapter_num, _title in batch_order:
+                    page_index = 0
+                    for candidate, page in enumerate(batch_doc.pages):
+                        if f'chapter-{chapter_num}' in page.anchors:
+                            page_index = candidate
                             break
-                    if not _found:
-                        chapter_page_map[_html_file] = _page_offset + 1
-                        chapter_page_map[_chap_num] = _page_offset + 1
-
+                    page_number = _page_offset + page_index + 1
+                    chapter_page_map[html_file] = page_number
+                    chapter_page_map[chapter_num] = page_number
                 _page_offset += len(batch_doc.pages)
                 current_page += len(batch_doc.pages)
-                elapsed = time.time() - _render_start
-                log(f"  🔖 Indexed batch {batch_idx+1}/{num_batches}: "
-                    f"{len(batch_order)} chapter bookmark(s), "
-                    f"{len(batch_doc.pages)} page(s) ({elapsed:.0f}s elapsed)")
-            except Exception as e:
-                log(f"  ⚠️ Failed to index batch {batch_idx+1}: {e}")
-
+                log(f"  ✅ Standard render batch {batch_idx+1}/{num_batches}: "
+                    f"{len(batch_doc.pages)} page(s) in "
+                    f"{time.time() - batch_started:.1f}s")
+            except Exception as exc:
+                log(f"  ⚠️ Failed to render batch {batch_idx+1}: {exc}")
         _render_stop.set()
         _render_hb.join(timeout=1)
-        _render_elapsed = time.time() - _render_start
-        log(f"  ✅ Render and indexing phases complete: {current_page} total page(s) "
-            f"({_render_elapsed:.1f}s)")
+        log(f"  ✅ Standard rendering complete: {current_page} total page(s) "
+            f"({time.time() - _render_start:.1f}s)")
 
-    if not documents:
+    if not documents and not rapid_render_bundle:
         log("⚠️ No chapters rendered for PDF")
         print(f'[RESULT] {json.dumps({"success": False, "error": "No chapters rendered"})}', flush=True)
         return
@@ -746,33 +884,52 @@ def run_pdf_generation(config_path):
 
     # --- Merge and write ---
     log("  🧩 Phase 3/3: merging rendered pages in source chapter order")
-    all_pages = [page for doc in documents for page in doc.pages]
-    log(f"  Total pages: {len(all_pages)}")
-    log("  Writing PDF to disk...")
     try:
-        _pdf_write_kwargs = {}
-        if compression_enabled:
-            _pdf_quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
-            _pdf_write_kwargs['jpeg_quality'] = _pdf_quality
-            _pdf_write_kwargs['optimize_images'] = True
-            log(f"  PDF jpeg_quality: {_pdf_quality}%, optimize_images: True")
+        if rapid_render_bundle:
+            total_pages = _merge_rapid_pdf_shards(
+                documents,
+                rapid_render_bundle['results'],
+                pdf_path,
+                chapters_order,
+                chapter_page_map,
+                settings,
+            )
+            log(f"  Total pages: {total_pages}")
         else:
-            log("  PDF images: default encoding (no lossy re-compression)")
-        _write_stop = threading.Event()
-        _write_start = time.time()
-        def _write_heartbeat():
-            while not _write_stop.is_set():
-                if _write_stop.wait(3.0):
-                    break
-                elapsed = time.time() - _write_start
-                log(f"  ⏳ Writing PDF... ({elapsed:.0f}s elapsed)")
-        _write_hb = threading.Thread(target=_write_heartbeat, daemon=True)
-        _write_hb.start()
-        documents[0].copy(all_pages).write_pdf(pdf_path, **_pdf_write_kwargs)
-        _write_stop.set()
-        _write_hb.join(timeout=1)
-        _write_elapsed = time.time() - _write_start
-        log(f"  ✅ PDF written ({_write_elapsed:.1f}s)")
+            all_pages = [page for doc in documents for page in doc.pages]
+            log(f"  Total pages: {len(all_pages)}")
+            log("  Writing PDF to disk...")
+            _pdf_write_kwargs = {}
+            if compression_enabled:
+                _pdf_quality = int(
+                    os.environ.get('IMAGE_COMPRESSION_QUALITY', '80')
+                )
+                _pdf_write_kwargs['jpeg_quality'] = _pdf_quality
+                _pdf_write_kwargs['optimize_images'] = True
+                log(f"  PDF jpeg_quality: {_pdf_quality}%, "
+                    "optimize_images: True")
+            else:
+                log("  PDF images: default encoding (no lossy re-compression)")
+            _write_stop = threading.Event()
+            _write_start = time.time()
+
+            def _write_heartbeat():
+                while not _write_stop.is_set():
+                    if _write_stop.wait(3.0):
+                        break
+                    elapsed = time.time() - _write_start
+                    log(f"  ⏳ Writing PDF... ({elapsed:.0f}s elapsed)")
+
+            _write_hb = threading.Thread(target=_write_heartbeat, daemon=True)
+            _write_hb.start()
+            documents[0].copy(all_pages).write_pdf(
+                pdf_path,
+                **_pdf_write_kwargs,
+            )
+            _write_stop.set()
+            _write_hb.join(timeout=1)
+            _write_elapsed = time.time() - _write_start
+            log(f"  ✅ PDF written ({_write_elapsed:.1f}s)")
     except BaseException as e:
         log(f"  ❌ write_pdf failed: {type(e).__name__}: {e}")
         log(f"  [DEBUG] {traceback.format_exc()}")
@@ -783,6 +940,8 @@ def run_pdf_generation(config_path):
         import shutil
         try:
             shutil.rmtree(_pdf_images_dir, ignore_errors=True)
+            if rapid_temp_dir:
+                shutil.rmtree(rapid_temp_dir, ignore_errors=True)
         except Exception:
             pass
 

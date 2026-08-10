@@ -170,6 +170,89 @@ def test_pdf_worker_writes_only_html_file_bookmarks(tmp_path):
     ]
 
 
+def test_pdf_worker_rapid_compiler_uses_pdf_workers_and_process_jobs(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    output_dir = tmp_path / "rapid-output"
+    images_dir = output_dir / "images"
+    css_dir = output_dir / "css"
+    images_dir.mkdir(parents=True)
+    css_dir.mkdir()
+    html_files = []
+    title_info = {}
+    for chapter_number in range(1, 5):
+        filename = f"chapter-{chapter_number}.html"
+        html_files.append(filename)
+        title_info[str(chapter_number)] = [
+            f"Chapter {chapter_number}",
+            1.0,
+            filename,
+        ]
+        (output_dir / filename).write_text(
+            f"<html><body><h1>Heading {chapter_number}</h1>"
+            f"<p>Body {chapter_number}</p></body></html>",
+            encoding="utf-8",
+        )
+
+    config_path = tmp_path / "rapid-pdf-config.json"
+    config_path.write_text(
+        json.dumps({
+            "output_dir": str(output_dir),
+            "images_dir": str(images_dir),
+            "css_dir": str(css_dir),
+            "html_files": html_files,
+            "chapter_titles_info": title_info,
+            "processed_images": {},
+            "cover_file": None,
+            "metadata": {"title": "Rapid Fixture"},
+            "env_vars": {
+                "PDF_PAGE_NUMBERS": "1",
+                "PDF_PAGE_NUMBER_ALIGNMENT": "right",
+                "PDF_GENERATE_TOC": "0",
+                "PDF_RENDER_BATCH_SIZE": "50",
+                "PDF_FAST_RENDERING": "0",
+                "PDF_USE_RAPID_WORKSPACE_COMPILER": "1",
+                "PDF_EXTRACTION_WORKERS": "2",
+                "ENABLE_IMAGE_COMPRESSION": "0",
+                "DEDUPLICATE_TOC": "0",
+            },
+        }),
+        encoding="utf-8",
+    )
+    worker_env = os.environ.copy()
+    worker_env["PYTHONIOENCODING"] = "utf-8"
+    for key in ("FONTCONFIG_FILE", "FONTCONFIG_PATH", "FC_CONFIG_FILE"):
+        worker_env.pop(key, None)
+    worker_path = Path(__file__).parents[1] / "src" / "_pdf_worker.py"
+
+    result = subprocess.run(
+        [sys.executable, str(worker_path), str(config_path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=worker_env,
+        timeout=90,
+        check=False,
+    )
+
+    assert '"success": true' in result.stdout.lower(), result.stdout + result.stderr
+    assert "PDF_EXTRACTION_WORKERS=2 → 2" in result.stdout
+    assert "2 process worker(s)" in result.stdout
+    assert "bookmark-aware job(s)" in result.stdout
+    pdf_files = list(output_dir.glob("*.pdf"))
+    assert len(pdf_files) == 1
+    with fitz.open(pdf_files[0]) as document:
+        assert document.page_count == 4
+        assert [row[1] for row in document.get_toc(simple=True)] == [
+            "Chapter 1",
+            "Chapter 2",
+            "Chapter 3",
+            "Chapter 4",
+        ]
+        assert "1" in document[0].get_text()
+        assert "4" in document[3].get_text()
+
+
 def test_toc_plan_uses_deepest_bookmark_and_keeps_front_matter():
     toc = [
         [1, "Book title", 3],

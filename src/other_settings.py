@@ -1954,8 +1954,9 @@ def _create_output_settings_section(self, parent):
     rapid_compiler_cb.setContentsMargins(20, 0, 0, 0)
     rapid_compiler_cb.setToolTip(
         "Uses the rapid workspace compiler for generated PDF output (default).\n"
-        "Independent render batches run in parallel, then merge in chapter order.\n"
-        "If a parallel batch fails, that PDF automatically falls back to the\n"
+        "Bookmark/HTML sections are balanced across the PDF extraction CPU workers,\n"
+        "rendered in isolated processes, then merged in bookmark order.\n"
+        "If a parallel job fails, that PDF automatically falls back to the\n"
         "standard sequential compiler. Turn this off to always use the legacy path."
     )
     try:
@@ -11174,7 +11175,7 @@ def _create_processing_options_section(self, parent):
 
     pdf_workers_desc = QLabel(
         f"Auto uses half of the available CPU count ({pdf_auto_workers} workers).\n"
-        "This setting only affects PDF input extraction."
+        "Used by PDF input extraction and Rapid Workspace PDF compilation."
     )
     pdf_workers_desc.setStyleSheet("color: gray; font-size: 10pt;")
     pdf_workers_desc.setContentsMargins(20, 0, 0, 10)
@@ -11192,7 +11193,7 @@ def _create_processing_options_section(self, parent):
         if stored_value == 'auto':
             pdf_workers_desc.setText(
                 f"Auto uses half of the available CPU count ({pdf_auto_workers} workers).\n"
-                "This setting only affects PDF input extraction."
+                "Used by PDF input extraction and Rapid Workspace PDF compilation."
             )
             self.pdf_extraction_workers_entry.setStyleSheet("")
             return
@@ -11203,7 +11204,7 @@ def _create_processing_options_section(self, parent):
         if 1 <= numeric_value <= pdf_cpu_cores:
             pdf_workers_desc.setText(
                 f"Using {numeric_value} of {pdf_cpu_cores} available CPU cores.\n"
-                "This setting only affects PDF input extraction."
+                "Used by PDF input extraction and Rapid Workspace PDF compilation."
             )
             self.pdf_extraction_workers_entry.setStyleSheet("")
         else:

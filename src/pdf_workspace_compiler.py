@@ -6,10 +6,12 @@ import html
 import json
 import os
 import re
+import shutil
+import tempfile
 import threading
 import time
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
@@ -38,61 +40,97 @@ def _log(callback: LogCallback | None, message: str) -> None:
 
 
 def _rapid_render_worker_count(job_count: int, requested: int | None = None) -> int:
-    """Choose a useful parallel render count without exhausting PDF memory."""
+    """Use the dedicated PDF worker setting for rapid rendering."""
     if job_count <= 1:
         return 1
-    if requested is None:
-        configured = os.environ.get(
-            "PDF_RAPID_RENDER_WORKERS",
-            os.environ.get("EXTRACTION_WORKERS", "auto"),
-        )
-        try:
-            requested = int(configured)
-        except (TypeError, ValueError):
-            requested = max(1, (os.cpu_count() or 1) // 2)
-    try:
-        safety_cap = max(
-            1,
-            int(os.environ.get("PDF_RAPID_RENDER_WORKER_CAP", "4")),
-        )
-    except (TypeError, ValueError):
-        safety_cap = 4
-    return max(1, min(job_count, max(1, int(requested)), safety_cap))
+    from pdf_fast_extractor import resolve_pdf_extraction_workers
+
+    resolved = resolve_pdf_extraction_workers(requested)
+    return max(1, min(job_count, resolved))
 
 
-def render_workspace_batches_rapid(
-    batch_jobs: list[tuple[int, str]],
+def build_bookmark_render_jobs(
+    chapter_parts: list[str],
+    chapter_orders: list[tuple[str, int, str]],
+    worker_count: int,
+) -> list[tuple[int, str, list[tuple[str, int, str]]]]:
+    """Create exactly one independently scheduled render job per bookmark."""
+    if not chapter_parts:
+        return []
+    if len(chapter_parts) != len(chapter_orders):
+        raise ValueError("Bookmark render parts and order records do not match")
+    del worker_count  # Concurrency limits execution, not bookmark boundaries.
+    return [
+        (job_index, chapter_part, [chapter_orders[job_index]])
+        for job_index, chapter_part in enumerate(chapter_parts)
+    ]
+
+
+def _render_workspace_pdf_shard(job: tuple) -> dict:
+    """Process-pool entry point for one bookmark-aware PDF render job."""
+    (
+        job_index,
+        total_jobs,
+        source,
+        base_url,
+        output_path,
+        chapter_order,
+        write_kwargs,
+    ) = job
+    started = time.perf_counter()
+    from weasyprint import HTML as WeasyHTML
+
+    document = WeasyHTML(string=source, base_url=base_url).render()
+    anchor_pages = {}
+    for source_filename, chapter_number, _title in chapter_order:
+        local_page = 0
+        anchor_name = f"chapter-{chapter_number}"
+        for page_index, page in enumerate(document.pages):
+            if anchor_name in page.anchors:
+                local_page = page_index
+                break
+        anchor_pages[str(chapter_number)] = local_page
+        anchor_pages[str(source_filename)] = local_page
+    document.write_pdf(output_path, **dict(write_kwargs or {}))
+    return {
+        "index": job_index,
+        "total": total_jobs,
+        "path": output_path,
+        "pages": len(document.pages),
+        "chapters": len(chapter_order),
+        "first_chapter": chapter_order[0][1] if chapter_order else None,
+        "last_chapter": chapter_order[-1][1] if chapter_order else None,
+        "anchor_pages": anchor_pages,
+        "elapsed": time.perf_counter() - started,
+        "bytes": os.path.getsize(output_path),
+    }
+
+
+def render_workspace_bookmarks_rapid(
+    batch_jobs: list[tuple[int, str, list[tuple[str, int, str]]]],
     base_url: str,
     log_callback: LogCallback | None = None,
     *,
     max_workers: int | None = None,
-    render_callable: Callable[[str, str], Any] | None = None,
-) -> list[Any]:
-    """Render independent HTML batches concurrently and return source order.
-
-    WeasyPrint documents cannot be pickled safely, so the rapid workspace
-    compiler uses isolated render calls on a bounded thread pool. Each call
-    owns its ``HTML`` instance; the returned documents are merged by the
-    caller only after every render has finished.
-    """
+    write_kwargs: dict | None = None,
+) -> dict:
+    """Render bookmark-aware shards in isolated processes and return paths."""
     jobs = list(batch_jobs or [])
     if not jobs:
-        return []
-    if render_callable is None:
-        from weasyprint import HTML as WeasyHTML
-
-        def render_callable(source: str, job_base_url: str):
-            return WeasyHTML(string=source, base_url=job_base_url).render()
+        return {"results": [], "temp_dir": "", "workers": 0}
 
     worker_count = _rapid_render_worker_count(len(jobs), max_workers)
     total = len(jobs)
     started = time.perf_counter()
     completed = 0
     heartbeat_done = threading.Event()
+    configured = os.environ.get("PDF_EXTRACTION_WORKERS", "auto")
+    temp_dir = tempfile.mkdtemp(prefix="rapid_pdf_", dir=base_url)
     _log(
         log_callback,
-        f"⚡ Rapid workspace renderer: queued {total} batch(es) on "
-        f"{worker_count} parallel worker(s)",
+        f"⚡ Rapid workspace renderer: {total} bookmark-aware job(s) on "
+        f"{worker_count} process worker(s) "
+        f"(PDF extraction setting={configured}, CPU cores={os.cpu_count() or 1})",
     )
 
     def heartbeat() -> None:
@@ -108,20 +146,8 @@ def render_workspace_batches_rapid(
             _log(
                 log_callback,
                 f"⏳ Rapid workspace renderer heartbeat: {completed}/{total} "
-                f"batch(es) complete, {elapsed:.0f}s elapsed",
+                f"job(s) complete, {elapsed:.0f}s elapsed",
             )
-
-    def render_one(job_index: int, source: str):
-        batch_started = time.perf_counter()
-        _log(
-            log_callback,
-            f"  ▶ Rapid render batch {job_index + 1}/{total} started "
-            f"({len(source):,} HTML characters)",
-        )
-        document = render_callable(source, base_url)
-        elapsed = time.perf_counter() - batch_started
-        page_count = len(getattr(document, "pages", []) or [])
-        return job_index, document, page_count, elapsed
 
     heartbeat_thread = threading.Thread(
         target=heartbeat,
@@ -131,32 +157,61 @@ def render_workspace_batches_rapid(
     heartbeat_thread.start()
     results: dict[int, Any] = {}
     try:
-        with ThreadPoolExecutor(
+        process_jobs = []
+        for job_index, source, chapter_order in jobs:
+            output_path = os.path.join(
+                temp_dir,
+                f"bookmark_job_{job_index + 1:04d}.pdf",
+            )
+            first = chapter_order[0][1] if chapter_order else "?"
+            last = chapter_order[-1][1] if chapter_order else "?"
+            _log(
+                log_callback,
+                f"  ▶ Queued render job {job_index + 1}/{total}: "
+                f"bookmark sections {first}-{last}, "
+                f"{len(chapter_order)} section(s), {len(source):,} HTML characters",
+            )
+            process_jobs.append((
+                job_index,
+                total,
+                source,
+                base_url,
+                output_path,
+                chapter_order,
+                dict(write_kwargs or {}),
+            ))
+
+        with ProcessPoolExecutor(
             max_workers=worker_count,
-            thread_name_prefix="rapid-pdf-render",
         ) as executor:
             futures = {
-                executor.submit(render_one, job_index, source): job_index
-                for job_index, source in jobs
+                executor.submit(_render_workspace_pdf_shard, job): job[0]
+                for job in process_jobs
             }
             for future in as_completed(futures):
                 job_index = futures[future]
                 try:
-                    result_index, document, page_count, elapsed = future.result()
+                    result = future.result()
                 except BaseException as exc:
                     for pending in futures:
                         pending.cancel()
                     raise RuntimeError(
-                        f"Rapid render batch {job_index + 1}/{total} failed: {exc}"
+                        f"Rapid render job {job_index + 1}/{total} failed: {exc}"
                     ) from exc
-                results[result_index] = document
+                results[result["index"]] = result
                 completed += 1
                 _log(
                     log_callback,
-                    f"  ✅ Rapid render batch {result_index + 1}/{total}: "
-                    f"{page_count} page(s) in {elapsed:.1f}s "
+                    f"  ✅ Render job {result['index'] + 1}/{total}: "
+                    f"sections {result['first_chapter']}-{result['last_chapter']}, "
+                    f"{result['pages']} page(s), "
+                    f"{result['bytes'] / 1024 / 1024:.2f} MiB in "
+                    f"{result['elapsed']:.1f}s "
                     f"({completed}/{total} complete)",
                 )
+    except BaseException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
     finally:
         heartbeat_done.set()
         heartbeat_thread.join(timeout=0.5)
@@ -164,10 +219,14 @@ def render_workspace_batches_rapid(
     elapsed = time.perf_counter() - started
     _log(
         log_callback,
-        f"⚡ Rapid workspace renderer finished {total} batch(es) in "
-        f"{elapsed:.1f}s; merge order preserved",
+        f"⚡ Rapid workspace renderer finished {total} job(s) in "
+        f"{elapsed:.1f}s; bookmark order preserved",
     )
-    return [results[job_index] for job_index, _source in jobs]
+    return {
+        "results": [results[job_index] for job_index, _source, _order in jobs],
+        "temp_dir": temp_dir,
+        "workers": worker_count,
+    }
 
 
 def _natural_key(value: str) -> list:

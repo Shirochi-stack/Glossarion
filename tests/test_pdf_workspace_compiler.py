@@ -1,5 +1,4 @@
 import json
-import threading
 import time
 from pathlib import Path
 
@@ -8,61 +7,32 @@ from bs4 import BeautifulSoup
 
 from output_workspace import write_workspace_source_reference
 from pdf_workspace_compiler import (
+    _rapid_render_worker_count,
     _normalize_workspace_pdf_section_filenames,
     _workspace_source_heading_alignments,
     _workspace_response_entries,
+    build_bookmark_render_jobs,
     compile_pdf_workspace,
     normalize_fast_semantic_heading_alignment,
     normalize_fast_semantic_paragraph_alignment,
     normalize_pdf_workspace_translated_html,
-    render_workspace_batches_rapid,
     restore_pdf_source_paragraph_alignment,
     translate_pdf_workspace_artifacts,
 )
 
 
-def test_rapid_workspace_renderer_runs_batches_in_parallel_and_keeps_order(
-    tmp_path,
-):
-    active = 0
-    max_active = 0
-    lock = threading.Lock()
+def test_rapid_workspace_creates_one_ordered_job_per_bookmark():
+    parts = ["a" * 100, "b" * 90, "c" * 80, "d" * 70, "e" * 60]
+    orders = [(f"chapter-{index}.html", index, f"Chapter {index}")
+              for index in range(1, 6)]
 
-    class FakeDocument:
-        def __init__(self, label):
-            self.label = label
-            self.pages = [object()]
+    shards = build_bookmark_render_jobs(parts, orders, worker_count=3)
 
-    def fake_render(source, base_url):
-        nonlocal active, max_active
-        assert base_url == str(tmp_path)
-        with lock:
-            active += 1
-            max_active = max(max_active, active)
-        try:
-            time.sleep(0.06 if source == "first" else 0.02)
-            return FakeDocument(source)
-        finally:
-            with lock:
-                active -= 1
-
-    logs = []
-    documents = render_workspace_batches_rapid(
-        [(0, "first"), (1, "second"), (2, "third")],
-        str(tmp_path),
-        log_callback=logs.append,
-        max_workers=3,
-        render_callable=fake_render,
-    )
-
-    assert max_active >= 2
-    assert [document.label for document in documents] == [
-        "first",
-        "second",
-        "third",
-    ]
-    assert any("queued 3 batch(es) on 3 parallel worker(s)" in log for log in logs)
-    assert any("merge order preserved" in log for log in logs)
+    assert len(shards) == 5
+    assert all(len(shard[2]) == 1 for shard in shards)
+    assert [record[1] for shard in shards for record in shard[2]] == [1, 2, 3, 4, 5]
+    assert "".join(shard[1] for shard in shards) == "".join(parts)
+    assert _rapid_render_worker_count(12, requested=7) == 7
 
 
 def test_long_centered_source_heading_is_restored_without_retranslation(
@@ -920,8 +890,10 @@ def test_pdf_output_rapid_workspace_toggle_defaults_on_and_reaches_worker():
     assert "self.config.get('pdf_use_rapid_workspace_compiler', True)" in settings_source
     assert gui_source.count("PDF_USE_RAPID_WORKSPACE_COMPILER") >= 3
     assert "'PDF_USE_RAPID_WORKSPACE_COMPILER'," in converter_source
+    assert "'PDF_EXTRACTION_WORKERS'," in converter_source
     assert "os.environ.get('PDF_USE_RAPID_WORKSPACE_COMPILER', '1')" in worker_source
-    assert "render_workspace_batches_rapid" in worker_source
+    assert "render_workspace_bookmarks_rapid" in worker_source
+    assert "resolve_pdf_extraction_workers" in worker_source
 
 
 def test_new_runtime_modules_are_packaged_in_all_desktop_specs():
