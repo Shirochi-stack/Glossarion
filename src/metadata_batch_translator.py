@@ -3153,6 +3153,9 @@ class MetadataTranslator:
         self.client = client
         self.config = config or {}
         self.progress_callback = progress_callback
+        self.last_completed_fields = set()
+        self.last_requested_fields = set()
+        self.last_no_request_fields = set()
         self._prefer_explicit_config = bool(
             self.config.get('_prefer_explicit_config', False)
         )
@@ -3316,6 +3319,8 @@ class MetadataTranslator:
                           mode: str = 'together') -> Dict[str, Any]:
         """Translate selected metadata fields"""
         self.last_completed_fields = set()
+        self.last_requested_fields = set()
+        self.last_no_request_fields = set()
         if not any(fields_to_translate.values()):
             return metadata
             
@@ -3333,19 +3338,24 @@ class MetadataTranslator:
             translated_metadata.update(translated_fields)
 
         # Completion is based on a successful response, not on whether the
-        # returned string differs from the input. Fields that already match the
-        # target language are also complete without an API request.
+        # returned string differs from the input. Only skip a request when we
+        # can safely establish that the value already matches the target.
         self.last_completed_fields.update(translated_fields.keys())
         for field, should_translate in fields_to_translate.items():
             value = metadata.get(field)
-            if should_translate and value and self._is_already_english(value):
+            if (
+                should_translate
+                and value
+                and self._is_already_target_language(value)
+            ):
                 self.last_completed_fields.add(field)
+                self.last_no_request_fields.add(field)
                 self._notify_field_progress(field, "completed")
             
         return translated_metadata
  
     def _is_already_english(self, text: Any) -> bool:
-        """Simple check if text is already in English"""
+        """Conservatively recognize text written in the Latin script."""
         if not text:
             return True
 
@@ -3354,16 +3364,48 @@ class MetadataTranslator:
 
         text = str(text)
         
-        # Check for CJK characters - if present, needs translation
+        # Any recognized non-Latin script means this is not English. This is
+        # intentionally conservative; metadata translation must not be marked
+        # complete merely because a string is not CJK.
         for char in text:
-            if ('\u4e00' <= char <= '\u9fff' or  # Chinese
-                '\u3040' <= char <= '\u309f' or  # Hiragana
-                '\u30a0' <= char <= '\u30ff' or  # Katakana
-                '\uac00' <= char <= '\ud7af'):   # Korean
+            if (
+                '\u4e00' <= char <= '\u9fff' or  # Chinese
+                '\u3040' <= char <= '\u30ff' or  # Japanese
+                '\uac00' <= char <= '\ud7af' or  # Korean
+                '\u0600' <= char <= '\u06ff' or  # Arabic
+                '\u0750' <= char <= '\u077f' or
+                '\u08a0' <= char <= '\u08ff' or
+                '\u0590' <= char <= '\u05ff' or  # Hebrew
+                '\u0400' <= char <= '\u052f' or  # Cyrillic
+                '\u0370' <= char <= '\u03ff' or  # Greek
+                '\u0e00' <= char <= '\u0e7f' or  # Thai
+                '\u0900' <= char <= '\u097f'     # Devanagari
+            ):
                 return False
-        
-        # If no CJK characters, assume it's already English
+
         return True
+
+    def _is_already_target_language(self, text: Any) -> bool:
+        """Return True only when a no-request completion is defensible.
+
+        Script alone cannot distinguish English from other Latin-script
+        languages. For any non-English target, always make the configured
+        translation request instead of fabricating a successful completion.
+        """
+        if not text:
+            return True
+        if isinstance(text, (list, tuple)):
+            return all(self._is_already_target_language(item) for item in text)
+
+        target_language = str(
+            self._setting('OUTPUT_LANGUAGE', 'output_language', 'English')
+            or 'English'
+        ).strip().casefold()
+        english_target = (
+            target_language in {'en', 'eng'}
+            or target_language.startswith('english')
+        )
+        return english_target and self._is_already_english(text)
  
     def _translate_fields_together(self, 
                                   metadata: Dict[str, Any],
@@ -3375,11 +3417,12 @@ class MetadataTranslator:
             if should_translate and field in metadata and metadata[field]:
                 if metadata.get(f'{field}_translated', False):
                     continue
-                if not self._is_already_english(metadata[field]):
+                if not self._is_already_target_language(metadata[field]):
                     fields_to_send[field] = metadata[field]
                 
         if not fields_to_send:
             return {}
+        self.last_requested_fields.update(fields_to_send)
         
         # Get configured prompt
         prompt_template = self.config.get('metadata_batch_prompt',
@@ -3477,11 +3520,14 @@ class MetadataTranslator:
             if should_translate
             and not metadata.get(f'{field}_translated', False)
             and (value := metadata.get(field))
-            and not self._is_already_english(value)
+            and not self._is_already_target_language(value)
         ]
         
         if not fields_to_process:
             return {}
+        self.last_requested_fields.update(
+            field for field, _value in fields_to_process
+        )
             
         translated = {}
         max_workers = min(5, len(fields_to_process))
@@ -3553,7 +3599,7 @@ class MetadataTranslator:
     
     def _translate_single_field(self, field_name: str, field_value: Any) -> Optional[Any]:
         """Translate a single field using configured prompts"""
-        if self._is_already_english(field_value):
+        if self._is_already_target_language(field_value):
             return field_value
         is_list_value = isinstance(field_value, list)
         field_value_text = (

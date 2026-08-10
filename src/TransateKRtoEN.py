@@ -22603,7 +22603,7 @@ def main(log_callback=None, stop_callback=None):
             if metadata.get('title_translated')
             else metadata.get('title')
         )
-        print(f"ðŸ“š PDF book title source (filename): {pdf_source_title}")
+        print(f"PDF book title source (filename): {pdf_source_title}")
     metadata_plan = []
     metadata_phase_by_field = {}
 
@@ -22812,6 +22812,9 @@ def main(log_callback=None, stop_callback=None):
                 # Mark every successfully handled field complete, including
                 # valid responses whose output is identical to the input.
                 completed_fields = set(getattr(translator, 'last_completed_fields', set()))
+                no_request_fields = set(
+                    getattr(translator, 'last_no_request_fields', set())
+                )
                 for field_name in completed_fields:
                     if field_name not in fields_to_translate:
                         continue
@@ -22826,7 +22829,16 @@ def main(log_callback=None, stop_callback=None):
                     if metadata_translation_mode == 'parallel':
                         _set_metadata_field_progress(field_name, "completed")
                     if translated_value == original_value:
-                        print(f"✓ {field_name} response matched the input; marking translation complete")
+                        if field_name in no_request_fields:
+                            print(
+                                f"{field_name} already matches the target language; "
+                                "no API request was sent"
+                            )
+                        else:
+                            print(
+                                f"{field_name} response matched the input; "
+                                "marking translation complete"
+                            )
                     elif field_name == 'title':
                         print(f"📚 Translated title: {translated_value}")
 

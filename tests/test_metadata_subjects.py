@@ -162,6 +162,58 @@ def test_parallel_translation_preserves_subject_array_shape():
     assert result["subject"] == translated_subjects
 
 
+def test_english_pdf_title_is_really_sent_when_target_is_arabic(monkeypatch):
+    monkeypatch.setenv("OUTPUT_LANGUAGE", "Arabic")
+    translator = MetadataTranslator(
+        object(),
+        {
+            "output_language": "Arabic",
+            "metadata_batch_prompt": (
+                "Translate the following metadata fields to {target_lang}. "
+                "Return only JSON."
+            ),
+        },
+    )
+    calls = []
+
+    def capture_request(**kwargs):
+        calls.append(kwargs)
+        return json.dumps({"title": "\u0645\u0627 \u0647\u0648 \u062f\u0641\u0627\u0639 \u0627\u0644\u0627\u0633\u062a\u0642\u0631\u0627\u0631 (1)"})
+
+    translator._send_with_retry = capture_request
+    source_title = "What is rest defence (1)"
+    result = translator.translate_metadata(
+        {"title": source_title}, {"title": True}, mode="together"
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["context"] == "metadata"
+    assert source_title in calls[0]["messages"][1]["content"]
+    assert result["title"] == "\u0645\u0627 \u0647\u0648 \u062f\u0641\u0627\u0639 \u0627\u0644\u0627\u0633\u062a\u0642\u0631\u0627\u0631 (1)"
+    assert translator.last_completed_fields == {"title"}
+    assert translator.last_requested_fields == {"title"}
+    assert translator.last_no_request_fields == set()
+
+
+def test_english_title_can_skip_only_when_target_is_english(monkeypatch):
+    monkeypatch.setenv("OUTPUT_LANGUAGE", "English")
+    translator = MetadataTranslator(object(), {"output_language": "English"})
+    translator._send_with_retry = lambda **_kwargs: pytest.fail(
+        "English target should not send an already-English title"
+    )
+
+    result = translator.translate_metadata(
+        {"title": "What is rest defence (1)"},
+        {"title": True},
+        mode="together",
+    )
+
+    assert result["title"] == "What is rest defence (1)"
+    assert translator.last_completed_fields == {"title"}
+    assert translator.last_requested_fields == set()
+    assert translator.last_no_request_fields == {"title"}
+
+
 def test_incomplete_subject_array_response_is_rejected():
     translator = MetadataTranslator(object(), {"output_language": "English"})
     response = json.dumps({"subject": ["Modern"]})

@@ -108,6 +108,13 @@ def test_pdf_source_structure_preserves_translation_only_for_same_filename(tmp_p
     assert "original_title" not in renamed_source
     assert "title_translated" not in renamed_source
 
+    false_no_request_completion = build_source_structure_metadata(
+        str(tmp_path / "Original title.pdf"),
+        {"title": "Original title", "title_translated": True},
+    )
+    assert false_no_request_completion["title"] == "Original title"
+    assert "title_translated" not in false_no_request_completion
+
 
 def test_valid_html_doctype_is_not_an_ai_artifact():
     artifacts = detect_ai_artifacts(
