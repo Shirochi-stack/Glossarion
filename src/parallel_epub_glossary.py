@@ -20,6 +20,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence
 from ebooklib import epub
 from PySide6.QtCore import QStringListModel, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -92,16 +93,47 @@ def _normalized_member_stem(filename: str) -> str:
 
 
 def _member_number_signature(filename: str) -> tuple:
-    return tuple(int(part) for part in re.findall(r"\d+", Path(str(filename or "")).stem))
+    numbers = tuple(
+        int(part) for part in re.findall(r"\d+", Path(str(filename or "")).stem)
+    )
+    # Zero-only names such as 0000_Information are front-matter offset
+    # candidates, not chapter-number anchors.
+    return numbers if any(number > 0 for number in numbers) else ()
+
+
+def _has_positive_member_number(filename: str) -> bool:
+    """Return whether a filename contains any numeric value greater than zero."""
+
+    return bool(_member_number_signature(filename))
+
+
+def _nonpositive_member_layout(chapters: Sequence) -> tuple:
+    """Describe where no-number/zero-only files occur among numbered files."""
+
+    positive_members_seen = 0
+    layout = []
+    for chapter in chapters:
+        if _has_positive_member_number(chapter_filename(chapter)):
+            positive_members_seen += 1
+        else:
+            layout.append(positive_members_seen)
+    return tuple(layout)
 
 
 def auto_map_epub_chapters(
     raw_chapters: Sequence,
     translated_chapters: Sequence,
+    *,
+    enable_auto_offset: bool = True,
 ) -> List[Dict[str, object]]:
-    """Create a stable one-to-one map using name, number, then reading order."""
+    """Map names/numbers, isolating unnumbered and zero-only offset files."""
     mappings: List[Dict[str, object]] = [
-        {"raw_index": index, "translated_index": None, "strategy": "Unmatched"}
+        {
+            "raw_index": index,
+            "translated_index": None,
+            "strategy": "Unmatched",
+            "auto_offset": 0,
+        }
         for index in range(len(raw_chapters))
     ]
     available = set(range(len(translated_chapters)))
@@ -129,17 +161,73 @@ def auto_map_epub_chapters(
             mappings[raw_index]["strategy"] = strategy
             available.discard(translated_index)
 
-    assign_unique(_normalized_member_stem, "Exact filename")
-    assign_unique(_member_number_signature, "Chapter number")
+    if enable_auto_offset:
+        # No-number and zero-only documents deliberately stay out of every
+        # automatic assignment, even when their stems match. They remain in
+        # the UI for explicit manual selection.
+        assign_unique(
+            lambda filename: (
+                _normalized_member_stem(filename)
+                if _has_positive_member_number(filename)
+                else ""
+            ),
+            "Exact filename",
+        )
+    else:
+        assign_unique(_normalized_member_stem, "Exact filename")
 
-    unmatched_raw = [
-        index for index, mapping in enumerate(mappings)
-        if mapping["translated_index"] is None
-    ]
-    for raw_index, translated_index in zip(unmatched_raw, sorted(available)):
-        mappings[raw_index]["translated_index"] = translated_index
-        mappings[raw_index]["strategy"] = "Reading order"
-        available.discard(translated_index)
+    def assign_reading_group(numbered: bool, strategy: str) -> None:
+        raw_indexes = [
+            index
+            for index, mapping in enumerate(mappings)
+            if mapping["translated_index"] is None
+            and _has_positive_member_number(chapter_filename(raw_chapters[index]))
+            is numbered
+        ]
+        translated_indexes = [
+            index
+            for index in sorted(available)
+            if _has_positive_member_number(
+                chapter_filename(translated_chapters[index])
+            )
+            is numbered
+        ]
+        for raw_index, translated_index in zip(raw_indexes, translated_indexes):
+            visual_offset = raw_index - translated_index if numbered else 0
+            mappings[raw_index]["translated_index"] = translated_index
+            mappings[raw_index]["auto_offset"] = visual_offset
+            mappings[raw_index]["strategy"] = (
+                f"Auto offset {visual_offset:+d}" if visual_offset else strategy
+            )
+            available.discard(translated_index)
+
+    if enable_auto_offset:
+        # When zero-only/unnumbered files occur at different positions, they
+        # are the offset signal. Align positive-numbered reading sequences
+        # first; raw_0002 can legitimately correspond to translated_0001.
+        has_nonpositive_offset = _nonpositive_member_layout(
+            raw_chapters
+        ) != _nonpositive_member_layout(translated_chapters)
+        if has_nonpositive_offset:
+            assign_reading_group(True, "Numbered order")
+        assign_unique(_member_number_signature, "Chapter number")
+        if not has_nonpositive_offset:
+            assign_reading_group(True, "Numbered order")
+
+        # No-number/zero-only raw rows stay Unmatched and their translated
+        # counterparts stay unused. This prevents front matter from entering
+        # the paired glossary unless the user selects it manually.
+    else:
+        assign_unique(_member_number_signature, "Chapter number")
+        unmatched_raw = [
+            index
+            for index, mapping in enumerate(mappings)
+            if mapping["translated_index"] is None
+        ]
+        for raw_index, translated_index in zip(unmatched_raw, sorted(available)):
+            mappings[raw_index]["translated_index"] = translated_index
+            mappings[raw_index]["strategy"] = "Reading order"
+            available.discard(translated_index)
 
     return mappings
 
@@ -555,6 +643,15 @@ class ParallelEpubPairDialog(QDialog):
         self.mapping_status = QLabel("Load both EPUBs to create a map.")
         self.mapping_status.setStyleSheet("color: #9ba4b3;")
         mapping_header.addWidget(self.mapping_status, 1)
+        self.auto_offset_checkbox = QCheckBox("Auto Offset")
+        self.auto_offset_checkbox.setChecked(
+            bool(self.config.get("parallel_epub_auto_offset_enabled", True))
+        )
+        self.auto_offset_checkbox.setToolTip(
+            "Automatically keep unnumbered and zero-only files from shifting "
+            "positive-numbered chapters. Turn off for plain reading-order mapping."
+        )
+        mapping_header.addWidget(self.auto_offset_checkbox)
         self.auto_map_button = QPushButton("Auto-map Again")
         self.auto_map_button.clicked.connect(self._rebuild_mapping)
         mapping_header.addWidget(self.auto_map_button)
@@ -586,6 +683,7 @@ class ParallelEpubPairDialog(QDialog):
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         mapping_layout.addWidget(self.mapping_table, 1)
+        self.auto_offset_checkbox.toggled.connect(self._auto_offset_toggled)
 
         prompt_group = QGroupBox("Parallel EPUB Glossary System Prompt")
         prompt_layout = QVBoxLayout(prompt_group)
@@ -758,6 +856,7 @@ class ParallelEpubPairDialog(QDialog):
         self.auto_map_button.setEnabled(available)
         self.offset_down_button.setEnabled(available)
         self.offset_up_button.setEnabled(available)
+        self.auto_offset_checkbox.setEnabled(not loading and not self._mapping_building)
 
     def _rebuild_mapping(self):
         self._mapping_build_serial += 1
@@ -773,7 +872,9 @@ class ParallelEpubPairDialog(QDialog):
             self._refresh_load_controls()
             return
         self._auto_mapping = auto_map_epub_chapters(
-            self.raw_chapters, self.translated_chapters
+            self.raw_chapters,
+            self.translated_chapters,
+            enable_auto_offset=self.auto_offset_checkbox.isChecked(),
         )
         self._translated_mapping_model.setStringList(
             ["— Unmapped —"]
@@ -837,6 +938,18 @@ class ParallelEpubPairDialog(QDialog):
         self._mapping_building = False
         self._update_mapping_status()
         self._refresh_load_controls()
+
+    def _auto_offset_toggled(self, enabled: bool):
+        """Persist the automatic offset preference and rebuild the mapping."""
+
+        self.config["parallel_epub_auto_offset_enabled"] = bool(enabled)
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "save_config"):
+            try:
+                parent.save_config(show_message=False)
+            except Exception:
+                pass
+        self._rebuild_mapping()
 
     @staticmethod
     def _configure_mapping_combo(combo: QComboBox):
@@ -926,6 +1039,18 @@ class ParallelEpubPairDialog(QDialog):
         parts = [f"{len(mapping)} mapped"]
         if self._mapping_offset:
             parts.append(f"offset {self._mapping_offset:+d}")
+        else:
+            automatic_offsets = sorted(
+                {
+                    int(item.get("auto_offset") or 0)
+                    for item in self._auto_mapping
+                    if int(item.get("auto_offset") or 0)
+                }
+            )
+            if len(automatic_offsets) == 1:
+                parts.append(f"auto offset {automatic_offsets[0]:+d}")
+            elif automatic_offsets:
+                parts.append("automatic numbering offsets")
         if unmatched_raw:
             parts.append(f"{unmatched_raw} raw unmatched")
         if unused_translated:
@@ -971,6 +1096,17 @@ class ParallelEpubPairDialog(QDialog):
         if not name:
             return
         if name == DEFAULT_PARALLEL_EPUB_PROFILE:
+            answer = QMessageBox.question(
+                self,
+                "Reset Profile",
+                "Reset the built-in Parallel EPUB Glossary profile?\n\n"
+                "The current prompt text will be replaced with the default "
+                "pair-specific and glossary extraction instructions.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
             self.profiles[name] = default_parallel_epub_system_prompt()
             self.system_prompt_edit.setPlainText(self.profiles[name])
         else:

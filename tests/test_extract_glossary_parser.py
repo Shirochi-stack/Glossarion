@@ -7,7 +7,7 @@ import zipfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from extract_glossary_from_epub import (
     DEFAULT_GLOSSARY_PROMPT,
@@ -373,21 +373,124 @@ def test_parallel_epub_auto_map_prefers_name_then_number_then_reading_order():
     raw = [
         ("raw prologue", "prologue.xhtml"),
         ("raw two", "raw_chapter_02.xhtml"),
-        ("raw ending", "shared-ending.xhtml"),
+        ("raw ending", "shared-ending-03.xhtml"),
     ]
     translated = [
-        ("translated ending", "shared-ending.xhtml"),
-        ("translated two", "translated_02.xhtml"),
         ("translated opening", "opening.xhtml"),
+        ("translated ending", "shared-ending-03.xhtml"),
+        ("translated two", "translated_02.xhtml"),
     ]
 
     mapping = auto_map_epub_chapters(raw, translated)
 
-    assert [item["translated_index"] for item in mapping] == [2, 1, 0]
+    assert [item["translated_index"] for item in mapping] == [None, 2, 1]
     assert [item["strategy"] for item in mapping] == [
-        "Reading order",
+        "Unmatched",
         "Chapter number",
         "Exact filename",
+    ]
+
+
+def test_parallel_epub_auto_offset_leaves_matching_nonpositive_files_unmapped():
+    raw = [
+        ("raw opening", "opening.xhtml"),
+        ("raw information", "raw_0000.xhtml"),
+        ("raw chapter", "raw_0001.xhtml"),
+    ]
+    translated = [
+        ("translated opening", "opening.xhtml"),
+        ("translated information", "raw_0000.xhtml"),
+        ("translated chapter", "translated_0001.xhtml"),
+    ]
+
+    mapping = auto_map_epub_chapters(raw, translated)
+    assert [item["translated_index"] for item in mapping] == [None, None, 2]
+    assert [item["strategy"] for item in mapping] == [
+        "Unmatched",
+        "Unmatched",
+        "Chapter number",
+    ]
+
+    mapping_without_offset = auto_map_epub_chapters(
+        raw,
+        translated,
+        enable_auto_offset=False,
+    )
+    assert [item["translated_index"] for item in mapping_without_offset] == [0, 1, 2]
+
+
+def test_parallel_epub_auto_map_offsets_zero_only_front_matter_from_chapters():
+    raw = [
+        ("raw one", "raw_0002.xhtml"),
+        ("raw two", "raw_0003.xhtml"),
+        ("raw three", "raw_0004.xhtml"),
+    ]
+    translated = [
+        ("information", "0000_Information.xhtml"),
+        ("translated one", "translated_0001.xhtml"),
+        ("translated two", "translated_0002.xhtml"),
+        ("translated three", "translated_0003.xhtml"),
+    ]
+
+    mapping = auto_map_epub_chapters(raw, translated)
+
+    assert [item["translated_index"] for item in mapping] == [1, 2, 3]
+    assert [item["auto_offset"] for item in mapping] == [-1, -1, -1]
+    assert [item["strategy"] for item in mapping] == [
+        "Auto offset -1",
+        "Auto offset -1",
+        "Auto offset -1",
+    ]
+
+    mapping_without_offset = auto_map_epub_chapters(
+        raw,
+        translated,
+        enable_auto_offset=False,
+    )
+    assert [item["translated_index"] for item in mapping_without_offset] == [
+        2,
+        3,
+        0,
+    ]
+    assert all(item["auto_offset"] == 0 for item in mapping_without_offset)
+
+
+def test_parallel_epub_auto_map_does_not_mix_unnumbered_with_numbered_files():
+    raw = [
+        ("raw front matter", "opening.xhtml"),
+        ("raw one", "raw_0001.xhtml"),
+        ("raw two", "raw_0002.xhtml"),
+    ]
+    translated = [
+        ("translated one", "0001_Chapter_1.xhtml"),
+        ("translated two", "0002_Chapter_2.xhtml"),
+    ]
+
+    mapping = auto_map_epub_chapters(raw, translated)
+
+    assert [item["translated_index"] for item in mapping] == [None, 0, 1]
+    assert [item["auto_offset"] for item in mapping] == [0, 1, 1]
+    assert mapping[1]["strategy"] == "Auto offset +1"
+
+
+def test_parallel_epub_auto_map_does_not_offset_positive_numbered_extras():
+    raw = [
+        ("raw one", "raw_0001.xhtml"),
+        ("raw two", "raw_0002.xhtml"),
+    ]
+    translated = [
+        ("numbered bonus", "translated_0009.xhtml"),
+        ("translated one", "translated_0001.xhtml"),
+        ("translated two", "translated_0002.xhtml"),
+    ]
+
+    mapping = auto_map_epub_chapters(raw, translated)
+
+    assert [item["translated_index"] for item in mapping] == [1, 2]
+    assert [item["auto_offset"] for item in mapping] == [0, 0]
+    assert [item["strategy"] for item in mapping] == [
+        "Chapter number",
+        "Chapter number",
     ]
 
 
@@ -515,6 +618,7 @@ def test_parallel_epub_dialog_loads_in_background_and_shows_drop_feedback(tmp_pa
 def test_parallel_epub_mapping_combos_lock_wheel_use_icon_and_support_offsets():
     app = QApplication.instance() or QApplication([])
     dialog = ParallelEpubPairDialog(config={})
+    assert dialog.auto_offset_checkbox.isChecked()
     assert dialog.profile_combo.objectName() == "parallelPromptProfileCombo"
     assert "QComboBox#parallelPromptProfileCombo::down-arrow" in dialog.styleSheet()
     raw_chapters = [
@@ -573,5 +677,25 @@ def test_parallel_epub_mapping_combos_lock_wheel_use_icon_and_support_offsets():
         {"raw_index": 2, "translated_index": 2},
     ]
     assert "offset" not in dialog.mapping_status.text()
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_parallel_epub_default_profile_reset_requires_confirmation(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    dialog = ParallelEpubPairDialog(config={})
+    dialog.system_prompt_edit.setPlainText("custom unsaved prompt")
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args, **_kwargs: QMessageBox.No)
+    dialog._delete_or_reset_profile()
+    assert dialog.system_prompt_edit.toPlainText() == "custom unsaved prompt"
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.Yes,
+    )
+    dialog._delete_or_reset_profile()
+    assert dialog.system_prompt_edit.toPlainText() == default_parallel_epub_system_prompt()
     dialog.deleteLater()
     app.processEvents()

@@ -400,7 +400,7 @@ Glossarion aligns their HTML chapters and sends each mapped raw/translated pair 
 1. Open the **🔍 Browse ▼** menu beside **Input File(s)** and choose **📚 Raw + Translated EPUB Pair…**.
 2. Drag the original EPUB onto **RAW EPUB** on the left, or click **Browse Raw EPUB…**.
 3. Drag the existing translation onto **TRANSLATED EPUB** on the right, or click **Browse Translated EPUB…**. The drop zones highlight while an EPUB is hovering over them. Large books are read in the background, so the window remains usable while files load.
-4. Review **HTML File Mapping** in the right-hand pane. Glossarion first matches exact filenames, then chapter numbers, then remaining files by reading order.
+4. Review **HTML File Mapping** in the right-hand pane. Glossarion first matches exact filenames and positive chapter numbers. It then aligns the remaining positive-numbered files in reading order without letting unnumbered or zero-only (`000`, `0000`, etc.) files shift the real chapters. While **Auto Offset** is enabled, every unnumbered/zero-only raw file starts as **— Unmapped —** and every such translated file remains **translated unused**, even if their names match. You can still select one manually. Any inferred displacement is labeled **Auto offset**.
 5. Correct any questionable row with its **Translated HTML** dropdown. The mouse wheel scrolls the table without accidentally changing a dropdown; click the dropdown when you actually want to change it.
 6. Click **Use Mapped Pair**. The main window will show the two EPUB names and the number of mapped HTML files.
 7. Click **Extract Glossary** and use the normal glossary extraction settings.
@@ -409,6 +409,7 @@ Glossarion aligns their HTML chapters and sends each mapped raw/translated pair 
 
 | Control | What it does |
 |---------|--------------|
+| **Auto Offset** | Checked by default. Keeps extra unnumbered and zero-only files unmapped so they cannot shift positive-numbered chapters. They remain available for manual selection. Uncheck it to restore exact-name and plain reading-order fallback for those files. The choice is saved. |
 | **Auto-map Again** | Discards manual/offset changes and rebuilds the automatic map from offset zero. |
 | **− Offset** | Moves every automatic mapped entry one raw row up per click. |
 | **+ Offset** | Moves every automatic mapped entry one raw row down per click. |
