@@ -237,8 +237,7 @@ def test_pdf_worker_rapid_compiler_uses_pdf_workers_and_process_jobs(tmp_path):
 
     assert '"success": true' in result.stdout.lower(), result.stdout + result.stderr
     assert "PDF_EXTRACTION_WORKERS=2 → 2" in result.stdout
-    assert "2 process worker(s)" in result.stdout
-    assert "bookmark-aware job(s)" in result.stdout
+    assert "2 bookmark-aware job(s) on 2 process worker(s)" in result.stdout
     pdf_files = list(output_dir.glob("*.pdf"))
     assert len(pdf_files) == 1
     with fitz.open(pdf_files[0]) as document:

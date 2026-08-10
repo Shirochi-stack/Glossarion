@@ -79,6 +79,7 @@ def _merge_rapid_pdf_shards(
                 f"{len(prefix_documents)} ({prefix_pages} prefix page(s))")
 
         chapter_pages = 0
+        input_merge_started = time.time()
         for position, result in enumerate(render_results, 1):
             source = fitz.open(result["path"])
             try:
@@ -88,8 +89,11 @@ def _merge_rapid_pdf_shards(
                 source.close()
             log(f"  📎 Merged bookmark render job {position}/"
                 f"{len(render_results)}: {chapter_pages} chapter page(s)")
+        log(f"  ✅ Merged {len(render_results)} rendered input PDF(s) in "
+            f"{time.time() - input_merge_started:.1f}s")
 
         if settings.get('page_numbers') and chapter_pages:
+            numbering_started = time.time()
             alignment = str(settings.get('page_number_alignment') or 'center')
             align_code = {
                 'left': fitz.TEXT_ALIGN_LEFT,
@@ -117,7 +121,10 @@ def _merge_rapid_pdf_shards(
                     align=align_code,
                     overlay=True,
                 )
+            log(f"  ✅ Continuous page numbers added in "
+                f"{time.time() - numbering_started:.1f}s")
 
+        outline_started = time.time()
         outline = []
         seen_sources = set()
         for source_filename, chapter_number, title in chapters_order:
@@ -130,15 +137,23 @@ def _merge_rapid_pdf_shards(
             outline.append([1, str(title).strip(), page_number])
         if outline:
             merged.set_toc(outline)
-            log(f"  🔖 Added {len(outline)} bookmark outline entries")
+            log(f"  🔖 Added {len(outline)} bookmark outline entries in "
+                f"{time.time() - outline_started:.1f}s")
 
         log(f"  💾 Saving merged rapid PDF ({merged.page_count} total page(s))")
+        save_started = time.time()
         merged.save(
             temporary_path,
-            garbage=3,
+            # ``merged`` is a brand-new document assembled exclusively from
+            # the rendered inputs, so there are no abandoned objects to
+            # garbage-collect. Repacking every object into object streams
+            # made the final save noticeably CPU-bound on image-heavy books.
+            garbage=0,
             deflate=False,
-            use_objstms=1,
+            use_objstms=0,
         )
+        log(f"  ✅ Merged PDF serialization finished in "
+            f"{time.time() - save_started:.1f}s")
     except BaseException:
         try:
             if os.path.isfile(temporary_path):
@@ -729,7 +744,7 @@ def run_pdf_generation(config_path):
         try:
             from pdf_fast_extractor import resolve_pdf_extraction_workers
             from pdf_workspace_compiler import (
-                build_bookmark_render_jobs,
+                build_balanced_bookmark_render_jobs,
                 render_workspace_bookmarks_rapid,
             )
 
@@ -742,7 +757,7 @@ def run_pdf_generation(config_path):
                 "(bookmark-aware process renderer)")
             log(f"  🧠 Worker plan: PDF_EXTRACTION_WORKERS={requested_setting} "
                 f"→ {resolved_workers} of {os.cpu_count() or 1} CPU core(s)")
-            bookmark_jobs = build_bookmark_render_jobs(
+            bookmark_jobs = build_balanced_bookmark_render_jobs(
                 all_chapters_parts,
                 chapters_order,
                 resolved_workers,
@@ -775,6 +790,7 @@ def run_pdf_generation(config_path):
             rapid_temp_dir = rapid_render_bundle.get('temp_dir', '')
 
             log("  🧭 Phase 2/3: indexing bookmark anchors from rendered jobs")
+            indexing_started = time.time()
             _page_offset = current_page
             shard_orders = {item[0]: item[2] for item in bookmark_jobs}
             for result in rapid_render_bundle['results']:
@@ -796,8 +812,8 @@ def run_pdf_generation(config_path):
                     f"{len(rapid_render_bundle['results'])}: "
                     f"{result['chapters']} bookmark section(s), "
                     f"{result['pages']} page(s)")
-            log(f"  ✅ Rapid render and indexing complete: "
-                f"{current_page} total page(s)")
+            log(f"  ✅ Rapid indexing complete: {current_page} total page(s) in "
+                f"{time.time() - indexing_started:.1f}s")
         except BaseException as exc:
             log(f"  ⚠️ Rapid workspace rendering failed: "
                 f"{type(exc).__name__}: {exc}")

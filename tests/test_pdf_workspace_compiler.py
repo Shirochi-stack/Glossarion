@@ -11,7 +11,7 @@ from pdf_workspace_compiler import (
     _normalize_workspace_pdf_section_filenames,
     _workspace_source_heading_alignments,
     _workspace_response_entries,
-    build_bookmark_render_jobs,
+    build_balanced_bookmark_render_jobs,
     compile_pdf_workspace,
     normalize_fast_semantic_heading_alignment,
     normalize_fast_semantic_paragraph_alignment,
@@ -21,18 +21,39 @@ from pdf_workspace_compiler import (
 )
 
 
-def test_rapid_workspace_creates_one_ordered_job_per_bookmark():
+def test_rapid_workspace_balances_jobs_only_at_bookmark_boundaries():
     parts = ["a" * 100, "b" * 90, "c" * 80, "d" * 70, "e" * 60]
     orders = [(f"chapter-{index}.html", index, f"Chapter {index}")
               for index in range(1, 6)]
 
-    shards = build_bookmark_render_jobs(parts, orders, worker_count=3)
+    shards = build_balanced_bookmark_render_jobs(parts, orders, worker_count=3)
 
-    assert len(shards) == 5
-    assert all(len(shard[2]) == 1 for shard in shards)
+    assert len(shards) == 3
     assert [record[1] for shard in shards for record in shard[2]] == [1, 2, 3, 4, 5]
     assert "".join(shard[1] for shard in shards) == "".join(parts)
+    weights = [len(shard[1]) for shard in shards]
+    assert max(weights) - min(weights) <= 100
     assert _rapid_render_worker_count(12, requested=7) == 7
+
+
+def test_rapid_workspace_removes_only_redundant_job_leading_page_breaks():
+    parts = [
+        '<div id="chapter-1">One</div>',
+        '<div style="page-break-before: always;" id="chapter-2">Two</div>',
+        '<div style="page-break-before: always;" id="chapter-3">Three</div>',
+        '<div style="page-break-before: always;" id="chapter-4">Four</div>',
+    ]
+    orders = [(f"chapter-{index}.html", index, f"Chapter {index}")
+              for index in range(1, 5)]
+
+    jobs = build_balanced_bookmark_render_jobs(parts, orders, worker_count=2)
+
+    assert len(jobs) == 2
+    assert all(not content.startswith(
+        '<div style="page-break-before: always;"'
+    ) for _index, content, _orders in jobs)
+    assert sum(content.count("page-break-before: always")
+               for _index, content, _orders in jobs) == 2
 
 
 def test_long_centered_source_heading_is_restored_without_retranslation(

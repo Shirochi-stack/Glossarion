@@ -49,21 +49,57 @@ def _rapid_render_worker_count(job_count: int, requested: int | None = None) -> 
     return max(1, min(job_count, resolved))
 
 
-def build_bookmark_render_jobs(
+def build_balanced_bookmark_render_jobs(
     chapter_parts: list[str],
     chapter_orders: list[tuple[str, int, str]],
     worker_count: int,
 ) -> list[tuple[int, str, list[tuple[str, int, str]]]]:
-    """Create exactly one independently scheduled render job per bookmark."""
+    """Pack bookmark-bound sections into balanced, contiguous process jobs."""
     if not chapter_parts:
         return []
     if len(chapter_parts) != len(chapter_orders):
         raise ValueError("Bookmark render parts and order records do not match")
-    del worker_count  # Concurrency limits execution, not bookmark boundaries.
-    return [
-        (job_index, chapter_part, [chapter_orders[job_index]])
-        for job_index, chapter_part in enumerate(chapter_parts)
-    ]
+    job_count = max(1, min(len(chapter_parts), int(worker_count or 1)))
+    weights = [max(1, len(part)) for part in chapter_parts]
+    prefix = [0]
+    for weight in weights:
+        prefix.append(prefix[-1] + weight)
+    total_weight = prefix[-1]
+
+    jobs = []
+    start = 0
+    for job_index in range(job_count):
+        jobs_left = job_count - job_index
+        if jobs_left == 1:
+            end = len(chapter_parts)
+        else:
+            minimum_end = start + 1
+            maximum_end = len(chapter_parts) - (jobs_left - 1)
+            target = total_weight * (job_index + 1) / job_count
+            end = min(
+                range(minimum_end, maximum_end + 1),
+                key=lambda boundary: abs(prefix[boundary] - target),
+            )
+        job_parts = list(chapter_parts[start:end])
+        # Every section after the first carries a break-before marker in the
+        # combined document. At a process-job boundary the PDF is already a
+        # new document, so retaining that marker can manufacture a blank first
+        # page. Keep all later bookmark breaks inside the job.
+        if job_parts:
+            job_parts[0] = re.sub(
+                r'^<div\s+style="page-break-before:\s*always;"',
+                '<div',
+                job_parts[0],
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        jobs.append((
+            job_index,
+            "".join(job_parts),
+            chapter_orders[start:end],
+        ))
+        start = end
+    return jobs
 
 
 def _render_workspace_pdf_shard(job: tuple) -> dict:
