@@ -7,9 +7,11 @@ from bs4 import BeautifulSoup
 
 from output_workspace import write_workspace_source_reference
 from pdf_workspace_compiler import (
+    _normalize_workspace_pdf_section_filenames,
     _workspace_response_entries,
     compile_pdf_workspace,
     normalize_fast_semantic_paragraph_alignment,
+    restore_pdf_source_paragraph_alignment,
     translate_pdf_workspace_artifacts,
 )
 
@@ -74,6 +76,138 @@ def test_workspace_responses_prefer_translated_pdf_bookmark_titles(tmp_path):
     entries = _workspace_response_entries(str(workspace))
 
     assert entries[0][1] == "Translated Chapter Two"
+
+
+def test_workspace_section_names_do_not_embed_sidebar_titles(tmp_path):
+    workspace = tmp_path / "Long_Title_PDF"
+    workspace.mkdir()
+    old_name = "response_pdf_section_001_" + ("A" * 88) + ".html"
+    (workspace / old_name).write_text("translated", encoding="utf-8")
+    progress = {
+        "chapters": {
+            "pdf:stable-hash": {
+                "actual_num": 1,
+                "status": "completed",
+                "output_file": old_name,
+                "pdf_toc_section": True,
+                "pdf_section_id": "stable-hash",
+                "pdf_toc_title": "A" * 1000,
+            }
+        },
+        "completed_list": [{"file": old_name, "key": "pdf:stable-hash"}],
+    }
+    progress_path = workspace / "translation_progress.json"
+    progress_path.write_text(json.dumps(progress), encoding="utf-8")
+
+    assert _normalize_workspace_pdf_section_filenames(str(workspace)) == 1
+
+    new_name = "response_pdf_section_001.html"
+    assert not (workspace / old_name).exists()
+    assert (workspace / new_name).read_text(encoding="utf-8") == "translated"
+    saved = json.loads(progress_path.read_text(encoding="utf-8"))
+    entry = saved["chapters"]["pdf:stable-hash"]
+    assert entry["output_file"] == new_name
+    assert entry["pdf_toc_title"] == "A" * 1000
+    assert saved["completed_list"][0]["file"] == new_name
+
+
+def test_source_alignment_is_restored_from_pdf_page_cache(tmp_path, monkeypatch):
+    workspace = tmp_path / "Alignment_PDF"
+    cache = workspace / ".pdf_extraction_cache" / "pages" / "fast_semantic"
+    cache.mkdir(parents=True)
+    source_html = (
+        '<article class="pdf-fast-semantic-page" data-pdf-page="7">'
+        '<p class="pdf-align-left" data-pdf-source-alignment="left" '
+        'style="text-align:left">Source body.</p></article>'
+    )
+    (cache / "page_000007.json").write_text(
+        json.dumps({"page_number": 7, "html": source_html}),
+        encoding="utf-8",
+    )
+    translated_html = (
+        '<article class="pdf-fast-semantic-page" data-pdf-page="7">'
+        '<p style="text-align:center">Translated body.</p></article>'
+    )
+
+    restored = restore_pdf_source_paragraph_alignment(
+        translated_html,
+        str(workspace),
+    )
+    restored_paragraph = BeautifulSoup(restored, "html.parser").p
+    assert restored_paragraph["data-pdf-source-alignment"] == "left"
+    assert restored_paragraph["class"] == ["pdf-align-left"]
+    assert restored_paragraph["style"] == "text-align:left"
+
+    monkeypatch.setenv("PDF_PARAGRAPH_ALIGNMENT", "source")
+    monkeypatch.setenv("PDF_PARAGRAPH_JUSTIFICATION", "source")
+    normalized = BeautifulSoup(
+        normalize_fast_semantic_paragraph_alignment(restored),
+        "html.parser",
+    ).p
+    assert normalized["class"] == ["pdf-align-left"]
+    assert normalized["style"] == "text-align:left"
+
+    monkeypatch.setenv("PDF_PARAGRAPH_ALIGNMENT", "center")
+    overridden = BeautifulSoup(
+        normalize_fast_semantic_paragraph_alignment(restored),
+        "html.parser",
+    ).p
+    assert overridden["class"] == ["pdf-align-center"]
+    assert overridden["style"] == "text-align:center"
+
+
+def test_legacy_cached_center_is_rechecked_against_source_pdf_geometry(tmp_path):
+    source_pdf = tmp_path / "source.pdf"
+    document = fitz.open()
+    page = document.new_page(width=600, height=800)
+    source_text = (
+        "This is a normal left aligned paragraph with enough words to wrap "
+        "onto another line while keeping the same left edge."
+    )
+    page.insert_textbox(
+        fitz.Rect(80, 100, 500, 180),
+        source_text,
+        fontsize=12,
+        align=fitz.TEXT_ALIGN_LEFT,
+    )
+    document.save(source_pdf)
+    document.close()
+
+    workspace = tmp_path / "Legacy_Alignment_PDF"
+    cache = workspace / ".pdf_extraction_cache" / "pages" / "fast_semantic"
+    cache.mkdir(parents=True)
+    source_html = (
+        '<article class="pdf-fast-semantic-page" data-pdf-page="1">'
+        '<p class="pdf-align-center" data-pdf-source-alignment="center" '
+        f'style="text-align:center">{source_text}</p></article>'
+    )
+    (cache / "page_000001.json").write_text(
+        json.dumps({"page_number": 1, "html": source_html}),
+        encoding="utf-8",
+    )
+    manifest = workspace / ".pdf_extraction_cache" / "manifest_fast_semantic.json"
+    manifest.write_text(
+        json.dumps({
+            "source": {"path": str(source_pdf), "sha256": "test-source"},
+            "settings": {"version": 5},
+        }),
+        encoding="utf-8",
+    )
+    translated_html = (
+        '<article class="pdf-fast-semantic-page" data-pdf-page="1">'
+        '<p style="text-align:center">Translated body.</p></article>'
+    )
+
+    restored = BeautifulSoup(
+        restore_pdf_source_paragraph_alignment(
+            translated_html,
+            str(workspace),
+        ),
+        "html.parser",
+    ).p
+    assert restored["data-pdf-source-alignment"] == "left"
+    assert restored["class"] == ["pdf-align-left"]
+    assert restored["style"] == "text-align:left"
 
 
 def test_pdf_bookmarks_and_html_headers_use_shared_batch_translation(
@@ -246,6 +380,16 @@ def test_pdf_bookmarks_and_html_headers_use_shared_batch_translation(
 
 def test_compile_pdf_workspace_has_one_bookmark_per_response(tmp_path, monkeypatch):
     workspace = _make_pdf_workspace(tmp_path)
+    (workspace / "metadata.json").write_text(
+        json.dumps({
+            "title": "[42] Translated Novel",
+            "original_title": "Novel",
+            "title_translated": True,
+        }),
+        encoding="utf-8",
+    )
+    (workspace / "Novel_translated.html").write_text("old", encoding="utf-8")
+    (workspace / "Novel_translated.pdf").write_bytes(b"old")
 
     def fake_create_pdf_from_html(
         html_content, output_path, css_path=None, images_dir=None
@@ -274,8 +418,10 @@ def test_compile_pdf_workspace_has_one_bookmark_per_response(tmp_path, monkeypat
 
     output = compile_pdf_workspace(str(workspace))
 
-    assert Path(output).name == "Novel_translated.pdf"
+    assert Path(output).name == "[42] Translated Novel_translated.pdf"
     assert Path(output).is_file()
+    assert not (workspace / "Novel_translated.pdf").exists()
+    assert not (workspace / "Novel_translated.html").exists()
     with fitz.open(output) as document:
         assert document.page_count >= 1
         toc_titles = [row[1] for row in document.get_toc(simple=True)]
@@ -287,7 +433,7 @@ def test_compile_pdf_workspace_has_one_bookmark_per_response(tmp_path, monkeypat
     assert "First body." in page_text
     assert "Second body." in page_text
     assert "Body sentence heading" not in toc_titles
-    compiled_html = (workspace / "Novel_translated.html").read_text(
+    compiled_html = (workspace / "[42] Translated Novel_translated.html").read_text(
         encoding="utf-8"
     )
     assert ".pdf-fast-semantic-page p.pdf-align-justify {" in compiled_html
@@ -295,9 +441,15 @@ def test_compile_pdf_workspace_has_one_bookmark_per_response(tmp_path, monkeypat
     assert "break-before: page;" in compiled_html
     assert "page-break-before: always;" in compiled_html
     compiled_soup = BeautifulSoup(compiled_html, "html.parser")
+    assert compiled_soup.title.get_text(strip=True) == "[42] Translated Novel - Translated"
     first_body = compiled_soup.find("p", string="First body.")
     assert first_body["class"] == ["pdf-align-center"]
     assert first_body["style"] == "text-align:center"
+    saved_metadata = json.loads((workspace / "metadata.json").read_text(encoding="utf-8"))
+    assert saved_metadata["compiled_pdf_file"] == Path(output).name
+    assert saved_metadata["compiled_html_file"] == (
+        "[42] Translated Novel_translated.html"
+    )
 
 
 def test_pdf_compiler_paragraph_formatting_overrides(monkeypatch):

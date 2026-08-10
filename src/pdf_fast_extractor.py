@@ -1190,6 +1190,13 @@ def _layout_paragraph_alignment(
         if (
             max(centers) - min(centers) <= max(5.0, page_width * 0.012)
             and max(widths) - min(widths) > tolerance * 2
+            # A wrapped, left-aligned paragraph can coincidentally have
+            # similar line centers when its last line is only moderately
+            # shorter.  True centered text varies at both edges; identical
+            # left edges are positive evidence that the paragraph is left
+            # aligned (and likewise for identical right edges).
+            and max(lefts) - min(lefts) > tolerance * 2
+            and max(rights) - min(rights) > tolerance * 2
         ):
             return "center"
         if max(rights) - min(rights) <= tolerance and max(lefts) - min(lefts) > tolerance:

@@ -462,12 +462,21 @@ def test_pdf_progress_reconciliation_removes_old_page_rows(monkeypatch):
     assert set(manager.prog["chapters"]) == {"2", "artifact"}
     assert set(manager.prog["chapter_chunks"]) == {"2"}
     assert FileUtilities.create_chapter_filename(current_sections[0], 1) == (
-        "response_pdf_section_001_First.html"
+        "response_pdf_section_001.html"
     )
     assert FileUtilities.create_chapter_filename(
         {**current_sections[0], "num": 1.1, "is_chunk": True},
         1.1,
-    ) == "response_pdf_section_001_100_First.html"
+    ) == "response_pdf_section_001_100.html"
+    very_long_title = "A" * 1000
+    assert FileUtilities.create_chapter_filename(
+        {**current_sections[0], "title": very_long_title},
+        1,
+    ) == "response_pdf_section_001.html"
+    from pdf_output_naming import safe_pdf_book_filename_stem
+
+    bounded_book_stem = safe_pdf_book_filename_stem("\U0001F680" * 300)
+    assert len(bounded_book_stem.encode("utf-16-le")) // 2 <= 180
 
 
 def test_pdf_toc_setting_is_defaulted_exported_and_persisted():
@@ -616,7 +625,7 @@ def test_progress_manager_merges_stable_pdf_rows_with_outline_seeds(tmp_path):
     assert set(prog["chapters"]) == {f"pdf:{section_id}"}
     entry = prog["chapters"][f"pdf:{section_id}"]
     assert entry["status"] == "completed"
-    readable_output = "response_pdf_section_001_Opening.html"
+    readable_output = "response_pdf_section_001.html"
     assert entry["output_file"] == readable_output
     assert not (output_dir / output_name).exists()
     assert (output_dir / readable_output).read_text(encoding="utf-8") == "translated"

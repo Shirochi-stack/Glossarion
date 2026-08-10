@@ -18,6 +18,10 @@ from bs4 import BeautifulSoup
 LogCallback = Callable[[str], None]
 
 
+_SOURCE_ALIGNMENT_CORRECTION_CACHE: dict[tuple, dict[int, dict[int, str]]] = {}
+_SOURCE_ALIGNMENT_CORRECTION_LOCK = threading.Lock()
+
+
 class PDFCompilationCancelled(RuntimeError):
     """Raised when compilation is cancelled between renderer phases."""
 
@@ -617,6 +621,296 @@ def _fragment_body(content: str) -> str:
     return "".join(str(child) for child in container.contents)
 
 
+def _paragraph_alignment_value(paragraph, fallback="left") -> str:
+    alignment = str(
+        paragraph.get("data-pdf-source-alignment") or ""
+    ).strip().lower()
+    if alignment in {"left", "center", "right", "justify"}:
+        return alignment
+    for css_class in paragraph.get("class", []):
+        css_class = str(css_class)
+        if css_class.startswith("pdf-align-"):
+            candidate = css_class[len("pdf-align-"):].strip().lower()
+            if candidate in {"left", "center", "right", "justify"}:
+                return candidate
+    for declaration in str(paragraph.get("style") or "").split(";"):
+        name, separator, value = declaration.partition(":")
+        if separator and name.strip().casefold() == "text-align":
+            candidate = value.strip().lower().replace("!important", "").strip()
+            if candidate in {"left", "center", "right", "justify"}:
+                return candidate
+    return fallback
+
+
+def _set_paragraph_source_alignment(paragraph, alignment: str) -> None:
+    alignment = (
+        alignment if alignment in {"left", "center", "right", "justify"}
+        else "left"
+    )
+    paragraph["data-pdf-source-alignment"] = alignment
+    classes = [
+        css_class
+        for css_class in paragraph.get("class", [])
+        if not str(css_class).startswith("pdf-align-")
+    ]
+    classes.append(f"pdf-align-{alignment}")
+    paragraph["class"] = classes
+    declarations = []
+    for declaration in str(paragraph.get("style") or "").split(";"):
+        declaration = declaration.strip()
+        name = declaration.partition(":")[0].strip().casefold()
+        if declaration and name != "text-align":
+            declarations.append(declaration)
+    declarations.append(f"text-align:{alignment}")
+    paragraph["style"] = ";".join(declarations)
+
+
+def _source_alignment_text_key(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    return " ".join(normalized.split())
+
+
+def _cached_source_alignment_corrections(folder: str) -> dict[int, dict[int, str]]:
+    """Recheck legacy cached ``center`` values against source line geometry.
+
+    Fast Semantic version 5 could mistake a normal wrapped paragraph for
+    centered text when its lines happened to have similar centers.  Opening
+    every page again would defeat the extraction cache, so inspect only cache
+    pages containing a centered paragraph and only read those source pages.
+    """
+    manifest_path = os.path.join(
+        folder,
+        ".pdf_extraction_cache",
+        "manifest_fast_semantic.json",
+    )
+    cache_root = os.path.join(
+        folder,
+        ".pdf_extraction_cache",
+        "pages",
+        "fast_semantic",
+    )
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(manifest, dict) or not os.path.isdir(cache_root):
+        return {}
+
+    source_info = manifest.get("source")
+    source_info = source_info if isinstance(source_info, dict) else {}
+    source_pdf = str(source_info.get("path") or "").strip()
+    if not os.path.isfile(source_pdf):
+        try:
+            from output_workspace import read_workspace_source_path
+
+            source_pdf = read_workspace_source_path(folder)
+        except Exception:
+            source_pdf = ""
+    if not source_pdf.lower().endswith(".pdf") or not os.path.isfile(source_pdf):
+        return {}
+
+    try:
+        manifest_mtime = os.stat(manifest_path).st_mtime_ns
+        source_mtime = os.stat(source_pdf).st_mtime_ns
+    except OSError:
+        return {}
+    cache_key = (
+        os.path.normcase(os.path.abspath(folder)),
+        os.path.normcase(os.path.abspath(source_pdf)),
+        source_mtime,
+        str(source_info.get("sha256") or ""),
+        manifest_mtime,
+    )
+    with _SOURCE_ALIGNMENT_CORRECTION_LOCK:
+        cached = _SOURCE_ALIGNMENT_CORRECTION_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    affected_pages: dict[int, list[tuple[int, str, int]]] = {}
+    try:
+        cache_names = sorted(
+            name
+            for name in os.listdir(cache_root)
+            if name.lower().endswith(".json")
+        )
+    except OSError:
+        return {}
+    for cache_name in cache_names:
+        try:
+            with open(
+                os.path.join(cache_root, cache_name),
+                "r",
+                encoding="utf-8",
+            ) as handle:
+                payload = json.load(handle)
+            page_number = int(payload.get("page_number"))
+            source_soup = BeautifulSoup(
+                str(payload.get("html") or ""),
+                "html.parser",
+            )
+        except (OSError, ValueError, TypeError):
+            continue
+        occurrences: dict[str, int] = {}
+        affected = []
+        for index, paragraph in enumerate(
+            source_soup.select(".pdf-fast-semantic-page p")
+        ):
+            text_key = _source_alignment_text_key(
+                paragraph.get_text(" ", strip=True)
+            )
+            occurrence = occurrences.get(text_key, 0)
+            occurrences[text_key] = occurrence + 1
+            if _paragraph_alignment_value(paragraph) == "center" and text_key:
+                affected.append((index, text_key, occurrence))
+        if affected:
+            affected_pages[page_number] = affected
+
+    corrections: dict[int, dict[int, str]] = {}
+    if affected_pages:
+        try:
+            import fitz
+            from pdf_fast_extractor import (
+                _layout_paragraph_alignment,
+                _semantic_layout_geometry,
+            )
+
+            block_flags = int(getattr(fitz, "TEXTFLAGS_BLOCKS", 195)) & ~int(
+                getattr(fitz, "TEXT_PRESERVE_IMAGES", 4)
+            )
+            dict_flags = int(getattr(fitz, "TEXTFLAGS_DICT", 199)) & ~int(
+                getattr(fitz, "TEXT_PRESERVE_IMAGES", 4)
+            )
+            document = fitz.open(source_pdf)
+            try:
+                for page_number, affected in affected_pages.items():
+                    if page_number < 1 or page_number > document.page_count:
+                        continue
+                    page = document[page_number - 1]
+                    try:
+                        blocks = page.get_text(
+                            "blocks",
+                            sort=True,
+                            flags=block_flags,
+                        ) or []
+                    except TypeError:
+                        blocks = page.get_text("blocks", sort=True) or []
+                    layout_by_number, column_bounds = _semantic_layout_geometry(
+                        page,
+                        dict_flags,
+                    )
+                    candidates: dict[str, list[str]] = {}
+                    for block in blocks:
+                        if len(block) < 7 or int(block[6]) != 0:
+                            continue
+                        text_value = " ".join(str(block[4] or "").split())
+                        text_key = _source_alignment_text_key(text_value)
+                        if not text_key:
+                            continue
+                        alignment = _layout_paragraph_alignment(
+                            layout_by_number.get(int(block[5])),
+                            float(page.rect.width),
+                            column_bounds,
+                            text_value,
+                        )
+                        candidates.setdefault(text_key, []).append(alignment)
+                    for index, text_key, occurrence in affected:
+                        matches = candidates.get(text_key) or []
+                        if occurrence >= len(matches):
+                            continue
+                        alignment = matches[occurrence]
+                        if alignment in {"left", "center", "right", "justify"}:
+                            corrections.setdefault(page_number, {})[index] = alignment
+            finally:
+                document.close()
+        except Exception:
+            # Source-format restoration remains best effort.  A missing PDF
+            # dependency or unreadable source must not block compilation.
+            corrections = {}
+
+    with _SOURCE_ALIGNMENT_CORRECTION_LOCK:
+        stale_keys = [
+            key
+            for key in _SOURCE_ALIGNMENT_CORRECTION_CACHE
+            if key[0] == cache_key[0] and key != cache_key
+        ]
+        for stale_key in stale_keys:
+            _SOURCE_ALIGNMENT_CORRECTION_CACHE.pop(stale_key, None)
+        _SOURCE_ALIGNMENT_CORRECTION_CACHE[cache_key] = corrections
+    return corrections
+
+
+def restore_pdf_source_paragraph_alignment(content: str, folder: str) -> str:
+    """Restore source alignment from cached PDF pages after model translation.
+
+    Translation responses are not authoritative formatting sources: a model can
+    remove the extraction classes or rewrite many ``text-align`` declarations.
+    Each fast-semantic article retains its PDF page number, so copy the original
+    alignment sequence from that page's extraction artifact before compilation.
+    """
+    soup = BeautifulSoup(content or "", "html.parser")
+    cache_root = os.path.join(
+        folder,
+        ".pdf_extraction_cache",
+        "pages",
+        "fast_semantic",
+    )
+    if not os.path.isdir(cache_root):
+        return str(content or "")
+
+    page_cache = {}
+    alignment_corrections = None
+    changed = False
+    for container in soup.select(".pdf-fast-semantic-page[data-pdf-page]"):
+        try:
+            page_number = int(container.get("data-pdf-page"))
+        except (TypeError, ValueError):
+            continue
+        if page_number not in page_cache:
+            cache_path = os.path.join(
+                cache_root,
+                f"page_{page_number:06d}.json",
+            )
+            try:
+                with open(cache_path, "r", encoding="utf-8") as handle:
+                    page_payload = json.load(handle)
+                source_soup = BeautifulSoup(
+                    str(page_payload.get("html") or ""),
+                    "html.parser",
+                )
+                page_cache[page_number] = [
+                    _paragraph_alignment_value(paragraph)
+                    for paragraph in source_soup.select(
+                        ".pdf-fast-semantic-page p"
+                    )
+                ]
+            except (OSError, ValueError, TypeError):
+                page_cache[page_number] = None
+        source_alignments = page_cache.get(page_number)
+        if source_alignments is None:
+            continue
+        if "center" in source_alignments:
+            if alignment_corrections is None:
+                alignment_corrections = _cached_source_alignment_corrections(folder)
+            for index, corrected in (
+                alignment_corrections.get(page_number, {}).items()
+            ):
+                if index < len(source_alignments):
+                    source_alignments[index] = corrected
+        translated_paragraphs = container.find_all("p")
+        for index, paragraph in enumerate(translated_paragraphs):
+            # If the model inserted an extra paragraph, default it to the
+            # ordinary source flow instead of trusting a hallucinated center.
+            alignment = (
+                source_alignments[index]
+                if index < len(source_alignments)
+                else "left"
+            )
+            _set_paragraph_source_alignment(paragraph, alignment)
+            changed = True
+    return str(soup) if changed else str(content or "")
+
+
 def normalize_fast_semantic_paragraph_alignment(content: str) -> str:
     """Preserve detected source formatting or apply the configured override."""
     from pdf_fast_extractor import (
@@ -627,28 +921,8 @@ def normalize_fast_semantic_paragraph_alignment(content: str) -> str:
     soup = BeautifulSoup(content or "", "html.parser")
     changed = False
     for paragraph in soup.select(".pdf-fast-semantic-page p"):
-        source_alignment = str(
-            paragraph.get("data-pdf-source-alignment") or ""
-        ).strip().lower()
-        if source_alignment not in {"left", "center", "right", "justify"}:
-            source_alignment = ""
-            for css_class in paragraph.get("class", []):
-                css_class = str(css_class)
-                if css_class.startswith("pdf-align-"):
-                    candidate = css_class[len("pdf-align-"):].strip().lower()
-                    if candidate in {"left", "center", "right", "justify"}:
-                        source_alignment = candidate
-                        break
         style = str(paragraph.get("style") or "")
-        if not source_alignment:
-            for declaration in style.split(";"):
-                name, separator, value = declaration.partition(":")
-                if separator and name.strip().casefold() == "text-align":
-                    candidate = value.strip().lower().replace("!important", "").strip()
-                    if candidate in {"left", "center", "right", "justify"}:
-                        source_alignment = candidate
-                        break
-        source_alignment = source_alignment or "left"
+        source_alignment = _paragraph_alignment_value(paragraph)
         alignment = resolve_pdf_paragraph_alignment(
             source_alignment,
             paragraph.get_text(" ", strip=True),
@@ -939,6 +1213,179 @@ def _source_pdf_stem(folder: str) -> str:
     return re.sub(r"_PDF(?:_\d+)?$", "", leaf, flags=re.IGNORECASE)
 
 
+def _workspace_book_metadata(folder: str) -> dict:
+    metadata_path = os.path.join(folder, "metadata.json")
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        return metadata if isinstance(metadata, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _compiled_book_identity(folder: str) -> tuple[str, str, dict]:
+    """Return the display title, safe output stem, and workspace metadata."""
+    from pdf_output_naming import safe_pdf_book_filename_stem
+
+    metadata = _workspace_book_metadata(folder)
+    fallback = _source_pdf_stem(folder)
+    display_title = str(
+        metadata.get("title")
+        or metadata.get("original_title")
+        or fallback
+    ).strip() or fallback
+    folder_units = len(os.path.abspath(folder).encode("utf-16-le")) // 2
+    suffix_units = len("\\_translated.pdf".encode("utf-16-le")) // 2
+    path_budget = max(24, 240 - folder_units - suffix_units)
+    stem = safe_pdf_book_filename_stem(
+        display_title,
+        fallback,
+        max_units=min(180, path_budget),
+    )
+    return display_title, stem, metadata
+
+
+def _remember_compiled_output_names(
+    folder: str,
+    metadata: dict,
+    html_name: str,
+    pdf_name: str,
+) -> None:
+    """Persist current compiled names so a future title change can retire them."""
+    if not metadata:
+        return
+    metadata = dict(metadata)
+    metadata["compiled_html_file"] = os.path.basename(html_name)
+    metadata["compiled_pdf_file"] = os.path.basename(pdf_name)
+    metadata_path = os.path.join(folder, "metadata.json")
+    temporary_path = f"{metadata_path}.tmp"
+    try:
+        with open(temporary_path, "w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+        os.replace(temporary_path, metadata_path)
+    finally:
+        if os.path.isfile(temporary_path):
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
+
+
+def _retire_previous_compiled_names(
+    folder: str,
+    current_paths: tuple[str, str],
+    metadata: dict,
+) -> None:
+    """Remove only known app-generated predecessors after a successful compile."""
+    current = {
+        os.path.normcase(os.path.abspath(path))
+        for path in current_paths
+    }
+    source_stem = _source_pdf_stem(folder)
+    candidates = {
+        str(metadata.get("compiled_html_file") or ""),
+        str(metadata.get("compiled_pdf_file") or ""),
+        f"{source_stem}_translated.html",
+        f"{source_stem}_translated.pdf",
+    }
+    for name in candidates:
+        basename = os.path.basename(name)
+        lowered = basename.casefold()
+        if not lowered.endswith(("_translated.html", "_translated.pdf")):
+            continue
+        path = os.path.abspath(os.path.join(folder, basename))
+        if os.path.normcase(path) in current:
+            continue
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def _normalize_workspace_pdf_section_filenames(folder: str) -> int:
+    """Move title-bearing section files to short names and update mappings."""
+    from pdf_output_naming import (
+        move_pdf_output_to_readable_name,
+        readable_pdf_section_filename,
+    )
+
+    progress_path = os.path.join(folder, "translation_progress.json")
+    try:
+        with open(progress_path, "r", encoding="utf-8") as handle:
+            progress = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return 0
+    if not isinstance(progress, dict):
+        return 0
+    chapters = progress.get("chapters")
+    if not isinstance(chapters, dict):
+        return 0
+
+    occupied = {
+        os.path.basename(str(info.get("output_file") or "")).casefold()
+        for info in chapters.values()
+        if isinstance(info, dict) and info.get("output_file")
+    }
+    renamed = 0
+    changed = False
+    file_mapping = {}
+    for info in chapters.values():
+        if not isinstance(info, dict) or not info.get("pdf_toc_section"):
+            continue
+        actual_num = info.get("actual_num", info.get("chapter_num", 0))
+        current = os.path.basename(str(info.get("output_file") or ""))
+        preferred = readable_pdf_section_filename(
+            {"pdf_toc_section": True, "num": actual_num},
+            actual_num=actual_num,
+            retain=not current.casefold().startswith("response_"),
+        )
+        if current.casefold() == preferred.casefold():
+            continue
+        try:
+            mapped, moved = move_pdf_output_to_readable_name(
+                folder,
+                current,
+                preferred,
+                occupied=occupied,
+            )
+        except OSError:
+            continue
+        if not mapped:
+            continue
+        occupied.discard(current.casefold())
+        occupied.add(mapped.casefold())
+        info["output_file"] = mapped
+        file_mapping[current.casefold()] = mapped
+        changed = True
+        if moved:
+            renamed += 1
+
+    completed_list = progress.get("completed_list")
+    if isinstance(completed_list, list) and file_mapping:
+        for item in completed_list:
+            if not isinstance(item, dict):
+                continue
+            current = os.path.basename(str(item.get("file") or ""))
+            mapped = file_mapping.get(current.casefold())
+            if mapped:
+                item["file"] = mapped
+
+    if changed:
+        temporary_path = f"{progress_path}.tmp"
+        try:
+            with open(temporary_path, "w", encoding="utf-8") as handle:
+                json.dump(progress, handle, ensure_ascii=False, indent=2)
+            os.replace(temporary_path, progress_path)
+        finally:
+            if os.path.isfile(temporary_path):
+                try:
+                    os.remove(temporary_path)
+                except OSError:
+                    pass
+    return renamed
+
+
 def _outline_title_key(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", str(value or ""))
     return " ".join(normalized.split()).casefold()
@@ -1016,6 +1463,12 @@ def compile_pdf_workspace(
                 log_callback=log_callback,
                 stop_callback=stop_callback,
             )
+    renamed_sections = _normalize_workspace_pdf_section_filenames(folder)
+    if renamed_sections:
+        _log(
+            log_callback,
+            f"Normalized {renamed_sections} PDF section filename(s) to short numbered names",
+        )
     entries = _workspace_response_entries(folder)
     if not entries:
         raise ValueError("No translated response HTML files were found.")
@@ -1029,6 +1482,7 @@ def compile_pdf_workspace(
             raise PDFCompilationCancelled("PDF compilation stopped by user")
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             content = handle.read()
+        content = restore_pdf_source_paragraph_alignment(content, folder)
         title = title or f"Section {index}"
         titles.append(title)
         source_contents.append(content)
@@ -1069,7 +1523,7 @@ def compile_pdf_workspace(
             f"{_fragment_body(content)}</section>"
         )
 
-    stem = _source_pdf_stem(folder)
+    book_title, stem, book_metadata = _compiled_book_identity(folder)
     html_path = os.path.join(folder, f"{stem}_translated.html")
     pdf_path = os.path.join(folder, f"{stem}_translated.pdf")
     document_html = f"""<!DOCTYPE html>
@@ -1077,7 +1531,7 @@ def compile_pdf_workspace(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{html.escape(stem)} - Translated</title>
+  <title>{html.escape(book_title)} - Translated</title>
   <link rel="stylesheet" href="styles.css">
   <style>
     h1, h2, h3, h4, h5, h6 {{ bookmark-level: none !important; }}
@@ -1168,5 +1622,16 @@ def compile_pdf_workspace(
         raise RuntimeError("The PDF renderer did not create an output file.")
     _log(log_callback, "📑 Normalizing PDF bookmarks (one per translated section)…")
     _keep_only_section_bookmarks(pdf_path, titles)
+    _retire_previous_compiled_names(
+        folder,
+        (html_path, pdf_path),
+        book_metadata,
+    )
+    _remember_compiled_output_names(
+        folder,
+        book_metadata,
+        os.path.basename(html_path),
+        os.path.basename(pdf_path),
+    )
     _log(log_callback, f"✅ PDF compilation complete: {pdf_path}")
     return pdf_path

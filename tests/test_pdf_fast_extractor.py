@@ -10,6 +10,7 @@ from pdf_extractor import build_pdf_toc_section_plan, group_pdf_pages_by_toc
 from pdf_fast_extractor import (
     PDFExtractionCancelled,
     _fast_pdf_worker_count,
+    _layout_paragraph_alignment,
     _semantic_page_html,
     _text_alignment,
     apply_pdf_image_rename_logic,
@@ -284,6 +285,48 @@ def test_fast_semantic_alignment_does_not_center_full_width_paragraphs():
         'Short body sentence</p>'
     ) in rendered
     assert '<p class="pdf-align-center"' not in rendered
+
+
+def test_multiline_alignment_requires_both_edges_to_move_for_centering():
+    left_aligned = {
+        "bbox": [80.0, 100.0, 500.0, 140.0],
+        "lines": [
+            {
+                "bbox": [80.0, 100.0, 500.0, 118.0],
+                "spans": [{"text": "First wrapped line"}],
+            },
+            {
+                "bbox": [80.0, 120.0, 470.0, 138.0],
+                "spans": [{"text": "Second wrapped line"}],
+            },
+        ],
+    }
+    centered = {
+        "bbox": [140.0, 100.0, 460.0, 140.0],
+        "lines": [
+            {
+                "bbox": [140.0, 100.0, 460.0, 118.0],
+                "spans": [{"text": "Long centered line"}],
+            },
+            {
+                "bbox": [190.0, 120.0, 410.0, 138.0],
+                "spans": [{"text": "Short centered line"}],
+            },
+        ],
+    }
+
+    assert _layout_paragraph_alignment(
+        left_aligned,
+        600.0,
+        (80.0, 500.0),
+        "First wrapped line Second wrapped line",
+    ) == "left"
+    assert _layout_paragraph_alignment(
+        centered,
+        600.0,
+        (80.0, 500.0),
+        "Long centered line Short centered line",
+    ) == "center"
 
 
 def test_fast_semantic_detects_source_justification_and_honors_overrides(monkeypatch):
@@ -939,7 +982,7 @@ def test_pdf_progress_uses_stable_section_id_across_display_number_changes(tmp_p
         "pdf_end_page": 4,
     }
 
-    readable_output = "response_pdf_section_003_Middle.html"
+    readable_output = "response_pdf_section_003.html"
     assert FileUtilities.create_chapter_filename(current_chapter, 3) == readable_output
     assert manager.reconcile_pdf_chapter_entries([current_chapter]) == 0
     assert manager.prog["chapters"][f"pdf:{section_id}"]["actual_num"] == 3

@@ -1,8 +1,9 @@
-"""Readable output names for bookmark-grouped PDF sections.
+"""Safe output names for bookmark-grouped PDF sections.
 
 PDF bookmark IDs are deliberately stable across outline insertions and belong in
-``translation_progress.json``.  They are not useful filenames, however.  This
-module keeps the stable identity separate from the human-facing output name.
+``translation_progress.json``. Bookmark titles are display metadata and can be
+arbitrarily long, so they do not belong in Windows filenames either. This module
+keeps both values separate from short, ordinary output filenames.
 """
 
 from __future__ import annotations
@@ -47,8 +48,34 @@ def _number_token(actual_num):
     return f"{major:03d}"
 
 
+def _truncate_utf16(value, max_units):
+    """Truncate to a Windows filename-component budget (UTF-16 code units)."""
+    result = []
+    used = 0
+    for character in str(value or ""):
+        units = max(1, len(character.encode("utf-16-le")) // 2)
+        if used + units > max_units:
+            break
+        result.append(character)
+        used += units
+    return "".join(result)
+
+
+def safe_pdf_book_filename_stem(value, fallback="translated", max_units=180):
+    """Return a Windows-safe, bounded book-title stem while preserving spaces."""
+    title = unicodedata.normalize("NFC", str(value or "").strip())
+    title = _INVALID_FILENAME_CHARS.sub("_", title)
+    title = _WHITESPACE.sub(" ", title).strip(" .")
+    if not title:
+        title = fallback
+    if title.casefold() in _WINDOWS_RESERVED:
+        title = f"_{title}"
+    title = _truncate_utf16(title, max(24, int(max_units))).rstrip(" .")
+    return title or fallback
+
+
 def readable_pdf_section_filename(chapter, actual_num=None, retain=False):
-    """Return a readable filename without exposing the stable bookmark hash."""
+    """Return a short numbered filename without hashes or bookmark titles."""
     chapter = chapter if isinstance(chapter, dict) else {}
     mapped = str(chapter.get("_pdf_mapped_output_file") or "").strip()
     if mapped:
@@ -56,13 +83,7 @@ def readable_pdf_section_filename(chapter, actual_num=None, retain=False):
 
     if actual_num is None:
         actual_num = chapter.get("actual_chapter_num", chapter.get("num", 0))
-    title = (
-        chapter.get("pdf_section_title")
-        or chapter.get("pdf_toc_title")
-        or chapter.get("title")
-        or f"Section {actual_num}"
-    )
-    stem = f"pdf_section_{_number_token(actual_num)}_{_safe_title(title)}"
+    stem = f"pdf_section_{_number_token(actual_num)}"
 
     if chapter.get("is_chunk"):
         chunk_info = chapter.get("chunk_info") or {}

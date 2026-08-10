@@ -28906,22 +28906,58 @@ def main(log_callback=None, stop_callback=None):
             
             # Create a combined file with proper section structure
             if input_path.lower().endswith('.pdf'):
+                from pdf_workspace_compiler import _compiled_book_identity
+
+                pdf_book_title, pdf_output_stem, _pdf_book_metadata = (
+                    _compiled_book_identity(out)
+                )
                 # Check if content is HTML or plain text
                 is_html_content = any('<html' in chapter_data.get('content', '').lower() or 
                                      '<p>' in chapter_data.get('content', '') or
                                      '<div' in chapter_data.get('content', '')
                                      for chapter_data in translated_chapters)
-                
+
+                # PDF workspaces have one authoritative compiler.  The former
+                # inline combiner below independently used the source filename
+                # and trusted model-mutated paragraph styles, bypassing the
+                # translated metadata title and cached source alignment.
+                if is_html_content:
+                    try:
+                        from pdf_workspace_compiler import (
+                            PDFCompilationCancelled,
+                            compile_pdf_workspace,
+                        )
+
+                        combined_path = compile_pdf_workspace(
+                            out,
+                            log_callback=print,
+                            stop_callback=stop_callback,
+                        )
+                        # ``None`` means the workspace compiler completed. It
+                        # skips both legacy branches while preserving their
+                        # plain-text/error fallback below.
+                        is_html_content = None
+                    except PDFCompilationCancelled:
+                        raise
+                    except Exception as workspace_compile_error:
+                        print(
+                            "Warning: Workspace PDF compiler failed; using the "
+                            f"legacy combiner: {workspace_compile_error}"
+                        )
+
                 if is_html_content:
                     # HTML content - create PDF from HTML with proper rendering
-                    combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.pdf")
+                    combined_path = os.path.join(out, f"{pdf_output_stem}_translated.pdf")
                     print(f"📄 Creating PDF from HTML with formatting and images...")
                     
                     # Build full HTML content
                     # Always insert page breaks between combined pages (one HTML fragment per output PDF page).
                     html_parts = []
                     current_main_chapter = None
-                    from pdf_workspace_compiler import normalize_fast_semantic_paragraph_alignment
+                    from pdf_workspace_compiler import (
+                        normalize_fast_semantic_paragraph_alignment,
+                        restore_pdf_source_paragraph_alignment,
+                    )
                     
                     # Note: translated_chapters is already sorted at this point
                     for i, chapter_data in enumerate(translated_chapters):
@@ -28929,6 +28965,7 @@ def main(log_callback=None, stop_callback=None):
 
                         # Preserve source-detected paragraph formatting or
                         # apply the user's PDF alignment/justification override.
+                        content = restore_pdf_source_paragraph_alignment(content, out)
                         content = normalize_fast_semantic_paragraph_alignment(content)
                         
                         # Extract body content from individual HTML pages if they have full HTML structure
@@ -29024,7 +29061,7 @@ def main(log_callback=None, stop_callback=None):
 <head>
     <meta charset=\"UTF-8\">
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
-    <title>{txt_processor.file_base} - Translated</title>
+    <title>{pdf_book_title} - Translated</title>
     {css_link}
     {extra_css}
 </head>
@@ -29034,7 +29071,7 @@ def main(log_callback=None, stop_callback=None):
 </html>"""
                     
                     # Save HTML file for reference
-                    html_path = os.path.join(out, f"{txt_processor.file_base}_translated.html")
+                    html_path = os.path.join(out, f"{pdf_output_stem}_translated.html")
                     with open(html_path, 'w', encoding='utf-8') as f:
                         f.write(full_html)
                     print(f"   • Created HTML file: {html_path}")
@@ -29068,9 +29105,9 @@ def main(log_callback=None, stop_callback=None):
                         traceback.print_exc()
                         print(f"   • Using HTML file instead: {html_path}")
                         combined_path = html_path
-                else:
+                elif is_html_content is False:
                     # Plain text content - use text-based PDF creation
-                    combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.pdf")
+                    combined_path = os.path.join(out, f"{pdf_output_stem}_translated.pdf")
                     print(f"📄 Creating PDF from plain text...")
                     
                     # Build full text content
@@ -29108,7 +29145,7 @@ def main(log_callback=None, stop_callback=None):
                         print(f"   • Created translated PDF file: {combined_path}")
                     else:
                         print("⚠️ Failed to create PDF, falling back to text output")
-                        combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.txt")
+                        combined_path = os.path.join(out, f"{pdf_output_stem}_translated.txt")
                         with open(combined_path, 'w', encoding='utf-8') as f:
                             f.write(full_text)
                         print(f"   • Created fallback text file: {combined_path}")
