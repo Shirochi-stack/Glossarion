@@ -133,7 +133,12 @@ _MANGLED_CLOSE_RE = re.compile(
 )
 
 
-def fix_empty_attr_tags(text: str) -> str:
+def fix_empty_attr_tags(
+    text: str,
+    *,
+    repair_log: list[dict[str, str]] | None = None,
+    repair_log_limit: int = 20,
+) -> str:
     """Rewrite empty-attribute tags into visible ``&lt;tag …&gt;`` text.
 
     Both paired (``<t a=""></t>``) and self-closing (``<t a=""/>``) forms
@@ -149,6 +154,11 @@ def fix_empty_attr_tags(text: str) -> str:
     if not isinstance(text, str) or not text:
         return text
 
+    def _record_repair(before: str, after: str) -> None:
+        if repair_log is None or len(repair_log) >= max(0, repair_log_limit):
+            return
+        repair_log.append({"before": before, "after": after})
+
     # --- Pre-pass: reconstruct mangled closing tags ----------------------
     # Must run BEFORE the normal empty-attr rewrite, otherwise the normal
     # pass would escape the tag to ``&lt;br < p/&gt;`` (garbage text).
@@ -157,7 +167,9 @@ def fix_empty_attr_tags(text: str) -> str:
         real_attrs = (m.group(2) or '').strip()
         close_tag = m.group(3)
         opener = f'<{tag} {real_attrs}>' if real_attrs else f'<{tag}>'
-        return f'{opener}</{close_tag}>'
+        replacement = f'{opener}</{close_tag}>'
+        _record_repair(m.group(0), replacement)
+        return replacement
 
     text = _MANGLED_CLOSE_RE.sub(_repl_mangled_close, text)
 
@@ -168,14 +180,19 @@ def fix_empty_attr_tags(text: str) -> str:
         if not _should_rewrite(tag, names):
             return m.group(0)
         body = m.group(3)
-        return f"&lt;{tag} {' '.join(names)}&gt;{body}"
+        replacement = f"&lt;{tag} {' '.join(names)}&gt;"
+        opening_tag = m.group(0).split('>', 1)[0] + '>'
+        _record_repair(opening_tag, replacement)
+        return f"{replacement}{body}"
 
     def _repl_self(m: re.Match) -> str:
         tag = m.group(1)
         names = _attr_names(m.group(2))
         if not _should_rewrite(tag, names):
             return m.group(0)
-        return f"&lt;{tag} {' '.join(names)}/&gt;"
+        replacement = f"&lt;{tag} {' '.join(names)}/&gt;"
+        _record_repair(m.group(0), replacement)
+        return replacement
 
     # Paired form first so the inner content of a paired tag isn't partially
     # consumed by the self-closing pattern.  Loop because nested empty-attr

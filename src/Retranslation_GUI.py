@@ -247,6 +247,7 @@ def _repair_empty_attribute_qa_file(file_path):
             'changed': False,
             'repaired': 0,
             'remaining': 0,
+            'repairs': [],
             'error': f"Output file not found: {path or file_path}",
         }
     try:
@@ -259,10 +260,16 @@ def _repair_empty_attribute_qa_file(file_path):
                 'changed': False,
                 'repaired': 0,
                 'remaining': 0,
+                'repairs': [],
                 'error': '',
             }
 
-        repaired_content = fix_empty_attr_tags(original)
+        repairs = []
+        repaired_content = fix_empty_attr_tags(
+            original,
+            repair_log=repairs,
+            repair_log_limit=20,
+        )
         remaining = count_empty_attr_tags(repaired_content)
         if remaining:
             return {
@@ -270,6 +277,7 @@ def _repair_empty_attribute_qa_file(file_path):
                 'changed': False,
                 'repaired': before - remaining,
                 'remaining': remaining,
+                'repairs': repairs,
                 'error': (
                     f"{remaining} empty-attribute tag(s) remain after repair."
                 ),
@@ -293,6 +301,7 @@ def _repair_empty_attribute_qa_file(file_path):
             'changed': repaired_content != original,
             'repaired': before,
             'remaining': 0,
+            'repairs': repairs,
             'error': '',
         }
     except Exception as exc:
@@ -301,6 +310,7 @@ def _repair_empty_attribute_qa_file(file_path):
             'changed': False,
             'repaired': 0,
             'remaining': 0,
+            'repairs': [],
             'error': str(exc),
         }
 
@@ -19817,6 +19827,64 @@ class RetranslationMixin:
             self._refresh_retranslation_data(data)
             self._show_message('info', "Audio Deleted", "Audio file deleted and TTS status reset to No TTS.", parent=data.get('dialog', self))
 
+        def _show_llm_token_repair_comparison(summary, repairs, total_repaired):
+            """Show the exact malformed and repaired tag previews side by side."""
+            parent_dialog = data.get('dialog', self)
+            dialog = QDialog(parent_dialog)
+            dialog.setWindowTitle("QA Issue Resolved — Before / After")
+            dialog.setModal(True)
+            dialog.resize(1000, 560)
+
+            layout = QVBoxLayout(dialog)
+            summary_label = QLabel(summary)
+            summary_label.setWordWrap(True)
+            summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            layout.addWidget(summary_label)
+
+            preview_count = len(repairs)
+            preview_label = QLabel(
+                f"Showing {preview_count} of {total_repaired} repaired tag(s)."
+            )
+            preview_label.setStyleSheet("color: #9aa0a6;")
+            layout.addWidget(preview_label)
+
+            comparison_layout = QHBoxLayout()
+            before_layout = QVBoxLayout()
+            after_layout = QVBoxLayout()
+            before_layout.addWidget(QLabel("Before — malformed LLM token tag"))
+            after_layout.addWidget(QLabel("After — safe visible text in HTML"))
+
+            before_text = QPlainTextEdit()
+            after_text = QPlainTextEdit()
+            before_text.setReadOnly(True)
+            after_text.setReadOnly(True)
+            comparison_font = QFont("Consolas", 10)
+            before_text.setFont(comparison_font)
+            after_text.setFont(comparison_font)
+
+            before_blocks = []
+            after_blocks = []
+            for index, repair in enumerate(repairs, 1):
+                before_blocks.append(
+                    f"[{index}]\n{str(repair.get('before') or '')}"
+                )
+                after_blocks.append(
+                    f"[{index}]\n{str(repair.get('after') or '')}"
+                )
+            before_text.setPlainText("\n\n".join(before_blocks))
+            after_text.setPlainText("\n\n".join(after_blocks))
+            before_layout.addWidget(before_text)
+            after_layout.addWidget(after_text)
+            comparison_layout.addLayout(before_layout, 1)
+            comparison_layout.addLayout(after_layout, 1)
+            layout.addLayout(comparison_layout, 1)
+
+            close_button = QPushButton("Close")
+            close_button.setMinimumHeight(34)
+            close_button.clicked.connect(dialog.accept)
+            layout.addWidget(close_button)
+            dialog.exec()
+
         def _resolve_llm_token_qa_issue(display_info, output_path):
             """Repair one output file and clear only its LLM-token QA markers."""
             parent_dialog = data.get('dialog', self)
@@ -19928,12 +19996,20 @@ class RetranslationMixin:
                 self.append_log(f"✅ {summary.replace(chr(10), ' ')}")
             except Exception:
                 pass
-            self._show_message(
-                'info',
-                "QA Issue Resolved",
-                summary,
-                parent=parent_dialog,
-            )
+            repairs = list(result.get('repairs') or [])
+            if repaired_count and repairs:
+                _show_llm_token_repair_comparison(
+                    summary,
+                    repairs,
+                    repaired_count,
+                )
+            else:
+                self._show_message(
+                    'info',
+                    "QA Issue Resolved",
+                    summary,
+                    parent=parent_dialog,
+                )
 
         def show_context_menu(pos):
             item = listbox.itemAt(pos)

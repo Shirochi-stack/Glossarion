@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 
 from Retranslation_GUI import (
     RetranslationMixin,
+    _clear_llm_token_qa_markers,
     _clear_refinement_progress_fields,
     _combine_glossary_progress_legend_stats,
     _glossary_progress_filename_keys,
@@ -20,10 +21,12 @@ from Retranslation_GUI import (
     _map_zero_based_glossary_progress_index,
     _normalize_progress_match_name,
     _persist_progress_manager_source_link,
+    _progress_entry_has_llm_token_qa,
     _progress_path_signature,
     _progress_entry_model_for_display,
     _progress_entry_refined_for_display,
     _progress_item_is_html,
+    _repair_empty_attribute_qa_file,
     _snapshot_progress_output_dir,
     _select_progress_entry_for_display,
 )
@@ -93,6 +96,82 @@ def test_progress_context_menu_places_remove_refinement_after_remove_qa():
         "Remove refinement status"
     )
     assert "remove_refinement_status()" in menu_block
+
+
+def test_progress_context_menu_resolves_llm_token_qa_locally():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "Retranslation_GUI.py"
+    ).read_text(encoding="utf-8")
+    start = source.index("        def show_context_menu(pos):")
+    end = source.index(
+        "        listbox.customContextMenuRequested.connect(show_context_menu)",
+        start,
+    )
+    menu_block = source[start:end]
+
+    assert "has_raw_foreign_text_qa or has_llm_token_qa" in menu_block
+    assert 'menu.addAction("⚠️ Resolve QA issue")' in menu_block
+    assert "_resolve_llm_token_qa_issue(" in menu_block
+    assert "_show_llm_token_repair_comparison(" in source
+    assert "Before — malformed LLM token tag" in source
+    assert "After — safe visible text in HTML" in source
+
+
+def test_llm_token_qa_detection_and_marker_cleanup_preserve_other_issues():
+    entry = {
+        "status": "qa_failed",
+        "qa_issues": True,
+        "qa_issues_found": [
+            'LLM_token_issue: \'<a and="" classes="">\'',
+            "missing_images: 1",
+        ],
+        "qa_timestamp": 123.0,
+    }
+
+    assert _progress_entry_has_llm_token_qa(entry)
+    changed, remaining = _clear_llm_token_qa_markers(entry)
+
+    assert changed is True
+    assert remaining is True
+    assert entry["status"] == "qa_failed"
+    assert entry["qa_issues_found"] == ["missing_images: 1"]
+
+    entry["qa_issues_found"] = ["LLM_token_issue_1_found"]
+    changed, remaining = _clear_llm_token_qa_markers(entry)
+    assert changed is True
+    assert remaining is False
+    assert entry["status"] == "completed"
+    assert "qa_issues_found" not in entry
+    assert "qa_timestamp" not in entry
+
+
+def test_repair_empty_attribute_qa_file_uses_shared_llm_token_fix(tmp_path):
+    output = tmp_path / "response_chapter.html"
+    output.write_text(
+        '<p>Before</p><a aesthetics="" attending="" can=""></a><p>After</p>',
+        encoding="utf-8",
+    )
+
+    result = _repair_empty_attribute_qa_file(output)
+
+    assert result == {
+        "resolved": True,
+        "changed": True,
+        "repaired": 1,
+        "remaining": 0,
+        "repairs": [
+            {
+                "before": '<a aesthetics="" attending="" can="">',
+                "after": "&lt;a aesthetics attending can&gt;",
+            }
+        ],
+        "error": "",
+    }
+    repaired = output.read_text(encoding="utf-8")
+    assert '&lt;a aesthetics attending can&gt;' in repaired
+    assert 'aesthetics=""' not in repaired
 
 
 def test_cleanup_missing_files_uses_one_directory_snapshot(tmp_path, monkeypatch):
