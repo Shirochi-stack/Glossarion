@@ -11434,8 +11434,8 @@ def _create_processing_options_section(self, parent):
         "Source PDF preserves detected paragraph and header formatting (default).\n"
         "Header alignment can be forced independently from paragraph alignment.\n"
         "An explicit Justified/Not justified choice takes precedence over alignment.\n"
-        "RTL layout uses the right edge for source-left paragraphs while preserving "
-        "centered/justified source formatting and explicit alignment overrides."
+        "RTL layout uses the right edge for source-left paragraphs while\n"
+        "preserving centered/justified source formatting and explicit alignment overrides."
     )
     pdf_paragraph_format_desc.setStyleSheet("color: gray; font-size: 10pt;")
     pdf_paragraph_format_desc.setContentsMargins(20, 0, 0, 10)
