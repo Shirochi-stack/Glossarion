@@ -18631,6 +18631,15 @@ class _WorkspaceReaderLoaderThread(QThread):
                             translated_html = stream.read().decode(
                                 "utf-8", errors="replace"
                             )
+                        if self._manifest.get("source_format") == "pdf":
+                            from pdf_workspace_compiler import (
+                                normalize_pdf_workspace_translated_html,
+                            )
+
+                            translated_html = normalize_pdf_workspace_translated_html(
+                                translated_html,
+                                str(self._manifest.get("workspace") or ""),
+                            )
                         # Use the same translated-heading resolver as Book
                         # Details so the reader sidebar and details list cannot
                         # disagree. Raw mode keeps the source bookmark title.

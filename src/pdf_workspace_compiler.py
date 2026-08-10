@@ -972,6 +972,30 @@ def normalize_fast_semantic_paragraph_alignment(content: str) -> str:
     return str(soup) if changed else str(content or "")
 
 
+def normalize_pdf_workspace_translated_html(content: str, folder: str) -> str:
+    """Apply source-authoritative PDF paragraph formatting to a response."""
+    restored = restore_pdf_source_paragraph_alignment(content, folder)
+    return normalize_fast_semantic_paragraph_alignment(restored)
+
+
+def _write_response_html_if_changed(path: str, original: str, content: str) -> bool:
+    """Atomically persist repaired response formatting without touching text."""
+    if content == original:
+        return False
+    temporary = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(temporary, path)
+    finally:
+        if os.path.isfile(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+    return True
+
+
 def _image_reference_basename(src: str) -> str:
     try:
         path = unquote(urlsplit(str(src or "")).path)
@@ -1481,8 +1505,12 @@ def compile_pdf_workspace(
         if stop_callback and stop_callback():
             raise PDFCompilationCancelled("PDF compilation stopped by user")
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            content = handle.read()
-        content = restore_pdf_source_paragraph_alignment(content, folder)
+            original_content = handle.read()
+        content = normalize_pdf_workspace_translated_html(
+            original_content,
+            folder,
+        )
+        _write_response_html_if_changed(path, original_content, content)
         title = title or f"Section {index}"
         titles.append(title)
         source_contents.append(content)
@@ -1501,10 +1529,6 @@ def compile_pdf_workspace(
         log_callback=log_callback,
         stop_callback=stop_callback,
     )
-    source_contents = [
-        normalize_fast_semantic_paragraph_alignment(content)
-        for content in source_contents
-    ]
     from pdf_fast_extractor import pdf_rtl_paragraph_layout_enabled
 
     rtl_layout = pdf_rtl_paragraph_layout_enabled()

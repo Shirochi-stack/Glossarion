@@ -11,6 +11,7 @@ from pdf_workspace_compiler import (
     _workspace_response_entries,
     compile_pdf_workspace,
     normalize_fast_semantic_paragraph_alignment,
+    normalize_pdf_workspace_translated_html,
     restore_pdf_source_paragraph_alignment,
     translate_pdf_workspace_artifacts,
 )
@@ -154,6 +155,90 @@ def test_source_alignment_is_restored_from_pdf_page_cache(tmp_path, monkeypatch)
     ).p
     assert overridden["class"] == ["pdf-align-center"]
     assert overridden["style"] == "text-align:center"
+
+    monkeypatch.setenv("PDF_PARAGRAPH_ALIGNMENT", "source")
+    normalized_response = BeautifulSoup(
+        normalize_pdf_workspace_translated_html(
+            translated_html,
+            str(workspace),
+        ),
+        "html.parser",
+    ).p
+    assert normalized_response["class"] == ["pdf-align-left"]
+    assert normalized_response["style"] == "text-align:left"
+
+
+def test_compile_persists_source_alignment_repair_to_response_html(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = tmp_path / "Persisted_Alignment_PDF"
+    cache = workspace / ".pdf_extraction_cache" / "pages" / "fast_semantic"
+    cache.mkdir(parents=True)
+    source_html = (
+        '<article class="pdf-fast-semantic-page" data-pdf-page="7">'
+        '<p class="pdf-align-left" data-pdf-source-alignment="left" '
+        'style="text-align:left">Source body.</p></article>'
+    )
+    (cache / "page_000007.json").write_text(
+        json.dumps({"page_number": 7, "html": source_html}),
+        encoding="utf-8",
+    )
+    response_path = workspace / "response_pdf_section_001.html"
+    response_path.write_text(
+        '<article class="pdf-fast-semantic-page" data-pdf-page="7">'
+        '<p style="text-align:center">Translated body.</p></article>',
+        encoding="utf-8",
+    )
+    (workspace / "translation_progress.json").write_text(
+        json.dumps({
+            "chapters": {
+                "pdf:one": {
+                    "actual_num": 1,
+                    "status": "completed",
+                    "output_file": response_path.name,
+                    "pdf_toc_section": True,
+                    "pdf_toc_title": "One",
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+    (workspace / "metadata.json").write_text(
+        json.dumps({"title": "Translated Book"}),
+        encoding="utf-8",
+    )
+
+    def fake_create_pdf_from_html(
+        html_content,
+        output_path,
+        css_path=None,
+        images_dir=None,
+    ):
+        del html_content, css_path, images_dir
+        document = fitz.open()
+        document.new_page()
+        document.set_toc([[1, "One", 1]])
+        document.save(output_path)
+        document.close()
+        return True
+
+    import pdf_extractor
+
+    monkeypatch.setattr(
+        pdf_extractor,
+        "create_pdf_from_html",
+        fake_create_pdf_from_html,
+    )
+    compile_pdf_workspace(str(workspace))
+
+    repaired = BeautifulSoup(
+        response_path.read_text(encoding="utf-8"),
+        "html.parser",
+    ).p
+    assert repaired["data-pdf-source-alignment"] == "left"
+    assert repaired["class"] == ["pdf-align-left"]
+    assert repaired["style"] == "text-align:left"
 
 
 def test_legacy_cached_center_is_rechecked_against_source_pdf_geometry(tmp_path):
