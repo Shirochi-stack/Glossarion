@@ -994,7 +994,7 @@ def test_gui_catalog_refresh_waits_until_model_typing_finishes(monkeypatch):
     assert "QAbstractItemView::item {\n        min-height" not in (
         completer_popup.styleSheet()
     )
-    assert "height: 14px" in completer_popup.styleSheet()
+    assert "height: 21px" in completer_popup.styleSheet()
     assert "padding: 0px 4px" in completer_popup.styleSheet()
     assert "min-height: 28px" not in completer_popup.styleSheet()
     assert "selection-background-color: #3d3d3d" in (
