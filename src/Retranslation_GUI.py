@@ -21767,16 +21767,6 @@ class RetranslationMixin:
                 f"{output_file} -> {output_display}"
             )
         elif info.get('pdf_toc_section') or chapter_info.get('pdf_toc_section'):
-            section_title = str(
-                info.get('pdf_toc_title_translated')
-                or info.get('translated_title')
-                or chapter_info.get('pdf_toc_title_translated')
-                or chapter_info.get('translated_title')
-                or info.get('pdf_toc_title')
-                or chapter_info.get('pdf_toc_title')
-                or chapter_info.get('title')
-                or f"Section {chapter_num}"
-            ).strip()
             start_page = (
                 info.get('pdf_start_page')
                 if info.get('pdf_start_page') is not None
@@ -21805,7 +21795,7 @@ class RetranslationMixin:
             except (TypeError, ValueError):
                 section_label = str(chapter_num)
             display = (
-                f"[{section_label}] {section_title} | {icon} {status_label:14s} | "
+                f"Section {section_label} | {icon} {status_label:14s} | "
                 f"{page_label} | {output_display}"
             )
         elif info.get('pdf_ocr'):
@@ -21900,6 +21890,20 @@ class RetranslationMixin:
             'item_key': self._progress_list_item_key(info),
         })
         item.setData(Qt.UserRole + 2, status)
+        chapter_info = info.get('info') or info.get('progress_entry') or {}
+        if info.get('pdf_toc_section') or chapter_info.get('pdf_toc_section'):
+            full_title = str(
+                info.get('pdf_toc_title_translated')
+                or info.get('translated_title')
+                or chapter_info.get('pdf_toc_title_translated')
+                or chapter_info.get('translated_title')
+                or info.get('pdf_toc_title')
+                or chapter_info.get('pdf_toc_title')
+                or chapter_info.get('title')
+                or ''
+            ).strip()
+            if full_title:
+                item.setToolTip(full_title)
         item.setHidden(is_skipped_special and not show_special_files)
 
     def _populate_progress_listbox_streamed(self, data, chunk_size=150, preserve_selection=False, preserve_scroll=False):

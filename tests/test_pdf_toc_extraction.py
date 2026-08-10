@@ -572,7 +572,8 @@ def test_progress_manager_seeds_bookmark_rows_and_hides_source_sidecar(tmp_path)
         25,
     )
     assert status == "not_translated"
-    assert "Opening" in display
+    assert "Section 001" in display
+    assert "Opening" not in display
     assert "Pages 1-2" in display
     assert "Chapter" not in display
 
