@@ -25536,6 +25536,25 @@ class UnifiedClient:
         last_error = None
         label = f"AuthGPT{acct_label}" if 'acct_label' in dir() and acct_label else "AuthGPT"
         print(f"🔐 {label}: Sending request via Codex API (model={actual_model})")
+
+        def _relogin_after_unauthorized(rejected_token: str) -> str:
+            print(f"🔐 {label}: 401 received – opening browser login…")
+            try:
+                recover = getattr(store, 'recover_from_unauthorized', None)
+                if callable(recover):
+                    return recover(
+                        rejected_access_token=rejected_token,
+                        auto_login=True,
+                    )
+                # Compatibility for custom/older token stores.
+                store.clear_tokens()
+                return store.get_valid_access_token(auto_login=True)
+            except Exception as login_exc:
+                raise UnifiedClientError(
+                    f"{label}: Session expired and re-login failed: {login_exc}",
+                    error_type="auth_error",
+                ) from login_exc
+
         for attempt in range(max_retries):
             # Check stop flag before each attempt
             if self._is_stop_requested():
@@ -25645,14 +25664,13 @@ class UnifiedClient:
                         error_type="rate_limit"
                     )
 
-                # On 401, try refreshing the token once
+                # A backend 401 is authoritative. Invalidate the rejected
+                # credential and return the user to the browser login flow;
+                # get_valid_access_token() alone can otherwise return the same
+                # token when its cached expires_at is still in the future.
                 if "401" in error_str and attempt == 0:
-                    print("🔄 AuthGPT: 401 received, attempting token refresh…")
-                    try:
-                        access_token = store.get_valid_access_token(auto_login=True)
-                        continue
-                    except Exception:
-                        pass
+                    access_token = _relogin_after_unauthorized(access_token)
+                    continue
                 last_error = exc
                 if attempt < max_retries - 1:
                     time.sleep(self._get_send_interval())
@@ -25660,6 +25678,10 @@ class UnifiedClient:
 
             except Exception as exc:
                 error_str = str(exc)
+
+                if "401" in error_str and attempt == 0:
+                    access_token = _relogin_after_unauthorized(access_token)
+                    continue
 
                 # 400 Bad Request: retry with random delay between half and full send interval
                 if "400" in error_str or "bad request" in error_str.lower():

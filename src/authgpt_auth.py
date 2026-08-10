@@ -554,6 +554,43 @@ class AuthGPTTokenStore:
             self.save_tokens(new_tokens)
             return new_tokens["access_token"]
 
+    def recover_from_unauthorized(
+        self,
+        rejected_access_token: Optional[str] = None,
+        auto_login: bool = True,
+    ) -> str:
+        """Replace a server-rejected token through the interactive login flow.
+
+        A backend 401 is authoritative even when the cached ``expires_at`` is
+        still in the future.  If another request thread already replaced the
+        rejected token, reuse that replacement instead of opening a second
+        browser window.
+        """
+        with self._lock:
+            tokens = self.load_tokens() or {}
+            current_access_token = tokens.get("access_token")
+            if (
+                rejected_access_token
+                and current_access_token
+                and current_access_token != rejected_access_token
+                and not self._is_token_expired(tokens)
+            ):
+                logger.info(
+                    "AuthGPT: Reusing access token replaced by another request thread"
+                )
+                return current_access_token
+
+            logger.warning(
+                "AuthGPT: Backend rejected the cached access token; forcing re-login"
+            )
+            self.clear_tokens()
+            if not auto_login:
+                raise RuntimeError(
+                    "AuthGPT: Access token was rejected and interactive login is disabled."
+                )
+            print("🔐 AuthGPT: Session expired – opening browser login…")
+            return self.get_valid_access_token(auto_login=True)
+
     @property
     def has_tokens(self) -> bool:
         """Return True if any tokens are cached (may be expired)."""
