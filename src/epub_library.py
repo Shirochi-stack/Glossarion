@@ -24462,6 +24462,14 @@ class EpubReaderDialog(QDialog):
             ".pdf-fast-semantic-page p, .pdf-fast-semantic-page li, "
             ".pdf-fast-semantic-page td, .pdf-fast-semantic-page th { "
             "direction: rtl; unicode-bidi: plaintext; }"
+            + (
+                ".pdf-fast-semantic-page p.pdf-align-left { "
+                "text-align: right !important; }"
+                if os.environ.get("PDF_PARAGRAPH_ALIGNMENT", "source") == "source"
+                else ""
+            )
+            + ".pdf-fast-semantic-page p.pdf-align-justify { "
+            "text-align-last: right !important; }"
             if (
                 getattr(self, "_workspace_mode", False)
                 and os.environ.get("PDF_RTL_PARAGRAPH_LAYOUT", "0") == "1"

@@ -29015,6 +29015,7 @@ def main(log_callback=None, stop_callback=None):
   .pdf-fast-semantic-page p.pdf-align-justify { text-align: justify !important; text-justify: auto; }
   .pdf-rtl-layout { direction: rtl; }
   .pdf-rtl-layout p, .pdf-rtl-layout li, .pdf-rtl-layout td, .pdf-rtl-layout th { direction: rtl; unicode-bidi: plaintext; }
+  .pdf-rtl-layout p.pdf-align-justify { text-align-last: right; }
 </style>
 """
 

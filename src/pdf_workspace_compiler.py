@@ -1105,6 +1105,9 @@ def compile_pdf_workspace(
       direction: rtl;
       unicode-bidi: plaintext;
     }}
+    .pdf-rtl-layout p.pdf-align-justify {{
+      text-align-last: right;
+    }}
     .pdf-fast-semantic-page a {{
       text-decoration: underline;
     }}

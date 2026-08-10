@@ -374,6 +374,27 @@ def test_pdf_paragraph_override_normalization_and_precedence():
         alignment_override="right",
         justification_override="justify",
     ) == "justify"
+    assert resolve_pdf_paragraph_alignment(
+        "left",
+        "Arabic body",
+        alignment_override="source",
+        justification_override="source",
+        rtl_layout=True,
+    ) == "right"
+    assert resolve_pdf_paragraph_alignment(
+        "left",
+        "Arabic body",
+        alignment_override="left",
+        justification_override="source",
+        rtl_layout=True,
+    ) == "left"
+    assert resolve_pdf_paragraph_alignment(
+        "justify",
+        "Arabic body",
+        alignment_override="source",
+        justification_override="source",
+        rtl_layout=True,
+    ) == "justify"
 
 
 def test_pdf_rtl_paragraph_layout_marks_semantic_document(monkeypatch):
@@ -404,6 +425,10 @@ def test_pdf_rtl_paragraph_layout_marks_semantic_document(monkeypatch):
     assert article["data-pdf-rtl-layout"] == "true"
     assert "pdf-rtl-layout" in article["class"]
     assert "unicode-bidi:plaintext" in rendered
+    assert "text-align-last:right" in rendered
+    paragraph = article.find("p")
+    assert paragraph["class"] == ["pdf-align-right"]
+    assert paragraph["style"] == "text-align:right"
 
     monkeypatch.setenv("PDF_RTL_PARAGRAPH_LAYOUT", "0")
     assert pdf_rtl_paragraph_layout_enabled() is False

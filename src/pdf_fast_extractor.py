@@ -1067,6 +1067,7 @@ def resolve_pdf_paragraph_alignment(
     *,
     alignment_override=None,
     justification_override=None,
+    rtl_layout=None,
 ) -> str:
     """Resolve source formatting and the two independent user overrides."""
     source = str(source_alignment or "left").strip().lower()
@@ -1078,14 +1079,27 @@ def resolve_pdf_paragraph_alignment(
     # An explicit justification choice has precedence over horizontal
     # alignment. Choosing an explicit alignment disables source justification.
     if justification == "justify":
-        return "justify"
-    if justification == "none":
+        resolved = "justify"
+    elif justification == "none":
         if alignment != "source":
-            return alignment
-        return _text_direction_alignment(text) if source == "justify" else source
-    if alignment != "source":
-        return alignment
-    return source
+            resolved = alignment
+        else:
+            resolved = _text_direction_alignment(text) if source == "justify" else source
+    elif alignment != "source":
+        resolved = alignment
+    else:
+        resolved = source
+
+    # Direction alone does not move a source-left paragraph to the right.
+    # In RTL mode, use the natural right edge unless the user explicitly chose
+    # an alignment. Centered and justified source paragraphs remain unchanged.
+    if (
+        pdf_rtl_paragraph_layout_enabled(rtl_layout)
+        and alignment == "source"
+        and resolved == "left"
+    ):
+        return "right"
+    return resolved
 
 
 def _semantic_layout_geometry(page, flags: int):
@@ -1350,6 +1364,7 @@ def _semantic_page_html(
         '.pdf-rtl-layout{direction:rtl}'
         '.pdf-rtl-layout p,.pdf-rtl-layout li,.pdf-rtl-layout td,'
         '.pdf-rtl-layout th{direction:rtl;unicode-bidi:plaintext}'
+        '.pdf-rtl-layout p.pdf-align-justify{text-align-last:right}'
         '.pdf-fast-semantic-page a{text-decoration:underline}'
         '.pdf-links{font-size:.9em}'
         '</style>',

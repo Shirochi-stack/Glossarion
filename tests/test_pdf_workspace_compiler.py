@@ -333,12 +333,22 @@ def test_pdf_compiler_paragraph_formatting_overrides(monkeypatch):
     assert justified["style"] == "color:red;text-align:justify"
 
     monkeypatch.setenv("PDF_RTL_PARAGRAPH_LAYOUT", "1")
+    monkeypatch.setenv("PDF_PARAGRAPH_ALIGNMENT", "source")
+    monkeypatch.setenv("PDF_PARAGRAPH_JUSTIFICATION", "source")
+    rtl_content = (
+        '<article class="pdf-fast-semantic-page">'
+        '<p class="pdf-align-left" data-pdf-source-alignment="left" '
+        'style="color:red;text-align:left">Arabic body.</p>'
+        '</article>'
+    )
     rtl = BeautifulSoup(
-        normalize_fast_semantic_paragraph_alignment(content), "html.parser"
+        normalize_fast_semantic_paragraph_alignment(rtl_content), "html.parser"
     ).article
     assert rtl["dir"] == "rtl"
     assert rtl["data-pdf-rtl-layout"] == "true"
     assert "pdf-rtl-layout" in rtl["class"]
+    assert rtl.p["class"] == ["pdf-align-right"]
+    assert rtl.p["style"] == "color:red;text-align:right"
 
     monkeypatch.setenv("PDF_RTL_PARAGRAPH_LAYOUT", "0")
     without_rtl = BeautifulSoup(
