@@ -175,6 +175,7 @@ def test_fast_semantic_alignment_does_not_center_full_width_paragraphs():
             return [
                 (214.0, 112.0, 382.0, 145.0, "Chapter", 0, 0),
                 (81.0, 186.0, 510.0, 218.0, "Body paragraph", 1, 0),
+                (214.0, 230.0, 382.0, 262.0, "Short body sentence", 2, 0),
             ]
 
     rendered = _semantic_page_html(_Page(), 1, [], "Chapter")
@@ -183,6 +184,11 @@ def test_fast_semantic_alignment_does_not_center_full_width_paragraphs():
         '<p class="pdf-align-left" style="text-align:left">'
         'Body paragraph</p>'
     ) in rendered
+    assert (
+        '<p class="pdf-align-left" style="text-align:left">'
+        'Short body sentence</p>'
+    ) in rendered
+    assert '<p class="pdf-align-center"' not in rendered
 
 
 def test_text_processor_automatically_applies_pdf_image_rename_logic(

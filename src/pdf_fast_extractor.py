@@ -669,6 +669,13 @@ def _semantic_page_html(page, page_number: int, images: List[Dict], section_titl
             parts.append(f'<h1 style="text-align:{alignment}">{escaped}</h1>')
             title_written = True
         else:
+            # A short, left-aligned PDF line can have nearly equal outer
+            # margins, which is geometrically indistinguishable from centered
+            # text when using block bounds alone.  Fast Semantic is a
+            # reading-oriented mode, so only use the alignment heuristic for
+            # the section heading; normal prose must follow the source text
+            # column's left edge.
+            alignment = "left"
             parts.append(
                 f'<p class="pdf-align-{alignment}" '
                 f'style="text-align:{alignment}">{escaped}</p>'

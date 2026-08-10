@@ -20,7 +20,10 @@ def _make_pdf_workspace(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (workspace / "response_pdf_section_2.html").write_text(
-        "<html><body><h3>Another sentence heading</h3><p>First body.</p></body></html>",
+        '<html><body><article class="pdf-fast-semantic-page">'
+        '<h3>Another sentence heading</h3>'
+        '<p class="pdf-align-center" style="text-align:center">First body.</p>'
+        '</article></body></html>',
         encoding="utf-8",
     )
     (workspace / "translation_progress.json").write_text(
@@ -103,10 +106,11 @@ def test_compile_pdf_workspace_has_one_bookmark_per_response(tmp_path, monkeypat
     compiled_html = (workspace / "Novel_translated.html").read_text(
         encoding="utf-8"
     )
-    assert (
-        ".pdf-fast-semantic-page p:not(.pdf-align-center):not(.pdf-align-right)"
-        in compiled_html
-    )
+    assert ".pdf-fast-semantic-page p {" in compiled_html
+    compiled_soup = BeautifulSoup(compiled_html, "html.parser")
+    first_body = compiled_soup.find("p", string="First body.")
+    assert first_body["class"] == ["pdf-align-left"]
+    assert first_body["style"] == "text-align:left"
 
 
 def test_compile_pdf_repairs_legacy_page_images_from_only_requested_pages(

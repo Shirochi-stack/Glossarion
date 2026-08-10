@@ -28798,10 +28798,17 @@ def main(log_callback=None, stop_callback=None):
                     # Always insert page breaks between combined pages (one HTML fragment per output PDF page).
                     html_parts = []
                     current_main_chapter = None
+                    from pdf_workspace_compiler import normalize_fast_semantic_paragraph_alignment
                     
                     # Note: translated_chapters is already sorted at this point
                     for i, chapter_data in enumerate(translated_chapters):
                         content = chapter_data['content']
+
+                        # Fast Semantic's old bounding-box alignment heuristic
+                        # mislabeled short, left-aligned prose as centered.
+                        # Normalize existing translated sections before the
+                        # automatic combined PDF is rendered.
+                        content = normalize_fast_semantic_paragraph_alignment(content)
                         
                         # Extract body content from individual HTML pages if they have full HTML structure
                         if '<html' in content.lower() and '<body' in content.lower():
@@ -28873,6 +28880,7 @@ def main(log_callback=None, stop_callback=None):
   img { margin: 0.6em auto; display: block; max-width: 100%; height: auto; }
   .keep-with-image { break-inside: avoid; page-break-inside: avoid; }
   .page-break { page-break-before: always; break-before: page; clear: both; height: 0; margin: 0; padding: 0; }
+  .pdf-fast-semantic-page p { text-align: left !important; }
 </style>
 """
 

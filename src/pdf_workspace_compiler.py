@@ -117,6 +117,39 @@ def _fragment_body(content: str) -> str:
     return "".join(str(child) for child in container.contents)
 
 
+def normalize_fast_semantic_paragraph_alignment(content: str) -> str:
+    """Remove unreliable geometry-inferred centering from semantic prose.
+
+    Older Fast Semantic extractions classified short body lines as centered
+    whenever their bounding box happened to have balanced page margins.  That
+    guess was copied into translated HTML as both a class and an inline style.
+    Normalize only paragraphs inside the Fast Semantic wrapper; headings and
+    images keep their intended alignment.
+    """
+    soup = BeautifulSoup(content or "", "html.parser")
+    changed = False
+    for paragraph in soup.select(".pdf-fast-semantic-page p"):
+        classes = [
+            css_class
+            for css_class in paragraph.get("class", [])
+            if not str(css_class).startswith("pdf-align-")
+        ]
+        classes.append("pdf-align-left")
+        paragraph["class"] = classes
+
+        style = str(paragraph.get("style") or "")
+        declarations = []
+        for declaration in style.split(";"):
+            declaration = declaration.strip()
+            if not declaration or declaration.casefold().startswith("text-align:"):
+                continue
+            declarations.append(declaration)
+        declarations.append("text-align:left")
+        paragraph["style"] = ";".join(declarations)
+        changed = True
+    return str(soup) if changed else str(content or "")
+
+
 def _image_reference_basename(src: str) -> str:
     try:
         path = unquote(urlsplit(str(src or "")).path)
@@ -435,6 +468,10 @@ def compile_pdf_workspace(
         log_callback=log_callback,
         stop_callback=stop_callback,
     )
+    source_contents = [
+        normalize_fast_semantic_paragraph_alignment(content)
+        for content in source_contents
+    ]
     sections = []
     for index, (content, title) in enumerate(zip(source_contents, titles), 1):
         sections.append(
@@ -463,7 +500,7 @@ def compile_pdf_workspace(
       color: transparent; font-size: 0; line-height: 0;
     }}
     .compiled-pdf-section {{ margin: 0; padding: 0; }}
-    .pdf-fast-semantic-page p:not(.pdf-align-center):not(.pdf-align-right) {{
+    .pdf-fast-semantic-page p {{
       text-align: left !important;
     }}
   </style>
