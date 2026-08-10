@@ -7,7 +7,7 @@ import zipfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QMessageBox
 
 from extract_glossary_from_epub import (
     DEFAULT_GLOSSARY_PROMPT,
@@ -618,7 +618,12 @@ def test_parallel_epub_dialog_loads_in_background_and_shows_drop_feedback(tmp_pa
 def test_parallel_epub_mapping_combos_lock_wheel_use_icon_and_support_offsets():
     app = QApplication.instance() or QApplication([])
     dialog = ParallelEpubPairDialog(config={})
+    assert dialog.width() == 1520
+    assert dialog.minimumWidth() == 1120
+    assert "font-size: 8pt" in dialog.mapping_status.styleSheet()
     assert dialog.auto_offset_checkbox.isChecked()
+    assert hasattr(dialog.auto_offset_checkbox, "_checkmark_label")
+    assert "QCheckBox::indicator:checked" in dialog.auto_offset_checkbox.styleSheet()
     assert dialog.profile_combo.objectName() == "parallelPromptProfileCombo"
     assert "QComboBox#parallelPromptProfileCombo::down-arrow" in dialog.styleSheet()
     raw_chapters = [
@@ -677,6 +682,34 @@ def test_parallel_epub_mapping_combos_lock_wheel_use_icon_and_support_offsets():
         {"raw_index": 2, "translated_index": 2},
     ]
     assert "offset" not in dialog.mapping_status.text()
+
+    dialog._set_rows_unmapped([0, 2])
+    assert dialog._selected_mapping() == [
+        {"raw_index": 1, "translated_index": 1},
+    ]
+    assert dialog.mapping_table.item(0, 2).text() == "Manual — Unmapped"
+    assert dialog.mapping_table.item(2, 2).text() == "Manual — Unmapped"
+    assert "2 raw unmatched" in dialog.mapping_status.text()
+    unmatched_raw, unused_translated = dialog._unpaired_file_counts(
+        dialog._selected_mapping()
+    )
+    assert (unmatched_raw, unused_translated) == (2, 2)
+    warning = dialog._unpaired_warning_text(dialog._selected_mapping())
+    assert "4 HTML file(s) are not part of a mapped pair" in warning
+    assert "Unmatched raw HTML files: 2" in warning
+    assert "Unused translated HTML files: 2" in warning
+    assert "overflow beyond the available raw rows" in warning
+    warning_box = dialog._create_unpaired_warning_box(dialog._selected_mapping())
+    button_box = warning_box.findChild(QDialogButtonBox)
+    assert button_box is not None
+    assert button_box.centerButtons()
+    assert button_box.layout().spacing() == 20
+    assert warning_box.defaultButton() is warning_box.button(QMessageBox.No)
+    for standard_button in (QMessageBox.Yes, QMessageBox.No):
+        button = warning_box.button(standard_button)
+        assert button.minimumWidth() == 120
+        assert button.minimumHeight() == 46
+    warning_box.deleteLater()
     dialog.deleteLater()
     app.processEvents()
 
@@ -686,14 +719,25 @@ def test_parallel_epub_default_profile_reset_requires_confirmation(monkeypatch):
     dialog = ParallelEpubPairDialog(config={})
     dialog.system_prompt_edit.setPlainText("custom unsaved prompt")
 
-    monkeypatch.setattr(QMessageBox, "question", lambda *_args, **_kwargs: QMessageBox.No)
+    class Confirmation:
+        def __init__(self, result):
+            self.result = result
+
+        def exec(self):
+            return self.result
+
+    monkeypatch.setattr(
+        dialog,
+        "_create_centered_question_box",
+        lambda *_args, **_kwargs: Confirmation(QMessageBox.No),
+    )
     dialog._delete_or_reset_profile()
     assert dialog.system_prompt_edit.toPlainText() == "custom unsaved prompt"
 
     monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        lambda *_args, **_kwargs: QMessageBox.Yes,
+        dialog,
+        "_create_centered_question_box",
+        lambda *_args, **_kwargs: Confirmation(QMessageBox.Yes),
     )
     dialog._delete_or_reset_profile()
     assert dialog.system_prompt_edit.toPlainText() == default_parallel_epub_system_prompt()

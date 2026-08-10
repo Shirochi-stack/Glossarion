@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QGroupBox,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QInputDialog,
     QLabel,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -472,8 +474,8 @@ class ParallelEpubPairDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Parallel EPUB Pair")
-        self.resize(1440, 860)
-        self.setMinimumSize(1050, 700)
+        self.resize(1520, 860)
+        self.setMinimumSize(1120, 700)
         self.config = config if isinstance(config, dict) else {}
         self.chapter_loader = chapter_loader or self._default_chapter_loader
         self.special_file_predicate = special_file_predicate
@@ -641,9 +643,9 @@ class ParallelEpubPairDialog(QDialog):
         mapping_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
         mapping_header.addWidget(mapping_title)
         self.mapping_status = QLabel("Load both EPUBs to create a map.")
-        self.mapping_status.setStyleSheet("color: #9ba4b3;")
+        self.mapping_status.setStyleSheet("color: #9ba4b3; font-size: 8pt;")
         mapping_header.addWidget(self.mapping_status, 1)
-        self.auto_offset_checkbox = QCheckBox("Auto Offset")
+        self.auto_offset_checkbox = self._create_auto_offset_checkbox()
         self.auto_offset_checkbox.setChecked(
             bool(self.config.get("parallel_epub_auto_offset_enabled", True))
         )
@@ -677,6 +679,15 @@ class ParallelEpubPairDialog(QDialog):
         )
         self.mapping_table.setAlternatingRowColors(True)
         self.mapping_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.mapping_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.mapping_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.mapping_table.customContextMenuRequested.connect(
+            self._show_mapping_context_menu
+        )
+        self.mapping_table.setToolTip(
+            "Select one or more rows, then right-click the Raw HTML column "
+            "to set them all as unmapped."
+        )
         self.mapping_table.verticalHeader().setVisible(False)
         header = self.mapping_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
@@ -713,7 +724,7 @@ class ParallelEpubPairDialog(QDialog):
         self.system_prompt_edit.setMinimumHeight(190)
         prompt_layout.addWidget(self.system_prompt_edit)
         controls_layout.addWidget(prompt_group, 1)
-        self.content_splitter.setSizes([570, 830])
+        self.content_splitter.setSizes([570, 910])
 
         button_row = QHBoxLayout()
         button_row.addStretch(1)
@@ -736,6 +747,60 @@ class ParallelEpubPairDialog(QDialog):
         path, _ = QFileDialog.getOpenFileName(self, title, "", "EPUB files (*.epub)")
         if path:
             self._load_epub(side, path)
+
+    def _create_auto_offset_checkbox(self) -> QCheckBox:
+        """Reuse the app's standard checkmark toggle, with a standalone fallback."""
+
+        parent = self.parent()
+        factory = getattr(parent, "_create_styled_checkbox", None)
+        if callable(factory):
+            return factory("Auto Offset")
+
+        checkbox = QCheckBox("Auto Offset")
+        checkbox.setStyleSheet(
+            """
+            QCheckBox { color: white; spacing: 6px; }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover { border-color: #7bb3e0; }
+            QCheckBox:disabled { color: #666666; }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+            """
+        )
+        checkmark = QLabel("\N{CHECK MARK}", checkbox)
+        checkmark.setStyleSheet(
+            "color: white; background: transparent; font-weight: bold; font-size: 11px;"
+        )
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        def update_checkmark():
+            try:
+                checkmark.setGeometry(2, 1, 14, 14)
+                checkmark.setVisible(checkbox.isChecked())
+                if checkbox.isChecked():
+                    checkmark.raise_()
+            except RuntimeError:
+                pass
+
+        checkbox._checkmark_label = checkmark
+        checkbox._update_checkmark = update_checkmark
+        checkbox.stateChanged.connect(update_checkmark)
+        QTimer.singleShot(0, update_checkmark)
+        return checkbox
 
     def _load_epub(self, side: str, path: str):
         path = os.path.abspath(path)
@@ -764,7 +829,7 @@ class ParallelEpubPairDialog(QDialog):
         self.mapping_status.setText(
             f"Reading {'raw' if side == 'raw' else 'translated'} EPUB HTML in the background…"
         )
-        self.mapping_status.setStyleSheet("color: #62a9e8;")
+        self.mapping_status.setStyleSheet("color: #62a9e8; font-size: 8pt;")
         self._refresh_load_controls()
 
         def load_in_background():
@@ -867,7 +932,7 @@ class ParallelEpubPairDialog(QDialog):
         self.mapping_table.setRowCount(0)
         if not self.raw_chapters or not self.translated_chapters:
             self.mapping_status.setText("Load both EPUBs to create a map.")
-            self.mapping_status.setStyleSheet("color: #9ba4b3;")
+            self.mapping_status.setStyleSheet("color: #9ba4b3; font-size: 8pt;")
             self.mapping_table.setUpdatesEnabled(True)
             self._refresh_load_controls()
             return
@@ -886,7 +951,7 @@ class ParallelEpubPairDialog(QDialog):
         self.mapping_status.setText(
             f"Building HTML mapping… 0/{len(self.raw_chapters)}"
         )
-        self.mapping_status.setStyleSheet("color: #62a9e8;")
+        self.mapping_status.setStyleSheet("color: #62a9e8; font-size: 8pt;")
         self._refresh_load_controls()
         QTimer.singleShot(
             0, lambda: self._populate_mapping_rows(build_serial, start_row=0)
@@ -1021,6 +1086,70 @@ class ParallelEpubPairDialog(QDialog):
             item.setText("Manual")
         self._update_mapping_status()
 
+    def _show_mapping_context_menu(self, position):
+        """Offer batch actions when the Raw HTML column is right-clicked."""
+
+        if self._mapping_building:
+            return
+        index = self.mapping_table.indexAt(position)
+        if not index.isValid() or index.column() != 0:
+            return
+        clicked_row = index.row()
+        selected_rows = sorted(
+            {
+                selected.row()
+                for selected in self.mapping_table.selectionModel().selectedRows(0)
+            }
+        )
+        if clicked_row not in selected_rows:
+            self.mapping_table.clearSelection()
+            self.mapping_table.selectRow(clicked_row)
+            selected_rows = [clicked_row]
+
+        menu = QMenu(self.mapping_table)
+        label = (
+            f"Set {len(selected_rows)} Selected Rows as Unmapped"
+            if len(selected_rows) > 1
+            else "Set This Row as Unmapped"
+        )
+        unmap_action = menu.addAction(label)
+        unmap_action.triggered.connect(
+            lambda: self._set_rows_unmapped(selected_rows)
+        )
+        menu.exec(self.mapping_table.viewport().mapToGlobal(position))
+
+    def _set_rows_unmapped(self, rows: Iterable[int]):
+        """Set several mapping combos to Unmapped in one repaint-safe batch."""
+
+        valid_rows = sorted(
+            {
+                int(row)
+                for row in rows
+                if 0 <= int(row) < self.mapping_table.rowCount()
+            }
+        )
+        if not valid_rows:
+            return
+        header = self.mapping_table.horizontalHeader()
+        self.mapping_table.setUpdatesEnabled(False)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        try:
+            for row in valid_rows:
+                combo = self.mapping_table.cellWidget(row, 1)
+                if combo is None:
+                    continue
+                signals_were_blocked = combo.blockSignals(True)
+                combo.setCurrentIndex(0)
+                combo.blockSignals(signals_were_blocked)
+                strategy_item = self.mapping_table.item(row, 2)
+                if strategy_item is not None:
+                    strategy_item.setText("Manual — Unmapped")
+        finally:
+            header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+            self.mapping_table.setUpdatesEnabled(True)
+            self.mapping_table.viewport().update()
+        self._update_mapping_status()
+
     def _selected_mapping(self) -> List[Dict[str, int]]:
         selected = []
         for row in range(self.mapping_table.rowCount()):
@@ -1030,12 +1159,66 @@ class ParallelEpubPairDialog(QDialog):
                 selected.append({"raw_index": row, "translated_index": translated_index})
         return selected
 
+    def _unpaired_file_counts(self, mapping: Sequence[Dict[str, int]]) -> tuple:
+        """Return unmatched raw and unused translated document counts."""
+
+        used_translated = {item["translated_index"] for item in mapping}
+        unmatched_raw = len(self.raw_chapters) - len(mapping)
+        unused_translated = len(self.translated_chapters) - len(used_translated)
+        return unmatched_raw, unused_translated
+
+    def _unpaired_warning_text(self, mapping: Sequence[Dict[str, int]]) -> str:
+        """Explain every individual HTML document excluded from the pair."""
+
+        unmatched_raw, unused_translated = self._unpaired_file_counts(mapping)
+        excluded_total = unmatched_raw + unused_translated
+        return (
+            f"{excluded_total} HTML file(s) are not part of a mapped pair and "
+            "will be skipped.\n\n"
+            f"Mapped raw/translated pairs: {len(mapping)}\n"
+            f"Unmatched raw HTML files: {unmatched_raw}\n"
+            f"Unused translated HTML files: {unused_translated}\n\n"
+            "Unused translated files are the extra files that overflow beyond "
+            "the available raw rows, or files that no raw row currently selects.\n\n"
+            "Continue with only the mapped pairs?"
+        )
+
+    def _create_centered_question_box(self, title: str, text: str) -> QMessageBox:
+        """Build a consistent centered Yes/No confirmation dialog."""
+
+        message_box = QMessageBox(self)
+        message_box.setWindowTitle(title)
+        message_box.setIcon(QMessageBox.Question)
+        message_box.setText(text)
+        message_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        message_box.setDefaultButton(QMessageBox.No)
+        message_box.setEscapeButton(QMessageBox.No)
+        button_box = message_box.findChild(QDialogButtonBox)
+        if button_box is not None:
+            button_box.setCenterButtons(True)
+            if button_box.layout() is not None:
+                button_box.layout().setSpacing(20)
+        for standard_button in (QMessageBox.Yes, QMessageBox.No):
+            button = message_box.button(standard_button)
+            if button is not None:
+                button.setMinimumSize(120, 46)
+        return message_box
+
+    def _create_unpaired_warning_box(
+        self, mapping: Sequence[Dict[str, int]]
+    ) -> QMessageBox:
+        """Build the centered unpaired-files confirmation."""
+
+        return self._create_centered_question_box(
+            "Unmapped HTML Files",
+            self._unpaired_warning_text(mapping),
+        )
+
     def _update_mapping_status(self):
         mapping = self._selected_mapping()
         used = [item["translated_index"] for item in mapping]
         duplicate_count = len(used) - len(set(used))
-        unmatched_raw = len(self.raw_chapters) - len(mapping)
-        unused_translated = len(self.translated_chapters) - len(set(used))
+        unmatched_raw, unused_translated = self._unpaired_file_counts(mapping)
         parts = [f"{len(mapping)} mapped"]
         if self._mapping_offset:
             parts.append(f"offset {self._mapping_offset:+d}")
@@ -1057,10 +1240,12 @@ class ParallelEpubPairDialog(QDialog):
             parts.append(f"{unused_translated} translated unused")
         if duplicate_count:
             parts.append(f"{duplicate_count} duplicate assignment(s)")
-            self.mapping_status.setStyleSheet("color: #ff7b7b;")
+            self.mapping_status.setStyleSheet("color: #ff7b7b; font-size: 8pt;")
         else:
-            self.mapping_status.setStyleSheet("color: #9ba4b3;")
-        self.mapping_status.setText(" • ".join(parts))
+            self.mapping_status.setStyleSheet("color: #9ba4b3; font-size: 8pt;")
+        status_text = " • ".join(parts)
+        self.mapping_status.setText(status_text)
+        self.mapping_status.setToolTip(status_text)
 
     def _load_profile(self, name: str):
         if not name or name not in self.profiles:
@@ -1096,15 +1281,12 @@ class ParallelEpubPairDialog(QDialog):
         if not name:
             return
         if name == DEFAULT_PARALLEL_EPUB_PROFILE:
-            answer = QMessageBox.question(
-                self,
+            answer = self._create_centered_question_box(
                 "Reset Profile",
                 "Reset the built-in Parallel EPUB Glossary profile?\n\n"
                 "The current prompt text will be replaced with the default "
                 "pair-specific and glossary extraction instructions.",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
+            ).exec()
             if answer != QMessageBox.Yes:
                 return
             self.profiles[name] = default_parallel_epub_system_prompt()
@@ -1185,14 +1367,9 @@ class ParallelEpubPairDialog(QDialog):
                 "Each translated HTML file can only be assigned once.",
             )
             return
-        if len(mapping) < len(self.raw_chapters):
-            answer = QMessageBox.question(
-                self,
-                "Unmatched Raw HTML",
-                f"{len(self.raw_chapters) - len(mapping)} raw HTML file(s) are unmatched and will be skipped. Continue?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
+        unmatched_raw, unused_translated = self._unpaired_file_counts(mapping)
+        if unmatched_raw or unused_translated:
+            answer = self._create_unpaired_warning_box(mapping).exec()
             if answer != QMessageBox.Yes:
                 return
 

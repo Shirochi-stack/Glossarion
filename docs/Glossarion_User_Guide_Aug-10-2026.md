@@ -415,6 +415,8 @@ Glossarion aligns their HTML chapters and sends each mapped raw/translated pair 
 | **+ Offset** | Moves every automatic mapped entry one raw row down per click. |
 | **Translated HTML dropdown** | Manually chooses a translated file for one raw file, or sets the row to **— Unmapped —**. |
 
+To unmap several raw files together, select their rows, right-click a selected cell in the **Raw HTML** column, and choose **Set Selected Rows as Unmapped**. Right-clicking a raw row outside the current selection selects and unmaps only that row.
+
 The offset is cumulative and shown beside the mapping count. For example, pressing **+ Offset** twice applies `+2`. A shifted match that falls before the first or after the last translated file becomes unmapped instead of wrapping around to the wrong chapter.
 
 **What is included and skipped:**
@@ -423,6 +425,8 @@ The offset is cumulative and shown beside the mapping count. For example, pressi
 - A raw row set to **— Unmapped —** is skipped. Glossarion asks for confirmation if any raw HTML files remain unmatched.
 - A translated HTML file that no raw row uses is also skipped; the status line reports it as **translated unused**.
 - Only the displayed mapped pairs enter the temporary paired EPUB. Duplicate use of one translated file is blocked.
+
+Before continuing, the confirmation dialog reports three separate values: mapped pairs, unmatched raw HTML files, and unused translated HTML files. Its headline total is the number of individual HTML documents excluded from the paired EPUB, so it includes translated files that overflow beyond the available raw rows—not only the unmatched raw count.
 
 > **✅ Check the first and last few rows before extracting.** EPUB editions often contain different front matter, so a one-step **− Offset** or **+ Offset** may fix the whole book. Use individual dropdowns for isolated differences.
 
