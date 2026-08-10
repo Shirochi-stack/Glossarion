@@ -44,6 +44,7 @@ Critical refinement rules:
 Return only the refined glossary content. Do not include markdown, explanations, comments, or surrounding prose."""
 
 DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT = ""
+DEFAULT_GLOSSARY_REFINEMENT_CHUNKING_MODE = "all"
 
 _progress_lock = threading.Lock()
 _SCHEMA_PLACEHOLDERS = ("{fields1}", "{{fields1}}", "{fields}", "{{fields}}", "{columns}", "{{columns}}")
@@ -62,6 +63,17 @@ def selected_refinement_types(active_types: Iterable[str]) -> List[str]:
     selected = [t.strip() for t in raw.split(",") if t.strip()]
     selected_lc = {t.lower() for t in selected}
     return [t for t in active if t.lower() in selected_lc]
+
+
+def refinement_chunking_mode() -> str:
+    """Return the canonical request mode, defaulting to all entry types."""
+    raw_mode = os.getenv(
+        "GLOSSARY_REFINEMENT_CHUNKING_MODE",
+        DEFAULT_GLOSSARY_REFINEMENT_CHUNKING_MODE,
+    ).strip().lower()
+    if raw_mode in ("all", "all_types", "all_in_one", "all_entries", "combined"):
+        return "all"
+    return "separate"
 
 
 def _batch_translation_enabled() -> bool:
@@ -706,9 +718,8 @@ def refine_glossary_entries(
     if not str(system_prompt or "").strip() or _is_legacy_default_refinement_prompt(system_prompt):
         system_prompt = DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
     user_prompt = os.getenv("GLOSSARY_REFINEMENT_USER_PROMPT", DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT)
-    raw_chunking_mode = os.getenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", "separate").strip().lower()
-    send_all_types = raw_chunking_mode in ("all", "all_types", "all_in_one", "all_entries", "combined")
-    canonical_mode = "all" if send_all_types else "separate"
+    canonical_mode = refinement_chunking_mode()
+    send_all_types = canonical_mode == "all"
     skip_dedupe = os.getenv("GLOSSARY_REFINEMENT_SKIP_DEDUPE", "0").strip().lower() in ("1", "true", "yes", "on")
     payload_delimiter = "\x1F" if _prompt_requests_unit_separator(system_prompt, user_prompt) else ","
     payload_delimiter_name = "unit_separator" if payload_delimiter == "\x1F" else "comma"

@@ -14374,7 +14374,7 @@ class RetranslationMixin:
             if not active_types:
                 return {}
 
-            chunking_mode = str(cfg.get('glossary_refinement_chunking_mode', 'separate') or 'separate').lower()
+            chunking_mode = str(cfg.get('glossary_refinement_chunking_mode', 'all') or 'all').lower()
             if chunking_mode in ('all', 'all_types', 'all_in_one'):
                 entry_type = 'all selected entry types'
                 return {

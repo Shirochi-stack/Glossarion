@@ -7145,7 +7145,7 @@ def main(log_callback=None, stop_callback=None):
         "GLOSSARY_REFINEMENT_USER_PROMPT": config.get("glossary_refinement_user_prompt", ""),
         "GLOSSARY_REFINEMENT_TYPE_MODE": config.get("glossary_refinement_type_mode", "all"),
         "GLOSSARY_REFINEMENT_SELECTED_TYPES": ",".join(config.get("glossary_refinement_selected_types", [])),
-        "GLOSSARY_REFINEMENT_CHUNKING_MODE": config.get("glossary_refinement_chunking_mode", "separate"),
+        "GLOSSARY_REFINEMENT_CHUNKING_MODE": config.get("glossary_refinement_chunking_mode", "all"),
         "GLOSSARY_REFINEMENT_SKIP_DEDUPE": "1" if config.get("glossary_refinement_skip_dedupe", False) else "0",
     }
     for _env_key, _env_value in refinement_env_defaults.items():

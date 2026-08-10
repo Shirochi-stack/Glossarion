@@ -5913,7 +5913,7 @@ Do not stop after the glossary."""
         self.glossary_refinement_chunking_combo = QComboBox()
         self.glossary_refinement_chunking_combo.addItems(["Send each entry type in a separate request", "Send all entry types"])
         self._apply_halgakos_combo_icons(self.glossary_refinement_chunking_combo)
-        saved_chunking = str(self.config.get('glossary_refinement_chunking_mode', 'separate')).lower()
+        saved_chunking = str(self.config.get('glossary_refinement_chunking_mode', 'all')).lower()
         self.glossary_refinement_chunking_combo.setCurrentIndex(1 if saved_chunking in ('all', 'all_types', 'all_in_one') else 0)
         self.glossary_refinement_chunking_combo.wheelEvent = lambda event: None
         request_layout.addWidget(self.glossary_refinement_chunking_combo)

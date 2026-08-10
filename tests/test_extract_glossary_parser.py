@@ -7,7 +7,11 @@ from extract_glossary_from_epub import (
     parse_api_response,
     skip_duplicate_entries,
 )
-from glossary_refinement import load_refinement_progress, refine_glossary_entries
+from glossary_refinement import (
+    load_refinement_progress,
+    refine_glossary_entries,
+    refinement_chunking_mode,
+)
 
 
 class _RefinementTestSplitter:
@@ -26,6 +30,14 @@ def _enable_refinement(monkeypatch):
     monkeypatch.setenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", "separate")
     monkeypatch.setenv("GLOSSARY_REFINEMENT_SKIP_DEDUPE", "1")
     monkeypatch.setenv("GLOSSARY_CUSTOM_FIELDS", json.dumps(["description"]))
+
+
+def test_glossary_refinement_request_mode_defaults_to_all_types(monkeypatch):
+    monkeypatch.delenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", raising=False)
+    assert refinement_chunking_mode() == "all"
+
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", "separate")
+    assert refinement_chunking_mode() == "separate"
 
 
 def _run_test_refinement(entries, progress_file, parsed_entries, send_fn):
