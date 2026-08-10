@@ -30,6 +30,7 @@ from scan_html_folder import (
     _count_quotation_marks,
     _missing_ending_quotation_paragraphs,
     _record_ai_truncation_issue,
+    build_pdf_qa_source_aliases,
     cross_reference_word_counts,
     detect_quotation_mismatch,
     extract_epub_punctuation_info,
@@ -278,6 +279,111 @@ def test_qa_scan_cross_references_standalone_html_source_end_to_end(tmp_path, mo
     assert word_count_check["found_match"] is True
     assert word_count_check["original_file"] == source_path.name
     assert word_count_check["ratio"] == 1.0
+
+
+def test_pdf_qa_source_aliases_use_progress_and_normalize_section_names(tmp_path):
+    workspace = tmp_path / "translated"
+    word_count = workspace / "word_count"
+    word_count.mkdir(parents=True)
+    (word_count / "pdf_section_1.html").write_text("one", encoding="utf-8")
+    (word_count / "pdf_section_2_0.html").write_text("two", encoding="utf-8")
+    (workspace / "response_pdf_section_stable-bookmark-id.html").write_text(
+        "one", encoding="utf-8"
+    )
+    (workspace / "response_pdf_section_002_part_1.html").write_text(
+        "two", encoding="utf-8"
+    )
+    (workspace / "translation_progress.json").write_text(
+        json.dumps({
+            "chapters": {
+                "pdf:stable-bookmark-id": {
+                    "actual_num": 1,
+                    "output_file": "response_pdf_section_stable-bookmark-id.html",
+                    "pdf_toc_section": True,
+                    "pdf_section_id": "stable-bookmark-id",
+                },
+                "pdf:split:2": {
+                    "actual_num": 2.0,
+                    "output_file": "response_pdf_section_002_part_1.html",
+                    "pdf_toc_section": True,
+                    "pdf_section_id": "split",
+                },
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    aliases = build_pdf_qa_source_aliases(str(workspace))
+
+    assert aliases["pdf_section_stable-bookmark-id.html"] == "pdf_section_1.html"
+    assert aliases["pdf_section_002_part_1.html"] == "pdf_section_2_0.html"
+
+
+def test_pdf_qa_scan_pairs_padded_output_with_raw_bookmark_chunk(tmp_path, monkeypatch):
+    monkeypatch.setenv("QA_USE_WORD_COUNT", "1")
+    monkeypatch.delenv("QA_EXACT_CHAR_COUNT", raising=False)
+    source_pdf = tmp_path / "book.pdf"
+    source_pdf.write_bytes(b"%PDF-1.4\n")
+    workspace = tmp_path / "book"
+    word_count = workspace / "word_count"
+    word_count.mkdir(parents=True)
+    (word_count / "pdf_section_1.html").write_text(
+        "<html><body><h1>Chapter One</h1><p>one two</p></body></html>",
+        encoding="utf-8",
+    )
+    (workspace / "response_pdf_section_001.html").write_text(
+        "<html><body><p>Chapter One one two</p></body></html>",
+        encoding="utf-8",
+    )
+    (workspace / "translation_progress.json").write_text(
+        json.dumps({
+            "chapters": {
+                "pdf:bookmark-one": {
+                    "actual_num": 1,
+                    "output_file": "response_pdf_section_001.html",
+                    "pdf_toc_section": True,
+                    "pdf_section_id": "bookmark-one",
+                    "status": "completed",
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+    settings = default_qa_scan_settings()
+    settings.update({
+        "check_word_count_ratio": True,
+        "min_duplicate_word_count": 0,
+        "check_missing_header_tags": True,
+        "check_missing_images": False,
+        "check_punctuation_mismatch": False,
+        "check_quotation_mismatch": False,
+        "check_silent_truncation": False,
+        "check_ai_truncation_detection": False,
+        "check_multiple_headers": False,
+        "check_repetition": False,
+        "check_translation_artifacts": False,
+        "check_glossary_leakage": False,
+        "use_thread_executor": True,
+        "source_language": "english",
+        "target_language": "english",
+    })
+
+    scan_html_folder(
+        str(workspace),
+        log=lambda _message: None,
+        mode="quick-scan",
+        qa_settings=settings,
+        epub_path=str(source_pdf),
+    )
+
+    report_path = workspace / f"{workspace.name}_Scan Report" / "validation_results.json"
+    results = json.loads(report_path.read_text(encoding="utf-8"))
+    translated_result = next(
+        row for row in results if row["filename"] == "response_pdf_section_001.html"
+    )
+    assert translated_result["word_count_check"]["found_match"] is True
+    assert translated_result["word_count_check"]["ratio"] == 1.0
+    assert "missing_header_tags" in translated_result["issues"]
 
 
 def test_repetition_check_allows_same_repetition_count_in_cjk_source():

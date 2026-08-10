@@ -813,7 +813,11 @@ def _source_small_file_word_count(source_info, default=0) -> int:
     return max(0, _safe_int(source_info, default))
 
 def _sum_source_word_counts(source_counts) -> int:
-    return sum(_source_word_count_value(info) for info in (source_counts or {}).values())
+    return sum(
+        _source_word_count_value(info)
+        for info in (source_counts or {}).values()
+        if not (isinstance(info, dict) and info.get('_qa_pdf_source_alias'))
+    )
 
 def _small_file_word_count_result(original_wc, translated_wc, original_file, threshold):
     ratio = translated_wc / max(1, original_wc)
@@ -6669,6 +6673,204 @@ def _strip_html_like_extensions(name):
     return result
 
 
+def _qa_source_basename(name):
+    """Return the source-side basename used by QA filename matching."""
+    if not isinstance(name, str):
+        return ""
+    base = os.path.basename(name).strip()
+    if base.lower().startswith('response_'):
+        base = base[9:]
+    base = _strip_html_like_extensions(base)
+    if base.lower().endswith('.txt'):
+        base = base[:-4]
+    return base.lower()
+
+
+def _pdf_section_filename_identity(name):
+    """Normalize old, readable, and split PDF section filenames.
+
+    Raw bookmark chunks historically use unpadded names such as
+    ``pdf_section_1.html`` while translated files now use readable padded
+    names such as ``response_pdf_section_001.html``. Split sections also have
+    old ``_1_0`` and new ``_001_part_1`` / ``_001_100`` spellings.  Return a
+    shared logical identity without confusing bookmark titles or stable IDs
+    with filesystem names.
+    """
+    stem = _qa_source_basename(name)
+    prefix = 'pdf_section_'
+    if not stem.startswith(prefix):
+        return None
+    suffix = stem[len(prefix):]
+
+    part_match = re.fullmatch(r'(\d+)(?:_(\d{3}))?_part_(\d+)', suffix)
+    if part_match:
+        major = int(part_match.group(1))
+        return ('pdf-section-chunk', major, max(0, int(part_match.group(3)) - 1))
+
+    numeric_pair = re.fullmatch(r'(\d+)_(\d+)', suffix)
+    if numeric_pair:
+        major_token, minor_token = numeric_pair.groups()
+        major = int(major_token)
+        minor = int(minor_token)
+        # Readable decimal chapter tokens use thousandths (1.1 -> 001_100),
+        # whereas raw split chunks use their zero-based suffix directly.
+        if len(minor_token) == 3 and minor % 100 == 0:
+            minor //= 100
+        return ('pdf-section-chunk', major, minor)
+
+    if re.fullmatch(r'\d+', suffix):
+        return ('pdf-section', int(suffix))
+    if suffix:
+        return ('pdf-section-id', suffix.casefold())
+    return None
+
+
+def _pdf_identity_from_progress_entry(entry, output_file=''):
+    """Resolve a raw bookmark-chunk identity from a PDF progress row."""
+    if not isinstance(entry, dict):
+        return None
+
+    output_identity = _pdf_section_filename_identity(output_file)
+    try:
+        actual_num = float(entry.get('actual_num'))
+    except (TypeError, ValueError):
+        actual_num = None
+
+    if actual_num is not None:
+        major = int(actual_num)
+        part_match = re.search(r'_part_(\d+)', _qa_source_basename(output_file))
+        if part_match:
+            return ('pdf-section-chunk', major, max(0, int(part_match.group(1)) - 1))
+        if not actual_num.is_integer():
+            return ('pdf-section-chunk', major, int(round((actual_num - major) * 10)))
+        if output_identity and output_identity[0] == 'pdf-section-chunk':
+            return output_identity
+        return ('pdf-section', major)
+
+    return output_identity
+
+
+def build_pdf_qa_source_aliases(folder_path, progress_path=None):
+    """Map translated PDF section names to their raw ``word_count`` chunks.
+
+    Stable bookmark IDs and page ranges live in ``translation_progress.json``;
+    the raw extraction sidecars remain numbered. Progress output mappings are
+    therefore authoritative, with normalized numbered filenames retained as a
+    compatibility fallback for older workspaces.
+    """
+    word_count_folder = os.path.join(folder_path, 'word_count')
+    if not os.path.isdir(word_count_folder):
+        return {}
+
+    raw_names = [
+        name for name in os.listdir(word_count_folder)
+        if name.lower().endswith(('.html', '.htm', '.xhtml', '.txt'))
+    ]
+    raw_by_name = {name.casefold(): name for name in raw_names}
+    raw_by_identity = {}
+    for raw_name in raw_names:
+        identity = _pdf_section_filename_identity(raw_name)
+        if identity is not None:
+            raw_by_identity.setdefault(identity, raw_name)
+
+    aliases = {}
+
+    def register(output_name, raw_name):
+        if not output_name or not raw_name:
+            return
+        clean_output = os.path.basename(str(output_name))
+        if clean_output.lower().startswith('response_'):
+            clean_output = clean_output[9:]
+        aliases[clean_output] = raw_name
+
+    progress_file = progress_path or os.path.join(folder_path, 'translation_progress.json')
+    if os.path.isfile(progress_file):
+        try:
+            with open(progress_file, 'r', encoding='utf-8') as progress_handle:
+                progress_data = json.load(progress_handle)
+            for entry in (progress_data.get('chapters') or {}).values():
+                if not isinstance(entry, dict) or not entry.get('pdf_toc_section'):
+                    continue
+                output_file = os.path.basename(str(entry.get('output_file') or ''))
+                if not output_file:
+                    continue
+
+                raw_name = None
+                original_basename = os.path.basename(
+                    str(entry.get('original_basename') or '')
+                )
+                if original_basename:
+                    raw_name = raw_by_name.get(original_basename.casefold())
+                    if raw_name is None:
+                        raw_name = raw_by_identity.get(
+                            _pdf_section_filename_identity(original_basename)
+                        )
+
+                if raw_name is None:
+                    raw_name = raw_by_identity.get(
+                        _pdf_identity_from_progress_entry(entry, output_file)
+                    )
+
+                # Older hashed output files can still be resolved through the
+                # stable progress row's current section number.
+                if raw_name is None and entry.get('pdf_section_id'):
+                    raw_name = raw_by_identity.get(
+                        ('pdf-section-id', str(entry['pdf_section_id']).casefold())
+                    )
+                register(output_file, raw_name)
+        except (OSError, ValueError, TypeError):
+            pass
+
+    # Progress files may be missing or predate bookmark metadata. Match all
+    # visible translated files through the normalized legacy/readable identity.
+    try:
+        translated_names = [
+            name for name in os.listdir(folder_path)
+            if name.lower().startswith('response_pdf_section_')
+            and name.lower().endswith(_HTML_LIKE_EXTENSIONS)
+        ]
+    except OSError:
+        translated_names = []
+    for output_name in translated_names:
+        clean_output = output_name[9:] if output_name.lower().startswith('response_') else output_name
+        if clean_output in aliases:
+            continue
+        register(
+            output_name,
+            raw_by_identity.get(_pdf_section_filename_identity(output_name)),
+        )
+
+    return aliases
+
+
+def _apply_pdf_qa_source_aliases(source_map, aliases):
+    """Add non-counting filename aliases to one extracted source-info map."""
+    if not isinstance(source_map, dict) or not source_map or not aliases:
+        return source_map
+
+    source_by_name = {
+        str(key).casefold(): key for key in source_map
+        if isinstance(key, str)
+    }
+    source_by_stem = {
+        _qa_source_basename(str(key)): key for key in source_map
+        if isinstance(key, str) and _qa_source_basename(str(key))
+    }
+    for alias, raw_name in aliases.items():
+        source_key = source_by_name.get(str(raw_name).casefold())
+        if source_key is None:
+            source_key = source_by_stem.get(_qa_source_basename(str(raw_name)))
+        if source_key is None or alias in source_map:
+            continue
+        source_info = source_map[source_key]
+        if isinstance(source_info, dict):
+            source_info = dict(source_info)
+            source_info['filename'] = alias
+            source_info['_qa_pdf_source_alias'] = True
+        source_map[alias] = source_info
+    return source_map
+
+
 def _count_beautifulsoup_review_tags(html_content):
     """Count non-empty source/output review text units visible to BeautifulSoup."""
     if not isinstance(html_content, str) or not html_content:
@@ -7957,11 +8159,22 @@ def process_html_file_batch(args):
         
         try:
             if text_file_mode:
-                # For text files, read directly
-                with open(full_path, 'r', encoding='utf-8') as f:
-                    raw_text = f.read()
-                raw_file_content = raw_text
-                qa_header_text = ""
+                if filename.lower().endswith(_HTML_LIKE_EXTENSIONS):
+                    # PDF inputs produce HTML bookmark sections. Run textual
+                    # QA against visible text, while retaining the full markup
+                    # for structural, image, link, and tag checks.
+                    raw_text, qa_header_text = extract_text_from_html(
+                        full_path,
+                        include_headers=True,
+                    )
+                    with open(full_path, 'r', encoding='utf-8') as f:
+                        raw_file_content = f.read()
+                else:
+                    # Plain .txt inputs are already visible text.
+                    with open(full_path, 'r', encoding='utf-8') as f:
+                        raw_text = f.read()
+                    raw_file_content = raw_text
+                    qa_header_text = ""
             else:
                 # For HTML, we need extracted text for most checks...
                 raw_text, qa_header_text = extract_text_from_html(full_path, include_headers=True)
@@ -8426,8 +8639,11 @@ def process_html_file_batch(args):
             def dummy_log(msg):
                 pass
             
-            # For PDF text mode, disable header tag check since PDFs don't generate headers
-            check_header_tags_enabled = not text_file_mode  # Disable for text mode (PDFs generate HTML without headers)
+            # Modern PDF extraction emits bookmark-section HTML with h1-h6
+            # headings. Keep the structural check enabled for those files;
+            # source metadata below prevents false positives when a particular
+            # raw section genuinely has no heading.
+            check_header_tags_enabled = True
             has_issues, html_issues = check_html_structure_issues(full_path, dummy_log, check_body_tag=check_body_tag, check_header_tags=check_header_tags_enabled)
             
             if has_issues:
@@ -8507,14 +8723,14 @@ def process_html_file_batch(args):
                     else:
                         issues.append(issue)
         
-        # Check for multiple headers (skip for PDF text mode since PDFs don't generate headers)
+        # Check for multiple headers. PDF bookmark HTML now carries headings,
+        # so it should follow the same configured rule as other HTML inputs.
         check_multiple_headers = qa_settings.get('check_multiple_headers', True)
         has_multiple = False
         header_count = 0
         header_info = None
         
-        # Disable multiple headers check for text mode (PDFs generate HTML without headers)
-        if check_multiple_headers and not text_file_mode:
+        if check_multiple_headers:
             has_multiple, header_count, header_info = detect_multiple_headers(raw_text)
             if has_multiple:
                 issues.append(f"multiple_headers_{header_count}_found")
@@ -9053,7 +9269,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     _need_source_word_counts = (
         check_word_count
         or check_invalid_tag_mismatch_setting
-        or (check_missing_header_tags_setting and not text_file_mode)
+        or check_missing_header_tags_setting
     )
     
     # Extract word counts, image info, and punctuation from original EPUB/text file if needed
@@ -9508,6 +9724,35 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             log("⚠️ Word count cross-reference enabled but no valid EPUB/HTML source provided - skipping this check")
             check_word_count = False
     
+    pdf_source_aliases = {}
+    if (
+        text_file_mode
+        and epub_path
+        and str(epub_path).lower().endswith('.pdf')
+    ):
+        pdf_source_aliases = build_pdf_qa_source_aliases(
+            folder_path,
+            progress_path=progress_path,
+        )
+        for source_map in (
+            original_word_counts,
+            original_image_info,
+            original_punctuation_info,
+            original_quotation_info,
+            original_html_content,
+        ):
+            _apply_pdf_qa_source_aliases(source_map, pdf_source_aliases)
+        if pdf_source_aliases:
+            log(
+                f"PDF bookmark QA mapping: resolved "
+                f"{len(pdf_source_aliases)} translated section(s) to raw bookmark chunks"
+            )
+        elif os.path.isdir(os.path.join(folder_path, 'word_count')):
+            log(
+                "WARNING: PDF bookmark QA mapping found no matching translated/raw "
+                "sections; source-dependent checks will skip unmatched files"
+            )
+
     # Log settings
     log(f"\n📋 QA Settings Status:")
     log(f"   ✓ Target language: {qa_settings.get('target_language', 'english').upper()}")
