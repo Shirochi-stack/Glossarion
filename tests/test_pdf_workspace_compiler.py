@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -14,9 +15,54 @@ from pdf_workspace_compiler import (
     normalize_fast_semantic_heading_alignment,
     normalize_fast_semantic_paragraph_alignment,
     normalize_pdf_workspace_translated_html,
+    render_workspace_batches_rapid,
     restore_pdf_source_paragraph_alignment,
     translate_pdf_workspace_artifacts,
 )
+
+
+def test_rapid_workspace_renderer_runs_batches_in_parallel_and_keeps_order(
+    tmp_path,
+):
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    class FakeDocument:
+        def __init__(self, label):
+            self.label = label
+            self.pages = [object()]
+
+    def fake_render(source, base_url):
+        nonlocal active, max_active
+        assert base_url == str(tmp_path)
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep(0.06 if source == "first" else 0.02)
+            return FakeDocument(source)
+        finally:
+            with lock:
+                active -= 1
+
+    logs = []
+    documents = render_workspace_batches_rapid(
+        [(0, "first"), (1, "second"), (2, "third")],
+        str(tmp_path),
+        log_callback=logs.append,
+        max_workers=3,
+        render_callable=fake_render,
+    )
+
+    assert max_active >= 2
+    assert [document.label for document in documents] == [
+        "first",
+        "second",
+        "third",
+    ]
+    assert any("queued 3 batch(es) on 3 parallel worker(s)" in log for log in logs)
+    assert any("merge order preserved" in log for log in logs)
 
 
 def test_long_centered_source_heading_is_restored_without_retranslation(
@@ -853,6 +899,29 @@ def test_library_compile_action_is_pdf_aware():
     assert "api_client=pdf_api_client" in gui_source
     assert "'USE_TOC_NCX'" in gui_source
     assert "'BATCH_TRANSLATE_HEADERS'" in gui_source
+
+
+def test_pdf_output_rapid_workspace_toggle_defaults_on_and_reaches_worker():
+    root = Path(__file__).resolve().parents[1]
+    settings_source = (root / "src" / "other_settings.py").read_text(
+        encoding="utf-8"
+    )
+    gui_source = (root / "src" / "translator_gui.py").read_text(
+        encoding="utf-8"
+    )
+    converter_source = (root / "src" / "epub_converter.py").read_text(
+        encoding="utf-8"
+    )
+    worker_source = (root / "src" / "_pdf_worker.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"Use Rapid Workspace Compiler"' in settings_source
+    assert "self.config.get('pdf_use_rapid_workspace_compiler', True)" in settings_source
+    assert gui_source.count("PDF_USE_RAPID_WORKSPACE_COMPILER") >= 3
+    assert "'PDF_USE_RAPID_WORKSPACE_COMPILER'," in converter_source
+    assert "os.environ.get('PDF_USE_RAPID_WORKSPACE_COMPILER', '1')" in worker_source
+    assert "render_workspace_batches_rapid" in worker_source
 
 
 def test_new_runtime_modules_are_packaged_in_all_desktop_specs():

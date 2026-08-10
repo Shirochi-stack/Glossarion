@@ -2792,6 +2792,7 @@ class EPUBCompiler:
                                     'PDF_PAGE_NUMBERS', 'PDF_PAGE_NUMBER_ALIGNMENT',
                                     'PDF_GENERATE_TOC', 'PDF_TOC_PAGE_NUMBERS',
                                     'PDF_RENDER_BATCH_SIZE', 'PDF_FAST_RENDERING',
+                                    'PDF_USE_RAPID_WORKSPACE_COMPILER',
                                     'DEDUPLICATE_TOC', 'DEDUPLICATE_TOC_USE_TRANSLATED',
                                     'EPUB_PATH',
                                 ] if os.environ.get(k) is not None

@@ -606,7 +606,17 @@ def run_pdf_generation(config_path):
     BATCH_SIZE = int(os.environ.get('PDF_RENDER_BATCH_SIZE', '50'))
     if all_chapters_parts:
         num_batches = (len(all_chapters_parts) + BATCH_SIZE - 1) // BATCH_SIZE
-        log(f"  Rendering {len(all_chapters_parts)} chapters in {num_batches} batches (batch size={BATCH_SIZE})...")
+        rapid_workspace_compiler = (
+            os.environ.get('PDF_USE_RAPID_WORKSPACE_COMPILER', '1') == '1'
+        )
+        engine_name = (
+            "Rapid Workspace Compiler"
+            if rapid_workspace_compiler
+            else "standard sequential compiler"
+        )
+        log(f"  🧭 PDF compiler engine: {engine_name}")
+        log(f"  📦 Render plan: {len(all_chapters_parts)} chapters, "
+            f"{num_batches} batch(es), batch size={BATCH_SIZE}")
         _render_start = time.time()
         _render_stop = threading.Event()
 
@@ -619,16 +629,63 @@ def run_pdf_generation(config_path):
         _render_hb = threading.Thread(target=_render_heartbeat, daemon=True)
         _render_hb.start()
 
-        _page_offset = 0  # cumulative page count across batches
+        batch_jobs = []
         for batch_idx in range(num_batches):
             batch_start = batch_idx * BATCH_SIZE
             batch_end = min(batch_start + BATCH_SIZE, len(all_chapters_parts))
             batch_parts = all_chapters_parts[batch_start:batch_end]
             batch_order = chapters_order[batch_start:batch_end]
-
             batch_html = f"<html><head><style>{styles}</style></head><body>{''.join(batch_parts)}</body></html>"
+            batch_jobs.append(
+                (batch_idx, batch_start, batch_end, batch_html, batch_order)
+            )
+
+        rendered_batches = []
+        if rapid_workspace_compiler:
             try:
-                batch_doc = WeasyHTML(string=batch_html, base_url=output_dir).render()
+                from pdf_workspace_compiler import render_workspace_batches_rapid
+
+                requested_workers = os.environ.get(
+                    'PDF_RAPID_RENDER_WORKERS',
+                    os.environ.get('EXTRACTION_WORKERS', 'auto'),
+                )
+                log(f"  ⚡ Phase 1/3: dispatching independent render batches "
+                    f"(requested workers={requested_workers})")
+                rapid_documents = render_workspace_batches_rapid(
+                    [(job[0], job[3]) for job in batch_jobs],
+                    output_dir,
+                    log_callback=log,
+                )
+                rendered_batches = list(zip(batch_jobs, rapid_documents))
+            except BaseException as exc:
+                log(f"  ⚠️ Rapid workspace rendering failed: {type(exc).__name__}: {exc}")
+                log("  ↩ Falling back to the standard sequential compiler for this PDF")
+                rendered_batches = []
+
+        if not rendered_batches:
+            log("  📄 Phase 1/3: rendering batches sequentially")
+            for job in batch_jobs:
+                batch_idx, batch_start, batch_end, batch_html, batch_order = job
+                batch_started = time.time()
+                log(f"  ▶ Standard render batch {batch_idx+1}/{num_batches} "
+                    f"(chapters {batch_start+1}-{batch_end})")
+                try:
+                    batch_doc = WeasyHTML(
+                        string=batch_html,
+                        base_url=output_dir,
+                    ).render()
+                    rendered_batches.append((job, batch_doc))
+                    elapsed = time.time() - batch_started
+                    log(f"  ✅ Standard render batch {batch_idx+1}/{num_batches}: "
+                        f"{len(batch_doc.pages)} page(s) in {elapsed:.1f}s")
+                except Exception as e:
+                    log(f"  ⚠️ Failed to render batch {batch_idx+1}: {e}")
+
+        log("  🧭 Phase 2/3: indexing chapter anchors and PDF bookmarks")
+        _page_offset = 0  # cumulative page count across chapter batches
+        for job, batch_doc in rendered_batches:
+            batch_idx, batch_start, batch_end, batch_html, batch_order = job
+            try:
                 documents.append(batch_doc)
 
                 # Source markup may contain hundreds of CSS-generated outline
@@ -658,14 +715,17 @@ def run_pdf_generation(config_path):
                 _page_offset += len(batch_doc.pages)
                 current_page += len(batch_doc.pages)
                 elapsed = time.time() - _render_start
-                log(f"  ✅ Batch {batch_idx+1}/{num_batches}: {len(batch_doc.pages)} pages ({elapsed:.0f}s)")
+                log(f"  🔖 Indexed batch {batch_idx+1}/{num_batches}: "
+                    f"{len(batch_order)} chapter bookmark(s), "
+                    f"{len(batch_doc.pages)} page(s) ({elapsed:.0f}s elapsed)")
             except Exception as e:
-                log(f"  ⚠️ Failed to render batch {batch_idx+1}: {e}")
+                log(f"  ⚠️ Failed to index batch {batch_idx+1}: {e}")
 
         _render_stop.set()
         _render_hb.join(timeout=1)
         _render_elapsed = time.time() - _render_start
-        log(f"  ✅ All rendering complete: {current_page} pages ({_render_elapsed:.1f}s)")
+        log(f"  ✅ Render and indexing phases complete: {current_page} total page(s) "
+            f"({_render_elapsed:.1f}s)")
 
     if not documents:
         log("⚠️ No chapters rendered for PDF")
@@ -685,7 +745,7 @@ def run_pdf_generation(config_path):
             log(f"  ⚠️ TOC generation failed: {e}")
 
     # --- Merge and write ---
-    log("  Merging all pages...")
+    log("  🧩 Phase 3/3: merging rendered pages in source chapter order")
     all_pages = [page for doc in documents for page in doc.pages]
     log(f"  Total pages: {len(all_pages)}")
     log("  Writing PDF to disk...")

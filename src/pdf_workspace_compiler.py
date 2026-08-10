@@ -9,6 +9,7 @@ import re
 import threading
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
@@ -34,6 +35,139 @@ def _log(callback: LogCallback | None, message: str) -> None:
             print(message)
         except UnicodeEncodeError:
             print(message.encode("ascii", errors="backslashreplace").decode("ascii"))
+
+
+def _rapid_render_worker_count(job_count: int, requested: int | None = None) -> int:
+    """Choose a useful parallel render count without exhausting PDF memory."""
+    if job_count <= 1:
+        return 1
+    if requested is None:
+        configured = os.environ.get(
+            "PDF_RAPID_RENDER_WORKERS",
+            os.environ.get("EXTRACTION_WORKERS", "auto"),
+        )
+        try:
+            requested = int(configured)
+        except (TypeError, ValueError):
+            requested = max(1, (os.cpu_count() or 1) // 2)
+    try:
+        safety_cap = max(
+            1,
+            int(os.environ.get("PDF_RAPID_RENDER_WORKER_CAP", "4")),
+        )
+    except (TypeError, ValueError):
+        safety_cap = 4
+    return max(1, min(job_count, max(1, int(requested)), safety_cap))
+
+
+def render_workspace_batches_rapid(
+    batch_jobs: list[tuple[int, str]],
+    base_url: str,
+    log_callback: LogCallback | None = None,
+    *,
+    max_workers: int | None = None,
+    render_callable: Callable[[str, str], Any] | None = None,
+) -> list[Any]:
+    """Render independent HTML batches concurrently and return source order.
+
+    WeasyPrint documents cannot be pickled safely, so the rapid workspace
+    compiler uses isolated render calls on a bounded thread pool. Each call
+    owns its ``HTML`` instance; the returned documents are merged by the
+    caller only after every render has finished.
+    """
+    jobs = list(batch_jobs or [])
+    if not jobs:
+        return []
+    if render_callable is None:
+        from weasyprint import HTML as WeasyHTML
+
+        def render_callable(source: str, job_base_url: str):
+            return WeasyHTML(string=source, base_url=job_base_url).render()
+
+    worker_count = _rapid_render_worker_count(len(jobs), max_workers)
+    total = len(jobs)
+    started = time.perf_counter()
+    completed = 0
+    heartbeat_done = threading.Event()
+    _log(
+        log_callback,
+        f"⚡ Rapid workspace renderer: queued {total} batch(es) on "
+        f"{worker_count} parallel worker(s)",
+    )
+
+    def heartbeat() -> None:
+        try:
+            interval = max(
+                0.05,
+                float(os.environ.get("PDF_COMPILE_HEARTBEAT_SECONDS", "3")),
+            )
+        except (TypeError, ValueError):
+            interval = 3.0
+        while not heartbeat_done.wait(interval):
+            elapsed = time.perf_counter() - started
+            _log(
+                log_callback,
+                f"⏳ Rapid workspace renderer heartbeat: {completed}/{total} "
+                f"batch(es) complete, {elapsed:.0f}s elapsed",
+            )
+
+    def render_one(job_index: int, source: str):
+        batch_started = time.perf_counter()
+        _log(
+            log_callback,
+            f"  ▶ Rapid render batch {job_index + 1}/{total} started "
+            f"({len(source):,} HTML characters)",
+        )
+        document = render_callable(source, base_url)
+        elapsed = time.perf_counter() - batch_started
+        page_count = len(getattr(document, "pages", []) or [])
+        return job_index, document, page_count, elapsed
+
+    heartbeat_thread = threading.Thread(
+        target=heartbeat,
+        name="rapid-pdf-render-heartbeat",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    results: dict[int, Any] = {}
+    try:
+        with ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="rapid-pdf-render",
+        ) as executor:
+            futures = {
+                executor.submit(render_one, job_index, source): job_index
+                for job_index, source in jobs
+            }
+            for future in as_completed(futures):
+                job_index = futures[future]
+                try:
+                    result_index, document, page_count, elapsed = future.result()
+                except BaseException as exc:
+                    for pending in futures:
+                        pending.cancel()
+                    raise RuntimeError(
+                        f"Rapid render batch {job_index + 1}/{total} failed: {exc}"
+                    ) from exc
+                results[result_index] = document
+                completed += 1
+                _log(
+                    log_callback,
+                    f"  ✅ Rapid render batch {result_index + 1}/{total}: "
+                    f"{page_count} page(s) in {elapsed:.1f}s "
+                    f"({completed}/{total} complete)",
+                )
+    finally:
+        heartbeat_done.set()
+        heartbeat_thread.join(timeout=0.5)
+
+    elapsed = time.perf_counter() - started
+    _log(
+        log_callback,
+        f"⚡ Rapid workspace renderer finished {total} batch(es) in "
+        f"{elapsed:.1f}s; merge order preserved",
+    )
+    return [results[job_index] for job_index, _source in jobs]
 
 
 def _natural_key(value: str) -> list:
@@ -1591,12 +1725,26 @@ def compile_pdf_workspace(
     """Build a translated PDF from the current response HTML files."""
     if not folder or not os.path.isdir(folder):
         raise ValueError("PDF output workspace does not exist.")
+    compile_started = time.perf_counter()
+    folder = os.path.abspath(folder)
+    _log(log_callback, "🚀 Rapid PDF workspace compiler started")
+    _log(log_callback, f"📂 Workspace: {folder}")
     if api_client is not None and (
         os.getenv("USE_TOC_NCX", "1") == "1"
         or os.getenv("BATCH_TRANSLATE_HEADERS", "0") == "1"
     ):
+        artifact_started = time.perf_counter()
+        _log(
+            log_callback,
+            "📝 Phase 1/6: checking translated PDF title, bookmark, and "
+            "header artifacts",
+        )
         artifact_chapters = load_pdf_workspace_artifact_chapters(folder)
         if artifact_chapters:
+            _log(
+                log_callback,
+                f"📝 Artifact plan: {len(artifact_chapters)} translated section(s)",
+            )
             translate_pdf_workspace_artifacts(
                 artifact_chapters,
                 folder,
@@ -1604,6 +1752,16 @@ def compile_pdf_workspace(
                 log_callback=log_callback,
                 stop_callback=stop_callback,
             )
+        _log(
+            log_callback,
+            f"✅ Artifact phase finished in "
+            f"{time.perf_counter() - artifact_started:.1f}s",
+        )
+    else:
+        _log(
+            log_callback,
+            "📝 Phase 1/6: artifact translation already complete or not requested",
+        )
     renamed_sections = _normalize_workspace_pdf_section_filenames(folder)
     if renamed_sections:
         _log(
@@ -1614,8 +1772,21 @@ def compile_pdf_workspace(
     if not entries:
         raise ValueError("No translated response HTML files were found.")
 
-    _log(log_callback, f"📄 Compiling PDF from {len(entries)} translated section(s)…")
+    _log(
+        log_callback,
+        f"🔎 Located {len(entries)} translated response HTML section(s)",
+    )
+    preparation_started = time.perf_counter()
+    _log(
+        log_callback,
+        "🎨 Phase 2/6: restoring source PDF formatting and normalizing HTML",
+    )
     source_heading_alignments = _workspace_source_heading_alignments(folder)
+    _log(
+        log_callback,
+        f"🎨 Source heading alignment map: "
+        f"{len(source_heading_alignments)} section(s)",
+    )
     source_contents = []
     titles = []
     last_decile = -1
@@ -1642,11 +1813,28 @@ def compile_pdf_workspace(
                 f"📄 PDF preparation: {index}/{len(entries)} sections ({percent}%)",
             )
 
+    source_characters = sum(len(content) for content in source_contents)
+    _log(
+        log_callback,
+        f"✅ HTML normalization complete: {len(source_contents)} section(s), "
+        f"{source_characters:,} characters in "
+        f"{time.perf_counter() - preparation_started:.1f}s",
+    )
+
+    image_started = time.perf_counter()
+    _log(log_callback, "🖼️ Phase 3/6: validating and repairing image references")
     source_contents, image_stats = _repair_pdf_image_references(
         folder,
         source_contents,
         log_callback=log_callback,
         stop_callback=stop_callback,
+    )
+    _log(
+        log_callback,
+        f"✅ Image phase complete: {image_stats['references']} reference(s), "
+        f"{image_stats['repaired']} repaired, "
+        f"{image_stats['unresolved']} unresolved in "
+        f"{time.perf_counter() - image_started:.1f}s",
     )
     from pdf_fast_extractor import pdf_rtl_paragraph_layout_enabled
 
@@ -1656,6 +1844,8 @@ def compile_pdf_workspace(
     if rtl_layout:
         section_class += " pdf-rtl-layout"
         section_attributes = ' dir="rtl" data-pdf-rtl-layout="true"'
+    assembly_started = time.perf_counter()
+    _log(log_callback, "🧩 Phase 4/6: assembling bookmark-delimited PDF document")
     sections = []
     for index, (content, title) in enumerate(zip(source_contents, titles), 1):
         sections.append(
@@ -1731,6 +1921,15 @@ def compile_pdf_workspace(
 </html>"""
     with open(html_path, "w", encoding="utf-8") as handle:
         handle.write(document_html)
+    html_bytes = os.path.getsize(html_path)
+    _log(log_callback, f"📕 Book title: {book_title}")
+    _log(log_callback, f"🧾 Combined HTML: {html_path}")
+    _log(
+        log_callback,
+        f"✅ Assembly complete: {len(sections)} section(s), "
+        f"{html_bytes / 1024 / 1024:.2f} MiB in "
+        f"{time.perf_counter() - assembly_started:.1f}s",
+    )
 
     from pdf_extractor import create_pdf_from_html
 
@@ -1740,9 +1939,12 @@ def compile_pdf_workspace(
         raise PDFCompilationCancelled("PDF compilation stopped by user")
     _log(
         log_callback,
-        f"📄 Rendering PDF ({image_stats['references']} image reference(s), "
-        f"{image_stats['unresolved']} unresolved)…",
+        f"⚡ Phase 5/6: rendering with WeasyPrint "
+        f"({image_stats['references']} image reference(s), "
+        f"{image_stats['unresolved']} unresolved)",
     )
+    _log(log_callback, f"📄 PDF target: {pdf_path}")
+    render_started = time.perf_counter()
     renderer_done = threading.Event()
     heartbeat = threading.Thread(
         target=_renderer_heartbeat,
@@ -1763,7 +1965,27 @@ def compile_pdf_workspace(
         heartbeat.join(timeout=0.5)
     if not success or not os.path.isfile(pdf_path):
         raise RuntimeError("The PDF renderer did not create an output file.")
-    _log(log_callback, "📑 Normalizing PDF bookmarks (one per translated section)…")
+    render_elapsed = time.perf_counter() - render_started
+    output_size = os.path.getsize(pdf_path)
+    output_pages = 0
+    try:
+        import fitz
+
+        with fitz.open(pdf_path) as document:
+            output_pages = document.page_count
+    except Exception:
+        output_pages = 0
+    page_summary = f", {output_pages} page(s)" if output_pages else ""
+    _log(
+        log_callback,
+        f"✅ Rendering complete in {render_elapsed:.1f}s{page_summary}, "
+        f"{output_size / 1024 / 1024:.2f} MiB",
+    )
+    bookmark_started = time.perf_counter()
+    _log(
+        log_callback,
+        "📑 Phase 6/6: normalizing one bookmark per translated section",
+    )
     _keep_only_section_bookmarks(pdf_path, titles)
     _retire_previous_compiled_names(
         folder,
@@ -1776,5 +1998,14 @@ def compile_pdf_workspace(
         os.path.basename(html_path),
         os.path.basename(pdf_path),
     )
-    _log(log_callback, f"✅ PDF compilation complete: {pdf_path}")
+    _log(
+        log_callback,
+        f"✅ Bookmark and metadata finalization complete in "
+        f"{time.perf_counter() - bookmark_started:.1f}s",
+    )
+    _log(
+        log_callback,
+        f"✅ PDF compilation complete in "
+        f"{time.perf_counter() - compile_started:.1f}s: {pdf_path}",
+    )
     return pdf_path

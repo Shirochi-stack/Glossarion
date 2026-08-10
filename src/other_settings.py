@@ -1945,6 +1945,43 @@ def _create_output_settings_section(self, parent):
             pass
     pdf_enable_cb.toggled.connect(_on_pdf_enable_toggle)
     section_v.addWidget(pdf_enable_cb)
+
+    # Rapid workspace compiler (default). This keeps the legacy sequential
+    # renderer available for documents or systems that dislike parallel layout.
+    rapid_compiler_cb = self._create_styled_checkbox(
+        "Use Rapid Workspace Compiler"
+    )
+    rapid_compiler_cb.setContentsMargins(20, 0, 0, 0)
+    rapid_compiler_cb.setToolTip(
+        "Uses the rapid workspace compiler for generated PDF output (default).\n"
+        "Independent render batches run in parallel, then merge in chapter order.\n"
+        "If a parallel batch fails, that PDF automatically falls back to the\n"
+        "standard sequential compiler. Turn this off to always use the legacy path."
+    )
+    try:
+        rapid_compiler_cb.setChecked(
+            self.config.get('pdf_use_rapid_workspace_compiler', True)
+        )
+    except Exception:
+        rapid_compiler_cb.setChecked(True)
+
+    def _on_rapid_compiler_toggle(checked):
+        try:
+            self.config['pdf_use_rapid_workspace_compiler'] = bool(checked)
+            os.environ['PDF_USE_RAPID_WORKSPACE_COMPILER'] = (
+                '1' if checked else '0'
+            )
+        except Exception:
+            pass
+
+    rapid_compiler_cb.toggled.connect(_on_rapid_compiler_toggle)
+    section_v.addWidget(rapid_compiler_cb)
+    pdf_controls.append(rapid_compiler_cb)
+    os.environ['PDF_USE_RAPID_WORKSPACE_COMPILER'] = (
+        '1'
+        if self.config.get('pdf_use_rapid_workspace_compiler', True)
+        else '0'
+    )
     
     # Generate Table of Contents
     if not hasattr(self, 'pdf_generate_toc_var'):

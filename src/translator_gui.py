@@ -33117,6 +33117,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'PDF_RTL_PARAGRAPH_LAYOUT': '1' if getattr(self, 'pdf_rtl_paragraph_layout_var', False) else '0',
             'PDF_RENDER_BATCH_SIZE': str(self.config.get('pdf_render_batch_size', 50)),
             'PDF_FAST_RENDERING': '1' if self.config.get('pdf_fast_rendering', True) else '0',
+            'PDF_USE_RAPID_WORKSPACE_COMPILER': '1' if self.config.get('pdf_use_rapid_workspace_compiler', True) else '0',
             # Image compression quality sub-settings
             'IMAGE_COMPRESSION_QUALITY': str(self.config.get('image_compression_quality', 80)),
             'EXCLUDE_COVER_COMPRESSION': '1' if self.config.get('exclude_cover_compression', True) else '0',
@@ -35242,6 +35243,7 @@ Important rules:
             os.environ['PDF_PAGE_NUMBER_ALIGNMENT'] = self.config.get('pdf_page_number_alignment', 'center')
             os.environ['PDF_RENDER_BATCH_SIZE'] = str(self.config.get('pdf_render_batch_size', 50))
             os.environ['PDF_FAST_RENDERING'] = '1' if self.config.get('pdf_fast_rendering', True) else '0'
+            os.environ['PDF_USE_RAPID_WORKSPACE_COMPILER'] = '1' if self.config.get('pdf_use_rapid_workspace_compiler', True) else '0'
 
 
             # EPUB structure settings
@@ -44770,6 +44772,7 @@ Important rules:
                 ('PDF_PAGE_NUMBER_ALIGNMENT', self.config.get('pdf_page_number_alignment', 'center')),
                 ('PDF_RENDER_BATCH_SIZE', str(self.config.get('pdf_render_batch_size', 50))),
                 ('PDF_FAST_RENDERING', '1' if self.config.get('pdf_fast_rendering', True) else '0'),
+                ('PDF_USE_RAPID_WORKSPACE_COMPILER', '1' if self.config.get('pdf_use_rapid_workspace_compiler', True) else '0'),
                 # Image compression quality sub-settings
                 ('IMAGE_COMPRESSION_QUALITY', str(self.config.get('image_compression_quality', 80))),
                 ('EXCLUDE_COVER_COMPRESSION', '1' if self.config.get('exclude_cover_compression', True) else '0'),
