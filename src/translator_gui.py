@@ -13888,6 +13888,15 @@ Text to analyze:
             'source', 'left', 'center', 'right'
         }:
             self.pdf_paragraph_alignment_var = 'source'
+        self.pdf_header_alignment_var = str(
+            self.config.get('pdf_header_alignment', 'source') or 'source'
+        ).strip().lower()
+        if self.pdf_header_alignment_var == 'centre':
+            self.pdf_header_alignment_var = 'center'
+        if self.pdf_header_alignment_var not in {
+            'source', 'left', 'center', 'right'
+        }:
+            self.pdf_header_alignment_var = 'source'
         self.pdf_paragraph_justification_var = str(
             self.config.get('pdf_paragraph_justification', 'source') or 'source'
         ).strip().lower()
@@ -13902,6 +13911,7 @@ Text to analyze:
         )
         os.environ['PDF_EXTRACTION_WORKERS'] = self.pdf_extraction_workers_var
         os.environ['PDF_PARAGRAPH_ALIGNMENT'] = self.pdf_paragraph_alignment_var
+        os.environ['PDF_HEADER_ALIGNMENT'] = self.pdf_header_alignment_var
         os.environ['PDF_PARAGRAPH_JUSTIFICATION'] = (
             self.pdf_paragraph_justification_var
         )
@@ -33101,6 +33111,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'PDF_ASYNC_PAGE_THRESHOLD': str(self.pdf_async_page_threshold_var) if hasattr(self, 'pdf_async_page_threshold_var') else '100',
             'PDF_EXTRACTION_WORKERS': str(getattr(self, 'pdf_extraction_workers_var', 'auto') or 'auto'),
             'PDF_PARAGRAPH_ALIGNMENT': str(getattr(self, 'pdf_paragraph_alignment_var', 'source') or 'source'),
+            'PDF_HEADER_ALIGNMENT': str(getattr(self, 'pdf_header_alignment_var', 'source') or 'source'),
             'PDF_PARAGRAPH_JUSTIFICATION': str(getattr(self, 'pdf_paragraph_justification_var', 'source') or 'source'),
             'PDF_RTL_PARAGRAPH_LAYOUT': '1' if getattr(self, 'pdf_rtl_paragraph_layout_var', False) else '0',
             'PDF_RENDER_BATCH_SIZE': str(self.config.get('pdf_render_batch_size', 50)),
@@ -34676,6 +34687,7 @@ Important rules:
                     'PDF_USE_TOC_SECTIONS': '1' if getattr(self, 'pdf_use_toc_sections_var', True) else '0',
                     'PDF_EXTRACTION_WORKERS': str(getattr(self, 'pdf_extraction_workers_var', 'auto') or 'auto'),
                     'PDF_PARAGRAPH_ALIGNMENT': str(getattr(self, 'pdf_paragraph_alignment_var', 'source') or 'source'),
+                    'PDF_HEADER_ALIGNMENT': str(getattr(self, 'pdf_header_alignment_var', 'source') or 'source'),
                     'PDF_PARAGRAPH_JUSTIFICATION': str(getattr(self, 'pdf_paragraph_justification_var', 'source') or 'source'),
                     'PDF_RTL_PARAGRAPH_LAYOUT': '1' if getattr(self, 'pdf_rtl_paragraph_layout_var', False) else '0',
                     # Custom API endpoints (must be propagated so UnifiedClient routes
@@ -43532,6 +43544,7 @@ Important rules:
                 ('pdf_async_page_threshold', ['pdf_async_page_threshold_var'], '100', str),
                 ('pdf_extraction_workers', ['pdf_extraction_workers_var'], 'auto', str),
                 ('pdf_paragraph_alignment', ['pdf_paragraph_alignment_var'], 'source', str),
+                ('pdf_header_alignment', ['pdf_header_alignment_var'], 'source', str),
                 ('pdf_paragraph_justification', ['pdf_paragraph_justification_var'], 'source', str),
                 ('pdf_rtl_paragraph_layout', ['pdf_rtl_paragraph_layout_var'], False, bool),
             ]
@@ -43792,6 +43805,10 @@ Important rules:
                 str(self.config.get('pdf_paragraph_alignment', 'source') or 'source'),
             ))
             env_vars_set.append(_update_env(
+                'PDF_HEADER_ALIGNMENT',
+                str(self.config.get('pdf_header_alignment', 'source') or 'source'),
+            ))
+            env_vars_set.append(_update_env(
                 'PDF_PARAGRAPH_JUSTIFICATION',
                 str(self.config.get('pdf_paragraph_justification', 'source') or 'source'),
             ))
@@ -43923,6 +43940,7 @@ Important rules:
                     ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers')) if self.config.get('enable_parallel_extraction') else '1'),
                     ('PDF_EXTRACTION_WORKERS', str(self.config.get('pdf_extraction_workers', 'auto') or 'auto')),
                     ('PDF_PARAGRAPH_ALIGNMENT', str(self.config.get('pdf_paragraph_alignment', 'source') or 'source')),
+                    ('PDF_HEADER_ALIGNMENT', str(self.config.get('pdf_header_alignment', 'source') or 'source')),
                     ('PDF_PARAGRAPH_JUSTIFICATION', str(self.config.get('pdf_paragraph_justification', 'source') or 'source')),
                     ('PDF_RTL_PARAGRAPH_LAYOUT', '1' if self.config.get('pdf_rtl_paragraph_layout', False) else '0'),
                     ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield') else '0'),
@@ -44002,6 +44020,7 @@ Important rules:
             'EXTRACTION_WORKERS': 'Number of extraction worker threads',
             'PDF_EXTRACTION_WORKERS': 'PDF input extraction workers (or auto)',
             'PDF_PARAGRAPH_ALIGNMENT': 'PDF paragraph alignment override',
+            'PDF_HEADER_ALIGNMENT': 'PDF header alignment override',
             'PDF_PARAGRAPH_JUSTIFICATION': 'PDF paragraph justification override',
             'PDF_RTL_PARAGRAPH_LAYOUT': 'PDF right-to-left paragraph layout',
             'ENABLE_GUI_YIELD': 'GUI yield during processing',
@@ -44354,6 +44373,7 @@ Important rules:
                 ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),
                 ('PDF_EXTRACTION_WORKERS', str(self.config.get('pdf_extraction_workers', 'auto') or 'auto')),
                 ('PDF_PARAGRAPH_ALIGNMENT', str(self.config.get('pdf_paragraph_alignment', 'source') or 'source')),
+                ('PDF_HEADER_ALIGNMENT', str(self.config.get('pdf_header_alignment', 'source') or 'source')),
                 ('PDF_PARAGRAPH_JUSTIFICATION', str(self.config.get('pdf_paragraph_justification', 'source') or 'source')),
                 ('PDF_RTL_PARAGRAPH_LAYOUT', '1' if self.config.get('pdf_rtl_paragraph_layout', False) else '0'),
                 ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield', True) else '0'),

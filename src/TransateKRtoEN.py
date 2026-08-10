@@ -21883,6 +21883,9 @@ def main(log_callback=None, stop_callback=None):
                     "pdf_paragraph_alignment": os.getenv(
                         "PDF_PARAGRAPH_ALIGNMENT", "source"
                     ),
+                    "pdf_header_alignment": os.getenv(
+                        "PDF_HEADER_ALIGNMENT", "source"
+                    ),
                     "pdf_paragraph_justification": os.getenv(
                         "PDF_PARAGRAPH_JUSTIFICATION", "source"
                     ),

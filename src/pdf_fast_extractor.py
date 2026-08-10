@@ -38,6 +38,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 FAST_EXTRACTOR_VERSION = 6
 FAST_MODES = {"fast_semantic", "fast_layout"}
 PDF_PARAGRAPH_ALIGNMENTS = {"source", "left", "center", "right"}
+PDF_HEADER_ALIGNMENTS = {"source", "left", "center", "right"}
 PDF_PARAGRAPH_JUSTIFICATIONS = {"source", "justify", "none"}
 
 _PDF_HASH_IMAGE_RE = re.compile(
@@ -1027,6 +1028,35 @@ def normalize_pdf_paragraph_alignment(value=None) -> str:
     return normalized if normalized in PDF_PARAGRAPH_ALIGNMENTS else "source"
 
 
+def normalize_pdf_header_alignment(value=None) -> str:
+    """Normalize the section-heading alignment override."""
+    normalized = str(
+        value
+        if value is not None
+        else os.environ.get("PDF_HEADER_ALIGNMENT", "source")
+    ).strip().lower()
+    normalized = {
+        "": "source",
+        "default": "source",
+        "source_pdf": "source",
+        "centre": "center",
+    }.get(normalized, normalized)
+    return normalized if normalized in PDF_HEADER_ALIGNMENTS else "source"
+
+
+def resolve_pdf_header_alignment(
+    source_alignment: str,
+    *,
+    alignment_override=None,
+) -> str:
+    """Resolve a source heading alignment against the user override."""
+    source = str(source_alignment or "left").strip().lower()
+    if source not in {"left", "center", "right"}:
+        source = "left"
+    override = normalize_pdf_header_alignment(alignment_override)
+    return source if override == "source" else override
+
+
 def normalize_pdf_paragraph_justification(value=None) -> str:
     normalized = str(
         value
@@ -1418,7 +1448,7 @@ def _semantic_page_html(
         text_value = str(value.get("text") or "")
         escaped = _linked_text_html(text_value, value.get("bbox") or [], links)
         text_key = _semantic_title_key(text_value)
-        alignment = _text_alignment(
+        source_alignment = _text_alignment(
             value.get("bbox") or [],
             float(page.rect.width),
             is_heading=True,
@@ -1429,7 +1459,11 @@ def _semantic_page_html(
             and (text_key == title_key or title_key in text_key)
         )
         if is_title:
-            parts.append(f'<h1 style="text-align:{alignment}">{escaped}</h1>')
+            alignment = resolve_pdf_header_alignment(source_alignment)
+            parts.append(
+                f'<h1 data-pdf-source-alignment="{source_alignment}" '
+                f'style="text-align:{alignment}">{escaped}</h1>'
+            )
             title_written = True
         else:
             source_alignment = _layout_paragraph_alignment(
@@ -1579,6 +1613,7 @@ def _fast_pdf_settings(mode: str, extract_images: bool) -> Dict:
         "version": FAST_EXTRACTOR_VERSION,
         "mode": mode,
         "extract_images": bool(extract_images),
+        "header_alignment": normalize_pdf_header_alignment(),
         "paragraph_alignment": normalize_pdf_paragraph_alignment(),
         "paragraph_justification": normalize_pdf_paragraph_justification(),
         "rtl_paragraph_layout": pdf_rtl_paragraph_layout_enabled(),

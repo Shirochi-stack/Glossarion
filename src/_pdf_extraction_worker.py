@@ -123,6 +123,13 @@ def _run_pdf_extraction_inner(config_path):
         )
         or "source"
     )
+    pdf_header_alignment = str(
+        config.get(
+            "pdf_header_alignment",
+            os.environ.get("PDF_HEADER_ALIGNMENT", "source"),
+        )
+        or "source"
+    )
     pdf_paragraph_justification = str(
         config.get(
             "pdf_paragraph_justification",
@@ -161,6 +168,7 @@ def _run_pdf_extraction_inner(config_path):
     os.environ["PDF_GENERATE_CSS"] = "1" if generate_css else "0"
     os.environ["PDF_EXTRACTION_WORKERS"] = pdf_extraction_workers
     os.environ["PDF_PARAGRAPH_ALIGNMENT"] = pdf_paragraph_alignment
+    os.environ["PDF_HEADER_ALIGNMENT"] = pdf_header_alignment
     os.environ["PDF_PARAGRAPH_JUSTIFICATION"] = pdf_paragraph_justification
     os.environ["PDF_RTL_PARAGRAPH_LAYOUT"] = (
         "1" if pdf_rtl_paragraph_layout else "0"

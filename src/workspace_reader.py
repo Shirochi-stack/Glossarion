@@ -204,6 +204,7 @@ def ensure_pdf_raw_section(
 
     from pdf_fast_extractor import (
         extract_pdf_page_range_for_reader,
+        normalize_pdf_header_alignment,
         normalize_pdf_paragraph_alignment,
         normalize_pdf_paragraph_justification,
         pdf_rtl_paragraph_layout_enabled,
@@ -227,6 +228,7 @@ def ensure_pdf_raw_section(
         "title": str(entry.get("title") or ""),
         "mode": mode,
         "extract_images": bool(extract_images),
+        "header_alignment": normalize_pdf_header_alignment(),
         "paragraph_alignment": normalize_pdf_paragraph_alignment(),
         "paragraph_justification": normalize_pdf_paragraph_justification(),
         "rtl_paragraph_layout": pdf_rtl_paragraph_layout_enabled(),

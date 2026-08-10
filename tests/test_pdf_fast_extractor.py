@@ -16,9 +16,11 @@ from pdf_fast_extractor import (
     apply_pdf_image_rename_logic,
     extract_pdf_fast,
     extract_pdf_page_range_for_reader,
+    normalize_pdf_header_alignment,
     normalize_pdf_paragraph_alignment,
     normalize_pdf_paragraph_justification,
     pdf_rtl_paragraph_layout_enabled,
+    resolve_pdf_header_alignment,
     resolve_pdf_paragraph_alignment,
     resolve_pdf_extraction_workers,
 )
@@ -254,7 +256,8 @@ def test_fast_pdf_images_receive_chapter_names_without_breaking_cache(
     assert "pdf_section_1_img_1.png" in legacy_chapter["body"]
 
 
-def test_fast_semantic_alignment_does_not_center_full_width_paragraphs():
+def test_fast_semantic_alignment_does_not_center_full_width_paragraphs(monkeypatch):
+    monkeypatch.setenv("PDF_HEADER_ALIGNMENT", "source")
     assert _text_alignment([81.0, 70.0, 510.0, 101.0], 595.0) == "left"
     assert _text_alignment([214.0, 112.0, 382.0, 145.0], 595.0) == "center"
     # Long chapter titles in real PDFs can be centered while occupying most
@@ -292,7 +295,10 @@ def test_fast_semantic_alignment_does_not_center_full_width_paragraphs():
             ]
 
     rendered = _semantic_page_html(_Page(), 1, [], "Chapter")
-    assert '<h1 style="text-align:center">Chapter</h1>' in rendered
+    assert (
+        '<h1 data-pdf-source-alignment="center" '
+        'style="text-align:center">Chapter</h1>'
+    ) in rendered
     assert (
         '<p class="pdf-align-left" data-pdf-source-alignment="left" '
         'style="text-align:left">'
@@ -459,6 +465,35 @@ def test_pdf_paragraph_override_normalization_and_precedence():
     ) == "justify"
 
 
+def test_pdf_header_alignment_override_normalization_and_resolution():
+    assert normalize_pdf_header_alignment("centre") == "center"
+    assert normalize_pdf_header_alignment("invalid") == "source"
+    assert resolve_pdf_header_alignment(
+        "center", alignment_override="source"
+    ) == "center"
+    assert resolve_pdf_header_alignment(
+        "center", alignment_override="left"
+    ) == "left"
+
+
+def test_fast_semantic_can_force_heading_alignment(monkeypatch):
+    class _Rect:
+        width = 595.0
+
+    class _Page:
+        rect = _Rect()
+
+        @staticmethod
+        def get_text(_kind, **_kwargs):
+            return [(214.0, 112.0, 382.0, 145.0, "Chapter", 0, 0)]
+
+    monkeypatch.setenv("PDF_HEADER_ALIGNMENT", "left")
+    rendered = _semantic_page_html(_Page(), 1, [], "Chapter")
+    heading = BeautifulSoup(rendered, "html.parser").h1
+    assert heading["data-pdf-source-alignment"] == "center"
+    assert heading["style"] == "text-align:left"
+
+
 def test_pdf_rtl_paragraph_layout_marks_semantic_document(monkeypatch):
     class _Rect:
         width = 595.0
@@ -498,7 +533,9 @@ def test_pdf_rtl_paragraph_layout_marks_semantic_document(monkeypatch):
     assert BeautifulSoup(rendered, "html.parser").article.get("dir") is None
 
 
-def test_fast_semantic_matches_bookmark_title_across_pdf_line_wrap_spaces():
+def test_fast_semantic_matches_bookmark_title_across_pdf_line_wrap_spaces(
+        monkeypatch):
+    monkeypatch.setenv("PDF_HEADER_ALIGNMENT", "source")
     class _Rect:
         width = 595.0
 
@@ -528,7 +565,7 @@ def test_fast_semantic_matches_bookmark_title_across_pdf_line_wrap_spaces():
     )
 
     assert (
-        '<h1 style="text-align:center">'
+        '<h1 data-pdf-source-alignment="center" style="text-align:center">'
         '결혼 전에 관계를 가지는 건 옳지 않으 니까.</h1>'
     ) in rendered
     assert '<p class="pdf-align-left"' in rendered
@@ -938,10 +975,13 @@ def test_other_settings_exposes_new_modes_and_legacy_fallback():
     assert "CPU cores:" in settings_source
     assert "PDF_EXTRACTION_WORKERS" in gui_source
     assert 'QLabel("Paragraph alignment:")' in settings_source
+    assert 'QLabel("Header alignment:")' in settings_source
     assert 'QLabel("Paragraph justification:")' in settings_source
     assert 'pdf_paragraph_alignment' in gui_source
+    assert 'pdf_header_alignment' in gui_source
     assert 'pdf_paragraph_justification' in gui_source
     assert "PDF_PARAGRAPH_ALIGNMENT" in gui_source
+    assert "PDF_HEADER_ALIGNMENT" in gui_source
     assert "PDF_PARAGRAPH_JUSTIFICATION" in gui_source
     assert '"Right-to-left paragraph layout (RTL)"' in settings_source
     assert "pdf_rtl_paragraph_layout" in gui_source

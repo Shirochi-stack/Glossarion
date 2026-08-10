@@ -11293,6 +11293,10 @@ def _create_processing_options_section(self, parent):
         self.pdf_paragraph_alignment_var = self.config.get(
             'pdf_paragraph_alignment', 'source'
         )
+    if not hasattr(self, 'pdf_header_alignment_var'):
+        self.pdf_header_alignment_var = self.config.get(
+            'pdf_header_alignment', 'source'
+        )
     if not hasattr(self, 'pdf_paragraph_justification_var'):
         self.pdf_paragraph_justification_var = self.config.get(
             'pdf_paragraph_justification', 'source'
@@ -11333,6 +11337,44 @@ def _create_processing_options_section(self, parent):
     pdf_alignment_h.addWidget(pdf_alignment_combo)
     pdf_alignment_h.addStretch()
     section_v.addWidget(pdf_alignment_row)
+
+    pdf_header_alignment_row = QWidget()
+    pdf_header_alignment_h = QHBoxLayout(pdf_header_alignment_row)
+    pdf_header_alignment_h.setContentsMargins(20, 2, 0, 0)
+    pdf_header_alignment_h.addWidget(QLabel("Header alignment:"))
+    pdf_header_alignment_combo = QComboBox()
+    for option_label, option_value in [
+        ("Source PDF (Default)", "source"),
+        ("Left", "left"),
+        ("Center", "center"),
+        ("Right", "right"),
+    ]:
+        pdf_header_alignment_combo.addItem(option_label, option_value)
+    pdf_header_alignment_combo.setFixedWidth(190)
+    self._add_combobox_arrow(pdf_header_alignment_combo)
+    self._disable_combobox_mousewheel(pdf_header_alignment_combo)
+    header_alignment_index = pdf_header_alignment_combo.findData(
+        str(self.pdf_header_alignment_var or 'source').strip().lower()
+    )
+    pdf_header_alignment_combo.setCurrentIndex(max(0, header_alignment_index))
+
+    def _on_pdf_header_alignment_changed(index):
+        selected = str(
+            pdf_header_alignment_combo.itemData(index) or 'source'
+        )
+        self.pdf_header_alignment_var = selected
+        self.config['pdf_header_alignment'] = selected
+        os.environ['PDF_HEADER_ALIGNMENT'] = selected
+
+    pdf_header_alignment_combo.currentIndexChanged.connect(
+        _on_pdf_header_alignment_changed
+    )
+    _on_pdf_header_alignment_changed(
+        pdf_header_alignment_combo.currentIndex()
+    )
+    pdf_header_alignment_h.addWidget(pdf_header_alignment_combo)
+    pdf_header_alignment_h.addStretch()
+    section_v.addWidget(pdf_header_alignment_row)
 
     pdf_justification_row = QWidget()
     pdf_justification_h = QHBoxLayout(pdf_justification_row)
@@ -11389,7 +11431,8 @@ def _create_processing_options_section(self, parent):
     section_v.addWidget(pdf_rtl_layout_cb)
 
     pdf_paragraph_format_desc = QLabel(
-        "Source PDF preserves detected paragraph formatting (default).\n"
+        "Source PDF preserves detected paragraph and header formatting (default).\n"
+        "Header alignment can be forced independently from paragraph alignment.\n"
         "An explicit Justified/Not justified choice takes precedence over alignment.\n"
         "RTL layout uses the right edge for source-left paragraphs while preserving "
         "centered/justified source formatting and explicit alignment overrides."

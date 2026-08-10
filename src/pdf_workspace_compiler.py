@@ -976,14 +976,35 @@ def normalize_fast_semantic_heading_alignment(
     content: str,
     alignment: str | None,
 ) -> str:
-    """Restore the source PDF alignment on a translated section heading."""
-    resolved = str(alignment or "").strip().lower()
-    if resolved not in {"left", "center", "right"}:
-        return str(content or "")
+    """Restore or override the alignment of a translated section heading."""
+    from pdf_fast_extractor import (
+        normalize_pdf_header_alignment,
+        resolve_pdf_header_alignment,
+    )
+
     soup = BeautifulSoup(content or "", "html.parser")
     heading = soup.find("h1")
     if heading is None:
         return str(content or "")
+
+    source_alignment = str(alignment or "").strip().lower()
+    if source_alignment not in {"left", "center", "right"}:
+        source_alignment = str(
+            heading.get("data-pdf-source-alignment") or ""
+        ).strip().lower()
+    if source_alignment not in {"left", "center", "right"}:
+        style_match = re.search(
+            r"(?:^|;)\s*text-align\s*:\s*(left|center|right)\b",
+            str(heading.get("style") or ""),
+            re.IGNORECASE,
+        )
+        source_alignment = style_match.group(1).lower() if style_match else "left"
+
+    override = normalize_pdf_header_alignment()
+    resolved = resolve_pdf_header_alignment(
+        source_alignment,
+        alignment_override=override,
+    )
 
     declarations = []
     for declaration in str(heading.get("style") or "").split(";"):
@@ -993,7 +1014,7 @@ def normalize_fast_semantic_heading_alignment(
             declarations.append(declaration)
     declarations.append(f"text-align:{resolved}")
     heading["style"] = ";".join(declarations)
-    heading["data-pdf-source-alignment"] = resolved
+    heading["data-pdf-source-alignment"] = source_alignment
     return str(soup)
 
 

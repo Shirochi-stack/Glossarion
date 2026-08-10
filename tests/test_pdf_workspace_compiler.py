@@ -19,7 +19,9 @@ from pdf_workspace_compiler import (
 )
 
 
-def test_long_centered_source_heading_is_restored_without_retranslation(tmp_path):
+def test_long_centered_source_heading_is_restored_without_retranslation(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("PDF_HEADER_ALIGNMENT", "source")
     source_pdf = tmp_path / "source.pdf"
     title = "A long centered chapter heading that fills most of the text column"
     document = fitz.open()
@@ -63,6 +65,28 @@ def test_long_centered_source_heading_is_restored_without_retranslation(tmp_path
     ).h1
     assert repaired["style"] == "text-align:center"
     assert repaired["data-pdf-source-alignment"] == "center"
+
+
+def test_pdf_compiler_can_force_heading_alignment_without_losing_source(
+        monkeypatch):
+    monkeypatch.setenv("PDF_HEADER_ALIGNMENT", "left")
+    repaired = BeautifulSoup(
+        normalize_fast_semantic_heading_alignment(
+            '<h1 style="text-align:center">Translated title</h1>',
+            "center",
+        ),
+        "html.parser",
+    ).h1
+    assert repaired["style"] == "text-align:left"
+    assert repaired["data-pdf-source-alignment"] == "center"
+
+    monkeypatch.setenv("PDF_HEADER_ALIGNMENT", "source")
+    restored = BeautifulSoup(
+        normalize_fast_semantic_heading_alignment(str(repaired), None),
+        "html.parser",
+    ).h1
+    assert restored["style"] == "text-align:center"
+    assert restored["data-pdf-source-alignment"] == "center"
 
 
 def _make_pdf_workspace(tmp_path: Path) -> Path:
