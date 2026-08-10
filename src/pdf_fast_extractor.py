@@ -18,20 +18,27 @@ cached pages without rendering them again.
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import hashlib
 import html
+import io
 import json
 import os
 import re
 import shutil
 import threading
 import time
+import unicodedata
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from statistics import median
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 
-FAST_EXTRACTOR_VERSION = 3
+FAST_EXTRACTOR_VERSION = 5
 FAST_MODES = {"fast_semantic", "fast_layout"}
+PDF_PARAGRAPH_ALIGNMENTS = {"source", "left", "center", "right"}
+PDF_PARAGRAPH_JUSTIFICATIONS = {"source", "justify", "none"}
 
 _PDF_HASH_IMAGE_RE = re.compile(
     r"^pdfimg_[0-9a-f]{64}\.[a-z0-9]{1,8}$", re.IGNORECASE
@@ -245,6 +252,30 @@ def _rect_list(value) -> List[float]:
             return [float(value[index]) for index in range(4)]
         except Exception:
             return [0.0, 0.0, 0.0, 0.0]
+
+
+def _rect_area(value) -> float:
+    rect = _rect_list(value)
+    return max(0.0, rect[2] - rect[0]) * max(0.0, rect[3] - rect[1])
+
+
+def _rect_intersection_area(left, right) -> float:
+    first = _rect_list(left)
+    second = _rect_list(right)
+    width = max(0.0, min(first[2], second[2]) - max(first[0], second[0]))
+    height = max(0.0, min(first[3], second[3]) - max(first[1], second[1]))
+    return width * height
+
+
+def _rect_center_inside(inner, outer) -> bool:
+    source = _rect_list(inner)
+    target = _rect_list(outer)
+    center_x = (source[0] + source[2]) / 2.0
+    center_y = (source[1] + source[3]) / 2.0
+    return (
+        target[0] <= center_x <= target[2]
+        and target[1] <= center_y <= target[3]
+    )
 
 
 def _stream_digest(doc, xref: int, cache: Dict[int, str]) -> str:
@@ -480,6 +511,374 @@ def _image_occurrences(page) -> List[Dict]:
     return items
 
 
+_PLAIN_URL_RE = re.compile(
+    r"(?i)(?:https?://|ftp://|www\.)[^\s<>\"']+"
+)
+
+
+def _safe_link_href(link: Dict) -> Tuple[str, bool]:
+    """Return a safe HTML target and whether it is an external URL."""
+    try:
+        target_page = int(link.get("page"))
+    except (TypeError, ValueError):
+        target_page = -1
+    if target_page >= 0:
+        return f"#page-{target_page + 1}", False
+
+    uri = str(link.get("uri") or "").strip()
+    if uri:
+        if re.match(r"(?i)^(?:javascript|data|vbscript):", uri):
+            return "", False
+        external = bool(re.match(r"(?i)^(?:https?|ftp|mailto|tel):", uri))
+        return uri, external
+
+    filename = str(link.get("file") or "").strip()
+    if filename:
+        return filename, False
+    named = str(link.get("nameddest") or link.get("name") or "").strip()
+    if named:
+        return f"#{named.lstrip('#')}", False
+    return "", False
+
+
+def _page_link_records(page) -> List[Dict]:
+    """Read PDF annotations and the exact words covered by each link."""
+    try:
+        source_links = page.get_links() or []
+    except Exception:
+        source_links = []
+    if not source_links:
+        return []
+
+    try:
+        words = page.get_text("words", sort=True) or []
+    except Exception:
+        words = []
+    records = []
+    for source_link in source_links:
+        href, external = _safe_link_href(source_link)
+        bbox = _rect_list(source_link.get("from"))
+        if not href or _rect_area(bbox) <= 0:
+            continue
+
+        matched_words = []
+        for word in words:
+            if len(word) < 5:
+                continue
+            word_bbox = [float(word[index]) for index in range(4)]
+            word_area = _rect_area(word_bbox)
+            overlap = _rect_intersection_area(word_bbox, bbox)
+            if not (
+                _rect_center_inside(word_bbox, bbox)
+                or (word_area > 0 and overlap / word_area >= 0.2)
+            ):
+                continue
+            order = tuple(word[index] if len(word) > index else 0 for index in (5, 6, 7))
+            matched_words.append((order, float(word[1]), float(word[0]), str(word[4])))
+        matched_words.sort(key=lambda item: (item[0], item[1], item[2]))
+        phrase = " ".join(item[3] for item in matched_words)
+        phrase = " ".join(phrase.split())
+        if not phrase:
+            try:
+                import fitz
+
+                phrase = " ".join(
+                    str(page.get_text("text", clip=fitz.Rect(*bbox)) or "").split()
+                )
+            except Exception:
+                phrase = ""
+        records.append(
+            {
+                "bbox": bbox,
+                "href": href,
+                "external": external,
+                "text": phrase,
+                "used": False,
+            }
+        )
+    return records
+
+
+def _link_attributes(href: str, external: bool) -> str:
+    attributes = f'href="{html.escape(str(href), quote=True)}"'
+    if external:
+        attributes += ' target="_blank" rel="noopener noreferrer"'
+    return attributes
+
+
+def _free_text_interval(
+    text: str,
+    needle: str,
+    occupied: Sequence[Tuple[int, int]],
+) -> Optional[Tuple[int, int]]:
+    if not needle:
+        return None
+    folded_text = text.casefold()
+    folded_needle = needle.casefold()
+    start = 0
+    while True:
+        index = folded_text.find(folded_needle, start)
+        if index < 0:
+            return None
+        interval = (index, index + len(needle))
+        if not any(interval[0] < end and begin < interval[1] for begin, end in occupied):
+            return interval
+        start = index + 1
+
+
+def _linked_text_html(
+    value: str,
+    bbox: Optional[Sequence[float]],
+    links: Sequence[Dict],
+) -> str:
+    """Escape text while retaining annotation links and plain URL strings."""
+    text_value = " ".join(str(value or "").split())
+    if not text_value:
+        return ""
+
+    intervals: List[Tuple[int, int, str, bool, Optional[Dict]]] = []
+    occupied: List[Tuple[int, int]] = []
+    for link in links or []:
+        if link.get("used"):
+            continue
+        link_bbox = link.get("bbox") or []
+        if bbox and _rect_intersection_area(bbox, link_bbox) <= 0:
+            continue
+        phrase = " ".join(str(link.get("text") or "").split())
+        interval = _free_text_interval(text_value, phrase, occupied)
+        if interval is None:
+            href_text = str(link.get("href") or "")
+            interval = _free_text_interval(text_value, href_text, occupied)
+        if interval is None:
+            continue
+        occupied.append(interval)
+        intervals.append(
+            (
+                interval[0],
+                interval[1],
+                str(link.get("href") or ""),
+                bool(link.get("external")),
+                link,
+            )
+        )
+
+    for match in _PLAIN_URL_RE.finditer(text_value):
+        start, end = match.span()
+        while end > start and text_value[end - 1] in ".,;:!?":
+            end -= 1
+        if end <= start or any(start < right and left < end for left, right in occupied):
+            continue
+        label = text_value[start:end]
+        href = label if not label.casefold().startswith("www.") else f"https://{label}"
+        occupied.append((start, end))
+        intervals.append((start, end, href, True, None))
+
+    if not intervals:
+        return html.escape(text_value)
+    intervals.sort(key=lambda item: (item[0], item[1]))
+    rendered = []
+    cursor = 0
+    for start, end, href, external, source_link in intervals:
+        if start < cursor:
+            continue
+        rendered.append(html.escape(text_value[cursor:start]))
+        rendered.append(
+            f"<a {_link_attributes(href, external)}>"
+            f"{html.escape(text_value[start:end])}</a>"
+        )
+        if source_link is not None:
+            source_link["used"] = True
+        cursor = end
+    rendered.append(html.escape(text_value[cursor:]))
+    return "".join(rendered)
+
+
+def _extract_page_tables(page, drawings=None) -> List[Dict]:
+    """Return usable PyMuPDF tables with row and cell geometry."""
+    if not hasattr(page, "find_tables"):
+        return []
+    try:
+        # PyMuPDF emits an optional-layout-package advertisement on every
+        # call. Keep extraction logs limited to actionable progress messages.
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            finder = page.find_tables(paths=drawings) if drawings is not None else page.find_tables()
+    except Exception:
+        return []
+
+    extracted_tables = []
+    for table_index, table in enumerate(getattr(finder, "tables", []) or []):
+        try:
+            values = table.extract() or []
+            row_objects = list(getattr(table, "rows", []) or [])
+            bbox = _rect_list(table.bbox)
+        except Exception:
+            continue
+        rows = []
+        nonempty = 0
+        for row_index, raw_row in enumerate(values):
+            cells = []
+            if row_index < len(row_objects):
+                cells = [
+                    _rect_list(cell) if cell is not None else None
+                    for cell in (getattr(row_objects[row_index], "cells", []) or [])
+                ]
+            normalized = []
+            for cell in list(raw_row or []):
+                cell_text = " ".join(str(cell or "").split())
+                normalized.append(cell_text)
+                if cell_text:
+                    nonempty += 1
+            rows.append({"values": normalized, "cells": cells})
+        if not rows or nonempty < 2 or _rect_area(bbox) <= 0:
+            continue
+
+        header_values = []
+        header_external = False
+        try:
+            header = table.header
+            header_values = [" ".join(str(item or "").split()) for item in (header.names or [])]
+            header_external = bool(header.external)
+        except Exception:
+            pass
+
+        header_row = None
+        if header_values and any(header_values):
+            if header_external:
+                header_row = {"values": header_values, "cells": []}
+            elif rows and [item.casefold() for item in rows[0]["values"]] == [
+                item.casefold() for item in header_values
+            ]:
+                header_row = rows.pop(0)
+        extracted_tables.append(
+            {
+                "bbox": bbox,
+                "number": table_index,
+                "header": header_row,
+                "rows": rows,
+            }
+        )
+    return extracted_tables
+
+
+def _vector_only_svg(page_svg: str, bbox: Sequence[float]) -> str:
+    """Clip a page SVG to one drawing cluster and remove text/raster nodes."""
+    ET.register_namespace("", "http://www.w3.org/2000/svg")
+    try:
+        root = ET.fromstring(page_svg)
+    except (ET.ParseError, TypeError, ValueError):
+        return ""
+    for parent in list(root.iter()):
+        for child in list(parent):
+            local_name = str(child.tag).rsplit("}", 1)[-1].casefold()
+            if local_name in {"text", "image"}:
+                parent.remove(child)
+    x0, y0, x1, y1 = _rect_list(bbox)
+    width = max(0.0, x1 - x0)
+    height = max(0.0, y1 - y0)
+    if width <= 0 or height <= 0:
+        return ""
+    root.set("width", f"{width:.3f}")
+    root.set("height", f"{height:.3f}")
+    root.set("viewBox", f"{x0:.3f} {y0:.3f} {width:.3f} {height:.3f}")
+    root.set("preserveAspectRatio", "xMinYMin meet")
+    return ET.tostring(root, encoding="unicode")
+
+
+def _vector_graphic_occurrences(
+    page,
+    drawings,
+    *,
+    excluded_bboxes: Sequence[Sequence[float]] = (),
+    image_bboxes: Sequence[Sequence[float]] = (),
+    starting_number: int = 0,
+) -> List[Dict]:
+    """Turn meaningful vector drawing clusters into sharp external SVGs."""
+    if not drawings or not hasattr(page, "cluster_drawings"):
+        return []
+    page_area = max(1.0, _rect_area(page.rect))
+    meaningful_drawings = []
+    for drawing in drawings:
+        bbox = _rect_list(drawing.get("rect"))
+        width = max(0.0, bbox[2] - bbox[0])
+        height = max(0.0, bbox[3] - bbox[1])
+        fill = drawing.get("fill")
+        stroke = drawing.get("color")
+        # Many exported web PDFs paint an opaque white rectangle behind every
+        # text line and use sub-point filled rectangles for hyperlink
+        # underlines. They are styling artifacts, not standalone graphics.
+        if (
+            stroke is None
+            and fill
+            and all(float(channel) >= 0.985 for channel in fill[:3])
+        ):
+            continue
+        if stroke is None and fill and min(width, height) <= 1.5:
+            continue
+        if _rect_area(bbox) >= page_area * 0.8:
+            continue
+        meaningful_drawings.append(drawing)
+    if not meaningful_drawings:
+        return []
+    try:
+        clusters = page.cluster_drawings(
+            drawings=meaningful_drawings,
+            x_tolerance=4,
+            y_tolerance=4,
+            final_filter=True,
+        ) or []
+    except Exception:
+        return []
+
+    accepted = []
+    for cluster in clusters:
+        bbox = _rect_list(cluster)
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+        area = _rect_area(bbox)
+        if width < 6 or height < 6 or area < 100 or area >= page_area * 0.8:
+            continue
+        if any(
+            _rect_intersection_area(bbox, excluded) / max(area, 1.0) >= 0.65
+            for excluded in excluded_bboxes
+        ):
+            continue
+        if any(
+            _rect_intersection_area(bbox, image_bbox) / max(area, 1.0) >= 0.65
+            for image_bbox in image_bboxes
+        ):
+            continue
+        accepted.append(bbox)
+    if not accepted:
+        return []
+
+    try:
+        page_svg = page.get_svg_image(text_as_path=False)
+    except Exception:
+        return []
+    occurrences = []
+    for vector_index, bbox in enumerate(accepted):
+        svg = _vector_only_svg(page_svg, bbox)
+        if not svg:
+            continue
+        source_digest = hashlib.sha256(svg.encode("utf-8")).hexdigest()
+        occurrences.append(
+            {
+                "index": starting_number + vector_index,
+                "number": starting_number + vector_index,
+                "resource_index": None,
+                "xref": 0,
+                "kind": "vector",
+                "source_digest": source_digest,
+                "bbox": bbox,
+                "width": max(1, int(round(bbox[2] - bbox[0]))),
+                "height": max(1, int(round(bbox[3] - bbox[1]))),
+                "asset_text": svg,
+                "asset_extension": "svg",
+            }
+        )
+    return occurrences
+
+
 def _normalize_extension(extension: str) -> str:
     extension = str(extension or "png").lower().lstrip(".")
     if extension == "jpeg":
@@ -498,7 +897,10 @@ def _extract_asset(
 ) -> Optional[Dict]:
     xref = int(occurrence.get("xref") or 0)
     source_digest = occurrence.get("source_digest") or ""
-    map_key = f"xref_{xref}" if xref else f"inline_{source_digest or occurrence['index']}"
+    fallback_key = hashlib.sha256(
+        str(source_digest or occurrence.get("index") or 0).encode("utf-8")
+    ).hexdigest()
+    map_key = f"xref_{xref}" if xref else f"inline_{fallback_key}"
     map_path = xref_map_dir / f"{map_key}.json"
     cached = _load_json(map_path, {}) or {}
     cached_filename = cached.get("filename")
@@ -509,6 +911,10 @@ def _extract_asset(
     extension = "png"
     width = int(occurrence.get("width") or 0)
     height = int(occurrence.get("height") or 0)
+    asset_text = occurrence.get("asset_text")
+    if asset_text:
+        image_bytes = str(asset_text).encode("utf-8")
+        extension = _normalize_extension(occurrence.get("asset_extension") or "svg")
     if xref:
         try:
             extracted = doc.extract_image(xref)
@@ -568,7 +974,11 @@ def _materialize_images(doc, page, occurrences, images_dir: Path, xref_map_dir: 
                 local_assets[key] = asset
         if not asset:
             continue
-        item = dict(occurrence)
+        item = {
+            name: value
+            for name, value in occurrence.items()
+            if name not in {"asset_text", "asset_extension"}
+        }
         item.update(asset)
         materialized.append(item)
     return materialized
@@ -594,14 +1004,264 @@ def _text_alignment(bbox: Sequence[float], page_width: float) -> str:
     return "left"
 
 
+def normalize_pdf_paragraph_alignment(value=None) -> str:
+    normalized = str(
+        value
+        if value is not None
+        else os.environ.get("PDF_PARAGRAPH_ALIGNMENT", "source")
+    ).strip().lower()
+    normalized = {
+        "": "source",
+        "default": "source",
+        "source_pdf": "source",
+        "centre": "center",
+    }.get(normalized, normalized)
+    return normalized if normalized in PDF_PARAGRAPH_ALIGNMENTS else "source"
+
+
+def normalize_pdf_paragraph_justification(value=None) -> str:
+    normalized = str(
+        value
+        if value is not None
+        else os.environ.get("PDF_PARAGRAPH_JUSTIFICATION", "source")
+    ).strip().lower()
+    normalized = {
+        "": "source",
+        "default": "source",
+        "source_pdf": "source",
+        "justified": "justify",
+        "not_justified": "none",
+        "off": "none",
+    }.get(normalized, normalized)
+    return normalized if normalized in PDF_PARAGRAPH_JUSTIFICATIONS else "source"
+
+
+def pdf_rtl_paragraph_layout_enabled(value=None) -> bool:
+    """Return whether PDF text should use an explicit RTL paragraph layout."""
+    raw_value = (
+        value
+        if value is not None
+        else os.environ.get("PDF_RTL_PARAGRAPH_LAYOUT", "0")
+    )
+    if isinstance(raw_value, bool):
+        return raw_value
+    return str(raw_value or "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled", "rtl"
+    }
+
+
+def _text_direction_alignment(text: str) -> str:
+    """Return the natural edge for a non-justified paragraph."""
+    for character in str(text or ""):
+        direction = unicodedata.bidirectional(character)
+        if direction in {"R", "AL"}:
+            return "right"
+        if direction == "L":
+            return "left"
+    return "left"
+
+
+def resolve_pdf_paragraph_alignment(
+    source_alignment: str,
+    text: str = "",
+    *,
+    alignment_override=None,
+    justification_override=None,
+) -> str:
+    """Resolve source formatting and the two independent user overrides."""
+    source = str(source_alignment or "left").strip().lower()
+    if source not in {"left", "center", "right", "justify"}:
+        source = _text_direction_alignment(text)
+    alignment = normalize_pdf_paragraph_alignment(alignment_override)
+    justification = normalize_pdf_paragraph_justification(justification_override)
+
+    # An explicit justification choice has precedence over horizontal
+    # alignment. Choosing an explicit alignment disables source justification.
+    if justification == "justify":
+        return "justify"
+    if justification == "none":
+        if alignment != "source":
+            return alignment
+        return _text_direction_alignment(text) if source == "justify" else source
+    if alignment != "source":
+        return alignment
+    return source
+
+
+def _semantic_layout_geometry(page, flags: int):
+    """Read line geometry and infer the dominant text-column bounds."""
+    try:
+        layout = page.get_text("dict", sort=True, flags=flags) or {}
+    except TypeError:
+        try:
+            layout = page.get_text("dict", sort=True) or {}
+        except Exception:
+            return {}, None
+    except Exception:
+        return {}, None
+    if not isinstance(layout, dict):
+        return {}, None
+
+    page_width = float(getattr(getattr(page, "rect", None), "width", 0.0) or 0.0)
+    by_number = {}
+    column_candidates = []
+    for block in layout.get("blocks") or []:
+        if not isinstance(block, dict) or int(block.get("type", 0)) != 0:
+            continue
+        try:
+            number = int(block.get("number"))
+        except (TypeError, ValueError):
+            continue
+        by_number[number] = block
+        bbox = block.get("bbox") or []
+        lines = block.get("lines") or []
+        if len(bbox) >= 4 and (
+            len(lines) >= 2 or float(bbox[2]) - float(bbox[0]) >= page_width * 0.38
+        ):
+            column_candidates.append((float(bbox[0]), float(bbox[2])))
+    column_bounds = None
+    if column_candidates:
+        column_bounds = (
+            float(median(item[0] for item in column_candidates)),
+            float(median(item[1] for item in column_candidates)),
+        )
+    return by_number, column_bounds
+
+
+def _layout_paragraph_alignment(
+    block: Optional[Dict],
+    page_width: float,
+    column_bounds,
+    text: str,
+) -> str:
+    """Detect left/center/right/justify from PDF line positions."""
+    if not isinstance(block, dict):
+        return _text_direction_alignment(text)
+    usable_lines = []
+    for line in block.get("lines") or []:
+        line_text = "".join(
+            str(span.get("text") or "")
+            for span in (line.get("spans") or [])
+            if isinstance(span, dict)
+        ).strip()
+        bbox = line.get("bbox") or []
+        if line_text and len(bbox) >= 4:
+            usable_lines.append([float(value) for value in bbox[:4]])
+    if not usable_lines:
+        return _text_direction_alignment(text)
+
+    lefts = [line[0] for line in usable_lines]
+    rights = [line[2] for line in usable_lines]
+    widths = [right - left for left, right in zip(lefts, rights)]
+    tolerance = max(1.5, page_width * 0.004)
+
+    if len(usable_lines) >= 2:
+        widest_right = max(rights)
+        common_left = min(lefts)
+        full_right_lines = sum(
+            abs(right - widest_right) <= tolerance for right in rights
+        )
+        stable_left_lines = sum(
+            abs(left - common_left) <= tolerance for left in lefts
+        )
+        if (
+            full_right_lines >= 2
+            and full_right_lines * 2 >= len(usable_lines)
+            and stable_left_lines * 4 >= len(usable_lines) * 3
+            and max(widths) >= page_width * 0.3
+        ):
+            return "justify"
+
+        centers = [(left + right) / 2.0 for left, right in zip(lefts, rights)]
+        if (
+            max(centers) - min(centers) <= max(5.0, page_width * 0.012)
+            and max(widths) - min(widths) > tolerance * 2
+        ):
+            return "center"
+        if max(rights) - min(rights) <= tolerance and max(lefts) - min(lefts) > tolerance:
+            return "right"
+
+    bbox = block.get("bbox") or []
+    if len(bbox) >= 4 and column_bounds:
+        block_left = float(bbox[0])
+        block_right = float(bbox[2])
+        column_left, column_right = column_bounds
+        edge_tolerance = max(6.0, page_width * 0.015)
+        if abs(block_left - column_left) <= edge_tolerance:
+            return "left"
+        if abs(block_right - column_right) <= edge_tolerance:
+            return "right"
+        if abs(
+            (block_left + block_right) / 2.0 - (column_left + column_right) / 2.0
+        ) <= edge_tolerance:
+            return "center"
+    return _text_direction_alignment(text)
+
+
 def _semantic_title_key(value: str) -> str:
     """Normalize PDF line-wrap whitespace for bookmark-title matching."""
     return re.sub(r"\s+", "", str(value or "").casefold())
 
 
-def _semantic_page_html(page, page_number: int, images: List[Dict], section_title: str) -> str:
+def _link_for_visual_bbox(bbox: Sequence[float], links: Sequence[Dict]) -> Optional[Dict]:
+    area = _rect_area(bbox)
+    if area <= 0:
+        return None
+    best_link = None
+    best_score = 0.0
+    for link in links or []:
+        if link.get("used"):
+            continue
+        link_bbox = link.get("bbox") or []
+        link_area = _rect_area(link_bbox)
+        overlap = _rect_intersection_area(bbox, link_bbox)
+        score = overlap / max(1.0, min(area, link_area))
+        if score > best_score:
+            best_score = score
+            best_link = link
+    return best_link if best_score >= 0.4 else None
+
+
+def _semantic_table_html(table: Dict, links: Sequence[Dict]) -> str:
+    parts = ['<table class="pdf-table">']
+    header_row = table.get("header")
+    if header_row:
+        parts.append("<thead><tr>")
+        values = header_row.get("values") or []
+        cells = header_row.get("cells") or []
+        for index, value in enumerate(values):
+            bbox = cells[index] if index < len(cells) else table.get("bbox")
+            parts.append(f"<th>{_linked_text_html(value, bbox, links)}</th>")
+        parts.append("</tr></thead>")
+    parts.append("<tbody>")
+    for row in table.get("rows") or []:
+        parts.append("<tr>")
+        values = row.get("values") or []
+        cells = row.get("cells") or []
+        for index, value in enumerate(values):
+            bbox = cells[index] if index < len(cells) else table.get("bbox")
+            parts.append(f"<td>{_linked_text_html(value, bbox, links)}</td>")
+        parts.append("</tr>")
+    parts.append("</tbody></table>")
+    return "".join(parts)
+
+
+def _semantic_page_html(
+    page,
+    page_number: int,
+    images: List[Dict],
+    section_title: str,
+    *,
+    tables: Optional[List[Dict]] = None,
+    links: Optional[List[Dict]] = None,
+) -> str:
     import fitz
 
+    if tables is None:
+        tables = _extract_page_tables(page)
+    if links is None:
+        links = _page_link_records(page)
+    table_bboxes = [table.get("bbox") or [] for table in tables]
     flags = int(getattr(fitz, "TEXTFLAGS_BLOCKS", 195)) & ~int(
         getattr(fitz, "TEXT_PRESERVE_IMAGES", 4)
     )
@@ -609,6 +1269,10 @@ def _semantic_page_html(page, page_number: int, images: List[Dict], section_titl
         blocks = page.get_text("blocks", sort=True, flags=flags) or []
     except TypeError:
         blocks = page.get_text("blocks", sort=True) or []
+    dict_flags = int(getattr(fitz, "TEXTFLAGS_DICT", 199)) & ~int(
+        getattr(fitz, "TEXT_PRESERVE_IMAGES", 4)
+    )
+    layout_by_number, column_bounds = _semantic_layout_geometry(page, dict_flags)
 
     events = []
     for block in blocks:
@@ -616,6 +1280,14 @@ def _semantic_page_html(page, page_number: int, images: List[Dict], section_titl
             continue
         text_value = " ".join(str(block[4] or "").split())
         if not text_value:
+            continue
+        block_bbox = [float(block[index]) for index in range(4)]
+        block_area = max(1.0, _rect_area(block_bbox))
+        if any(
+            _rect_center_inside(block_bbox, table_bbox)
+            or _rect_intersection_area(block_bbox, table_bbox) / block_area >= 0.5
+            for table_bbox in table_bboxes
+        ):
             continue
         events.append(
             (
@@ -625,8 +1297,20 @@ def _semantic_page_html(page, page_number: int, images: List[Dict], section_titl
                 "text",
                 {
                     "text": text_value,
-                    "bbox": [float(block[index]) for index in range(4)],
+                    "bbox": block_bbox,
+                    "layout": layout_by_number.get(int(block[5])),
                 },
+            )
+        )
+    for table in tables:
+        bbox = table.get("bbox") or [0, 0, 0, 0]
+        events.append(
+            (
+                float(bbox[1]),
+                float(bbox[0]),
+                int(table.get("number", 0)),
+                "table",
+                table,
             )
         )
     for image_info in images:
@@ -640,29 +1324,69 @@ def _semantic_page_html(page, page_number: int, images: List[Dict], section_titl
                 image_info,
             )
         )
-    events.sort(key=lambda item: (item[0], item[1], item[2], item[3] != "text"))
+    kind_order = {"table": 0, "text": 1, "image": 2}
+    events.sort(key=lambda item: (item[0], item[1], kind_order.get(item[3], 9), item[2]))
 
     title_key = _semantic_title_key(section_title)
     title_written = False
+    rtl_layout = pdf_rtl_paragraph_layout_enabled()
+    article_classes = "pdf-fast-semantic-page"
+    article_attributes = ""
+    if rtl_layout:
+        article_classes += " pdf-rtl-layout"
+        article_attributes = ' dir="rtl" data-pdf-rtl-layout="true"'
     parts = [
         '<!DOCTYPE html><html><head><meta charset="utf-8">',
-        '<style>.pdf-fast-semantic-page img{max-width:100%;height:auto}.pdf-image{text-align:center;margin:1em 0}</style>',
+        '<style>'
+        '.pdf-fast-semantic-page img{max-width:100%;height:auto}'
+        '.pdf-image,.pdf-vector-graphic{text-align:center;margin:1em 0}'
+        '.pdf-table{border-collapse:collapse;width:100%;margin:1em 0}'
+        '.pdf-table th,.pdf-table td{border:1px solid #777;padding:.35em .5em;'
+        'vertical-align:top;text-align:left}'
+        '.pdf-align-left{text-align:left}'
+        '.pdf-align-center{text-align:center}'
+        '.pdf-align-right{text-align:right}'
+        '.pdf-align-justify{text-align:justify;text-justify:auto}'
+        '.pdf-rtl-layout{direction:rtl}'
+        '.pdf-rtl-layout p,.pdf-rtl-layout li,.pdf-rtl-layout td,'
+        '.pdf-rtl-layout th{direction:rtl;unicode-bidi:plaintext}'
+        '.pdf-fast-semantic-page a{text-decoration:underline}'
+        '.pdf-links{font-size:.9em}'
+        '</style>',
         '</head><body>',
-        f'<article class="pdf-fast-semantic-page" data-pdf-page="{page_number}">',
+        f'<article class="{article_classes}" data-pdf-page="{page_number}"'
+        f'{article_attributes}>',
         f'<a id="page-{page_number}"></a>',
     ]
     for _y, _x, _number, kind, value in events:
+        if kind == "table":
+            parts.append(_semantic_table_html(value, links))
+            continue
         if kind == "image":
             filename = html.escape(str(value.get("filename") or ""), quote=True)
             if filename:
+                visual_link = _link_for_visual_bbox(value.get("bbox") or [], links)
+                image_tag = (
+                    f'<img src="images/{filename}" alt="PDF graphic" loading="lazy">'
+                )
+                if visual_link:
+                    image_tag = (
+                        f'<a {_link_attributes(visual_link["href"], bool(visual_link.get("external")))}>'
+                        f"{image_tag}</a>"
+                    )
+                    visual_link["used"] = True
+                figure_class = (
+                    "pdf-vector-graphic"
+                    if value.get("kind") == "vector"
+                    else "pdf-image"
+                )
                 parts.append(
-                    f'<figure class="pdf-image"><img src="images/{filename}" '
-                    f'alt="PDF image" loading="lazy"></figure>'
+                    f'<figure class="{figure_class}">{image_tag}</figure>'
                 )
             continue
 
         text_value = str(value.get("text") or "")
-        escaped = html.escape(text_value)
+        escaped = _linked_text_html(text_value, value.get("bbox") or [], links)
         text_key = _semantic_title_key(text_value)
         alignment = _text_alignment(value.get("bbox") or [], float(page.rect.width))
         is_title = bool(
@@ -674,17 +1398,39 @@ def _semantic_page_html(page, page_number: int, images: List[Dict], section_titl
             parts.append(f'<h1 style="text-align:{alignment}">{escaped}</h1>')
             title_written = True
         else:
-            # A short, left-aligned PDF line can have nearly equal outer
-            # margins, which is geometrically indistinguishable from centered
-            # text when using block bounds alone.  Fast Semantic is a
-            # reading-oriented mode, so only use the alignment heuristic for
-            # the section heading; normal prose must follow the source text
-            # column's left edge.
-            alignment = "left"
+            source_alignment = _layout_paragraph_alignment(
+                value.get("layout"),
+                float(page.rect.width),
+                column_bounds,
+                text_value,
+            )
+            alignment = resolve_pdf_paragraph_alignment(
+                source_alignment,
+                text_value,
+            )
             parts.append(
                 f'<p class="pdf-align-{alignment}" '
+                f'data-pdf-source-alignment="{source_alignment}" '
                 f'style="text-align:{alignment}">{escaped}</p>'
             )
+    unresolved = []
+    seen_hrefs = set()
+    for link in links:
+        href = str(link.get("href") or "")
+        if link.get("used") or not href or href in seen_hrefs:
+            continue
+        seen_hrefs.add(href)
+        label = str(link.get("text") or "").strip() or href
+        unresolved.append(
+            f'<li><a {_link_attributes(href, bool(link.get("external")))}>'
+            f"{html.escape(label)}</a></li>"
+        )
+    if unresolved:
+        parts.append(
+            '<aside class="pdf-links" aria-label="PDF links"><p>Links:</p><ul>'
+            + "".join(unresolved)
+            + "</ul></aside>"
+        )
     parts.extend(["</article>", "</body></html>"])
     return "\n".join(parts)
 
@@ -699,7 +1445,13 @@ def _xhtml_parts(xhtml: str) -> Tuple[str, str]:
     return head, body
 
 
-def _layout_page_html(page, page_number: int, images: List[Dict]) -> str:
+def _layout_page_html(
+    page,
+    page_number: int,
+    images: List[Dict],
+    *,
+    links: Optional[List[Dict]] = None,
+) -> str:
     import fitz
 
     flags = int(getattr(fitz, "TEXTFLAGS_HTML", 199)) & ~int(
@@ -734,6 +1486,30 @@ def _layout_page_html(page, page_number: int, images: List[Dict]) -> str:
             f'width:{width:.3f}pt;height:{height:.3f}pt">'
         )
 
+    if links is None:
+        links = _page_link_records(page)
+    link_tags = []
+    for link in links:
+        x0, y0, x1, y1 = _rect_list(link.get("bbox") or [])
+        width = max(0.0, x1 - x0)
+        height = max(0.0, y1 - y0)
+        href = str(link.get("href") or "")
+        if not href or width <= 0 or height <= 0:
+            continue
+        link_tags.append(
+            f'<a class="pdf-fast-layout-link" '
+            f'{_link_attributes(href, bool(link.get("external")))} '
+            f'style="position:absolute;left:{x0:.3f}pt;top:{y0:.3f}pt;'
+            f'width:{width:.3f}pt;height:{height:.3f}pt" '
+            f'aria-label="{html.escape(str(link.get("text") or href), quote=True)}"></a>'
+        )
+
+    rtl_layout = pdf_rtl_paragraph_layout_enabled()
+    layout_classes = "pdf-fast-layout-page"
+    layout_attributes = ""
+    if rtl_layout:
+        layout_classes += " pdf-rtl-layout"
+        layout_attributes = ' dir="rtl" data-pdf-rtl-layout="true"'
     page_width = float(page.rect.width)
     page_height = float(page.rect.height)
     return "\n".join(
@@ -743,13 +1519,18 @@ def _layout_page_html(page, page_number: int, images: List[Dict]) -> str:
             '<style>.pdf-fast-layout-page{position:relative;margin:0 auto;overflow:hidden}'
             '.pdf-fast-layout-page>div{position:absolute;left:0;top:0;z-index:1}'
             '.pdf-fast-layout-page p{position:absolute;white-space:pre;margin:0}'
-            '.pdf-fast-layout-image{z-index:0}</style>',
+            '.pdf-rtl-layout{direction:rtl}'
+            '.pdf-rtl-layout p{direction:rtl;unicode-bidi:plaintext}'
+            '.pdf-fast-layout-image{z-index:0}'
+            '.pdf-fast-layout-link{display:block;z-index:5;background:transparent}</style>',
             '</head><body>',
-            f'<div class="pdf-fast-layout-page" data-pdf-page="{page_number}" '
+            f'<div class="{layout_classes}" data-pdf-page="{page_number}"'
+            f'{layout_attributes} '
             f'style="width:{page_width:.3f}pt;height:{page_height:.3f}pt">',
             f'<a id="page-{page_number}"></a>',
             body,
             *image_tags,
+            *link_tags,
             '</div></body></html>',
         ]
     )
@@ -757,6 +1538,17 @@ def _layout_page_html(page, page_number: int, images: List[Dict]) -> str:
 
 def _page_cache_path(cache_root: Path, mode: str, page_number: int) -> Path:
     return cache_root / "pages" / mode / f"page_{page_number:06d}.json"
+
+
+def _fast_pdf_settings(mode: str, extract_images: bool) -> Dict:
+    return {
+        "version": FAST_EXTRACTOR_VERSION,
+        "mode": mode,
+        "extract_images": bool(extract_images),
+        "paragraph_alignment": normalize_pdf_paragraph_alignment(),
+        "paragraph_justification": normalize_pdf_paragraph_justification(),
+        "rtl_paragraph_layout": pdf_rtl_paragraph_layout_enabled(),
+    }
 
 
 def _cache_entry_is_usable(cache_root: Path, entry: Dict) -> bool:
@@ -829,16 +1621,49 @@ def _extract_page_range(args):
                 )
                 continue
 
+            links = _page_link_records(page)
+            drawings = []
+            if extract_images or mode == "fast_semantic":
+                try:
+                    drawings = page.get_drawings() or []
+                except Exception:
+                    drawings = []
+            tables = (
+                _extract_page_tables(page, drawings=drawings)
+                if mode == "fast_semantic"
+                else []
+            )
             occurrences = _image_occurrences(page) if extract_images else []
+            if extract_images and drawings:
+                occurrences.extend(
+                    _vector_graphic_occurrences(
+                        page,
+                        drawings,
+                        excluded_bboxes=[
+                            table.get("bbox") or [] for table in tables
+                        ],
+                        image_bboxes=[
+                            occurrence.get("bbox") or [] for occurrence in occurrences
+                        ],
+                        starting_number=len(occurrences),
+                    )
+                )
             images = _materialize_images(doc, page, occurrences, images_dir, xref_map_dir)
             if mode == "fast_layout":
-                page_html = _layout_page_html(page, page_number, images)
+                page_html = _layout_page_html(
+                    page,
+                    page_number,
+                    images,
+                    links=links,
+                )
             else:
                 page_html = _semantic_page_html(
                     page,
                     page_number,
                     images,
                     str((section_titles or {}).get(str(page_index), "")),
+                    tables=tables,
+                    links=links,
                 )
 
             cache_path = _page_cache_path(cache_root, mode, page_number)
@@ -1290,7 +2115,12 @@ def extract_pdf_page_range_for_reader(
 
     manifest_path = cache_root / f"manifest_{mode}.json"
     previous = _load_json(manifest_path, {}) or {}
-    previous_pages = previous.get("pages") if isinstance(previous, dict) else {}
+    expected_settings = _fast_pdf_settings(mode, bool(extract_images))
+    previous_pages = (
+        previous.get("pages")
+        if isinstance(previous, dict) and previous.get("settings") == expected_settings
+        else {}
+    )
     previous_pages = previous_pages if isinstance(previous_pages, dict) else {}
     relevant_prior = {
         str(page_number): previous_pages.get(str(page_number), {})
@@ -1361,11 +2191,7 @@ def _extract_pdf_fast_impl(
         raise PDFExtractionCancelled("PDF extraction cancelled")
     outline_hash = _outline_digest(toc_entries)
 
-    settings = {
-        "version": FAST_EXTRACTOR_VERSION,
-        "mode": mode,
-        "extract_images": bool(extract_images),
-    }
+    settings = _fast_pdf_settings(mode, bool(extract_images))
     manifest_path = cache_root / f"manifest_{mode}.json"
     previous = _load_json(manifest_path, {}) or {}
     previous_pages = previous.get("pages") if previous.get("settings") == settings else {}
@@ -1683,6 +2509,24 @@ def ensure_pdf_page_images(
             else:
                 page = doc[page_number - 1]
                 occurrences = _image_occurrences(page)
+                try:
+                    drawings = page.get_drawings() or []
+                except Exception:
+                    drawings = []
+                tables = _extract_page_tables(page, drawings=drawings)
+                occurrences.extend(
+                    _vector_graphic_occurrences(
+                        page,
+                        drawings,
+                        excluded_bboxes=[
+                            table.get("bbox") or [] for table in tables
+                        ],
+                        image_bboxes=[
+                            occurrence.get("bbox") or [] for occurrence in occurrences
+                        ],
+                        starting_number=len(occurrences),
+                    )
+                )
                 page_images = _materialize_images(
                     doc,
                     page,

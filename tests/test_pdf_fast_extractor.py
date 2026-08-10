@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import pytest
+from bs4 import BeautifulSoup
 
 from pdf_extractor import build_pdf_toc_section_plan, group_pdf_pages_by_toc
 from pdf_fast_extractor import (
@@ -14,6 +15,10 @@ from pdf_fast_extractor import (
     apply_pdf_image_rename_logic,
     extract_pdf_fast,
     extract_pdf_page_range_for_reader,
+    normalize_pdf_paragraph_alignment,
+    normalize_pdf_paragraph_justification,
+    pdf_rtl_paragraph_layout_enabled,
+    resolve_pdf_paragraph_alignment,
     resolve_pdf_extraction_workers,
 )
 from workspace_reader import (
@@ -92,6 +97,94 @@ def test_fast_semantic_deduplicates_repeated_images(tmp_path, monkeypatch):
     }
     assert len(filenames) == 1
     assert len(list((output_dir / "images").glob("pdfimg_*"))) == 1
+
+
+def test_fast_semantic_preserves_links_tables_and_vector_graphics(
+    tmp_path,
+    monkeypatch,
+):
+    fitz = pytest.importorskip("fitz")
+    pdf_path = tmp_path / "structured.pdf"
+    output_dir = tmp_path / "output"
+    document = fitz.open()
+    page = document.new_page(width=420, height=520)
+    page.insert_text((36, 42), "Reference: finish the attack for details.", fontsize=11)
+    page.insert_text((36, 68), "Plain URL: https://example.org/guide", fontsize=11)
+    link_rect = page.search_for("finish the attack")[0]
+    page.insert_link(
+        {
+            "kind": fitz.LINK_URI,
+            "from": link_rect,
+            "uri": "https://academy.example/program",
+        }
+    )
+
+    for x in (36, 156, 276):
+        page.draw_line((x, 100), (x, 180), color=(0, 0, 0))
+    for y in (100, 140, 180):
+        page.draw_line((36, y), (276, y), color=(0, 0, 0))
+    page.insert_text((46, 126), "Name", fontsize=10)
+    page.insert_text((166, 126), "URL", fontsize=10)
+    page.insert_text((46, 166), "Example", fontsize=10)
+    page.insert_text((166, 166), "https://table.example", fontsize=10)
+
+    page.draw_circle(
+        (340, 130),
+        32,
+        color=(0.8, 0.1, 0.1),
+        fill=(1.0, 0.8, 0.2),
+        width=3,
+    )
+    document.set_toc([[1, "Structured Page", 1]])
+    document.save(pdf_path)
+    document.close()
+    monkeypatch.setenv("EXTRACTION_WORKERS", "1")
+
+    pages, images_by_page = extract_pdf_fast(
+        str(pdf_path),
+        str(output_dir),
+        mode="fast_semantic",
+        extract_images=True,
+        page_by_page=True,
+    )
+
+    assert len(pages) == 1
+    soup = BeautifulSoup(pages[0][1], "html.parser")
+    annotation = soup.find("a", href="https://academy.example/program")
+    assert annotation is not None
+    assert annotation.get_text(" ", strip=True) == "finish the attack"
+    assert soup.find("a", href="https://example.org/guide") is not None
+    table = soup.find("table", class_="pdf-table")
+    assert table is not None
+    assert [cell.get_text(" ", strip=True) for cell in table.find_all(["th", "td"])] == [
+        "Name",
+        "URL",
+        "Example",
+        "https://table.example",
+    ]
+    assert table.find("a", href="https://table.example") is not None
+    assert not any("Example" in paragraph.get_text() for paragraph in soup.find_all("p"))
+
+    vector = soup.find("figure", class_="pdf-vector-graphic")
+    assert vector is not None
+    vector_src = vector.img["src"]
+    assert vector_src.lower().endswith(".svg")
+    vector_path = output_dir / vector_src
+    assert vector_path.is_file()
+    assert "<path" in vector_path.read_text(encoding="utf-8")
+    assert images_by_page[0][0]["kind"] == "vector"
+
+    chapter = {
+        "num": 1,
+        "filename": "pdf_section_structured.html",
+        "body": pages[0][1],
+    }
+    apply_pdf_image_rename_logic([chapter], str(output_dir))
+    renamed = BeautifulSoup(chapter["body"], "html.parser").find(
+        "figure", class_="pdf-vector-graphic"
+    )
+    assert renamed.img["src"] == "images/pdf_section_structured_img_1.svg"
+    assert (output_dir / renamed.img["src"]).is_file()
 
 
 def test_fast_pdf_images_receive_chapter_names_without_breaking_cache(
@@ -181,14 +274,141 @@ def test_fast_semantic_alignment_does_not_center_full_width_paragraphs():
     rendered = _semantic_page_html(_Page(), 1, [], "Chapter")
     assert '<h1 style="text-align:center">Chapter</h1>' in rendered
     assert (
-        '<p class="pdf-align-left" style="text-align:left">'
+        '<p class="pdf-align-left" data-pdf-source-alignment="left" '
+        'style="text-align:left">'
         'Body paragraph</p>'
     ) in rendered
     assert (
-        '<p class="pdf-align-left" style="text-align:left">'
+        '<p class="pdf-align-left" data-pdf-source-alignment="left" '
+        'style="text-align:left">'
         'Short body sentence</p>'
     ) in rendered
     assert '<p class="pdf-align-center"' not in rendered
+
+
+def test_fast_semantic_detects_source_justification_and_honors_overrides(monkeypatch):
+    class _Rect:
+        width = 595.0
+
+    class _Page:
+        rect = _Rect()
+
+        @staticmethod
+        def get_text(kind, **_kwargs):
+            if kind == "dict":
+                return {
+                    "blocks": [
+                        {
+                            "number": 0,
+                            "type": 0,
+                            "bbox": [70.8, 90.0, 250.0, 110.0],
+                            "lines": [{
+                                "bbox": [70.8, 90.0, 250.0, 110.0],
+                                "spans": [{"text": "What is rest defence?"}],
+                            }],
+                        },
+                        {
+                            "number": 1,
+                            "type": 0,
+                            "bbox": [70.8, 130.0, 528.2, 220.0],
+                            "lines": [
+                                {"bbox": [70.8, 130.0, 528.2, 145.0], "spans": [{"text": "First full line"}]},
+                                {"bbox": [70.8, 150.0, 528.1, 165.0], "spans": [{"text": "Second full line"}]},
+                                {"bbox": [70.8, 170.0, 528.2, 185.0], "spans": [{"text": "Third full line"}]},
+                                {"bbox": [70.8, 190.0, 260.0, 205.0], "spans": [{"text": "Short last line"}]},
+                            ],
+                        },
+                    ]
+                }
+            return [
+                (70.8, 90.0, 250.0, 110.0, "What is rest defence?", 0, 0),
+                (
+                    70.8,
+                    130.0,
+                    528.2,
+                    220.0,
+                    "First full line Second full line Third full line Short last line",
+                    1,
+                    0,
+                ),
+            ]
+
+    monkeypatch.setenv("PDF_PARAGRAPH_ALIGNMENT", "source")
+    monkeypatch.setenv("PDF_PARAGRAPH_JUSTIFICATION", "source")
+    rendered = _semantic_page_html(
+        _Page(), 1, [], "What is rest defence?", tables=[], links=[]
+    )
+    paragraph = BeautifulSoup(rendered, "html.parser").find("p")
+    assert paragraph["class"] == ["pdf-align-justify"]
+    assert paragraph["data-pdf-source-alignment"] == "justify"
+    assert paragraph["style"] == "text-align:justify"
+
+    monkeypatch.setenv("PDF_PARAGRAPH_JUSTIFICATION", "none")
+    rendered = _semantic_page_html(
+        _Page(), 1, [], "What is rest defence?", tables=[], links=[]
+    )
+    paragraph = BeautifulSoup(rendered, "html.parser").find("p")
+    assert paragraph["class"] == ["pdf-align-left"]
+    assert paragraph["data-pdf-source-alignment"] == "justify"
+    assert paragraph["style"] == "text-align:left"
+
+    monkeypatch.setenv("PDF_PARAGRAPH_ALIGNMENT", "right")
+    monkeypatch.setenv("PDF_PARAGRAPH_JUSTIFICATION", "source")
+    rendered = _semantic_page_html(
+        _Page(), 1, [], "What is rest defence?", tables=[], links=[]
+    )
+    paragraph = BeautifulSoup(rendered, "html.parser").find("p")
+    assert paragraph["class"] == ["pdf-align-right"]
+    assert paragraph["data-pdf-source-alignment"] == "justify"
+    assert paragraph["style"] == "text-align:right"
+
+
+def test_pdf_paragraph_override_normalization_and_precedence():
+    assert normalize_pdf_paragraph_alignment("centre") == "center"
+    assert normalize_pdf_paragraph_alignment("invalid") == "source"
+    assert normalize_pdf_paragraph_justification("justified") == "justify"
+    assert normalize_pdf_paragraph_justification("off") == "none"
+    assert resolve_pdf_paragraph_alignment(
+        "left",
+        "Body",
+        alignment_override="right",
+        justification_override="justify",
+    ) == "justify"
+
+
+def test_pdf_rtl_paragraph_layout_marks_semantic_document(monkeypatch):
+    class _Rect:
+        width = 595.0
+
+    class _Page:
+        rect = _Rect()
+
+        def get_text(self, kind, **_kwargs):
+            if kind == "dict":
+                return {
+                    "blocks": [{
+                        "type": 0,
+                        "lines": [{
+                            "bbox": [70.0, 100.0, 520.0, 130.0],
+                            "spans": [{"text": "Ù†Øµ Ø¹Ø±Ø¨ÙŠ"}],
+                        }],
+                    }]
+                }
+            return [(70.0, 100.0, 520.0, 130.0, "Ù†Øµ Ø¹Ø±Ø¨ÙŠ", 0, 0)]
+
+    monkeypatch.setenv("PDF_RTL_PARAGRAPH_LAYOUT", "1")
+    assert pdf_rtl_paragraph_layout_enabled() is True
+    rendered = _semantic_page_html(_Page(), 1, [], "", tables=[], links=[])
+    article = BeautifulSoup(rendered, "html.parser").article
+    assert article["dir"] == "rtl"
+    assert article["data-pdf-rtl-layout"] == "true"
+    assert "pdf-rtl-layout" in article["class"]
+    assert "unicode-bidi:plaintext" in rendered
+
+    monkeypatch.setenv("PDF_RTL_PARAGRAPH_LAYOUT", "0")
+    assert pdf_rtl_paragraph_layout_enabled() is False
+    rendered = _semantic_page_html(_Page(), 1, [], "", tables=[], links=[])
+    assert BeautifulSoup(rendered, "html.parser").article.get("dir") is None
 
 
 def test_fast_semantic_matches_bookmark_title_across_pdf_line_wrap_spaces():
@@ -425,6 +645,35 @@ def test_exact_source_cache_hit_skips_all_page_extraction(tmp_path, monkeypatch)
     assert manifest["stats"]["extracted_pages"] == 0
 
 
+def test_pdf_paragraph_override_change_invalidates_page_cache(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "formatting.pdf"
+    output_dir = tmp_path / "output"
+    _make_image_pdf(pdf_path, page_count=2)
+    monkeypatch.setenv("EXTRACTION_WORKERS", "1")
+    monkeypatch.setenv("PDF_PARAGRAPH_ALIGNMENT", "source")
+    monkeypatch.setenv("PDF_PARAGRAPH_JUSTIFICATION", "source")
+
+    extract_pdf_fast(
+        str(pdf_path),
+        str(output_dir),
+        mode="fast_semantic",
+        page_by_page=True,
+    )
+    monkeypatch.setenv("PDF_PARAGRAPH_JUSTIFICATION", "justify")
+    pages, _ = extract_pdf_fast(
+        str(pdf_path),
+        str(output_dir),
+        mode="fast_semantic",
+        page_by_page=True,
+    )
+
+    manifest = _manifest(output_dir)
+    assert manifest["settings"]["paragraph_justification"] == "justify"
+    assert manifest["stats"]["reused_pages"] == 0
+    assert manifest["stats"]["extracted_pages"] == 2
+    assert all('class="pdf-align-justify"' in html for _page, html in pages)
+
+
 def test_parallel_page_range_pool_returns_pages_in_source_order(tmp_path, monkeypatch):
     pdf_path = tmp_path / "parallel.pdf"
     output_dir = tmp_path / "output"
@@ -601,6 +850,15 @@ def test_other_settings_exposes_new_modes_and_legacy_fallback():
     assert 'QPushButton("Auto")' in settings_source
     assert "CPU cores:" in settings_source
     assert "PDF_EXTRACTION_WORKERS" in gui_source
+    assert 'QLabel("Paragraph alignment:")' in settings_source
+    assert 'QLabel("Paragraph justification:")' in settings_source
+    assert 'pdf_paragraph_alignment' in gui_source
+    assert 'pdf_paragraph_justification' in gui_source
+    assert "PDF_PARAGRAPH_ALIGNMENT" in gui_source
+    assert "PDF_PARAGRAPH_JUSTIFICATION" in gui_source
+    assert '"Right-to-left paragraph layout (RTL)"' in settings_source
+    assert "pdf_rtl_paragraph_layout" in gui_source
+    assert "PDF_RTL_PARAGRAPH_LAYOUT" in gui_source
 
 
 def test_unchanged_bookmark_sections_keep_stable_identity_when_one_is_added():
@@ -816,6 +1074,14 @@ def test_pdf_reader_raw_cache_extracts_only_requested_range_and_invalidates(
     source.write_bytes(b"updated PDF version with an added bookmark")
     ensure_pdf_raw_section(manifest, entry, extract_images=False)
     assert len(calls) == 3
+
+    monkeypatch.setenv("PDF_PARAGRAPH_JUSTIFICATION", "justify")
+    ensure_pdf_raw_section(manifest, entry, extract_images=False)
+    assert len(calls) == 4
+
+    monkeypatch.setenv("PDF_RTL_PARAGRAPH_LAYOUT", "1")
+    ensure_pdf_raw_section(manifest, entry, extract_images=False)
+    assert len(calls) == 5
 
 
 def test_reader_page_range_extractor_never_walks_unrequested_pdf_pages(

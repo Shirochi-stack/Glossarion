@@ -202,7 +202,12 @@ def ensure_pdf_raw_section(
     if start_page < 1 or end_page < start_page:
         raise ValueError(f"Invalid PDF bookmark range: {start_page}-{end_page}")
 
-    from pdf_fast_extractor import extract_pdf_page_range_for_reader
+    from pdf_fast_extractor import (
+        extract_pdf_page_range_for_reader,
+        normalize_pdf_paragraph_alignment,
+        normalize_pdf_paragraph_justification,
+        pdf_rtl_paragraph_layout_enabled,
+    )
 
     if mode not in ("fast_semantic", "fast_layout"):
         mode = "fast_semantic"
@@ -213,7 +218,7 @@ def ensure_pdf_raw_section(
     meta_path = cache_dir / f"section_{section_key}.json"
     source_stat = os.stat(source)
     expected = {
-        "version": 2,
+        "version": 3,
         "source_path": os.path.normcase(source),
         "source_size": int(source_stat.st_size),
         "source_mtime_ns": int(source_stat.st_mtime_ns),
@@ -222,6 +227,9 @@ def ensure_pdf_raw_section(
         "title": str(entry.get("title") or ""),
         "mode": mode,
         "extract_images": bool(extract_images),
+        "paragraph_alignment": normalize_pdf_paragraph_alignment(),
+        "paragraph_justification": normalize_pdf_paragraph_justification(),
+        "rtl_paragraph_layout": pdf_rtl_paragraph_layout_enabled(),
     }
     cached = _load_json(meta_path, {}) or {}
     if html_path.is_file() and all(cached.get(key) == value for key, value in expected.items()):
@@ -249,11 +257,15 @@ def ensure_pdf_raw_section(
             f"{page_body}</section>"
         )
     title = html.escape(str(entry.get("title") or "PDF section"), quote=True)
+    body_attributes = (
+        ' class="pdf-rtl-layout" dir="rtl" data-pdf-rtl-layout="true"'
+        if pdf_rtl_paragraph_layout_enabled() else ""
+    )
     document = (
         '<!DOCTYPE html><html><head><meta charset="utf-8">'
         f"<title>{title}</title>"
         + "\n".join(head_parts)
-        + "</head><body>"
+        + f"</head><body{body_attributes}>"
         + "\n".join(body_parts)
         + "</body></html>"
     )

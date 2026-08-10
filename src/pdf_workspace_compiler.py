@@ -618,35 +618,83 @@ def _fragment_body(content: str) -> str:
 
 
 def normalize_fast_semantic_paragraph_alignment(content: str) -> str:
-    """Remove unreliable geometry-inferred centering from semantic prose.
+    """Preserve detected source formatting or apply the configured override."""
+    from pdf_fast_extractor import (
+        pdf_rtl_paragraph_layout_enabled,
+        resolve_pdf_paragraph_alignment,
+    )
 
-    Older Fast Semantic extractions classified short body lines as centered
-    whenever their bounding box happened to have balanced page margins.  That
-    guess was copied into translated HTML as both a class and an inline style.
-    Normalize only paragraphs inside the Fast Semantic wrapper; headings and
-    images keep their intended alignment.
-    """
     soup = BeautifulSoup(content or "", "html.parser")
     changed = False
     for paragraph in soup.select(".pdf-fast-semantic-page p"):
+        source_alignment = str(
+            paragraph.get("data-pdf-source-alignment") or ""
+        ).strip().lower()
+        if source_alignment not in {"left", "center", "right", "justify"}:
+            source_alignment = ""
+            for css_class in paragraph.get("class", []):
+                css_class = str(css_class)
+                if css_class.startswith("pdf-align-"):
+                    candidate = css_class[len("pdf-align-"):].strip().lower()
+                    if candidate in {"left", "center", "right", "justify"}:
+                        source_alignment = candidate
+                        break
+        style = str(paragraph.get("style") or "")
+        if not source_alignment:
+            for declaration in style.split(";"):
+                name, separator, value = declaration.partition(":")
+                if separator and name.strip().casefold() == "text-align":
+                    candidate = value.strip().lower().replace("!important", "").strip()
+                    if candidate in {"left", "center", "right", "justify"}:
+                        source_alignment = candidate
+                        break
+        source_alignment = source_alignment or "left"
+        alignment = resolve_pdf_paragraph_alignment(
+            source_alignment,
+            paragraph.get_text(" ", strip=True),
+        )
         classes = [
             css_class
             for css_class in paragraph.get("class", [])
             if not str(css_class).startswith("pdf-align-")
         ]
-        classes.append("pdf-align-left")
+        classes.append(f"pdf-align-{alignment}")
         paragraph["class"] = classes
 
-        style = str(paragraph.get("style") or "")
         declarations = []
         for declaration in style.split(";"):
             declaration = declaration.strip()
-            if not declaration or declaration.casefold().startswith("text-align:"):
+            name = declaration.partition(":")[0].strip().casefold()
+            if not declaration or name == "text-align":
                 continue
             declarations.append(declaration)
-        declarations.append("text-align:left")
+        declarations.append(f"text-align:{alignment}")
         paragraph["style"] = ";".join(declarations)
         changed = True
+
+    rtl_enabled = pdf_rtl_paragraph_layout_enabled()
+    for container in soup.select(
+        ".pdf-fast-semantic-page, .pdf-fast-layout-page"
+    ):
+        classes = [str(css_class) for css_class in container.get("class", [])]
+        marker_enabled = (
+            str(container.get("data-pdf-rtl-layout") or "").lower() == "true"
+        )
+        if rtl_enabled:
+            if "pdf-rtl-layout" not in classes:
+                classes.append("pdf-rtl-layout")
+            container["class"] = classes
+            container["dir"] = "rtl"
+            container["data-pdf-rtl-layout"] = "true"
+            changed = True
+        elif marker_enabled:
+            container["class"] = [
+                css_class for css_class in classes
+                if css_class != "pdf-rtl-layout"
+            ]
+            container.attrs.pop("dir", None)
+            container.attrs.pop("data-pdf-rtl-layout", None)
+            changed = True
     return str(soup) if changed else str(content or "")
 
 
@@ -1003,10 +1051,19 @@ def compile_pdf_workspace(
         normalize_fast_semantic_paragraph_alignment(content)
         for content in source_contents
     ]
+    from pdf_fast_extractor import pdf_rtl_paragraph_layout_enabled
+
+    rtl_layout = pdf_rtl_paragraph_layout_enabled()
+    section_class = "compiled-pdf-section"
+    section_attributes = ""
+    if rtl_layout:
+        section_class += " pdf-rtl-layout"
+        section_attributes = ' dir="rtl" data-pdf-rtl-layout="true"'
     sections = []
     for index, (content, title) in enumerate(zip(source_contents, titles), 1):
         sections.append(
-            f'<section class="compiled-pdf-section" data-section="{index}">'
+            f'<section class="{section_class}" data-section="{index}"'
+            f'{section_attributes}>'
             f'<div id="pdf-section-{index}" class="pdf-bookmark-anchor">'
             f"{html.escape(title)}</div>"
             f"{_fragment_body(content)}</section>"
@@ -1035,8 +1092,36 @@ def compile_pdf_workspace(
       break-before: page;
       page-break-before: always;
     }}
-    .pdf-fast-semantic-page p {{
-      text-align: left !important;
+    .pdf-fast-semantic-page p.pdf-align-left {{ text-align: left !important; }}
+    .pdf-fast-semantic-page p.pdf-align-center {{ text-align: center !important; }}
+    .pdf-fast-semantic-page p.pdf-align-right {{ text-align: right !important; }}
+    .pdf-fast-semantic-page p.pdf-align-justify {{
+      text-align: justify !important;
+      text-justify: auto;
+    }}
+    .pdf-rtl-layout {{ direction: rtl; }}
+    .pdf-rtl-layout p, .pdf-rtl-layout li,
+    .pdf-rtl-layout td, .pdf-rtl-layout th {{
+      direction: rtl;
+      unicode-bidi: plaintext;
+    }}
+    .pdf-fast-semantic-page a {{
+      text-decoration: underline;
+    }}
+    .pdf-table {{
+      width: 100%; border-collapse: collapse; margin: 1em 0;
+      break-inside: avoid; page-break-inside: avoid;
+    }}
+    .pdf-table th, .pdf-table td {{
+      border: 1px solid #777; padding: 0.35em 0.5em;
+      vertical-align: top; text-align: left;
+    }}
+    .pdf-image, .pdf-vector-graphic {{
+      margin: 1em 0; text-align: center;
+      break-inside: avoid; page-break-inside: avoid;
+    }}
+    .pdf-image img, .pdf-vector-graphic img {{
+      max-width: 100%; height: auto;
     }}
   </style>
 </head>

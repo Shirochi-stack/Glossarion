@@ -11285,6 +11285,117 @@ def _create_processing_options_section(self, parent):
     pdf_render_h.addWidget(pdf_render_combo)
     pdf_render_h.addStretch()
     section_v.addWidget(pdf_render_row)
+
+    # Fast Semantic paragraph formatting. These are independent so users can
+    # preserve the PDF, force a horizontal edge, or explicitly enable/disable
+    # justification without changing the extraction engine.
+    if not hasattr(self, 'pdf_paragraph_alignment_var'):
+        self.pdf_paragraph_alignment_var = self.config.get(
+            'pdf_paragraph_alignment', 'source'
+        )
+    if not hasattr(self, 'pdf_paragraph_justification_var'):
+        self.pdf_paragraph_justification_var = self.config.get(
+            'pdf_paragraph_justification', 'source'
+        )
+    if not hasattr(self, 'pdf_rtl_paragraph_layout_var'):
+        self.pdf_rtl_paragraph_layout_var = bool(
+            self.config.get('pdf_rtl_paragraph_layout', False)
+        )
+
+    pdf_alignment_row = QWidget()
+    pdf_alignment_h = QHBoxLayout(pdf_alignment_row)
+    pdf_alignment_h.setContentsMargins(20, 2, 0, 0)
+    pdf_alignment_h.addWidget(QLabel("Paragraph alignment:"))
+    pdf_alignment_combo = QComboBox()
+    for option_label, option_value in [
+        ("Source PDF (Default)", "source"),
+        ("Left", "left"),
+        ("Center", "center"),
+        ("Right", "right"),
+    ]:
+        pdf_alignment_combo.addItem(option_label, option_value)
+    pdf_alignment_combo.setFixedWidth(190)
+    self._add_combobox_arrow(pdf_alignment_combo)
+    self._disable_combobox_mousewheel(pdf_alignment_combo)
+    alignment_index = pdf_alignment_combo.findData(
+        str(self.pdf_paragraph_alignment_var or 'source').strip().lower()
+    )
+    pdf_alignment_combo.setCurrentIndex(max(0, alignment_index))
+
+    def _on_pdf_alignment_changed(index):
+        selected = str(pdf_alignment_combo.itemData(index) or 'source')
+        self.pdf_paragraph_alignment_var = selected
+        self.config['pdf_paragraph_alignment'] = selected
+        os.environ['PDF_PARAGRAPH_ALIGNMENT'] = selected
+
+    pdf_alignment_combo.currentIndexChanged.connect(_on_pdf_alignment_changed)
+    _on_pdf_alignment_changed(pdf_alignment_combo.currentIndex())
+    pdf_alignment_h.addWidget(pdf_alignment_combo)
+    pdf_alignment_h.addStretch()
+    section_v.addWidget(pdf_alignment_row)
+
+    pdf_justification_row = QWidget()
+    pdf_justification_h = QHBoxLayout(pdf_justification_row)
+    pdf_justification_h.setContentsMargins(20, 2, 0, 0)
+    pdf_justification_h.addWidget(QLabel("Paragraph justification:"))
+    pdf_justification_combo = QComboBox()
+    for option_label, option_value in [
+        ("Source PDF (Default)", "source"),
+        ("Justified", "justify"),
+        ("Not justified", "none"),
+    ]:
+        pdf_justification_combo.addItem(option_label, option_value)
+    pdf_justification_combo.setFixedWidth(190)
+    self._add_combobox_arrow(pdf_justification_combo)
+    self._disable_combobox_mousewheel(pdf_justification_combo)
+    justification_index = pdf_justification_combo.findData(
+        str(self.pdf_paragraph_justification_var or 'source').strip().lower()
+    )
+    pdf_justification_combo.setCurrentIndex(max(0, justification_index))
+
+    def _on_pdf_justification_changed(index):
+        selected = str(pdf_justification_combo.itemData(index) or 'source')
+        self.pdf_paragraph_justification_var = selected
+        self.config['pdf_paragraph_justification'] = selected
+        os.environ['PDF_PARAGRAPH_JUSTIFICATION'] = selected
+
+    pdf_justification_combo.currentIndexChanged.connect(
+        _on_pdf_justification_changed
+    )
+    _on_pdf_justification_changed(pdf_justification_combo.currentIndex())
+    pdf_justification_h.addWidget(pdf_justification_combo)
+    pdf_justification_h.addStretch()
+    section_v.addWidget(pdf_justification_row)
+
+    pdf_rtl_layout_cb = self._create_styled_checkbox(
+        "Right-to-left paragraph layout (RTL)"
+    )
+    pdf_rtl_layout_cb.setToolTip(
+        "Display extracted and translated PDF text from right to left.\n"
+        "Adds RTL direction and bidirectional text handling to the PDF reader "
+        "and compiled PDF output."
+    )
+    pdf_rtl_layout_cb.setChecked(bool(self.pdf_rtl_paragraph_layout_var))
+
+    def _on_pdf_rtl_layout_changed(checked):
+        enabled = bool(checked)
+        self.pdf_rtl_paragraph_layout_var = enabled
+        self.config['pdf_rtl_paragraph_layout'] = enabled
+        os.environ['PDF_RTL_PARAGRAPH_LAYOUT'] = '1' if enabled else '0'
+
+    pdf_rtl_layout_cb.toggled.connect(_on_pdf_rtl_layout_changed)
+    _on_pdf_rtl_layout_changed(pdf_rtl_layout_cb.isChecked())
+    pdf_rtl_layout_cb.setContentsMargins(20, 2, 0, 0)
+    section_v.addWidget(pdf_rtl_layout_cb)
+
+    pdf_paragraph_format_desc = QLabel(
+        "Source PDF preserves detected paragraph formatting (default).\n"
+        "An explicit Justified/Not justified choice takes precedence over alignment.\n"
+        "RTL layout changes reading direction without changing the selected alignment."
+    )
+    pdf_paragraph_format_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    pdf_paragraph_format_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(pdf_paragraph_format_desc)
     
     pdf_render_desc = QLabel(
         "PDF extraction mode:\n"

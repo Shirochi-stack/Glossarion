@@ -9,6 +9,7 @@ from output_workspace import write_workspace_source_reference
 from pdf_workspace_compiler import (
     _workspace_response_entries,
     compile_pdf_workspace,
+    normalize_fast_semantic_paragraph_alignment,
     translate_pdf_workspace_artifacts,
 )
 
@@ -289,14 +290,159 @@ def test_compile_pdf_workspace_has_one_bookmark_per_response(tmp_path, monkeypat
     compiled_html = (workspace / "Novel_translated.html").read_text(
         encoding="utf-8"
     )
-    assert ".pdf-fast-semantic-page p {" in compiled_html
+    assert ".pdf-fast-semantic-page p.pdf-align-justify {" in compiled_html
     assert ".compiled-pdf-section + .compiled-pdf-section {" in compiled_html
     assert "break-before: page;" in compiled_html
     assert "page-break-before: always;" in compiled_html
     compiled_soup = BeautifulSoup(compiled_html, "html.parser")
     first_body = compiled_soup.find("p", string="First body.")
-    assert first_body["class"] == ["pdf-align-left"]
-    assert first_body["style"] == "text-align:left"
+    assert first_body["class"] == ["pdf-align-center"]
+    assert first_body["style"] == "text-align:center"
+
+
+def test_pdf_compiler_paragraph_formatting_overrides(monkeypatch):
+    content = (
+        '<article class="pdf-fast-semantic-page">'
+        '<p class="pdf-align-center" data-pdf-source-alignment="justify" '
+        'style="color:red;text-align:center">Body.</p>'
+        '</article>'
+    )
+
+    monkeypatch.setenv("PDF_PARAGRAPH_ALIGNMENT", "source")
+    monkeypatch.setenv("PDF_PARAGRAPH_JUSTIFICATION", "source")
+    preserved = BeautifulSoup(
+        normalize_fast_semantic_paragraph_alignment(content), "html.parser"
+    ).p
+    assert preserved["class"] == ["pdf-align-justify"]
+    assert preserved["style"] == "color:red;text-align:justify"
+
+    monkeypatch.setenv("PDF_PARAGRAPH_ALIGNMENT", "right")
+    monkeypatch.setenv("PDF_PARAGRAPH_JUSTIFICATION", "none")
+    right_aligned = BeautifulSoup(
+        normalize_fast_semantic_paragraph_alignment(content), "html.parser"
+    ).p
+    assert right_aligned["class"] == ["pdf-align-right"]
+    assert right_aligned["style"] == "color:red;text-align:right"
+
+    monkeypatch.setenv("PDF_PARAGRAPH_ALIGNMENT", "left")
+    monkeypatch.setenv("PDF_PARAGRAPH_JUSTIFICATION", "justify")
+    justified = BeautifulSoup(
+        normalize_fast_semantic_paragraph_alignment(content), "html.parser"
+    ).p
+    assert justified["class"] == ["pdf-align-justify"]
+    assert justified["style"] == "color:red;text-align:justify"
+
+    monkeypatch.setenv("PDF_RTL_PARAGRAPH_LAYOUT", "1")
+    rtl = BeautifulSoup(
+        normalize_fast_semantic_paragraph_alignment(content), "html.parser"
+    ).article
+    assert rtl["dir"] == "rtl"
+    assert rtl["data-pdf-rtl-layout"] == "true"
+    assert "pdf-rtl-layout" in rtl["class"]
+
+    monkeypatch.setenv("PDF_RTL_PARAGRAPH_LAYOUT", "0")
+    without_rtl = BeautifulSoup(
+        normalize_fast_semantic_paragraph_alignment(str(rtl)), "html.parser"
+    ).article
+    assert without_rtl.get("dir") is None
+    assert without_rtl.get("data-pdf-rtl-layout") is None
+    assert "pdf-rtl-layout" not in without_rtl["class"]
+
+
+def test_compile_pdf_workspace_keeps_links_tables_and_graphics(tmp_path, monkeypatch):
+    workspace = tmp_path / "Structured_PDF"
+    workspace.mkdir()
+    write_workspace_source_reference(workspace, tmp_path / "Structured.pdf")
+    images_dir = workspace / "images"
+    images_dir.mkdir()
+    (images_dir / "diagram.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="80" '
+        'viewBox="0 0 160 80"><rect x="5" y="5" width="150" height="70" '
+        'rx="8" fill="#ffcc33" stroke="#b02020" stroke-width="4"/></svg>',
+        encoding="utf-8",
+    )
+    response = workspace / "response_pdf_section_structured.html"
+    response.write_text(
+        '<html><body><article class="pdf-fast-semantic-page">'
+        '<p>Read <a href="https://academy.example/program">the linked lesson</a>.</p>'
+        '<table class="pdf-table"><thead><tr><th>Item</th><th>Value</th></tr></thead>'
+        '<tbody><tr><td>Speed</td><td>Fast</td></tr></tbody></table>'
+        '<figure class="pdf-vector-graphic"><img src="images/diagram.svg" '
+        'alt="Diagram"></figure></article></body></html>',
+        encoding="utf-8",
+    )
+    (workspace / "translation_progress.json").write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "pdf:structured": {
+                        "actual_num": 1,
+                        "status": "completed",
+                        "output_file": response.name,
+                        "pdf_section_title": "Structured",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_create_pdf_from_html(
+        html_content,
+        output_path,
+        css_path=None,
+        images_dir=None,
+    ):
+        del css_path, images_dir
+        soup = BeautifulSoup(html_content, "html.parser")
+        document = fitz.open()
+        page = document.new_page(width=595, height=842)
+        page.insert_textbox(
+            fitz.Rect(50, 50, 545, 500),
+            soup.get_text(" ", strip=True),
+            fontsize=11,
+        )
+        link = soup.find("a", href=True)
+        page.insert_link(
+            {
+                "kind": fitz.LINK_URI,
+                "from": fitz.Rect(50, 50, 220, 72),
+                "uri": link["href"],
+            }
+        )
+        page.draw_rect(
+            fitz.Rect(50, 520, 210, 600),
+            color=(0.7, 0.1, 0.1),
+            fill=(1.0, 0.8, 0.2),
+        )
+        document.save(output_path)
+        document.close()
+        return True
+
+    import pdf_extractor
+
+    monkeypatch.setattr(
+        pdf_extractor,
+        "create_pdf_from_html",
+        fake_create_pdf_from_html,
+    )
+
+    output = compile_pdf_workspace(str(workspace))
+
+    compiled_html = (workspace / "Structured_translated.html").read_text(
+        encoding="utf-8"
+    )
+    compiled_soup = BeautifulSoup(compiled_html, "html.parser")
+    assert compiled_soup.find("a", href="https://academy.example/program") is not None
+    assert compiled_soup.find("table", class_="pdf-table") is not None
+    assert compiled_soup.find("img", src="images/diagram.svg") is not None
+    with fitz.open(output) as document:
+        links = [link for page in document for link in (page.get_links() or [])]
+        text = "\n".join(page.get_text() for page in document)
+        drawings = [drawing for page in document for drawing in page.get_drawings()]
+    assert any(link.get("uri") == "https://academy.example/program" for link in links)
+    assert "Item" in text and "Speed" in text and "Fast" in text
+    assert drawings
 
 
 def test_compile_pdf_repairs_legacy_page_images_from_only_requested_pages(

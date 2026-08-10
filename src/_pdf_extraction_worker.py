@@ -116,6 +116,30 @@ def _run_pdf_extraction_inner(config_path):
         )
         or "auto"
     )
+    pdf_paragraph_alignment = str(
+        config.get(
+            "pdf_paragraph_alignment",
+            os.environ.get("PDF_PARAGRAPH_ALIGNMENT", "source"),
+        )
+        or "source"
+    )
+    pdf_paragraph_justification = str(
+        config.get(
+            "pdf_paragraph_justification",
+            os.environ.get("PDF_PARAGRAPH_JUSTIFICATION", "source"),
+        )
+        or "source"
+    )
+    pdf_rtl_paragraph_layout_value = config.get(
+        "pdf_rtl_paragraph_layout",
+        os.environ.get("PDF_RTL_PARAGRAPH_LAYOUT", "0"),
+    )
+    pdf_rtl_paragraph_layout = (
+        pdf_rtl_paragraph_layout_value
+        if isinstance(pdf_rtl_paragraph_layout_value, bool)
+        else str(pdf_rtl_paragraph_layout_value or "").strip().lower()
+        in {"1", "true", "yes", "on", "enabled", "rtl"}
+    )
     stop_file = config.get("stop_file", "")
 
     # Make stop file path available to pdf_extractor via env var
@@ -136,6 +160,11 @@ def _run_pdf_extraction_inner(config_path):
     os.environ["PDF_EXTRACT_IMAGES"] = "1" if extract_images else "0"
     os.environ["PDF_GENERATE_CSS"] = "1" if generate_css else "0"
     os.environ["PDF_EXTRACTION_WORKERS"] = pdf_extraction_workers
+    os.environ["PDF_PARAGRAPH_ALIGNMENT"] = pdf_paragraph_alignment
+    os.environ["PDF_PARAGRAPH_JUSTIFICATION"] = pdf_paragraph_justification
+    os.environ["PDF_RTL_PARAGRAPH_LAYOUT"] = (
+        "1" if pdf_rtl_paragraph_layout else "0"
+    )
 
     # Import pdf_extractor
     try:

@@ -15,6 +15,39 @@ from pdf_extractor import (
 )
 import shutil
 
+
+def build_source_structure_metadata(file_path: str, existing_metadata=None) -> Dict:
+    """Build source metadata while treating a PDF filename as its book title."""
+    source_file = os.path.basename(file_path)
+    is_pdf = str(file_path or '').lower().endswith('.pdf')
+    metadata = (
+        dict(existing_metadata)
+        if is_pdf and isinstance(existing_metadata, dict)
+        else {}
+    )
+    metadata.update({
+        'source_file': source_file,
+        'type': 'pdf' if is_pdf else 'text',
+        'encoding': 'utf-8',
+    })
+
+    if is_pdf:
+        source_title = os.path.splitext(source_file)[0]
+        translated_title_matches_source = (
+            bool(metadata.get('title_translated'))
+            and str(metadata.get('original_title') or '') == source_title
+            and bool(str(metadata.get('title') or '').strip())
+        )
+        if not translated_title_matches_source:
+            # The PDF has no EPUB-style package metadata. Its filename stem is
+            # the authoritative source title and is what the API must receive.
+            metadata['title'] = source_title
+            metadata.pop('original_title', None)
+            metadata.pop('title_translated', None)
+
+    return metadata
+
+
 class TextFileProcessor:
     """Process plain text files for translation"""
     
@@ -606,13 +639,20 @@ class TextFileProcessor:
     
     def save_original_structure(self):
         """Save original text file structure info"""
-        metadata = {
-            'source_file': os.path.basename(self.file_path),
-            'type': 'text',
-            'encoding': 'utf-8'
-        }
-        
         metadata_path = os.path.join(self.output_dir, 'metadata.json')
+        existing_metadata = None
+        if self.file_path.lower().endswith('.pdf') and os.path.isfile(metadata_path):
+            try:
+                with open(metadata_path, 'r', encoding='utf-8') as existing_file:
+                    existing_metadata = json.load(existing_file)
+            except (OSError, ValueError, TypeError):
+                existing_metadata = None
+
+        metadata = build_source_structure_metadata(
+            self.file_path,
+            existing_metadata,
+        )
+
         with open(metadata_path, 'w', encoding='utf-8') as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
     

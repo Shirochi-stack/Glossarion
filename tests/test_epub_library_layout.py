@@ -628,8 +628,8 @@ def test_translated_pdf_workspace_normalizes_legacy_h3_body_weight():
         "padding: 0; }"
     )
     alignment_fix = (
-        ".pdf-fast-semantic-page p:not(.pdf-align-center):not(.pdf-align-right) { "
-        "text-align: left !important; }"
+        ".pdf-fast-semantic-page p.pdf-align-justify { "
+        "text-align: justify !important; text-justify: auto; }"
     )
     paginated = EpubReaderDialog._wrap_html(
         ReaderStub(), "<h3>Legacy PDF body</h3>", paginated=True

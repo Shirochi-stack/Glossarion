@@ -157,7 +157,7 @@ from history_manager import HistoryManager
 from chapter_splitter import ChapterSplitter
 from image_translator import ImageTranslator
 from typing import Dict, List, Tuple 
-from txt_processor import TextFileProcessor
+from txt_processor import TextFileProcessor, build_source_structure_metadata
 from ai_hunter_enhanced import ImprovedAIHunterDetection
 import GlossaryManager  # Module with glossary functions
 from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
@@ -21890,6 +21890,15 @@ def main(log_callback=None, stop_callback=None):
                     "pdf_extraction_workers": os.getenv(
                         "PDF_EXTRACTION_WORKERS", "auto"
                     ),
+                    "pdf_paragraph_alignment": os.getenv(
+                        "PDF_PARAGRAPH_ALIGNMENT", "source"
+                    ),
+                    "pdf_paragraph_justification": os.getenv(
+                        "PDF_PARAGRAPH_JUSTIFICATION", "source"
+                    ),
+                    "pdf_rtl_paragraph_layout": os.getenv(
+                        "PDF_RTL_PARAGRAPH_LAYOUT", "0"
+                    ) == "1",
                     "result_path": _pdf_ext_result_path,
                 }
                 _pdf_ext_config['stop_file'] = _pdf_stop_file
@@ -22473,6 +22482,12 @@ def main(log_callback=None, stop_callback=None):
     if not metadata_only and os.path.exists(metadata_path):
         with open(metadata_path, 'r', encoding='utf-8') as mf:
             metadata = json.load(mf)
+    if is_pdf_file:
+        # PDF extraction is routed through TextFileProcessor, whose legacy
+        # metadata used to omit the title and label the source as text. Restore
+        # the filename stem as the authoritative PDF source title before
+        # constructing metadata/title translation requests.
+        metadata = build_source_structure_metadata(input_path, metadata)
 
     if not metadata_only:
         metadata["chapter_count"] = len(chapters)
@@ -22582,6 +22597,13 @@ def main(log_callback=None, stop_callback=None):
         and not (is_pdf_title and skip_pdf_title)
     )
     title_selected = bool(translate_metadata_fields.get('title', True))
+    if is_pdf_title and title_selected and title_translation_allowed:
+        pdf_source_title = (
+            metadata.get('original_title')
+            if metadata.get('title_translated')
+            else metadata.get('title')
+        )
+        print(f"ðŸ“š PDF book title source (filename): {pdf_source_title}")
     metadata_plan = []
     metadata_phase_by_field = {}
 
@@ -28893,10 +28915,8 @@ def main(log_callback=None, stop_callback=None):
                     for i, chapter_data in enumerate(translated_chapters):
                         content = chapter_data['content']
 
-                        # Fast Semantic's old bounding-box alignment heuristic
-                        # mislabeled short, left-aligned prose as centered.
-                        # Normalize existing translated sections before the
-                        # automatic combined PDF is rendered.
+                        # Preserve source-detected paragraph formatting or
+                        # apply the user's PDF alignment/justification override.
                         content = normalize_fast_semantic_paragraph_alignment(content)
                         
                         # Extract body content from individual HTML pages if they have full HTML structure
@@ -28957,6 +28977,14 @@ def main(log_callback=None, stop_callback=None):
                     # Wrap in full HTML document with CSS
                     css_path = os.path.join(out, 'styles.css')
                     css_link = '<link rel="stylesheet" href="styles.css">' if os.path.exists(css_path) else ''
+                    pdf_rtl_layout = (
+                        os.getenv('PDF_RTL_PARAGRAPH_LAYOUT', '0') == '1'
+                    )
+                    pdf_body_attributes = (
+                        ' class="pdf-rtl-layout" dir="rtl" '
+                        'data-pdf-rtl-layout="true"'
+                        if pdf_rtl_layout else ''
+                    )
                     
                     # Extra inline CSS for PDF-derived HTML:
                     # - h3 is used as body text in our PDF extraction; normalize it to paragraph-like styling
@@ -28969,7 +28997,12 @@ def main(log_callback=None, stop_callback=None):
   img { margin: 0.6em auto; display: block; max-width: 100%; height: auto; }
   .keep-with-image { break-inside: avoid; page-break-inside: avoid; }
   .page-break { page-break-before: always; break-before: page; clear: both; height: 0; margin: 0; padding: 0; }
-  .pdf-fast-semantic-page p { text-align: left !important; }
+  .pdf-fast-semantic-page p.pdf-align-left { text-align: left !important; }
+  .pdf-fast-semantic-page p.pdf-align-center { text-align: center !important; }
+  .pdf-fast-semantic-page p.pdf-align-right { text-align: right !important; }
+  .pdf-fast-semantic-page p.pdf-align-justify { text-align: justify !important; text-justify: auto; }
+  .pdf-rtl-layout { direction: rtl; }
+  .pdf-rtl-layout p, .pdf-rtl-layout li, .pdf-rtl-layout td, .pdf-rtl-layout th { direction: rtl; unicode-bidi: plaintext; }
 </style>
 """
 
@@ -28982,7 +29015,7 @@ def main(log_callback=None, stop_callback=None):
     {css_link}
     {extra_css}
 </head>
-<body>
+<body{pdf_body_attributes}>
 {full_html_body}
 </body>
 </html>"""

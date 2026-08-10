@@ -13879,7 +13879,35 @@ Text to analyze:
         self.pdf_extraction_workers_var = str(
             self.config.get('pdf_extraction_workers', 'auto') or 'auto'
         )
+        self.pdf_paragraph_alignment_var = str(
+            self.config.get('pdf_paragraph_alignment', 'source') or 'source'
+        ).strip().lower()
+        if self.pdf_paragraph_alignment_var == 'centre':
+            self.pdf_paragraph_alignment_var = 'center'
+        if self.pdf_paragraph_alignment_var not in {
+            'source', 'left', 'center', 'right'
+        }:
+            self.pdf_paragraph_alignment_var = 'source'
+        self.pdf_paragraph_justification_var = str(
+            self.config.get('pdf_paragraph_justification', 'source') or 'source'
+        ).strip().lower()
+        if self.pdf_paragraph_justification_var == 'justified':
+            self.pdf_paragraph_justification_var = 'justify'
+        if self.pdf_paragraph_justification_var not in {
+            'source', 'justify', 'none'
+        }:
+            self.pdf_paragraph_justification_var = 'source'
+        self.pdf_rtl_paragraph_layout_var = bool(
+            self.config.get('pdf_rtl_paragraph_layout', False)
+        )
         os.environ['PDF_EXTRACTION_WORKERS'] = self.pdf_extraction_workers_var
+        os.environ['PDF_PARAGRAPH_ALIGNMENT'] = self.pdf_paragraph_alignment_var
+        os.environ['PDF_PARAGRAPH_JUSTIFICATION'] = (
+            self.pdf_paragraph_justification_var
+        )
+        os.environ['PDF_RTL_PARAGRAPH_LAYOUT'] = (
+            '1' if self.pdf_rtl_paragraph_layout_var else '0'
+        )
         
          # Enhanced filtering level
         if not hasattr(self, 'enhanced_filtering_var'):
@@ -33051,6 +33079,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'PDF_USE_TOC_SECTIONS': '1' if getattr(self, 'pdf_use_toc_sections_var', True) else '0',
             'PDF_ASYNC_PAGE_THRESHOLD': str(self.pdf_async_page_threshold_var) if hasattr(self, 'pdf_async_page_threshold_var') else '100',
             'PDF_EXTRACTION_WORKERS': str(getattr(self, 'pdf_extraction_workers_var', 'auto') or 'auto'),
+            'PDF_PARAGRAPH_ALIGNMENT': str(getattr(self, 'pdf_paragraph_alignment_var', 'source') or 'source'),
+            'PDF_PARAGRAPH_JUSTIFICATION': str(getattr(self, 'pdf_paragraph_justification_var', 'source') or 'source'),
+            'PDF_RTL_PARAGRAPH_LAYOUT': '1' if getattr(self, 'pdf_rtl_paragraph_layout_var', False) else '0',
             'PDF_RENDER_BATCH_SIZE': str(self.config.get('pdf_render_batch_size', 50)),
             'PDF_FAST_RENDERING': '1' if self.config.get('pdf_fast_rendering', True) else '0',
             # Image compression quality sub-settings
@@ -34623,6 +34654,9 @@ Important rules:
                     'USE_ASYNC_CHAPTER_EXTRACTION': '1',
                     'PDF_USE_TOC_SECTIONS': '1' if getattr(self, 'pdf_use_toc_sections_var', True) else '0',
                     'PDF_EXTRACTION_WORKERS': str(getattr(self, 'pdf_extraction_workers_var', 'auto') or 'auto'),
+                    'PDF_PARAGRAPH_ALIGNMENT': str(getattr(self, 'pdf_paragraph_alignment_var', 'source') or 'source'),
+                    'PDF_PARAGRAPH_JUSTIFICATION': str(getattr(self, 'pdf_paragraph_justification_var', 'source') or 'source'),
+                    'PDF_RTL_PARAGRAPH_LAYOUT': '1' if getattr(self, 'pdf_rtl_paragraph_layout_var', False) else '0',
                     # Custom API endpoints (must be propagated so UnifiedClient routes
                     # Gemini / OpenAI / Anthropic requests through the user's custom endpoint
                     # during glossary extraction, especially when using glossary keys pool).
@@ -43457,6 +43491,9 @@ Important rules:
                 ('pdf_use_toc_sections', ['pdf_use_toc_sections_var'], True, bool),
                 ('pdf_async_page_threshold', ['pdf_async_page_threshold_var'], '100', str),
                 ('pdf_extraction_workers', ['pdf_extraction_workers_var'], 'auto', str),
+                ('pdf_paragraph_alignment', ['pdf_paragraph_alignment_var'], 'source', str),
+                ('pdf_paragraph_justification', ['pdf_paragraph_justification_var'], 'source', str),
+                ('pdf_rtl_paragraph_layout', ['pdf_rtl_paragraph_layout_var'], False, bool),
             ]
             
             # Process the settings map to populate self.config
@@ -43710,6 +43747,19 @@ Important rules:
                 'PDF_EXTRACTION_WORKERS',
                 str(self.config.get('pdf_extraction_workers', 'auto') or 'auto'),
             ))
+            env_vars_set.append(_update_env(
+                'PDF_PARAGRAPH_ALIGNMENT',
+                str(self.config.get('pdf_paragraph_alignment', 'source') or 'source'),
+            ))
+            env_vars_set.append(_update_env(
+                'PDF_PARAGRAPH_JUSTIFICATION',
+                str(self.config.get('pdf_paragraph_justification', 'source') or 'source'),
+            ))
+            env_vars_set.append(_update_env(
+                'PDF_RTL_PARAGRAPH_LAYOUT',
+                self.config.get('pdf_rtl_paragraph_layout', False),
+                is_bool=True,
+            ))
             env_vars_set.append(_update_env('USE_THREAD_POOL_EXTRACTION', self.config.get('use_thread_pool_extraction'), is_bool=True))
 
             # Wire debug payload saving to GUI debug mode
@@ -43832,6 +43882,9 @@ Important rules:
                     ('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')),
                     ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers')) if self.config.get('enable_parallel_extraction') else '1'),
                     ('PDF_EXTRACTION_WORKERS', str(self.config.get('pdf_extraction_workers', 'auto') or 'auto')),
+                    ('PDF_PARAGRAPH_ALIGNMENT', str(self.config.get('pdf_paragraph_alignment', 'source') or 'source')),
+                    ('PDF_PARAGRAPH_JUSTIFICATION', str(self.config.get('pdf_paragraph_justification', 'source') or 'source')),
+                    ('PDF_RTL_PARAGRAPH_LAYOUT', '1' if self.config.get('pdf_rtl_paragraph_layout', False) else '0'),
                     ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield') else '0'),
                     ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension') else '0'),
                     ('DOWNLOAD_REMOTE_IMAGE_URLS', '1' if self.config.get('download_remote_image_urls') else '0'),
@@ -43908,6 +43961,9 @@ Important rules:
             # General application settings
             'EXTRACTION_WORKERS': 'Number of extraction worker threads',
             'PDF_EXTRACTION_WORKERS': 'PDF input extraction workers (or auto)',
+            'PDF_PARAGRAPH_ALIGNMENT': 'PDF paragraph alignment override',
+            'PDF_PARAGRAPH_JUSTIFICATION': 'PDF paragraph justification override',
+            'PDF_RTL_PARAGRAPH_LAYOUT': 'PDF right-to-left paragraph layout',
             'ENABLE_GUI_YIELD': 'GUI yield during processing',
             'RETAIN_SOURCE_EXTENSION': 'Retain source file extension',
             'DOWNLOAD_REMOTE_IMAGE_URLS': 'Download remote EPUB image URLs',
@@ -44257,6 +44313,9 @@ Important rules:
                 # General settings
                 ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),
                 ('PDF_EXTRACTION_WORKERS', str(self.config.get('pdf_extraction_workers', 'auto') or 'auto')),
+                ('PDF_PARAGRAPH_ALIGNMENT', str(self.config.get('pdf_paragraph_alignment', 'source') or 'source')),
+                ('PDF_PARAGRAPH_JUSTIFICATION', str(self.config.get('pdf_paragraph_justification', 'source') or 'source')),
+                ('PDF_RTL_PARAGRAPH_LAYOUT', '1' if self.config.get('pdf_rtl_paragraph_layout', False) else '0'),
                 ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield', True) else '0'),
                 ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension', False) else '0'),
                 ('DOWNLOAD_REMOTE_IMAGE_URLS', '1' if self.config.get('download_remote_image_urls', False) else '0'),

@@ -13,7 +13,7 @@ from PIL import Image
 import Chapter_Extractor as chapter_extractor
 import epub_converter
 import translate_headers_standalone
-from QA_Scanner_GUI import _normalize_qa_dialog_path
+from QA_Scanner_GUI import _normalize_qa_dialog_path, _wrapped_tooltip_html
 from enhanced_text_extractor import EnhancedTextExtractor
 from epub_converter import EPUBCompiler, FileUtils, HTMLEntityDecoder, XMLValidator
 from html_tag_entities import unescape_valid_html_tag_entities
@@ -127,6 +127,26 @@ def test_cancelled_native_folder_dialog_values_are_rejected(tmp_path):
     # component happens to use that name remains a valid path value.
     real_path = tmp_path / "false"
     assert _normalize_qa_dialog_path(real_path) == str(real_path)
+
+
+def test_quotation_option_tooltips_use_bounded_rich_text():
+    tooltip = _wrapped_tooltip_html("First line\nUse <marks> & quotes.", width=320)
+    assert tooltip.startswith("<qt>")
+    assert "white-space: normal" in tooltip
+    assert "width: 320px" in tooltip
+    assert "First line<br>Use &lt;marks&gt; &amp; quotes." in tooltip
+
+    source_path = Path(__file__).resolve().parents[1] / "src" / "QA_Scanner_GUI.py"
+    source = source_path.read_text(encoding="utf-8")
+    for checkbox_name in (
+        "check_quotation_checkbox",
+        "ignore_excess_quotation_checkbox",
+        "only_check_incomplete_quotations_checkbox",
+        "ignore_consecutive_quotations_checkbox",
+        "skip_stylistic_single_quotes_checkbox",
+        "include_square_brackets_checkbox",
+    ):
+        assert f"{checkbox_name}.setToolTip(_wrapped_tooltip_html(" in source
 
 
 def test_qa_executor_worker_does_not_construct_qt_dialogs():

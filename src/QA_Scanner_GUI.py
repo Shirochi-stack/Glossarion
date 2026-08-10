@@ -7,6 +7,7 @@ import os
 import sys
 import re
 import json
+import html as _html
 from PySide6.QtWidgets import (QApplication, QDialog, QWidget, QLabel, QPushButton,
                                QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
                                QCheckBox, QSpinBox, QSlider, QTextEdit, QScrollArea,
@@ -66,6 +67,15 @@ scan_html_folder = None  # Will be lazy-loaded from translator_gui
 import importlib.util as _importlib_util
 
 _truncation_deps_probe_result = None  # will be a list of missing dep names
+
+
+def _wrapped_tooltip_html(text, width=360):
+    """Return a bounded rich-text tooltip so Qt wraps long descriptions."""
+    safe_text = _html.escape(str(text or "")).replace("\n", "<br>")
+    return (
+        "<qt><p style='white-space: normal; margin: 0; "
+        f"width: {max(200, int(width))}px;'>{safe_text}</p></qt>"
+    )
 
 def _probe_truncation_deps_fast():
     """Check for heavy optional deps using find_spec (instant, no imports)."""
@@ -3491,12 +3501,12 @@ class QAScannerMixin:
                 "Check quotation mark mismatches (compares with source file)"
             )
             check_quotation_checkbox.setChecked(qa_settings.get('check_quotation_mismatch', False))
-            check_quotation_checkbox.setToolTip(
+            check_quotation_checkbox.setToolTip(_wrapped_tooltip_html(
                 "Compares quotation marks across all visible source and translated text; HTML "
                 "attributes and non-visible tags are ignored. Plain non-EPUB text is also supported. "
                 "Supports straight, curly, CJK, and HTML-encoded marks. Paragraphs missing a closing "
                 "straight, curly, angle, or CJK quotation mark are also flagged."
-            )
+            ))
             detection_layout.addWidget(check_quotation_checkbox)
 
             ignore_excess_quotation_widget = QWidget()
@@ -3508,6 +3518,11 @@ class QAScannerMixin:
             ignore_excess_quotation_checkbox.setChecked(
                 qa_settings.get('ignore_excess_quotation_marks', False)
             )
+            ignore_excess_quotation_checkbox.setToolTip(_wrapped_tooltip_html(
+                "Only reports quotation-count differences when the translated output contains "
+                "fewer quotation marks than the source. Extra quotation marks are ignored; "
+                "incomplete paragraph endings can still be reported."
+            ))
             ignore_excess_quotation_layout.addWidget(ignore_excess_quotation_checkbox)
             ignore_excess_quotation_layout.addStretch()
             detection_layout.addWidget(ignore_excess_quotation_widget)
@@ -3523,10 +3538,10 @@ class QAScannerMixin:
             only_check_incomplete_quotations_checkbox.setChecked(
                 qa_settings.get('only_check_incomplete_quotations', False)
             )
-            only_check_incomplete_quotations_checkbox.setToolTip(
+            only_check_incomplete_quotations_checkbox.setToolTip(_wrapped_tooltip_html(
                 "Only flags paragraphs with an unmatched ending quotation and skips the "
                 "source/output quotation-count comparison."
-            )
+            ))
             only_check_incomplete_quotations_layout.addWidget(
                 only_check_incomplete_quotations_checkbox
             )
@@ -3544,11 +3559,11 @@ class QAScannerMixin:
             ignore_consecutive_quotations_checkbox.setChecked(
                 qa_settings.get('ignore_consecutive_missing_quotations', False)
             )
-            ignore_consecutive_quotations_checkbox.setToolTip(
+            ignore_consecutive_quotations_checkbox.setToolTip(_wrapped_tooltip_html(
                 "Suppresses missing-ending warnings when they occur in two or more consecutive "
                 "paragraphs (pN, pN+1, ...). Isolated missing endings and the source/output "
                 "quotation-count comparison are still checked."
-            )
+            ))
             ignore_consecutive_quotations_layout.addWidget(
                 ignore_consecutive_quotations_checkbox
             )
@@ -3564,11 +3579,11 @@ class QAScannerMixin:
             skip_stylistic_single_quotes_checkbox.setChecked(
                 qa_settings.get('skip_stylistic_single_quotes', False)
             )
-            skip_stylistic_single_quotes_checkbox.setToolTip(
+            skip_stylistic_single_quotes_checkbox.setToolTip(_wrapped_tooltip_html(
                 "Excludes balanced straight pairs such as 'Naught' and \"honey\", plus trailing "
                 "possessive apostrophes such as Girls', protagonists', and ladies’, from both totals. "
                 "Unmatched straight double quotes are still checked separately."
-            )
+            ))
             skip_stylistic_single_quotes_layout.addWidget(skip_stylistic_single_quotes_checkbox)
             skip_stylistic_single_quotes_layout.addStretch()
             detection_layout.addWidget(skip_stylistic_single_quotes_widget)
@@ -3582,10 +3597,10 @@ class QAScannerMixin:
             include_square_brackets_checkbox.setChecked(
                 qa_settings.get('include_square_brackets_as_quotations', False)
             )
-            include_square_brackets_checkbox.setToolTip(
+            include_square_brackets_checkbox.setToolTip(_wrapped_tooltip_html(
                 "Includes [ and ] in source/output quotation totals and flags an unmatched "
                 "[ as an incomplete quotation."
-            )
+            ))
             include_square_brackets_layout.addWidget(include_square_brackets_checkbox)
             include_square_brackets_layout.addStretch()
             detection_layout.addWidget(include_square_brackets_widget)

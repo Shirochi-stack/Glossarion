@@ -24448,10 +24448,24 @@ class EpubReaderDialog(QDialog):
         _pdf_workspace_body_css = (
             "body h3 { font-size: 1em; font-weight: normal !important; margin: 0.6em 0; "
             "padding: 0; }"
-            ".pdf-fast-semantic-page p:not(.pdf-align-center):not(.pdf-align-right) { "
-            "text-align: left !important; }"
+            ".pdf-fast-semantic-page p.pdf-align-left { text-align: left !important; }"
+            ".pdf-fast-semantic-page p.pdf-align-center { text-align: center !important; }"
+            ".pdf-fast-semantic-page p.pdf-align-right { text-align: right !important; }"
+            ".pdf-fast-semantic-page p.pdf-align-justify { "
+            "text-align: justify !important; text-justify: auto; }"
             if (getattr(self, "_workspace_mode", False)
                 and not getattr(self, "_show_raw", False))
+            else ""
+        )
+        _pdf_workspace_rtl_css = (
+            "body, .pdf-fast-semantic-page, .pdf-fast-layout-page { direction: rtl; }"
+            ".pdf-fast-semantic-page p, .pdf-fast-semantic-page li, "
+            ".pdf-fast-semantic-page td, .pdf-fast-semantic-page th { "
+            "direction: rtl; unicode-bidi: plaintext; }"
+            if (
+                getattr(self, "_workspace_mode", False)
+                and os.environ.get("PDF_RTL_PARAGRAPH_LAYOUT", "0") == "1"
+            )
             else ""
         )
         if paginated:
@@ -24483,6 +24497,7 @@ class EpubReaderDialog(QDialog):
                 f"{{ break-before: avoid !important; page-break-before: avoid !important; }}"
                 f"h1, h2, h3, h4, h5, h6 {{ color: {t['heading']}; margin: 0; padding: 0; }}"
                 f"{_pdf_workspace_body_css}"
+                f"{_pdf_workspace_rtl_css}"
                 f"img {{ display: block; max-width: 100%; max-height: calc(100vh - 60px); "
                 f"height: auto; object-fit: contain; "
                 f"border-radius: 4px; margin: 12px auto; break-inside: avoid; }}"
@@ -24607,6 +24622,7 @@ class EpubReaderDialog(QDialog):
                 f"padding: 10px 20px 28px 20px; margin: 0 auto; }}"
                 f"{_scroll_heading_css}"
                 f"{_pdf_workspace_body_css}"
+                f"{_pdf_workspace_rtl_css}"
                 f"img {{ display: block; max-width: 100%; height: auto; "
                 f"border-radius: 4px; margin: 12px auto; }}"
                 f"{_scroll_paragraph_css}"

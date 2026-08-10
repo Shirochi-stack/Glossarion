@@ -67,6 +67,48 @@ def test_pdf_title_skip_setting_is_persisted_and_defaults_off():
     assert "os.getenv('SKIP_PDF_TITLE_TRANSLATION', '0')" in translator_source
 
 
+def test_pdf_source_structure_uses_filename_stem_as_book_title(tmp_path):
+    from txt_processor import TextFileProcessor
+
+    pdf_path = tmp_path / "[433975] ê°“ê²œì˜ ë””ë ‰í„°ê°€ ë˜ì—ˆë‹¤.pdf"
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    processor = TextFileProcessor(str(pdf_path), str(output_dir))
+    processor.save_original_structure()
+
+    metadata = json.loads(
+        (output_dir / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["type"] == "pdf"
+    assert metadata["source_file"] == pdf_path.name
+    assert metadata["title"] == pdf_path.stem
+
+
+def test_pdf_source_structure_preserves_translation_only_for_same_filename(tmp_path):
+    from txt_processor import build_source_structure_metadata
+
+    translated = {
+        "title": "Translated title",
+        "original_title": "Original title",
+        "title_translated": True,
+    }
+
+    same_source = build_source_structure_metadata(
+        str(tmp_path / "Original title.pdf"), translated
+    )
+    assert same_source["title"] == "Translated title"
+    assert same_source["original_title"] == "Original title"
+    assert same_source["title_translated"] is True
+
+    renamed_source = build_source_structure_metadata(
+        str(tmp_path / "Updated title.pdf"), translated
+    )
+    assert renamed_source["title"] == "Updated title"
+    assert "original_title" not in renamed_source
+    assert "title_translated" not in renamed_source
+
+
 def test_valid_html_doctype_is_not_an_ai_artifact():
     artifacts = detect_ai_artifacts(
         "<!DOCTYPE html>\n<html><body><p>Normal output.</p></body></html>"
@@ -312,6 +354,65 @@ def test_pdf_progress_rows_include_toc_and_header_artifacts(tmp_path):
         "translated_headers.txt",
     ]
     assert [row["status"] for row in rows] == ["completed", "completed"]
+
+
+def test_pdf_progress_rows_replace_generic_artifact_rows_without_duplicates(tmp_path):
+    output_dir = tmp_path / "book_PDF"
+    output_dir.mkdir()
+    (output_dir / "TOC.txt").write_text("Contents", encoding="utf-8")
+    (output_dir / "translated_headers.txt").write_text(
+        "Chapter", encoding="utf-8"
+    )
+    gui = RetranslationMixin()
+    gui.config = {
+        "use_toc_ncx": True,
+        "batch_translate_headers": True,
+    }
+    prog = {"chapters": {}, "version": "2.1"}
+    gui._ensure_translation_artifact_progress_entries(
+        prog, str(output_dir), str(tmp_path / "book.pdf")
+    )
+
+    chapters = prog["chapters"]
+    rows = [
+        {
+            "key": "__translation_artifact__:headers",
+            "info": chapters["__translation_artifact__:headers"],
+            "output_file": "translated_headers.txt",
+            "status": "completed",
+        },
+        {
+            "key": "__translation_artifact__:toc",
+            "info": chapters["__translation_artifact__:toc"],
+            "output_file": "TOC.txt",
+            "status": "completed",
+        },
+        {
+            "key": "chapter_000",
+            "info": {"status": "completed"},
+            "output_file": "response_pdf_section_000.html",
+            "status": "completed",
+        },
+    ]
+
+    gui._append_translation_artifact_display_info(
+        {
+            "file_path": str(tmp_path / "book.pdf"),
+            "output_dir": str(output_dir),
+            "prog": prog,
+        },
+        rows,
+    )
+
+    assert [row["output_file"] for row in rows] == [
+        "TOC.txt",
+        "translated_headers.txt",
+        "response_pdf_section_000.html",
+    ]
+    assert sum(row["output_file"] == "TOC.txt" for row in rows) == 1
+    assert sum(
+        row["output_file"] == "translated_headers.txt" for row in rows
+    ) == 1
 
 
 def test_artifact_in_progress_is_preserved_before_cache_file_exists(tmp_path):

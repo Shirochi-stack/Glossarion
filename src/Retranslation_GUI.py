@@ -11950,6 +11950,15 @@ class RetranslationMixin:
         if not file_path.lower().endswith(('.epub', '.pdf')):
             return
 
+        # The fallback chapter builder iterates every progress entry, including
+        # TOC/header artifacts.  Remove those generic rows before inserting the
+        # canonical artifact rows below so initial loads and refreshes cannot
+        # display each managed artifact twice.
+        chapter_display_info[:] = [
+            info for info in chapter_display_info
+            if not self._is_translation_artifact_progress_info(info)
+        ]
+
         prog = data.get('prog') or {}
         chapters = prog.get('chapters', {})
         rows = []
