@@ -35,7 +35,7 @@ from statistics import median
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 
-FAST_EXTRACTOR_VERSION = 5
+FAST_EXTRACTOR_VERSION = 6
 FAST_MODES = {"fast_semantic", "fast_layout"}
 PDF_PARAGRAPH_ALIGNMENTS = {"source", "left", "center", "right"}
 PDF_PARAGRAPH_JUSTIFICATIONS = {"source", "justify", "none"}
@@ -984,7 +984,12 @@ def _materialize_images(doc, page, occurrences, images_dir: Path, xref_map_dir: 
     return materialized
 
 
-def _text_alignment(bbox: Sequence[float], page_width: float) -> str:
+def _text_alignment(
+    bbox: Sequence[float],
+    page_width: float,
+    *,
+    is_heading: bool = False,
+) -> str:
     if len(bbox) < 4 or page_width <= 0:
         return "left"
     left = float(bbox[0])
@@ -995,9 +1000,12 @@ def _text_alignment(bbox: Sequence[float], page_width: float) -> str:
     # a materially inset block as well; this still recognizes centered titles
     # while keeping full-width body paragraphs left aligned.
     if (
-        min(left, right) >= page_width * 0.18
-        and abs(left - right) <= max(12.0, page_width * 0.04)
+        abs(left - right) <= max(12.0, page_width * 0.04)
+        and (is_heading or min(left, right) >= page_width * 0.18)
     ):
+        # Equal outer margins are sufficient for a confirmed bookmark title.
+        # The 18% inset remains required for generic text so a full-width body
+        # paragraph is not mistaken for centered text.
         return "center"
     if right < page_width * 0.08 and left > page_width * 0.2:
         return "right"
@@ -1410,7 +1418,11 @@ def _semantic_page_html(
         text_value = str(value.get("text") or "")
         escaped = _linked_text_html(text_value, value.get("bbox") or [], links)
         text_key = _semantic_title_key(text_value)
-        alignment = _text_alignment(value.get("bbox") or [], float(page.rect.width))
+        alignment = _text_alignment(
+            value.get("bbox") or [],
+            float(page.rect.width),
+            is_heading=True,
+        )
         is_title = bool(
             not title_written
             and title_key

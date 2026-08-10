@@ -8,13 +8,61 @@ from bs4 import BeautifulSoup
 from output_workspace import write_workspace_source_reference
 from pdf_workspace_compiler import (
     _normalize_workspace_pdf_section_filenames,
+    _workspace_source_heading_alignments,
     _workspace_response_entries,
     compile_pdf_workspace,
+    normalize_fast_semantic_heading_alignment,
     normalize_fast_semantic_paragraph_alignment,
     normalize_pdf_workspace_translated_html,
     restore_pdf_source_paragraph_alignment,
     translate_pdf_workspace_artifacts,
 )
+
+
+def test_long_centered_source_heading_is_restored_without_retranslation(tmp_path):
+    source_pdf = tmp_path / "source.pdf"
+    title = "A long centered chapter heading that fills most of the text column"
+    document = fitz.open()
+    page = document.new_page(width=595.3, height=842)
+    page.insert_textbox(
+        fitz.Rect(81, 100, 510, 180),
+        title,
+        fontsize=22,
+        align=fitz.TEXT_ALIGN_CENTER,
+    )
+    document.save(source_pdf)
+    document.close()
+
+    workspace = tmp_path / "Heading_Alignment_PDF"
+    response_name = "response_pdf_section_001.html"
+    write_workspace_source_reference(workspace, source_pdf)
+    (workspace / "translation_progress.json").write_text(
+        json.dumps({
+            "chapters": {
+                "pdf:one": {
+                    "actual_num": 1,
+                    "output_file": response_name,
+                    "pdf_toc_section": True,
+                    "pdf_toc_title": title,
+                    "pdf_start_page": 1,
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    alignments = _workspace_source_heading_alignments(str(workspace))
+    assert alignments[response_name.casefold()] == "center"
+
+    repaired = BeautifulSoup(
+        normalize_fast_semantic_heading_alignment(
+            '<h1 style="text-align:left">Translated title</h1>',
+            alignments[response_name.casefold()],
+        ),
+        "html.parser",
+    ).h1
+    assert repaired["style"] == "text-align:center"
+    assert repaired["data-pdf-source-alignment"] == "center"
 
 
 def _make_pdf_workspace(tmp_path: Path) -> Path:

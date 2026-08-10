@@ -972,10 +972,106 @@ def normalize_fast_semantic_paragraph_alignment(content: str) -> str:
     return str(soup) if changed else str(content or "")
 
 
-def normalize_pdf_workspace_translated_html(content: str, folder: str) -> str:
-    """Apply source-authoritative PDF paragraph formatting to a response."""
+def normalize_fast_semantic_heading_alignment(
+    content: str,
+    alignment: str | None,
+) -> str:
+    """Restore the source PDF alignment on a translated section heading."""
+    resolved = str(alignment or "").strip().lower()
+    if resolved not in {"left", "center", "right"}:
+        return str(content or "")
+    soup = BeautifulSoup(content or "", "html.parser")
+    heading = soup.find("h1")
+    if heading is None:
+        return str(content or "")
+
+    declarations = []
+    for declaration in str(heading.get("style") or "").split(";"):
+        declaration = declaration.strip()
+        name = declaration.partition(":")[0].strip().casefold()
+        if declaration and name != "text-align":
+            declarations.append(declaration)
+    declarations.append(f"text-align:{resolved}")
+    heading["style"] = ";".join(declarations)
+    heading["data-pdf-source-alignment"] = resolved
+    return str(soup)
+
+
+def _workspace_source_heading_alignments(folder: str) -> dict[str, str]:
+    """Map response basenames to heading alignment measured from the raw PDF."""
+    progress_path = os.path.join(folder, "translation_progress.json")
+    try:
+        with open(progress_path, "r", encoding="utf-8") as handle:
+            progress = json.load(handle)
+        chapters = progress.get("chapters", {})
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(chapters, dict):
+        return {}
+
+    try:
+        from output_workspace import read_workspace_source_path
+
+        source_pdf = read_workspace_source_path(folder)
+        if not source_pdf.lower().endswith(".pdf") or not os.path.isfile(source_pdf):
+            return {}
+        import fitz
+        from pdf_fast_extractor import _semantic_title_key, _text_alignment
+
+        document = fitz.open(source_pdf)
+    except Exception:
+        return {}
+
+    alignments: dict[str, str] = {}
+    try:
+        for info in chapters.values():
+            if not isinstance(info, dict) or not info.get("pdf_toc_section"):
+                continue
+            output_name = os.path.basename(str(info.get("output_file") or ""))
+            title = str(
+                info.get("pdf_toc_title")
+                or info.get("pdf_section_title")
+                or info.get("title")
+                or ""
+            ).strip()
+            try:
+                page_number = int(info.get("pdf_start_page") or 0)
+            except (TypeError, ValueError):
+                page_number = 0
+            if not output_name or not title or not (1 <= page_number <= len(document)):
+                continue
+
+            page = document[page_number - 1]
+            title_key = _semantic_title_key(title)
+            for block in page.get_text("blocks", sort=True) or []:
+                if len(block) < 5:
+                    continue
+                block_key = _semantic_title_key(block[4])
+                if block_key != title_key and title_key not in block_key:
+                    continue
+                alignments[output_name.casefold()] = _text_alignment(
+                    block[:4],
+                    float(page.rect.width),
+                    is_heading=True,
+                )
+                break
+    finally:
+        document.close()
+    return alignments
+
+
+def normalize_pdf_workspace_translated_html(
+    content: str,
+    folder: str,
+    heading_alignment: str | None = None,
+) -> str:
+    """Apply source-authoritative PDF paragraph and heading formatting."""
     restored = restore_pdf_source_paragraph_alignment(content, folder)
-    return normalize_fast_semantic_paragraph_alignment(restored)
+    normalized = normalize_fast_semantic_paragraph_alignment(restored)
+    return normalize_fast_semantic_heading_alignment(
+        normalized,
+        heading_alignment,
+    )
 
 
 def _write_response_html_if_changed(path: str, original: str, content: str) -> bool:
@@ -1498,6 +1594,7 @@ def compile_pdf_workspace(
         raise ValueError("No translated response HTML files were found.")
 
     _log(log_callback, f"📄 Compiling PDF from {len(entries)} translated section(s)…")
+    source_heading_alignments = _workspace_source_heading_alignments(folder)
     source_contents = []
     titles = []
     last_decile = -1
@@ -1509,6 +1606,7 @@ def compile_pdf_workspace(
         content = normalize_pdf_workspace_translated_html(
             original_content,
             folder,
+            source_heading_alignments.get(os.path.basename(path).casefold()),
         )
         _write_response_html_if_changed(path, original_content, content)
         title = title or f"Section {index}"

@@ -257,6 +257,25 @@ def test_fast_pdf_images_receive_chapter_names_without_breaking_cache(
 def test_fast_semantic_alignment_does_not_center_full_width_paragraphs():
     assert _text_alignment([81.0, 70.0, 510.0, 101.0], 595.0) == "left"
     assert _text_alignment([214.0, 112.0, 382.0, 145.0], 595.0) == "center"
+    # Long chapter titles in real PDFs can be centered while occupying most
+    # of the body column. Their equal outer margins and inset from both column
+    # edges distinguish them from a left-aligned full-width heading.
+    assert (
+        _text_alignment(
+            [101.1, 112.7, 494.3, 144.6],
+            595.3,
+            is_heading=True,
+        )
+        == "center"
+    )
+    assert (
+        _text_alignment(
+            [81.0, 112.7, 400.0, 144.6],
+            595.3,
+            is_heading=True,
+        )
+        == "left"
+    )
 
     class _Rect:
         width = 595.0
