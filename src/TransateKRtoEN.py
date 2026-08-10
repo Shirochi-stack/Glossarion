@@ -164,6 +164,10 @@ from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import fix_stray_p_gt_artifacts as _fix_stray_p_gt_artifacts
 from html_output_utils import convert_br_to_paragraphs, write_utf8_html_file
+from pdf_output_naming import (
+    move_pdf_output_to_readable_name,
+    readable_pdf_section_filename,
+)
 from metadata_progress import (
     METADATA_PROGRESS_KEY,
     build_metadata_progress_plan,
@@ -3248,26 +3252,10 @@ class FileUtilities:
         # old page translation such as response_001.html from being mistaken
         # for the new outline section that also happens to be numbered 1.
         if chapter.get("pdf_toc_section"):
-            if actual_num is None:
-                actual_num = chapter.get("actual_chapter_num", chapter.get("num", 0))
-            section_id = str(chapter.get("pdf_section_id") or "").strip()
-            if section_id:
-                section_stem = f"pdf_section_{section_id}"
-                if chapter.get("is_chunk"):
-                    chunk_info = chapter.get("chunk_info") or {}
-                    chunk_index = chunk_info.get("chunk_idx")
-                    if chunk_index is not None:
-                        section_stem = f"{section_stem}_{chunk_index}"
-            elif isinstance(actual_num, float):
-                major = int(actual_num)
-                minor = int(round((actual_num - major) * 10))
-                section_stem = f"pdf_section_{major}_{minor}"
-            else:
-                section_stem = f"pdf_section_{actual_num}"
-            return (
-                f"{section_stem}.html"
-                if retain
-                else f"response_{section_stem}.html"
+            return readable_pdf_section_filename(
+                chapter,
+                actual_num=actual_num,
+                retain=retain,
             )
 
         if chapter.get("subtitle_batch") and chapter.get("original_basename"):
@@ -5345,6 +5333,14 @@ class ProgressManager:
         # Check if we have tracking for this chapter
         if chapter_key in self.prog["chapters"]:
             chapter_info = self.prog["chapters"][chapter_key]
+            if (
+                chapter_obj
+                and chapter_obj.get("pdf_toc_section")
+                and chapter_info.get("output_file")
+            ):
+                chapter_obj["_pdf_mapped_output_file"] = os.path.basename(
+                    str(chapter_info["output_file"])
+                )
             status = chapter_info.get("status")
             status_l = status.lower() if isinstance(status, str) else status or ""
             if chapter_obj and chapter_obj.get("subtitle_batch"):
@@ -5707,6 +5703,8 @@ class ProgressManager:
                 expected_pdf_sections[section_id] = {
                     "actual_num": actual_num,
                     "content_hash": str(chapter.get("content_hash") or ""),
+                    "chapter": chapter,
+                    "output_file": output_file,
                     "pdf_toc_level": chapter.get("pdf_toc_level"),
                     "pdf_start_page": chapter.get("pdf_start_page"),
                     "pdf_end_page": chapter.get("pdf_end_page"),
@@ -5718,6 +5716,7 @@ class ProgressManager:
                     ).add(section_id)
 
         removed = 0
+        renamed_outputs = 0
         removed_number_keys = set()
         progress_chapters = self.prog.setdefault("chapters", {})
 
@@ -5827,6 +5826,35 @@ class ProgressManager:
                     if current_section.get(pdf_key) is not None:
                         entry[pdf_key] = current_section[pdf_key]
                 entry["pdf_progress_key"] = f"pdf:{entry_section_id}"
+                current_chapter = current_section.get("chapter")
+                preferred_output = current_section.get("output_file")
+                current_output = entry.get("output_file")
+                if current_chapter is not None and preferred_output:
+                    occupied_outputs = [
+                        other.get("output_file")
+                        for other_key, other in progress_chapters.items()
+                        if other_key != progress_key and isinstance(other, dict)
+                    ]
+                    try:
+                        mapped_output, moved = move_pdf_output_to_readable_name(
+                            self.payloads_dir,
+                            current_output,
+                            preferred_output,
+                            occupied=occupied_outputs,
+                        )
+                    except OSError as exc:
+                        mapped_output = current_output or preferred_output
+                        moved = False
+                        print(
+                            "Warning: Could not rename PDF section output "
+                            f"{current_output!r}: {exc}"
+                        )
+                    if mapped_output:
+                        entry["output_file"] = mapped_output
+                        current_chapter["_pdf_mapped_output_file"] = mapped_output
+                    if moved:
+                        renamed_outputs += 1
+                        self._listing_cache = None
                 if migrate_legacy_pdf_hash:
                     current_hash = str(
                         current_section.get("content_hash") or ""
@@ -5853,6 +5881,12 @@ class ProgressManager:
             print(
                 f"Removed {removed} stale PDF progress entr"
                 f"{'y' if removed == 1 else 'ies'} after extraction layout changed"
+            )
+        if renamed_outputs:
+            print(
+                f"Renamed {renamed_outputs} PDF section output file"
+                f"{'s' if renamed_outputs != 1 else ''} to readable names; "
+                "bookmark hashes remain in translation_progress.json"
             )
         return removed
 

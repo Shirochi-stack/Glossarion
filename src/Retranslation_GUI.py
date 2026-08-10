@@ -49,6 +49,10 @@ from metadata_progress import (
     is_metadata_progress_entry,
     metadata_field_complete,
 )
+from pdf_output_naming import (
+    move_pdf_output_to_readable_name,
+    readable_pdf_section_filename,
+)
 from translation_artifacts import (
     TRANSLATION_ARTIFACT_SPECS,
     is_translation_artifact_progress_entry,
@@ -10810,13 +10814,16 @@ class RetranslationMixin:
             level = int(section.get('level') or 0)
             section_id = str(section.get('section_id') or '').strip()
             section_stem = f'pdf_section_{section_num}'
-            stable_stem = (
-                f'pdf_section_{section_id}' if section_id else section_stem
-            )
-            expected_output = (
-                f'{stable_stem}.html'
-                if retain
-                else f'response_{stable_stem}.html'
+            expected_output = readable_pdf_section_filename(
+                {
+                    'num': section_num,
+                    'title': title,
+                    'pdf_toc_title': title,
+                    'pdf_section_title': title,
+                    'pdf_toc_section': True,
+                },
+                actual_num=section_num,
+                retain=retain,
             )
 
             exact = []
@@ -10837,7 +10844,12 @@ class RetranslationMixin:
                 if section_id and _entry_section_id(key, entry) == section_id:
                     if (
                         str(key).startswith(f'pdf:{section_id}:')
-                        or normalized_output.startswith(f'{stable_stem}_')
+                        or (
+                            normalized_output.startswith(
+                                f'pdf_section_{section_id}_'
+                            )
+                            and normalized_output != f'pdf_section_{section_id}'
+                        )
                     ):
                         stable_chunks.append((key, entry))
                     else:
@@ -10902,6 +10914,30 @@ class RetranslationMixin:
                 continue
 
             for progress_key, entry in matching:
+                is_split_entry = bool(
+                    section_id
+                    and str(progress_key).startswith(f'pdf:{section_id}:')
+                )
+                if not is_split_entry:
+                    occupied_outputs = [
+                        other.get('output_file')
+                        for other_key, other in chapters.items()
+                        if other_key != progress_key and isinstance(other, dict)
+                    ]
+                    try:
+                        mapped_output, _moved = move_pdf_output_to_readable_name(
+                            output_dir,
+                            entry.get('output_file'),
+                            expected_output,
+                            occupied=occupied_outputs,
+                        )
+                    except OSError as exc:
+                        mapped_output = entry.get('output_file') or expected_output
+                        print(
+                            'Warning: Could not rename PDF section output '
+                            f"{entry.get('output_file')!r}: {exc}"
+                        )
+                    _set(entry, 'output_file', mapped_output)
                 _set(entry, 'pdf_toc_section', True)
                 _set(entry, 'pdf_toc_title', title)
                 if not str(entry.get('title') or '').strip():

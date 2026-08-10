@@ -589,7 +589,7 @@ def test_pdf_progress_uses_stable_section_id_across_display_number_changes(tmp_p
     manager = ProgressManager(str(payloads))
     section_id = "abc123stable"
     output_file = f"response_pdf_section_{section_id}.html"
-    (tmp_path / output_file).write_text("translated", encoding="utf-8")
+    (payloads / output_file).write_text("translated", encoding="utf-8")
     manager.prog["chapters"] = {
         f"pdf:{section_id}": {
             "actual_num": 2,
@@ -614,9 +614,14 @@ def test_pdf_progress_uses_stable_section_id_across_display_number_changes(tmp_p
         "pdf_end_page": 4,
     }
 
-    assert FileUtilities.create_chapter_filename(current_chapter, 3) == output_file
+    readable_output = "response_pdf_section_003_Middle.html"
+    assert FileUtilities.create_chapter_filename(current_chapter, 3) == readable_output
     assert manager.reconcile_pdf_chapter_entries([current_chapter]) == 0
     assert manager.prog["chapters"][f"pdf:{section_id}"]["actual_num"] == 3
+    assert manager.prog["chapters"][f"pdf:{section_id}"]["output_file"] == readable_output
+    assert not (payloads / output_file).exists()
+    assert (payloads / readable_output).read_text(encoding="utf-8") == "translated"
+    assert FileUtilities.create_chapter_filename(current_chapter, 3) == readable_output
     manager.migrate_to_content_hash([current_chapter])
     assert f"pdf:{section_id}" in manager.prog["chapters"]
 
