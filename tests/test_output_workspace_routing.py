@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+from types import SimpleNamespace
 
 
 from output_workspace import (
@@ -118,3 +120,189 @@ def test_parallel_pair_open_output_creates_and_opens_raw_glossary_folder(
     assert expected.is_dir()
     assert opened == [str(expected.resolve())]
     assert "Parallel EPUB Pair glossary folder" in logs[-1]
+
+
+def test_parallel_pair_mapping_sidecar_is_saved_in_raw_glossary_folder(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.delenv("OUTPUT_DIRECTORY", raising=False)
+    from translator_gui import TranslatorGUI
+
+    output_root = tmp_path / "configured output"
+    raw_path = tmp_path / "books" / "Raw Novel.epub"
+    translated_path = tmp_path / "books" / "Translated Novel.epub"
+    gui = TranslatorGUI.__new__(TranslatorGUI)
+    gui.config = {"output_directory": str(output_root)}
+    selection = {
+        "version": 1,
+        "raw_path": str(raw_path.resolve()),
+        "translated_path": str(translated_path.resolve()),
+        "mapping": [
+            {
+                "raw_index": 1,
+                "translated_index": 4,
+                "raw_filename": "Text/chapter0002.xhtml",
+                "translated_filename": "Text/0002_Chapter.xhtml",
+            }
+        ],
+        "wrapper_prompt": "{raw_text}\n{translated_text}",
+        "system_prompt": "Use established terms.",
+        "profile_name": "Parallel EPUB Glossary",
+    }
+
+    saved_path = TranslatorGUI._write_parallel_epub_mapping_sidecar(
+        gui, selection
+    )
+
+    expected = (
+        output_root
+        / "Glossary"
+        / "Raw Novel"
+        / "Raw Novel_parallel_epub_mapping.json"
+    )
+    assert Path(saved_path) == expected.resolve()
+    assert json.loads(expected.read_text(encoding="utf-8")) == selection
+    assert TranslatorGUI._read_parallel_epub_mapping_sidecar(
+        gui, str(raw_path)
+    ) == selection
+
+
+def test_parallel_pair_glossary_only_notice_centers_and_widens_ok(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QDialogButtonBox, QMessageBox
+    from translator_gui import TranslatorGUI
+
+    app = QApplication.instance() or QApplication([])
+    message_box = TranslatorGUI._create_parallel_epub_glossary_only_notice(None)
+    button_box = message_box.findChild(QDialogButtonBox)
+    ok_button = message_box.button(QMessageBox.Ok)
+
+    assert app is not None
+    assert button_box is not None and button_box.centerButtons()
+    assert ok_button is not None
+    assert ok_button.minimumWidth() == 140
+    assert ok_button.minimumHeight() == 44
+    message_box.deleteLater()
+
+
+def test_parallel_epub_mapper_is_cached_and_not_deleted_on_close(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    import parallel_epub_glossary
+    from PySide6.QtCore import Qt
+    from translator_gui import TranslatorGUI
+
+    created = []
+
+    class FakeParallelDialog:
+        def __init__(self, parent, **kwargs):
+            self.parent = parent
+            self.kwargs = kwargs
+            self.attributes = {}
+            created.append(self)
+
+        def setAttribute(self, attribute, enabled=True):
+            self.attributes[attribute] = enabled
+
+        @staticmethod
+        def windowTitle():
+            return "Parallel EPUB Pair"
+
+    monkeypatch.setattr(
+        parallel_epub_glossary, "ParallelEpubPairDialog", FakeParallelDialog
+    )
+    gui = SimpleNamespace(
+        config={},
+        _load_parallel_epub_chapters=lambda path: path,
+        _is_special_file=lambda filename: False,
+    )
+
+    first = TranslatorGUI._get_or_create_parallel_epub_pair_dialog(gui)
+    second = TranslatorGUI._get_or_create_parallel_epub_pair_dialog(gui)
+
+    assert first is second
+    assert created == [first]
+    assert first.attributes[Qt.WA_DeleteOnClose] is False
+
+
+def test_clear_file_selection_also_clears_cached_parallel_mapper(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from translator_gui import TranslatorGUI
+
+    class Entry:
+        def clear(self):
+            pass
+
+        def setText(self, _text):
+            pass
+
+        def setToolTip(self, _text):
+            pass
+
+    class PairDialog:
+        cleared = False
+
+        def clear_selection(self):
+            self.cleared = True
+
+    dialog = PairDialog()
+    gui = TranslatorGUI.__new__(TranslatorGUI)
+    gui.config = {
+        "parallel_epub_pair_selection": {"mapping": [{}]},
+        "parallel_epub_glossary_last_raw_epub": "C:/Books/raw.epub",
+        "parallel_epub_glossary_last_translated_epub": "C:/Books/translated.epub",
+    }
+    gui._parallel_epub_pair_dialog = dialog
+    gui._parallel_epub_pair_source = None
+    gui.entry_epub = Entry()
+    gui.selected_files = ["paired.epub"]
+    gui.file_path = "paired.epub"
+    gui.current_file_index = 0
+    gui._subtitle_zip_output_groups = {}
+    gui.save_config = lambda **_kwargs: None
+    gui.append_log = lambda _message: None
+
+    TranslatorGUI.clear_file_selection(gui)
+
+    assert dialog.cleared
+    assert "parallel_epub_pair_selection" not in gui.config
+    assert "parallel_epub_glossary_last_raw_epub" not in gui.config
+    assert "parallel_epub_glossary_last_translated_epub" not in gui.config
+    assert gui.selected_files == []
+
+
+def test_selecting_replacement_input_clears_cached_parallel_mapper(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from translator_gui import TranslatorGUI
+
+    class PairDialog:
+        cleared = False
+
+        def clear_selection(self):
+            self.cleared = True
+
+    dialog = PairDialog()
+    gui = TranslatorGUI.__new__(TranslatorGUI)
+    gui.config = {
+        "parallel_epub_pair_selection": {"mapping": [{}]},
+        "parallel_epub_glossary_last_raw_epub": "C:/Books/raw.epub",
+        "parallel_epub_glossary_last_translated_epub": "C:/Books/translated.epub",
+    }
+    gui._parallel_epub_pair_dialog = dialog
+    gui._parallel_epub_pair_source = None
+
+    def stop_after_pair_reset(_paths):
+        raise RuntimeError("selection continued after pair reset")
+
+    gui._normalize_windows_input_filenames = stop_after_pair_reset
+    try:
+        TranslatorGUI._handle_file_selection(gui, ["C:/Books/other.epub"])
+    except RuntimeError as exc:
+        assert str(exc) == "selection continued after pair reset"
+    else:
+        raise AssertionError("replacement selection did not continue")
+
+    assert dialog.cleared
+    assert "parallel_epub_pair_selection" not in gui.config
+    assert "parallel_epub_glossary_last_raw_epub" not in gui.config
+    assert "parallel_epub_glossary_last_translated_epub" not in gui.config

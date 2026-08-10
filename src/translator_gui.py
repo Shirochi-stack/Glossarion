@@ -24757,17 +24757,21 @@ Recent translations to summarize:
             return os.path.join(os.path.dirname(os.path.abspath(file_path)), 'GTool_Translation')
         return self._resolve_translation_output_dir(file_path)
 
-    def _resolve_parallel_epub_glossary_output_dir(self, *, create=False) -> str:
+    def _resolve_parallel_epub_glossary_output_dir(
+        self, raw_path="", *, create=False
+    ) -> str:
         """Return the normal Glossary/<raw EPUB>/ directory for a pair."""
 
-        if not self._parallel_epub_pair_is_selected():
-            return ""
-        state = getattr(self, "_parallel_epub_pair_source", None)
-        if not isinstance(state, dict):
-            return ""
-        raw_path = str(state.get("raw_path") or "")
+        raw_path = str(raw_path or "")
         if not raw_path:
-            return ""
+            if not self._parallel_epub_pair_is_selected():
+                return ""
+            state = getattr(self, "_parallel_epub_pair_source", None)
+            if not isinstance(state, dict):
+                return ""
+            raw_path = str(state.get("raw_path") or "")
+            if not raw_path:
+                return ""
 
         raw_base = os.path.splitext(os.path.basename(raw_path))[0]
         override_dir = os.environ.get("OUTPUT_DIRECTORY") or self.config.get(
@@ -24793,6 +24797,63 @@ Recent translations to summarize:
             create=bool(create),
             fallback_base=raw_path,
         )
+
+    def _parallel_epub_mapping_sidecar_path(
+        self, raw_path: str, *, create_parent=False
+    ) -> str:
+        """Return the durable mapping path inside the raw book's glossary folder."""
+
+        raw_path = str(raw_path or "").strip()
+        if not raw_path:
+            return ""
+        raw_path = os.path.abspath(raw_path)
+        folder = self._resolve_parallel_epub_glossary_output_dir(
+            raw_path, create=bool(create_parent)
+        )
+        if not folder:
+            return ""
+        from glossary_paths import sanitize_glossary_folder_name
+
+        raw_base = os.path.splitext(os.path.basename(raw_path))[0]
+        safe_base = sanitize_glossary_folder_name(raw_base)
+        return os.path.join(folder, f"{safe_base}_parallel_epub_mapping.json")
+
+    def _write_parallel_epub_mapping_sidecar(self, selection: dict) -> str:
+        """Atomically persist a compact, chapter-text-free pair selection."""
+
+        if not isinstance(selection, dict) or not selection.get("mapping"):
+            raise ValueError("The Parallel EPUB mapping is empty.")
+        path = self._parallel_epub_mapping_sidecar_path(
+            str(selection.get("raw_path") or ""), create_parent=True
+        )
+        if not path:
+            raise ValueError("The Parallel EPUB mapping path could not be resolved.")
+        _atomic_json_write(path, selection)
+        return path
+
+    def _read_parallel_epub_mapping_sidecar(self, raw_path: str):
+        """Read and validate a compact mapping stored with glossary artifacts."""
+
+        path = self._parallel_epub_mapping_sidecar_path(raw_path)
+        if not path or not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                selection = json.load(handle)
+            if not isinstance(selection, dict) or not isinstance(
+                selection.get("mapping"), list
+            ):
+                return None
+            saved_raw_path = os.path.abspath(
+                str(selection.get("raw_path") or "")
+            )
+            if os.path.normcase(saved_raw_path) != os.path.normcase(
+                os.path.abspath(str(raw_path or ""))
+            ):
+                return None
+            return selection
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
 
     def _open_folder_in_file_manager(self, folder_path: str):
         """Open an existing folder in the platform file manager."""
@@ -28993,6 +29054,29 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.append_log(f"⚠️ Error in OPF sorting: {e}")
             return file_list
  
+    def _create_parallel_epub_glossary_only_notice(self):
+        """Build the centered, single-action notice for paired EPUB sources."""
+
+        from PySide6.QtWidgets import QDialogButtonBox
+
+        message_box = QMessageBox(self)
+        message_box.setWindowTitle("Glossary-only Source")
+        message_box.setIcon(QMessageBox.Information)
+        message_box.setText(
+            "Parallel EPUB Pair is prepared for cross-checked glossary extraction.\n\n"
+            "Click Extract Glossary instead of Run Translation."
+        )
+        message_box.setStandardButtons(QMessageBox.Ok)
+        message_box.setDefaultButton(QMessageBox.Ok)
+        message_box.setEscapeButton(QMessageBox.Ok)
+        button_box = message_box.findChild(QDialogButtonBox)
+        if button_box is not None:
+            button_box.setCenterButtons(True)
+        ok_button = message_box.button(QMessageBox.Ok)
+        if ok_button is not None:
+            ok_button.setMinimumSize(140, 44)
+        return message_box
+
     def run_translation_thread(self):
         """Start translation in a background worker (ThreadPoolExecutor)"""
         # Prevent overlap with glossary extraction
@@ -29006,12 +29090,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.append_log(
                 "ℹ️ Parallel EPUB Pair is a glossary-only source. Use Extract Glossary."
             )
-            QMessageBox.information(
-                self,
-                "Glossary-only Source",
-                "Parallel EPUB Pair is prepared for cross-checked glossary extraction.\n\n"
-                "Click Extract Glossary instead of Run Translation.",
-            )
+            self._create_parallel_epub_glossary_only_notice().exec()
             return
         
         if self.translation_thread and self.translation_thread.is_alive():
@@ -38619,6 +38698,15 @@ Important rules:
         pairs = list(result.get("pairs") or [])
         pair_count = len(pairs)
         persistent_selection = compact_parallel_epub_selection(result)
+        mapping_sidecar_path = ""
+        try:
+            mapping_sidecar_path = self._write_parallel_epub_mapping_sidecar(
+                persistent_selection
+            )
+        except Exception as exc:
+            self.append_log(
+                f"⚠️ Could not save the Parallel EPUB mapping beside its glossary: {exc}"
+            )
         self.config[PARALLEL_EPUB_SELECTION_CONFIG_KEY] = persistent_selection
         self._parallel_epub_pair_source = {
             "raw_path": raw_path,
@@ -38630,6 +38718,7 @@ Important rules:
                 str(pair.get("raw_filename") or "") for pair in pairs
             ],
             "persistent_selection": persistent_selection,
+            "mapping_sidecar_path": mapping_sidecar_path,
             "generated_path": generated_path,
             "temporary_directory": pair_temp_dir,
         }
@@ -38671,6 +38760,10 @@ Important rules:
             f"🔗 Mapped {pair_count} HTML file pair(s). "
             "Click Extract Glossary to begin."
         )
+        if mapping_sidecar_path:
+            self.append_log(
+                f"💾 Saved Parallel EPUB mapping: {mapping_sidecar_path}"
+            )
         if skipped_mappings:
             self.append_log(
                 f"⚠️ {skipped_mappings} saved mapping(s) could not be restored "
@@ -38685,6 +38778,11 @@ Important rules:
         selection = self.config.get(PARALLEL_EPUB_SELECTION_CONFIG_KEY)
         if not isinstance(selection, dict) or not selection.get("mapping"):
             return
+        saved_sidecar = self._read_parallel_epub_mapping_sidecar(
+            str(selection.get("raw_path") or "")
+        )
+        if isinstance(saved_sidecar, dict) and saved_sidecar.get("mapping"):
+            selection = saved_sidecar
         raw_path = str(selection.get("raw_path") or "")
         translated_path = str(selection.get("translated_path") or "")
         missing = [
@@ -38936,8 +39034,79 @@ Important rules:
         except Exception:
             pass
 
+    def _clear_parallel_epub_pair_dialog_selection(self):
+        """Clear the cached mapper when the main input selection is cleared."""
+
+        dialog = getattr(self, "_parallel_epub_pair_dialog", None)
+        if dialog is not None:
+            clear_selection = getattr(dialog, "clear_selection", None)
+            if callable(clear_selection):
+                try:
+                    clear_selection()
+                except RuntimeError:
+                    self._parallel_epub_pair_dialog = None
+        # These are only pointers to the most recently opened pair. Removing
+        # them prevents a newly-created dialog from immediately reloading its
+        # sidecar after an explicit Clear Selection. The book sidecar itself is
+        # retained with the glossary output, just like other glossary data.
+        try:
+            self.config.pop("parallel_epub_glossary_last_raw_epub", None)
+            self.config.pop("parallel_epub_glossary_last_translated_epub", None)
+        except Exception:
+            pass
+
+    def _reset_parallel_epub_pair_for_input_change(self):
+        """Release the active pair and empty its mapper for a replacement input."""
+
+        self._release_parallel_epub_pair_source()
+        self._clear_parallel_epub_pair_dialog_selection()
+
+    def _get_or_create_parallel_epub_pair_dialog(self):
+        """Return the session-persistent raw/translated EPUB mapper."""
+
+        dialog = getattr(self, "_parallel_epub_pair_dialog", None)
+        if dialog is not None:
+            try:
+                dialog.windowTitle()
+                return dialog
+            except RuntimeError:
+                self._parallel_epub_pair_dialog = None
+
+        from parallel_epub_glossary import ParallelEpubPairDialog
+
+        dialog = ParallelEpubPairDialog(
+            self,
+            config=self.config,
+            chapter_loader=self._load_parallel_epub_chapters,
+            special_file_predicate=self._is_special_file,
+        )
+        # QDialog normally hides on reject/close, but make the intended
+        # session-persistent lifetime explicit so reopening retains all state.
+        dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+        self._parallel_epub_pair_dialog = dialog
+        from parallel_epub_glossary import PARALLEL_EPUB_SELECTION_CONFIG_KEY
+
+        selection = self.config.get(PARALLEL_EPUB_SELECTION_CONFIG_KEY)
+        raw_hint = (
+            str(selection.get("raw_path") or "")
+            if isinstance(selection, dict)
+            else ""
+        ) or str(self.config.get("parallel_epub_glossary_last_raw_epub") or "")
+        read_sidecar = getattr(self, "_read_parallel_epub_mapping_sidecar", None)
+        saved_sidecar = read_sidecar(raw_hint) if callable(read_sidecar) else None
+        if isinstance(saved_sidecar, dict) and saved_sidecar.get("mapping"):
+            selection = saved_sidecar
+        restore_selection = getattr(dialog, "restore_persisted_selection", None)
+        if (
+            callable(restore_selection)
+            and isinstance(selection, dict)
+            and selection.get("mapping")
+        ):
+            restore_selection(selection)
+        return dialog
+
     def open_parallel_epub_pair_dialog(self):
-        """Open the raw/translated EPUB mapper and prepare a glossary source."""
+        """Show the persistent EPUB mapper and prepare an accepted pair."""
         if (
             (getattr(self, "translation_thread", None) and self.translation_thread.is_alive())
             or (
@@ -38958,21 +39127,12 @@ Important rules:
             return
 
         try:
-            from parallel_epub_glossary import ParallelEpubPairDialog
-
-            dialog = ParallelEpubPairDialog(
-                self,
-                config=self.config,
-                chapter_loader=self._load_parallel_epub_chapters,
-                special_file_predicate=self._is_special_file,
-            )
+            dialog = self._get_or_create_parallel_epub_pair_dialog()
             if dialog.exec() != QDialog.Accepted or not dialog.result_data:
-                dialog.deleteLater()
                 return
 
             result = dict(dialog.result_data)
             dialog.result_data = None
-            dialog.deleteLater()
             self._activate_parallel_epub_pair_source(result)
         except Exception as exc:
             self.append_log(f"❌ Could not prepare Parallel EPUB Pair: {exc}")
@@ -39052,7 +39212,7 @@ Important rules:
 
     def clear_file_selection(self):
         """Clear all selected files"""
-        self._release_parallel_epub_pair_source()
+        self._reset_parallel_epub_pair_for_input_change()
         self.entry_epub.clear()
         self.entry_epub.setText("No file selected")
         self.entry_epub.setToolTip("")
@@ -39444,7 +39604,7 @@ Important rules:
         """Common handler for file selection"""
         if not paths:
             return
-        self._release_parallel_epub_pair_source()
+        self._reset_parallel_epub_pair_for_input_change()
         paths = self._normalize_windows_input_filenames(paths)
         renamed_paths = []
         for path in paths:
@@ -40280,7 +40440,7 @@ Important rules:
                                     "Please wait for it to finish (or stop it) first.")
                 return False
 
-            self._release_parallel_epub_pair_source()
+            self._reset_parallel_epub_pair_for_input_change()
 
             epub_path = os.path.abspath(epub_path)
             # Mirror the "Load for translation" effect so the main window
@@ -40326,7 +40486,7 @@ Important rules:
         try:
             if not path or not os.path.isfile(path):
                 return
-            self._release_parallel_epub_pair_source()
+            self._reset_parallel_epub_pair_for_input_change()
             path = os.path.abspath(path)
             # Populate the EPUB entry text field if present.
             try:
@@ -40387,10 +40547,10 @@ Important rules:
                 valid.append(abs_p)
             if not valid:
                 return
-            self._release_parallel_epub_pair_source()
             if len(valid) == 1:
                 self._handle_library_import_epub(valid[0])
                 return
+            self._reset_parallel_epub_pair_for_input_change()
             try:
                 self.selected_files = valid
                 self.current_file_index = 0

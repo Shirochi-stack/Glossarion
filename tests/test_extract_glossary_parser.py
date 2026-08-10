@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import zipfile
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -721,6 +722,120 @@ def test_parallel_epub_dialog_loads_in_background_and_shows_drop_feedback(tmp_pa
         {"text": "raw text", "filename": "chapter-01.xhtml"}
     ]
     assert "eligible HTML" in dialog.raw_drop.count_label.text()
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_parallel_epub_dialog_restores_saved_mapping_after_async_load(
+    tmp_path, monkeypatch
+):
+    app = QApplication.instance() or QApplication([])
+    load_errors = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, text, *_args, **_kwargs: load_errors.append(text),
+    )
+    raw_path = tmp_path / "raw.epub"
+    translated_path = tmp_path / "translated.epub"
+    raw_path.write_bytes(b"raw")
+    translated_path.write_bytes(b"translated")
+
+    raw_chapters = [
+        (f"raw {index}", f"Text/chapter-{index:02d}.xhtml")
+        for index in range(1, 4)
+    ]
+    translated_chapters = [
+        (f"translated {index}", f"Text/translated-{index:02d}.xhtml")
+        for index in range(1, 4)
+    ]
+
+    def loader(path):
+        return raw_chapters if Path(path) == raw_path else translated_chapters
+
+    dialog = ParallelEpubPairDialog(config={}, chapter_loader=loader)
+    restored = dialog.restore_persisted_selection(
+        {
+            "version": 1,
+            "raw_path": str(raw_path),
+            "translated_path": str(translated_path),
+            "mapping": [
+                {
+                    "raw_index": 0,
+                    "translated_index": 2,
+                    "raw_filename": "Text/chapter-01.xhtml",
+                    "translated_filename": "Text/translated-03.xhtml",
+                },
+                {
+                    "raw_index": 2,
+                    "translated_index": 0,
+                    "raw_filename": "Text/chapter-03.xhtml",
+                    "translated_filename": "Text/translated-01.xhtml",
+                },
+            ],
+            "wrapper_prompt": "Before\n{raw_text}\n{translated_text}",
+            "system_prompt": "Saved exact prompt",
+            "profile_name": "Parallel EPUB Glossary",
+        }
+    )
+
+    deadline = time.monotonic() + 3
+    while (
+        dialog._active_load is not None
+        or dialog._pending_loads
+        or dialog._mapping_building
+    ) and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+
+    assert restored
+    assert not load_errors
+    assert dialog._selected_mapping() == [
+        {"raw_index": 0, "translated_index": 2},
+        {"raw_index": 2, "translated_index": 0},
+    ]
+    assert dialog.mapping_table.item(1, 1).data(Qt.UserRole) == -1
+    assert dialog.mapping_table.item(1, 2).text() == "Saved — Unmapped"
+    assert dialog.wrapper_edit.toPlainText() == (
+        "Before\n{raw_text}\n{translated_text}"
+    )
+    assert dialog.system_prompt_edit.toPlainText() == "Saved exact prompt"
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_parallel_epub_dialog_clear_selection_empties_loaded_pair():
+    app = QApplication.instance() or QApplication([])
+    dialog = ParallelEpubPairDialog(config={})
+    raw_chapters = [
+        {"text": "raw one", "filename": "chapter-01.xhtml"},
+        {"text": "raw two", "filename": "chapter-02.xhtml"},
+    ]
+    translated_chapters = [
+        {"text": "translated one", "filename": "translated-01.xhtml"},
+        {"text": "translated two", "filename": "translated-02.xhtml"},
+    ]
+    dialog._apply_loaded_epub("raw", "C:/Books/raw.epub", raw_chapters)
+    dialog._apply_loaded_epub(
+        "translated", "C:/Books/translated.epub", translated_chapters
+    )
+    deadline = time.monotonic() + 3
+    while dialog._mapping_building and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    assert dialog.mapping_table.rowCount() == 2
+
+    dialog.clear_selection()
+
+    assert dialog.raw_path == ""
+    assert dialog.translated_path == ""
+    assert dialog.raw_chapters == []
+    assert dialog.translated_chapters == []
+    assert dialog.mapping_table.rowCount() == 0
+    assert dialog.raw_drop.path_label.text() == "Drop an .epub here"
+    assert dialog.translated_drop.path_label.text() == "Drop an .epub here"
+    assert dialog.mapping_status.text() == "Load both EPUBs to create a map."
+    assert not dialog.use_pair_button.isEnabled()
     dialog.deleteLater()
     app.processEvents()
 

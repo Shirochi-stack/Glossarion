@@ -600,6 +600,17 @@ class _EpubDropZone(QFrame):
         self.loading_bar.hide()
         self._refresh_visuals()
 
+    def clear_epub(self):
+        """Return the drop zone to its empty state."""
+
+        self._visual_state = "idle"
+        self._hovered = False
+        self.path_label.setText("Drop an .epub here")
+        self.path_label.setToolTip("")
+        self.count_label.setText("")
+        self.loading_bar.hide()
+        self._refresh_visuals()
+
 
 class _MappingComboDelegate(QStyledItemDelegate):
     """Paint lightweight dropdown cells and create one combo only while editing."""
@@ -716,6 +727,7 @@ class ParallelEpubPairDialog(QDialog):
         self._mapping_offset = 0
         self._mapping_build_serial = 0
         self._mapping_building = False
+        self._pending_persisted_selection: Optional[dict] = None
         self._loaded_profile = ""
         self.result_data: Optional[dict] = None
         self._load_serial = 0
@@ -1040,6 +1052,13 @@ class ParallelEpubPairDialog(QDialog):
         if not os.path.isfile(path) or not path.lower().endswith(".epub"):
             QMessageBox.warning(self, "Invalid EPUB", "Please choose an existing .epub file.")
             return
+        pending = self._pending_persisted_selection
+        if isinstance(pending, dict):
+            saved_path = os.path.abspath(str(pending.get(f"{side}_path") or ""))
+            if saved_path and os.path.normcase(path) != os.path.normcase(saved_path):
+                # A newly chosen EPUB starts a new mapping. Do not apply an old
+                # sidecar after its asynchronous table build finishes.
+                self._pending_persisted_selection = None
         self._load_serial += 1
         serial = self._load_serial
         self._latest_load_serial[side] = serial
@@ -1109,7 +1128,8 @@ class ParallelEpubPairDialog(QDialog):
         chapters,
         error: str,
     ):
-        if self._active_load == (side, path, serial):
+        completed_active_load = self._active_load == (side, path, serial)
+        if completed_active_load:
             self._active_load = None
         is_latest = self._latest_load_serial.get(side) == serial
         if is_latest and error:
@@ -1129,10 +1149,13 @@ class ParallelEpubPairDialog(QDialog):
         elif is_latest:
             self._apply_loaded_epub(side, path, list(chapters or []))
 
-        if self._pending_loads:
+        # Only the loader that currently owns the serialized queue may advance
+        # it. A stale loader invalidated by Clear Selection must not start a
+        # newly queued job while another new loader is already active.
+        if completed_active_load and self._pending_loads:
             next_side, next_path, next_serial = self._pending_loads.pop(0)
             self._start_epub_load(next_side, next_path, next_serial)
-        else:
+        elif completed_active_load or self._active_load is None:
             self._refresh_load_controls()
 
     def _apply_loaded_epub(self, side: str, path: str, chapters):
@@ -1145,6 +1168,99 @@ class ParallelEpubPairDialog(QDialog):
             self.translated_chapters = chapters
             self.translated_drop.set_epub(path, len(chapters))
         self._rebuild_mapping()
+
+    def clear_selection(self):
+        """Clear both EPUBs and invalidate any background mapping work."""
+
+        # The loaders are daemon threads and may already be reading ZIP data.
+        # Advancing each serial makes their eventual signal stale, while
+        # clearing the queue prevents the second old load from starting.
+        self._load_serial += 1
+        self._latest_load_serial = {
+            "raw": self._load_serial,
+            "translated": self._load_serial,
+        }
+        self._active_load = None
+        self._pending_loads = []
+        self._mapping_build_serial += 1
+        self._mapping_building = False
+        self._pending_persisted_selection = None
+        self._mapping_offset = 0
+        self._auto_mapping = []
+        self.raw_path = ""
+        self.translated_path = ""
+        self.raw_chapters = []
+        self.translated_chapters = []
+        self.result_data = None
+        self._translated_mapping_model.setStringList(["— Unmapped —"])
+        self.mapping_table.setUpdatesEnabled(False)
+        self.mapping_table.setRowCount(0)
+        self.mapping_table.setUpdatesEnabled(True)
+        self.mapping_table.verticalScrollBar().setValue(0)
+        self.raw_drop.clear_epub()
+        self.translated_drop.clear_epub()
+        self.mapping_status.setText("Load both EPUBs to create a map.")
+        self.mapping_status.setStyleSheet("color: #9ba4b3; font-size: 8pt;")
+        self._refresh_load_controls()
+
+    def restore_persisted_selection(self, selection: dict) -> bool:
+        """Load both real EPUBs and restore a text-free saved HTML mapping."""
+
+        if not isinstance(selection, dict) or not selection.get("mapping"):
+            return False
+        raw_path = os.path.abspath(str(selection.get("raw_path") or ""))
+        translated_path = os.path.abspath(
+            str(selection.get("translated_path") or "")
+        )
+        if not (
+            os.path.isfile(raw_path)
+            and raw_path.lower().endswith(".epub")
+            and os.path.isfile(translated_path)
+            and translated_path.lower().endswith(".epub")
+        ):
+            return False
+
+        self._pending_persisted_selection = {
+            **selection,
+            "raw_path": raw_path,
+            "translated_path": translated_path,
+            "mapping": [
+                dict(item)
+                for item in selection.get("mapping") or []
+                if isinstance(item, dict)
+            ],
+        }
+
+        wrapper_prompt = str(selection.get("wrapper_prompt") or "")
+        if wrapper_prompt:
+            self.wrapper_edit.setPlainText(wrapper_prompt)
+        profile_name = str(selection.get("profile_name") or "").strip()
+        if profile_name and self.profile_combo.findText(profile_name) >= 0:
+            self.profile_combo.setCurrentText(profile_name)
+        system_prompt = str(selection.get("system_prompt") or "")
+        if system_prompt:
+            # Restore the exact saved prompt. Profiles are not migrated or
+            # rewritten while loading a mapping sidecar.
+            self.system_prompt_edit.setPlainText(system_prompt)
+
+        raw_loaded = (
+            bool(self.raw_chapters)
+            and os.path.normcase(os.path.abspath(self.raw_path))
+            == os.path.normcase(raw_path)
+        )
+        translated_loaded = (
+            bool(self.translated_chapters)
+            and os.path.normcase(os.path.abspath(self.translated_path))
+            == os.path.normcase(translated_path)
+        )
+        if raw_loaded and translated_loaded:
+            self._rebuild_mapping()
+        else:
+            if not raw_loaded:
+                self._load_epub("raw", raw_path)
+            if not translated_loaded:
+                self._load_epub("translated", translated_path)
+        return True
 
     def _refresh_load_controls(self):
         loading = self._active_load is not None or bool(self._pending_loads)
@@ -1244,8 +1360,67 @@ class ParallelEpubPairDialog(QDialog):
             2, QHeaderView.ResizeToContents
         )
         self._mapping_building = False
+        self._apply_pending_persisted_mapping()
         self._update_mapping_status()
         self._refresh_load_controls()
+
+    def _apply_pending_persisted_mapping(self) -> bool:
+        """Apply saved choices after auto-mapping has finished building rows."""
+
+        selection = self._pending_persisted_selection
+        if not isinstance(selection, dict):
+            return False
+        current_paths = (
+            os.path.normcase(os.path.abspath(self.raw_path)),
+            os.path.normcase(os.path.abspath(self.translated_path)),
+        )
+        saved_paths = (
+            os.path.normcase(os.path.abspath(str(selection.get("raw_path") or ""))),
+            os.path.normcase(
+                os.path.abspath(str(selection.get("translated_path") or ""))
+            ),
+        )
+        if current_paths != saved_paths:
+            return False
+
+        restored, _skipped = restore_parallel_epub_pairs(
+            self.raw_chapters,
+            self.translated_chapters,
+            selection.get("mapping") or [],
+        )
+        header = self.mapping_table.horizontalHeader()
+        self.mapping_table.setUpdatesEnabled(False)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        try:
+            # Missing entries in the compact mapping are intentional unmapped
+            # rows, so clear every auto-map assignment before restoring pairs.
+            for row in range(self.mapping_table.rowCount()):
+                translated_item = self.mapping_table.item(row, 1)
+                if translated_item is not None:
+                    translated_item.setData(Qt.UserRole, -1)
+                    translated_item.setText(self._translated_mapping_label(-1))
+                strategy_item = self.mapping_table.item(row, 2)
+                if strategy_item is not None:
+                    strategy_item.setText("Saved — Unmapped")
+            for pair in restored:
+                row = int(pair["raw_index"])
+                translated_index = int(pair["translated_index"])
+                translated_item = self.mapping_table.item(row, 1)
+                if translated_item is not None:
+                    translated_item.setData(Qt.UserRole, translated_index)
+                    translated_item.setText(
+                        self._translated_mapping_label(translated_index)
+                    )
+                strategy_item = self.mapping_table.item(row, 2)
+                if strategy_item is not None:
+                    strategy_item.setText("Saved Mapping")
+        finally:
+            header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+            self.mapping_table.setUpdatesEnabled(True)
+            self.mapping_table.viewport().update()
+        self._mapping_offset = 0
+        self._pending_persisted_selection = None
+        return True
 
     def _auto_offset_toggled(self, enabled: bool):
         """Persist the automatic offset preference and rebuild the mapping."""
