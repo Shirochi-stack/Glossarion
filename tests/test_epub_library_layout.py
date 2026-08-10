@@ -911,6 +911,58 @@ def test_remote_image_url_survives_local_image_processing(tmp_path):
     assert 'class="remote-image"' in processed
 
 
+def test_leading_workspace_pdf_image_does_not_start_on_blank_column(tmp_path):
+    reader = EpubReaderDialog.__new__(EpubReaderDialog)
+    reader._epub_path = str(tmp_path / "source.pdf")
+    reader._images = {}
+    reader._extra_image_dirs = [str(tmp_path / "images")]
+    reader._img_temp_dir = str(tmp_path / "reader-images")
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "cover.png").write_bytes(b"image" * 2000)
+
+    processed = reader._process_html(
+        '<article class="pdf-fast-semantic-page">'
+        '<a id="page-1"></a>'
+        '<figure class="pdf-image"><img src="images/cover.png"></figure>'
+        '</article>'
+    )
+
+    assert 'class="full-page-img full-page-img-first"' in processed
+
+    class ReaderStub:
+        _font_family = "Georgia"
+        _font_size = 14
+        _line_spacing = 1.8
+        _translated_overlay = {}
+        _raw_epub_alt_path = ""
+        _translated_css_dirs = []
+        _workspace_mode = True
+        _show_raw = False
+
+        @staticmethod
+        def _get_theme():
+            return {
+                "bg": "#111111",
+                "fg": "#eeeeee",
+                "heading": "#ffffff",
+                "link": "#88aaff",
+                "code_bg": "#222222",
+                "border": "#333333",
+            }
+
+        @staticmethod
+        def _get_embedded_css():
+            return ""
+
+    wrapped = EpubReaderDialog._wrap_html(
+        ReaderStub(), processed, paginated=True
+    )
+    assert (
+        ".full-page-img-first { break-before: avoid !important; }"
+        in wrapped
+    )
+
+
 def test_remote_cover_page_is_downloaded_and_cached(tmp_path, monkeypatch):
     remote_url = (
         "https://images.novelpia.com/imagebox/cover/"

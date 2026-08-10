@@ -24157,7 +24157,7 @@ class EpubReaderDialog(QDialog):
                         pass
                     if image_is_sizeable:
                         wrapper = soup.new_tag("div")
-                        wrapper["class"] = "full-page-img"
+                        wrapper["class"] = ["full-page-img"]
                         # Find the block-level container of this img
                         # (typically <p><img/></p> or <div><img/></div>).
                         # Do not wrap a mixed content parent like:
@@ -24183,6 +24183,30 @@ class EpubReaderDialog(QDialog):
                                 to_pull.append(prev2)
                         elif prev and prev.name in _HEADERS:
                             to_pull.append(prev)
+                        # A full-page image normally starts a fresh column.
+                        # When it is the first meaningful item in a chapter,
+                        # however, that break creates an entirely blank first
+                        # page and strands the image in the next column. Mark
+                        # that leading case explicitly so paginated CSS can
+                        # suppress only the unnecessary initial break.
+                        leading_node = to_pull[-1] if to_pull else container
+                        has_content_before = False
+                        for sibling in leading_node.previous_siblings:
+                            sibling_name = getattr(sibling, "name", None)
+                            if sibling_name:
+                                if (
+                                    sibling_name == "a"
+                                    and not sibling.get_text(" ", strip=True)
+                                    and not sibling.find("img")
+                                ):
+                                    continue
+                                has_content_before = True
+                                break
+                            if str(sibling).strip():
+                                has_content_before = True
+                                break
+                        if not has_content_before:
+                            wrapper["class"].append("full-page-img-first")
                         # Extract siblings, wrap container, then re-insert in order
                         for el in to_pull:
                             el.extract()
@@ -24460,6 +24484,7 @@ class EpubReaderDialog(QDialog):
                 f"display: flex; flex-direction: column; align-items: center; justify-content: center; "
                 f"min-height: calc(100vh - 40px); overflow: hidden; "
                 f"padding: 0; margin: 0; }}"
+                f".full-page-img-first {{ break-before: avoid !important; }}"
                 f"#content > .full-page-img:first-child {{ break-before: avoid !important; }}"
                 f".full-page-img + .full-page-img {{ margin-top: 0; break-before: column; }}"
                 f".full-page-img img {{ margin: 0 auto; max-height: calc(100vh - 100px); }}"
