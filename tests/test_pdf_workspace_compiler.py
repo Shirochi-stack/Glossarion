@@ -202,3 +202,43 @@ def test_library_compile_action_is_pdf_aware():
     assert 'converter_name = (' in library_source
     assert '"pdf_converter" if compile_kind == "pdf"' in library_source
     assert "def pdf_converter(self, folder=None):" in gui_source
+
+
+def test_new_runtime_modules_are_packaged_in_all_desktop_specs():
+    root = Path(__file__).resolve().parents[1]
+    required_modules = (
+        "installer_utils",
+        "pdf_bookmarks",
+        "output_workspace",
+        "pdf_fast_extractor",
+        "pdf_workspace_compiler",
+        "workspace_reader",
+        "pdf_output_naming",
+    )
+    spec_names = (
+        "translator.spec",
+        "translator_Heavy.spec",
+        "translator_NoCuda.spec",
+        "translator_TurboLite.spec",
+        "translator_lite.spec",
+        "translator_lite_linux.spec",
+        "translator_lite_mac.spec",
+        "translator_lite_mac_NoCuda.spec",
+        "translator_lite_mac_intel.spec",
+        "translator_lite_mac_intel_NoCuda.spec",
+        "translatoronefileoff.spec",
+    )
+
+    for spec_name in spec_names:
+        source = (root / "src" / spec_name).read_text(encoding="utf-8")
+        for module in required_modules:
+            assert source.count(f"('{module}.py', '.')") == 1, (
+                spec_name,
+                module,
+                "app_files",
+            )
+            assert source.count(f"'{module}',") == 1, (
+                spec_name,
+                module,
+                "app_modules",
+            )
