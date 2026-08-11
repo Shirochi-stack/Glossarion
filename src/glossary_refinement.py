@@ -66,7 +66,11 @@ def selected_refinement_types(active_types: Iterable[str]) -> List[str]:
 
 
 def refinement_chunking_mode() -> str:
-    """Return the canonical request mode, defaulting to all entry types."""
+    """Return the canonical runtime request mode without mutating settings.
+
+    This fallback is worker-only.  GUI controls must be initialized from an
+    explicit saved value instead of treating this fallback as a user choice.
+    """
     raw_mode = os.getenv(
         "GLOSSARY_REFINEMENT_CHUNKING_MODE",
         DEFAULT_GLOSSARY_REFINEMENT_CHUNKING_MODE,

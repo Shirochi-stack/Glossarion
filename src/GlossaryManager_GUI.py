@@ -35,6 +35,23 @@ class GlossaryManagerMixin:
 
     GLOSSARY_PROMPT_DEFAULT_PROFILE = "Default"
 
+    @staticmethod
+    def _configured_glossary_refinement_chunking_mode(config):
+        """Return an explicitly configured request mode, if one is valid.
+
+        Runtime fallbacks must not be used to select a settings control.  The
+        combo box has its own stable first-item default; only a saved user
+        value is allowed to move it away from that state.
+        """
+        if not isinstance(config, dict) or 'glossary_refinement_chunking_mode' not in config:
+            return None
+        raw_mode = str(config.get('glossary_refinement_chunking_mode') or '').strip().lower()
+        if raw_mode in ('all', 'all_types', 'all_in_one', 'all_entries', 'combined'):
+            return 'all'
+        if raw_mode in ('separate', 'separate_requests', 'per_type'):
+            return 'separate'
+        return None
+
     def _glossary_editor_input_sources(self):
         """Return the current source identities used by the glossary editor.
 
@@ -5913,8 +5930,9 @@ Do not stop after the glossary."""
         self.glossary_refinement_chunking_combo = QComboBox()
         self.glossary_refinement_chunking_combo.addItems(["Send each entry type in a separate request", "Send all entry types"])
         self._apply_halgakos_combo_icons(self.glossary_refinement_chunking_combo)
-        saved_chunking = str(self.config.get('glossary_refinement_chunking_mode', 'all')).lower()
-        self.glossary_refinement_chunking_combo.setCurrentIndex(1 if saved_chunking in ('all', 'all_types', 'all_in_one') else 0)
+        saved_chunking = self._configured_glossary_refinement_chunking_mode(self.config)
+        if saved_chunking == 'all':
+            self.glossary_refinement_chunking_combo.setCurrentIndex(1)
         self.glossary_refinement_chunking_combo.wheelEvent = lambda event: None
         request_layout.addWidget(self.glossary_refinement_chunking_combo)
         request_layout.addStretch()

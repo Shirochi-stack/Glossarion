@@ -41,6 +41,7 @@ from glossary_refinement import (
     refine_glossary_entries,
     refinement_chunking_mode,
 )
+from GlossaryManager_GUI import GlossaryManagerMixin
 
 
 class _RefinementTestSplitter:
@@ -64,9 +65,21 @@ def _enable_refinement(monkeypatch):
 def test_glossary_refinement_request_mode_defaults_to_all_types(monkeypatch):
     monkeypatch.delenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", raising=False)
     assert refinement_chunking_mode() == "all"
+    assert "GLOSSARY_REFINEMENT_CHUNKING_MODE" not in os.environ
 
     monkeypatch.setenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", "separate")
     assert refinement_chunking_mode() == "separate"
+
+
+def test_glossary_refinement_gui_only_applies_explicit_request_mode():
+    resolve = GlossaryManagerMixin._configured_glossary_refinement_chunking_mode
+    config = {}
+
+    assert resolve(config) is None
+    assert config == {}
+    assert resolve({"glossary_refinement_chunking_mode": "unknown"}) is None
+    assert resolve({"glossary_refinement_chunking_mode": "separate"}) == "separate"
+    assert resolve({"glossary_refinement_chunking_mode": "all"}) == "all"
 
 
 def _run_test_refinement(entries, progress_file, parsed_entries, send_fn):
