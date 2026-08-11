@@ -185,9 +185,17 @@ def test_reader_accepts_translated_pdf_html_workspace(qapp, tmp_path, monkeypatc
     assert toolbar.indexOf(dialog._layout_combo) < toolbar.indexOf(
         dialog._raw_btn
     )
+    assert dialog._reader_startup_pending is True
+    assert dialog._loading_widget.isHidden() is False
+    assert dialog._toolbar_widget.isHidden() is True
+    assert dialog._content_widget.isHidden() is True
     try:
         dialog.show()
         _pump_events(qapp, timeout=1.2)
+        assert dialog._reader_startup_pending is False
+        assert dialog._loading_widget.isHidden() is True
+        assert dialog._toolbar_widget.isHidden() is False
+        assert dialog._content_widget.isHidden() is False
         assert len(dialog._chapters_overlaid) == 1
         assert "translated" in dialog._chapters_overlaid[0][1]
         assert dialog._chapters_overlaid[0][0] == "Abertura traduzida"
@@ -676,6 +684,9 @@ def test_reader_recounts_pages_after_hidden_prime_is_revealed(monkeypatch):
         def _end_toc_width_lock(self, sizes):
             self.restored_sizes = sizes
 
+        def _reveal_initial_reader_shell(self):
+            self.shell_revealed = True
+
         def _resync_page_count(self):
             self.recounted = True
 
@@ -692,11 +703,62 @@ def test_reader_recounts_pages_after_hidden_prime_is_revealed(monkeypatch):
     assert reader._priming_initial_render is False
     assert reader.restored_sizes == [240, 960]
     assert reader._prime_toc_sizes is None
+    assert reader.shell_revealed is True
     assert len(scheduled) == 1
     assert scheduled[0][0] == 0
 
     scheduled[0][1]()
     assert reader.recounted is True
+
+
+def test_reader_initial_shell_is_revealed_in_one_batched_update():
+    events = []
+
+    class WidgetStub:
+        def __init__(self, name):
+            self.name = name
+
+        def show(self):
+            events.append((self.name, "show"))
+
+        def hide(self):
+            events.append((self.name, "hide"))
+
+    class TimerStub:
+        def stop(self):
+            events.append(("spinner", "stop"))
+
+    class ReaderStub:
+        _reader_startup_pending = True
+        _spin_timer = TimerStub()
+        _reader_stack = WidgetStub("reader")
+        _toolbar_widget = WidgetStub("toolbar")
+        _content_widget = WidgetStub("content")
+        _loading_widget = WidgetStub("loading")
+
+        def setUpdatesEnabled(self, enabled):
+            events.append(("updates", enabled))
+
+        def update(self):
+            events.append(("dialog", "update"))
+
+    reader = ReaderStub()
+
+    EpubReaderDialog._reveal_initial_reader_shell(reader)
+
+    assert reader._reader_startup_pending is False
+    assert events == [
+        ("spinner", "stop"),
+        ("updates", False),
+        ("reader", "show"),
+        ("toolbar", "show"),
+        ("content", "show"),
+        ("loading", "hide"),
+        ("updates", True),
+        ("dialog", "update"),
+    ]
+    EpubReaderDialog._reveal_initial_reader_shell(reader)
+    assert len(events) == 8
 
 
 def test_reader_resync_ignores_transitional_page_count(monkeypatch):
@@ -831,6 +893,11 @@ def test_reader_paints_shell_before_creating_browser_views(
     load_starts = []
     monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
     monkeypatch.setattr(
+        epub_library,
+        "_epub_reader_webengine_is_warmed",
+        lambda: False,
+    )
+    monkeypatch.setattr(
         EpubReaderDialog,
         "_start_loading",
         lambda self, preserve_shell=False: load_starts.append(preserve_shell),
@@ -863,6 +930,54 @@ def test_reader_paints_shell_before_creating_browser_views(
         assert dialog._loading_widget.isVisible()
         assert not dialog._toolbar_widget.isVisible()
         assert not dialog._content_widget.isVisible()
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_reader_cold_webengine_is_initialized_before_first_show(
+    qapp, monkeypatch,
+):
+    events = []
+    state = {"warmed": False}
+
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", True)
+    monkeypatch.setattr(
+        epub_library,
+        "_epub_reader_webengine_is_warmed",
+        lambda: state["warmed"],
+    )
+
+    def prewarm():
+        events.append("prewarm")
+        state["warmed"] = True
+        return True
+
+    def initialize(self):
+        events.append("initialize")
+        self._reader_init_queued = False
+        self._reader_views_ready = True
+        self._reader = QWidget()
+
+    monkeypatch.setattr(
+        epub_library, "prewarm_epub_reader_webengine", prewarm
+    )
+    monkeypatch.setattr(
+        EpubReaderDialog, "_initialize_reader_views", initialize
+    )
+
+    dialog = EpubReaderDialog(
+        "C:/layout-test/cold-webengine-reader.epub", config={}
+    )
+    try:
+        assert events == ["prewarm", "initialize"]
+        assert dialog._reader_views_ready is True
+        assert dialog.isVisible() is False
+
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.isVisible() is True
+        assert events == ["prewarm", "initialize"]
     finally:
         dialog.close()
         qapp.processEvents()

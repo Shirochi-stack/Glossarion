@@ -19669,6 +19669,11 @@ class EpubReaderDialog(QDialog):
         # native paint.
         self._reader_views_ready = False
         self._reader_init_queued = False
+        # Keep the lightweight loading shell on screen until Chromium has
+        # completed the first real chapter render (including the hidden
+        # scroll-to-paginated prime pass). Revealing the content any earlier
+        # exposes the intermediate layout and causes an opening flicker.
+        self._reader_startup_pending = True
 
         # ── Live single-chapter translation state ──────────────────────
         # The toolbar Translate button streams the chapter's translation
@@ -19717,6 +19722,14 @@ class EpubReaderDialog(QDialog):
             self.resize(1020, 760)
             self.setMinimumSize(600, 400)
 
+        # Chromium must be initialized while this dialog is still hidden.
+        # Attaching the first QWebEngineView from showEvent temporarily unmaps
+        # the native dialog on Windows, which looks like the reader opens,
+        # closes, and then opens again. The retained 1x1 view starts the engine
+        # without exposing a native surface to the user.
+        if _HAS_WEBENGINE and not _epub_reader_webengine_is_warmed():
+            prewarm_epub_reader_webengine()
+
         self._setup_ui()
         # Restore combo positions after UI is built
         modes = [LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_SCROLL, LAYOUT_ALL]
@@ -19752,11 +19765,10 @@ class EpubReaderDialog(QDialog):
         self._loading_widget.show()
         self._content_widget.hide()
         self._spin_timer.start()
-        # Progress Manager normally prewarms Chromium while its chapter list
-        # is on screen. In that case install the real pane now, while this
-        # dialog is still hidden, so showEvent produces one native-window paint
-        # instead of attaching a Chromium surface to an already-visible dialog.
-        if _epub_reader_webengine_is_warmed():
+        # Always install WebEngine-backed panes before the native reader window
+        # is shown. The deferred showEvent path remains only for the lightweight
+        # QTextBrowser fallback used when QtWebEngine is unavailable.
+        if _HAS_WEBENGINE or _epub_reader_webengine_is_warmed():
             self._initialize_reader_views()
 
     def _setup_ui(self):
@@ -20406,7 +20418,6 @@ class EpubReaderDialog(QDialog):
         """Install a translation-folder HTML manifest in the shared reader."""
         if getattr(self, "_closing", False):
             return
-        self._spin_timer.stop()
         self._finalize_post_load(
             list(raw_chapters or []),
             list(translated_chapters or []),
@@ -20475,7 +20486,6 @@ class EpubReaderDialog(QDialog):
     def _on_epub_loaded_from_cache(self, chapters, images, filenames=None):
         if getattr(self, "_closing", False):
             return
-        self._spin_timer.stop()
         filenames = list(filenames or [])
         raw_chapters = list(chapters or [])
         # Fast path: nothing to merge (plain EPUB open, no overlay, no
@@ -20583,6 +20593,28 @@ class EpubReaderDialog(QDialog):
         if sizes and any(s > 0 for s in sizes):
             self._splitter.setSizes(sizes)
 
+    def _reveal_initial_reader_shell(self) -> None:
+        """Atomically replace the loading shell with the rendered reader.
+
+        The first Chromium chapter is rendered while the main content widget
+        remains hidden.  Batching all visibility changes into one update keeps
+        Windows from painting the toolbar/TOC, an empty browser surface, and
+        the final page as three separate frames.
+        """
+        if not getattr(self, "_reader_startup_pending", False):
+            return
+        self._reader_startup_pending = False
+        self._spin_timer.stop()
+        self.setUpdatesEnabled(False)
+        try:
+            self._reader_stack.show()
+            self._toolbar_widget.show()
+            self._content_widget.show()
+            self._loading_widget.hide()
+        finally:
+            self.setUpdatesEnabled(True)
+        self.update()
+
     def _finalize_post_load(self, raw_chapters, overlaid_chapters, images,
                             overlay_applied: bool, filenames):
         """Install the loaded chapters + images into the reader UI.
@@ -20652,9 +20684,13 @@ class EpubReaderDialog(QDialog):
         if _saved_sizes and any(s > 0 for s in _saved_sizes):
             self._splitter.setSizes(_saved_sizes)
 
-        self._toolbar_widget.show()
-        self._loading_widget.hide()
-        self._content_widget.show()
+        # During the initial open, keep the loading shell visible until the
+        # browser finishes its real chapter render. Later reloads retain the
+        # already-visible reader, matching the existing seamless swap path.
+        if not getattr(self, "_reader_startup_pending", False):
+            self._toolbar_widget.show()
+            self._loading_widget.hide()
+            self._content_widget.show()
 
         if self._chapters:
             # Honor an explicit initial chapter if one was requested by the
@@ -20705,7 +20741,8 @@ class EpubReaderDialog(QDialog):
             # GPU-composited #columns layer at the wrong DPR and text
             # stays blurry until the user toggles modes.
             saved_mode = self._layout_mode
-            if saved_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            if (_HAS_WEBENGINE
+                    and saved_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE)):
                 # Hide the reader stack during the prime swap so the
                 # brief scroll-mode render never becomes visible. The
                 # TOC width remains locked until the real paginated view
@@ -20722,6 +20759,8 @@ class EpubReaderDialog(QDialog):
             else:
                 self._end_toc_width_lock(_saved_sizes)
                 self._render_current()
+                if not _HAS_WEBENGINE:
+                    self._reveal_initial_reader_shell()
         else:
             self._end_toc_width_lock(_saved_sizes)
             self._reader_stack.setCurrentIndex(0)
@@ -20729,6 +20768,7 @@ class EpubReaderDialog(QDialog):
                 "<div style='text-align:center; padding: 60px; color: #888;'>"
                 "<p style='font-size: 16pt;'>📭</p>"
                 "<p>No readable content found for this book.</p></div>")
+            self._reveal_initial_reader_shell()
 
         # Kick off the auto-refresh timer now that the initial load has
         # finished. Only started once per dialog \u2014 subsequent finalize
@@ -20977,15 +21017,18 @@ class EpubReaderDialog(QDialog):
 
     def _on_epub_error(self, error_msg):
         self._spin_timer.stop()
-        self._toolbar_widget.show()
-        self._loading_widget.hide()
-        self._content_widget.show()
         self._reader_stack.setCurrentIndex(0)
         source_label = "PDF workspace" if self._workspace_mode else "EPUB"
         self._reader.setHtml(
             f"<div style='text-align:center; padding: 60px; color: #ff6b6b;'>"
             f"<p style='font-size: 16pt;'>⚠️</p>"
             f"<p>Failed to load {source_label}:<br>{error_msg}</p></div>")
+        if getattr(self, "_reader_startup_pending", False):
+            self._reveal_initial_reader_shell()
+        else:
+            self._toolbar_widget.show()
+            self._loading_widget.hide()
+            self._content_widget.show()
 
     # ── Theme / Font / Spacing ─────────────────────────────────────────────
 
@@ -22725,6 +22768,8 @@ class EpubReaderDialog(QDialog):
             self._render_current()
             return
         if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            if self.sender() is self._reader:
+                self._reveal_initial_reader_shell()
             if (self._layout_mode in (LAYOUT_SCROLL, LAYOUT_ALL)
                     and self.sender() is self._reader
                     and getattr(self, '_pending_search_text', None)):
@@ -22900,10 +22945,11 @@ class EpubReaderDialog(QDialog):
             # animate=False: jump instantly so the reader doesn't visibly
             # slide from page 1 to the current page on theme/chapter change.
             self._js_scroll_to(self._reader, self._current_page, animate=False)
-            self._js_reveal(self._reader)
-            self._update_nav_buttons()
-            self._reveal_reader_stack_after_prime()
-            self._consume_pending_search(self._reader)
+            def after_reveal():
+                self._update_nav_buttons()
+                self._reveal_reader_stack_after_prime()
+                self._consume_pending_search(self._reader)
+            self._js_reveal(self._reader, after_reveal)
         self._js_page_count(self._reader, on_count)
 
     def _finalize_double_page(self):
@@ -22915,10 +22961,11 @@ class EpubReaderDialog(QDialog):
             self._current_page = self._clamp_page_for_layout(
                 self._current_page, count)
             self._js_scroll_to(self._reader, self._current_page, animate=False)
-            self._js_reveal(self._reader)
-            self._update_nav_buttons()
-            self._reveal_reader_stack_after_prime()
-            self._consume_pending_search(self._reader)
+            def after_reveal():
+                self._update_nav_buttons()
+                self._reveal_reader_stack_after_prime()
+                self._consume_pending_search(self._reader)
+            self._js_reveal(self._reader, after_reveal)
         self._js_page_count(self._reader, on_count)
 
     def _reveal_reader_stack_after_prime(self):
@@ -22932,6 +22979,7 @@ class EpubReaderDialog(QDialog):
         sizes = getattr(self, '_prime_toc_sizes', None)
         self._prime_toc_sizes = None
         self._end_toc_width_lock(sizes)
+        self._reveal_initial_reader_shell()
         # The first paginated page count is measured while ``_reader_stack``
         # is hidden.  Showing it gives QWebEngine its real viewport height and
         # can reflow the chapter into a different number of CSS columns.  The
@@ -22952,12 +23000,21 @@ class EpubReaderDialog(QDialog):
         self._js_scroll_to(self._reader, self._current_page)
         self._update_nav_buttons()
 
-    def _js_reveal(self, browser):
-        """Show the #columns element after positioning."""
+    def _js_reveal(self, browser, callback=None):
+        """Show the positioned columns, then notify the shell handoff."""
         if _HAS_WEBENGINE:
-            browser.page().runJavaScript(
-                "var c = document.getElementById('columns'); if (c) c.style.opacity = '1';"
+            js = (
+                "var c = document.getElementById('columns'); "
+                "if (c) c.style.opacity = '1';"
             )
+            if callback:
+                browser.page().runJavaScript(
+                    js, lambda _result: callback()
+                )
+            else:
+                browser.page().runJavaScript(js)
+        elif callback:
+            callback()
 
     def resizeEvent(self, event):
         """Invalidate page cache on resize, preserving reading position."""
