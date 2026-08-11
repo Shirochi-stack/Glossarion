@@ -19487,10 +19487,10 @@ class EpubReaderDialog(QDialog):
     # Some image-heavy sections spend long stretches in native extraction;
     # without this small handoff the UI can appear frozen on translated text.
     _RAW_PDF_WORKER_PAINT_DELAY_MS = 120
-    # ``runJavaScript`` completion precedes Chromium presenting that DOM state
-    # to its native compositor. Keep the loading shell visible for this short
-    # settle interval instead of exposing the compositor's default-black frame.
-    _FIRST_FRAME_SETTLE_MS = 100
+    # The startup transition keeps a native snapshot above Chromium while its
+    # first visible compositor buffers settle, then fades that snapshot away.
+    _STARTUP_TRANSITION_SETTLE_MS = 100
+    _STARTUP_TRANSITION_FADE_MS = 160
 
     def __init__(self, epub_path: str, config: dict | None = None, parent=None,
                  initial_chapter: int | None = None,
@@ -19691,6 +19691,8 @@ class EpubReaderDialog(QDialog):
         # exposes the intermediate layout and causes an opening flicker.
         self._reader_startup_pending = True
         self._reader_reveal_queued = False
+        self._reader_transition_overlay = None
+        self._reader_transition_animation = None
 
         # ── Live single-chapter translation state ──────────────────────
         # The toolbar Translate button streams the chapter's translation
@@ -20614,32 +20616,71 @@ class EpubReaderDialog(QDialog):
             self._splitter.setSizes(sizes)
 
     def _reveal_initial_reader_shell(self) -> None:
-        """Queue the native browser handoff after its first frame settles.
+        """Crossfade the loading shell into the first rendered reader frame.
 
-        A WebEngine JavaScript callback only confirms that Chromium accepted
-        the DOM update; its native compositor can still be presenting the old
-        default-black buffer.  Keep the loading shell mapped until that frame
-        has had time to commit, then perform the Qt widget swap atomically.
+        QWebEngine's Chromium surface is a native compositor layer, so an
+        ordinary child QWidget cannot cover its first black buffers. Instead,
+        snapshot the loading shell into a separate owned tool window, expose
+        Chromium behind it, then fade that native overlay away.
         """
         if not getattr(self, "_reader_startup_pending", False):
             return
         if (_HAS_WEBENGINE
                 and not getattr(self, "_reader_reveal_queued", False)):
             self._reader_reveal_queued = True
-            QTimer.singleShot(
-                self._FIRST_FRAME_SETTLE_MS,
-                self._commit_initial_reader_shell,
-            )
+            self._begin_initial_reader_transition()
             return
         if getattr(self, "_reader_reveal_queued", False):
             return
         self._commit_initial_reader_shell()
 
-    def _commit_initial_reader_shell(self) -> None:
-        """Atomically replace the loading shell with the settled reader."""
-        self._reader_reveal_queued = False
+    def _begin_initial_reader_transition(self) -> None:
+        """Place a native loading-shell snapshot above the reader window."""
         if (getattr(self, "_closing", False)
                 or not getattr(self, "_reader_startup_pending", False)):
+            self._reader_reveal_queued = False
+            return
+        try:
+            snapshot = self.grab()
+            if snapshot.isNull():
+                raise RuntimeError("reader transition snapshot is empty")
+            flags = (
+                Qt.Tool
+                | Qt.FramelessWindowHint
+                | Qt.NoDropShadowWindowHint
+                | Qt.WindowDoesNotAcceptFocus
+            )
+            overlay = QLabel(parent=self, f=flags)
+            overlay.setObjectName("readerStartupTransition")
+            overlay.setAttribute(Qt.WA_ShowWithoutActivating, True)
+            overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            overlay.setPixmap(snapshot)
+            overlay.setScaledContents(True)
+            top_left = self.mapToGlobal(QPoint(0, 0))
+            overlay.setGeometry(
+                top_left.x(), top_left.y(), self.width(), self.height())
+            overlay.setWindowOpacity(1.0)
+            overlay.show()
+            overlay.raise_()
+            self._reader_transition_overlay = overlay
+            # Give the owned native overlay one event-loop turn to paint before
+            # the underlying WebEngine surface is made visible.
+            QTimer.singleShot(0, self._commit_initial_reader_shell)
+        except Exception:
+            logger.debug("Reader startup transition unavailable: %s",
+                         traceback.format_exc())
+            # The themed loading shell still stays up during the compositor
+            # settle interval when a platform cannot create the overlay.
+            QTimer.singleShot(
+                self._STARTUP_TRANSITION_SETTLE_MS,
+                self._commit_initial_reader_shell,
+            )
+
+    def _commit_initial_reader_shell(self) -> None:
+        """Expose the reader behind the startup-transition snapshot."""
+        if (getattr(self, "_closing", False)
+                or not getattr(self, "_reader_startup_pending", False)):
+            self._cleanup_initial_reader_transition()
             return
         self._reader_startup_pending = False
         self._spin_timer.stop()
@@ -20652,6 +20693,48 @@ class EpubReaderDialog(QDialog):
         finally:
             self.setUpdatesEnabled(True)
         self.update()
+        if getattr(self, "_reader_transition_overlay", None) is not None:
+            QTimer.singleShot(
+                self._STARTUP_TRANSITION_SETTLE_MS,
+                self._fade_initial_reader_transition,
+            )
+        else:
+            self._reader_reveal_queued = False
+
+    def _fade_initial_reader_transition(self) -> None:
+        """Fade the loading snapshot away after Chromium is visibly stable."""
+        overlay = getattr(self, "_reader_transition_overlay", None)
+        if getattr(self, "_closing", False) or overlay is None:
+            self._cleanup_initial_reader_transition()
+            return
+        animation = QPropertyAnimation(overlay, b"windowOpacity", self)
+        animation.setDuration(self._STARTUP_TRANSITION_FADE_MS)
+        animation.setStartValue(1.0)
+        animation.setEndValue(0.0)
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+        animation.finished.connect(self._cleanup_initial_reader_transition)
+        self._reader_transition_animation = animation
+        animation.start()
+
+    def _cleanup_initial_reader_transition(self) -> None:
+        """Destroy transition resources and leave the reader fully interactive."""
+        animation = getattr(self, "_reader_transition_animation", None)
+        self._reader_transition_animation = None
+        if animation is not None:
+            try:
+                animation.stop()
+            except RuntimeError:
+                pass
+            animation.deleteLater()
+        overlay = getattr(self, "_reader_transition_overlay", None)
+        self._reader_transition_overlay = None
+        if overlay is not None:
+            try:
+                overlay.hide()
+                overlay.deleteLater()
+            except RuntimeError:
+                pass
+        self._reader_reveal_queued = False
 
     def _finalize_post_load(self, raw_chapters, overlaid_chapters, images,
                             overlay_applied: bool, filenames):
@@ -23878,6 +23961,7 @@ class EpubReaderDialog(QDialog):
         self._config['epub_reader_font_family'] = self._font_family
         self._config['epub_reader_show_raw'] = self._show_raw
         self._closing = True
+        self._cleanup_initial_reader_transition()
         # Stop timers and browser loads before worker shutdown so no
         # queued callbacks can restart work while the dialog is closing.
         # Live-translation cleanup: detach from the main GUI's log stream

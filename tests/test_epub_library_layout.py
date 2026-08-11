@@ -842,9 +842,8 @@ def test_reader_initial_shell_is_revealed_in_one_batched_update(monkeypatch):
     assert len(events) == 8
 
 
-def test_reader_waits_for_first_webengine_frame_before_handoff(monkeypatch):
+def test_reader_starts_one_native_crossfade_before_webengine_handoff(monkeypatch):
     events = []
-    scheduled = []
 
     class WidgetStub:
         def __init__(self, name):
@@ -864,7 +863,7 @@ def test_reader_waits_for_first_webengine_frame_before_handoff(monkeypatch):
         _reader_startup_pending = True
         _reader_reveal_queued = False
         _closing = False
-        _FIRST_FRAME_SETTLE_MS = 100
+        _reader_transition_overlay = None
         _spin_timer = TimerStub()
         _reader_stack = WidgetStub("reader")
         _toolbar_widget = WidgetStub("toolbar")
@@ -873,6 +872,9 @@ def test_reader_waits_for_first_webengine_frame_before_handoff(monkeypatch):
         _commit_initial_reader_shell = \
             EpubReaderDialog._commit_initial_reader_shell
 
+        def _begin_initial_reader_transition(self):
+            events.append(("transition", "begin"))
+
         def setUpdatesEnabled(self, enabled):
             events.append(("updates", enabled))
 
@@ -880,31 +882,64 @@ def test_reader_waits_for_first_webengine_frame_before_handoff(monkeypatch):
             events.append(("dialog", "update"))
 
     monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", True)
-    monkeypatch.setattr(
-        epub_library.QTimer,
-        "singleShot",
-        lambda delay, callback: scheduled.append((delay, callback)),
-    )
     reader = ReaderStub()
 
     EpubReaderDialog._reveal_initial_reader_shell(reader)
 
     assert reader._reader_startup_pending is True
     assert reader._reader_reveal_queued is True
-    assert events == []
-    assert len(scheduled) == 1
-    assert scheduled[0][0] == 100
+    assert events == [("transition", "begin")]
 
-    # A repeated completion signal cannot queue a second reveal timer.
+    # A repeated completion signal cannot launch a second native overlay.
     EpubReaderDialog._reveal_initial_reader_shell(reader)
-    assert len(scheduled) == 1
+    assert events == [("transition", "begin")]
 
-    scheduled[0][1]()
+    EpubReaderDialog._commit_initial_reader_shell(reader)
     assert reader._reader_startup_pending is False
     assert reader._reader_reveal_queued is False
-    assert events[0] == ("spinner", "stop")
+    assert ("spinner", "stop") in events
     assert ("content", "show") in events
     assert ("loading", "hide") in events
+
+
+def test_reader_crossfade_uses_owned_native_snapshot(qapp, monkeypatch):
+    scheduled = []
+
+    class TransitionHarness(QWidget):
+        def __init__(self):
+            super().__init__()
+            self._closing = False
+            self._reader_startup_pending = True
+            self._reader_reveal_queued = True
+            self._reader_transition_overlay = None
+            self._reader_transition_animation = None
+
+        def _commit_initial_reader_shell(self):
+            pass
+
+    monkeypatch.setattr(
+        epub_library.QTimer,
+        "singleShot",
+        lambda delay, callback: scheduled.append((delay, callback)),
+    )
+    harness = TransitionHarness()
+    harness.setStyleSheet("background: #1e1e1e;")
+    harness.resize(360, 240)
+    harness.show()
+    qapp.processEvents()
+    try:
+        EpubReaderDialog._begin_initial_reader_transition(harness)
+
+        overlay = harness._reader_transition_overlay
+        assert overlay is not None
+        assert overlay.isWindow() is True
+        assert overlay.parent() is harness
+        assert bool(overlay.windowFlags() & Qt.Tool)
+        assert scheduled == [(0, harness._commit_initial_reader_shell)]
+    finally:
+        EpubReaderDialog._cleanup_initial_reader_transition(harness)
+        harness.close()
+        qapp.processEvents()
 
 
 def test_reader_resync_ignores_transitional_page_count(monkeypatch):
