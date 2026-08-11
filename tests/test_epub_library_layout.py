@@ -787,8 +787,9 @@ def test_stale_paginated_callback_cannot_finalize_newer_raw_render():
     assert reader._chapter_page_cache == {}
 
 
-def test_reader_initial_shell_is_revealed_in_one_batched_update():
+def test_reader_initial_shell_is_revealed_in_one_batched_update(monkeypatch):
     events = []
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
 
     class WidgetStub:
         def __init__(self, name):
@@ -806,11 +807,15 @@ def test_reader_initial_shell_is_revealed_in_one_batched_update():
 
     class ReaderStub:
         _reader_startup_pending = True
+        _reader_reveal_queued = False
+        _closing = False
         _spin_timer = TimerStub()
         _reader_stack = WidgetStub("reader")
         _toolbar_widget = WidgetStub("toolbar")
         _content_widget = WidgetStub("content")
         _loading_widget = WidgetStub("loading")
+        _commit_initial_reader_shell = \
+            EpubReaderDialog._commit_initial_reader_shell
 
         def setUpdatesEnabled(self, enabled):
             events.append(("updates", enabled))
@@ -835,6 +840,71 @@ def test_reader_initial_shell_is_revealed_in_one_batched_update():
     ]
     EpubReaderDialog._reveal_initial_reader_shell(reader)
     assert len(events) == 8
+
+
+def test_reader_waits_for_first_webengine_frame_before_handoff(monkeypatch):
+    events = []
+    scheduled = []
+
+    class WidgetStub:
+        def __init__(self, name):
+            self.name = name
+
+        def show(self):
+            events.append((self.name, "show"))
+
+        def hide(self):
+            events.append((self.name, "hide"))
+
+    class TimerStub:
+        def stop(self):
+            events.append(("spinner", "stop"))
+
+    class ReaderStub:
+        _reader_startup_pending = True
+        _reader_reveal_queued = False
+        _closing = False
+        _FIRST_FRAME_SETTLE_MS = 100
+        _spin_timer = TimerStub()
+        _reader_stack = WidgetStub("reader")
+        _toolbar_widget = WidgetStub("toolbar")
+        _content_widget = WidgetStub("content")
+        _loading_widget = WidgetStub("loading")
+        _commit_initial_reader_shell = \
+            EpubReaderDialog._commit_initial_reader_shell
+
+        def setUpdatesEnabled(self, enabled):
+            events.append(("updates", enabled))
+
+        def update(self):
+            events.append(("dialog", "update"))
+
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", True)
+    monkeypatch.setattr(
+        epub_library.QTimer,
+        "singleShot",
+        lambda delay, callback: scheduled.append((delay, callback)),
+    )
+    reader = ReaderStub()
+
+    EpubReaderDialog._reveal_initial_reader_shell(reader)
+
+    assert reader._reader_startup_pending is True
+    assert reader._reader_reveal_queued is True
+    assert events == []
+    assert len(scheduled) == 1
+    assert scheduled[0][0] == 100
+
+    # A repeated completion signal cannot queue a second reveal timer.
+    EpubReaderDialog._reveal_initial_reader_shell(reader)
+    assert len(scheduled) == 1
+
+    scheduled[0][1]()
+    assert reader._reader_startup_pending is False
+    assert reader._reader_reveal_queued is False
+    assert events[0] == ("spinner", "stop")
+    assert ("content", "show") in events
+    assert ("loading", "hide") in events
 
 
 def test_reader_resync_ignores_transitional_page_count(monkeypatch):

@@ -19487,6 +19487,10 @@ class EpubReaderDialog(QDialog):
     # Some image-heavy sections spend long stretches in native extraction;
     # without this small handoff the UI can appear frozen on translated text.
     _RAW_PDF_WORKER_PAINT_DELAY_MS = 120
+    # ``runJavaScript`` completion precedes Chromium presenting that DOM state
+    # to its native compositor. Keep the loading shell visible for this short
+    # settle interval instead of exposing the compositor's default-black frame.
+    _FIRST_FRAME_SETTLE_MS = 100
 
     def __init__(self, epub_path: str, config: dict | None = None, parent=None,
                  initial_chapter: int | None = None,
@@ -19585,6 +19589,16 @@ class EpubReaderDialog(QDialog):
         self._font_family = self._config.get('epub_reader_font_family', 'Embedded CSS')
         layout_key = self._config.get('epub_reader_layout', LAYOUT_SINGLE)
         self._layout_mode = layout_key if layout_key in (LAYOUT_SCROLL, LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_ALL) else LAYOUT_SINGLE
+        # Give the native dialog a real backing colour before Windows maps it.
+        # Otherwise DWM can briefly expose its default black erase buffer while
+        # the first child-widget paint is still being assembled.
+        from PySide6.QtGui import QPalette
+        initial_palette = self.palette()
+        initial_palette.setColor(
+            QPalette.Window, QColor(self._get_theme()['bg']))
+        self.setPalette(initial_palette)
+        self.setAutoFillBackground(True)
+        self.setAttribute(Qt.WA_StyledBackground, True)
         # Optional — caller can request opening at a specific chapter index.
         # The index is clamped to the available chapter range once the EPUB
         # has finished loading (see _on_epub_loaded_from_cache). When the
@@ -19676,6 +19690,7 @@ class EpubReaderDialog(QDialog):
         # scroll-to-paginated prime pass). Revealing the content any earlier
         # exposes the intermediate layout and causes an opening flicker.
         self._reader_startup_pending = True
+        self._reader_reveal_queued = False
 
         # ── Live single-chapter translation state ──────────────────────
         # The toolbar Translate button streams the chapter's translation
@@ -20253,8 +20268,11 @@ class EpubReaderDialog(QDialog):
             # internal Chromium scroller.
             widget = _WheelCapturingView()
             _configure_epub_reader_web_settings(widget)
-            widget.setUrl(QUrl("about:blank"))
+            # Set the compositor clear colour before the first navigation.
+            # Doing this after about:blank allowed one default-black surface
+            # to be presented during initial attachment on Windows.
             widget.page().setBackgroundColor(QColor(self._get_theme()['bg']))
+            widget.setUrl(QUrl("about:blank"))
             widget.wheel_scrolled.connect(self._on_reader_wheel_scrolled)
         else:
             widget = QTextBrowser()
@@ -20596,14 +20614,32 @@ class EpubReaderDialog(QDialog):
             self._splitter.setSizes(sizes)
 
     def _reveal_initial_reader_shell(self) -> None:
-        """Atomically replace the loading shell with the rendered reader.
+        """Queue the native browser handoff after its first frame settles.
 
-        The first Chromium chapter is rendered while the main content widget
-        remains hidden.  Batching all visibility changes into one update keeps
-        Windows from painting the toolbar/TOC, an empty browser surface, and
-        the final page as three separate frames.
+        A WebEngine JavaScript callback only confirms that Chromium accepted
+        the DOM update; its native compositor can still be presenting the old
+        default-black buffer.  Keep the loading shell mapped until that frame
+        has had time to commit, then perform the Qt widget swap atomically.
         """
         if not getattr(self, "_reader_startup_pending", False):
+            return
+        if (_HAS_WEBENGINE
+                and not getattr(self, "_reader_reveal_queued", False)):
+            self._reader_reveal_queued = True
+            QTimer.singleShot(
+                self._FIRST_FRAME_SETTLE_MS,
+                self._commit_initial_reader_shell,
+            )
+            return
+        if getattr(self, "_reader_reveal_queued", False):
+            return
+        self._commit_initial_reader_shell()
+
+    def _commit_initial_reader_shell(self) -> None:
+        """Atomically replace the loading shell with the settled reader."""
+        self._reader_reveal_queued = False
+        if (getattr(self, "_closing", False)
+                or not getattr(self, "_reader_startup_pending", False)):
             return
         self._reader_startup_pending = False
         self._spin_timer.stop()
