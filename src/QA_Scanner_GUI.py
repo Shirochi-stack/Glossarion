@@ -4367,9 +4367,19 @@ class QAScannerMixin:
 
             wordcount_layout.addSpacing(10)
 
-            # Missing images check (requires source file like word count does)
-            check_missing_images_checkbox = self._create_styled_checkbox("Check for missing image tags (images lost during translation)")
+            # Source resource preservation (requires source file like word count does)
+            check_missing_images_checkbox = self._create_styled_checkbox(
+                "Check source resources (images, links, tables, and graphics)"
+            )
             check_missing_images_checkbox.setChecked(qa_settings.get('check_missing_images', True))
+            check_missing_images_checkbox.setToolTip(
+                _wrapped_tooltip_html(
+                    "Compares each translated chapter with its matched source chapter. "
+                    "Detects missing or replaced image references, changed URLs, and lost "
+                    "or added table, SVG, canvas, object, embed, picture, video, and CSS "
+                    "background elements. PDF files are paired by bookmark section."
+                )
+            )
             wordcount_layout.addWidget(check_missing_images_checkbox)
 
             images_desc = QLabel("Compares image tags between original and translated HTML files.\n" +
@@ -4397,8 +4407,17 @@ class QAScannerMixin:
             additional_layout.addSpacing(10)
 
             # Multiple headers check
-            check_multiple_headers_checkbox = self._create_styled_checkbox("Detect files with 2 or more headers (h1-h6 tags)")
+            check_multiple_headers_checkbox = self._create_styled_checkbox(
+                "Detect unexpected extra headers (h1-h6 tags)"
+            )
             check_multiple_headers_checkbox.setChecked(qa_settings.get('check_multiple_headers', True))
+            check_multiple_headers_checkbox.setToolTip(
+                _wrapped_tooltip_html(
+                    "Compares the translated file's header count with its matched source. "
+                    "Multiple source headers are allowed; only unexpected header growth is "
+                    "flagged. If no source can be resolved, the legacy two-header rule is used."
+                )
+            )
             additional_layout.addWidget(check_multiple_headers_checkbox)
 
             headers_desc = QLabel("Identifies files that may have been incorrectly split or merged.\n" +

@@ -1892,7 +1892,11 @@ def extract_epub_image_info(epub_path, log=print):
         log(f"❌ Error extracting image info from EPUB: {e}")
         return {}
 
-def detect_missing_images(translated_html, chapter_num, original_image_info):
+def detect_missing_images(
+        translated_html,
+        chapter_num,
+        original_image_info,
+        image_rename_map=None):
     """
     Detect missing or extra images by comparing translated HTML with original EPUB image info.
     
@@ -1958,6 +1962,55 @@ def detect_missing_images(translated_html, chapter_num, original_image_info):
                 'translated_count': trans_img_count,
                 'description': f'Translation has {extra_count} extra images compared to original ({trans_img_count}/{orig_img_count})'
             })
+
+        # Equal counts are not sufficient: one missing image can be replaced by
+        # an unrelated reference. Compare canonical references while honoring
+        # extraction's image_rename_map.json and path-only differences.
+        orig_srcs = orig_info.get('image_srcs') or []
+        if orig_srcs and trans_img_count == orig_img_count:
+            normalized_map = {
+                os.path.basename(str(old_name).replace('\\', '/')).casefold():
+                os.path.basename(str(new_name).replace('\\', '/')).casefold()
+                for old_name, new_name in (image_rename_map or {}).items()
+                if old_name and new_name
+            }
+            source_refs = Counter(
+                ref for ref in (
+                    _normalize_preserved_reference(src, normalized_map, image=True)
+                    for src in orig_srcs
+                ) if ref
+            )
+            output_refs = Counter(
+                ref for ref in (
+                    _normalize_preserved_reference(
+                        image.get('src', ''),
+                        normalized_map,
+                        image=True,
+                    )
+                    for image in trans_images
+                ) if ref
+            )
+            missing_refs = source_refs - output_refs
+            unexpected_refs = output_refs - source_refs
+            if missing_refs or unexpected_refs:
+                changed_count = max(
+                    sum(missing_refs.values()),
+                    sum(unexpected_refs.values()),
+                )
+                details.append({
+                    'type': 'changed_image_references',
+                    'severity': 'high',
+                    'count': changed_count,
+                    'original_count': orig_img_count,
+                    'translated_count': trans_img_count,
+                    'missing_srcs': list(missing_refs.elements())[:5],
+                    'unexpected_srcs': list(unexpected_refs.elements())[:5],
+                    'description': (
+                        'Translation image references differ from the source '
+                        f'({sum(missing_refs.values())} missing, '
+                        f'{sum(unexpected_refs.values())} unexpected)'
+                    ),
+                })
         
         return len(details) > 0, details
         
@@ -6865,10 +6918,289 @@ def _apply_pdf_qa_source_aliases(source_map, aliases):
         source_info = source_map[source_key]
         if isinstance(source_info, dict):
             source_info = dict(source_info)
+            source_info.setdefault(
+                '_qa_pdf_raw_filename',
+                source_info.get('filename') or str(raw_name),
+            )
             source_info['filename'] = alias
             source_info['_qa_pdf_source_alias'] = True
         source_map[alias] = source_info
     return source_map
+
+
+def _normalize_preserved_reference(value, rename_map=None, *, image=False):
+    """Normalize an HTML reference without hiding meaningful URL changes."""
+    if not isinstance(value, str):
+        return ""
+    reference = html_lib.unescape(value).strip().replace('\\', '/')
+    if not reference:
+        return ""
+    if reference.lower().startswith('data:'):
+        return 'data:' + hashlib.sha256(reference.encode('utf-8')).hexdigest()
+
+    if not image:
+        return reference
+
+    if re.match(r'^[a-z][a-z0-9+.-]*://', reference, flags=re.IGNORECASE):
+        return reference
+
+    # Image files are routinely moved between ``images/`` and chapter-relative
+    # paths. Their basename is the stable identity, with image_rename_map.json
+    # providing the canonical replacement when extraction renamed the asset.
+    path_only = reference.split('#', 1)[0].split('?', 1)[0]
+    basename = os.path.basename(path_only).casefold()
+    if not basename:
+        return reference.casefold()
+    mapped = (rename_map or {}).get(basename)
+    return str(mapped or basename).casefold()
+
+
+def _html_preservation_profile(html_content, image_rename_map=None):
+    """Return compact source/output structure used by preservation QA."""
+    if not isinstance(html_content, str) or not html_content:
+        return {
+            'header_count': 0,
+            'header_info': [],
+            'review_tag_counts': {},
+            'link_hrefs': {},
+            'table_counts': {},
+            'table_shapes': [],
+            'graphic_counts': {},
+            'graphic_refs': {},
+            'image_srcs': {},
+        }
+
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+    except Exception:
+        return _html_preservation_profile('', image_rename_map)
+
+    headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+    header_info = [
+        {'tag': header.name, 'text': header.get_text(' ', strip=True)[:80]}
+        for header in headers[:5]
+    ]
+
+    links = Counter()
+    for anchor in soup.find_all('a'):
+        href = _normalize_preserved_reference(anchor.get('href', ''))
+        if href:
+            links[href] += 1
+
+    table_counts = {
+        tag_name: len(soup.find_all(tag_name))
+        for tag_name in ('table', 'caption', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td')
+    }
+    table_counts = {name: count for name, count in table_counts.items() if count}
+
+    graphic_counts = {
+        tag_name: len(soup.find_all(tag_name))
+        for tag_name in (
+            'svg', 'path', 'circle', 'ellipse', 'rect', 'line', 'polygon',
+            'polyline', 'image', 'use', 'canvas', 'object', 'embed', 'picture',
+            'video',
+        )
+    }
+    css_backgrounds = 0
+    for element in soup.find_all(style=True):
+        css_backgrounds += len(re.findall(
+            r'background(?:-image)?\s*:[^;]*url\s*\(',
+            str(element.get('style', '')),
+            flags=re.IGNORECASE,
+        ))
+    if css_backgrounds:
+        graphic_counts['css-background'] = css_backgrounds
+    graphic_counts = {name: count for name, count in graphic_counts.items() if count}
+
+    image_srcs = Counter()
+    normalized_map = {
+        os.path.basename(str(old_name).replace('\\', '/')).casefold():
+        os.path.basename(str(new_name).replace('\\', '/')).casefold()
+        for old_name, new_name in (image_rename_map or {}).items()
+        if old_name and new_name
+    }
+    for image in soup.find_all('img'):
+        src = _normalize_preserved_reference(
+            image.get('src', ''),
+            normalized_map,
+            image=True,
+        )
+        if src:
+            image_srcs[src] += 1
+
+    graphic_refs = Counter()
+    for tag, attribute in (
+        ('source', 'src'),
+        ('source', 'srcset'),
+        ('object', 'data'),
+        ('embed', 'src'),
+        ('video', 'src'),
+        ('video', 'poster'),
+        ('image', 'href'),
+        ('image', 'xlink:href'),
+        ('use', 'href'),
+        ('use', 'xlink:href'),
+    ):
+        for element in soup.find_all(tag):
+            reference = _normalize_preserved_reference(element.get(attribute, ''))
+            if reference:
+                graphic_refs[f'{tag}.{attribute}:{reference}'] += 1
+
+    table_shapes = []
+    for table in soup.find_all('table'):
+        rows = table.find_all('tr')
+        row_widths = []
+        span_signature = []
+        for row in rows:
+            cells = row.find_all(['th', 'td'], recursive=False)
+            if not cells:
+                cells = row.find_all(['th', 'td'])
+            row_widths.append(len(cells))
+            for cell in cells:
+                span_signature.append((
+                    cell.name,
+                    str(cell.get('rowspan', '1')),
+                    str(cell.get('colspan', '1')),
+                ))
+        table_shapes.append((tuple(row_widths), tuple(span_signature)))
+
+    return {
+        'header_count': len(headers),
+        'header_info': header_info,
+        'review_tag_counts': _count_beautifulsoup_review_tags(html_content),
+        'link_hrefs': dict(links),
+        'table_counts': table_counts,
+        'table_shapes': table_shapes,
+        'graphic_counts': graphic_counts,
+        'graphic_refs': dict(graphic_refs),
+        'image_srcs': dict(image_srcs),
+    }
+
+
+def _build_source_preservation_info(original_html_content, image_rename_map=None):
+    """Build a small, process-safe structure map instead of copying full HTML."""
+    result = {}
+    for key, source_info in (original_html_content or {}).items():
+        if not isinstance(source_info, dict):
+            continue
+        source_html = source_info.get('html')
+        if not isinstance(source_html, str):
+            continue
+        profile = _html_preservation_profile(source_html, image_rename_map)
+        profile['filename'] = source_info.get('filename', str(key))
+        profile['_qa_pdf_raw_filename'] = source_info.get(
+            '_qa_pdf_raw_filename',
+            source_info.get('filename', str(key)),
+        )
+        result[key] = profile
+    return result
+
+
+def _source_preservation_profile_for_output(source_info, filename):
+    """Find source structure using the same response-prefix rules as PDF QA."""
+    wanted = _qa_source_basename(filename)
+    if not wanted:
+        return None
+    for key, profile in (source_info or {}).items():
+        if not isinstance(profile, dict):
+            continue
+        candidates = (
+            key if isinstance(key, str) else '',
+            profile.get('filename', ''),
+            profile.get('_qa_pdf_raw_filename', ''),
+        )
+        if any(_qa_source_basename(str(candidate)) == wanted for candidate in candidates):
+            return profile
+    return None
+
+
+def _preservation_count_issues(source_profile, output_profile):
+    """Report lost links, tables, and non-img graphics with useful previews."""
+    if not isinstance(source_profile, dict) or not isinstance(output_profile, dict):
+        return []
+    issues = []
+
+    source_links = Counter(source_profile.get('link_hrefs') or {})
+    output_links = Counter(output_profile.get('link_hrefs') or {})
+    missing_links = source_links - output_links
+    unexpected_links = output_links - source_links
+    same_link_count = sum(source_links.values()) == sum(output_links.values())
+    if missing_links and unexpected_links and same_link_count:
+        changed_total = max(
+            sum(missing_links.values()),
+            sum(unexpected_links.values()),
+        )
+        issues.append((
+            f"changed_link_targets_{changed_total}_found",
+            (
+                "missing: " + ', '.join(list(missing_links.elements())[:3])
+                + "; unexpected: "
+                + ', '.join(list(unexpected_links.elements())[:3])
+            ),
+        ))
+    elif missing_links:
+        missing_total = sum(missing_links.values())
+        issues.append((
+            f"missing_link_targets_{missing_total}_lost_"
+            f"({sum(output_links.values())}/{sum(source_links.values())})",
+            ', '.join(list(missing_links.elements())[:5]),
+        ))
+    elif unexpected_links:
+        unexpected_total = sum(unexpected_links.values())
+        issues.append((
+            f"changed_link_targets_{unexpected_total}_found",
+            ', '.join(list(unexpected_links.elements())[:5]),
+        ))
+
+    for family, label in (('table_counts', 'table_elements'), ('graphic_counts', 'graphics')):
+        source_counts = source_profile.get(family) or {}
+        output_counts = output_profile.get(family) or {}
+        for tag_name in sorted(set(source_counts) | set(output_counts)):
+            source_count = int(source_counts.get(tag_name, 0) or 0)
+            output_count = int(output_counts.get(tag_name, 0) or 0)
+            if output_count < source_count:
+                issues.append((
+                    f"missing_{label}_{tag_name}_{source_count - output_count}_lost_"
+                    f"({output_count}/{source_count})",
+                    f"<{tag_name}>: source={source_count}, output={output_count}",
+                ))
+            elif output_count > source_count:
+                issues.append((
+                    f"extra_{label}_{tag_name}_{output_count - source_count}_added_"
+                    f"({output_count}/{source_count})",
+                    f"<{tag_name}>: source={source_count}, output={output_count}",
+                ))
+
+    source_table_shapes = source_profile.get('table_shapes') or []
+    output_table_shapes = output_profile.get('table_shapes') or []
+    if (
+        source_table_shapes
+        and len(source_table_shapes) == len(output_table_shapes)
+        and source_table_shapes != output_table_shapes
+    ):
+        issues.append((
+            'changed_table_structure_found',
+            'table row/cell/span structure differs from source',
+        ))
+
+    source_graphic_refs = Counter(source_profile.get('graphic_refs') or {})
+    output_graphic_refs = Counter(output_profile.get('graphic_refs') or {})
+    missing_graphic_refs = source_graphic_refs - output_graphic_refs
+    unexpected_graphic_refs = output_graphic_refs - source_graphic_refs
+    if missing_graphic_refs or unexpected_graphic_refs:
+        changed_count = max(
+            sum(missing_graphic_refs.values()),
+            sum(unexpected_graphic_refs.values()),
+        )
+        issues.append((
+            f'changed_graphic_references_{changed_count}_found',
+            (
+                'missing: ' + ', '.join(list(missing_graphic_refs.elements())[:3])
+                + '; unexpected: '
+                + ', '.join(list(unexpected_graphic_refs.elements())[:3])
+            ),
+        ))
+    return issues
 
 
 def _count_beautifulsoup_review_tags(html_content):
@@ -6910,12 +7242,27 @@ def _xml_inner_xml_or_text(element):
     return "".join(parts)
 
 
-def _sdlxliff_review_tag_counts(folder_path, filename):
+def _sdlxliff_review_tag_counts(
+        folder_path,
+        filename,
+        fallback_source_counts=None,
+        current_output_html=None):
+    """Read SDLXLIFF review counts, with bookmark-aware direct HTML fallback.
+
+    PDF response files may be renamed after their SDLXLIFF sidecar was written.
+    In that case an exact sidecar filename is no longer authoritative, while
+    the bookmark alias map still gives us the correct raw source structure.
+    """
     output_name = os.path.basename(str(filename or "").replace("\\", "/"))
     if not output_name:
         return None, None
     sidecar_path = os.path.join(str(folder_path or ""), "SDLXLIFF", f"{output_name}.sdlxliff")
     if not os.path.isfile(sidecar_path):
+        if isinstance(fallback_source_counts, dict) and current_output_html is not None:
+            return (
+                dict(fallback_source_counts),
+                _count_beautifulsoup_review_tags(current_output_html),
+            )
         return None, None
     try:
         root = ET.parse(sidecar_path).getroot()
@@ -6927,11 +7274,19 @@ def _sdlxliff_review_tag_counts(folder_path, filename):
                 source_parts.append(_xml_inner_xml_or_text(element))
             elif name == "target":
                 target_parts.append(_xml_inner_xml_or_text(element))
-        return (
-            _count_beautifulsoup_review_tags("\n".join(source_parts)),
-            _count_beautifulsoup_review_tags("\n".join(target_parts)),
+        source_counts = _count_beautifulsoup_review_tags("\n".join(source_parts))
+        output_counts = (
+            _count_beautifulsoup_review_tags(current_output_html)
+            if current_output_html is not None
+            else _count_beautifulsoup_review_tags("\n".join(target_parts))
         )
+        return source_counts, output_counts
     except Exception:
+        if isinstance(fallback_source_counts, dict) and current_output_html is not None:
+            return (
+                dict(fallback_source_counts),
+                _count_beautifulsoup_review_tags(current_output_html),
+            )
         return None, None
 
 
@@ -8116,7 +8471,22 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
 
 def process_html_file_batch(args):
     """Process a batch of HTML or text files - MUST BE AT MODULE LEVEL"""
-    if len(args) >= 10:
+    if len(args) >= 12:
+        (
+            file_batch,
+            folder_path,
+            qa_settings,
+            mode,
+            original_word_counts,
+            merge_info,
+            text_file_mode,
+            original_image_info,
+            original_punctuation_info,
+            original_quotation_info,
+            original_preservation_info,
+            image_rename_map,
+        ) = args[:12]
+    elif len(args) >= 10:
         (
             file_batch,
             folder_path,
@@ -8129,10 +8499,14 @@ def process_html_file_batch(args):
             original_punctuation_info,
             original_quotation_info,
         ) = args[:10]
+        original_preservation_info = {}
+        image_rename_map = {}
     else:
         # Backward-compatible worker tuple used by existing callers/tests.
         file_batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode, original_image_info, original_punctuation_info = args
         original_quotation_info = {}
+        original_preservation_info = {}
+        image_rename_map = {}
     batch_results = []
     
     # Import what we need inside the worker
@@ -8308,6 +8682,16 @@ def process_html_file_batch(args):
         # previews without changing code-based QA handling.
         issues = []
         qa_issue_previews = {}
+        source_preservation_profile = _source_preservation_profile_for_output(
+            original_preservation_info,
+            filename,
+        )
+        output_preservation_profile = None
+        if raw_file_content and filename.lower().endswith(_HTML_LIKE_EXTENSIONS):
+            output_preservation_profile = _html_preservation_profile(
+                raw_file_content,
+                image_rename_map,
+            )
 
          # Check for glossary leakage
         check_glossary = qa_settings.get('check_glossary_leakage', True)
@@ -8332,8 +8716,23 @@ def process_html_file_batch(args):
                     total_glossary_items = sum(g.get('count', 1) for g in glossary_issues)
                     issues.append(f"glossary_leakage_{total_glossary_items}_entries_found")
         
-        # Check for missing images (skip for text file mode unless we have HTML files with image info)
+        # Source resource preservation. This extends the historical missing-img
+        # option to links, tables and non-img graphics while retaining the same
+        # setting and source matching rules.
         check_missing_imgs = qa_settings.get('check_missing_images', True)
+        if (
+            check_missing_imgs
+            and source_preservation_profile
+            and output_preservation_profile
+        ):
+            for resource_issue, resource_preview in _preservation_count_issues(
+                    source_preservation_profile,
+                    output_preservation_profile):
+                issues.append(resource_issue)
+                if resource_preview:
+                    qa_issue_previews[resource_issue] = resource_preview
+
+        # Check for missing images (skip for text file mode unless we have HTML files with image info)
         
         # DEBUG: Show the condition check
         # print(f"[DEBUG] File {filename}: text_mode={text_file_mode}, check_imgs={check_missing_imgs}, is_html={filename.lower().endswith(('.html', '.xhtml', '.htm'))}, has_img_info={bool(original_image_info)}")
@@ -8371,7 +8770,12 @@ def process_html_file_batch(args):
                                 break
                     
                     if matched_key:
-                        has_missing_imgs, img_issues = detect_missing_images(translated_html, matched_key, original_image_info)
+                        has_missing_imgs, img_issues = detect_missing_images(
+                            translated_html,
+                            matched_key,
+                            original_image_info,
+                            image_rename_map=image_rename_map,
+                        )
                         # print(f"[IMAGE DEBUG] Matched {filename} to original chunk '{matched_key}'")
                     else:
                         # print(f"[IMAGE DEBUG] No match found for {filename} in word_count folder")
@@ -8385,7 +8789,12 @@ def process_html_file_batch(args):
                         
                         # EXACT match only - no fuzzy logic, no position-based matching
                         if orig_basename == search_basename:
-                            has_missing_imgs, img_issues = detect_missing_images(translated_html, spine_idx, original_image_info)
+                            has_missing_imgs, img_issues = detect_missing_images(
+                                translated_html,
+                                spine_idx,
+                                original_image_info,
+                                image_rename_map=image_rename_map,
+                            )
                             matched_key = spine_idx
                             # print(f"[IMAGE DEBUG] Matched {filename} to spine file '{orig_filename}' at spine_idx={spine_idx}")
                             break
@@ -8419,6 +8828,15 @@ def process_html_file_batch(args):
                         trans_count = img_issue.get('translated_count', 0)
                         if issue_type == 'extra_images':
                             issues.append(f"extra_images_{issue_count}_added_({trans_count}/{orig_count})")
+                        elif issue_type == 'changed_image_references':
+                            issue_code = f"changed_image_references_{issue_count}_found"
+                            issues.append(issue_code)
+                            changed_examples = (
+                                img_issue.get('missing_srcs', [])
+                                + img_issue.get('unexpected_srcs', [])
+                            )
+                            if changed_examples:
+                                qa_issue_previews[issue_code] = ', '.join(changed_examples[:5])
                         else:
                             issues.append(f"missing_images_{issue_count}_lost_({trans_count}/{orig_count})")
                 else:
@@ -8723,15 +9141,24 @@ def process_html_file_batch(args):
                     else:
                         issues.append(issue)
         
-        # Check for multiple headers. PDF bookmark HTML now carries headings,
-        # so it should follow the same configured rule as other HTML inputs.
+        # Check for multiple headers against the matching source bookmark.
+        # Parsing visible ``raw_text`` could never see h1-h6 tags, and blindly
+        # flagging every second heading penalized legitimate multi-page PDF
+        # sections. Only flag header growth beyond the source allowance.
         check_multiple_headers = qa_settings.get('check_multiple_headers', True)
         has_multiple = False
         header_count = 0
         header_info = None
         
-        if check_multiple_headers:
-            has_multiple, header_count, header_info = detect_multiple_headers(raw_text)
+        if check_multiple_headers and raw_file_content:
+            _legacy_multiple, header_count, header_info = detect_multiple_headers(raw_file_content)
+            if source_preservation_profile is not None:
+                source_header_count = int(
+                    source_preservation_profile.get('header_count', 0) or 0
+                )
+                has_multiple = header_count > max(1, source_header_count)
+            else:
+                has_multiple = _legacy_multiple
             if has_multiple:
                 issues.append(f"multiple_headers_{header_count}_found")
         
@@ -8764,7 +9191,17 @@ def process_html_file_batch(args):
         if (check_missing_beautifulsoup_tags
                 and filename.lower().endswith(_HTML_LIKE_EXTENSIONS)
                 and raw_file_content):
-            source_tag_counts, output_tag_counts = _sdlxliff_review_tag_counts(folder_path, filename)
+            fallback_source_counts = None
+            if source_preservation_profile is not None:
+                fallback_source_counts = source_preservation_profile.get(
+                    'review_tag_counts'
+                )
+            source_tag_counts, output_tag_counts = _sdlxliff_review_tag_counts(
+                folder_path,
+                filename,
+                fallback_source_counts=fallback_source_counts,
+                current_output_html=raw_file_content,
+            )
             if source_tag_counts is not None and output_tag_counts is not None:
                 missing_tag_issue = _missing_beautifulsoup_tags_issue(
                     source_tag_counts,
@@ -9278,8 +9715,20 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     original_punctuation_info = {}  # For punctuation mismatch detection
     original_quotation_info = {}  # Kept separate from established ?! punctuation data
     original_html_content = {}  # For silent truncation detection
+    original_preservation_info = {}  # Compact links/tables/graphics/header metadata
+    image_rename_map = {}
     merge_info = {}  # For request merging support
     combined_text_file = None  # For text file mode word count analysis
+
+    image_rename_map_path = os.path.join(folder_path, 'image_rename_map.json')
+    if os.path.isfile(image_rename_map_path):
+        try:
+            with open(image_rename_map_path, 'r', encoding='utf-8') as rename_file:
+                loaded_rename_map = json.load(rename_file)
+            if isinstance(loaded_rename_map, dict):
+                image_rename_map = loaded_rename_map
+        except (OSError, ValueError, TypeError) as exc:
+            log(f"   WARNING: Could not read image_rename_map.json for QA: {exc}")
     
     # Extract image info from EPUB or word_count folder if missing images check is enabled
     check_missing_imgs = qa_settings.get('check_missing_images', True)
@@ -9533,7 +9982,18 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     check_truncation = qa_settings.get('check_silent_truncation', False)
     check_ai_truncation = qa_settings.get('check_ai_truncation_detection', False)
     check_repetition = qa_settings.get('check_repetition', True)
-    _need_source_html = check_truncation or check_ai_truncation or check_repetition
+    check_missing_beautifulsoup_tags_setting = qa_settings.get(
+        'check_missing_beautifulsoup_tags',
+        False,
+    )
+    _need_source_html = (
+        check_truncation
+        or check_ai_truncation
+        or check_repetition
+        or check_missing_imgs
+        or check_multiple_headers
+        or check_missing_beautifulsoup_tags_setting
+    )
     if _need_source_html:
         if text_file_mode:
             # For text file mode, extract from word_count folder
@@ -9611,13 +10071,19 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                                     for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
                                         tag.decompose()
                                     chunk_text = soup.get_text(separator=' ', strip=True)
-                                chunk_word_count = _count_small_file_words(chunk_text)
+                                # Use the active QA counter on both sides of
+                                # the ratio. The legacy implementation always
+                                # stored source *words* here even when the
+                                # translated side used exact/sampled character
+                                # counting, producing meaningless PDF ratios.
+                                chunk_comparison_count = _count_words_cached(chunk_text)
+                                chunk_small_file_word_count = _count_small_file_words(chunk_text)
                                 # Store with filename as key
                                 if chunk_file.lower().endswith(('.html', '.htm', '.xhtml')):
                                     script_hint = detect_dominant_script(chunk_text)
                                     chunk_source_info = {
-                                        'word_count': chunk_word_count,
-                                        'small_file_word_count': chunk_word_count,
+                                        'word_count': chunk_comparison_count,
+                                        'small_file_word_count': chunk_small_file_word_count,
                                         'filename': chunk_file,
                                         'has_headers': has_headers,
                                         'custom_tags_count': custom_tags_count,
@@ -9625,7 +10091,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                                         'is_cjk': script_hint in ['cjk', 'japanese', 'korean'],
                                         'script': script_hint,
                                     }
-                                original_word_counts[chunk_file] = chunk_source_info if chunk_source_info is not None else chunk_word_count
+                                original_word_counts[chunk_file] = (
+                                    chunk_source_info
+                                    if chunk_source_info is not None
+                                    else chunk_comparison_count
+                                )
                             
                             log(f"   Loaded {len(original_word_counts)} original chunk files from word_count folder")
                             log(f"   Total source words: {_sum_source_word_counts(original_word_counts):,}")
@@ -9753,6 +10223,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 "sections; source-dependent checks will skip unmatched files"
             )
 
+    original_preservation_info = _build_source_preservation_info(
+        original_html_content,
+        image_rename_map=image_rename_map,
+    )
+
     # Log settings
     log(f"\n📋 QA Settings Status:")
     log(f"   ✓ Target language: {qa_settings.get('target_language', 'english').upper()}")
@@ -9836,10 +10311,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
     log(f"   ✓ Translation artifacts check: {'ENABLED' if qa_settings.get('check_translation_artifacts', False) else 'DISABLED'}")
     log(f"   ✓ Glossary leakage check: {'ENABLED' if qa_settings.get('check_glossary_leakage', True) else 'DISABLED'}")
-    log(f"   ✓ Missing images check: {'ENABLED' if qa_settings.get('check_missing_images', True) else 'DISABLED'}")
+    log(f"   ✓ Source resource preservation (images/links/tables/graphics): {'ENABLED' if qa_settings.get('check_missing_images', True) else 'DISABLED'}")
     log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")
     log(f"   ✓ Missing header tags check: {'ENABLED' if qa_settings.get('check_missing_header_tags', False) else 'DISABLED'}")
-    log(f"   ✓ SDLXLIFF source->output p/h tag check: {'ENABLED' if qa_settings.get('check_missing_beautifulsoup_tags', False) else 'DISABLED'}")
+    log(f"   ✓ Source->output p/h tag check (SDLXLIFF + bookmark fallback): {'ENABLED' if qa_settings.get('check_missing_beautifulsoup_tags', False) else 'DISABLED'}")
     if qa_settings.get('check_missing_beautifulsoup_tags', False):
         try:
             retained_pct = int(round(float(
@@ -9878,7 +10353,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     else:
         counting_mode_str = "CHARACTER COUNT (sampled)"
     log(f"   ✓ Counting mode: {counting_mode_str}")
-    log(f"   ✓ Multiple headers check: {'ENABLED' if qa_settings.get('check_multiple_headers', False) else 'DISABLED'}")
+    log(f"   ✓ Unexpected extra headers check: {'ENABLED' if qa_settings.get('check_multiple_headers', False) else 'DISABLED'}")
     log(f"   ✓ All-text-in-header check: {'ENABLED' if qa_settings.get('check_all_text_in_header', True) else 'DISABLED'}")
     log(f"   ✓ Invalid/custom tag mismatch check: {'ENABLED' if qa_settings.get('check_invalid_tag_mismatch', False) else 'DISABLED'}")
     
@@ -10025,6 +10500,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             original_image_info,
             original_punctuation_info,
             original_quotation_info,
+            original_preservation_info,
+            image_rename_map,
         )
         worker_args.append(args)
     

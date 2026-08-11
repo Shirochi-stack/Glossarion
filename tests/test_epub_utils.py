@@ -32,6 +32,7 @@ from scan_html_folder import (
     _record_ai_truncation_issue,
     build_pdf_qa_source_aliases,
     cross_reference_word_counts,
+    detect_missing_images,
     detect_quotation_mismatch,
     extract_epub_punctuation_info,
     extract_epub_quotation_info,
@@ -319,9 +320,141 @@ def test_pdf_qa_source_aliases_use_progress_and_normalize_section_names(tmp_path
     assert aliases["pdf_section_002_part_1.html"] == "pdf_section_2_0.html"
 
 
-def test_pdf_qa_scan_pairs_padded_output_with_raw_bookmark_chunk(tmp_path, monkeypatch):
-    monkeypatch.setenv("QA_USE_WORD_COUNT", "1")
-    monkeypatch.delenv("QA_EXACT_CHAR_COUNT", raising=False)
+def test_missing_image_check_detects_replacement_and_honors_rename_map():
+    source_info = {
+        "pdf_section_1.html": {
+            "image_count": 1,
+            "image_srcs": ["images/pdfimg_hash.png"],
+        }
+    }
+
+    changed, changed_issues = detect_missing_images(
+        '<p><img src="images/unrelated.png"></p>',
+        "pdf_section_1.html",
+        source_info,
+    )
+    assert changed is True
+    assert changed_issues[0]["type"] == "changed_image_references"
+    assert changed_issues[0]["missing_srcs"] == ["pdfimg_hash.png"]
+    assert changed_issues[0]["unexpected_srcs"] == ["unrelated.png"]
+
+    renamed, renamed_issues = detect_missing_images(
+        '<p><img src="images/pdf_section_1_img_1.png"></p>',
+        "pdf_section_1.html",
+        source_info,
+        image_rename_map={"pdfimg_hash.png": "pdf_section_1_img_1.png"},
+    )
+    assert renamed is False
+    assert renamed_issues == []
+
+
+def test_pdf_bookmark_qa_preserves_structure_without_exact_sdlxliff_name(tmp_path):
+    source_pdf = tmp_path / "book.pdf"
+    source_pdf.write_bytes(b"%PDF-1.4\n")
+    workspace = tmp_path / "book"
+    word_count = workspace / "word_count"
+    sidecars = workspace / "SDLXLIFF"
+    word_count.mkdir(parents=True)
+    sidecars.mkdir()
+
+    (word_count / "pdf_section_1.html").write_text(
+        """<html><body>
+        <h1>Chapter One</h1><h2>Legitimate subsection</h2>
+        <p>First source paragraph.</p><p>Second source paragraph.</p>
+        <a href="https://example.test/original">source link</a>
+        <table><tbody><tr><td>source cell</td></tr></tbody></table>
+        <svg><path d="M0 0"></path></svg>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    output_name = "response_pdf_section_001.html"
+    (workspace / output_name).write_text(
+        """<html><body>
+        <h1>Chapter One</h1><h2>Legitimate subsection</h2>
+        <p>Only one translated paragraph remains.</p>
+        <a href="https://example.test/changed">translated link</a>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    # A stale pre-rename sidecar must not make this check silently disappear.
+    (sidecars / "response_pdf_section_old-hash.html.sdlxliff").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+        <xliff version="1.2"><file original="pdf_section_1.html"><body>
+        <trans-unit id="1"><source>&lt;p&gt;old&lt;/p&gt;</source>
+        <target>&lt;p&gt;old&lt;/p&gt;</target></trans-unit>
+        </body></file></xliff>""",
+        encoding="utf-8",
+    )
+    (workspace / "translation_progress.json").write_text(
+        json.dumps({
+            "chapters": {
+                "pdf:bookmark-one": {
+                    "actual_num": 1,
+                    "output_file": output_name,
+                    "original_basename": "pdf_section_1.html",
+                    "pdf_toc_section": True,
+                    "pdf_section_id": "bookmark-one",
+                    "status": "completed",
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    settings = default_qa_scan_settings()
+    settings.update({
+        "check_word_count_ratio": False,
+        "check_missing_images": True,
+        "check_missing_beautifulsoup_tags": True,
+        "sdlxliff_tag_retention_threshold": 1.0,
+        "sdlxliff_tag_surplus_tolerance": 0.0,
+        "sdlxliff_min_source_paragraph_tags": 0,
+        "check_multiple_headers": True,
+        "check_punctuation_mismatch": False,
+        "check_quotation_mismatch": False,
+        "check_silent_truncation": False,
+        "check_ai_truncation_detection": False,
+        "check_repetition": False,
+        "check_translation_artifacts": False,
+        "check_glossary_leakage": False,
+        "use_thread_executor": True,
+        "source_language": "english",
+        "target_language": "english",
+    })
+
+    scan_html_folder(
+        str(workspace),
+        log=lambda _message: None,
+        mode="quick-scan",
+        qa_settings=settings,
+        epub_path=str(source_pdf),
+    )
+
+    report_path = workspace / f"{workspace.name}_Scan Report" / "validation_results.json"
+    results = json.loads(report_path.read_text(encoding="utf-8"))
+    translated = next(row for row in results if row["filename"] == output_name)
+    issues = translated["issues"]
+
+    assert "multiple_headers_2_found" not in issues
+    assert "missing_tags: 4/3 (-1)" in issues
+    assert "changed_link_targets_1_found" in issues
+    assert "missing_table_elements_table_1_lost_(0/1)" in issues
+    assert "missing_table_elements_tr_1_lost_(0/1)" in issues
+    assert "missing_table_elements_td_1_lost_(0/1)" in issues
+    assert "missing_graphics_svg_1_lost_(0/1)" in issues
+    assert "missing_graphics_path_1_lost_(0/1)" in issues
+
+
+@pytest.mark.parametrize(
+    ("use_word_count", "exact_char_count"),
+    [("1", "0"), ("0", "1"), ("0", "0")],
+    ids=("word", "exact-character", "sampled-character"),
+)
+def test_pdf_qa_scan_pairs_padded_output_with_raw_bookmark_chunk(
+    tmp_path, monkeypatch, use_word_count, exact_char_count
+):
+    monkeypatch.setenv("QA_USE_WORD_COUNT", use_word_count)
+    monkeypatch.setenv("QA_EXACT_CHAR_COUNT", exact_char_count)
     source_pdf = tmp_path / "book.pdf"
     source_pdf.write_bytes(b"%PDF-1.4\n")
     workspace = tmp_path / "book"
