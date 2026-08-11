@@ -178,6 +178,13 @@ def test_reader_accepts_translated_pdf_html_workspace(qapp, tmp_path, monkeypatc
     assert dialog._workspace_manifest["entries"][0]["title"] == "Opening"
     assert dialog._workspace_manifest["entries"][0]["filename"] == \
         "response_pdf_section_1.html"
+    toolbar = dialog._toolbar_widget.layout()
+    assert toolbar.indexOf(dialog._translate_btn) < toolbar.indexOf(
+        dialog._layout_combo
+    )
+    assert toolbar.indexOf(dialog._layout_combo) < toolbar.indexOf(
+        dialog._raw_btn
+    )
     try:
         dialog.show()
         _pump_events(qapp, timeout=1.2)

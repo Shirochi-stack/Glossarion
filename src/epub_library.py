@@ -19782,6 +19782,32 @@ class EpubReaderDialog(QDialog):
 
         toolbar.addStretch()
 
+        # Translate-current-chapter button: keep this action at the left edge
+        # of the reader controls, immediately before the page-layout selector.
+        # It runs a single-chapter translation through the main GUI and
+        # replaces the page with raw streaming output while it runs. While a
+        # run is active the button flips between the live and normal reader.
+        self._translate_btn = QPushButton("\U0001f310  Translate")
+        self._translate_btn.setToolTip(
+            "Translate the current chapter now.\n"
+            "Only this chapter's HTML is extracted (full extraction is\n"
+            "skipped) and the live streaming output replaces the page\n"
+            "while the translation runs."
+        )
+        self._translate_btn.setFixedHeight(26)
+        self._translate_btn.setCursor(Qt.PointingHandCursor)
+        self._translate_btn.setStyleSheet("""
+            QPushButton { background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #b0b0c0; font-size: 8.5pt; font-weight: bold; padding: 2px 10px; }
+            QPushButton:hover { background: #3a3a5e; color: #e0e0e0; }
+        """)
+        self._translate_btn.setAutoDefault(False)
+        self._translate_btn.setDefault(False)
+        self._translate_btn.clicked.connect(self._on_translate_current_chapter)
+        toolbar.addWidget(self._translate_btn)
+
+        toolbar.addSpacing(6)
+
         # Layout mode dropdown
         self._layout_combo = QComboBox()
         self._layout_combo.addItems(["📄 Single Page", "📖 Double Page", "📜 Scroll", "📃 Scroll All"])
@@ -19836,32 +19862,6 @@ class EpubReaderDialog(QDialog):
         # overlaid list actually differs from the raw one.
         self._raw_btn.hide()
         toolbar.addWidget(self._raw_btn)
-
-        toolbar.addSpacing(6)
-
-        # Translate-current-chapter button: runs a single-chapter
-        # translation through the main GUI and replaces the page with the
-        # raw streaming output while it runs (all streaming toggles are
-        # forced ON for the run). While a run is active the button flips
-        # between the live view and the normal reader.
-        self._translate_btn = QPushButton("\U0001f310  Translate")
-        self._translate_btn.setToolTip(
-            "Translate the current chapter now.\n"
-            "Only this chapter's HTML is extracted (full extraction is\n"
-            "skipped) and the live streaming output replaces the page\n"
-            "while the translation runs."
-        )
-        self._translate_btn.setFixedHeight(26)
-        self._translate_btn.setCursor(Qt.PointingHandCursor)
-        self._translate_btn.setStyleSheet("""
-            QPushButton { background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
-                color: #b0b0c0; font-size: 8.5pt; font-weight: bold; padding: 2px 10px; }
-            QPushButton:hover { background: #3a3a5e; color: #e0e0e0; }
-        """)
-        self._translate_btn.setAutoDefault(False)
-        self._translate_btn.setDefault(False)
-        self._translate_btn.clicked.connect(self._on_translate_current_chapter)
-        toolbar.addWidget(self._translate_btn)
 
         toolbar.addSpacing(8)
 

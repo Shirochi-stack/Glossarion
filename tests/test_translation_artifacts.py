@@ -1254,6 +1254,125 @@ def test_scan_folder_checks_only_translated_payloads_in_all_three_artifacts(
     ]["status"] == "completed"
 
 
+def test_pdf_scan_skips_combined_html_and_checks_only_translated_sidecars(
+    tmp_path,
+):
+    source_pdf = tmp_path / "The Reincarnated Girl's Resume.pdf"
+    source_pdf.write_bytes(b"%PDF-1.4\n")
+    workspace = tmp_path / "pdf_workspace"
+    workspace.mkdir()
+    (workspace / "response_pdf_section_001.html").write_text(
+        "<html><body><h1>Translated Chapter</h1>"
+        "<p>English bookmark text.</p></body></html>",
+        encoding="utf-8",
+    )
+    combined_filename = "The Reincarnated Girl's Resume_translated.html"
+    (workspace / combined_filename).write_text(
+        "<html><body><p>\u5931\u8d25\u7ffb\u8bd1 \u672c\u6587</p></body></html>",
+        encoding="utf-8",
+    )
+    (workspace / "source_epub.txt").write_text(
+        "\u539f\u59cb PDF control path", encoding="utf-8"
+    )
+    (workspace / "TOC.txt").write_text(
+        "Original: \u539f\u59cb\u76ee\u5f55\nTranslated: Table of Contents\n",
+        encoding="utf-8",
+    )
+    (workspace / "translated_headers.txt").write_text(
+        "Original: \u539f\u59cb\u6807\u9898\nTranslated: Translated Chapter\n",
+        encoding="utf-8",
+    )
+    progress_path = workspace / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "version": "2.1",
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "output_file": "response_pdf_section_001.html",
+                        "status": "completed",
+                        "pdf_toc_section": True,
+                    },
+                    "__translation_artifact__:toc": {
+                        "actual_num": -2,
+                        "output_file": "TOC.txt",
+                        "status": "qa_failed",
+                        "special_type": "toc",
+                        "qa_issues_found": ["old_issue"],
+                    },
+                    "__translation_artifact__:headers": {
+                        "actual_num": -3,
+                        "output_file": "translated_headers.txt",
+                        "status": "qa_failed",
+                        "special_type": "headers",
+                        "qa_issues_found": ["old_issue"],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = default_qa_scan_settings()
+    settings.update(
+        {
+            "target_language": "english",
+            "foreign_char_threshold": 0,
+            "check_word_count_ratio": False,
+            "check_missing_images": False,
+            "check_punctuation_mismatch": False,
+            "check_quotation_mismatch": False,
+            "check_silent_truncation": False,
+            "check_ai_truncation_detection": False,
+            "check_multiple_headers": False,
+            "check_repetition": False,
+            "check_translation_artifacts": False,
+            "check_glossary_leakage": False,
+            "check_encoding_issues": False,
+            "use_thread_executor": True,
+        }
+    )
+    logs = []
+
+    scan_html_folder(
+        str(workspace),
+        log=logs.append,
+        mode="quick-scan",
+        qa_settings=settings,
+        epub_path=str(source_pdf),
+        progress_path=str(progress_path),
+    )
+
+    report = json.loads(
+        (
+            workspace
+            / f"{workspace.name}_Scan Report"
+            / "validation_results.json"
+        ).read_text(encoding="utf-8")
+    )
+    by_name = {row["filename"]: row for row in report}
+    assert "response_pdf_section_001.html" in by_name
+    assert "TOC.txt" in by_name
+    assert "translated_headers.txt" in by_name
+    assert combined_filename not in by_name
+    assert "source_epub.txt" not in by_name
+    assert by_name["TOC.txt"]["issues"] == []
+    assert by_name["translated_headers.txt"]["issues"] == []
+    assert not any(combined_filename in message for message in logs)
+
+    updated_progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert not any(
+        entry.get("output_file") == combined_filename
+        for entry in updated_progress["chapters"].values()
+    )
+    for key in (
+        "__translation_artifact__:toc",
+        "__translation_artifact__:headers",
+    ):
+        assert updated_progress["chapters"][key]["status"] == "completed"
+        assert updated_progress["chapters"][key].get("qa_issues_found", []) == []
+
+
 def test_partial_b_adds_only_enabled_foreign_qa_artifacts(tmp_path, monkeypatch):
     for filename in ("metadata.json", "TOC.txt", "translated_headers.txt"):
         (tmp_path / filename).write_text("payload", encoding="utf-8")

@@ -10413,20 +10413,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         log("   🎯 Designed specifically for catching AI retranslations of the same content")
         log("   ⏱️ NOTE: AI Hunter mode checks EVERY file pair - but now with PARALLEL PROCESSING!")
     
-    # Get files to scan (HTML or text based on mode)
-    if text_file_mode:
-        # For text files, scan section files (including response_ prefix versions)
-        # Support both .txt and .html files for PDF sources that generate HTML
-        all_txt_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith((".txt", ".html"))])
-        # Filter out only combined files (_translated.txt)
-        html_files = [f for f in all_txt_files if not f.endswith('_translated.txt')]
-        log(f"📄 Text file mode enabled - scanning section files (response_ prefix ignored for comparison)")
-    else:
-        html_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith((".html", ".xhtml", ".htm"))])
-
-    # These three translated artifacts are intentionally scanned separately
-    # from HTML. Their source/audit fields contain foreign text by design, so
-    # only their translated payload values are eligible for QA.
+    # Resolve translated workspace artifacts before choosing ordinary chapter
+    # files. PDF text mode keeps these files in the workspace root, so treating
+    # TOC/header caches as raw text would scan their intentional ``Original:``
+    # lines instead of only the translated payload.
     folder_names = {
         name.casefold(): name
         for name in os.listdir(folder_path)
@@ -10436,7 +10426,30 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         folder_names[expected.casefold()]
         for expected in QA_TRANSLATION_ARTIFACT_FILENAMES
         if expected.casefold() in folder_names
-    ] if not text_file_mode else []
+    ]
+    artifact_name_folds = {name.casefold() for name in artifact_files}
+
+    # Get files to scan (HTML or text based on mode)
+    if text_file_mode:
+        # For text files, scan section files (including response_ prefix versions)
+        # Support both .txt and .html files for PDF sources that generate HTML
+        all_txt_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith((".txt", ".html"))])
+        # Combined PDF/legacy text output is a compilation artifact rather than
+        # one translatable bookmark entry. Workspace control files are either
+        # excluded or routed through translated-payload-only artifact QA.
+        html_files = [
+            filename for filename in all_txt_files
+            if not filename.casefold().endswith(('_translated.txt', '_translated.html'))
+            and filename.casefold() not in artifact_name_folds
+            and filename.casefold() != 'source_epub.txt'
+        ]
+        log(f"📄 Text file mode enabled - scanning section files (response_ prefix ignored for comparison)")
+    else:
+        html_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith((".html", ".xhtml", ".htm"))])
+
+    # These three translated artifacts are intentionally scanned separately
+    # from HTML. Their source/audit fields contain foreign text by design, so
+    # only their translated payload values are eligible for QA.
     
     # If specific files were selected, filter to those (by basename)
     if selected_files:
