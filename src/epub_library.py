@@ -19662,6 +19662,8 @@ class EpubReaderDialog(QDialog):
         self._workspace_raw_thread: _PdfRawSectionLoaderThread | None = None
         self._workspace_raw_ready: set[int] = set()
         self._workspace_raw_pending_row: int | None = None
+        self._raw_toggle_in_flight = False
+        self._reader_render_generation = 0
         # QWebEngineView starts a Chromium renderer the first time it is
         # constructed. On packaged builds that can take several seconds, so
         # keep it out of __init__: callers can show the lightweight loading
@@ -20761,6 +20763,7 @@ class EpubReaderDialog(QDialog):
                 self._render_current()
                 if not _HAS_WEBENGINE:
                     self._reveal_initial_reader_shell()
+                    self._finish_raw_toggle()
         else:
             self._end_toc_width_lock(_saved_sizes)
             self._reader_stack.setCurrentIndex(0)
@@ -20769,6 +20772,7 @@ class EpubReaderDialog(QDialog):
                 "<p style='font-size: 16pt;'>📭</p>"
                 "<p>No readable content found for this book.</p></div>")
             self._reveal_initial_reader_shell()
+            self._finish_raw_toggle()
 
         # Kick off the auto-refresh timer now that the initial load has
         # finished. Only started once per dialog \u2014 subsequent finalize
@@ -21029,6 +21033,7 @@ class EpubReaderDialog(QDialog):
             self._toolbar_widget.show()
             self._loading_widget.hide()
             self._content_widget.show()
+        self._finish_raw_toggle()
 
     # ── Theme / Font / Spacing ─────────────────────────────────────────────
 
@@ -22551,6 +22556,11 @@ class EpubReaderDialog(QDialog):
         """Re-render the current chapter in the active layout mode."""
         if not self._chapters:
             return
+        # Async WebEngine callbacks from an older render must never finalize
+        # pagination or visibility after a newer chapter/flavor has won.
+        self._reader_render_generation = int(getattr(
+            self, "_reader_render_generation", 0
+        ) or 0) + 1
         if self._workspace_mode and self._show_raw:
             self._ensure_workspace_raw_chapter(self._current_row)
         self._apply_reader_style()  # refresh theme
@@ -22746,6 +22756,9 @@ class EpubReaderDialog(QDialog):
     def _on_reader_load_finished(self, ok):
         """Called when QWebEngineView finishes loading HTML."""
         if not ok:
+            # Never strand a raw/translated transition with the browser pane
+            # hidden merely because WebEngine rejected/cancelled a load.
+            self._finish_raw_toggle()
             return
         # Ignore stray load events that fire before a real chapter was
         # ever queued up. ``_make_reader_widget`` calls
@@ -22755,6 +22768,7 @@ class EpubReaderDialog(QDialog):
         # this guard, :meth:`_finalize_single_page` runs against an
         # empty state and crashes the Python callback pipeline.
         if not self._chapters:
+            self._finish_raw_toggle()
             return
         # Prime phase: the scroll-mode render has just completed. Swap
         # back to the configured paginated mode immediately — this is the
@@ -22774,6 +22788,8 @@ class EpubReaderDialog(QDialog):
                     and self.sender() is self._reader
                     and getattr(self, '_pending_search_text', None)):
                 self._consume_pending_search(self._reader)
+            if self.sender() is self._reader:
+                self._finish_raw_toggle()
             return
         # The signal fires from whichever browser finished loading; route
         # based on the sender rather than layout alone so stale loads from
@@ -22934,7 +22950,12 @@ class EpubReaderDialog(QDialog):
 
     def _finalize_single_page(self):
         """After HTML load: get page count and scroll to current page."""
+        generation = int(getattr(self, "_reader_render_generation", 0) or 0)
+
         def on_count(count):
+            if generation != int(getattr(
+                    self, "_reader_render_generation", 0) or 0):
+                return
             count = int(count)
             self._chapter_page_cache[self._current_row] = count
             # Restore the pre-swap reading position when a Show-raw
@@ -22946,15 +22967,24 @@ class EpubReaderDialog(QDialog):
             # slide from page 1 to the current page on theme/chapter change.
             self._js_scroll_to(self._reader, self._current_page, animate=False)
             def after_reveal():
+                if generation != int(getattr(
+                        self, "_reader_render_generation", 0) or 0):
+                    return
                 self._update_nav_buttons()
                 self._reveal_reader_stack_after_prime()
                 self._consume_pending_search(self._reader)
+                self._finish_raw_toggle()
             self._js_reveal(self._reader, after_reveal)
         self._js_page_count(self._reader, on_count)
 
     def _finalize_double_page(self):
         """After HTML load: get page count and position both panes."""
+        generation = int(getattr(self, "_reader_render_generation", 0) or 0)
+
         def on_count(count):
+            if generation != int(getattr(
+                    self, "_reader_render_generation", 0) or 0):
+                return
             count = int(count)
             self._chapter_page_cache[self._current_row] = count
             self._apply_pending_page_hint(count)
@@ -22962,9 +22992,13 @@ class EpubReaderDialog(QDialog):
                 self._current_page, count)
             self._js_scroll_to(self._reader, self._current_page, animate=False)
             def after_reveal():
+                if generation != int(getattr(
+                        self, "_reader_render_generation", 0) or 0):
+                    return
                 self._update_nav_buttons()
                 self._reveal_reader_stack_after_prime()
                 self._consume_pending_search(self._reader)
+                self._finish_raw_toggle()
             self._js_reveal(self._reader, after_reveal)
         self._js_page_count(self._reader, on_count)
 
@@ -23916,6 +23950,63 @@ class EpubReaderDialog(QDialog):
 
     # ── Chapter rendering ───────────────────────────────────────────────
 
+    def _set_raw_toggle_busy(self, busy: bool) -> None:
+        """Serialize raw/translated swaps.
+
+        A swap may span an EPUB cache load, a hidden scroll-mode prime, and a
+        second paginated WebEngine load.  Letting the button start another
+        swap during that chain used to leave ``_reader_stack`` hidden when the
+        callbacks completed out of order.
+        """
+        self._raw_toggle_in_flight = bool(busy)
+        button = getattr(self, "_raw_btn", None)
+        if button is not None:
+            button.setEnabled(not busy)
+
+    def _finish_raw_toggle(self) -> None:
+        """Finish a raw swap and recover every temporarily-hidden UI part."""
+        if not getattr(self, "_raw_toggle_in_flight", False):
+            return
+
+        # A failed/cancelled load can strand the hidden pagination-prime
+        # sequence before ``_reveal_reader_stack_after_prime`` runs.  Restore
+        # the saved layout and splitter state here as a final safety net.
+        if getattr(self, "_priming_initial_render", False):
+            self._priming_initial_render = False
+            if self._layout_mode == LAYOUT_SCROLL:
+                self._layout_mode = getattr(
+                    self, "_prime_saved_mode", LAYOUT_SINGLE)
+            sizes = getattr(self, "_prime_toc_sizes", None)
+            self._prime_toc_sizes = None
+            self._end_toc_width_lock(sizes)
+
+        stack = getattr(self, "_reader_stack", None)
+        if stack is not None:
+            stack.show()
+        if _HAS_WEBENGINE and getattr(self, "_reader", None) is not None:
+            try:
+                self._reader.page().runJavaScript(
+                    "var c=document.getElementById('columns');"
+                    "if(c)c.style.opacity='1';"
+                )
+            except RuntimeError:
+                pass
+        self._set_raw_toggle_busy(False)
+
+    def _restore_raw_toggle_value(self, value: bool) -> None:
+        """Roll the pill and persisted state back after a rejected swap."""
+        self._show_raw = bool(value)
+        button = getattr(self, "_raw_btn", None)
+        if button is not None:
+            button.blockSignals(True)
+            button.setChecked(self._show_raw)
+            button.blockSignals(False)
+        try:
+            self._config['epub_reader_show_raw'] = self._show_raw
+        except Exception:
+            pass
+        self._finish_raw_toggle()
+
     def _on_show_raw_toggled(self, checked: bool):
         """Swap between raw and translated content.
 
@@ -23939,8 +24030,20 @@ class EpubReaderDialog(QDialog):
         of the new flavor (page counts differ between translations).
         """
         new_value = bool(checked)
+        if getattr(self, "_raw_toggle_in_flight", False):
+            # Normally impossible because the pill is disabled during the
+            # transition, but also guard programmatic toggles and queued Qt
+            # click events that were posted before it became disabled.
+            button = getattr(self, "_raw_btn", None)
+            if button is not None:
+                button.blockSignals(True)
+                button.setChecked(bool(self._show_raw))
+                button.blockSignals(False)
+            return
         if new_value == self._show_raw:
             return
+        previous_value = bool(self._show_raw)
+        self._set_raw_toggle_busy(True)
         self._show_raw = new_value
         # Invalidate embedded CSS cache so it re-reads from the correct EPUB
         if hasattr(self, '_embedded_css_cache'):
@@ -23965,6 +24068,7 @@ class EpubReaderDialog(QDialog):
             target = (self._raw_epub_alt_path if self._show_raw
                       else self._translated_epub_path)
             if not target or not os.path.isfile(target):
+                self._restore_raw_toggle_value(previous_value)
                 return
             self._epub_path = target
             # Reload pipeline consumes this hint to pick the same row
@@ -23974,6 +24078,7 @@ class EpubReaderDialog(QDialog):
             return
         # Overlay mode — in-memory chapter swap.
         if not self._chapters_raw and not self._chapters_overlaid:
+            self._restore_raw_toggle_value(previous_value)
             return
         self._chapters = (self._chapters_raw if self._show_raw
                           else self._chapters_overlaid)
@@ -24006,6 +24111,10 @@ class EpubReaderDialog(QDialog):
             if _HAS_WEBENGINE:
                 self._reader.page().runJavaScript(_hide)
             self._render_current()
+            if not _HAS_WEBENGINE:
+                self._finish_raw_toggle()
+        else:
+            self._finish_raw_toggle()
 
     def _capture_position_hint(self) -> dict:
         """Snapshot the current reading position for later restoration.

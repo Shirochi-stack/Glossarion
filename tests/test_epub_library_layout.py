@@ -711,6 +711,82 @@ def test_reader_recounts_pages_after_hidden_prime_is_revealed(monkeypatch):
     assert reader.recounted is True
 
 
+def test_raw_toggle_is_serialized_and_queued_click_is_rejected(qapp):
+    button = QPushButton("Raw")
+    button.setCheckable(True)
+    button.setChecked(True)
+
+    class ReaderStub:
+        _raw_toggle_in_flight = True
+        _show_raw = False
+        _raw_btn = button
+
+    reader = ReaderStub()
+    EpubReaderDialog._on_show_raw_toggled(reader, True)
+
+    assert reader._show_raw is False
+    assert button.isChecked() is False
+
+
+def test_finishing_raw_toggle_recovers_hidden_prime_and_unlocks_button(
+        qapp, monkeypatch):
+    class StackStub:
+        shown = False
+
+        def show(self):
+            self.shown = True
+
+    button = QPushButton("Raw")
+    button.setEnabled(False)
+
+    class ReaderStub:
+        _raw_toggle_in_flight = True
+        _raw_btn = button
+        _priming_initial_render = True
+        _layout_mode = epub_library.LAYOUT_SCROLL
+        _prime_saved_mode = epub_library.LAYOUT_SINGLE
+        _prime_toc_sizes = [240, 960]
+        _reader_stack = StackStub()
+        _reader = None
+        _set_raw_toggle_busy = EpubReaderDialog._set_raw_toggle_busy
+
+        def _end_toc_width_lock(self, sizes):
+            self.restored_sizes = sizes
+
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    reader = ReaderStub()
+
+    EpubReaderDialog._finish_raw_toggle(reader)
+
+    assert reader._raw_toggle_in_flight is False
+    assert button.isEnabled() is True
+    assert reader._reader_stack.shown is True
+    assert reader._priming_initial_render is False
+    assert reader._layout_mode == epub_library.LAYOUT_SINGLE
+    assert reader._prime_toc_sizes is None
+    assert reader.restored_sizes == [240, 960]
+
+
+def test_stale_paginated_callback_cannot_finalize_newer_raw_render():
+    callbacks = []
+
+    class ReaderStub:
+        _reader_render_generation = 7
+        _reader = object()
+        _chapter_page_cache = {}
+        _current_row = 0
+
+        def _js_page_count(self, browser, callback):
+            callbacks.append(callback)
+
+    reader = ReaderStub()
+    EpubReaderDialog._finalize_single_page(reader)
+    reader._reader_render_generation = 8
+    callbacks[0](12)
+
+    assert reader._chapter_page_cache == {}
+
+
 def test_reader_initial_shell_is_revealed_in_one_batched_update():
     events = []
 
