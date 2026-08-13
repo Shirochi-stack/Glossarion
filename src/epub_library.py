@@ -12047,6 +12047,7 @@ class EpubLibraryDialog(QDialog):
                 config=self._config,
                 parent=self,
                 alt_epub_path=alt_path or None,
+                toc_output_dir=workspace or None,
             )
             QApplication.restoreOverrideCursor()
             reader.setModal(False)
@@ -13898,6 +13899,177 @@ _RE_HTML_TITLE = re.compile(rb"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DO
 _RE_HTML_HEADING = re.compile(rb"<(h[1-6])[^>]*>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
 _RE_HTML_STRIP_TAGS = re.compile(rb"<[^>]+>")
 _RE_HTML_WS = re.compile(rb"\s+")
+
+
+def _parse_native_toc_txt(path: str) -> list[dict[str, str]]:
+    """Parse Glossarion's ``TOC.txt`` cache into ordered reader entries."""
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as stream:
+            text = stream.read()
+    except OSError:
+        return []
+
+    entries: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if re.match(r"^Chapter\s+\d+\s*:\s*$", line, re.IGNORECASE):
+            current = {}
+            continue
+        match = re.match(
+            r"^(Original|Translated|Target\s+URI)\s*:\s*(.*)$",
+            line,
+            re.IGNORECASE,
+        )
+        if not match:
+            continue
+        key = match.group(1).lower().replace(" ", "_")
+        current[key] = match.group(2).strip()
+        if key != "target_uri":
+            continue
+        title = current.get("translated") or current.get("original") or ""
+        target = current.get("target_uri") or ""
+        if title and target:
+            entries.append({
+                "title": title,
+                "target": target,
+                "source": os.path.abspath(path),
+            })
+        current = {}
+    return entries
+
+
+def _parse_native_toc_ncx(data: bytes | str, source: str = "") -> list[dict[str, str]]:
+    """Parse NCX navPoints without depending on a particular XML namespace."""
+    from xml.etree import ElementTree as ET
+
+    try:
+        root = ET.fromstring(data)
+    except (ET.ParseError, TypeError, ValueError):
+        return []
+
+    def _local_name(tag) -> str:
+        return str(tag or "").rsplit("}", 1)[-1].rsplit(":", 1)[-1].lower()
+
+    entries: list[dict[str, str]] = []
+    for nav_point in root.iter():
+        if _local_name(nav_point.tag) != "navpoint":
+            continue
+        title = ""
+        target = ""
+        for child in list(nav_point):
+            local = _local_name(child.tag)
+            if local == "navlabel" and not title:
+                for label_child in child.iter():
+                    if _local_name(label_child.tag) == "text":
+                        title = " ".join("".join(label_child.itertext()).split())
+                        if title:
+                            break
+            elif local == "content" and not target:
+                target = str(child.get("src") or "").strip()
+        if title and target:
+            entries.append({
+                "title": title,
+                "target": target,
+                "source": source,
+            })
+    return entries
+
+
+def _find_reader_sidecar(directory: str, filename: str) -> str:
+    """Return a case-insensitive sidecar match from *directory*."""
+    if not directory or not os.path.isdir(directory):
+        return ""
+    direct = os.path.join(directory, filename)
+    if os.path.isfile(direct):
+        return direct
+    wanted = filename.casefold()
+    try:
+        for entry in os.scandir(directory):
+            if (entry.is_file(follow_symlinks=False)
+                    and entry.name.casefold() == wanted):
+                return entry.path
+    except OSError:
+        pass
+    return ""
+
+
+def _load_reader_native_toc(output_dir: str, epub_path: str) -> list[dict[str, str]]:
+    """Load TOC.txt, a sidecar NCX, or finally the EPUB's embedded NCX."""
+    toc_txt = _find_reader_sidecar(output_dir, "TOC.txt")
+    if toc_txt:
+        entries = _parse_native_toc_txt(toc_txt)
+        if entries:
+            return entries
+
+    sidecar_ncx = _find_reader_sidecar(output_dir, "toc.ncx")
+    if sidecar_ncx:
+        try:
+            with open(sidecar_ncx, "rb") as stream:
+                entries = _parse_native_toc_ncx(
+                    stream.read(), source=os.path.abspath(sidecar_ncx))
+            if entries:
+                return entries
+        except OSError:
+            pass
+
+    if not (epub_path and os.path.isfile(epub_path)
+            and epub_path.lower().endswith(".epub")):
+        return []
+    try:
+        import zipfile
+        with zipfile.ZipFile(epub_path, "r") as archive:
+            member = next(
+                (name for name in archive.namelist()
+                 if name.lower().endswith("toc.ncx")),
+                "",
+            )
+            if member:
+                return _parse_native_toc_ncx(
+                    archive.read(member),
+                    source=f"{os.path.abspath(epub_path)}::{member}",
+                )
+    except (OSError, ValueError, zipfile.BadZipFile):
+        pass
+    return []
+
+
+def _native_toc_target_key(target: str) -> tuple[str, str]:
+    """Return ``(chapter basename key, fragment)`` for a TOC target URI."""
+    from html import unescape
+    from urllib.parse import unquote
+
+    value = unquote(unescape(str(target or "").strip())).replace("\\", "/")
+    path, separator, fragment = value.partition("#")
+    path = path.split("?", 1)[0]
+    basename = path.rsplit("/", 1)[-1].casefold()
+    if basename.startswith("response_"):
+        basename = basename[len("response_"):]
+    stem = os.path.splitext(basename)[0]
+    return stem, fragment if separator else ""
+
+
+def _map_native_toc_to_chapters(
+    entries: list[dict[str, str]],
+    chapter_filenames: list[str],
+) -> list[dict]:
+    """Attach each native TOC entry to its matching loaded spine chapter."""
+    chapter_by_key: dict[str, int] = {}
+    for index, filename in enumerate(chapter_filenames or []):
+        key, _fragment = _native_toc_target_key(filename)
+        if key:
+            chapter_by_key.setdefault(key, index)
+
+    mapped: list[dict] = []
+    for entry in entries or []:
+        key, fragment = _native_toc_target_key(entry.get("target", ""))
+        if key not in chapter_by_key:
+            continue
+        mapped_entry = dict(entry)
+        mapped_entry["chapter_index"] = chapter_by_key[key]
+        mapped_entry["fragment"] = fragment
+        mapped.append(mapped_entry)
+    return mapped
 
 
 def _extract_html_title_fast(raw: bytes) -> str:
@@ -17878,6 +18050,7 @@ class BookDetailsDialog(QDialog):
                     show_special_files=self._show_special_files,
                     alt_epub_path=alt_for_reader or None,
                     overlay_provider=overlay_provider,
+                    toc_output_dir=output_folder or None,
                 )
                 QApplication.restoreOverrideCursor()
                 reader.setModal(False)
@@ -19505,7 +19678,8 @@ class EpubReaderDialog(QDialog):
                  overlay_provider=None,
                  auto_refresh_interval_ms: int = 3000,
                  workspace_dir: str | None = None,
-                 initial_show_raw: bool | None = None):
+                 initial_show_raw: bool | None = None,
+                 toc_output_dir: str | None = None):
         super().__init__(parent)
         self._config = config or {}
         self._workspace_manifest: dict = {}
@@ -19588,6 +19762,8 @@ class EpubReaderDialog(QDialog):
         self._line_spacing = self._config.get('epub_reader_line_spacing', 1.8)
         self._theme_index = self._config.get('epub_reader_theme', 0)
         self._font_family = self._config.get('epub_reader_font_family', 'Embedded CSS')
+        self._native_toc_enabled = bool(
+            self._config.get('epub_reader_native_toc', False))
         layout_key = self._config.get('epub_reader_layout', LAYOUT_SINGLE)
         self._layout_mode = layout_key if layout_key in (LAYOUT_SCROLL, LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_ALL) else LAYOUT_SINGLE
         # Give the native dialog a real backing colour before Windows maps it.
@@ -19643,6 +19819,37 @@ class EpubReaderDialog(QDialog):
         self._translated_css_dirs: list[str] = [
             str(p) for p in (translated_css_dirs or workspace_css_dirs) if p
         ]
+        # Native TOC sidecars belong to the translated output workspace, not
+        # necessarily the active EPUB path (overlay mode reads the raw EPUB).
+        # Prefer the caller's explicit folder, then derive it from the workspace
+        # or translated assets, and finally fall back to the EPUB's parent.
+        toc_dir = str(toc_output_dir or "").strip()
+        if not toc_dir:
+            toc_dir = str(self._workspace_manifest.get("workspace") or "").strip()
+        if not toc_dir and self._translated_overlay:
+            first_overlay = next(iter(self._translated_overlay.values()), {})
+            overlay_path = str(first_overlay.get("path") or "")
+            if overlay_path:
+                toc_dir = os.path.dirname(overlay_path)
+        if not toc_dir and self._extra_image_dirs:
+            toc_dir = os.path.dirname(str(self._extra_image_dirs[0]))
+        if not toc_dir and self._translated_css_dirs:
+            css_dir = str(self._translated_css_dirs[0])
+            if os.path.isfile(css_dir):
+                toc_dir = os.path.dirname(css_dir)
+            elif os.path.basename(os.path.normpath(css_dir)).casefold() in {
+                "css", "styles"
+            }:
+                toc_dir = os.path.dirname(css_dir)
+            else:
+                toc_dir = css_dir
+        if not toc_dir and self._epub_path and os.path.isfile(self._epub_path):
+            toc_dir = os.path.dirname(self._epub_path)
+        self._toc_output_dir = os.path.abspath(toc_dir) if toc_dir else ""
+        self._native_toc_source_entries: list[dict[str, str]] = \
+            _load_reader_native_toc(self._toc_output_dir, self._epub_path)
+        self._native_toc_entries: list[dict] = []
+        self._toc_row_to_chapter: list[int] = []
         # Auto-refresh: when a ``overlay_provider`` callable is supplied
         # (typically :meth:`BookDetailsDialog._build_translated_overlay`)
         # the reader ticks a :class:`QTimer` on a short interval, re-runs
@@ -19811,6 +20018,28 @@ class EpubReaderDialog(QDialog):
         self._toc_btn = self._make_toolbar_btn("📑", "Toggle table of contents")
         self._toc_btn.clicked.connect(self._toggle_toc)
         toolbar.addWidget(self._toc_btn)
+
+        self._native_toc_btn = QPushButton("📑 TOC")
+        self._native_toc_btn.setToolTip(
+            "Use TOC.txt or toc.ncx entries in the sidebar instead of\n"
+            "titles extracted from each chapter's HTML."
+        )
+        self._native_toc_btn.setFixedHeight(26)
+        self._native_toc_btn.setCursor(Qt.PointingHandCursor)
+        self._native_toc_btn.setCheckable(True)
+        self._native_toc_btn.setChecked(self._native_toc_enabled)
+        self._native_toc_btn.setEnabled(bool(self._native_toc_source_entries))
+        self._native_toc_btn.setStyleSheet("""
+            QPushButton { background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #b0b0c0; font-size: 8.5pt; font-weight: bold; padding: 2px 10px; }
+            QPushButton:hover { background: #3a3a5e; color: #e0e0e0; }
+            QPushButton:checked { background: #6c63ff; border-color: #7c73ff; color: #fff; }
+            QPushButton:disabled { color: #666675; border-color: #303044; }
+        """)
+        self._native_toc_btn.setAutoDefault(False)
+        self._native_toc_btn.setDefault(False)
+        self._native_toc_btn.toggled.connect(self._on_native_toc_toggled)
+        toolbar.addWidget(self._native_toc_btn)
 
         toolbar.addStretch()
 
@@ -20797,12 +21026,8 @@ class EpubReaderDialog(QDialog):
         # paginated-prime render. Otherwise the TOC can momentarily fill
         # the splitter when the reader stack is hidden.
         _saved_sizes = self._begin_toc_width_lock()
-        self._toc_list.blockSignals(True)
-        self._toc_list.clear()
-        for idx, (title, _) in enumerate(self._chapters):
-            item = QListWidgetItem(title)
-            self._toc_list.addItem(item)
-        self._toc_list.blockSignals(False)
+        self._refresh_native_toc_entries()
+        self._rebuild_toc_sidebar(current_chapter=0)
         if _saved_sizes and any(s > 0 for s in _saved_sizes):
             self._splitter.setSizes(_saved_sizes)
 
@@ -20850,9 +21075,7 @@ class EpubReaderDialog(QDialog):
             # Select initial chapter silently — the priming sequence below
             # drives the initial render so we don't want setCurrentRow to
             # also fire _on_chapter_selected.
-            self._toc_list.blockSignals(True)
-            self._toc_list.setCurrentRow(initial)
-            self._toc_list.blockSignals(False)
+            self._set_toc_selection_for_chapter(initial)
             self._current_row = initial
             self._current_page = 0
 
@@ -21088,17 +21311,13 @@ class EpubReaderDialog(QDialog):
         # count can grow (new translated chapters surface with
         # translated titles) but never shrinks during a refresh.
         _saved_sizes = self._begin_toc_width_lock()
-        self._toc_list.blockSignals(True)
-        self._toc_list.clear()
-        for title, _ in new_chapters:
-            self._toc_list.addItem(QListWidgetItem(title))
         if new_chapters:
             new_row = max(0, min(prev_row, len(new_chapters) - 1))
-            self._toc_list.setCurrentRow(new_row)
             self._current_row = new_row
         else:
             self._current_row = 0
-        self._toc_list.blockSignals(False)
+        self._refresh_native_toc_entries()
+        self._rebuild_toc_sidebar(current_chapter=self._current_row)
         self._end_toc_width_lock(_saved_sizes)
         # Refresh the Show-raw pill visibility \u2014 overlay_applied can
         # flip from False \u2192 True when the first translated chapter
@@ -22245,10 +22464,8 @@ class EpubReaderDialog(QDialog):
         if chapter_idx != self._current_row:
             self._pending_search_text = text
             self._pending_search_index = occurrence
-            self._toc_list.blockSignals(True)
-            self._toc_list.setCurrentRow(chapter_idx)
-            self._toc_list.blockSignals(False)
-            self._on_chapter_selected(chapter_idx)
+            self._set_toc_selection_for_chapter(chapter_idx)
+            self._activate_chapter_index(chapter_idx)
         else:
             self._select_text_occurrence(
                 self._active_search_browser(), text, occurrence)
@@ -22314,10 +22531,8 @@ class EpubReaderDialog(QDialog):
                 if idx != self._current_row:
                     self._pending_search_text = text
                     self._pending_search_index = 0
-                    self._toc_list.blockSignals(True)
-                    self._toc_list.setCurrentRow(idx)
-                    self._toc_list.blockSignals(False)
-                    self._on_chapter_selected(idx)
+                    self._set_toc_selection_for_chapter(idx)
+                    self._activate_chapter_index(idx)
                 else:
                     browser.findText(text)
                 return
@@ -22325,6 +22540,97 @@ class EpubReaderDialog(QDialog):
             self._search_bar.styleSheet() + " QLineEdit { border-color: #c04040; }")
         QTimer.singleShot(800, lambda: self._apply_reader_style())
         return
+
+    def _refresh_native_toc_entries(self) -> None:
+        """Reload sidecar/embedded TOC data and map it to loaded chapters."""
+        self._native_toc_source_entries = _load_reader_native_toc(
+            getattr(self, "_toc_output_dir", ""),
+            getattr(self, "_epub_path", ""),
+        )
+        self._native_toc_entries = _map_native_toc_to_chapters(
+            self._native_toc_source_entries,
+            self._chapter_filenames,
+        )
+        button = getattr(self, "_native_toc_btn", None)
+        if button is not None:
+            available = bool(self._native_toc_entries)
+            button.setEnabled(available)
+            if available:
+                source = str(self._native_toc_entries[0].get("source") or "")
+                button.setToolTip(
+                    "Use the book's native table of contents in the sidebar.\n"
+                    f"Source: {source}"
+                )
+            else:
+                button.setToolTip(
+                    "No TOC.txt or toc.ncx entries could be matched to this "
+                    "book's loaded chapters."
+                )
+
+    def _rebuild_toc_sidebar(self, current_chapter: int | None = None) -> None:
+        """Populate the sidebar from HTML headings or mapped native TOC rows."""
+        if current_chapter is None:
+            current_chapter = self._current_row
+        old_blocked = self._toc_list.blockSignals(True)
+        try:
+            self._toc_list.clear()
+            self._toc_row_to_chapter = []
+            use_native = bool(
+                self._native_toc_enabled and self._native_toc_entries)
+            if use_native:
+                for entry in self._native_toc_entries:
+                    chapter_index = int(entry.get("chapter_index", 0))
+                    item = QListWidgetItem(str(entry.get("title") or "Section"))
+                    item.setData(Qt.UserRole, chapter_index)
+                    item.setData(Qt.UserRole + 1, str(entry.get("fragment") or ""))
+                    self._toc_list.addItem(item)
+                    self._toc_row_to_chapter.append(chapter_index)
+            else:
+                for chapter_index, (title, _content) in enumerate(self._chapters):
+                    item = QListWidgetItem(title)
+                    item.setData(Qt.UserRole, chapter_index)
+                    self._toc_list.addItem(item)
+                    self._toc_row_to_chapter.append(chapter_index)
+            self._set_toc_selection_for_chapter(
+                int(current_chapter), signals_already_blocked=True)
+        finally:
+            self._toc_list.blockSignals(old_blocked)
+
+    def _set_toc_selection_for_chapter(
+        self,
+        chapter_index: int,
+        *,
+        signals_already_blocked: bool = False,
+    ) -> None:
+        """Highlight the sidebar row mapped to *chapter_index*, if present."""
+        try:
+            toc_row = self._toc_row_to_chapter.index(int(chapter_index))
+        except (ValueError, TypeError):
+            toc_row = -1
+        if signals_already_blocked:
+            self._toc_list.setCurrentRow(toc_row)
+            return
+        old_blocked = self._toc_list.blockSignals(True)
+        try:
+            self._toc_list.setCurrentRow(toc_row)
+        finally:
+            self._toc_list.blockSignals(old_blocked)
+
+    def _toc_chapter_index_for_row(self, toc_row: int) -> int:
+        """Resolve a visible sidebar row to its underlying spine index."""
+        if toc_row < 0 or toc_row >= len(self._toc_row_to_chapter):
+            return -1
+        return int(self._toc_row_to_chapter[toc_row])
+
+    def _on_native_toc_toggled(self, checked: bool) -> None:
+        """Switch sidebar sources and retain the choice in reader config."""
+        self._native_toc_enabled = bool(checked)
+        self._config['epub_reader_native_toc'] = self._native_toc_enabled
+        _persist_config_via_parent(self)
+        self._refresh_native_toc_entries()
+        saved_sizes = self._begin_toc_width_lock()
+        self._rebuild_toc_sidebar(current_chapter=self._current_row)
+        self._end_toc_width_lock(saved_sizes)
 
     def _toggle_toc(self):
         """Show or hide the TOC sidebar using splitter sizes."""
@@ -23253,9 +23559,7 @@ class EpubReaderDialog(QDialog):
             elif self._current_row > 0:
                 # Go to previous chapter's last page
                 self._current_row -= 1
-                self._toc_list.blockSignals(True)
-                self._toc_list.setCurrentRow(self._current_row)
-                self._toc_list.blockSignals(False)
+                self._set_toc_selection_for_chapter(self._current_row)
                 # Set page to last page of previous chapter (will be clamped in finalize)
                 pages = self._get_chapter_pages(self._current_row)
                 self._current_page = self._clamp_page_for_layout(pages - 1, pages)
@@ -23263,9 +23567,7 @@ class EpubReaderDialog(QDialog):
         else:
             new_row = max(0, self._current_row - 1)
             self._current_row = new_row
-            self._toc_list.blockSignals(True)
-            self._toc_list.setCurrentRow(new_row)
-            self._toc_list.blockSignals(False)
+            self._set_toc_selection_for_chapter(new_row)
             self._render_current()
 
     def _next_chapter(self):
@@ -23295,9 +23597,7 @@ class EpubReaderDialog(QDialog):
         else:
             new_row = min(len(self._chapters) - 1, self._current_row + 1)
             self._current_row = new_row
-            self._toc_list.blockSignals(True)
-            self._toc_list.setCurrentRow(new_row)
-            self._toc_list.blockSignals(False)
+            self._set_toc_selection_for_chapter(new_row)
             self._render_current()
 
     def _advance_paginated_next(self, ch_pages):
@@ -23313,9 +23613,7 @@ class EpubReaderDialog(QDialog):
         elif self._current_row < len(self._chapters) - 1:
             self._current_row += 1
             self._current_page = 0
-            self._toc_list.blockSignals(True)
-            self._toc_list.setCurrentRow(self._current_row)
-            self._toc_list.blockSignals(False)
+            self._set_toc_selection_for_chapter(self._current_row)
             self._render_current()
 
     # ── Live single-chapter translation ──────────────────────────────────
@@ -23961,6 +24259,7 @@ class EpubReaderDialog(QDialog):
             self._config['epub_reader_layout'] = self._layout_mode
         self._config['epub_reader_font_family'] = self._font_family
         self._config['epub_reader_show_raw'] = self._show_raw
+        self._config['epub_reader_native_toc'] = self._native_toc_enabled
         self._closing = True
         self._cleanup_initial_reader_transition()
         # Stop timers and browser loads before worker shutdown so no
@@ -24208,12 +24507,8 @@ class EpubReaderDialog(QDialog):
         # the current row so we don't lose the reading position.
         current_row = max(0, min(self._current_row, len(self._chapters) - 1))
         _saved_sizes = self._begin_toc_width_lock()
-        self._toc_list.blockSignals(True)
-        self._toc_list.clear()
-        for title, _ in self._chapters:
-            self._toc_list.addItem(QListWidgetItem(title))
-        self._toc_list.setCurrentRow(current_row)
-        self._toc_list.blockSignals(False)
+        self._refresh_native_toc_entries()
+        self._rebuild_toc_sidebar(current_chapter=current_row)
         self._end_toc_width_lock(_saved_sizes)
         self._current_row = current_row
         # Force a fresh paginated render: page-count caches differ
@@ -24320,10 +24615,17 @@ class EpubReaderDialog(QDialog):
         self._cache_loader_thread.miss.connect(self._on_cache_miss)
         self._cache_loader_thread.start()
 
-    def _on_chapter_selected(self, row):
-        if row < 0 or row >= len(self._chapters):
+    def _on_chapter_selected(self, toc_row):
+        chapter_index = self._toc_chapter_index_for_row(toc_row)
+        if chapter_index < 0:
             return
-        self._current_row = row
+        self._activate_chapter_index(chapter_index)
+
+    def _activate_chapter_index(self, chapter_index: int) -> None:
+        """Open an underlying spine chapter independently of sidebar shape."""
+        if chapter_index < 0 or chapter_index >= len(self._chapters):
+            return
+        self._current_row = chapter_index
         self._current_page = 0  # reset pagination when selecting a new chapter
         if not getattr(self, '_pending_search_text', None):
             self._search_match_index = 0

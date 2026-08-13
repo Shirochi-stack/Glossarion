@@ -240,6 +240,120 @@ def test_reader_accepts_translated_pdf_html_workspace(qapp, tmp_path, monkeypatc
         qapp.processEvents()
 
 
+def test_reader_native_toc_prefers_translated_txt_and_maps_targets(tmp_path):
+    (tmp_path / "TOC.txt").write_text(
+        """TOC Translations
+==================================================
+
+Chapter 1:
+  Original:   Prologue
+  Translated: Opening
+  Target URI: Text/part0010.xhtml#opening
+----------------------------------------
+Chapter 2:
+  Original:   Chapter One
+  Translated: First Day
+  Target URI: part0011.xhtml
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "toc.ncx").write_text(
+        """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap><navPoint><navLabel><text>NCX label</text></navLabel>
+  <content src="part0010.xhtml" /></navPoint></navMap>
+</ncx>""",
+        encoding="utf-8",
+    )
+
+    entries = epub_library._load_reader_native_toc(str(tmp_path), "")
+    mapped = epub_library._map_native_toc_to_chapters(
+        entries,
+        ["cover.xhtml", "part0010.xhtml", "part0011.xhtml"],
+    )
+
+    assert [entry["title"] for entry in mapped] == ["Opening", "First Day"]
+    assert [entry["chapter_index"] for entry in mapped] == [1, 2]
+    assert mapped[0]["fragment"] == "opening"
+    assert mapped[0]["source"].endswith("TOC.txt")
+
+
+def test_reader_native_toc_falls_back_to_embedded_ncx(tmp_path):
+    epub_path = tmp_path / "book.epub"
+    with zipfile.ZipFile(epub_path, "w") as archive:
+        archive.writestr(
+            "OEBPS/toc.ncx",
+            """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap><navPoint><navLabel><text>Opening</text></navLabel>
+  <content src="Text/part0010.xhtml#start" /></navPoint></navMap>
+</ncx>""",
+        )
+
+    entries = epub_library._load_reader_native_toc("", str(epub_path))
+
+    assert entries[0]["title"] == "Opening"
+    assert entries[0]["target"] == "Text/part0010.xhtml#start"
+    assert entries[0]["source"].endswith("::OEBPS/toc.ncx")
+
+
+def test_reader_native_toc_toggle_rebuilds_sidebar_and_restores_config(
+        qapp, tmp_path, monkeypatch):
+    (tmp_path / "toc.txt").write_text(
+        """Chapter 1:
+  Original: Prologue
+  Translated: Opening
+  Target URI: part0010.xhtml#opening
+Chapter 2:
+  Original: Chapter One
+  Translated: First Day
+  Target URI: part0011.xhtml
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    config = {"epub_reader_native_toc": False}
+    reader = EpubReaderDialog(
+        str(tmp_path / "missing.epub"),
+        config=config,
+        toc_output_dir=str(tmp_path),
+    )
+    restored = None
+    try:
+        reader._chapters = [
+            ("Cover", ""),
+            ("HTML prologue", ""),
+            ("HTML chapter", ""),
+        ]
+        reader._chapter_filenames = [
+            "cover.xhtml", "part0010.xhtml", "part0011.xhtml"
+        ]
+        reader._refresh_native_toc_entries()
+        reader._rebuild_toc_sidebar(current_chapter=0)
+        assert reader._toc_list.count() == 3
+
+        reader._native_toc_btn.setChecked(True)
+
+        assert config["epub_reader_native_toc"] is True
+        assert reader._toc_list.count() == 2
+        assert reader._toc_list.item(0).text() == "Opening"
+        assert reader._toc_row_to_chapter == [1, 2]
+
+        restored = EpubReaderDialog(
+            str(tmp_path / "missing.epub"),
+            config=config,
+            toc_output_dir=str(tmp_path),
+        )
+        assert restored._native_toc_enabled is True
+        assert restored._native_toc_btn.isChecked() is True
+    finally:
+        if restored is not None:
+            restored.close()
+        reader.close()
+        qapp.processEvents()
+
+
 def test_pdf_book_details_uses_bookmark_entries_not_workspace_artifacts(
         qapp, tmp_path):
     workspace = tmp_path / "PDF details"

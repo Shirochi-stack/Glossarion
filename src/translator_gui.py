@@ -44211,6 +44211,7 @@ Important rules:
                 ('epub_reader_line_spacing', [('config', 'epub_reader_line_spacing')], 1.6, float),
                 ('epub_reader_theme', [('config', 'epub_reader_theme')], 0, int),
                 ('epub_reader_layout', [('config', 'epub_reader_layout')], 'single_page', str),
+                ('epub_reader_native_toc', [('config', 'epub_reader_native_toc')], False, bool),
                 # EPUB library settings (persisted by EpubLibraryDialog.closeEvent)
                 ('epub_library_sort', [('config', 'epub_library_sort')], 'date', str),
                 ('epub_library_card_size', [('config', 'epub_library_card_size')], 'compact', str),
