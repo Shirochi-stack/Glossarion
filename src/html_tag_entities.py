@@ -17,7 +17,7 @@ VALID_ENTITY_TAGS = frozenset({
     'section', 'article', 'header', 'footer', 'nav', 'main', 'aside', 'details', 'summary',
     'figure', 'figcaption',
     'form', 'input', 'button', 'select', 'option', 'textarea', 'label', 'fieldset', 'legend',
-    'iframe', 'canvas', 'svg', 'math',
+    'iframe', 'canvas', 'svg', 'image', 'math',
     'video', 'audio', 'source', 'track', 'embed', 'object', 'param',
     'map', 'area',
     'ruby', 'rt', 'rp', 'rb', 'rtc',

@@ -36,6 +36,7 @@ from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QImageRea
 
 from metadata_progress import is_metadata_progress_entry
 from translation_artifacts import is_translation_artifact_progress_entry
+from html_tag_entities import unescape_valid_html_tag_entities
 
 try:
     import dpi_setup
@@ -24340,7 +24341,75 @@ class EpubReaderDialog(QDialog):
                     tempfile.gettempdir(), "Glossarion_EpubImages", epub_hash)
                 os.makedirs(self._img_temp_dir, exist_ok=True)
 
+            # Translation output can contain safely escaped markup when it was
+            # produced before a tag was added to the shared HTML allowlist.
+            # Rehydrate known tags here so existing workspaces also benefit
+            # from reader fixes without requiring a fresh translation run.
+            html_content = unescape_valid_html_tag_entities(html_content)
             soup = BeautifulSoup(html_content, "html.parser")
+
+            def _resolve_image_data(src: str):
+                """Return bytes for an EPUB/workspace-relative image reference."""
+                image_data = None
+                candidates = [
+                    src,
+                    os.path.basename(src),
+                    src.lstrip("../"),
+                    src.lstrip("./"),
+                ]
+                for candidate in candidates:
+                    if candidate in self._images:
+                        image_data = self._images[candidate]
+                        break
+
+                # Filesystem fallback: if the image wasn't found in the
+                # pre-merged dict (common when the translator renamed images
+                # during extraction), try the workspace and source folders.
+                if not image_data:
+                    img_basename = os.path.basename(src)
+                    for extra_dir in getattr(self, '_extra_image_dirs', []) or []:
+                        if extra_dir and os.path.isdir(extra_dir):
+                            disk_path = os.path.join(extra_dir, img_basename)
+                            if os.path.isfile(disk_path):
+                                try:
+                                    with open(disk_path, "rb") as df:
+                                        image_data = df.read()
+                                except OSError:
+                                    pass
+                                if image_data:
+                                    break
+
+                    if not image_data and hasattr(self, '_epub_path') and self._epub_path:
+                        epub_dir = os.path.dirname(self._epub_path)
+                        if epub_dir:
+                            rel_candidate = os.path.normpath(os.path.join(epub_dir, src))
+                            if os.path.isfile(rel_candidate):
+                                try:
+                                    with open(rel_candidate, "rb") as df:
+                                        image_data = df.read()
+                                except OSError:
+                                    pass
+                            if not image_data:
+                                for sub in ("images", "Images", "translated_images"):
+                                    disk_path = os.path.join(epub_dir, sub, img_basename)
+                                    if os.path.isfile(disk_path):
+                                        try:
+                                            with open(disk_path, "rb") as df:
+                                                image_data = df.read()
+                                        except OSError:
+                                            pass
+                                        if image_data:
+                                            break
+                return image_data
+
+            def _cache_image(src: str, image_data: bytes) -> str:
+                """Cache image bytes and return a browser-readable file URL."""
+                safe_name = os.path.basename(src).replace("/", "_").replace("\\", "_")
+                img_path = os.path.join(self._img_temp_dir, safe_name)
+                if not os.path.isfile(img_path):
+                    with open(img_path, "wb") as f:
+                        f.write(image_data)
+                return QUrl.fromLocalFile(img_path).toString()
 
             # Pre-pass: split <p> tags that contain multiple <img> tags
             # into separate <p> tags, one per image. Without this, the
@@ -24389,62 +24458,9 @@ class EpubReaderDialog(QDialog):
                 # HTTP(S) image resources.
                 if QUrl(src).scheme().lower() in ("http", "https"):
                     continue
-                image_data = None
-                candidates = [src, os.path.basename(src), src.lstrip("../"), src.lstrip("./")]
-                for candidate in candidates:
-                    if candidate in self._images:
-                        image_data = self._images[candidate]
-                        break
-                # Filesystem fallback: if the image wasn't found in the
-                # pre-merged dict (common when the translator renamed
-                # images during extraction, or extra_image_dirs wasn't
-                # populated), try to load it directly from disk.
-                if not image_data:
-                    img_basename = os.path.basename(src)
-                    # 1. Check extra image directories (output_folder/images, etc.)
-                    for extra_dir in getattr(self, '_extra_image_dirs', []) or []:
-                        if extra_dir and os.path.isdir(extra_dir):
-                            disk_path = os.path.join(extra_dir, img_basename)
-                            if os.path.isfile(disk_path):
-                                try:
-                                    with open(disk_path, "rb") as df:
-                                        image_data = df.read()
-                                except OSError:
-                                    pass
-                                if image_data:
-                                    break
-                    # 2. Resolve relative to the EPUB's parent directory
-                    if not image_data and hasattr(self, '_epub_path') and self._epub_path:
-                        epub_dir = os.path.dirname(self._epub_path)
-                        if epub_dir:
-                            # Try the raw relative path resolved from the EPUB's dir
-                            rel_candidate = os.path.normpath(os.path.join(epub_dir, src))
-                            if os.path.isfile(rel_candidate):
-                                try:
-                                    with open(rel_candidate, "rb") as df:
-                                        image_data = df.read()
-                                except OSError:
-                                    pass
-                            # Also try common image subdirs (images/, Images/)
-                            if not image_data:
-                                for sub in ("images", "Images", "translated_images"):
-                                    disk_path = os.path.join(epub_dir, sub, img_basename)
-                                    if os.path.isfile(disk_path):
-                                        try:
-                                            with open(disk_path, "rb") as df:
-                                                image_data = df.read()
-                                        except OSError:
-                                            pass
-                                        if image_data:
-                                            break
+                image_data = _resolve_image_data(src)
                 if image_data:
-                    # Write to temp file (skip if already cached)
-                    safe_name = os.path.basename(src).replace("/", "_").replace("\\", "_")
-                    img_path = os.path.join(self._img_temp_dir, safe_name)
-                    if not os.path.isfile(img_path):
-                        with open(img_path, "wb") as f:
-                            f.write(image_data)
-                    img_tag["src"] = QUrl.fromLocalFile(img_path).toString()
+                    img_tag["src"] = _cache_image(src, image_data)
                     # Wrap sizeable images in full-page containers. Byte size
                     # alone misses flat/white page images that compress tiny.
                     image_is_sizeable = len(image_data) > 5120
@@ -24514,6 +24530,28 @@ class EpubReaderDialog(QDialog):
                         container.wrap(wrapper)
                         for el in reversed(to_pull):
                             wrapper.insert(0, el)
+
+            # SVG uses <image href="..."> or the EPUB2-compatible
+            # <image xlink:href="..."> instead of HTML's <img src="...">.
+            # Resolve all common spellings to the same cached local resources.
+            svg_href_attrs = (
+                "href",
+                "xlink:href",
+                "{http://www.w3.org/1999/xlink}href",
+            )
+            for image_tag in soup.find_all("image"):
+                href_attr = next(
+                    (attr for attr in svg_href_attrs if image_tag.get(attr)),
+                    None,
+                )
+                if not href_attr:
+                    continue
+                src = image_tag.get(href_attr, "")
+                if not src or QUrl(src).scheme().lower() in ("http", "https"):
+                    continue
+                image_data = _resolve_image_data(src)
+                if image_data:
+                    image_tag[href_attr] = _cache_image(src, image_data)
 
             return str(soup)
         except Exception:
@@ -24801,7 +24839,7 @@ class EpubReaderDialog(QDialog):
                 f"h1, h2, h3, h4, h5, h6 {{ color: {t['heading']}; margin: 0; padding: 0; }}"
                 f"{_pdf_workspace_body_css}"
                 f"{_pdf_workspace_rtl_css}"
-                f"img {{ display: block; max-width: 100%; max-height: calc(100vh - 60px); "
+                f"img, svg {{ display: block; max-width: 100%; max-height: calc(100vh - 60px); "
                 f"height: auto; object-fit: contain; "
                 f"border-radius: 4px; margin: 12px auto; break-inside: avoid; }}"
                 f".full-page-img {{ break-inside: avoid; break-before: column; "
@@ -24926,7 +24964,7 @@ class EpubReaderDialog(QDialog):
                 f"{_scroll_heading_css}"
                 f"{_pdf_workspace_body_css}"
                 f"{_pdf_workspace_rtl_css}"
-                f"img {{ display: block; max-width: 100%; height: auto; "
+                f"img, svg {{ display: block; max-width: 100%; height: auto; "
                 f"border-radius: 4px; margin: 12px auto; }}"
                 f"{_scroll_paragraph_css}"
                 f"a {{ color: {t['link']}; }}"

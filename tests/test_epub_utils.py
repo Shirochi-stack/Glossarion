@@ -1255,6 +1255,22 @@ def test_valid_html_tag_entities_rehydrate_real_markup():
     )
 
 
+def test_valid_html_tag_entities_rehydrate_svg_image_link():
+    html = (
+        '&lt;svg xmlns:xlink="http://www.w3.org/1999/xlink"&gt;'
+        '&lt;image height="2560" width="1804" '
+        'xlink:href="../Images/cover_img_1.jpg" /&gt;'
+        '&lt;/svg&gt;'
+    )
+
+    assert unescape_valid_html_tag_entities(html) == (
+        '<svg xmlns:xlink="http://www.w3.org/1999/xlink">'
+        '<image height="2560" width="1804" '
+        'xlink:href="../Images/cover_img_1.jpg" />'
+        '</svg>'
+    )
+
+
 def test_xhtml_converter_keeps_escaped_angle_bracket_prose():
     sample = (
         "<p>&lt;A talent possessing both a clean character and noble integrity. "

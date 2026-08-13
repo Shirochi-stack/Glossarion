@@ -1214,6 +1214,32 @@ def test_remote_image_url_survives_local_image_processing(tmp_path):
     assert 'class="remote-image"' in processed
 
 
+@pytest.mark.parametrize("href_attr", ["href", "xlink:href"])
+def test_svg_image_link_is_rehydrated_and_resolved(tmp_path, href_attr):
+    reader = EpubReaderDialog.__new__(EpubReaderDialog)
+    reader._epub_path = str(tmp_path / "book.epub")
+    reader._images = {"cover_img_1.jpg": b"valid-cover-bytes"}
+    reader._extra_image_dirs = []
+    reader._img_temp_dir = str(tmp_path / "reader-images")
+    (tmp_path / "reader-images").mkdir()
+
+    escaped_image = (
+        f'&lt;image height="2560" width="1804" '
+        f'{href_attr}="../Images/cover_img_1.jpg" /&gt;'
+    )
+    processed = reader._process_html(
+        '<svg viewBox="0 0 1804 2560" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink">'
+        f'{escaped_image}</svg>'
+    )
+
+    cached_path = tmp_path / "reader-images" / "cover_img_1.jpg"
+    cached_url = epub_library.QUrl.fromLocalFile(str(cached_path)).toString()
+    assert cached_path.read_bytes() == b"valid-cover-bytes"
+    assert f'{href_attr}="{cached_url}"' in processed
+    assert "&lt;image" not in processed
+
+
 def test_leading_workspace_pdf_image_does_not_start_on_blank_column(tmp_path):
     reader = EpubReaderDialog.__new__(EpubReaderDialog)
     reader._epub_path = str(tmp_path / "source.pdf")
