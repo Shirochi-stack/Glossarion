@@ -3022,6 +3022,162 @@ def test_resource_cleanup_preserves_remote_image_cache(monkeypatch, tmp_path):
     assert not (tmp_path / 'css').exists()
 
 
+def test_single_chapter_retry_restores_persisted_image_names_and_refs(tmp_path):
+    images_dir = tmp_path / 'images'
+    images_dir.mkdir()
+    original_name = 'source-illustration.png'
+    prior_canonical_name = 'chapter0041_img_1.png'
+    canonical_name = 'chapter0042_img_1.png'
+    (images_dir / original_name).write_bytes(_remote_test_png_bytes())
+    (tmp_path / 'image_rename_map.json').write_text(
+        json.dumps({
+            original_name: prior_canonical_name,
+            prior_canonical_name: canonical_name,
+        }),
+        encoding='utf-8',
+    )
+    markup = (
+        '<html><body>'
+        f'<img src="../images/{original_name}">'
+        f'<div style="background-image: url(\'../images/{original_name}\')"></div>'
+        '</body></html>'
+    )
+    chapters = [{
+        'num': 42,
+        'body': markup,
+        'original_html': markup,
+    }]
+
+    restored = chapter_extractor._prepare_single_chapter_image_renames(
+        chapters,
+        str(tmp_path),
+    )
+
+    assert not (images_dir / original_name).exists()
+    assert not (images_dir / prior_canonical_name).exists()
+    assert (images_dir / canonical_name).is_file()
+    assert original_name not in restored[0]['body']
+    assert restored[0]['body'].count(canonical_name) == 2
+    assert original_name not in restored[0]['original_html']
+    assert restored[0]['original_html'].count(canonical_name) == 2
+
+
+def test_first_reader_translation_creates_a_targeted_image_rename_map(tmp_path):
+    images_dir = tmp_path / 'images'
+    images_dir.mkdir()
+    original_name = 'first-reader-image.png'
+    canonical_name = 'chapter0007_img_1.png'
+    (images_dir / original_name).write_bytes(_remote_test_png_bytes())
+    chapters = [{
+        'num': 7,
+        'filename': 'Text/chapter0007.xhtml',
+        'original_basename': 'chapter0007',
+        'body': f'<html><body><img src="../images/{original_name}"></body></html>',
+    }]
+
+    prepared = chapter_extractor._prepare_single_chapter_image_renames(
+        chapters,
+        str(tmp_path),
+    )
+
+    assert not (images_dir / original_name).exists()
+    assert (images_dir / canonical_name).is_file()
+    assert canonical_name in prepared[0]['body']
+    assert json.loads(
+        (tmp_path / 'image_rename_map.json').read_text(encoding='utf-8')
+    ) == {original_name: canonical_name}
+
+
+def test_first_reader_extraction_bootstraps_missing_epub_images(
+    monkeypatch, tmp_path
+):
+    epub_path = tmp_path / 'reader-source.epub'
+    chapter_markup = (
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        '<h1>Chapter 7</h1><p>Reader translation target.</p>'
+        '<img src="../Images/illustration.png"/>'
+        '</body></html>'
+    )
+    container_xml = '''<?xml version="1.0"?>
+    <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+      <rootfiles><rootfile full-path="OEBPS/content.opf"
+        media-type="application/oebps-package+xml"/></rootfiles>
+    </container>'''
+    content_opf = '''<?xml version="1.0" encoding="UTF-8"?>
+    <package xmlns="http://www.idpf.org/2007/opf" version="2.0"
+      unique-identifier="book-id">
+      <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <dc:identifier id="book-id">reader-test</dc:identifier>
+        <dc:title>Reader Test</dc:title><dc:language>en</dc:language>
+      </metadata>
+      <manifest>
+        <item id="chapter7" href="Text/chapter0007.xhtml"
+          media-type="application/xhtml+xml"/>
+        <item id="image1" href="Images/illustration.png"
+          media-type="image/png"/>
+      </manifest>
+      <spine><itemref idref="chapter7"/></spine>
+    </package>'''
+    with zipfile.ZipFile(epub_path, 'w') as archive:
+        archive.writestr('mimetype', 'application/epub+zip')
+        archive.writestr('META-INF/container.xml', container_xml)
+        archive.writestr('OEBPS/content.opf', content_opf)
+        archive.writestr('OEBPS/Text/chapter0007.xhtml', chapter_markup)
+        archive.writestr(
+            'OEBPS/Images/illustration.png',
+            _remote_test_png_bytes(),
+        )
+
+    output_dir = tmp_path / 'reader-output'
+    output_dir.mkdir()
+    monkeypatch.setenv('SINGLE_CHAPTER_FILTER', 'chapter0007.xhtml')
+    monkeypatch.setenv('EXTRACTION_MODE', 'comprehensive')
+    monkeypatch.setenv('EXTRACTION_WORKERS', '1')
+    monkeypatch.setenv('DOWNLOAD_REMOTE_IMAGE_URLS', '0')
+
+    with zipfile.ZipFile(epub_path, 'r') as archive:
+        chapters = chapter_extractor.extract_chapters(
+            archive,
+            str(output_dir),
+            parser='html.parser',
+        )
+
+    canonical_name = 'chapter0007_img_1.png'
+    assert len(chapters) == 1
+    assert not (output_dir / 'images' / 'illustration.png').exists()
+    assert (output_dir / 'images' / canonical_name).is_file()
+    assert canonical_name in chapters[0]['body']
+    assert json.loads(
+        (output_dir / 'image_rename_map.json').read_text(encoding='utf-8')
+    ) == {'illustration.png': canonical_name}
+
+
+def test_single_chapter_cleanup_preserves_the_full_epub_workspace(tmp_path):
+    from TransateKRtoEN import cleanup_previous_extraction
+
+    images_dir = tmp_path / 'images'
+    images_dir.mkdir()
+    image_path = images_dir / 'chapter0001_img_1.png'
+    image_path.write_bytes(_remote_test_png_bytes())
+    marker_path = tmp_path / '.resources_extracted'
+    marker_path.write_text('ready', encoding='utf-8')
+    opf_path = tmp_path / 'content.opf'
+    opf_path.write_text('<package/>', encoding='utf-8')
+    map_path = tmp_path / 'image_rename_map.json'
+    map_path.write_text('{}', encoding='utf-8')
+
+    cleaned = cleanup_previous_extraction(
+        str(tmp_path),
+        preserve_workspace=True,
+    )
+
+    assert cleaned == 0
+    assert image_path.is_file()
+    assert marker_path.is_file()
+    assert opf_path.is_file()
+    assert map_path.is_file()
+
+
 def test_chapter_extractor_preserves_cache_only_for_matching_source_count(
     monkeypatch, tmp_path
 ):

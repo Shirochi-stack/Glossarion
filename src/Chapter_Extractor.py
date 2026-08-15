@@ -1073,6 +1073,243 @@ def _update_image_refs_in_soup(soup, rename_map):
     
     return modified
 
+
+def _prepare_single_chapter_image_renames(
+    chapters,
+    output_dir,
+    progress_callback=None,
+):
+    """Prepare safe canonical image names during a targeted translation.
+
+    Library / Reader single-chapter runs deliberately cannot call
+    :func:`_rename_images_to_chapter_format` with their one-chapter subset: doing
+    so would assign every other image in the book to the selected chapter.  A
+    previous full extraction normally recorded the authoritative assignments in
+    ``image_rename_map.json``, so targeted retries replay that map and update the
+    freshly extracted chapter markup.  On a first-ever Reader translation, only
+    images referenced by the selected chapter are assigned; unrelated book
+    images remain untouched.
+
+    Replaying the physical renames also repairs workspaces damaged by an older
+    targeted run that restored the source EPUB filenames in ``images/``.
+    """
+    rename_map_path = os.path.join(output_dir, 'image_rename_map.json')
+    images_dir = os.path.join(output_dir, 'images')
+
+    map_was_missing = False
+    try:
+        with open(rename_map_path, 'r', encoding='utf-8') as f:
+            loaded_map = json.load(f)
+    except FileNotFoundError:
+        loaded_map = {}
+        map_was_missing = True
+    except Exception as e:
+        print(f"⚠️ Could not load existing image rename map: {e}")
+        loaded_map = {}
+
+    if not isinstance(loaded_map, dict):
+        loaded_map = {}
+
+    # Rename maps contain basenames, not paths.  Enforce that invariant before
+    # touching the filesystem so malformed/stale metadata cannot escape images/.
+    rename_map = {}
+    for original, renamed in loaded_map.items():
+        original_name = os.path.basename(str(original or '').replace('\\', '/'))
+        renamed_name = os.path.basename(str(renamed or '').replace('\\', '/'))
+        if original_name and renamed_name:
+            rename_map[original_name] = renamed_name
+
+    # Repair passes can extend the map (original -> prior canonical -> current
+    # canonical).  Collapse those chains so a restored source file goes directly
+    # to the final name and fresh source markup receives that same final ref.
+    collapsed_map = {}
+    for original_name in rename_map:
+        renamed_name = rename_map[original_name]
+        seen = {original_name}
+        while renamed_name in rename_map and renamed_name not in seen:
+            seen.add(renamed_name)
+            next_name = rename_map[renamed_name]
+            if next_name == renamed_name:
+                break
+            renamed_name = next_name
+        collapsed_map[original_name] = renamed_name
+    rename_map = collapsed_map
+
+    try:
+        existing_images = {
+            name for name in os.listdir(images_dir)
+            if os.path.isfile(os.path.join(images_dir, name))
+        }
+    except OSError:
+        existing_images = set()
+
+    # A reader can start a targeted translation before the book has ever had a
+    # full translation run.  In that case there is no persisted map yet.  Claim
+    # only images actually referenced by the selected chapter; unlike the full
+    # pass, never rename unrelated files as covers.
+    new_mapping_keys = set()
+    reserved_names = set(existing_images) | set(rename_map.values())
+    for chapter in chapters:
+        chapter_basename = chapter.get('original_basename', '')
+        if not chapter_basename:
+            chapter_filename = chapter.get('filename', '')
+            chapter_basename = (
+                os.path.splitext(os.path.basename(chapter_filename))[0]
+                if chapter_filename else ''
+            )
+        if not chapter_basename:
+            chapter_basename = f"chapter{int(chapter.get('num', 0)):03d}"
+        chapter_stem = os.path.splitext(chapter_basename)[0]
+
+        image_srcs = []
+        seen_srcs = set()
+        for html_key in ('body', 'original_html', 'source_html', 'raw_html'):
+            markup = chapter.get(html_key)
+            if not markup:
+                continue
+            try:
+                markup_srcs = _collect_image_srcs(
+                    BeautifulSoup(markup, 'html.parser')
+                )
+            except Exception:
+                continue
+            for src in markup_srcs:
+                if src not in seen_srcs:
+                    seen_srcs.add(src)
+                    image_srcs.append(src)
+
+        image_counter = 1
+        for src in image_srcs:
+            if not src or src.startswith('data:'):
+                continue
+            basename = os.path.basename(src.split('?', 1)[0])
+            if not basename or basename in rename_map:
+                continue
+            if basename not in existing_images:
+                basename = next(
+                    (name for name in existing_images
+                     if name.lower() == basename.lower()),
+                    basename,
+                )
+            if basename not in existing_images:
+                continue
+            if re.match(r'^.+_img_\d+(?:\.[^.]+)?$', basename, re.IGNORECASE):
+                continue
+
+            extension = os.path.splitext(basename)[1]
+            renamed_name = f"{chapter_stem}_img_{image_counter}{extension}"
+            while renamed_name in reserved_names:
+                image_counter += 1
+                renamed_name = f"{chapter_stem}_img_{image_counter}{extension}"
+            rename_map[basename] = renamed_name
+            new_mapping_keys.add(basename)
+            reserved_names.add(renamed_name)
+            image_counter += 1
+
+    restored_count = 0
+    if os.path.isdir(images_dir):
+        # Use temporary names just like the full rename pass.  This keeps replay
+        # safe when one map destination happens to be another map source.
+        temp_renames = []
+        for index, (original_name, renamed_name) in enumerate(
+            list(rename_map.items())
+        ):
+            if original_name == renamed_name:
+                continue
+            original_path = os.path.join(images_dir, original_name)
+            renamed_path = os.path.join(images_dir, renamed_name)
+            if not os.path.isfile(original_path) or os.path.exists(renamed_path):
+                continue
+            temp_name = f"_temp_restore_{index}_{original_name}"
+            temp_path = os.path.join(images_dir, temp_name)
+            try:
+                os.rename(original_path, temp_path)
+                temp_renames.append(
+                    (original_name, temp_path, original_path, renamed_path)
+                )
+            except OSError as e:
+                print(f"   ⚠️ Could not stage image restore {original_name}: {e}")
+                if original_name in new_mapping_keys:
+                    rename_map.pop(original_name, None)
+                    new_mapping_keys.discard(original_name)
+
+        for original_name, temp_path, original_path, renamed_path in temp_renames:
+            try:
+                if os.path.exists(renamed_path):
+                    os.rename(temp_path, original_path)
+                    continue
+                os.rename(temp_path, renamed_path)
+                restored_count += 1
+            except OSError as e:
+                print(
+                    f"   ⚠️ Could not restore image name "
+                    f"{os.path.basename(original_path)} → "
+                    f"{os.path.basename(renamed_path)}: {e}"
+                )
+                try:
+                    if os.path.exists(temp_path) and not os.path.exists(original_path):
+                        os.rename(temp_path, original_path)
+                except OSError:
+                    pass
+                if original_name in new_mapping_keys:
+                    rename_map.pop(original_name, None)
+                    new_mapping_keys.discard(original_name)
+
+    try:
+        existing_images = {
+            name for name in os.listdir(images_dir)
+            if os.path.isfile(os.path.join(images_dir, name))
+        }
+    except OSError:
+        existing_images = set()
+
+    # Only rewrite a reference when its canonical destination is present.  A
+    # stale map must never turn a currently valid source reference into a broken
+    # one.
+    available_map = {
+        original: renamed
+        for original, renamed in rename_map.items()
+        if renamed in existing_images
+    }
+
+    if rename_map and (map_was_missing or new_mapping_keys or rename_map != loaded_map):
+        try:
+            with open(rename_map_path, 'w', encoding='utf-8') as f:
+                json.dump(rename_map, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            print(f"⚠️ Could not save targeted image rename map: {e}")
+    updated_chapters = 0
+    if available_map:
+        for chapter in chapters:
+            chapter_modified = False
+            for html_key in ('body', 'original_html', 'source_html', 'raw_html'):
+                markup = chapter.get(html_key)
+                if not markup:
+                    continue
+                try:
+                    soup = BeautifulSoup(markup, 'html.parser')
+                    if _update_image_refs_in_soup(soup, available_map):
+                        chapter[html_key] = str(soup)
+                        chapter_modified = True
+                except Exception:
+                    continue
+            if chapter_modified:
+                updated_chapters += 1
+
+    if restored_count or updated_chapters or new_mapping_keys:
+        message = (
+            f"Single-chapter image state restored: {restored_count} file(s) "
+            f"renamed, {updated_chapters} chapter(s) updated"
+        )
+        print(f"🖼️ {message}")
+        if progress_callback:
+            progress_callback(message)
+    else:
+        print("🎯 Single-chapter mode: existing image names already preserved")
+
+    return chapters
+
+
 def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=None):
     """Rename image files to chapter-based format and update all references.
     
@@ -1662,20 +1899,49 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
         )
     print(f"🔧 Using {max_workers} workers for parallel processing")
     
-    # Single-chapter mode (SINGLE_CHAPTER_FILTER): skip the heavy full
-    # resource pass — we only need the one HTML file. Resources from a
-    # previous full extraction (css/, images/, fonts/) are left untouched.
+    # Single-chapter mode (SINGLE_CHAPTER_FILTER): reuse a prior extraction's
+    # resources.  If the images directory is absent/empty (including a
+    # workspace damaged by the old targeted-run cleanup), restore packaged
+    # resources once; only the selected HTML file is still parsed below.
     _single_mode = bool((os.getenv("SINGLE_CHAPTER_FILTER", "") or "").strip())
-    if _single_mode:
+    images_dir = os.path.join(output_dir, 'images')
+    try:
+        existing_packaged_images = [
+            name for name in os.listdir(images_dir)
+            if (
+                os.path.isfile(os.path.join(images_dir, name))
+                and os.path.splitext(name)[1].lower()
+                in {'.jpg', '.jpeg', '.png', '.gif', '.svg', '.bmp', '.webp'}
+            )
+        ]
+    except OSError:
+        existing_packaged_images = []
+    _single_resource_bootstrap = (
+        _single_mode
+        and source_epub_image_count > 0
+        and not existing_packaged_images
+    )
+    if _single_mode and not _single_resource_bootstrap:
         print("🎯 Single-chapter mode: skipping full resource extraction (css/fonts/images)")
         extracted_resources = {'css': [], 'fonts': [], 'images': [],
                                'epub_structure': [], 'other': []}
     else:
+        if _single_resource_bootstrap:
+            print(
+                "🎯 Single-chapter mode: restoring missing EPUB image "
+                "resources before the targeted retry"
+            )
+            try:
+                os.remove(os.path.join(output_dir, '.resources_extracted'))
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                print(f"⚠️ Could not reset the resource marker: {e}")
         extracted_resources = _extract_all_resources(
             zf,
             output_dir,
             progress_callback,
-            preserve_images=preserve_remote_images,
+            preserve_images=(preserve_remote_images or _single_resource_bootstrap),
         )
 
     # Check stop after resource extraction
@@ -1740,7 +2006,12 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     if not _single_mode:
         chapters = _rename_images_to_chapter_format(chapters, output_dir, progress_callback)
     else:
-        print("🎯 Single-chapter mode: skipping image rename pass")
+        print("🎯 Single-chapter mode: preparing canonical image names")
+        chapters = _prepare_single_chapter_image_renames(
+            chapters,
+            output_dir,
+            progress_callback,
+        )
     
     chapters_info_path = os.path.join(output_dir, 'chapters_info.json')
     chapters_info = []

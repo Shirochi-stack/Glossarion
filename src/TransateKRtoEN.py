@@ -16318,8 +16318,19 @@ def _should_preserve_remote_image_cache(input_path, output_dir):
     )
 
 
-def cleanup_previous_extraction(output_dir, preserve_images=False):
-    """Clean up any files from previous extraction runs (preserves CSS files)"""
+def cleanup_previous_extraction(
+    output_dir,
+    preserve_images=False,
+    preserve_workspace=False,
+):
+    """Clean up a prior extraction, or retain it for a targeted chapter run."""
+    if preserve_workspace:
+        print(
+            "🎯 Single-chapter mode: preserving the existing extraction "
+            "workspace (images, rename map, CSS, fonts, and EPUB structure)"
+        )
+        return 0
+
     # Remove 'css' from cleanup_items to preserve CSS files
     cleanup_items = [
         # Removed 'css' from this list
@@ -21698,6 +21709,9 @@ def main(log_callback=None, stop_callback=None):
                 preserve_pdf_ocr_images
                 or preserve_fast_pdf_images
                 or preserve_remote_image_cache
+            ),
+            preserve_workspace=bool(
+                (os.getenv("SINGLE_CHAPTER_FILTER", "") or "").strip()
             ),
         )
 
