@@ -471,9 +471,28 @@ _GUI_LOG_PENDING_MAX_MESSAGES = 50_000
 _GUI_LOG_DIRECT_EVENT_LIMIT = 100
 
 
+def _normalize_gui_log_message(message):
+    """Return text that is safe for UTF-8 log handlers and Qt widgets.
+
+    A few historical status strings used two ``\\udxxx`` surrogate escapes
+    instead of one full Unicode code point.  Combine valid pairs and render an
+    isolated malformed surrogate as an escaped sequence rather than letting a
+    logger raise ``UnicodeEncodeError``.
+    """
+    text = str(message)
+    if not any(0xD800 <= ord(char) <= 0xDFFF for char in text):
+        return text
+    try:
+        return text.encode('utf-16', 'surrogatepass').decode('utf-16')
+    except UnicodeError:
+        return text.encode('utf-8', 'backslashreplace').decode('utf-8')
+
+
 def _persist_gui_log_message(message):
     """Write a direct GUI message through the full run.log handler."""
-    logging.getLogger("glossarion.gui").info(str(message))
+    logging.getLogger("glossarion.gui").info(
+        _normalize_gui_log_message(message)
+    )
 
 # macOS GPU rendering safety — must be set BEFORE any Qt/PySide6 import.
 # On Hackintosh (AMD CPU) systems, Qt6's default Metal backend can segfault
@@ -18123,7 +18142,7 @@ Recent translations to summarize:
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
                 )
             else:
-                self.authcd_login_btn.setText(f"\ud83d\udd10 Claude{acct_suffix} Login")
+                self.authcd_login_btn.setText(f"🔐 Claude{acct_suffix} Login")
                 self.authcd_login_btn.setToolTip(
                     "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
                     "Log in with your Claude Pro/Max subscription via browser. "
@@ -18134,7 +18153,7 @@ Recent translations to summarize:
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
                 )
         except ImportError:
-            self.authcd_login_btn.setText("\ud83d\udd10 Claude Login (unavailable)")
+            self.authcd_login_btn.setText("🔐 Claude Login (unavailable)")
             self.authcd_login_btn.setEnabled(False)
 
     def _authcd_login_clicked(self):
@@ -18181,7 +18200,7 @@ Recent translations to summarize:
                     except OSError:
                         pass
                 self._refresh_auth_account_arrows()
-                self.append_log(f"\ud83d\udd13 Claude{acct_suffix}: Logged out")
+                self.append_log(f"🔓 Claude{acct_suffix}: Logged out")
             return
 
         # --- Strategy 1: Try loading existing Claude Code credentials ---
@@ -18224,7 +18243,7 @@ Recent translations to summarize:
 
         self.authcd_login_btn.setText("\u23f3 Logging in\u2026")
         self.authcd_login_btn.setEnabled(False)
-        self.append_log(f"\ud83d\udd10 Claude{acct_suffix}: Opening browser for Claude login\u2026")
+        self.append_log(f"🔐 Claude{acct_suffix}: Opening browser for Claude login\u2026")
 
         def _do_claude_login():
             import subprocess, time as _time, os
@@ -18357,7 +18376,7 @@ Recent translations to summarize:
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
                 )
             else:
-                self.authgpt_login_btn.setText(f"\ud83d\udd10 ChatGPT{acct_suffix} Login")
+                self.authgpt_login_btn.setText(f"🔐 ChatGPT{acct_suffix} Login")
                 self.authgpt_login_btn.setToolTip(
                     "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
                     "Log in with your ChatGPT Plus/Pro subscription via browser. "
@@ -18368,7 +18387,7 @@ Recent translations to summarize:
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
                 )
         except ImportError:
-            self.authgpt_login_btn.setText("\ud83d\udd10 ChatGPT Login (unavailable)")
+            self.authgpt_login_btn.setText("🔐 ChatGPT Login (unavailable)")
             self.authgpt_login_btn.setEnabled(False)
 
     def _authgpt_login_clicked(self):
@@ -18397,13 +18416,13 @@ Recent translations to summarize:
             if reply == QMessageBox.Yes:
                 store.clear_tokens()
                 self._refresh_auth_account_arrows()
-                self.append_log(f"\ud83d\udd13 ChatGPT{acct_suffix}: Logged out")
+                self.append_log(f"🔓 ChatGPT{acct_suffix}: Logged out")
             return
 
         # Start login in background thread
         self.authgpt_login_btn.setText("\u23f3 Logging in\u2026")
         self.authgpt_login_btn.setEnabled(False)
-        self.append_log(f"\ud83d\udd10 ChatGPT{acct_suffix}: Opening browser for login\u2026")
+        self.append_log(f"🔐 ChatGPT{acct_suffix}: Opening browser for login\u2026")
 
         def _do_login():
             try:
@@ -20872,7 +20891,7 @@ Recent translations to summarize:
         model_btn_layout.addWidget(self.authgrok_acct_combo)
         
         # AuthCD Login button (visible only for authcd/ models)
-        self.authcd_login_btn = QPushButton("\ud83d\udd10 Claude Login")
+        self.authcd_login_btn = QPushButton("🔐 Claude Login")
         self.authcd_login_btn.setStyleSheet(
             "background-color: #d97706; color: white; font-weight: bold; "
             "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
@@ -29141,7 +29160,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # use a synthetic sentinel so the rest of the pipeline works
                     self.selected_files = ["__generative_mode__"]
                     self.append_log(
-                        f"\ud83c\udfa8 Generative model detected ({_model_name}) – "
+                        f"🎨 Generative model detected ({_model_name}) – "
                         "running without an input file."
                     )
                 else:
@@ -29756,7 +29775,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         """
         try:
             model = str(getattr(self, 'model_var', '')).strip()
-            self.append_log(f"\ud83c\udfa8 Generative mode: sending prompt to {model}\u2026")
+            self.append_log(f"🎨 Generative mode: sending prompt to {model}\u2026")
 
             # Build the user prompt from available config fields.
             # The system prompt lives in the prompt_text QTextEdit widget.
@@ -29794,7 +29813,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 messages.append({'role': 'system', 'content': system_prompt})
             messages.append({'role': 'user', 'content': user_prompt})
 
-            self.append_log(f"\ud83d\udcdd Prompt: {user_prompt[:200]}{'...' if len(user_prompt) > 200 else ''}")
+            self.append_log(f"📝 Prompt: {user_prompt[:200]}{'...' if len(user_prompt) > 200 else ''}")
 
             # Push critical output-mode env vars so the client picks them up
             os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = self._get_allowed_image_output_mode()
@@ -29829,7 +29848,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             result_text = (result_text or '').strip()
 
             self.append_log(f"\n\u2705 Generation complete!")
-            self.append_log(f"\ud83d\udd17 Result: {result_text}")
+            self.append_log(f"🔗 Result: {result_text}")
 
             # Check if it's a generated media sentinel
             import re, shutil
@@ -29848,14 +29867,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # It's a media file — already saved in Generated_Media, just log it
                     generated_media_path = match.group(1)
                     if os.path.exists(generated_media_path):
-                        self.append_log(f"\ud83d\udcc4 Media saved to: {generated_media_path}")
+                        self.append_log(f"📄 Media saved to: {generated_media_path}")
                         result_text = generated_media_path
                 else:
                     # Standard text response, save as .txt
                     fname = f"generated_{safe_model}_{ts}.txt"
                     out_path = out_dir / fname
                     out_path.write_text(result_text, encoding='utf-8')
-                    self.append_log(f"\ud83d\udcc4 Saved to: {out_path}")
+                    self.append_log(f"📄 Saved to: {out_path}")
             except Exception as save_err:
                 self.append_log(f"\u26a0\ufe0f Could not save result file: {save_err}")
 
@@ -38026,6 +38045,7 @@ Important rules:
        """Append message to log with safety checks (fallback to print if GUI is gone).
        Also suppresses repeated stop/cancel notices once a stop has been requested.
        """
+       message = _normalize_gui_log_message(message)
        # Direct GUI status messages do not originate from Python logging, so
        # explicitly send them through the root file handler. Backend logger
        # records set _from_logging=True to avoid duplicate lines in run.log.
@@ -40460,7 +40480,7 @@ Important rules:
             self._force_stream_all = bool(force_stream_all)
 
             self.append_log(
-                f"\ud83c\udfaf Queued single-chapter translation: {self._single_chapter_filter} "
+                f"🎯 Queued single-chapter translation: {self._single_chapter_filter} "
                 f"({os.path.basename(epub_path)})")
             self.run_translation_thread()
             # run_translation_thread can bail out early on validation \u2014

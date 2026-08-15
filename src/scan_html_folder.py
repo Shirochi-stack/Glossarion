@@ -11887,7 +11887,7 @@ if __name__ == "__main__":
             
             # For custom mode with --interactive, show the custom detection settings dialog
             if args.mode == 'custom' and args.interactive:
-                print("\ud83c\udfdb️ Opening Custom Detection Settings dialog...")
+                print("🏛️ Opening Custom Detection Settings dialog...")
                 from PySide6.QtWidgets import QApplication
                 from QA_Scanner_GUI import show_custom_detection_dialog
                 

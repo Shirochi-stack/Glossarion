@@ -552,6 +552,25 @@ def test_translator_gui_direct_messages_are_persisted_once(monkeypatch):
     assert persisted == ["direct status"]
 
 
+def test_translator_gui_normalizes_surrogate_pairs_before_logging(caplog):
+    import translator_gui
+
+    malformed_target = chr(0xD83C) + chr(0xDFAF)
+
+    with caplog.at_level(
+        translator_gui.logging.INFO,
+        logger="glossarion.gui",
+    ):
+        translator_gui._persist_gui_log_message(
+            f"{malformed_target} Queued single-chapter translation"
+        )
+
+    persisted = [record.getMessage() for record in caplog.records]
+    assert "🎯 Queued single-chapter translation" in persisted
+    normalized = persisted[-1]
+    assert normalized.encode("utf-8").startswith(b"\xf0\x9f\x8e\xaf")
+
+
 def test_google_free_translate_keeps_ajax_endpoint_last(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
