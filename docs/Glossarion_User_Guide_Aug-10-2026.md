@@ -268,7 +268,8 @@ Click **⚙️ Other Setting** to open the advanced window. **You can translate 
 ### Response handling & retries (these save failed runs)
 
 - **Auto-retry Truncated Responses** — "Auto-retry logic for clear cases of truncation the API doesn't report" (when the AI silently cuts off). **✅ Keep on.**
-- **Preserve Original Text on Failure** — if a translation fails, save the original foreign text wrapped in a failure marker instead of an empty/blocked result. Lets you find and fix it later.
+- **Preserve Original Text on Failure** — if a translation fails for any reason, save the original foreign text verbatim instead of an empty, partial, truncated, or blocked result. This takes priority over the blocked/prohibited and truncated-output save settings. The chapter remains marked as QA failed so you can find and fix it later.
+- **Save blocked/prohibited responses** — save blocked, prohibited, and API-error output for inspection. When streaming is enabled, text received before the failure is saved instead of an empty file.
 - **Save partial/stopped chapters as QA-failed** — chapters you interrupt with Stop are saved and marked failed (instead of vanishing), so you can retry just them.
 - **Streaming** — "Streams tokens as they're generated to reduce wait time. Some providers (e.g. Google Gemini) may truncate streams silently — turn streaming off if you see incomplete output."
 - **Show thinking logs** — show the AI's 🧠 reasoning in the log for models that support it.

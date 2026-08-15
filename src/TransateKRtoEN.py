@@ -162,7 +162,10 @@ from ai_hunter_enhanced import ImprovedAIHunterDetection
 import GlossaryManager  # Module with glossary functions
 from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
-from html_tag_entities import fix_stray_p_gt_artifacts as _fix_stray_p_gt_artifacts
+from html_tag_entities import (
+    VALID_ENTITY_TAGS as _VALID_ENTITY_HTML_TAGS,
+    fix_stray_p_gt_artifacts as _fix_stray_p_gt_artifacts,
+)
 from html_output_utils import convert_br_to_paragraphs, write_utf8_html_file
 from pdf_output_naming import (
     move_pdf_output_to_readable_name,
@@ -9840,7 +9843,7 @@ class BatchTranslationProcessor:
 
                         # Handle graceful-stop skipped chunks
                         if finish_reason == "graceful_stop":
-                            save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
+                            save_partial_results = _save_partial_results_enabled(self.config)
                             if save_partial_results:
                                 fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                                 partial_content = None
@@ -9849,7 +9852,13 @@ class BatchTranslationProcessor:
                                     partial_content = getattr(tls, '_last_truncated_content', None)
                                 except Exception:
                                     partial_content = getattr(self.client, '_last_truncated_content', None)
-                                if isinstance(partial_content, str) and partial_content:
+                                had_partial_content = isinstance(partial_content, str) and bool(partial_content)
+                                partial_content = _failure_output_for_save(
+                                    partial_content,
+                                    chunk_html,
+                                    self.config,
+                                )
+                                if partial_content:
                                     try:
                                         with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                                             f.write(partial_content)
@@ -9859,12 +9868,13 @@ class BatchTranslationProcessor:
                                         self.update_progress_fn(
                                             chapter_progress_idx, actual_num, content_hash, fname,
                                             status="qa_failed",
-                                            qa_issues_found=["TRUNCATED"],
+                                            qa_issues_found=["TRUNCATED"] if had_partial_content else ["PARTIAL"],
                                             chapter_obj=chapter
                                         )
-                                        graceful_stop_qa_issue = ["TRUNCATED"]
+                                        graceful_stop_qa_issue = ["TRUNCATED"] if had_partial_content else ["PARTIAL"]
                                         self.save_progress_fn()
-                                    print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — saved truncated output")
+                                    saved_label = "truncated" if had_partial_content else "original source"
+                                    print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — saved {saved_label}")
                                 else:
                                     with self.progress_lock:
                                         self.update_progress_fn(
@@ -9908,10 +9918,14 @@ class BatchTranslationProcessor:
                                 qa_issue=qa_issue,
                             )
                             if save_failure_results:
-                                # Do NOT preserve original; save AI output if any, otherwise empty
+                                failure_output = _failure_output_for_save(
+                                    result,
+                                    chunk_html,
+                                    self.config,
+                                )
                                 try:
                                     with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                                        f.write(result if isinstance(result, str) else "")
+                                        f.write(failure_output)
                                 except Exception:
                                     pass
                             with self.progress_lock:
@@ -9930,6 +9944,12 @@ class BatchTranslationProcessor:
                             chunk_abort_event.set()
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                             print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Timeout - aborting chapter")
+                            if _preserve_original_text_on_failure_enabled(self.config):
+                                try:
+                                    with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                                        f.write(chunk_html if isinstance(chunk_html, str) else "")
+                                except Exception:
+                                    pass
                             with self.progress_lock:
                                 self.update_progress_fn(
                                     chapter_progress_idx, actual_num, content_hash, fname,
@@ -9948,11 +9968,16 @@ class BatchTranslationProcessor:
                             chunk_abort_event.set()
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                             print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Truncated - aborting chapter")
-                            save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
-                            if save_partial_results:
+                            save_truncated_result = _should_save_truncated_response(self.config)
+                            if save_truncated_result:
+                                failure_output = _failure_output_for_save(
+                                    result,
+                                    chunk_html,
+                                    self.config,
+                                )
                                 try:
                                     with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                                        f.write(result if isinstance(result, str) else "")
+                                        f.write(failure_output)
                                 except Exception:
                                     pass
                             with self.progress_lock:
@@ -10200,9 +10225,14 @@ class BatchTranslationProcessor:
                     )
                     if should_save:
                         try:
+                            failure_output = _failure_output_for_save(
+                                cleaned,
+                                chapter_body,
+                                self.config,
+                            )
                             write_utf8_html_file(
                                 os.path.join(self.out_dir, fname),
-                                cleaned if isinstance(cleaned, str) else "",
+                                failure_output,
                             )
                         except Exception:
                             pass
@@ -10257,26 +10287,32 @@ class BatchTranslationProcessor:
             
             # ------------------------------------------------------------------
             # Truncation / partial-result gate — check BEFORE writing to disk.
-            # When "Save interrupted chapters" is OFF we must NOT create a file.
+            # Truncation is also saved when source preservation is enabled.
             # ------------------------------------------------------------------
             if chapter_truncated or chapter_truncated_event.is_set() or is_partial_result:
-                save_partial_results = (
-                    os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1'
-                    or bool(getattr(self.config, 'save_partial_results', False))
+                is_truncated_result = chapter_truncated or chapter_truncated_event.is_set()
+                should_save_result = (
+                    _should_save_truncated_response(self.config)
+                    if is_truncated_result
+                    else _save_partial_results_enabled(self.config)
                 )
-                qa_issue = ["TRUNCATED"] if (chapter_truncated or chapter_truncated_event.is_set()) else ["PARTIAL"]
-                qa_label = "truncated" if (chapter_truncated or chapter_truncated_event.is_set()) else "partial (graceful stop)"
+                qa_issue = ["TRUNCATED"] if is_truncated_result else ["PARTIAL"]
+                qa_label = "truncated" if is_truncated_result else "partial (graceful stop)"
 
-                if save_partial_results:
-                    # User opted-in: write the truncated/partial output to disk
+                if should_save_result:
+                    failure_output = _failure_output_for_save(
+                        cleaned,
+                        chapter_body,
+                        self.config,
+                    )
                     if self.is_text_file:
                         with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                            f.write(cleaned)
+                            f.write(failure_output)
                     else:
-                        write_utf8_html_file(os.path.join(self.out_dir, fname), cleaned)
-                    print(f"💾 Saved Chapter {actual_num} ({qa_label}): {fname} ({len(cleaned)} chars)")
+                        write_utf8_html_file(os.path.join(self.out_dir, fname), failure_output)
+                    print(f"💾 Saved Chapter {actual_num} ({qa_label}): {fname} ({len(failure_output)} chars)")
                 else:
-                    print(f"⏭️ Chapter {actual_num} not saved ({qa_label}) — 'Save interrupted chapters' is OFF")
+                    print(f"⏭️ Chapter {actual_num} not saved ({qa_label}) — failure-output saving is OFF")
 
                 with self.progress_lock:
                     self.update_progress_fn(
@@ -10414,6 +10450,14 @@ class BatchTranslationProcessor:
             with self.progress_lock:
                 # Use the same output filename so we can track failed chapters properly
                 fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                if _preserve_original_text_on_failure_enabled(self.config):
+                    try:
+                        write_utf8_html_file(
+                            os.path.join(self.out_dir, fname),
+                            chapter_body if isinstance(chapter_body, str) else "",
+                        )
+                    except Exception:
+                        pass
                 # Check if it's a timeout failure
                 if "[TIMEOUT]" in error_msg or error_type == 'timeout':
                     self.update_progress_fn(
@@ -11043,10 +11087,26 @@ class BatchTranslationProcessor:
                                 cleaned = ContentProcessor.emergency_restore_paragraphs(cleaned)
                         except Exception:
                             pass
-            
-                # Check for truncation / QA failures first
+
+                if merged_truncated:
+                    # Do this before split-the-merge so each saved section also
+                    # receives source text when preservation has priority.
+                    cleaned = _failure_output_for_save(
+                        cleaned,
+                        merged_content,
+                        self.config,
+                    )
+
+                # Check for truncation / QA failures first. Preserve Original
+                # Text intentionally removes visible failure markers, so the
+                # provider finish reason must remain authoritative here.
                 results = []
-                if is_qa_failed_response(cleaned):
+                merged_failure_qa_issue = None
+                if merged_finish_reason in ("content_filter", "prohibited_content"):
+                    merged_failure_qa_issue = ["PROHIBITED_CONTENT"]
+                elif merged_finish_reason == "error":
+                    merged_failure_qa_issue = ["API_ERROR"]
+                if merged_failure_qa_issue or is_qa_failed_response(cleaned):
                     # Only save file for debugging if it contains meaningful content beyond error markers
                     cleaned_stripped = cleaned.strip()
                     is_only_error_marker = cleaned_stripped in [
@@ -11063,6 +11123,7 @@ class BatchTranslationProcessor:
                         cleaned,
                         failure_reason=failure_reason,
                         config=self.config,
+                        qa_issue=merged_failure_qa_issue,
                     )
                     block_failure_debug_save = (
                         is_prohibited_failure(cleaned, failure_reason)
@@ -11071,7 +11132,12 @@ class BatchTranslationProcessor:
                     if should_save:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
-                            cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
+                            failure_output = _failure_output_for_save(
+                                cleaned,
+                                merged_content,
+                                self.config,
+                            )
+                            cleaned_to_save = ContentProcessor.strip_split_markers(failure_output)
                             write_utf8_html_file(
                                 os.path.join(self.out_dir, parent_fname),
                                 cleaned_to_save if isinstance(cleaned_to_save, str) else "",
@@ -11095,6 +11161,7 @@ class BatchTranslationProcessor:
                                 content_hash,
                                 chapter_fname,
                                 status="qa_failed",
+                                qa_issues_found=merged_failure_qa_issue,
                                 chapter_obj=chapter,
                             )
                             self.save_progress_fn()
@@ -11130,11 +11197,18 @@ class BatchTranslationProcessor:
                         "[]"
                     ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
                     
-                    if not is_only_error_marker and cleaned_stripped:
+                    if _preserve_original_text_on_failure_enabled(self.config) or (
+                        not is_only_error_marker and cleaned_stripped
+                    ):
                         # Save for debugging - contains actual translation attempt that failed split
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
-                            cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
+                            failure_output = _failure_output_for_save(
+                                cleaned,
+                                merged_content,
+                                self.config,
+                            )
+                            cleaned_to_save = ContentProcessor.strip_split_markers(failure_output)
                             write_utf8_html_file(os.path.join(self.out_dir, parent_fname), cleaned_to_save)
                         except Exception:
                             pass
@@ -11249,25 +11323,25 @@ class BatchTranslationProcessor:
 
                 # ------------------------------------------------------------------
                 # Truncation gate — check BEFORE writing to disk.
-                # When "Save interrupted chapters" is OFF we must NOT create a file
-                # for truncated merged results.
+                # Truncation is also saved when source preservation is enabled.
                 # ------------------------------------------------------------------
                 if merged_truncated:
-                    save_partial_results = (
-                        os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1'
-                        or bool(getattr(self.config, 'save_partial_results', False))
-                    )
-                    if save_partial_results:
-                        # User opted-in: write truncated output to disk
+                    save_truncated_result = _should_save_truncated_response(self.config)
+                    if save_truncated_result:
+                        failure_output = _failure_output_for_save(
+                            cleaned_to_save,
+                            merged_content,
+                            self.config,
+                        )
                         if getattr(self, 'is_text_file', False):
-                            text_content = _content_for_text_output(cleaned_to_save)
+                            text_content = _content_for_text_output(failure_output)
                             with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
                                 f.write(text_content)
                         else:
-                            write_utf8_html_file(os.path.join(self.out_dir, fname), cleaned_to_save)
-                        print(f"   💾 Saved merged content (truncated) to Chapter {parent_actual_num}: {saved_name} ({len(cleaned_to_save)} chars)")
+                            write_utf8_html_file(os.path.join(self.out_dir, fname), failure_output)
+                        print(f"   💾 Saved merged content (truncated) to Chapter {parent_actual_num}: {saved_name} ({len(failure_output)} chars)")
                     else:
-                        print(f"   ⏭️ Merged content for Chapter {parent_actual_num} not saved (truncated) — 'Save interrupted chapters' is OFF")
+                        print(f"   ⏭️ Merged content for Chapter {parent_actual_num} not saved (truncated) — failure-output saving is OFF")
                 else:
                     # Not truncated — always save
                     if getattr(self, 'is_text_file', False):
@@ -13292,6 +13366,28 @@ def _save_partial_results_enabled(config=None):
     return os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(config, 'save_partial_results', False))
 
 
+def _preserve_original_text_on_failure_enabled(config=None):
+    return (
+        os.getenv('PRESERVE_ORIGINAL_TEXT_ON_FAILURE', '0') == '1'
+        or bool(getattr(config, 'preserve_original_text_on_failure', False))
+    )
+
+
+def _should_save_truncated_response(config=None):
+    """Preserved source text takes precedence over the truncated-output toggle."""
+    return (
+        _preserve_original_text_on_failure_enabled(config)
+        or _save_partial_results_enabled(config)
+    )
+
+
+def _failure_output_for_save(provider_content, source_content, config=None):
+    """Select the source verbatim before any failed provider/partial response."""
+    if _preserve_original_text_on_failure_enabled(config):
+        return source_content if isinstance(source_content, str) else ""
+    return provider_content if isinstance(provider_content, str) else ""
+
+
 def _normalize_qa_issue_set(qa_issue=None):
     if qa_issue is None:
         return set()
@@ -13332,6 +13428,11 @@ def is_api_error_failure(content, failure_reason=None):
 
 def _should_save_failure_response(content=None, failure_reason=None, config=None, qa_issue=None):
     """Route failed-output saves to the matching user toggle."""
+    # Preserve Original Text is itself an opt-in to materialize failed
+    # translations. UnifiedClient has already replaced the failed provider
+    # output with the raw source text before this save gate is reached.
+    if _preserve_original_text_on_failure_enabled(config):
+        return True
     issues = _normalize_qa_issue_set(qa_issue)
     if issues.intersection({"PROHIBITED_CONTENT", "API_ERROR"}):
         return _save_prohibited_results_enabled(config)
@@ -20780,26 +20881,13 @@ def _fix_img_p_nesting(html):
 # =====================================================
 # INVALID HTML TAG ESCAPING (BeautifulSoup mode)
 # =====================================================
-# Known HTML tag names that should NOT be escaped. Mirrors the set used
-# by epub_converter.py's _escape_plaintext_angle_brackets() so the
-# translation post-process and the EPUB compilation stay in sync.
-_KNOWN_HTML_TAGS = frozenset({
-    'html','head','body','title','meta','link','style','script','noscript',
-    'p','div','span','br','hr','img','a','h1','h2','h3','h4','h5','h6',
-    'ul','ol','li','dl','dt','dd',
-    'pre','code','em','strong','b','i','u','s','strike','del','ins','mark','small','sub','sup',
-    'table','thead','tbody','tfoot','tr','td','th','caption','col','colgroup',
-    'blockquote','q','cite',
-    'section','article','header','footer','nav','main','aside','details','summary',
-    'figure','figcaption',
-    'form','input','button','select','option','textarea','label','fieldset','legend',
-    'iframe','canvas','svg','math',
-    'video','audio','source','track','embed','object','param',
-    'map','area',
-    'center', 'font', 'base',
-    # EPUB / Ruby / misc
-    'ruby','rt','rp','wbr','picture','image',
-})
+# Use the entity helper's canonical allowlist so Ruby annotation tags such as
+# ``rb`` and ``rtc`` stay consistent across translation and EPUB compilation.
+# These four tags were already accepted here and remain translation-only
+# supplements to the conservative entity-rehydration list.
+_KNOWN_HTML_TAGS = frozenset(
+    set(_VALID_ENTITY_HTML_TAGS) | {'script', 'tfoot', 'wbr', 'picture'}
+)
 
 
 def _escape_invalid_html_tags(html_text: str) -> str:
@@ -27448,10 +27536,14 @@ def main(log_callback=None, stop_callback=None):
                         qa_issue=qa_issue,
                     )
                     if save_failure_results:
-                        # Do NOT preserve original; save AI output if any, otherwise empty
+                        failure_output = _failure_output_for_save(
+                            result,
+                            chunk_html,
+                            config,
+                        )
                         try:
                             with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                                f.write(result if isinstance(result, str) else "")
+                                f.write(failure_output)
                         except Exception:
                             pass
                     progress_manager.update(
@@ -27468,7 +27560,7 @@ def main(log_callback=None, stop_callback=None):
                 # Handle graceful-stop skipped chunks
                 if finish_reason == "graceful_stop":
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
-                    save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(config, 'save_partial_results', False))
+                    save_partial_results = _save_partial_results_enabled(config)
                     if save_partial_results:
                         # If we have a truncated partial response, save it and mark TRUNCATED
                         partial_content = None
@@ -27477,7 +27569,13 @@ def main(log_callback=None, stop_callback=None):
                             partial_content = getattr(tls, '_last_truncated_content', None)
                         except Exception:
                             partial_content = getattr(translation_processor.client, '_last_truncated_content', None)
-                        if isinstance(partial_content, str) and partial_content:
+                        had_partial_content = isinstance(partial_content, str) and bool(partial_content)
+                        partial_content = _failure_output_for_save(
+                            partial_content,
+                            chunk_html,
+                            config,
+                        )
+                        if partial_content:
                             try:
                                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                                     f.write(partial_content)
@@ -27486,11 +27584,12 @@ def main(log_callback=None, stop_callback=None):
                             progress_manager.update(
                                 idx, actual_num, content_hash, fname,
                                 status="qa_failed",
-                                qa_issues_found=["TRUNCATED"],
+                                qa_issues_found=["TRUNCATED"] if had_partial_content else ["PARTIAL"],
                                 chapter_obj=c
                             )
                             progress_manager.save()
-                            print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — saved truncated output")
+                            saved_label = "truncated" if had_partial_content else "original source"
+                            print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — saved {saved_label}")
                         else:
                             progress_manager.update(
                                 idx, actual_num, content_hash, fname,
@@ -27525,13 +27624,30 @@ def main(log_callback=None, stop_callback=None):
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
                     # Check if it's a timeout failure
                     if result == "[TIMEOUT]" or finish_reason == "timeout":
-                        progress_manager.update(idx, actual_num, content_hash, fname, status="qa_failed", qa_issues_found=["TIMEOUT"], chapter_obj=c)
+                        qa_issue = ["TIMEOUT"]
+                        progress_manager.update(idx, actual_num, content_hash, fname, status="qa_failed", qa_issues_found=qa_issue, chapter_obj=c)
                         print(f"❌ Chunk {chunk_idx}/{total_chunks} timed out; aborting chapter {actual_num}")
                         chunk_abort = True
                     else:
+                        qa_issue = ["API_ERROR"]
                         progress_manager.update(idx, actual_num, content_hash, fname, status="failed")
                         print(f"❌ Translation failed for chapter {actual_num} - marked as failed, aborting chapter")
                         chunk_abort = True
+                    if _should_save_failure_response(
+                        result,
+                        config=config,
+                        qa_issue=qa_issue,
+                    ):
+                        failure_output = _failure_output_for_save(
+                            result,
+                            chunk_html,
+                            config,
+                        )
+                        try:
+                            with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                                f.write(failure_output)
+                        except Exception:
+                            pass
                     progress_manager.save()
                     break
                 
@@ -27602,11 +27718,16 @@ def main(log_callback=None, stop_callback=None):
                                     # All retries exhausted - mark as QA_failed with TRUNCATED
                                     print(f"    ❌ All char-ratio retries ({char_ratio_retry_limit}) exhausted for Chapter {actual_num} Chunk {chunk_idx}/{total_chunks} - marking as QA_failed")
                                     fname = FileUtilities.create_chapter_filename(c, actual_num)
-                                    save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(config, 'save_partial_results', False))
-                                    if save_partial_results:
+                                    save_truncated_result = _should_save_truncated_response(config)
+                                    if save_truncated_result:
+                                        failure_output = _failure_output_for_save(
+                                            result,
+                                            chunk_html,
+                                            config,
+                                        )
                                         try:
                                             with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                                                f.write(result if isinstance(result, str) else "")
+                                                f.write(failure_output)
                                         except Exception:
                                             pass
                                     progress_manager.update(idx, actual_num, content_hash, fname,
@@ -27960,6 +28081,22 @@ def main(log_callback=None, stop_callback=None):
                 if sdlxliff_truncated or is_partial_result:
                     qa_issue = ["TRUNCATED"] if sdlxliff_truncated else ["PARTIAL"]
                     qa_label = "truncated" if sdlxliff_truncated else "partial"
+                    should_save_result = (
+                        _should_save_truncated_response(config)
+                        if sdlxliff_truncated
+                        else _save_partial_results_enabled(config)
+                    )
+                    if should_save_result:
+                        failure_output = _failure_output_for_save(
+                            cleaned,
+                            c.get("body", ""),
+                            config,
+                        )
+                        try:
+                            with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                                f.write(failure_output)
+                        except Exception:
+                            pass
                     print(f"⚠️ {batch_label} batch {actual_num}: {qa_label} output rejected")
                     progress_manager.update(
                         idx,
@@ -27986,6 +28123,12 @@ def main(log_callback=None, stop_callback=None):
                             f"❌ {batch_label} batch {actual_num}: structured "
                             f"JSON validation failed: {issue} — {detail}"
                         )
+                    if _preserve_original_text_on_failure_enabled(config):
+                        try:
+                            with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                                f.write(c.get("body", "") if isinstance(c.get("body", ""), str) else "")
+                        except Exception:
+                            pass
                     progress_manager.update(
                         idx,
                         actual_num,
@@ -28123,7 +28266,14 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Track whether the underlying API response was truncated; if so mark qa_failed immediately
                 preserved_fr = locals().get("merged_finish_reason", finish_reason)
-                was_truncated = preserved_fr in ["length", "max_tokens"]
+                was_truncated = bool(chapter_truncated) or preserved_fr in [
+                    "length",
+                    "max_tokens",
+                    "max_length",
+                    "stop_sequence_limit",
+                    "truncated",
+                    "incomplete",
+                ]
 
                 if was_truncated:
                     print(f"   ⚠️ Merged response was TRUNCATED (finish_reason: {preserved_fr})")
@@ -28140,7 +28290,13 @@ def main(log_callback=None, stop_callback=None):
                         )
                     progress_manager.save()
                     print(f"   ⚠️ Merged group marked as qa_failed due to truncation")
-                    continue
+                    if not _should_save_truncated_response(config):
+                        continue
+                    cleaned = _failure_output_for_save(
+                        cleaned,
+                        c.get("body", ""),
+                        config,
+                    )
 
                 # We may exit early on QA failure below, but we still want to strip
                 # injected split markers from any saved merged output when Split-the-Merge is enabled.
@@ -28167,11 +28323,19 @@ def main(log_callback=None, stop_callback=None):
                         failure_reason=failure_reason,
                         config=config,
                     )
-                    if should_save and not is_only_error_marker:
+                    if should_save and (
+                        _preserve_original_text_on_failure_enabled(config)
+                        or not is_only_error_marker
+                    ):
                         # Save for debugging - contains actual translation attempt that failed QA
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
-                            cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
+                            failure_output = _failure_output_for_save(
+                                cleaned,
+                                c.get("body", ""),
+                                config,
+                            )
+                            cleaned_to_save = ContentProcessor.strip_split_markers(failure_output)
                             write_utf8_html_file(os.path.join(out, parent_fname), cleaned_to_save)
                         except Exception:
                             pass
@@ -28222,10 +28386,15 @@ def main(log_callback=None, stop_callback=None):
                         "[]"
                     ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
                     
-                    if not is_only_error_marker:
+                    if _preserve_original_text_on_failure_enabled(config) or not is_only_error_marker:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
-                            cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
+                            failure_output = _failure_output_for_save(
+                                cleaned,
+                                c.get("body", ""),
+                                config,
+                            )
+                            cleaned_to_save = ContentProcessor.strip_split_markers(failure_output)
                             write_utf8_html_file(os.path.join(out, parent_fname), cleaned_to_save)
                         except Exception:
                             pass
@@ -28406,31 +28575,36 @@ def main(log_callback=None, stop_callback=None):
             
             # ------------------------------------------------------------------
             # Truncation / partial-result gate — check BEFORE writing to disk.
-            # When "Save interrupted chapters" is OFF we must NOT create a file.
+            # Truncation is also saved when source preservation is enabled.
             # ------------------------------------------------------------------
             is_truncated_result = chapter_truncated or finish_reason in ["length", "max_tokens", "max_length", "stop_sequence_limit", "truncated", "incomplete"]
             if is_truncated_result or is_partial_result:
-                save_partial_results = (
-                    os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1'
-                    or bool(getattr(config, 'save_partial_results', False))
+                should_save_result = (
+                    _should_save_truncated_response(config)
+                    if is_truncated_result
+                    else _save_partial_results_enabled(config)
                 )
                 qa_issue = ["TRUNCATED"] if is_truncated_result else ["PARTIAL"]
                 qa_label = "truncated" if is_truncated_result else "partial (graceful stop)"
 
-                if save_partial_results:
-                    # User opted-in: write the truncated/partial output to disk
+                if should_save_result:
+                    failure_output = _failure_output_for_save(
+                        cleaned,
+                        c.get("body", ""),
+                        config,
+                    )
                     if is_text_file and not is_pdf_file:
                         fname_out = fname.replace('.html', '.txt')
-                        text_content = _content_for_text_output(cleaned)
+                        text_content = _content_for_text_output(failure_output)
                         with open(os.path.join(out, fname_out), 'w', encoding='utf-8') as f:
                             f.write(text_content)
                     else:
                         fname_out = fname
-                        write_utf8_html_file(os.path.join(out, fname), cleaned)
-                    print(f"💾 Saved Chapter {actual_num} ({qa_label}): {fname_out} ({len(cleaned)} chars)")
+                        write_utf8_html_file(os.path.join(out, fname), failure_output)
+                    print(f"💾 Saved Chapter {actual_num} ({qa_label}): {fname_out} ({len(failure_output)} chars)")
                 else:
                     fname_out = fname if not (is_text_file and not is_pdf_file) else fname.replace('.html', '.txt')
-                    print(f"⏭️ Chapter {actual_num} not saved ({qa_label}) — 'Save interrupted chapters' is OFF")
+                    print(f"⏭️ Chapter {actual_num} not saved ({qa_label}) — failure-output saving is OFF")
 
                 progress_manager.update(
                     idx, actual_num, content_hash,

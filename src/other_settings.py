@@ -5485,8 +5485,9 @@ def _create_response_handling_section(self, parent):
     self.save_prohibited_results_checkbox = self._create_styled_checkbox("Save blocked/prohibited responses")
     self.save_prohibited_results_checkbox.setContentsMargins(20, 0, 0, 0)
     self.save_prohibited_results_checkbox.setToolTip(
-        "When enabled, blocked/prohibited/API-error responses are saved (AI output or empty)\n"
-        "and marked as QA failed (PROHIBITED_CONTENT or API_ERROR)."
+        "When enabled, blocked/prohibited/API-error responses are saved and marked as QA failed\n"
+        "(PROHIBITED_CONTENT or API_ERROR). With streaming enabled, text received before the\n"
+        "failure is preserved instead of an empty response."
     )
     try:
         self.save_prohibited_results_checkbox.setChecked(bool(self.save_prohibited_results_var))
@@ -5501,7 +5502,8 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(self.save_prohibited_results_checkbox)
 
     save_prohibited_desc = QLabel(
-        "Saves blocked/prohibited/API-error responses and marks the chapter QA failed."
+        "Saves blocked/prohibited/API-error responses, including streamed text received before failure,\n"
+        "and marks the chapter QA failed."
     )
     save_prohibited_desc.setStyleSheet("color: gray; font-size: 10pt;")
     save_prohibited_desc.setContentsMargins(20, 2, 0, 10)
@@ -5576,7 +5578,8 @@ def _create_response_handling_section(self, parent):
     preserve_cb = self._create_styled_checkbox("Preserve Original Text on Failure")
     preserve_cb.setToolTip(
         "When enabled, failed translation responses (timeouts, rate limits, extraction failures, etc.)\n"
-        "return the original source text inside a failure marker instead of an empty/blocked response."
+        "return the original source text verbatim instead of an empty, partial, or blocked response.\n"
+        "This takes priority over the blocked/prohibited and interrupted/truncated save options."
     )
     try:
         preserve_cb.setChecked(bool(self.preserve_original_text_var))
@@ -5590,7 +5593,10 @@ def _create_response_handling_section(self, parent):
     preserve_cb.toggled.connect(_on_preserve_toggle)
     section_v.addWidget(preserve_cb)
     
-    preserve_desc = QLabel("Return original untranslated text when translation fails.\n⚠️ May mix source language into translated output")
+    preserve_desc = QLabel(
+        "Return original untranslated text for every translation failure, taking priority over other failure-save options.\n"
+        "⚠️ May mix source language into translated output"
+    )
     preserve_desc.setStyleSheet("color: gray; font-size: 10pt;")
     preserve_desc.setContentsMargins(20, 5, 0, 10)
     section_v.addWidget(preserve_desc)

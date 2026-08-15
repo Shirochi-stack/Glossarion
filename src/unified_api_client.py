@@ -1986,7 +1986,12 @@ class UnifiedClient:
             fb_reason = "empty_image" if request_type == 'image' else "empty"
         fallback = self._handle_empty_result(messages, context, getattr(response, 'error_details', fb_reason) if response else fb_reason)
         if self._is_truncation_finish_reason(finish_reason):
-            return "", 'length'
+            return self._failure_response_content(
+                messages,
+                context,
+                provider_content=extracted_content,
+                fallback="",
+            ), 'length'
         return fallback, ('content_filter' if is_safety else 'error')
 
     def _retry_empty_truncated_response(
@@ -8614,7 +8619,52 @@ class UnifiedClient:
     def send(self, messages, temperature=None, max_tokens=None, 
              max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
         """Backwards-compatible public API; now delegates to unified _send_core."""
-        return self._send_core(messages, temperature, max_tokens, max_completion_tokens, context, image_data=None)
+        effective_context = context or getattr(self, 'context', None) or 'translation'
+        try:
+            result = self._send_core(
+                messages,
+                temperature,
+                max_tokens,
+                max_completion_tokens,
+                context,
+                image_data=None,
+            )
+        except UnifiedClientError as exc:
+            if getattr(exc, 'error_type', None) == 'cancelled' or 'cancelled' in str(exc).lower():
+                raise
+            preserved = self._preserved_original_failure_content(messages, effective_context)
+            error_type = getattr(exc, 'error_type', None)
+            if preserved is not None:
+                finish_reason = (
+                    'prohibited_content'
+                    if error_type == 'prohibited_content'
+                    else 'error'
+                )
+                return preserved, finish_reason
+            streamed_content = self._partial_content_from_error(exc)
+            if streamed_content and error_type == 'prohibited_content':
+                return streamed_content, 'prohibited_content'
+            raise
+        except Exception:
+            preserved = self._preserved_original_failure_content(messages, effective_context)
+            if preserved is None:
+                raise
+            return preserved, 'error'
+
+        if isinstance(result, tuple) and len(result) >= 2:
+            finish_reason = self._normalize_finish_reason(result[1]) or result[1]
+            if self._is_failed_finish_reason(finish_reason):
+                preserved = self._preserved_original_failure_content(messages, effective_context)
+                if preserved is not None:
+                    normalized_failure_reason = str(finish_reason or '').strip().lower()
+                    if normalized_failure_reason in {'blocked', 'censorship_blocked'}:
+                        normalized_failure_reason = 'prohibited_content'
+                    elif normalized_failure_reason in {'content_filter', 'prohibited_content'}:
+                        pass
+                    elif not self._is_truncation_finish_reason(normalized_failure_reason):
+                        normalized_failure_reason = 'error'
+                    return (preserved, normalized_failure_reason, *result[2:])
+        return result
 
     def _remember_actual_request_model(self, model=None, key_identifier=None):
         """Record the concrete model selected for the current request."""
@@ -9521,11 +9571,16 @@ class UnifiedClient:
 
                 # If provider explicitly signaled content filter/prohibited, raise immediately to trigger fallback
                 if _is_content_blocked(original_finish):
+                    if extracted_content:
+                        self._save_response(extracted_content, response_name)
                     raise UnifiedClientError(
                         "Content blocked by provider",
                         error_type="prohibited_content",
                         http_status=400,
-                        details={"finish_reason": original_finish}
+                        details={
+                            "finish_reason": original_finish,
+                            "partial_content": extracted_content or "",
+                        }
                     )
 
                 # CRITICAL: Save response for duplicate detection
@@ -9541,7 +9596,10 @@ class UnifiedClient:
                     raise UnifiedClientError(
                         f"Content refused by API",
                         error_type="prohibited_content",
-                        details={"refusal_message": extracted_content[:500]}
+                        details={
+                            "refusal_message": extracted_content[:500],
+                            "partial_content": extracted_content,
+                        }
                     )
 
                 # A provider can return usable-looking text while still explicitly
@@ -9575,7 +9633,11 @@ class UnifiedClient:
                     self._save_failed_request(messages, finish_reason_error, context, response)
                     self._track_stats(context, False, "finish_reason_error", time.time() - start_time)
                     self._attach_usage_to_last_payload(usage)
-                    return extracted_content, 'error'
+                    return self._failure_response_content(
+                        messages,
+                        context,
+                        provider_content=extracted_content,
+                    ), 'error'
 
                 # Handle empty responses
                 if is_empty_response:
@@ -9933,7 +9995,8 @@ class UnifiedClient:
                     raise UnifiedClientError(
                         "Content blocked by provider",
                         error_type="prohibited_content",
-                        http_status=400
+                        http_status=400,
+                        details={"partial_content": extracted_content or ""},
                     )
                 
                 # Return the response with accurate finish_reason
@@ -10278,7 +10341,13 @@ class UnifiedClient:
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, type(e).__name__, time.time() - start_time)
                     fallback_content = self._handle_empty_result(messages, context, str(e))
-                    return fallback_content, 'prohibited_content'
+                    return self._failure_response_content(
+                        messages,
+                        context,
+                        provider_content=extracted_content,
+                        error=e,
+                        fallback=fallback_content,
+                    ), 'prohibited_content'
                 
                 # Check for retryable server errors (500, 502, 503, 504)
                 http_status = getattr(e, 'http_status', None)
@@ -10373,7 +10442,13 @@ class UnifiedClient:
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, type(e).__name__, time.time() - start_time)
                     fallback_content = self._handle_empty_result(messages, context, str(e))
-                    return fallback_content, 'error'
+                    return self._failure_response_content(
+                        messages,
+                        context,
+                        provider_content=extracted_content,
+                        error=e,
+                        fallback=fallback_content,
+                    ), 'error'
                 else:
                     # For other errors, try again with a short delay
                     delay = self._compute_backoff(attempt, base_delay/4, 15)  # Short delay for other errors
@@ -10421,7 +10496,13 @@ class UnifiedClient:
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, "nonetype_length_error", time.time() - start_time)
                     fallback_content = self._handle_empty_result(messages, context, "NoneType length error")
-                    return fallback_content, 'error'
+                    return self._failure_response_content(
+                        messages,
+                        context,
+                        provider_content=extracted_content,
+                        error=e,
+                        fallback=fallback_content,
+                    ), 'error'
                 
                 # For unexpected errors, check if it's a timeout
                 if "timed out" in error_str:
@@ -10506,7 +10587,13 @@ class UnifiedClient:
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, "unexpected_error", time.time() - start_time)
                     fallback_content = self._handle_empty_result(messages, context, str(e))
-                    return fallback_content, 'error'
+                    return self._failure_response_content(
+                        messages,
+                        context,
+                        provider_content=extracted_content,
+                        error=e,
+                        fallback=fallback_content,
+                    ), 'error'
                 
                 # Check for retryable server errors
                 retryable_server_errors = ["500", "502", "503", "504", "internal server error", "bad gateway", "service unavailable", "gateway timeout"]
@@ -10584,7 +10671,13 @@ class UnifiedClient:
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, "unexpected_error", time.time() - start_time)
                     fallback_content = self._handle_empty_result(messages, context, str(e))
-                    return fallback_content, 'error'
+                    return self._failure_response_content(
+                        messages,
+                        context,
+                        provider_content=extracted_content,
+                        error=e,
+                        fallback=fallback_content,
+                    ), 'error'
                 else:
                     # In multi-key mode, try rotating keys before short backoff
                     if self._multi_key_mode and attempt > 0:  # Only after first attempt
@@ -12373,21 +12466,13 @@ class UnifiedClient:
             
         elif context == 'translation':
             # Check if user wants original text preserved on failure (disabled by default)
-            preserve_original = os.getenv('PRESERVE_ORIGINAL_TEXT_ON_FAILURE', '0') == '1'
+            preserved = self._preserved_original_failure_content(messages, context)
             
-            if preserve_original:
-                # Extract the original text and return it with a marker
-                original_text = self._extract_user_content(messages)
-                
-                # Add more specific error info if available
-                if is_extraction_failure:
-                    return f"[EXTRACTION FAILED - ORIGINAL TEXT PRESERVED]\n{original_text}"
-                elif 'rate' in error_type.lower():
-                    return f"[RATE LIMITED - ORIGINAL TEXT PRESERVED]\n{original_text}"
-                elif 'safety' in error_type.lower() or 'prohibited' in error_type.lower():
-                    return f"[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]\n{original_text}"
-                else:
-                    return f"[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]\n{original_text}"
+            if preserved is not None:
+                # Return the source text verbatim. Failure state is carried by
+                # finish_reason/QA metadata, so adding a marker here corrupts the
+                # raw source the user explicitly asked us to preserve.
+                return preserved
             else:
                 # Return clear error message without original text
                 if is_extraction_failure:
@@ -12975,11 +13060,79 @@ class UnifiedClient:
         
         return None
     
+    @staticmethod
+    def _is_failed_finish_reason(finish_reason) -> bool:
+        reason = str(finish_reason or '').strip().lower()
+        return reason in {
+            'error', 'content_filter', 'prohibited_content', 'blocked',
+            'censorship_blocked', 'timeout', 'rate_limit', 'length',
+            'max_tokens', 'max_length', 'stop_sequence_limit', 'truncated',
+            'incomplete', 'malformed_function_call', 'other_error',
+            'unexpected_tool_call', 'api_error', 'validation',
+            'validation_error', 'extraction_error', 'empty',
+            'empty_response', 'rate_limited', 'server_error',
+            'network_error', 'parse_error',
+        }
+
+    def _preserved_original_failure_content(self, messages, context):
+        """Return verbatim source text when the failure-preservation toggle applies."""
+        context_norm = str(context or '').strip().lower().replace('-', '_').replace(' ', '_')
+        if context_norm != 'translation':
+            return None
+        if os.getenv('PRESERVE_ORIGINAL_TEXT_ON_FAILURE', '0') != '1':
+            return None
+        return self._extract_user_content(messages)
+
+    @staticmethod
+    def _partial_content_from_error(error):
+        """Recover text accumulated by a streaming provider before it failed."""
+        details = getattr(error, 'details', None)
+        if not isinstance(details, dict):
+            return ''
+        for key in ('partial_content', 'streamed_text'):
+            value = details.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return ''
+
+    def _failure_response_content(
+        self,
+        messages,
+        context,
+        provider_content='',
+        error=None,
+        fallback='',
+    ):
+        """Choose source preservation, streamed provider text, or a marker in that order."""
+        preserved = self._preserved_original_failure_content(messages, context)
+        if preserved is not None:
+            return preserved
+        if isinstance(provider_content, str) and provider_content:
+            return provider_content
+        partial_content = self._partial_content_from_error(error)
+        if partial_content:
+            return partial_content
+        return fallback
+
     def _extract_user_content(self, messages):
-        """Extract user content from messages"""
-        for msg in reversed(messages):
-            if msg.get('role') == 'user':
-                return msg.get('content', '')
+        """Extract the last user message's raw textual content."""
+        for msg in reversed(messages or []):
+            if not isinstance(msg, dict) or msg.get('role') != 'user':
+                continue
+            content = msg.get('content', '')
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                text_parts = []
+                for part in content:
+                    if isinstance(part, str):
+                        text_parts.append(part)
+                    elif isinstance(part, dict):
+                        value = part.get('text')
+                        if isinstance(value, str):
+                            text_parts.append(value)
+                return ''.join(text_parts)
+            return '' if content is None else str(content)
         return ''
     
     def _get_file_names(self, messages, context=None):
@@ -14767,6 +14920,7 @@ class UnifiedClient:
                                 raise UnifiedClientError(
                                     f"Content blocked by Vertex AI Gemini: {fr_name}",
                                     error_type="prohibited_content",
+                                    details={"partial_content": result_text},
                                 )
                             if fr_name in _FR_LENGTH:
                                 # Mark as truncated so the outer retry layer
@@ -14858,7 +15012,8 @@ class UnifiedClient:
                         if block_reason:
                             raise UnifiedClientError(
                                 f"Content blocked by Vertex AI: {block_reason}",
-                                error_type="prohibited_content"
+                                error_type="prohibited_content",
+                                details={"partial_content": result_text},
                             )
 
                     # Report response summary + thinking tokens (same style as authgem)
@@ -15115,7 +15270,8 @@ class UnifiedClient:
                                 if _br:
                                     raise UnifiedClientError(
                                         f"Content blocked by Vertex AI: {_br}",
-                                        error_type="prohibited_content"
+                                        error_type="prohibited_content",
+                                        details={"partial_content": result_text},
                                     )
 
                             if not result_text and not image_data:
@@ -20701,7 +20857,10 @@ class UnifiedClient:
                             raise UnifiedClientError(
                                 f"Content blocked: {feedback.block_reason}",
                                 error_type="prohibited_content",
-                                details={"block_reason": str(feedback.block_reason)}
+                                details={
+                                    "block_reason": str(feedback.block_reason),
+                                    "partial_content": text_content if use_streaming else "",
+                                }
                             )
                     
                     # Check if response has candidates with blocked/prohibited finish reasons
@@ -20755,7 +20914,8 @@ class UnifiedClient:
                             error_type="prohibited_content",
                             details={
                                 "finish_reason": blocked_reason,
-                                "thinking_tokens_wasted": thinking_tokens_wasted
+                                "thinking_tokens_wasted": thinking_tokens_wasted,
+                                "partial_content": text_content if use_streaming else "",
                             }
                         )
                     
@@ -23911,10 +24071,28 @@ class UnifiedClient:
                                 continue
 
                         if stream_read_error is not None:
-                            if not text_parts:
+                            partial_content = "".join(text_parts)
+                            if self._detect_safety_filter(
+                                messages,
+                                partial_content,
+                                finish_reason,
+                                stream_read_error,
+                                provider,
+                            ):
+                                raise UnifiedClientError(
+                                    str(stream_read_error),
+                                    error_type="prohibited_content",
+                                    http_status=self._extract_http_status_from_exception(stream_read_error),
+                                    details={
+                                        "provider": provider,
+                                        "source": "openai_compatible_stream",
+                                        "partial_content": partial_content,
+                                    },
+                                )
+                            if not partial_content:
                                 raise stream_read_error
                             if not self._is_stop_requested():
-                                print(f"⚠️ [{provider}] Stream closed with transport error after {len(''.join(text_parts))} chars; using collected text ({self._summarize_exception(stream_read_error)})")
+                                print(f"⚠️ [{provider}] Stream closed with transport error after {len(partial_content)} chars; using collected text ({self._summarize_exception(stream_read_error)})")
                         
                         # Print any remaining buffer content at the end
                         if log_buf and log_stream and not self._is_stop_requested():
@@ -30184,22 +30362,28 @@ class UnifiedClient:
             
             # Check if there was an error
             if 'error' in result:
-                # Check if we should preserve original text on failure
-                # By default (toggle OFF), we should return an error if translation failed
-                preserve_original = os.getenv('PRESERVE_ORIGINAL_TEXT_ON_FAILURE', '0') == '1'
-                
-                if not preserve_original and result['translatedText'] == text_to_translate:
-                    # If we're not preserving original text and the result IS the original text (fallback in google_free_translate.py),
-                    # treat this as a hard failure and return an error message
-                    return UnifiedResponse(
-                        content=f"[TRANSLATION FAILED: {result['error']}]",
-                        finish_reason='error',
-                        usage={
-                            'characters': len(text_to_translate),
-                            'detected_source_lang': detected_lang
-                        },
-                        raw_response=result
-                    )
+                free_error = str(result['error'])
+                if 'cancel' in free_error.lower() or 'stopped by user' in free_error.lower():
+                    raise UnifiedClientError(free_error, error_type="cancelled")
+                provider_content = translated_text
+                if provider_content == text_to_translate:
+                    provider_content = ""
+                failure_content = self._failure_response_content(
+                    messages,
+                    'translation',
+                    provider_content=provider_content,
+                    fallback=f"[TRANSLATION FAILED: {free_error}]",
+                )
+                return UnifiedResponse(
+                    content=failure_content,
+                    finish_reason='error',
+                    usage={
+                        'characters': len(text_to_translate),
+                        'detected_source_lang': detected_lang
+                    },
+                    raw_response=result,
+                    error_details=free_error,
+                )
             
             # Create UnifiedResponse object
             response = UnifiedResponse(

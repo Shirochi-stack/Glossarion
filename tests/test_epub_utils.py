@@ -1255,6 +1255,19 @@ def test_valid_html_tag_entities_rehydrate_real_markup():
     )
 
 
+def test_valid_html_tag_entities_rehydrate_ruby_base_markup():
+    html = (
+        "&lt;ruby&gt;&lt;rb&gt;Tomoki&lt;/rb&gt;"
+        "&lt;rt&gt;tomoki&lt;/rt&gt;&lt;rtc&gt;"
+        "&lt;rt&gt;reading&lt;/rt&gt;&lt;/rtc&gt;&lt;/ruby&gt;"
+    )
+
+    assert unescape_valid_html_tag_entities(html) == (
+        "<ruby><rb>Tomoki</rb><rt>tomoki</rt>"
+        "<rtc><rt>reading</rt></rtc></ruby>"
+    )
+
+
 def test_valid_html_tag_entities_rehydrate_svg_image_link():
     html = (
         '&lt;svg xmlns:xlink="http://www.w3.org/1999/xlink"&gt;'

@@ -16,8 +16,12 @@ from TransateKRtoEN import (
     ProgressManager,
     _apply_partial_refinement_response,
     _append_partial_b_translation_artifact_chapters,
+    _escape_invalid_html_tags,
+    _failure_output_for_save,
     _partial_b_target_request_matches,
     _partial_refinement_target_fragment,
+    _should_save_failure_response,
+    _should_save_truncated_response,
 )
 from qa_scan_runtime import (
     apply_qa_scan_env_from_settings,
@@ -47,6 +51,247 @@ from translation_artifacts import (
 
 def _contains_cjk(text):
     return any("\u3400" <= char <= "\u9fff" for char in str(text))
+
+
+def test_invalid_html_tag_escaping_preserves_ruby_annotation_tags():
+    ruby_html = (
+        "<p><ruby><rb>Tomoki</rb><rt>tomoki</rt>"
+        "<rtc><rt>reading</rt></rtc></ruby></p>"
+    )
+
+    assert _escape_invalid_html_tags(ruby_html) == ruby_html
+
+
+def test_preserve_original_toggle_enables_failed_output_save(monkeypatch):
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", "0")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", "0")
+
+    assert _should_save_failure_response(
+        "raw source",
+        config=None,
+        qa_issue=["API_ERROR"],
+    ) is True
+
+
+def test_preserve_original_takes_priority_over_other_failure_save_toggles(monkeypatch):
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", "1")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", "1")
+
+    assert _failure_output_for_save(
+        "streamed or truncated translation",
+        "raw source",
+    ) == "raw source"
+    assert _should_save_truncated_response() is True
+
+
+def test_truncated_save_gate_still_respects_legacy_toggle_without_preservation(
+    monkeypatch,
+):
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "0")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", "0")
+    assert _should_save_truncated_response() is False
+
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", "1")
+    assert _should_save_truncated_response() is True
+    assert _failure_output_for_save("partial translation", "raw source") == (
+        "partial translation"
+    )
+
+
+@pytest.mark.parametrize(
+    "error_info",
+    [
+        {"error": "parse failure"},
+        {"error": "rate limit"},
+        {"error": "prohibited content"},
+        {"error": "unexpected provider failure"},
+    ],
+)
+def test_preserve_original_returns_verbatim_text_for_all_failure_types(
+    monkeypatch, error_info
+):
+    from unified_api_client import UnifiedClient
+
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    client = object.__new__(UnifiedClient)
+    source = "<p>원문 그대로</p>"
+
+    assert client._handle_empty_result(
+        [{"role": "user", "content": source}],
+        "translation",
+        error_info,
+    ) == source
+
+
+@pytest.mark.parametrize(
+    ("provider_finish_reason", "expected_finish_reason"),
+    [
+        ("error", "error"),
+        ("content_filter", "content_filter"),
+        ("prohibited_content", "prohibited_content"),
+        ("length", "length"),
+        ("timeout", "error"),
+        ("other_error", "error"),
+    ],
+)
+def test_send_replaces_any_failed_result_with_original_text(
+    monkeypatch, provider_finish_reason, expected_finish_reason
+):
+    from unified_api_client import UnifiedClient
+
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    client = object.__new__(UnifiedClient)
+    monkeypatch.setattr(
+        client,
+        "_send_core",
+        lambda *args, **kwargs: (
+            "partially streamed translation",
+            provider_finish_reason,
+        ),
+    )
+
+    assert client.send(
+        [{"role": "user", "content": "raw source"}],
+        context="translation",
+    ) == ("raw source", expected_finish_reason)
+
+
+def test_send_replaces_raised_provider_failure_but_not_cancellation(monkeypatch):
+    from unified_api_client import UnifiedClient, UnifiedClientError
+
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    client = object.__new__(UnifiedClient)
+
+    def fail(*args, **kwargs):
+        raise UnifiedClientError("provider timed out", error_type="timeout")
+
+    monkeypatch.setattr(client, "_send_core", fail)
+    messages = [{"role": "user", "content": "raw source"}]
+    assert client.send(messages, context="translation") == ("raw source", "error")
+
+    def cancel(*args, **kwargs):
+        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+    monkeypatch.setattr(client, "_send_core", cancel)
+    with pytest.raises(UnifiedClientError, match="cancelled"):
+        client.send(messages, context="translation")
+
+
+def test_blocked_stream_text_is_recovered_from_provider_error(monkeypatch):
+    from unified_api_client import UnifiedClient, UnifiedClientError
+
+    monkeypatch.delenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", raising=False)
+    client = object.__new__(UnifiedClient)
+    error = UnifiedClientError(
+        "blocked at end of stream",
+        error_type="prohibited_content",
+        details={"partial_content": "streamed response"},
+    )
+
+    assert client._failure_response_content(
+        [{"role": "user", "content": "raw source"}],
+        "translation",
+        error=error,
+        fallback="[CONTENT BLOCKED]",
+    ) == "streamed response"
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(client, "_send_core", fail)
+    assert client.send(
+        [{"role": "user", "content": "raw source"}],
+        context="translation",
+    ) == ("streamed response", "prohibited_content")
+
+
+def test_preserved_source_wins_over_streamed_blocked_text(monkeypatch):
+    from unified_api_client import UnifiedClient, UnifiedClientError
+
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", "1")
+    client = object.__new__(UnifiedClient)
+    error = UnifiedClientError(
+        "blocked at end of stream",
+        error_type="prohibited_content",
+        details={"partial_content": "streamed response"},
+    )
+
+    assert client._failure_response_content(
+        [{"role": "user", "content": "raw source"}],
+        "translation",
+        provider_content="provider response",
+        error=error,
+        fallback="[CONTENT BLOCKED]",
+    ) == "raw source"
+
+
+def test_google_free_failure_is_preserved_and_stays_a_failure(monkeypatch):
+    from google_free_translate import GoogleFreeTranslateNew
+    from unified_api_client import UnifiedClient
+
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    monkeypatch.setattr(
+        GoogleFreeTranslateNew,
+        "translate",
+        lambda self, text: {
+            "translatedText": text,
+            "detectedSourceLanguage": "ko",
+            "provider": "google",
+            "error": "all endpoints failed",
+        },
+    )
+    client = object.__new__(UnifiedClient)
+    source = "raw source"
+
+    response = client._send_google_translate_free(
+        [{"role": "user", "content": source}],
+    )
+
+    assert response.content == source
+    assert response.finish_reason == "error"
+
+
+def test_terminal_blocked_response_returns_accumulated_stream_text(monkeypatch):
+    from unified_api_client import UnifiedClient, UnifiedResponse
+
+    monkeypatch.delenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", raising=False)
+    monkeypatch.setenv("MAX_RETRIES", "1")
+    monkeypatch.setenv("USE_MULTI_API_KEYS", "0")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("USE_GLOSSARY_KEYS", "0")
+    monkeypatch.setenv("USE_GLOSSARY_REFINEMENT_KEYS", "0")
+
+    client = UnifiedClient(api_key="test-key", model="gpt-test")
+    streamed = "translated text received before the block"
+    response = UnifiedResponse(
+        content=streamed,
+        finish_reason="prohibited_content",
+    )
+    monkeypatch.setattr(client, "_get_response", lambda *args, **kwargs: response)
+    monkeypatch.setattr(
+        client,
+        "_get_file_names",
+        lambda messages, context=None: ("payload.json", "response.txt"),
+    )
+    for method_name in (
+        "_save_payload",
+        "_save_response",
+        "_save_failed_request",
+        "_track_stats",
+        "_attach_usage_to_last_payload",
+    ):
+        monkeypatch.setattr(client, method_name, lambda *args, **kwargs: None)
+
+    assert client._send_internal(
+        messages=[{"role": "user", "content": "raw source"}],
+        temperature=0.2,
+        max_tokens=100,
+        context="translation",
+        request_id="streamed-block-test",
+    ) == (streamed, "prohibited_content")
 
 
 def test_ai_artifact_check_defaults_off():
