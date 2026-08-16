@@ -1416,6 +1416,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._book_nav_updating = False
         self._last_review_signature = None
         self._last_machine_translation_signature = None
+        self._review_image_assets_output = ""
         self._two_column_layout_enabled = self._review_two_column_layout_enabled()
         self._auto_refresh_timer = None
         self._refreshing_review_data = False
@@ -1776,10 +1777,29 @@ class SDLXLIFFReviewDialog(QDialog):
             "machine_translation_changed": False,
             "autogen_changed": False,
             "sidecars_generated": False,
+            "image_assets": None,
             "stats": None,
             "error": "",
         }
         try:
+            try:
+                image_assets_output = os.path.normcase(
+                    os.path.abspath(self.output_dir or "")
+                )
+            except Exception:
+                image_assets_output = str(self.output_dir or "")
+            if (
+                last_review_signature is None
+                or force
+                or image_assets_output
+                != getattr(self, "_review_image_assets_output", "")
+            ):
+                result["image_assets"] = self._ensure_review_image_assets()
+                if (
+                    isinstance(result["image_assets"], dict)
+                    and result["image_assets"].get("ready")
+                ):
+                    self._review_image_assets_output = image_assets_output
             review_signature = self._current_review_signature()
             mt_signature = self._current_machine_translation_signature()
             autogen_signature = self._current_review_autogen_signature()
@@ -3537,6 +3557,47 @@ class SDLXLIFFReviewDialog(QDialog):
                     str(entry.get("original_filename") or entry.get("href") or ""),
                 ))
         return tuple(sorted(signature))
+
+    def _review_source_epub_for_image_assets(self):
+        """Return the exact source EPUB associated with this review workspace."""
+        candidates = [getattr(self, "_sdlxliff_autogen_file_path", None)]
+        try:
+            if 0 <= self._book_index < len(self._book_entries):
+                candidates.append(self._book_entries[self._book_index].get("epub_path"))
+        except Exception:
+            pass
+        source_ref = os.path.join(self.output_dir or "", "source_epub.txt")
+        try:
+            with open(source_ref, "r", encoding="utf-8", errors="ignore") as handle:
+                candidates.append(handle.read().strip())
+        except OSError:
+            pass
+        for candidate in candidates:
+            if not candidate:
+                continue
+            path = str(candidate)
+            if not os.path.isabs(path):
+                path = os.path.join(self.output_dir or "", path)
+            path = os.path.normpath(path)
+            if os.path.isfile(path) and path.lower().endswith(".epub"):
+                return path
+        return None
+
+    def _ensure_review_image_assets(self):
+        """Run only Chapter Extractor's image preparation for this workspace."""
+        source_epub = self._review_source_epub_for_image_assets()
+        if not source_epub or not self.output_dir:
+            return None
+        try:
+            from Chapter_Extractor import prepare_epub_image_assets
+
+            return prepare_epub_image_assets(source_epub, self.output_dir)
+        except Exception as exc:
+            return {
+                "ready": False,
+                "prepared": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
 
     @staticmethod
     def _changed_review_autogen_outputs(previous_signature, current_signature):

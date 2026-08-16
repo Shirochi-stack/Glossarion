@@ -31,6 +31,7 @@ from TransateKRtoEN import (
 )
 from Retranslation_GUI import RetranslationMixin, SDLXLIFFReviewDialog, _sdlxliff_machine_translation_path
 from qa_scan_runtime import default_qa_scan_settings
+from Chapter_Extractor import prepare_epub_image_assets
 from scan_html_folder import (
     _count_beautifulsoup_review_tags,
     _extract_paragraphs,
@@ -40,6 +41,48 @@ from scan_html_folder import (
     check_html_structure_issues,
     process_html_file_batch,
 )
+
+
+def test_sdlxliff_image_asset_preparation_runs_without_chapter_extraction(tmp_path):
+    epub_path = tmp_path / "source.epub"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_html = (
+        '<html><body><p><img src="../Images/1.png" alt="one"></p></body></html>'
+    )
+    with zipfile.ZipFile(epub_path, "w") as source_zip:
+        source_zip.writestr(
+            "OEBPS/Text/chapter_notice0002.xhtml", source_html
+        )
+        source_zip.writestr(
+            "OEBPS/Images/1.png",
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            ),
+        )
+    output_html = workspace / "response_chapter_notice0002.html"
+    output_html.write_text(source_html, encoding="utf-8")
+
+    result = prepare_epub_image_assets(str(epub_path), str(workspace))
+
+    assert result["ready"] is True
+    assert result["prepared"] is True
+    assert result["source_images"] == 1
+    assert result["extracted"] == 1
+    rename_map = json.loads(
+        (workspace / "image_rename_map.json").read_text(encoding="utf-8")
+    )
+    assert rename_map == {"1.png": "chapter_notice0002_img_1.png"}
+    assert (workspace / "images" / "chapter_notice0002_img_1.png").is_file()
+    assert "../Images/chapter_notice0002_img_1.png" in output_html.read_text(
+        encoding="utf-8"
+    )
+    assert not (workspace / "metadata.json").exists()
+    assert not (workspace / "chapters_info.json").exists()
+
+    second_result = prepare_epub_image_assets(str(epub_path), str(workspace))
+    assert second_result["ready"] is True
+    assert second_result["prepared"] is False
 
 
 def test_html_sdlxliff_writer_is_shared_between_translation_and_review_paths():

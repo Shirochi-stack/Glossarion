@@ -1310,6 +1310,166 @@ def _prepare_single_chapter_image_renames(
     return chapters
 
 
+def prepare_epub_image_assets(epub_path, output_dir, progress_callback=None):
+    """Extract and canonically rename only EPUB images needed by review HTML.
+
+    This is the resource-only counterpart of :func:`extract_chapters`: it does
+    not run text extraction, create chapter payloads, or start translation.
+    Existing complete image state is left untouched.
+    """
+    result = {
+        "ready": False,
+        "prepared": False,
+        "source_images": 0,
+        "extracted": 0,
+        "renamed": 0,
+        "error": "",
+    }
+    epub_path = os.path.abspath(str(epub_path or ""))
+    output_dir = os.path.abspath(str(output_dir or ""))
+    if not os.path.isfile(epub_path) or not epub_path.lower().endswith(".epub"):
+        result["error"] = "Source EPUB was not found"
+        return result
+    if not os.path.isdir(output_dir):
+        result["error"] = "Output folder was not found"
+        return result
+
+    images_dir = os.path.join(output_dir, "images")
+    rename_map_path = os.path.join(output_dir, "image_rename_map.json")
+    loaded_map = {}
+    try:
+        with open(rename_map_path, "r", encoding="utf-8") as handle:
+            candidate_map = json.load(handle)
+        if isinstance(candidate_map, dict):
+            loaded_map = {
+                os.path.basename(str(original).replace("\\", "/")):
+                os.path.basename(str(renamed).replace("\\", "/"))
+                for original, renamed in candidate_map.items()
+                if original and renamed
+            }
+    except (OSError, ValueError, TypeError):
+        pass
+
+    if loaded_map and all(
+        os.path.isfile(os.path.join(images_dir, renamed))
+        for renamed in loaded_map.values()
+    ):
+        result.update({
+            "ready": True,
+            "renamed": len(loaded_map),
+        })
+        return result
+
+    try:
+        import contextlib
+        import zipfile
+        from glossary_usage import read_epub_spine_chapters
+
+        with zipfile.ZipFile(epub_path, "r") as source_zip:
+            names = [name for name in source_zip.namelist() if name and not name.endswith("/")]
+            image_members = [
+                name for name in names
+                if os.path.splitext(name)[1].lower() in _REMOTE_CACHE_IMAGE_EXTENSIONS
+            ]
+            result["source_images"] = len(image_members)
+            if not image_members:
+                result["ready"] = True
+                return result
+
+            os.makedirs(images_dir, exist_ok=True)
+            existing_before = {
+                name for name in os.listdir(images_dir)
+                if os.path.isfile(os.path.join(images_dir, name))
+            }
+            loaded_lookup = {
+                str(original).casefold(): renamed
+                for original, renamed in loaded_map.items()
+            }
+            for member in image_members:
+                safe_name = sanitize_resource_filename(os.path.basename(member))
+                if not safe_name:
+                    continue
+                canonical_name = loaded_lookup.get(safe_name.casefold(), "")
+                if canonical_name and os.path.isfile(os.path.join(images_dir, canonical_name)):
+                    continue
+                destination = os.path.join(images_dir, safe_name)
+                if os.path.isfile(destination):
+                    continue
+                with source_zip.open(member, "r") as source, open(destination, "wb") as target:
+                    shutil.copyfileobj(source, target)
+                result["extracted"] += 1
+
+            spine_members = []
+            try:
+                spine_members = [
+                    str(entry.get("member_path") or "")
+                    for entry in read_epub_spine_chapters(
+                        epub_path, translate_special=True, include_text=False
+                    )
+                    if entry.get("member_path")
+                ]
+            except Exception:
+                spine_members = []
+            html_members = [
+                name for name in names
+                if name.lower().endswith((".xhtml", ".html", ".htm"))
+            ]
+            ordered_html = list(dict.fromkeys(
+                spine_members + sorted(
+                    (name for name in html_members if name not in set(spine_members)),
+                    key=str.casefold,
+                )
+            ))
+            chapters = []
+            for chapter_number, member in enumerate(ordered_html, 1):
+                try:
+                    markup = source_zip.read(member).decode("utf-8", errors="ignore")
+                except Exception:
+                    continue
+                chapters.append({
+                    "num": chapter_number,
+                    "filename": member,
+                    "original_basename": os.path.basename(member),
+                    "body": markup,
+                })
+
+        # A pristine workspace can use the full canonical pass. If files or a
+        # map already exist, replay/extend that state without reclassifying
+        # unrelated existing files as covers.
+        # These legacy routines print emoji and source-language filenames.
+        # The standalone SDLXLIFF viewer may inherit a narrow Windows console
+        # encoding, where logging itself would otherwise abort preparation.
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            if not loaded_map and not existing_before:
+                _rename_images_to_chapter_format(chapters, output_dir, progress_callback)
+            else:
+                _prepare_single_chapter_image_renames(
+                    chapters, output_dir, progress_callback
+                )
+
+        final_map = {}
+        try:
+            with open(rename_map_path, "r", encoding="utf-8") as handle:
+                candidate_map = json.load(handle)
+            if isinstance(candidate_map, dict):
+                final_map = candidate_map
+        except (OSError, ValueError, TypeError):
+            pass
+        result["renamed"] = sum(
+            1 for renamed in final_map.values()
+            if os.path.isfile(os.path.join(images_dir, os.path.basename(str(renamed))))
+        )
+        result["ready"] = bool(final_map) and result["renamed"] == len(final_map)
+        result["prepared"] = bool(result["extracted"] or final_map != loaded_map)
+        if result["ready"] and callable(progress_callback):
+            progress_callback(
+                f"Prepared {result['renamed']} EPUB image asset(s) for SDLXLIFF review"
+            )
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
 def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=None):
     """Rename image files to chapter-based format and update all references.
     
