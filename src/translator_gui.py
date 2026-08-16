@@ -19472,7 +19472,7 @@ Recent translations to summarize:
             self.antigravity_login_btn.setText("🔐 Antigravity Login")
             self.antigravity_login_btn.setToolTip(
                 "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
-                "Start the local frieser/antigravity-proxy and open Google's login flow.<br>"
+                "Start the local Shirochi-stack/antigravity-proxy and open Google's login flow.<br>"
                 "This stores accounts in the local proxy, not in Glossarion.</p></qt>"
             )
             self.antigravity_login_btn.setStyleSheet(
@@ -21010,7 +21010,7 @@ Recent translations to summarize:
         )
         self.antigravity_login_btn.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
-            "Start the local frieser/antigravity-proxy and open Google's login flow.<br>"
+            "Start the local Shirochi-stack/antigravity-proxy and open Google's login flow.<br>"
             "No Git checkout is required; Glossarion manages the proxy runtime.</p></qt>"
         )
         self.antigravity_login_btn.clicked.connect(self._antigravity_login_clicked)

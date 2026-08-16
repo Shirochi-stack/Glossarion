@@ -164,7 +164,7 @@ Custom endpoints can use either a base URL or a user-defined prefix route for se
 3. **AuthGPT** — use your ChatGPT subscription via OAuth (no API key needed)
 4. **AuthGrok** — type `authgrok/grok-4.5`, click **Grok Login**, and sign in to xAI (Google sign-in is available on xAI's page)
 5. **OcAgy** — use `ocagy0/gemini-3.1-pro-high` for automatic plugin account rotation or a numbered account route for batch translation, then use **OCAGY Login**; Glossarion installs the required OpenCode runtime and auth plugin when needed (no API key required)
-6. **Antigravity** — local Cloud Code proxy on `localhost:3000` via `frieser/antigravity-proxy` (no API key needed)
+6. **Antigravity** — local Cloud Code proxy on `localhost:3000` via `Shirochi-stack/antigravity-proxy` (no API key needed)
 7. **Custom Endpoints** — configure base URL for self-hosted or alternative endpoints
 
 ### Manga Translation Setup

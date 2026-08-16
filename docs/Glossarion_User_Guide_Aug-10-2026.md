@@ -753,7 +753,7 @@ Yes — you can run Glossarion **without spending a cent.** There are several fr
 | **ChatGPT login** | `authgpt/...` | A **ChatGPT login** (🔐 button) | Only **a few free requests**. |
 | **Google AI Studio key (Gemini)** | `gemini-...` (e.g. `gemini-3.1-flash-lite`) | A **[free Google AI Studio key](https://aistudio.google.com/apikey)** | A few free requests on most models — but **~500 free requests/day when used with Gemini 3.1 Flash Lite**. |
 | **Gemini coding endpoint** | `authgem/...` | A **Google login** (🔐 button) | Free, but throttled to **1 request per minute (RPM)**. |
-| **Antigravity login** | `antigravity/...` (e.g. `antigravity/gemini-3.5-flash-low`) | A **Google login**; Glossarion installs Bun automatically when needed | Free Cloud Code routing through a local proxy on `localhost:3000` using `frieser/antigravity-proxy`; see [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
+| **Antigravity login** | `antigravity/...` (e.g. `antigravity/gemini-3.5-flash-low`) | A **Google login**; Glossarion installs Bun automatically when needed | Free Cloud Code routing through a local proxy on `localhost:3000` using `Shirochi-stack/antigravity-proxy`; see [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
 | **OcAgy login** | `ocagy0/...` or a pinned OcAgy prefix | A **Google login**; Glossarion installs OpenCode and the auth plugin automatically when needed | Uses `opencode-antigravity-auth`; supports pooled and deterministic numbered-account routing. See [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
 | **OpenRouter free models** | `or/...:free` (e.g. `or/deepseek/deepseek-v4-flash:free`) | A **[free OpenRouter key](https://openrouter.ai/settings/keys)** | Limited to OpenRouter's **free-tier models** (the ones ending in `:free`). |
 | **Google Translate (free)** | `google-translate-free` | **Nothing** | It's plain **machine translation**, not an AI — fast and free, but lower quality / no context. |
@@ -777,7 +777,7 @@ Go to Google AI Studio, create a **free API key** (this is a *Google AI Studio k
 Log in with the **🔐 Gemini Login** and use an `authgem/...` model. This routes through **Gemini's coding endpoint**, which is free but **capped at 1 request per minute**. Fine for slow background translation; frustrating if you're in a hurry. (Tip: raise your **API call delay** in Section 6 so you don't trip the limit.)
 
 **6. `antigravity/` — Antigravity through the local proxy.**
-Click the **🔐 Antigravity Login** button, log in with Google, and type a model like `antigravity/gemini-3.5-flash-low`. This is a free no-API-key route that runs through the local **Antigravity proxy** on `http://localhost:3000`. Glossarion uses the `frieser/antigravity-proxy` runtime for that helper server; compiled `.exe` builds need **Node.js LTS** or **Bun** available so Glossarion can start it. Full setup is in **[Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds)**.
+Click the **🔐 Antigravity Login** button, log in with Google, and type a model like `antigravity/gemini-3.5-flash-low`. This is a free no-API-key route that runs through the local **Antigravity proxy** on `http://localhost:3000`. Glossarion uses the `Shirochi-stack/antigravity-proxy` runtime for that helper server; compiled `.exe` builds need **Node.js LTS** or **Bun** available so Glossarion can start it. Full setup is in **[Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds)**.
 
 **7. OcAgy — OpenCode Antigravity OAuth, including Gemini 3.1 Pro High.**
 Click **🔐 OCAGY Login**. Glossarion installs the **OpenCode terminal CLI** and `opencode-antigravity-auth` automatically when needed. In the terminal, choose **Google → OAuth with Google (Antigravity)** and finish signing in. Use `ocagy0/gemini-3.1-pro-high` for the plugin-managed shared account pool, or use a pinned prefix such as `ocagy/gemini-3.1-pro-high` (account #1) or `ocagy1/gemini-3.1-pro-high` (account #2). This route does **not** use the local port-3000 proxy and needs no API key. Full setup is in **[Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds)**.
@@ -803,12 +803,12 @@ Glossarion has two separate Google Antigravity routes. Their prefixes are not al
 
 | Prefix | Request path | Runtime setup | Notable model |
 |--------|--------------|------------------|---------------|
-| `antigravity/...` | Glossarion's local `frieser/antigravity-proxy` server on `localhost:3000` | Bun is installed automatically if Bun/Node.js is missing | `antigravity/gemini-3.1-pro-low` |
+| `antigravity/...` | Glossarion's local `Shirochi-stack/antigravity-proxy` server on `localhost:3000` | Bun is installed automatically if Bun/Node.js is missing | `antigravity/gemini-3.1-pro-low` |
 | OcAgy (`ocagy0/...`, `ocagy/...`, `ocagy1/...`, ...) | OpenCode with `opencode-antigravity-auth` | OpenCode and the plugin are installed automatically when needed | `ocagy0/gemini-3.1-pro-high` |
 
 ### `antigravity/`: local proxy setup
 
-Antigravity models use a **local helper server** called the **Antigravity proxy**, based on the `frieser/antigravity-proxy` repository. When you type a model such as `antigravity/gemini-3.5-flash-low`, Glossarion starts that proxy on your computer, logs you in with Google, and sends requests through `http://localhost:3000`.
+Antigravity models use a **local helper server** called the **Antigravity proxy**, based on the `Shirochi-stack/antigravity-proxy` repository. When you type a model such as `antigravity/gemini-3.5-flash-low`, Glossarion starts that proxy on your computer, logs you in with Google, and sends requests through `http://localhost:3000`.
 
 ### Automatic runtime setup
 
@@ -832,7 +832,7 @@ The installer is user-local and normally does not require administrator privileg
 
 Glossarion handles the rest:
 
-1. It downloads the supported `frieser/antigravity-proxy` runtime into your user config folder.
+1. It downloads the supported `Shirochi-stack/antigravity-proxy` runtime into your user config folder.
 2. If Bun and Node.js/npm are both missing, it installs Bun for the current user using Bun's official installer.
 3. It updates that local runtime when the cached copy is too old or needs a Glossarion patch.
 4. It starts the proxy locally, usually with a command like:

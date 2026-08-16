@@ -141,6 +141,9 @@ def test_antigravity_catalog_retains_local_tier_aliases():
     assert "antigravity/gemini-3.5-flash-low" in merged
     assert "antigravity/gemini-3.5-flash-medium" in merged
     assert "antigravity/gemini-3.5-flash-high" in merged
+    assert "antigravity/gemini-3.7-flash-low" in merged
+    assert "antigravity/gemini-3.7-flash-medium" in merged
+    assert "antigravity/gemini-3.7-flash-high" in merged
     assert "antigravity/gemini-3.1-pro-high" in merged
 
 

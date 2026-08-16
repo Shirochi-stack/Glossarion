@@ -183,6 +183,10 @@ def test_normalize_model_name_prefixes_sandbox_ids_for_upstream_proxy():
         == "antigravity-gemini-3.5-flash-high"
     )
     assert (
+        antigravity_proxy._normalize_model_name("antigravity/gemini-3.7-flash-medium")
+        == "antigravity-gemini-3.7-flash-medium"
+    )
+    assert (
         antigravity_proxy._normalize_model_name("antigravity-claude-opus-4-6-thinking-high")
         == "antigravity-claude-opus-4-6-thinking-high"
     )
@@ -879,6 +883,9 @@ def test_model_options_match_current_antigravity_dashboard_catalog():
         "antigravity/gemini-3.6-flash-low",
         "antigravity/gemini-3.6-flash-medium",
         "antigravity/gemini-3.6-flash-high",
+        "antigravity/gemini-3.7-flash-low",
+        "antigravity/gemini-3.7-flash-medium",
+        "antigravity/gemini-3.7-flash-high",
         "antigravity/gemini-3.5-flash-extra-low",
         "antigravity/gemini-3.5-flash-low",
         "antigravity/gemini-3.5-flash-medium",
@@ -898,14 +905,11 @@ def test_model_options_match_current_antigravity_dashboard_catalog():
     assert antigravity_options == expected
 
 
-def test_latest_proxy_version_prefers_newer_github_tag_without_git(monkeypatch):
+def test_latest_proxy_release_uses_fork_main_revision_without_git(monkeypatch):
     def fake_get(url, headers=None, timeout=15):
-        assert url == antigravity_proxy.PROXY_GITHUB_API_TAGS
+        assert url == antigravity_proxy.PROXY_GITHUB_API_MAIN
         return FakeHTTPResponse(
-            json_data=[
-                {"name": "v0.7.0", "zipball_url": "https://example.test/v0.7.0.zip"},
-                {"name": "v1.7.1", "zipball_url": "https://example.test/v1.7.1.zip"},
-            ]
+            json_data={"sha": "a" * 40}
         )
 
     monkeypatch.delenv("ANTIGRAVITY_PROXY_TAG", raising=False)
@@ -915,7 +919,11 @@ def test_latest_proxy_version_prefers_newer_github_tag_without_git(monkeypatch):
     release = antigravity_proxy._latest_proxy_release()
 
     assert release["version"] == "1.7.1"
-    assert release["archive_url"].endswith("/archive/refs/tags/v1.7.1.zip")
+    assert release["tag"] == f"main-{'a' * 12}"
+    assert release["archive_url"] == (
+        "https://github.com/Shirochi-stack/antigravity-proxy/archive/"
+        f"{'a' * 40}.zip"
+    )
 
 
 def test_latest_antigravity_client_version_uses_google_public_bundle(monkeypatch):
@@ -952,58 +960,34 @@ def test_patch_runtime_antigravity_client_version(tmp_path):
     assert 'const ANTIGRAVITY_VERSION = "2.2.1";' in headers_file.read_text(encoding="utf-8")
 
 
-def test_patch_runtime_gemini35_flash_support(tmp_path):
-    utils_dir = tmp_path / "src" / "utils"
-    utils_dir.mkdir(parents=True)
-    transform_file = utils_dir / "transform.ts"
-    transform_file.write_text(
-        '    const nativelySupported = [\n'
-        '      "gemini-3.1-pro-preview",\n'
-        '      "gemini-3.5-flash-low",\n'
-        '      "gemini-3-flash",\n'
-        '  ];\n'
-        '        if (isNative) {\n'
-        '            if (baseModel.includes("gemini-3.5-flash")) {\n'
-        '                googleModel = "gemini-3.5-flash-low";\n'
-        '            } else if (baseModel.includes("gemini-3.1-pro")) {\n'
-        '                googleModel = `gemini-3.1-pro-${extractedTier || "high"}`;\n'
-        '            } else if (baseModel.includes("gemini-3-pro")) {\n'
-        '                googleModel = `gemini-3-pro-${extractedTier || "high"}`;\n'
-        '            }\n'
-        '        }\n'
-        'googleRequest.generationConfig.thinkingConfig.thinkingLevel = extractedTier || "low";\n',
-        encoding="utf-8",
+def test_runtime_fork_feature_check_rejects_relabelled_upstream_cache(tmp_path):
+    runtime = tmp_path / "runtime"
+    transform_file = runtime / "src" / "utils" / "transform.ts"
+    transform_file.parent.mkdir(parents=True)
+    transform_file.write_text("// upstream transform\n", encoding="utf-8")
+    (runtime / "src" / "server.ts").write_text("// server\n", encoding="utf-8")
+    (runtime / "package.json").write_text("{}\n", encoding="utf-8")
+
+    assert not antigravity_proxy._runtime_has_fork_features(str(runtime))
+    assert not antigravity_proxy._runtime_metadata_matches(
+        str(runtime), "main-example", "2.2.1"
     )
 
-    assert antigravity_proxy._patch_runtime_gemini35_flash_support(str(tmp_path))
 
-    content = transform_file.read_text(encoding="utf-8")
-    assert '"gemini-3.5-flash-high"' in content
-    assert '"gemini-3.5-flash-medium"' in content
-    assert '"gemini-3.5-flash-low"' in content
-    assert '"gemini-3.5-flash",' in content
-    assert 'extractedTier === "medium" || extractedTier === "high"' in content
-    assert '? "gemini-3.5-flash-low"' in content
-    assert '`gemini-3.5-flash-${extractedTier || "medium"}`' in content
-    assert 'thinkingLevel = extractedTier || "low";' in content
-
-
-def test_patch_runtime_gemini31_pro_high_alias_uses_low_model_with_high_thinking(tmp_path):
+def test_runtime_fork_feature_check_accepts_native_model_routing(tmp_path):
     transform_file = tmp_path / "src" / "utils" / "transform.ts"
     transform_file.parent.mkdir(parents=True)
     transform_file.write_text(
-        'googleModel = `gemini-3.1-pro-${extractedTier || "high"}`;\n'
-        'googleRequest.generationConfig.thinkingConfig.thinkingLevel = extractedTier || "low";\n',
+        "GEMINI_37_FLASH_ALIASES\n"
+        "GEMINI_37_FLASH_WIRE_MODEL\n"
+        "gemini-3.7-flash-high\n"
+        "GEMINI_31_PRO_HIGH_WIRE_MODEL\n"
+        "GEMINI_35_FLASH_ALIASES\n"
+        "gemini35FlashWireModel\n",
         encoding="utf-8",
     )
 
-    assert antigravity_proxy._patch_runtime_gemini31_pro_high_alias(str(tmp_path))
-
-    content = transform_file.read_text(encoding="utf-8")
-    assert (
-        'extractedTier === "high" ? "gemini-3.1-pro-low"' in content
-    )
-    assert 'thinkingLevel = extractedTier || "low";' in content
+    assert antigravity_proxy._runtime_has_fork_features(str(tmp_path))
 
 
 def test_patch_runtime_account_reset_support_clears_capabilities(tmp_path):

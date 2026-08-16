@@ -8334,12 +8334,12 @@ class UnifiedClient:
                 print(f"🔐 AuthGem: Using account slot #{account_id}")
 
         elif self.client_type == 'antigravity':
-            # Antigravity uses frieser/antigravity-proxy – no SDK client needed
+            # Antigravity uses Shirochi-stack/antigravity-proxy – no SDK client needed
             if not ANTIGRAVITY_AVAILABLE:
                 raise ImportError(
                     "Antigravity proxy module not found. Make sure 'antigravity_proxy.py' exists in src/."
                 )
-            logger.info("🛸 Antigravity will use local proxy (frieser/antigravity-proxy)")
+            logger.info("🛸 Antigravity will use local proxy (Shirochi-stack/antigravity-proxy)")
 
         elif self.client_type == 'ocagy':
             # OpenCode and opencode-antigravity-auth own OAuth and requests.
@@ -26772,7 +26772,7 @@ class UnifiedClient:
     def _send_antigravity(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request via the Antigravity Cloud Code proxy.
 
-        Uses frieser/antigravity-proxy (localhost:3000) which proxies to
+        Uses Shirochi-stack/antigravity-proxy (localhost:3000) which proxies to
         Google Cloud Code through an OpenAI-compatible API. Models are prefixed
         with 'antigravity/' or 'antigravityN/' (e.g.
         antigravity/claude-sonnet-4-6, antigravity1/gemini-3-flash).
@@ -26790,7 +26790,7 @@ class UnifiedClient:
         if not ANTIGRAVITY_AVAILABLE or _antigravity_send is None:
             raise UnifiedClientError(
                 "Antigravity proxy module is not available. Ensure antigravity_proxy.py exists in src/.\n"
-                "Glossarion auto-updates and launches frieser/antigravity-proxy when Node/npm or Bun is available.",
+                "Glossarion auto-updates and launches Shirochi-stack/antigravity-proxy when Node/npm or Bun is available.",
                 error_type="config_error"
             )
 

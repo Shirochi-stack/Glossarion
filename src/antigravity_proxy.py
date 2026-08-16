@@ -1,10 +1,10 @@
 # antigravity_proxy.py - Antigravity Proxy integration
-# Routes requests through frieser/antigravity-proxy:
-# https://github.com/frieser/antigravity-proxy
+# Routes requests through Shirochi-stack/antigravity-proxy:
+# https://github.com/Shirochi-stack/antigravity-proxy
 #
 # Glossarion keeps using model names prefixed with "antigravity/".
 # This module translates them to the OpenAI-compatible model ids expected by
-# frieser/antigravity-proxy and exposes the same Python API as the previous
+# Shirochi-stack/antigravity-proxy and exposes the same Python API as the previous
 # Antigravity adapter.
 
 """Antigravity Proxy adapter for Glossarion.
@@ -58,14 +58,17 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PROXY_URL = "http://localhost:3000"
 PROXY_PACKAGE_NAME = "antigravity-proxy"
-PROXY_GITHUB_API_TAGS = "https://api.github.com/repos/frieser/antigravity-proxy/tags"
-PROXY_GITHUB_ARCHIVE_URL = (
-    "https://github.com/frieser/antigravity-proxy/archive/refs/tags/{tag}.zip"
+PROXY_REPO_URL = "https://github.com/Shirochi-stack/antigravity-proxy"
+PROXY_GITHUB_API_MAIN = (
+    "https://api.github.com/repos/Shirochi-stack/antigravity-proxy/commits/main"
 )
-PROXY_DEFAULT_TAG = "v1.7.1"
+PROXY_GITHUB_TAG_ARCHIVE_URL = f"{PROXY_REPO_URL}/archive/refs/tags/{{tag}}.zip"
+PROXY_GITHUB_REVISION_ARCHIVE_URL = f"{PROXY_REPO_URL}/archive/{{revision}}.zip"
+PROXY_DEFAULT_REVISION = "f2f621db4bc1bf0ff5d4fe9bfcf2a0e3d9889486"
+PROXY_DEFAULT_VERSION = "1.7.1"
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
 BUN_INSTALL_TIMEOUT_SECONDS = 300
-RUNTIME_PATCH_VERSION = "2026-08-06-gemini-tier-aliases-via-low"
+RUNTIME_PATCH_VERSION = "2026-08-16-fork-native-routing-v3"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -78,8 +81,6 @@ CLAUDE_MAX_OUTPUT_TOKENS = 64000
 # Antigravity's Cloud Code route rejects 65,536 even when the public Gemini model
 # advertises that limit. Keep Gemini on the same 64k ceiling to avoid 400s.
 GEMINI_MAX_OUTPUT_TOKENS = 64000
-
-PROXY_REPO_URL = "https://github.com/frieser/antigravity-proxy"
 
 # Module-level cancellation flag.
 _cancel_event = threading.Event()
@@ -121,7 +122,7 @@ def _notify_proxy_started() -> None:
 
 
 def _proxy_command_for_humans() -> str:
-    return "Glossarion auto-updates frieser/antigravity-proxy and launches it locally"
+    return "Glossarion auto-updates Shirochi-stack/antigravity-proxy and launches it locally"
 
 
 def _get_proxy_data_dir() -> str:
@@ -159,7 +160,7 @@ def _github_headers() -> Dict[str, str]:
 
 
 def _latest_proxy_release() -> Dict[str, str]:
-    """Return the current frieser/antigravity-proxy tag via GitHub HTTPS APIs."""
+    """Return the current Shirochi-stack fork revision via GitHub HTTPS APIs."""
     override = os.environ.get("ANTIGRAVITY_PROXY_TAG", "").strip()
     if not override:
         version_override = os.environ.get("ANTIGRAVITY_PROXY_VERSION", "").strip()
@@ -171,40 +172,29 @@ def _latest_proxy_release() -> Dict[str, str]:
         return {
             "tag": tag,
             "version": _version_to_str(_parse_semver(tag)),
-            "archive_url": PROXY_GITHUB_ARCHIVE_URL.format(tag=tag),
+            "archive_url": PROXY_GITHUB_TAG_ARCHIVE_URL.format(tag=tag),
         }
 
     try:
-        resp = requests.get(PROXY_GITHUB_API_TAGS, headers=_github_headers(), timeout=15)
+        resp = requests.get(PROXY_GITHUB_API_MAIN, headers=_github_headers(), timeout=15)
         resp.raise_for_status()
-        tags = resp.json()
-        candidates = []
-        if isinstance(tags, list):
-            for item in tags:
-                if not isinstance(item, dict):
-                    continue
-                tag = str(item.get("name") or "").strip()
-                if not tag:
-                    continue
-                candidates.append(
-                    (
-                        _parse_semver(tag),
-                        {
-                            "tag": tag,
-                            "version": _version_to_str(_parse_semver(tag)),
-                            "archive_url": PROXY_GITHUB_ARCHIVE_URL.format(tag=tag),
-                        },
-                    )
-                )
-        if candidates:
-            return max(candidates, key=lambda item: item[0])[1]
+        payload = resp.json()
+        revision = str(payload.get("sha") or "").strip() if isinstance(payload, dict) else ""
+        if re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+            return {
+                "tag": f"main-{revision[:12]}",
+                "version": PROXY_DEFAULT_VERSION,
+                "archive_url": PROXY_GITHUB_REVISION_ARCHIVE_URL.format(revision=revision),
+            }
     except Exception as exc:
-        logger.debug("Could not resolve latest Antigravity proxy tag: %s", exc)
+        logger.debug("Could not resolve the latest Antigravity proxy fork revision: %s", exc)
 
     return {
-        "tag": PROXY_DEFAULT_TAG,
-        "version": _version_to_str(_parse_semver(PROXY_DEFAULT_TAG)),
-        "archive_url": PROXY_GITHUB_ARCHIVE_URL.format(tag=PROXY_DEFAULT_TAG),
+        "tag": f"main-{PROXY_DEFAULT_REVISION[:12]}",
+        "version": PROXY_DEFAULT_VERSION,
+        "archive_url": PROXY_GITHUB_REVISION_ARCHIVE_URL.format(
+            revision=PROXY_DEFAULT_REVISION
+        ),
     }
 
 
@@ -324,120 +314,6 @@ def _patch_runtime_antigravity_client_version(runtime_dir: str, version: str) ->
             f.write(updated)
 
     return bool(count)
-
-
-def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
-    """Patch upstream transform support for Antigravity's Gemini 3.5 Flash tiers."""
-    transform_path = os.path.join(runtime_dir, "src", "utils", "transform.ts")
-    if not os.path.exists(transform_path):
-        return False
-
-    with open(transform_path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    updated = content
-    changed = False
-
-    updated, count = re.subn(
-        r'\n\s*"gemini-3\.5-flash(?:-(?:high|medium|low))?",',
-        "",
-        updated,
-    )
-    changed = changed or count > 0
-
-    def add_supported_models(match: re.Match) -> str:
-        indent = match.group("indent")
-        return (
-            match.group(0)
-            + f'{indent}"gemini-3.5-flash-high",\n'
-            + f'{indent}"gemini-3.5-flash-medium",\n'
-            + f'{indent}"gemini-3.5-flash-low",\n'
-            + f'{indent}"gemini-3.5-flash",\n'
-        )
-
-    updated, count = re.subn(
-        r'(?P<indent>\s*)"gemini-3\.1-pro-preview",\n',
-        add_supported_models,
-        updated,
-        count=1,
-    )
-    changed = changed or count > 0
-
-    mapping_marker = (
-        'googleModel = extractedTier === "medium" || extractedTier === "high" '
-        '? "gemini-3.5-flash-low" '
-        ': `gemini-3.5-flash-${extractedTier || "medium"}`;'
-    )
-    for legacy_mapping in (
-        'googleModel = "gemini-3.5-flash-low";',
-        'googleModel = `gemini-3.5-flash-${extractedTier || "medium"}`;',
-    ):
-        if mapping_marker not in updated and legacy_mapping in updated:
-            updated = updated.replace(legacy_mapping, mapping_marker, 1)
-            changed = True
-
-    if mapping_marker not in updated:
-        def add_flash_mapping(match: re.Match) -> str:
-            if_indent = match.group("if_indent")
-            body_indent = match.group("body_indent")
-            original = match.group(0)
-            return (
-                f'{if_indent}if (baseModel.includes("gemini-3.5-flash")) {{\n'
-                f'{body_indent}{mapping_marker}\n'
-                f'{if_indent}}} else {original.lstrip()}'
-            )
-
-        updated, count = re.subn(
-            r'(?P<if_indent>\s*)if \(baseModel\.includes\("gemini-3\.1-pro"\)\) \{\n'
-            r'(?P<body_indent>\s*)googleModel = `gemini-3\.1-pro-\$\{extractedTier \|\| "high"\}`;',
-            add_flash_mapping,
-            updated,
-            count=1,
-        )
-        changed = changed or count > 0
-
-    if changed:
-        with open(transform_path, "w", encoding="utf-8") as f:
-            f.write(updated)
-
-    return (
-        '"gemini-3.5-flash-high"' in updated
-        and '"gemini-3.5-flash-medium"' in updated
-        and '"gemini-3.5-flash-low"' in updated
-        and '"gemini-3.5-flash",' in updated
-        and mapping_marker in updated
-        and 'thinkingLevel = extractedTier || "low";' in updated
-    )
-
-
-def _patch_runtime_gemini31_pro_high_alias(runtime_dir: str) -> bool:
-    """Route Gemini 3.1 Pro high thinking through the available low model ID."""
-    transform_path = os.path.join(runtime_dir, "src", "utils", "transform.ts")
-    if not os.path.exists(transform_path):
-        return False
-
-    with open(transform_path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    original_mapping = (
-        'googleModel = `gemini-3.1-pro-${extractedTier || "high"}`;'
-    )
-    alias_mapping = (
-        'googleModel = extractedTier === "high" ? "gemini-3.1-pro-low" '
-        ': `gemini-3.1-pro-${extractedTier || "high"}`;'
-    )
-    updated = content
-    if alias_mapping not in updated and original_mapping in updated:
-        updated = updated.replace(original_mapping, alias_mapping, 1)
-        with open(transform_path, "w", encoding="utf-8") as f:
-            f.write(updated)
-
-    # The alias keeps extractedTier="high", which the transform applies as the
-    # Gemini thinking level even though the backend model ID is the low variant.
-    return (
-        alias_mapping in updated
-        and 'thinkingLevel = extractedTier || "low";' in updated
-    )
 
 
 def _patch_runtime_finish_reason_mapping(runtime_dir: str) -> bool:
@@ -876,6 +752,24 @@ def _runtime_has_entrypoint(runtime_dir: str) -> bool:
     )
 
 
+def _runtime_has_fork_features(runtime_dir: str) -> bool:
+    """Return whether the runtime contains the fork's native model routing."""
+    transform_path = os.path.join(runtime_dir, "src", "utils", "transform.ts")
+    try:
+        with open(transform_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return False
+    return (
+        "GEMINI_37_FLASH_ALIASES" in content
+        and "GEMINI_37_FLASH_WIRE_MODEL" in content
+        and "gemini-3.7-flash-high" in content
+        and "GEMINI_31_PRO_HIGH_WIRE_MODEL" in content
+        and "GEMINI_35_FLASH_ALIASES" in content
+        and "gemini35FlashWireModel" in content
+    )
+
+
 def _runtime_metadata_path(runtime_dir: str) -> str:
     return os.path.join(runtime_dir, ".glossarion-runtime.json")
 
@@ -886,7 +780,7 @@ def _read_runtime_metadata(runtime_dir: str) -> Dict[str, Any]:
 
 
 def _runtime_metadata_matches(runtime_dir: str, tag: str, client_version: str) -> bool:
-    if not _runtime_has_entrypoint(runtime_dir):
+    if not _runtime_has_entrypoint(runtime_dir) or not _runtime_has_fork_features(runtime_dir):
         return False
 
     try:
@@ -953,10 +847,8 @@ def _download_proxy_runtime(
         _patch_runtime_package_json(archive_root, release["version"])
         if not _patch_runtime_antigravity_client_version(archive_root, client_version):
             raise RuntimeError("Downloaded proxy archive did not contain ANTIGRAVITY_VERSION")
-        if not _patch_runtime_gemini35_flash_support(archive_root):
-            raise RuntimeError("Downloaded proxy archive could not be patched for Gemini 3.5 Flash")
-        if not _patch_runtime_gemini31_pro_high_alias(archive_root):
-            raise RuntimeError("Downloaded proxy archive could not be patched for Gemini 3.1 Pro high")
+        if not _runtime_has_fork_features(archive_root):
+            raise RuntimeError("Downloaded proxy archive lacks the fork's native model routing")
         if not _patch_runtime_finish_reason_mapping(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for finish reason mapping")
         if not _patch_runtime_account_reset_support(archive_root):
@@ -993,7 +885,10 @@ def _cached_runtime_needs_patch(data_dir: str) -> bool:
         metadata = _read_runtime_metadata(runtime_dir)
     except Exception:
         return True
-    return metadata.get("patch_version") != RUNTIME_PATCH_VERSION
+    return (
+        metadata.get("patch_version") != RUNTIME_PATCH_VERSION
+        or not _runtime_has_fork_features(runtime_dir)
+    )
 
 
 def _patch_cached_runtime(
@@ -1003,12 +898,14 @@ def _patch_cached_runtime(
     log_fn=None,
 ) -> bool:
     try:
-        _patch_runtime_package_json(runtime_dir, release["version"])
+        # Never relabel an upstream cache as the fork. A cached fallback is only
+        # eligible when it already contains the fork's native model routing.
+        if not _runtime_has_fork_features(runtime_dir):
+            return False
+        cached_metadata = _read_runtime_metadata(runtime_dir)
+        cached_version = str(cached_metadata.get("version") or release["version"])
+        _patch_runtime_package_json(runtime_dir, cached_version)
         if not _patch_runtime_antigravity_client_version(runtime_dir, client_version):
-            return False
-        if not _patch_runtime_gemini35_flash_support(runtime_dir):
-            return False
-        if not _patch_runtime_gemini31_pro_high_alias(runtime_dir):
             return False
         if not _patch_runtime_finish_reason_mapping(runtime_dir):
             return False
@@ -1018,7 +915,14 @@ def _patch_cached_runtime(
             return False
         if not _patch_runtime_verbose_access_denied(runtime_dir):
             return False
-        _write_runtime_metadata(runtime_dir, release, client_version)
+        cached_metadata.update({
+            "client_version": client_version,
+            "patch_version": RUNTIME_PATCH_VERSION,
+            "updated_at": int(time.time()),
+        })
+        with open(_runtime_metadata_path(runtime_dir), "w", encoding="utf-8") as f:
+            json.dump(cached_metadata, f, indent=2)
+            f.write("\n")
         (log_fn or _log_noop)("Antigravity: patched cached proxy runtime in place.")
         return True
     except Exception as exc:
@@ -1059,7 +963,7 @@ def _ensure_proxy_runtime(data_dir: str, log_fn=None, force_update: bool = False
 def _ensure_proxy_config() -> str:
     """Ensure the auto-launched proxy has a stable working/data directory.
 
-    frieser/antigravity-proxy stores config.json and reads package.json relative
+    Shirochi-stack/antigravity-proxy stores config.json and reads package.json relative
     to process.cwd(). We launch from this dedicated directory while executing
     the downloaded proxy script by absolute path, so config/accounts stay stable
     across runtime updates.
@@ -1348,7 +1252,7 @@ def _open_auth_browser_once(proxy_url: str, log_fn=None) -> bool:
 # ---------------------------------------------------------------------------
 
 def _normalize_model_name(model: str) -> str:
-    """Convert Glossarion's model ids to frieser/antigravity-proxy ids.
+    """Convert Glossarion's model ids to Shirochi-stack/antigravity-proxy ids.
 
     Glossarion strips the public "antigravity/" provider prefix before calling
     this module. This adapter always uses the proxy's explicit "antigravity-"
@@ -1820,7 +1724,7 @@ def _proxy_reports_unsupported(proxy_url: Optional[str] = None) -> bool:
 
 
 def check_proxy_health() -> Dict[str, Any]:
-    """Check if frieser/antigravity-proxy is running."""
+    """Check if Shirochi-stack/antigravity-proxy is running."""
     proxy_url = get_proxy_url()
 
     try:
@@ -2593,7 +2497,7 @@ def send_message(
     log_fn=None,
     account_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Send a non-streaming message to frieser/antigravity-proxy."""
+    """Send a non-streaming message to Shirochi-stack/antigravity-proxy."""
     _raise_if_cancelled()
     proxy_url = get_proxy_url()
     url = f"{proxy_url}{CHAT_COMPLETIONS_ENDPOINT}"
@@ -2816,7 +2720,7 @@ def send_message_stream(
     log_stream: bool = True,
     account_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Send a streaming message to frieser/antigravity-proxy."""
+    """Send a streaming message to Shirochi-stack/antigravity-proxy."""
     _raise_if_cancelled()
     proxy_url = get_proxy_url()
     url = f"{proxy_url}{CHAT_COMPLETIONS_ENDPOINT}"

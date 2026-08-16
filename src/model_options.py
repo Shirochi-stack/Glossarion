@@ -336,7 +336,7 @@ def _get_static_model_options() -> List[str]:
         "ocagy/claude-opus-4-6-thinking-low",
         "ocagy/claude-opus-4-6-thinking-max",
 
-        # Antigravity Cloud Code proxy (frieser/antigravity-proxy dashboard catalog)
+        # Antigravity Cloud Code proxy (Shirochi-stack/antigravity-proxy catalog)
         "antigravity/gemini-3-flash",
         "antigravity/gemini-3-flash-agent",
         "antigravity/gemini-3.1-flash-image",
@@ -344,6 +344,9 @@ def _get_static_model_options() -> List[str]:
         "antigravity/gemini-3.6-flash-low",
         "antigravity/gemini-3.6-flash-medium",
         "antigravity/gemini-3.6-flash-high",
+        "antigravity/gemini-3.7-flash-low",
+        "antigravity/gemini-3.7-flash-medium",
+        "antigravity/gemini-3.7-flash-high",
         "antigravity/gemini-3.5-flash-extra-low",
         "antigravity/gemini-3.5-flash-low",
         "antigravity/gemini-3.5-flash-medium",
@@ -830,6 +833,9 @@ def _deduplicate_models(models: Iterable[str]) -> List[str]:
 
 _PROVIDER_CATALOG_COMPATIBILITY_ALIASES: Dict[str, Tuple[str, ...]] = {
     "antigravity": (
+        "antigravity/gemini-3.7-flash-low",
+        "antigravity/gemini-3.7-flash-medium",
+        "antigravity/gemini-3.7-flash-high",
         "antigravity/gemini-3.5-flash-medium",
         "antigravity/gemini-3.5-flash-high",
         "antigravity/gemini-3.1-pro-high",
