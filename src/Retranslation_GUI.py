@@ -1274,6 +1274,9 @@ class SDLXLIFFReviewDialog(QDialog):
         while who whom whose will with would you your yours
     """.split())
     MACHINE_TRANSLATION_PENDING_TEXT = "⏳ Generating machine translation preview..."
+    MACHINE_TRANSLATION_MANUAL_BATCH_MAX_ROWS = 40
+    MACHINE_TRANSLATION_MANUAL_BATCH_MAX_CHARS = 3500
+    MACHINE_TRANSLATION_MANUAL_MAX_ATTEMPTS = 96
     MANUAL_REFRESH_BUTTON_TEXT = "↻ Refresh"
     MANUAL_EDITING_CONFIG_KEY = "retranslation_manual_editing"
     _SDLXLIFF_AUTOGEN_STATUSES = {
@@ -2802,6 +2805,213 @@ class SDLXLIFFReviewDialog(QDialog):
         raw = json.dumps(rows_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
 
+    def _progress_path_for_review_piece(self, piece):
+        """Return the progress file belonging to a sidecar's output folder."""
+        try:
+            sidecar_path = os.path.abspath(str((piece or {}).get("path") or ""))
+            sidecar_dir = os.path.dirname(sidecar_path)
+            if sidecar_path and os.path.basename(sidecar_dir).casefold() == "sdlxliff":
+                return os.path.join(os.path.dirname(sidecar_dir), "translation_progress.json")
+        except Exception:
+            pass
+        return os.path.join(getattr(self, "output_dir", "") or "", "translation_progress.json")
+
+    @staticmethod
+    def _review_progress_chapters(progress_data):
+        if not isinstance(progress_data, dict):
+            return {}
+        chapters = progress_data.get("chapters")
+        if isinstance(chapters, dict):
+            return chapters
+        # Retain support for the legacy top-level chapter-entry layout used by
+        # the existing Progress Manager reader.
+        return progress_data
+
+    @staticmethod
+    def _refresh_review_progress_completed_list(progress_data):
+        """Keep ProgressManager's derived completed-list cache in sync."""
+        if not isinstance(progress_data, dict):
+            return
+        chapters = SDLXLIFFReviewDialog._review_progress_chapters(progress_data)
+        completed = []
+        for key, entry in list(chapters.items()):
+            if not isinstance(entry, dict) or entry.get("special_type"):
+                continue
+            if str(entry.get("status") or "").lower() != "completed":
+                continue
+            output_file = entry.get("output_file")
+            if not output_file:
+                continue
+            actual_num = entry.get("actual_num", 0)
+            completed.append({
+                "num": actual_num,
+                "idx": 0,
+                "title": entry.get("original_basename") or f"Chapter {actual_num}",
+                "file": output_file,
+                "key": key,
+            })
+        try:
+            completed.sort(key=lambda item: float(item.get("num", 0)))
+        except (TypeError, ValueError):
+            completed.sort(key=lambda item: str(item.get("num", "")))
+        progress_data["completed_list"] = completed
+
+    @staticmethod
+    def _write_review_progress_data(path, progress_data):
+        if not path or not isinstance(progress_data, dict):
+            return False
+        tmp_path = ""
+        try:
+            progress_dir = os.path.dirname(path)
+            if progress_dir:
+                os.makedirs(progress_dir, exist_ok=True)
+            tmp_path = (
+                f"{path}.{os.getpid()}.{threading.get_ident()}."
+                f"{time.time_ns()}.tmp"
+            )
+            with open(tmp_path, "w", encoding="utf-8") as progress_file:
+                json.dump(progress_data, progress_file, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, path)
+            return True
+        except Exception:
+            try:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            return False
+
+    def _sync_cached_review_progress_data(self, progress_path, progress_data):
+        """Update the live Progress Manager data passed to this review window."""
+        cached = getattr(self, "_sdlxliff_autogen_progress_data", None)
+        if not isinstance(cached, dict):
+            return
+        expected_path = os.path.join(getattr(self, "output_dir", "") or "", "translation_progress.json")
+        try:
+            if os.path.normcase(os.path.abspath(progress_path)) != os.path.normcase(os.path.abspath(expected_path)):
+                return
+            replacement = copy.deepcopy(progress_data)
+            cached.clear()
+            cached.update(replacement)
+        except Exception:
+            pass
+
+    def _mark_piece_progress_completed(self, piece):
+        """Mark every progress row matching this piece's output file completed."""
+        progress_path = self._progress_path_for_review_piece(piece)
+        if not os.path.isfile(progress_path):
+            return {"ok": False, "matched": 0, "error": "translation_progress.json was not found"}
+        try:
+            with open(progress_path, "r", encoding="utf-8") as progress_file:
+                progress_data = json.load(progress_file)
+        except Exception as exc:
+            return {"ok": False, "matched": 0, "error": f"could not read progress: {exc}"}
+        if not isinstance(progress_data, dict):
+            return {"ok": False, "matched": 0, "error": "translation progress is invalid"}
+
+        target_name = self._canonical_basename(self._output_name_for_piece(piece))
+        chapters = self._review_progress_chapters(progress_data)
+        matches = [
+            (key, entry)
+            for key, entry in list(chapters.items())
+            if isinstance(entry, dict)
+            and self._canonical_basename(entry.get("output_file")) == target_name
+        ]
+        if not target_name or not matches:
+            output_name = self._output_name_for_piece(piece)
+            return {
+                "ok": False,
+                "matched": 0,
+                "error": f"no progress entry matches {output_name}",
+            }
+
+        previous_entries = {
+            str(key): copy.deepcopy(entry)
+            for key, entry in matches
+        }
+        now = time.time()
+        for _key, entry in matches:
+            entry["status"] = "completed"
+            entry["last_updated"] = now
+            entry["manually_marked_completed"] = True
+            for field in (
+                "qa_issues", "qa_issues_found", "qa_issue_previews",
+                "qa_timestamp", "failure_reason", "error_message",
+                "previous_status", "previous_progress_entry",
+                "previous_status_unknown", "merged_parent_chapter",
+            ):
+                entry.pop(field, None)
+        self._refresh_review_progress_completed_list(progress_data)
+        if not self._write_review_progress_data(progress_path, progress_data):
+            return {"ok": False, "matched": 0, "error": "could not save translation progress"}
+
+        piece["manual_green_progress_path"] = progress_path
+        piece["manual_green_previous_progress_entries"] = previous_entries
+        piece["manual_green_completion_updated_at"] = now
+        self._sync_cached_review_progress_data(progress_path, progress_data)
+        try:
+            self._last_autogen_signature = self._current_review_autogen_signature()
+        except Exception:
+            pass
+        return {"ok": True, "matched": len(matches), "error": ""}
+
+    def _restore_piece_progress_before_manual_completion(self, piece, override_entry=None):
+        """Restore the progress rows captured by Mark as Completed."""
+        override_entry = override_entry if isinstance(override_entry, dict) else {}
+        previous_entries = (piece or {}).get("manual_green_previous_progress_entries")
+        if not isinstance(previous_entries, dict):
+            previous_entries = override_entry.get("previous_progress_entries")
+        if not isinstance(previous_entries, dict) or not previous_entries:
+            # Legacy green overrides predate progress mutation and need no
+            # progress restoration.
+            return True
+
+        progress_path = str(
+            (piece or {}).get("manual_green_progress_path")
+            or override_entry.get("progress_path")
+            or self._progress_path_for_review_piece(piece)
+        )
+        try:
+            with open(progress_path, "r", encoding="utf-8") as progress_file:
+                progress_data = json.load(progress_file)
+        except Exception:
+            return False
+        if not isinstance(progress_data, dict):
+            return False
+
+        chapters = self._review_progress_chapters(progress_data)
+        completion_updated_at = (
+            (piece or {}).get("manual_green_completion_updated_at")
+            or override_entry.get("completion_updated_at")
+        )
+        changed = False
+        for key, previous_entry in previous_entries.items():
+            current_entry = chapters.get(str(key))
+            if not isinstance(current_entry, dict) or not isinstance(previous_entry, dict):
+                continue
+            # Do not overwrite a later real translation or another external
+            # Progress Manager change made after this review action.
+            if (
+                str(current_entry.get("status") or "").lower() == "completed"
+                and current_entry.get("manually_marked_completed") is True
+                and (
+                    completion_updated_at is None
+                    or current_entry.get("last_updated") == completion_updated_at
+                )
+            ):
+                chapters[str(key)] = copy.deepcopy(previous_entry)
+                changed = True
+        if changed:
+            self._refresh_review_progress_completed_list(progress_data)
+            if not self._write_review_progress_data(progress_path, progress_data):
+                return False
+            self._sync_cached_review_progress_data(progress_path, progress_data)
+            try:
+                self._last_autogen_signature = self._current_review_autogen_signature()
+            except Exception:
+                pass
+        return True
+
     @staticmethod
     def _manual_green_empty_override_data():
         return {"version": 1, "entries": {}}
@@ -2876,12 +3086,17 @@ class SDLXLIFFReviewDialog(QDialog):
             entries = {}
         entries[key] = {
             "status": "green",
-            "reason": str(piece.get("manual_green_reason") or "manually marked green"),
+            "reason": str(piece.get("manual_green_reason") or "manually marked completed"),
             "content_hash": self._manual_green_piece_content_hash(piece),
             "sidecar": os.path.basename(str(piece.get("path") or piece.get("name") or key)),
             "output_name": self._output_name_for_piece(piece),
             "updated_at": time.time(),
         }
+        previous_entries = piece.get("manual_green_previous_progress_entries")
+        if isinstance(previous_entries, dict) and previous_entries:
+            entries[key]["progress_path"] = str(piece.get("manual_green_progress_path") or "")
+            entries[key]["previous_progress_entries"] = copy.deepcopy(previous_entries)
+            entries[key]["completion_updated_at"] = piece.get("manual_green_completion_updated_at")
         data["entries"] = entries
         saved = self._write_manual_green_override_data(path, data)
         if saved:
@@ -2947,7 +3162,7 @@ class SDLXLIFFReviewDialog(QDialog):
         if not isinstance(piece, dict):
             return False
         piece["manual_green_override"] = True
-        piece["manual_green_reason"] = str(reason or "manually marked green")
+        piece["manual_green_reason"] = str(reason or "manually marked completed")
         piece["manual_green_content_hash"] = str(content_hash or self._manual_green_piece_content_hash(piece))
         self._refresh_piece_summary(piece)
         return True
@@ -2956,9 +3171,16 @@ class SDLXLIFFReviewDialog(QDialog):
         entry = self._manual_green_override_entry_for_piece(piece)
         if not isinstance(entry, dict):
             return False
+        previous_entries = entry.get("previous_progress_entries")
+        if isinstance(previous_entries, dict) and previous_entries:
+            piece["manual_green_previous_progress_entries"] = copy.deepcopy(previous_entries)
+            piece["manual_green_progress_path"] = str(
+                entry.get("progress_path") or self._progress_path_for_review_piece(piece)
+            )
+            piece["manual_green_completion_updated_at"] = entry.get("completion_updated_at")
         return self._apply_manual_green_override_to_piece(
             piece,
-            reason=entry.get("reason") or "manually marked green",
+            reason=entry.get("reason") or "manually marked completed",
             content_hash=entry.get("content_hash"),
         )
 
@@ -2966,11 +3188,28 @@ class SDLXLIFFReviewDialog(QDialog):
         if not isinstance(piece, dict):
             return False
         had_override = bool(piece.get("manual_green_override"))
+        if not had_override:
+            return False
+        override_entry = self._manual_green_override_entry_for_piece(piece) if persist else None
+        if persist and not self._restore_piece_progress_before_manual_completion(piece, override_entry):
+            return False
+        if persist:
+            override_path = self._manual_green_overrides_path_for_piece(piece)
+            override_key = self._manual_green_override_key(piece)
+            override_data = self._read_manual_green_override_data(override_path)
+            override_entries = override_data.get("entries") if isinstance(override_data, dict) else {}
+            if (
+                isinstance(override_entries, dict)
+                and override_key in override_entries
+                and not self._remove_piece_manual_green_override(piece)
+            ):
+                return False
         piece.pop("manual_green_override", None)
         piece.pop("manual_green_reason", None)
         piece.pop("manual_green_content_hash", None)
-        if persist:
-            self._remove_piece_manual_green_override(piece)
+        piece.pop("manual_green_progress_path", None)
+        piece.pop("manual_green_previous_progress_entries", None)
+        piece.pop("manual_green_completion_updated_at", None)
         return had_override
 
     def _current_review_autogen_signature(self):
@@ -5608,7 +5847,7 @@ class SDLXLIFFReviewDialog(QDialog):
         if not manual_accuracy_active and not manual_green_override:
             self._promote_top_skewed_row_for_count_mismatch(rows, source_count, target_count)
         if manual_green_override:
-            reason = str(piece.get("manual_green_reason") or "manually marked green")
+            reason = str(piece.get("manual_green_reason") or "manually marked completed")
             for row in rows:
                 if row.get("status") in self.MANUAL_GREEN_STATUSES:
                     row["status"] = "green"
@@ -8451,6 +8690,113 @@ class SDLXLIFFReviewDialog(QDialog):
             )
         return valid, ""
 
+    def _translate_tooltip_work_with_retry(
+        self,
+        translator,
+        work,
+        adaptive=False,
+        progress_callback=None,
+    ):
+        """Translate preview rows, splitting provider-refused manual batches."""
+        work = list(work or [])
+        if not work:
+            return {}, ""
+
+        pending = []
+        if adaptive:
+            current_batch = []
+            current_chars = 0
+            for item in work:
+                source_chars = len(
+                    html_lib.escape(str(item[2] or ""), quote=False)
+                ) + 80
+                if current_batch and (
+                    len(current_batch) >= self.MACHINE_TRANSLATION_MANUAL_BATCH_MAX_ROWS
+                    or current_chars + source_chars
+                    > self.MACHINE_TRANSLATION_MANUAL_BATCH_MAX_CHARS
+                ):
+                    pending.append(current_batch)
+                    current_batch = []
+                    current_chars = 0
+                current_batch.append(item)
+                current_chars += source_chars
+            if current_batch:
+                pending.append(current_batch)
+        else:
+            pending = [work]
+        translated_by_key = {}
+        terminal_errors = []
+        result_notes = []
+        completed_batches = 0
+
+        while pending:
+            batch = pending.pop(0)
+            batch_html = self._tooltip_batch_html(batch)
+            result = translator.translate(batch_html)
+            result_error = (
+                str(result.get("error") or "").strip()
+                if isinstance(result, dict)
+                else ""
+            )
+            result_note = self._machine_translation_result_note(result)
+            if result_note and result_note not in result_notes:
+                result_notes.append(result_note)
+            translated_html = (
+                str(result.get("translatedText") or "").strip()
+                if isinstance(result, dict)
+                else ""
+            )
+            batch_translations = self._extract_tooltip_batch_translations(
+                translated_html,
+                batch,
+            )
+            batch_translations, validation_error = (
+                self._validate_tooltip_batch_translations(
+                    batch_translations,
+                    batch,
+                )
+            )
+            if result_error:
+                batch_translations = {}
+
+            translated_by_key.update(batch_translations)
+            missing = [
+                item for item in batch
+                if item[1] not in batch_translations
+            ]
+            retry_validation_failure = bool(
+                adaptive
+                and not result_error
+                and missing
+                and len(batch) > 1
+                and completed_batches + len(pending) + 2
+                <= self.MACHINE_TRANSLATION_MANUAL_MAX_ATTEMPTS
+                and (
+                    validation_error
+                    or len(batch_translations) < len(batch)
+                )
+            )
+            if retry_validation_failure:
+                midpoint = max(1, len(missing) // 2)
+                retry_batches = [missing[:midpoint], missing[midpoint:]]
+                pending[0:0] = [retry for retry in retry_batches if retry]
+            else:
+                batch_error = result_error or validation_error
+                if batch_error and batch_error not in terminal_errors:
+                    terminal_errors.append(batch_error)
+
+            completed_batches += 1
+            if callable(progress_callback):
+                progress_callback(
+                    completed_batches,
+                    completed_batches + len(pending),
+                )
+
+        error = " ".join(terminal_errors)
+        for note in result_notes:
+            error = self._append_machine_translation_note(error, note)
+        return translated_by_key, error
+
     def _current_piece_row(self):
         try:
             return self.piece_list.currentRow()
@@ -8564,25 +8910,25 @@ class SDLXLIFFReviewDialog(QDialog):
                 if 0 <= row < len(self.pieces) and self.pieces[row].get("manual_green_override")
             ]
             menu.addSeparator()
-            green_text = (
-                f"\u2705  Mark Red/Yellow Sidecars as Green ({len(eligible_rows)} entries)"
+            completed_text = (
+                f"\u2705  Mark as Completed ({len(eligible_rows)} entries)"
                 if len(rows) != 1
-                else "\u2705  Mark Red/Yellow Sidecar as Green"
+                else "\u2705  Mark as Completed"
             )
-            green_action = menu.addAction(green_text)
-            green_action.setEnabled(bool(eligible_rows))
-            green_action.triggered.connect(
-                lambda _checked=False, selected_rows=list(rows): self._mark_review_sidecars_green(selected_rows)
+            completed_action = menu.addAction(completed_text)
+            completed_action.setEnabled(bool(eligible_rows))
+            completed_action.triggered.connect(
+                lambda _checked=False, selected_rows=list(rows): self._mark_review_sidecars_completed(selected_rows)
             )
             undo_text = (
-                f"\u21a9\ufe0f  Undo Green Mark ({len(undo_rows)} entries)"
+                f"\u21a9\ufe0f  Undo Completed Mark ({len(undo_rows)} entries)"
                 if len(rows) != 1
-                else "\u21a9\ufe0f  Undo Green Mark"
+                else "\u21a9\ufe0f  Undo Completed Mark"
             )
             undo_action = menu.addAction(undo_text)
             undo_action.setEnabled(bool(undo_rows))
             undo_action.triggered.connect(
-                lambda _checked=False, selected_rows=list(rows): self._undo_review_sidecars_green(selected_rows)
+                lambda _checked=False, selected_rows=list(rows): self._undo_review_sidecars_completed(selected_rows)
             )
             self._piece_list_context_menu = menu
             self._set_review_context_menu_open(True)
@@ -8591,12 +8937,12 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
-    def _mark_review_sidecars_green(self, piece_rows):
+    def _mark_review_sidecars_completed(self, piece_rows):
         rows = sorted({row for row in (piece_rows or []) if 0 <= row < len(self.pieces)})
         if not rows:
             return
         marked = 0
-        saved = 0
+        errors = []
         current_row = self._displayed_piece_row()
         for piece_index in rows:
             try:
@@ -8605,13 +8951,21 @@ class SDLXLIFFReviewDialog(QDialog):
                 continue
             if not self._piece_needs_manual_green_override(piece):
                 continue
+            progress_result = self._mark_piece_progress_completed(piece)
+            if not progress_result.get("ok"):
+                errors.append(str(progress_result.get("error") or "progress update failed"))
+                continue
             before = [
                 (str(row_data.get("status") or ""), str(row_data.get("reason") or ""))
                 for row_data in (piece.get("rows") or [])
             ]
             self._apply_manual_green_override_to_piece(piece)
-            if self._persist_piece_manual_green_override(piece):
-                saved += 1
+            if not self._persist_piece_manual_green_override(piece):
+                restored = self._restore_piece_progress_before_manual_completion(piece)
+                if restored:
+                    self._clear_piece_manual_green_override(piece, persist=False)
+                errors.append("could not save the completed review mark")
+                continue
             marked += 1
 
             changed_rows = [
@@ -8630,16 +8984,22 @@ class SDLXLIFFReviewDialog(QDialog):
 
         try:
             if marked <= 0:
-                self.save_status_label.setText("No red/yellow SDLXLIFF sidecars selected")
-            elif saved == marked:
-                self.save_status_label.setText(f"Marked {marked} SDLXLIFF sidecar{'s' if marked != 1 else ''} green")
+                if errors:
+                    self.save_status_label.setText(f"Could not mark completed: {errors[0]}")
+                else:
+                    self.save_status_label.setText("No eligible SDLXLIFF sidecars selected")
+            elif errors:
+                self.save_status_label.setText(
+                    f"Marked {marked} completed; {len(errors)} progress update{'s' if len(errors) != 1 else ''} failed"
+                )
             else:
-                failed = marked - saved
-                self.save_status_label.setText(f"Marked {marked} sidecar{'s' if marked != 1 else ''} green; {failed} not saved")
+                self.save_status_label.setText(
+                    f"Marked {marked} SDLXLIFF sidecar{'s' if marked != 1 else ''} completed"
+                )
         except Exception:
             pass
 
-    def _undo_review_sidecars_green(self, piece_rows):
+    def _undo_review_sidecars_completed(self, piece_rows):
         rows = sorted({row for row in (piece_rows or []) if 0 <= row < len(self.pieces)})
         if not rows:
             return
@@ -8678,11 +9038,21 @@ class SDLXLIFFReviewDialog(QDialog):
 
         try:
             if undone <= 0:
-                self.save_status_label.setText("No manually green SDLXLIFF sidecars selected")
+                self.save_status_label.setText("No manually completed SDLXLIFF sidecars selected")
             else:
-                self.save_status_label.setText(f"Undid green mark for {undone} SDLXLIFF sidecar{'s' if undone != 1 else ''}")
+                self.save_status_label.setText(
+                    f"Undid completed mark for {undone} SDLXLIFF sidecar{'s' if undone != 1 else ''}"
+                )
         except Exception:
             pass
+
+    # Compatibility for callers retaining references to the former action
+    # names. The visible command now represents progress completion.
+    def _mark_review_sidecars_green(self, piece_rows):
+        return self._mark_review_sidecars_completed(piece_rows)
+
+    def _undo_review_sidecars_green(self, piece_rows):
+        return self._undo_review_sidecars_completed(piece_rows)
 
     def _clear_piece_list_context_menu(self, menu):
         try:
@@ -8788,6 +9158,7 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
         self._mark_tooltip_translation_pending(row, work)
+        adaptive = bool(self.pieces[row].get("manual_editing"))
 
         def _worker():
             translations = {}
@@ -8798,20 +9169,12 @@ class SDLXLIFFReviewDialog(QDialog):
                     self._tooltip_translation_status.emit(row, work_keys, str(message or ""))
 
                 translator = self._machine_translation_translator(target_code, status_callback=_status)
-                batch_html = self._tooltip_batch_html(work)
-                result = translator.translate(batch_html)
-                result_error = str(result.get("error") or "").strip() if isinstance(result, dict) else ""
-                result_note = self._machine_translation_result_note(result)
-                translated_html = str(result.get("translatedText") or "").strip()
-                translations = self._extract_tooltip_batch_translations(translated_html, work)
-                translations, validation_error = self._validate_tooltip_batch_translations(translations, work)
-                if result_error:
-                    error = result_error
-                    translations = {}
-                elif validation_error:
-                    error = validation_error
-                error = self._append_machine_translation_note(error, result_note)
-                self._tooltip_translation_progress.emit(1, 1)
+                translations, error = self._translate_tooltip_work_with_retry(
+                    translator,
+                    work,
+                    adaptive=adaptive,
+                    progress_callback=lambda done, total: self._tooltip_translation_progress.emit(done, total),
+                )
             except Exception as exc:
                 error = str(exc)
             self._tooltip_translation_finished.emit(row, translations, error)
@@ -8873,19 +9236,11 @@ class SDLXLIFFReviewDialog(QDialog):
                 translations = {}
                 error = ""
                 try:
-                    batch_html = self._tooltip_batch_html(work)
-                    result = translator.translate(batch_html)
-                    result_error = str(result.get("error") or "").strip() if isinstance(result, dict) else ""
-                    result_note = self._machine_translation_result_note(result)
-                    translated_html = str(result.get("translatedText") or "").strip()
-                    translations = self._extract_tooltip_batch_translations(translated_html, work)
-                    translations, validation_error = self._validate_tooltip_batch_translations(translations, work)
-                    if result_error:
-                        error = result_error
-                        translations = {}
-                    elif validation_error:
-                        error = validation_error
-                    error = self._append_machine_translation_note(error, result_note)
+                    translations, error = self._translate_tooltip_work_with_retry(
+                        translator,
+                        work,
+                        adaptive=bool(self.pieces[piece_index].get("manual_editing")),
+                    )
                     translated_count += len(translations)
                 except Exception as exc:
                     error = str(exc)

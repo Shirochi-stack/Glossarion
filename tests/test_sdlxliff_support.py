@@ -1749,7 +1749,8 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "QLineEdit.Password" in source
     assert "from google_free_translate import GoogleFreeTranslateNew" in source
     assert 'name="sdlxliff-machine-translation-preview"' in source
-    assert "batch_html = self._tooltip_batch_html(work)" in source
+    assert "batch_html = self._tooltip_batch_html(batch)" in source
+    assert "_translate_tooltip_work_with_retry" in source
     assert "result = translator.translate(batch_html)" in source
     assert 'data-sdl-tip="' in source
     assert "self._review_loading_minimum_ms = 10" in source
@@ -2770,6 +2771,187 @@ def test_manual_editing_generated_html_applies_image_rename_map(tmp_path, monkey
     assert "background.webp" not in output_html
     _source, saved_target = dialog._read_sdlxliff_html_pair(sidecar)
     assert saved_target == output_html
+
+
+def test_sdlxliff_mark_as_completed_updates_matching_progress_and_undoes(tmp_path):
+    output_name = "response_chapter0001.html"
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0001.xhtml"},
+        "<html><body><p>Untranslated source.</p></body></html>",
+        "<html><body><p>Untranslated source.</p></body></html>",
+        raise_errors=True,
+        manual_untranslated=True,
+    )
+    progress_path = tmp_path / "translation_progress.json"
+    original_progress = {
+        "chapters": {
+            "7": {
+                "actual_num": 7,
+                "status": "qa_failed",
+                "output_file": f"nested\\{output_name}",
+                "original_basename": "chapter0001.xhtml",
+                "failure_reason": "blocked",
+                "qa_issues_found": ["test issue"],
+                "model_name": "test-model",
+                "last_updated": 10.0,
+            },
+            "7_duplicate": {
+                "actual_num": 7,
+                "status": "pending",
+                "output_file": output_name,
+                "original_basename": "chapter0001.xhtml",
+                "last_updated": 11.0,
+            },
+            "8": {
+                "actual_num": 8,
+                "status": "completed",
+                "output_file": "response_chapter0002.html",
+                "original_basename": "chapter0002.xhtml",
+                "last_updated": 12.0,
+            },
+        },
+        "completed_list": [
+            {
+                "num": 8,
+                "idx": 0,
+                "title": "chapter0002.xhtml",
+                "file": "response_chapter0002.html",
+                "key": "8",
+            }
+        ],
+    }
+    progress_path.write_text(json.dumps(original_progress), encoding="utf-8")
+
+    live_progress = json.loads(json.dumps(original_progress))
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._config = {"output_language": "English"}
+    dialog._book_entries = []
+    dialog._last_autogen_signature = None
+    dialog._sdlxliff_autogen_progress_data = live_progress
+    piece = dialog._build_piece(sidecar, 0, {"output_name": output_name})
+
+    assert dialog._piece_needs_manual_green_override(piece) is True
+    result = dialog._mark_piece_progress_completed(piece)
+    assert result == {"ok": True, "matched": 2, "error": ""}
+    assert dialog._apply_manual_green_override_to_piece(piece) is True
+    assert dialog._persist_piece_manual_green_override(piece) is True
+
+    completed_progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    for key in ("7", "7_duplicate"):
+        entry = completed_progress["chapters"][key]
+        assert entry["status"] == "completed"
+        assert entry["manually_marked_completed"] is True
+        assert "failure_reason" not in entry
+        assert "qa_issues_found" not in entry
+    assert completed_progress["chapters"]["7"]["model_name"] == "test-model"
+    assert live_progress["chapters"]["7"]["status"] == "completed"
+    assert piece["mismatch"] is False
+
+    reloaded_dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    reloaded_dialog.output_dir = str(tmp_path)
+    reloaded_dialog._config = {"output_language": "English"}
+    reloaded_dialog._book_entries = []
+    reloaded_dialog._last_autogen_signature = None
+    reloaded_dialog._sdlxliff_autogen_progress_data = {}
+    reloaded_piece = reloaded_dialog._build_piece(
+        sidecar,
+        0,
+        {"output_name": output_name},
+    )
+    assert reloaded_piece["manual_green_override"] is True
+
+    assert reloaded_dialog._clear_piece_manual_green_override(
+        reloaded_piece,
+        persist=True,
+    ) is True
+    restored_progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert restored_progress == original_progress
+    override_data = json.loads(
+        (tmp_path / "SDLXLIFF" / "review_status_overrides.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert override_data["entries"] == {}
+
+
+def test_sdlxliff_completion_context_action_uses_new_label_and_handler():
+    source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
+
+    assert "Mark as Completed" in source
+    assert "Mark Red/Yellow Sidecar as Green" not in source
+    assert "self._mark_review_sidecars_completed(selected_rows)" in source
+
+
+def test_manual_editing_sidecar_machine_translation_preview_button(tmp_path, monkeypatch, qtbot):
+    output_name = "response_chapter0001.html"
+    source_html = "<html><body>" + "".join(
+        f"<p>수동 번역 원문 {index}입니다.</p>"
+        for index in range(12)
+    ) + "</body></html>"
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0001.xhtml"},
+        source_html,
+        source_html,
+        raise_errors=True,
+        manual_untranslated=True,
+    )
+
+    class Translator:
+        call_sizes = []
+
+        @classmethod
+        def translate(cls, batch_html):
+            soup = BeautifulSoup(batch_html, "html.parser")
+            nodes = soup.find_all(attrs={"data-sdl-tip": True})
+            cls.call_sizes.append(len(nodes))
+            if len(nodes) > 3:
+                return {"translatedText": batch_html}
+            for node in nodes:
+                node.string = f"Manual sidecar preview {node['data-sdl-tip']}."
+            return {"translatedText": str(soup)}
+
+    dialog = SDLXLIFFReviewDialog(
+        str(tmp_path),
+        sidecar,
+        config={"output_language": "English"},
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    monkeypatch.setattr(
+        dialog,
+        "_machine_translation_translator",
+        lambda _target_code, status_callback=None: Translator(),
+    )
+    qtbot.waitUntil(lambda: bool(dialog.pieces), timeout=5000)
+    assert dialog.pieces[0]["manual_untranslated"] is True
+    assert dialog.pieces[0]["target_count"] == 0
+
+    dialog.translate_tooltips_btn.click()
+
+    qtbot.waitUntil(
+        lambda: not dialog._tooltip_translation_running,
+        timeout=5000,
+    )
+    assert Translator.call_sizes[0] == 12
+    assert max(Translator.call_sizes[1:]) <= 6
+    assert all(
+        row["tooltip_translation"].startswith("Manual sidecar preview ")
+        for row in dialog.pieces[0]["rows"]
+    )
+    preview_path = (
+        tmp_path
+        / "SDLXLIFF"
+        / "Machine_Translation"
+        / f"{output_name}.json"
+    )
+    assert preview_path.is_file()
+    preview_data = json.loads(preview_path.read_text(encoding="utf-8"))
+    assert len(preview_data["entries"]) == 12
 
 
 def test_progress_manager_exposes_manual_editing_toggle_for_not_translated_rows():
