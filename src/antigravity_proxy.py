@@ -68,12 +68,12 @@ PROXY_GITHUB_RAW_PACKAGE_URL = (
 )
 PROXY_GITHUB_TAG_ARCHIVE_URL = f"{PROXY_REPO_URL}/archive/refs/tags/{{tag}}.zip"
 PROXY_GITHUB_REVISION_ARCHIVE_URL = f"{PROXY_REPO_URL}/archive/{{revision}}.zip"
-PROXY_DEFAULT_REVISION = "dcc517ee0c954bafd18aa611fcbeb2979f61eeeb"
-PROXY_DEFAULT_VERSION = "0.7.4"
+PROXY_DEFAULT_REVISION = "abc82ce6b756ee1c4d794b9f1599eda9b55730d8"
+PROXY_DEFAULT_VERSION = "0.7.7"
 PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
 BUN_INSTALL_TIMEOUT_SECONDS = 300
-RUNTIME_PATCH_VERSION = "2026-08-17-auto-account-log-v1"
+RUNTIME_PATCH_VERSION = "2026-08-17-round-robin-auto-account-v2"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -770,6 +770,109 @@ def _patch_runtime_selected_account_header(runtime_dir: str) -> bool:
     return server.count(marker) >= 2
 
 
+def _patch_runtime_auto_rotation_support(runtime_dir: str) -> bool:
+    """Make antigravity0/ requests bypass sticky selection and round-robin."""
+    server_path = os.path.join(runtime_dir, "src", "server.ts")
+    manager_path = os.path.join(runtime_dir, "src", "auth", "manager.ts")
+    if not os.path.exists(server_path) or not os.path.exists(manager_path):
+        return False
+
+    with open(server_path, "r", encoding="utf-8") as f:
+        server = f.read()
+    with open(manager_path, "r", encoding="utf-8") as f:
+        manager = f.read()
+
+    server_marker = 'const forceRoundRobin = requestedRotation === "round-robin";'
+    if server_marker not in server:
+        client_needle = (
+            '      const clientId = req.headers.get("x-client-id") || '
+            'url.searchParams.get("client_id") || "unknown";\n'
+        )
+        client_replacement = (
+            '      const requestedRotation = req.headers.get("x-antigravity-rotation")'
+            '?.trim().toLowerCase();\n'
+            '      const forceRoundRobin = requestedRotation === "round-robin";\n'
+            '      const clientId = forceRoundRobin\n'
+            '        ? undefined\n'
+            '        : req.headers.get("x-client-id") || '
+            'url.searchParams.get("client_id") || "unknown";\n'
+        )
+        if client_needle in server:
+            server = server.replace(client_needle, client_replacement, 1)
+
+        server = server.replace(
+            '      const userIdent = openaiBody.user || clientId;\n',
+            '      const userIdent = openaiBody.user || clientId || "automatic-rotation";\n',
+            1,
+        )
+        server = server.replace(
+            'clientId, triedEmails, true)',
+            'clientId, triedEmails, true, forceRoundRobin)',
+        )
+        server = server.replace(
+            'clientId, triedEmails, false)',
+            'clientId, triedEmails, false, forceRoundRobin)',
+        )
+
+    manager_marker = "export function selectRoundRobinCandidate"
+    if manager_marker not in manager:
+        sticky_map_needle = 'const clientStickyMap = new Map<string, string>();\n'
+        if sticky_map_needle in manager:
+            manager = manager.replace(
+                sticky_map_needle,
+                sticky_map_needle + 'const roundRobinLastEmail = new Map<string, string>();\n',
+                1,
+            )
+
+        signature = (
+            "export async function getBestAccount(pool?: 'cli' | 'sandbox', "
+            "model?: string, clientId?: string, excludeEmails: string[] = [], "
+            "skipRescue: boolean = false): Promise<AntigravityAccount | null> {"
+        )
+        replacement = '''export function selectRoundRobinCandidate<T extends { email: string }>(candidates: T[], rotationKey: string): T | null {
+  if (candidates.length === 0) return null;
+
+  const lastEmail = roundRobinLastEmail.get(rotationKey);
+  const lastIndex = lastEmail ? candidates.findIndex(candidate => candidate.email === lastEmail) : -1;
+  const selected = candidates[(lastIndex + 1) % candidates.length];
+  roundRobinLastEmail.set(rotationKey, selected.email);
+  return selected;
+}
+
+export async function getBestAccount(pool?: 'cli' | 'sandbox', model?: string, clientId?: string, excludeEmails: string[] = [], skipRescue: boolean = false, forceRoundRobin: boolean = false): Promise<AntigravityAccount | null> {'''
+        if signature in manager:
+            manager = manager.replace(signature, replacement, 1)
+
+        selection_needle = (
+            '    if (candidates.length === 0) return null;\n'
+            '    \n'
+            '    if (clientId && excludeEmails.length === 0) {'
+        )
+        selection_replacement = (
+            '    if (candidates.length === 0) return null;\n\n'
+            '    if (forceRoundRobin) {\n'
+            '      const selected = selectRoundRobinCandidate(candidates, `${pool}|${family}`);\n'
+            '      return selected ? await ensureAccountReady(selected) : null;\n'
+            '    }\n'
+            '    \n'
+            '    if (clientId && excludeEmails.length === 0) {'
+        )
+        if selection_needle in manager:
+            manager = manager.replace(selection_needle, selection_replacement, 1)
+
+    with open(server_path, "w", encoding="utf-8") as f:
+        f.write(server)
+    with open(manager_path, "w", encoding="utf-8") as f:
+        f.write(manager)
+
+    return (
+        server_marker in server
+        and server.count("forceRoundRobin)") >= 3
+        and manager_marker in manager
+        and "if (forceRoundRobin)" in manager
+    )
+
+
 def _patch_runtime_verbose_access_denied(runtime_dir: str) -> bool:
     """Return the upstream Google error details instead of only unknown_error."""
     server_path = os.path.join(runtime_dir, "src", "server.ts")
@@ -1068,7 +1171,7 @@ def _download_proxy_runtime(
     log_fn=None,
 ) -> None:
     _log = log_fn or _log_noop
-    _log(f"Antigravity: downloading {PROXY_PACKAGE_NAME} {release['tag']}...")
+    _log(f"⬇️ Antigravity: downloading {PROXY_PACKAGE_NAME} {release['tag']}...")
 
     resp = requests.get(release["archive_url"], headers=_github_headers(), timeout=60)
     resp.raise_for_status()
@@ -1098,6 +1201,8 @@ def _download_proxy_runtime(
             raise RuntimeError("Downloaded proxy archive could not be patched for forced account routing")
         if not _patch_runtime_selected_account_header(archive_root):
             raise RuntimeError("Downloaded proxy archive could not expose selected account headers")
+        if not _patch_runtime_auto_rotation_support(archive_root):
+            raise RuntimeError("Downloaded proxy archive could not enable automatic account rotation")
         if not _patch_runtime_verbose_access_denied(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for verbose access-denied errors")
         _write_runtime_metadata(archive_root, release, client_version)
@@ -1201,6 +1306,8 @@ def _patch_cached_runtime(
         if not _patch_runtime_forced_account_support(runtime_dir):
             return False
         if not _patch_runtime_selected_account_header(runtime_dir):
+            return False
+        if not _patch_runtime_auto_rotation_support(runtime_dir):
             return False
         if not _patch_runtime_verbose_access_denied(runtime_dir):
             return False
@@ -1347,6 +1454,8 @@ def _build_headers(account_id: Optional[int] = None) -> Dict[str, str]:
             )
         headers["X-Antigravity-Account"] = email
         headers["X-Client-Id"] = f"glossarion-antigravity{account_id}"
+    elif account_id == 0:
+        headers["X-Antigravity-Rotation"] = "round-robin"
     return headers
 
 
@@ -2375,7 +2484,7 @@ def ensure_proxy_running(log_fn=None, notify_started: bool = True) -> Dict[str, 
     if health.get("healthy"):
         running_version = (health.get("details") or {}).get("version")
         if _cached_runtime_needs_update(data_dir, running_version):
-            _log("Antigravity proxy update detected; restarting with the latest fork runtime...")
+            _log("🔄 Antigravity proxy update detected; restarting with the latest fork runtime...")
             _kill_proxy_by_port(_get_proxy_port())
             force_update = True
             time.sleep(2)
@@ -2387,7 +2496,7 @@ def ensure_proxy_running(log_fn=None, notify_started: bool = True) -> Dict[str, 
         if health.get("healthy"):
             running_version = (health.get("details") or {}).get("version")
             if _cached_runtime_needs_update(data_dir, running_version):
-                _log("Antigravity proxy update detected; restarting with the latest fork runtime...")
+                _log("🔄 Antigravity proxy update detected; restarting with the latest fork runtime...")
                 _kill_proxy_by_port(_get_proxy_port())
                 force_update = True
                 time.sleep(2)

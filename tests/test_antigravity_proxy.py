@@ -963,6 +963,7 @@ def test_numbered_antigravity_prefix_controls_account_routing(monkeypatch):
     rotating_headers = antigravity_proxy._build_headers(account_id=0)
     assert "X-Antigravity-Account" not in rotating_headers
     assert "X-Client-Id" not in rotating_headers
+    assert rotating_headers["X-Antigravity-Rotation"] == "round-robin"
 
     headers = antigravity_proxy._build_headers(account_id=2)
 
@@ -1021,6 +1022,7 @@ def test_antigravity_zero_prefix_reaches_proxy_without_forced_account(monkeypatc
     assert captured["account_id"] == 0
     assert "X-Antigravity-Account" not in captured["headers"]
     assert "X-Client-Id" not in captured["headers"]
+    assert captured["headers"]["X-Antigravity-Rotation"] == "round-robin"
     client = _unified_antigravity_client("antigravity0/gemini-2.5-flash")
     assert client._extract_antigravity_account_id(client.model) == 0
 
@@ -1571,6 +1573,40 @@ def test_patch_runtime_selected_account_header(tmp_path):
 
     server = server_file.read_text(encoding="utf-8")
     assert server.count('"X-Antigravity-Account": account.email') == 2
+
+
+def test_patch_runtime_auto_rotation_support(tmp_path):
+    server_file = tmp_path / "src" / "server.ts"
+    manager_file = tmp_path / "src" / "auth" / "manager.ts"
+    server_file.parent.mkdir(parents=True)
+    manager_file.parent.mkdir(parents=True)
+    server_file.write_text(
+        '      const clientId = req.headers.get("x-client-id") || url.searchParams.get("client_id") || "unknown";\n'
+        '      const userIdent = openaiBody.user || clientId;\n'
+        'account = await getBestAccount(pool, model, clientId, triedEmails, true);\n'
+        'account = await getBestAccount(otherPool, model, clientId, triedEmails, true);\n'
+        'account = await getBestAccount(pool, model, clientId, triedEmails, false);\n',
+        encoding="utf-8",
+    )
+    manager_file.write_text(
+        'const clientStickyMap = new Map<string, string>();\n'
+        "export async function getBestAccount(pool?: 'cli' | 'sandbox', model?: string, clientId?: string, excludeEmails: string[] = [], skipRescue: boolean = false): Promise<AntigravityAccount | null> {\n"
+        '    if (candidates.length === 0) return null;\n'
+        '    \n'
+        '    if (clientId && excludeEmails.length === 0) {\n'
+        '    }\n'
+        '}\n',
+        encoding="utf-8",
+    )
+
+    assert antigravity_proxy._patch_runtime_auto_rotation_support(str(tmp_path))
+
+    server = server_file.read_text(encoding="utf-8")
+    manager = manager_file.read_text(encoding="utf-8")
+    assert 'const forceRoundRobin = requestedRotation === "round-robin";' in server
+    assert server.count("forceRoundRobin)") == 3
+    assert "export function selectRoundRobinCandidate" in manager
+    assert "if (forceRoundRobin)" in manager
 
 
 def test_antigravity_exhausted_quota_is_not_retried(monkeypatch):
