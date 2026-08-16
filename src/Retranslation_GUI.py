@@ -11444,9 +11444,10 @@ class SDLXLIFFReviewDialog(QDialog):
 
                 const EDIT_ATTR = 'data-sdl-notepad-text';
                 const PLACEHOLDER_ATTR = 'data-sdl-notepad-placeholder';
+                const BREAK_ATTR = 'data-sdl-notepad-break';
                 const SOURCE_ATTR = 'data-sdl-notepad-source';
                 const ORIGINAL_EDITABLE_ATTR = 'data-sdl-notepad-original-editable';
-                const ALLOWED_INLINE_TAGS = new Set(['STRONG', 'EM', 'U', 'B', 'I']);
+                const ALLOWED_INLINE_TAGS = new Set(['STRONG', 'EM', 'U', 'B', 'I', 'BR']);
                 const blockedParents = 'script,style,noscript,template,textarea,select,option,svg,math';
                 const editableHost = node => {
                     const element = node && node.nodeType === Node.ELEMENT_NODE
@@ -11528,6 +11529,22 @@ class SDLXLIFFReviewDialog(QDialog):
                     };
                 };
                 const markDirty = () => { window.__sdlNotepadDirty = true; };
+                const insertBreak = host => {
+                    const selection = window.getSelection();
+                    if (!host || !selection || !selection.rangeCount
+                            || !selectionInside(host)) return false;
+                    const range = selection.getRangeAt(0);
+                    range.deleteContents();
+                    const lineBreak = document.createElement('br');
+                    range.insertNode(lineBreak);
+                    range.setStartAfter(lineBreak);
+                    range.collapse(true);
+                    host.removeAttribute(PLACEHOLDER_ATTR);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    markDirty();
+                    return true;
+                };
                 const sanitizeHost = host => {
                     if (!host) return;
                     for (const element of Array.from(host.querySelectorAll('*'))) {
@@ -11693,6 +11710,24 @@ class SDLXLIFFReviewDialog(QDialog):
                     );
                 }
 
+                // A void <br> cannot itself be contenteditable. Give every
+                // existing break a small editable caret target immediately
+                // before it, preserving the break as a sibling so its browser
+                // layout and saved HTML semantics stay unchanged.
+                for (const lineBreak of Array.from(document.body.querySelectorAll('br'))) {
+                    if (lineBreak.closest('[' + EDIT_ATTR + ']')
+                            || lineBreak.closest(blockedParents)) continue;
+                    const sourceContainer = lineBreak.parentElement
+                        ? lineBreak.parentElement.closest('[' + SOURCE_ATTR + ']') : null;
+                    const host = makeHost(
+                        null,
+                        true,
+                        sourceContainer ? sourceContainer.getAttribute(SOURCE_ATTR) || '' : ''
+                    );
+                    host.setAttribute(BREAK_ATTR, '1');
+                    lineBreak.parentNode.insertBefore(host, lineBreak);
+                }
+
                 // Empty rendered text containers still need a caret target.
                 document.body.querySelectorAll(
                     'p,h1,h2,h3,h4,h5,h6,li,td,th,caption,figcaption,blockquote'
@@ -11787,6 +11822,9 @@ class SDLXLIFFReviewDialog(QDialog):
                     const inputType = String(event.inputType || '');
                     if (inputType === 'insertParagraph' || inputType === 'insertLineBreak') {
                         event.preventDefault();
+                        event.stopImmediatePropagation();
+                        const host = editableHost(event.target);
+                        if (host && selectionInside(host)) insertBreak(host);
                         return;
                     }
                     const host = editableHost(event.target);
@@ -11849,22 +11887,7 @@ class SDLXLIFFReviewDialog(QDialog):
                         event.preventDefault();
                         event.stopImmediatePropagation();
                         const current = editableHost(event.target);
-                        if (!current) return;
-                        const hosts = Array.from(
-                            document.body.querySelectorAll('[' + EDIT_ATTR + ']')
-                        );
-                        const index = hosts.indexOf(current);
-                        const nextIndex = event.shiftKey ? index - 1 : index + 1;
-                        const next = hosts[nextIndex];
-                        if (next) {
-                            next.focus();
-                            const selection = window.getSelection();
-                            const range = document.createRange();
-                            range.selectNodeContents(next);
-                            range.collapse(!event.shiftKey);
-                            selection.removeAllRanges();
-                            selection.addRange(range);
-                        }
+                        if (current) insertBreak(current);
                         return;
                     }
                     if (event.key !== 'Backspace' && event.key !== 'Delete') return;

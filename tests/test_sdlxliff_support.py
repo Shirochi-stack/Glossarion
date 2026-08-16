@@ -3479,6 +3479,8 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert js_value("document.querySelector('p').isContentEditable") is False
     assert js_value("document.querySelector('strong').isContentEditable") is False
     assert js_value("document.querySelector('[data-sdl-notepad-text]').isContentEditable") is True
+    assert js_value("document.querySelectorAll('[data-sdl-notepad-break]').length") == 1
+    assert js_value("document.querySelector('[data-sdl-notepad-break]').isContentEditable") is True
     assert js_value(
         "document.querySelector('[data-sdl-notepad-text]').getAttribute('contenteditable')"
     ) == "true"
@@ -3623,15 +3625,14 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
             range.collapse(false);
             selection.removeAllRanges();
             selection.addRange(range);
-            const before = document.body.innerHTML;
             const event = new KeyboardEvent('keydown', {
                 key: 'Enter', bubbles: true, cancelable: true
             });
             first.dispatchEvent(event);
             return JSON.stringify([
                 event.defaultPrevented,
-                before === document.body.innerHTML,
-                document.activeElement === hosts[1]
+                first.querySelectorAll('br').length === 1,
+                document.activeElement === first
             ]);
         } catch (error) { return String(error && error.stack || error); }
         })();
@@ -3724,11 +3725,20 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         """
         (() => {
             const host = document.querySelector('[data-sdl-notepad-text]');
+            host.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(host);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const before = host.querySelectorAll('br').length;
             const event = new InputEvent('beforeinput', {
                 inputType: 'insertParagraph', bubbles: true, cancelable: true
             });
             host.dispatchEvent(event);
-            return event.defaultPrevented;
+            return event.defaultPrevented
+                && host.querySelectorAll('br').length === before + 1;
         })();
         """
     ) is True
@@ -3736,11 +3746,20 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         """
         (() => {
             const host = document.querySelector('[data-sdl-notepad-text]');
+            host.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(host);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const before = host.querySelectorAll('br').length;
             const event = new InputEvent('beforeinput', {
                 inputType: 'insertLineBreak', bubbles: true, cancelable: true
             });
             host.dispatchEvent(event);
-            return event.defaultPrevented;
+            return event.defaultPrevented
+                && host.querySelectorAll('br').length === before + 1;
         })();
         """
     ) is True
@@ -3789,7 +3808,7 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         """
         (() => {
             const editor = document.querySelector('p > [data-sdl-notepad-text]');
-            editor.textContent = 'Edited in the rendered page. ';
+            editor.innerHTML = 'Edited in the rendered page. <br>';
             editor.dispatchEvent(new InputEvent('input', {bubbles: true}));
         })();
         """
@@ -3801,6 +3820,7 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         timeout=5000,
     )
     saved_soup = BeautifulSoup(output_path.read_text(encoding="utf-8"), "html.parser")
+    assert saved_soup.find("p").find("br") is not None
     assert saved_soup.find("strong").get_text(strip=True) == "protected"
     saved_addition = saved_soup.find("p", id="empty")
     assert saved_addition is not None
@@ -3817,13 +3837,14 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert output_path.read_text(encoding="utf-8").count("Edited in the rendered page.") == 1
     assert output_path.read_text(encoding="utf-8").count("protected") == 1
     notepad_tag_order = dialog.pieces[0]["_notepad_tag_order"]
-    assert notepad_tag_order[:9] == [
-        "html", "head", "meta", "title", "body", "div", "img", "p", "strong"
+    assert notepad_tag_order[:10] == [
+        "html", "head", "meta", "title", "body", "div", "img", "p", "br", "strong"
     ]
     assert notepad_tag_order.count("p") == 2
     assert notepad_tag_order.count("strong") == 2
     assert "em" in notepad_tag_order
     assert "u" in notepad_tag_order
+    assert notepad_tag_order.count("br") == 2
     assert notepad_tag_order[-1] == "br"
 
     dialog.two_column_layout_btn.click()
