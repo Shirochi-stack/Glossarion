@@ -4022,6 +4022,42 @@ def test_sdlxliff_viewer_refresh_only_checks_missing_manual_entries(tmp_path):
     assert owner.entries == []
 
 
+def test_sdlxliff_refresh_discards_scan_result_already_integrated_by_editor_save():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog._review_refresh_scan_token = 7
+    dialog._review_refresh_scan_running = True
+    dialog._review_refresh_scan_requested = False
+    dialog._last_review_signature = ("saved-sidecar",)
+    dialog._last_autogen_signature = ("saved-output",)
+    dialog._last_machine_translation_signature = ("mt",)
+    dialog._tooltip_translation_running = False
+    dialog._queue_stop_refresh_button_animation = lambda _delay: None
+
+    reload_attempts = []
+    dialog._queue_async_review_piece_reload = lambda **_kwargs: reload_attempts.append(True)
+    dialog.refresh_review_data = lambda **_kwargs: reload_attempts.append(True)
+
+    dialog._apply_review_refresh_scan(
+        7,
+        {
+            "force": False,
+            "review_signature": ("saved-sidecar",),
+            "machine_translation_signature": ("mt",),
+            "autogen_signature": ("saved-output",),
+            # These flags were computed against the scan's older baseline.
+            "sidecar_changed": True,
+            "autogen_changed": True,
+            "sidecars_generated": False,
+            "machine_translation_changed": False,
+            "stats": None,
+            "error": "",
+        },
+    )
+
+    assert reload_attempts == []
+    assert dialog._review_refresh_scan_running is False
+
+
 def test_retranslation_sdlxliff_generation_skips_current_sidecar_even_with_overwrite(tmp_path, monkeypatch):
     source = tmp_path / "chapter0001.xhtml"
     output = tmp_path / "response_chapter0001.html"

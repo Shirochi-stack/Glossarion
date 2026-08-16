@@ -2770,6 +2770,34 @@ class SDLXLIFFReviewDialog(QDialog):
             mt_signature = result.get("machine_translation_signature")
             autogen_signature = result.get("autogen_signature")
             stats = result.get("stats")
+
+            # A background scan may start immediately before an editor save.
+            # The save updates the active piece and advances both signatures
+            # in place, but the scan's booleans were calculated against its
+            # older snapshot. Do not let that stale result rebuild the page
+            # and flash "Refreshed 1 SDLXLIFF entry" when its final state is
+            # already exactly the state the editor has integrated.
+            already_integrated = bool(
+                not result.get("force")
+                and not result.get("sidecars_generated")
+                and signature == getattr(self, "_last_review_signature", None)
+                and autogen_signature == getattr(self, "_last_autogen_signature", None)
+            )
+            if already_integrated:
+                if (
+                    result.get("machine_translation_changed")
+                    and mt_signature != getattr(
+                        self, "_last_machine_translation_signature", None
+                    )
+                ):
+                    if self._tooltip_translation_running:
+                        self._last_machine_translation_signature = mt_signature
+                    else:
+                        self._reload_machine_translation_previews(
+                            signature=mt_signature
+                        )
+                return
+
             if stats:
                 summary = self._review_generation_summary(stats)
                 if summary:
@@ -4524,6 +4552,21 @@ class SDLXLIFFReviewDialog(QDialog):
                 focus = QApplication.focusWidget()
                 if focus is not None and focus.window() is self and isinstance(focus, QPlainTextEdit):
                     return
+                try:
+                    row = self.piece_list.currentRow()
+                    page = self._piece_pages.get(row)
+                    browser = (
+                        page.findChild(QWidget, "SdlReviewNotepadBrowser")
+                        if page is not None else None
+                    )
+                    if browser is not None and (
+                        browser.hasFocus()
+                        or focus is browser
+                        or (focus is not None and browser.isAncestorOf(focus))
+                    ):
+                        return
+                except (AttributeError, RuntimeError):
+                    pass
             except Exception:
                 pass
             self._queue_review_refresh_scan(force=False, current_path=self.current_path, delay_ms=350)
