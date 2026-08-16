@@ -43,6 +43,7 @@ from sdlxliff_sidecar_writer import (
 from glossary_usage import (
     CHECK_PREFIX,
     WARNING_PREFIX,
+    _is_special_basename,
     build_chapter_footnote,
     parse_glossary_file,
     read_translated_output_text,
@@ -584,6 +585,38 @@ def _normalize_progress_match_name(name):
 
 
 _PROGRESS_READER_HTML_EXTENSIONS = (".html", ".htm", ".xhtml")
+
+
+def _manual_editing_output_filename(entry, current_output, retain_source_extension):
+    """Return the HTML filename a manual sidecar must save for this naming mode."""
+    entry = entry if isinstance(entry, dict) else {}
+    source_name = ""
+    for key in (
+        "original_name", "original_basename", "original_filename",
+        "filename", "href",
+    ):
+        candidate = os.path.basename(
+            str(entry.get(key) or "").replace("\\", "/")
+        )
+        if candidate and candidate.lower().endswith(_PROGRESS_READER_HTML_EXTENSIONS):
+            source_name = candidate
+            break
+
+    current_name = os.path.basename(
+        str(current_output or entry.get("output_file") or "").replace("\\", "/")
+    )
+    if not source_name:
+        source_name = current_name
+    if source_name.lower().startswith("response_"):
+        source_name = source_name[len("response_"):]
+    if not source_name:
+        return current_name
+
+    if retain_source_extension:
+        return source_name
+
+    source_stem, _source_ext = os.path.splitext(source_name)
+    return f"response_{source_stem or source_name}.html"
 
 
 def _progress_item_is_html(display_info) -> bool:
@@ -1987,7 +2020,7 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             return False
 
-    def _queue_generated_sidecar_stream_piece(self, path, progress_index=0):
+    def _queue_generated_sidecar_stream_piece(self, path, progress_index=0, opf_position=None):
         try:
             if not getattr(self, "_generation_streaming_active", False):
                 return False
@@ -1997,7 +2030,7 @@ class SDLXLIFFReviewDialog(QDialog):
             if not isinstance(pending, list):
                 pending = []
                 self._generation_stream_pending_pieces = pending
-            pending.append((str(path), int(progress_index or 0)))
+            pending.append((str(path), int(progress_index or 0), opf_position))
             self._schedule_generation_stream_flush(delay_ms=0 if len(pending) <= 1 else 16)
             return True
         except Exception:
@@ -2025,8 +2058,14 @@ class SDLXLIFFReviewDialog(QDialog):
             pending_before = len(pending)
             flushed = 0
             while pending and flushed < 4:
-                path, progress_index = pending.pop(0)
-                if self._append_generated_sidecar_stream_piece(path, progress_index=progress_index):
+                queued = pending.pop(0)
+                path, progress_index = queued[:2]
+                opf_position = queued[2] if len(queued) > 2 else None
+                if self._append_generated_sidecar_stream_piece(
+                    path,
+                    progress_index=progress_index,
+                    opf_position=opf_position,
+                ):
                     flushed += 1
             if pending:
                 self._trace_review_perf(
@@ -2052,11 +2091,55 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
+    def _resort_generated_review_pieces(self):
+        """Put streamed pieces into content.opf order without reparsing them."""
+        if len(getattr(self, "pieces", []) or []) < 2:
+            return False
+        indexed = list(enumerate(self.pieces))
+        ordered = sorted(
+            indexed,
+            key=lambda item: (
+                item[1].get("opf_position") is None,
+                item[1].get("opf_position")
+                if item[1].get("opf_position") is not None
+                else item[0],
+                item[0],
+            ),
+        )
+        if [old_index for old_index, _piece in ordered] == list(range(len(indexed))):
+            return False
+        selected_path = ""
+        try:
+            current_row = self.piece_list.currentRow()
+            if 0 <= current_row < len(self.pieces):
+                selected_path = self.pieces[current_row].get("path") or ""
+        except Exception:
+            pass
+        self._render_token += 1
+        self._clear_cached_review_pages()
+        self.pieces = [piece for _old_index, piece in ordered]
+        for row, piece in enumerate(self.pieces):
+            piece["index"] = row
+            display_position = (
+                int(piece["opf_position"]) + 1
+                if piece.get("opf_position") is not None
+                else row + 1
+            )
+            piece["review_label"] = self._review_label_from_metadata({
+                "display_position": display_position,
+                "chapter_num": piece.get("chapter_num"),
+            })
+        if selected_path:
+            self.current_path = selected_path
+        self._populate_piece_list()
+        return True
+
     def _finish_generation_streaming(self, message=""):
         trace_started = time.perf_counter()
         try:
             was_streaming = bool(getattr(self, "_generation_streaming_active", False))
             self._generation_streaming_active = False
+            self._resort_generated_review_pieces()
             self._review_data_loaded = bool(self.pieces)
             self._generation_stream_preserve_after_finish = bool(was_streaming and self.pieces)
             if self.pieces:
@@ -2148,7 +2231,7 @@ class SDLXLIFFReviewDialog(QDialog):
             workers = 1
         return min(total, max(1, workers))
 
-    def _append_generated_sidecar_stream_piece(self, path, progress_index=0):
+    def _append_generated_sidecar_stream_piece(self, path, progress_index=0, opf_position=None):
         trace_started = time.perf_counter()
         try:
             if not getattr(self, "_generation_streaming_active", False):
@@ -2166,6 +2249,16 @@ class SDLXLIFFReviewDialog(QDialog):
             progress_map = getattr(self, "_generation_stream_progress_map", {}) or {}
             spine_positions = getattr(self, "_generation_stream_spine_positions", {}) or {}
             metadata = self._sidecar_metadata(path, row, progress_map, spine_positions)
+            if opf_position is not None:
+                try:
+                    metadata["opf_position"] = int(opf_position)
+                    metadata["sort_key"] = (
+                        int(opf_position),
+                        self._chapter_number_from_name(metadata.get("output_name")),
+                        str(metadata.get("output_name") or "").lower(),
+                    )
+                except (TypeError, ValueError):
+                    pass
             if metadata.get("opf_position") is None:
                 metadata["display_position"] = int(progress_index or row + 1)
             else:
@@ -2260,7 +2353,11 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._prepare_generation_streaming_piece_list(total=total)
                 self._set_generation_progress(0, total, f"0/{total} SDLXLIFF")
             elif stage == "created":
-                self._queue_generated_sidecar_stream_piece(str(payload.get("path") or ""), progress_index=index)
+                self._queue_generated_sidecar_stream_piece(
+                    str(payload.get("path") or ""),
+                    progress_index=index,
+                    opf_position=payload.get("opf_position"),
+                )
                 self._set_generation_progress(index, total, f"{index}/{total} SDLXLIFF")
             elif stage in {"checking", "missing_source", "missing_output", "failed", "skipped"} and total:
                 self._set_generation_progress(index, total, f"{index}/{total} SDLXLIFF")
@@ -2893,6 +2990,107 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
+    def _retain_source_extension_enabled(self):
+        config = self._config if isinstance(getattr(self, "_config", None), dict) else {}
+        return (
+            str(os.getenv("RETAIN_SOURCE_EXTENSION", "0")).strip().lower()
+            in {"1", "true", "yes", "on"}
+            or bool(config.get("retain_source_extension", False))
+        )
+
+    def _manual_output_name_for_piece(self, piece, current_output=None):
+        current_output = current_output or (
+            (piece or {}).get("output_name")
+            or self._sidecar_output_name((piece or {}).get("path") or (piece or {}).get("name") or "")
+        )
+        return _manual_editing_output_filename(
+            piece,
+            current_output,
+            self._retain_source_extension_enabled(),
+        )
+
+    def _matching_review_progress_entries(self, progress_data, piece, *extra_names):
+        """Match a sidecar to progress across response-prefix/extension renames."""
+        chapters = self._review_progress_chapters(progress_data)
+        progress_key = str((piece or {}).get("progress_key") or "")
+        exact_names = {
+            self._canonical_basename(name)
+            for name in (
+                (piece or {}).get("output_name"),
+                self._sidecar_output_name((piece or {}).get("path") or ""),
+                *extra_names,
+            )
+            if name
+        }
+        logical_names = {
+            _normalize_progress_match_name(name).casefold()
+            for name in (
+                *exact_names,
+                (piece or {}).get("original_name"),
+            )
+            if name and _normalize_progress_match_name(name)
+        }
+
+        matches = []
+        seen = set()
+        for key, entry in list(chapters.items()):
+            if not isinstance(entry, dict):
+                continue
+            entry_output = entry.get("output_file")
+            entry_original = entry.get("original_basename") or entry.get("original_filename")
+            exact_match = self._canonical_basename(entry_output) in exact_names
+            logical_match = any(
+                _normalize_progress_match_name(candidate).casefold() in logical_names
+                for candidate in (entry_output, entry_original)
+                if candidate
+            )
+            if str(key) == progress_key or exact_match or logical_match:
+                marker = id(entry)
+                if marker not in seen:
+                    matches.append((key, entry))
+                    seen.add(marker)
+        return matches
+
+    def _mark_piece_progress_pending(self, piece, previous_output_name=None):
+        """Keep manually authored HTML pending until its explicit completion action."""
+        progress_path = self._progress_path_for_review_piece(piece)
+        if not os.path.isfile(progress_path):
+            return False
+        try:
+            with open(progress_path, "r", encoding="utf-8") as progress_file:
+                progress_data = json.load(progress_file)
+        except Exception:
+            return False
+        if not isinstance(progress_data, dict):
+            return False
+
+        output_name = self._manual_output_name_for_piece(piece, previous_output_name)
+        matches = self._matching_review_progress_entries(
+            progress_data,
+            piece,
+            previous_output_name,
+            output_name,
+        )
+        if not matches:
+            return False
+
+        now = time.time()
+        for key, entry in matches:
+            entry["output_file"] = output_name
+            entry["status"] = "pending"
+            entry["manual_editing_pending"] = True
+            entry["last_updated"] = now
+            entry.pop("manually_marked_completed", None)
+            if not (piece or {}).get("progress_key"):
+                piece["progress_key"] = str(key)
+        piece["output_name"] = output_name
+        piece["manual_editing_pending"] = True
+        self._refresh_review_progress_completed_list(progress_data)
+        if not self._write_review_progress_data(progress_path, progress_data):
+            return False
+        self._sync_cached_review_progress_data(progress_path, progress_data)
+        return True
+
     def _mark_piece_progress_completed(self, piece):
         """Mark every progress row matching this piece's output file completed."""
         progress_path = self._progress_path_for_review_piece(piece)
@@ -2906,16 +3104,14 @@ class SDLXLIFFReviewDialog(QDialog):
         if not isinstance(progress_data, dict):
             return {"ok": False, "matched": 0, "error": "translation progress is invalid"}
 
-        target_name = self._canonical_basename(self._output_name_for_piece(piece))
-        chapters = self._review_progress_chapters(progress_data)
-        matches = [
-            (key, entry)
-            for key, entry in list(chapters.items())
-            if isinstance(entry, dict)
-            and self._canonical_basename(entry.get("output_file")) == target_name
-        ]
+        output_name = self._output_name_for_piece(piece)
+        target_name = self._canonical_basename(output_name)
+        matches = self._matching_review_progress_entries(
+            progress_data,
+            piece,
+            output_name,
+        )
         if not target_name or not matches:
-            output_name = self._output_name_for_piece(piece)
             return {
                 "ok": False,
                 "matched": 0,
@@ -2931,6 +3127,7 @@ class SDLXLIFFReviewDialog(QDialog):
             entry["status"] = "completed"
             entry["last_updated"] = now
             entry["manually_marked_completed"] = True
+            entry.pop("manual_editing_pending", None)
             for field in (
                 "qa_issues", "qa_issues_found", "qa_issue_previews",
                 "qa_timestamp", "failure_reason", "error_message",
@@ -2938,6 +3135,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 "previous_status_unknown", "merged_parent_chapter",
             ):
                 entry.pop(field, None)
+        piece.pop("manual_editing_pending", None)
         self._refresh_review_progress_completed_list(progress_data)
         if not self._write_review_progress_data(progress_path, progress_data):
             return {"ok": False, "matched": 0, "error": "could not save translation progress"}
@@ -3125,6 +3323,8 @@ class SDLXLIFFReviewDialog(QDialog):
     def _piece_needs_manual_green_override(self, piece):
         if not isinstance(piece, dict) or piece.get("manual_green_override"):
             return False
+        if piece.get("manual_editing") and not piece.get("manual_untranslated"):
+            return True
         if piece.get("mismatch") or int(piece.get("yellow_count") or 0) > 0:
             return True
         try:
@@ -5930,6 +6130,9 @@ class SDLXLIFFReviewDialog(QDialog):
             copied = dict(entry)
             copied["_progress_key"] = key
             output_map[normalized] = copied
+            logical = _normalize_progress_match_name(output_file).casefold()
+            if logical:
+                output_map.setdefault(f"logical:{logical}", copied)
         return output_map
 
     def _find_opf_path(self, allow_deep_search=True):
@@ -5957,45 +6160,52 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _read_spine_positions(self, allow_deep_search=True):
         opf_path = self._find_opf_path(allow_deep_search=allow_deep_search)
-        if not opf_path:
-            return {}
-        try:
-            root = ET.parse(opf_path).getroot()
-        except Exception:
-            return {}
-
-        id_to_href = {}
-        for element in root.iter():
-            if self._local_name(element.tag) != "item":
-                continue
-            item_id = element.attrib.get("id")
-            href = element.attrib.get("href")
-            if item_id and href:
-                id_to_href[item_id] = unquote(href)
-
         spine_positions = {}
-        position = 0
-        for element in root.iter():
-            if self._local_name(element.tag) != "itemref":
-                continue
-            idref = element.attrib.get("idref")
-            href = id_to_href.get(idref)
-            if not href:
-                continue
-            href_key = self._canonical_review_path(href)
-            if href_key:
-                spine_positions[href_key] = position
-                no_ext, _ext = os.path.splitext(href_key)
-                if no_ext:
-                    spine_positions[no_ext] = position
-            href_base = self._canonical_basename(href)
-            if not href_base:
-                continue
-            spine_positions[href_base] = position
-            no_ext, _ext = os.path.splitext(href_base)
-            if no_ext:
-                spine_positions[no_ext] = position
-            position += 1
+        if opf_path:
+            try:
+                root = ET.parse(opf_path).getroot()
+            except Exception:
+                root = None
+            if root is not None:
+                id_to_href = {}
+                for element in root.iter():
+                    if self._local_name(element.tag) != "item":
+                        continue
+                    item_id = element.attrib.get("id")
+                    href = element.attrib.get("href")
+                    if item_id and href:
+                        id_to_href[item_id] = unquote(href)
+
+                position = 0
+                for element in root.iter():
+                    if self._local_name(element.tag) != "itemref":
+                        continue
+                    idref = element.attrib.get("idref")
+                    href = id_to_href.get(idref)
+                    if not href:
+                        continue
+                    href_key = self._canonical_review_path(href)
+                    if href_key:
+                        spine_positions[href_key] = position
+                        no_ext, _ext = os.path.splitext(href_key)
+                        if no_ext:
+                            spine_positions[no_ext] = position
+                    href_base = self._canonical_basename(href)
+                    if href_base:
+                        spine_positions[href_base] = position
+                        no_ext, _ext = os.path.splitext(href_base)
+                        if no_ext:
+                            spine_positions[no_ext] = position
+                    position += 1
+
+        # Manual generation reads source-EPUB OPF data in its background
+        # worker. Reuse that cache here when content.opf is not copied into the
+        # output folder, without doing ZIP I/O on the GUI thread.
+        owner = getattr(self, "_sdlxliff_autogen_owner", None)
+        cached_positions = getattr(owner, "_sdlxliff_cached_source_spine_positions", None)
+        if isinstance(cached_positions, dict):
+            for key, position in cached_positions.items():
+                spine_positions.setdefault(str(key), position)
         return spine_positions
 
     def _original_name_from_output(self, output_name):
@@ -6010,19 +6220,20 @@ class SDLXLIFFReviewDialog(QDialog):
     def _sidecar_metadata(self, path, fallback_index, progress_map, spine_positions):
         output_name = self._sidecar_output_name(path)
         progress_entry = progress_map.get(self._canonical_basename(output_name), {})
+        if not progress_entry:
+            progress_entry = progress_map.get(
+                f"logical:{_normalize_progress_match_name(output_name).casefold()}",
+                {},
+            )
         original_name = (
             progress_entry.get("original_basename")
             or progress_entry.get("original_filename")
             or self._original_name_from_output(output_name)
         )
 
-        opf_position = progress_entry.get("opf_position")
-        if opf_position is None:
-            opf_position = progress_entry.get("position")
-        try:
-            opf_position = int(opf_position) if opf_position is not None else None
-        except Exception:
-            opf_position = None
+        # content.opf is authoritative. Progress positions can be stale or can
+        # reflect translation/insertion order rather than EPUB reading order.
+        opf_position = None
         for candidate in (original_name, output_name, self._original_name_from_output(output_name)):
             if opf_position is not None:
                 break
@@ -6043,14 +6254,28 @@ class SDLXLIFFReviewDialog(QDialog):
             if opf_position is not None:
                 break
 
+        if opf_position is None:
+            opf_position = progress_entry.get("opf_position")
+            if opf_position is None:
+                opf_position = progress_entry.get("position")
+            try:
+                opf_position = int(opf_position) if opf_position is not None else None
+            except Exception:
+                opf_position = None
+
         chapter_num = progress_entry.get("actual_num", progress_entry.get("chapter_num"))
-        if chapter_num is None:
+        source_stem = os.path.splitext(os.path.basename(str(original_name or "")))[0]
+        is_special = bool(progress_entry.get("is_special")) or _is_special_basename(original_name)
+        if is_special or not re.search(r"\d", source_stem):
+            chapter_num = 0
+        elif chapter_num is None:
             chapter_num = self._chapter_number_from_name(output_name)
 
         sort_position = opf_position if opf_position is not None else 100000 + fallback_index
         metadata = {
             "output_name": output_name,
             "progress_entry": progress_entry,
+            "progress_key": progress_entry.get("_progress_key"),
             "original_name": original_name,
             "opf_position": opf_position,
             "chapter_num": chapter_num,
@@ -6337,9 +6562,12 @@ class SDLXLIFFReviewDialog(QDialog):
                 "index": index,
                 "name": os.path.basename(path),
                 "output_name": metadata.get("output_name"),
+                "original_name": metadata.get("original_name"),
+                "progress_key": metadata.get("progress_key"),
                 "review_label": metadata.get("label"),
                 "opf_position": metadata.get("opf_position"),
                 "chapter_num": metadata.get("chapter_num"),
+                "sort_key": metadata.get("sort_key"),
                 "source_html": source_html,
                 "target_html": target_html,
                 "source_count": source_count,
@@ -6351,6 +6579,9 @@ class SDLXLIFFReviewDialog(QDialog):
                 "mismatch": source_count != target_count or red_count > 0,
                 "manual_editing": manual_editing,
                 "manual_untranslated": manual_untranslated,
+                "manual_editing_pending": bool(
+                    (metadata.get("progress_entry") or {}).get("manual_editing_pending")
+                ),
                 "rows": rows,
             }
             self._load_machine_translation_file_for_piece(piece)
@@ -6379,9 +6610,12 @@ class SDLXLIFFReviewDialog(QDialog):
                 "index": index,
                 "name": os.path.basename(path),
                 "output_name": metadata.get("output_name"),
+                "original_name": metadata.get("original_name"),
+                "progress_key": metadata.get("progress_key"),
                 "review_label": metadata.get("label"),
                 "opf_position": metadata.get("opf_position"),
                 "chapter_num": metadata.get("chapter_num"),
+                "sort_key": metadata.get("sort_key"),
                 "source_count": 0,
                 "target_count": 0,
                 "count_ratio": 0.0,
@@ -6391,6 +6625,9 @@ class SDLXLIFFReviewDialog(QDialog):
                 "mismatch": True,
                 "manual_editing": _is_manual_editing_sdlxliff(path),
                 "manual_untranslated": _is_manual_untranslated_sdlxliff(path),
+                "manual_editing_pending": bool(
+                    (metadata.get("progress_entry") or {}).get("manual_editing_pending")
+                ),
                 "error": str(exc),
                 "rows": [],
             }
@@ -6398,8 +6635,6 @@ class SDLXLIFFReviewDialog(QDialog):
     @staticmethod
     def _review_piece_is_empty_sidecar(piece):
         if not isinstance(piece, dict) or piece.get("error"):
-            return False
-        if piece.get("manual_untranslated"):
             return False
         return int(piece.get("source_count") or 0) == 0 and int(piece.get("target_count") or 0) == 0
 
@@ -9510,6 +9745,8 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _output_name_for_piece(self, piece):
         output_name = piece.get("output_name") or self._sidecar_output_name(piece.get("path") or piece.get("name") or "")
+        if piece.get("manual_editing"):
+            output_name = self._manual_output_name_for_piece(piece, output_name)
         return output_name or piece.get("name") or "SDLXLIFF output"
 
     def _output_path_for_piece(self, piece):
@@ -9594,6 +9831,10 @@ class SDLXLIFFReviewDialog(QDialog):
         sidecar_path = piece.get("path")
         if not sidecar_path:
             return target_html
+        previous_output_name = (
+            piece.get("output_name")
+            or self._sidecar_output_name(sidecar_path)
+        )
         target_html = self._html_with_output_image_renames(target_html)
         tree = ET.parse(sidecar_path)
         root = tree.getroot()
@@ -9608,6 +9849,11 @@ class SDLXLIFFReviewDialog(QDialog):
             target_element.remove(child)
         target_element.text = target_html
         was_manual_untranslated = _is_manual_untranslated_sdlxliff(root)
+        is_manual_editing = (
+            was_manual_untranslated
+            or piece.get("manual_editing")
+            or _is_manual_editing_sdlxliff(root)
+        )
         try:
             ET.register_namespace("", "urn:oasis:names:tc:xliff:document:1.2")
             ET.register_namespace("sdl", "http://sdl.com/FileTypes/SdlXliff/1.0")
@@ -9615,6 +9861,12 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
         tree.write(sidecar_path, encoding="utf-8", xml_declaration=True)
 
+        if is_manual_editing:
+            piece["output_name"] = self._manual_output_name_for_piece(
+                piece,
+                previous_output_name,
+            )
+            self._mark_piece_progress_pending(piece, previous_output_name)
         output_path = self._output_path_for_piece(piece)
         if output_path:
             with open(output_path, "w", encoding="utf-8") as f:
@@ -9623,6 +9875,25 @@ class SDLXLIFFReviewDialog(QDialog):
             _clear_manual_untranslated_sdlxliff(root)
             tree.write(sidecar_path, encoding="utf-8", xml_declaration=True)
             piece["manual_untranslated"] = False
+            piece["manual_editing"] = True
+
+            desired_sidecar_path = os.path.join(
+                os.path.dirname(sidecar_path),
+                f"{piece.get('output_name')}.sdlxliff",
+            )
+            if (
+                os.path.normcase(os.path.abspath(desired_sidecar_path))
+                != os.path.normcase(os.path.abspath(sidecar_path))
+                and not os.path.exists(desired_sidecar_path)
+            ):
+                os.rename(sidecar_path, desired_sidecar_path)
+                piece["path"] = desired_sidecar_path
+                piece["name"] = os.path.basename(desired_sidecar_path)
+                if getattr(self, "current_path", "") and (
+                    os.path.normcase(os.path.abspath(self.current_path))
+                    == os.path.normcase(os.path.abspath(sidecar_path))
+                ):
+                    self.current_path = desired_sidecar_path
         try:
             self._last_review_signature = self._current_review_signature()
         except Exception:
@@ -11032,6 +11303,114 @@ class RetranslationMixin:
             resolved.append(path)
         return resolved
 
+    @staticmethod
+    def _sdlxliff_add_spine_position(positions, name, position):
+        normalized = str(name or "").replace("\\", "/").strip("/").casefold()
+        if not normalized:
+            return
+        basename = os.path.basename(normalized)
+        logical = _normalize_progress_match_name(basename).casefold()
+        for key in (normalized, basename, os.path.splitext(normalized)[0], os.path.splitext(basename)[0], logical):
+            if key:
+                positions.setdefault(key, int(position))
+
+    def _sdlxliff_source_spine_positions(self, output_dir, file_path=None):
+        """Read authoritative HTML order from the selected EPUB's content.opf."""
+        positions = {}
+        candidates = self._sdlxliff_autogen_epub_candidates(output_dir, file_path)
+        for source_path in candidates:
+            if os.path.isfile(source_path) and source_path.lower().endswith(".epub"):
+                try:
+                    chapters = read_epub_spine_chapters(
+                        source_path,
+                        translate_special=True,
+                        include_text=False,
+                    )
+                except Exception:
+                    chapters = []
+                for fallback, chapter in enumerate(chapters):
+                    try:
+                        position = int(chapter.get("spine_number", fallback + 1)) - 1
+                    except (TypeError, ValueError):
+                        position = fallback
+                    self._sdlxliff_add_spine_position(
+                        positions,
+                        chapter.get("member_path") or chapter.get("filename"),
+                        position,
+                    )
+                    self._sdlxliff_add_spine_position(
+                        positions,
+                        chapter.get("filename"),
+                        position,
+                    )
+                if positions:
+                    break
+                continue
+
+            if not os.path.isdir(source_path):
+                continue
+            opf_path = None
+            for direct in (
+                os.path.join(source_path, "content.opf"),
+                os.path.join(source_path, "OEBPS", "content.opf"),
+                os.path.join(source_path, "EPUB", "content.opf"),
+            ):
+                if os.path.isfile(direct):
+                    opf_path = direct
+                    break
+            if not opf_path:
+                try:
+                    for root_dir, _dirs, files in os.walk(source_path):
+                        match = next((name for name in files if name.lower().endswith(".opf")), None)
+                        if match:
+                            opf_path = os.path.join(root_dir, match)
+                            break
+                except Exception:
+                    opf_path = None
+            if not opf_path:
+                continue
+            try:
+                root = ET.parse(opf_path).getroot()
+            except Exception:
+                continue
+            id_to_href = {}
+            for element in root.iter():
+                if str(element.tag).rsplit("}", 1)[-1] != "item":
+                    continue
+                item_id = element.attrib.get("id")
+                href = unquote(element.attrib.get("href") or "")
+                if item_id and href:
+                    id_to_href[item_id] = href
+            position = 0
+            for element in root.iter():
+                if str(element.tag).rsplit("}", 1)[-1] != "itemref":
+                    continue
+                href = id_to_href.get(element.attrib.get("idref"))
+                if not href:
+                    continue
+                self._sdlxliff_add_spine_position(positions, href, position)
+                position += 1
+            if positions:
+                break
+        self._sdlxliff_cached_source_spine_positions = dict(positions)
+        return positions
+
+    @staticmethod
+    def _sdlxliff_spine_position_for_entry(entry, positions):
+        entry = entry if isinstance(entry, dict) else {}
+        for key in (
+            "original_filename", "href", "original_basename", "filename", "output_file",
+        ):
+            candidate = str(entry.get(key) or "").replace("\\", "/").strip("/").casefold()
+            if not candidate:
+                continue
+            basename = os.path.basename(candidate)
+            logical = _normalize_progress_match_name(basename).casefold()
+            for lookup in (candidate, basename, os.path.splitext(candidate)[0], os.path.splitext(basename)[0], logical):
+                if lookup in positions:
+                    return positions[lookup]
+        return None
+
     def _sdlxliff_autogen_read_source_html(self, output_dir, entry, output_file=None, progress_key=None, file_path=None):
         candidates = self._sdlxliff_autogen_source_candidates(entry, output_file, progress_key)
         candidate_names = {str(c).replace("\\", "/").lower().strip("/") for c in candidates if c}
@@ -11401,14 +11780,33 @@ class RetranslationMixin:
 
         work_entries = []
         seen_outputs = set()
+        retain_source_extension = (
+            str(os.getenv("RETAIN_SOURCE_EXTENSION", "0")).strip().lower()
+            in {"1", "true", "yes", "on"}
+            or bool(
+                (getattr(self, "config", {}) or {}).get(
+                    "retain_source_extension",
+                    False,
+                )
+            )
+        )
         for entry_key, entry in entries:
             if not isinstance(entry, dict):
                 continue
             status = str(entry.get("status", "") or "").strip().lower()
             if status not in self._SDLXLIFF_MANUAL_UNTRANSLATED_STATUSES:
                 continue
+            manual_entry = dict(entry)
+            if not manual_entry.get("original_basename"):
+                manual_entry["original_basename"] = entry.get("filename")
+            if not manual_entry.get("original_filename"):
+                manual_entry["original_filename"] = entry.get("href")
             output_file = entry.get("output_file")
-            output_name = os.path.basename(str(output_file or "").replace("\\", "/"))
+            output_name = _manual_editing_output_filename(
+                manual_entry,
+                output_file,
+                retain_source_extension,
+            )
             if not output_name.lower().endswith((".html", ".htm", ".xhtml")):
                 continue
             output_key = output_name.lower()
@@ -11416,17 +11814,37 @@ class RetranslationMixin:
                 stats["skipped"] += 1
                 continue
             seen_outputs.add(output_key)
-            manual_entry = dict(entry)
-            if not manual_entry.get("original_basename"):
-                manual_entry["original_basename"] = entry.get("filename")
-            if not manual_entry.get("original_filename"):
-                manual_entry["original_filename"] = entry.get("href")
             work_entries.append((str(entry_key), manual_entry, output_name))
+
+        # Progress JSON insertion order is not EPUB reading order. Resolve and
+        # sort against the source content.opf before emitting any sidecars so
+        # the live-streamed viewer is correct from its first row onward.
+        spine_positions = self._sdlxliff_source_spine_positions(
+            output_dir,
+            file_path=file_path,
+        )
+        ordered_work_entries = []
+        for original_index, work_entry in enumerate(work_entries):
+            entry = work_entry[1]
+            opf_position = self._sdlxliff_spine_position_for_entry(
+                entry,
+                spine_positions,
+            )
+            entry["_manual_opf_position"] = opf_position
+            ordered_work_entries.append((opf_position, original_index, work_entry))
+        ordered_work_entries.sort(
+            key=lambda item: (
+                item[0] is None,
+                item[0] if item[0] is not None else item[1],
+                item[1],
+            )
+        )
+        work_entries = [item[2] for item in ordered_work_entries]
 
         total = len(work_entries)
         stats["total"] = total
 
-        def _notify(stage, index=0, output_name="", path="", message="", error=""):
+        def _notify(stage, index=0, output_name="", path="", message="", error="", opf_position=None):
             if not callable(progress_callback):
                 return
             try:
@@ -11438,6 +11856,7 @@ class RetranslationMixin:
                     "path": path,
                     "message": message,
                     "error": error,
+                    "opf_position": opf_position,
                     "stats": dict(stats),
                 })
             except Exception:
@@ -11505,7 +11924,13 @@ class RetranslationMixin:
                 if result_path:
                     stats["created"] += 1
                     stats["paths"].append(result_path)
-                    _notify("created", entry_index, output_name, path=result_path)
+                    _notify(
+                        "created",
+                        entry_index,
+                        output_name,
+                        path=result_path,
+                        opf_position=entry.get("_manual_opf_position"),
+                    )
                 else:
                     stats["failed"] += 1
                     _notify("failed", entry_index, output_name, error=writer_error)
@@ -14713,7 +15138,11 @@ class RetranslationMixin:
             # Set status and output file based on findings
             if matched_info:
                 # We found progress tracking info - use its status
-                status = matched_info.get('status', 'unknown')
+                status = (
+                    'pending'
+                    if matched_info.get('manual_editing_pending')
+                    else matched_info.get('status', 'unknown')
+                )
                 spine_ch['progress_key'] = matched_key
                 
                 # CRITICAL: For failed/in_progress/qa_failed/pending, ALWAYS use progress status
@@ -22463,7 +22892,11 @@ class RetranslationMixin:
             file_exists = file_exists_fast(expected_response)
 
             if matched_info:
-                status = matched_info.get('status', 'unknown')
+                status = (
+                    'pending'
+                    if matched_info.get('manual_editing_pending')
+                    else matched_info.get('status', 'unknown')
+                )
                 spine_ch['progress_key'] = matched_key
 
                 if status in ['failed', 'in_progress', 'qa_failed', 'pending']:
@@ -23186,6 +23619,8 @@ class RetranslationMixin:
             pass
         status = info.get('status', 'unknown')
         entry = info.get('progress_entry') or info.get('info') or {}
+        if entry.get('manual_editing_pending'):
+            status = 'pending'
         mode = self._current_progress_output_mode(data, entry)
 
         if status in ('completed_empty', 'completed_image_only'):
@@ -23311,7 +23746,11 @@ class RetranslationMixin:
             
             # Update status based on current state from progress file
             if matched_info:
-                new_status = matched_info.get('status', 'unknown')
+                new_status = (
+                    'pending'
+                    if matched_info.get('manual_editing_pending')
+                    else matched_info.get('status', 'unknown')
+                )
                 # Handle legacy completed variants as completed for display
                 if new_status in ('completed_empty', 'completed_image_only'):
                     new_status = 'completed'

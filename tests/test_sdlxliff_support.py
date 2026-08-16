@@ -2627,6 +2627,7 @@ def test_manual_editing_generates_untranslated_and_pending_sidecars_without_outp
         },
     ]
     monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    monkeypatch.setenv("RETAIN_SOURCE_EXTENSION", "0")
     mixin = RetranslationMixin.__new__(RetranslationMixin)
 
     stats = mixin._generate_sdlxliff_sidecars_from_untranslated_entries(
@@ -2659,6 +2660,7 @@ def test_manual_editing_generates_untranslated_and_pending_sidecars_without_outp
 
 def test_manual_untranslated_sidecar_is_dimmed_and_first_edit_creates_html(tmp_path, monkeypatch):
     monkeypatch.setenv("OUTPUT_SDLXLIFF", "1")
+    monkeypatch.setenv("RETAIN_SOURCE_EXTENSION", "0")
     output_name = "response_chapter0001.html"
     source_html = "<html><body><p>Untranslated source.</p></body></html>"
     sidecar = _shared_write_html_sdlxliff_sidecar(
@@ -2719,6 +2721,7 @@ def test_manual_untranslated_sidecar_is_dimmed_and_first_edit_creates_html(tmp_p
 
 def test_manual_editing_generated_html_applies_image_rename_map(tmp_path, monkeypatch):
     monkeypatch.setenv("OUTPUT_SDLXLIFF", "1")
+    monkeypatch.setenv("RETAIN_SOURCE_EXTENSION", "0")
     output_name = "response_chapter0001.html"
     source_html = (
         '<html><body><p>Untranslated source.</p>'
@@ -2770,6 +2773,151 @@ def test_manual_editing_generated_html_applies_image_rename_map(tmp_path, monkey
     assert "background.webp" not in output_html
     _source, saved_target = dialog._read_sdlxliff_html_pair(sidecar)
     assert saved_target == output_html
+
+
+def test_manual_edit_save_stays_pending_until_explicitly_completed(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "1")
+    monkeypatch.setenv("RETAIN_SOURCE_EXTENSION", "0")
+    output_name = "response_chapter0001.html"
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0001.xhtml"},
+        "<html><body><p>Source.</p></body></html>",
+        "<html><body><p>Source.</p></body></html>",
+        raise_errors=True,
+        manual_untranslated=True,
+    )
+    progress_path = tmp_path / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "status": "not_translated",
+                        "output_file": output_name,
+                        "original_basename": "chapter0001.xhtml",
+                    }
+                },
+                "completed_list": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog.current_path = sidecar
+    dialog._config = {"retain_source_extension": False}
+    dialog._last_review_signature = None
+    dialog._current_review_signature = lambda: ()
+    piece = dialog._build_piece(
+        sidecar,
+        0,
+        {
+            "output_name": output_name,
+            "original_name": "chapter0001.xhtml",
+            "progress_key": "1",
+        },
+    )
+    edited_html = dialog._target_html_with_edit(piece, piece["rows"][0], "Manual target.")
+
+    dialog._write_piece_target_html(piece, edited_html)
+
+    pending_progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    pending_entry = pending_progress["chapters"]["1"]
+    assert pending_entry["status"] == "pending"
+    assert pending_entry["manual_editing_pending"] is True
+    assert pending_entry["output_file"] == output_name
+    assert pending_progress["completed_list"] == []
+    progress_mixin = RetranslationMixin.__new__(RetranslationMixin)
+    assert progress_mixin._progress_display_status(
+        {
+            "status": "completed",
+            "output_file": output_name,
+            "info": pending_entry,
+        }
+    ) == "pending"
+    assert dialog._piece_needs_manual_green_override(piece) is True
+
+    result = dialog._mark_piece_progress_completed(piece)
+
+    assert result == {"ok": True, "matched": 1, "error": ""}
+    completed_entry = json.loads(progress_path.read_text(encoding="utf-8"))["chapters"]["1"]
+    assert completed_entry["status"] == "completed"
+    assert "manual_editing_pending" not in completed_entry
+
+
+def test_manual_edit_save_retains_source_name_and_extension_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "1")
+    monkeypatch.setenv("RETAIN_SOURCE_EXTENSION", "1")
+    old_output_name = "response_chapter0001.html"
+    retained_output_name = "chapter0001.xhtml"
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        old_output_name,
+        {"original_basename": retained_output_name},
+        "<html><body><p>Source.</p></body></html>",
+        "<html><body><p>Source.</p></body></html>",
+        raise_errors=True,
+        manual_untranslated=True,
+    )
+    progress_path = tmp_path / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "status": "not_translated",
+                        "output_file": old_output_name,
+                        "original_basename": retained_output_name,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog.current_path = sidecar
+    dialog._config = {"retain_source_extension": True}
+    dialog._last_review_signature = None
+    dialog._current_review_signature = lambda: ()
+    piece = dialog._build_piece(
+        sidecar,
+        0,
+        {
+            "output_name": old_output_name,
+            "original_name": retained_output_name,
+            "progress_key": "1",
+        },
+    )
+    edited_html = dialog._target_html_with_edit(piece, piece["rows"][0], "Manual target.")
+
+    dialog._write_piece_target_html(piece, edited_html)
+
+    assert not (tmp_path / old_output_name).exists()
+    assert (tmp_path / retained_output_name).read_text(encoding="utf-8") == edited_html
+    assert piece["output_name"] == retained_output_name
+    assert piece["path"] == str(
+        tmp_path / "SDLXLIFF" / f"{retained_output_name}.sdlxliff"
+    )
+    assert not os.path.exists(sidecar)
+    retained_progress = json.loads(progress_path.read_text(encoding="utf-8"))["chapters"]["1"]
+    assert retained_progress["output_file"] == retained_output_name
+    assert retained_progress["status"] == "pending"
+    assert retained_progress["manual_editing_pending"] is True
+
+    renamed_sidecar = piece["path"]
+    progress_map = dialog._read_progress_metadata()
+    metadata = dialog._sidecar_metadata(renamed_sidecar, 0, progress_map, {})
+    reloaded_piece = dialog._build_piece(renamed_sidecar, 0, metadata)
+    assert reloaded_piece["output_name"] == retained_output_name
+    assert reloaded_piece["manual_editing_pending"] is True
+    assert dialog._piece_needs_manual_green_override(reloaded_piece) is True
 
 
 def test_sdlxliff_mark_as_completed_updates_matching_progress_and_undoes(tmp_path):
@@ -3349,6 +3497,124 @@ def test_sdlxliff_review_spine_positions_include_relative_epub_paths(tmp_path):
     assert positions["piece_0001"] == 0
 
 
+def test_manual_sidecar_generation_uses_source_content_opf_order(tmp_path, monkeypatch):
+    output_dir = tmp_path / "ordered-book"
+    output_dir.mkdir()
+    epub_path = tmp_path / "ordered-book.epub"
+    opf = """<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="cover" href="Text/cover.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c2" href="Text/chapter0002.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c1" href="Text/chapter0001.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="cover"/><itemref idref="c2"/><itemref idref="c1"/></spine>
+</package>"""
+    with zipfile.ZipFile(epub_path, "w") as epub:
+        epub.writestr("OEBPS/content.opf", opf)
+        epub.writestr("OEBPS/Text/cover.xhtml", "<p>Cover text</p>")
+        epub.writestr("OEBPS/Text/chapter0002.xhtml", "<p>Second in the spine</p>")
+        epub.writestr("OEBPS/Text/chapter0001.xhtml", "<p>Third in the spine</p>")
+
+    entries = [
+        {
+            "status": "not_translated",
+            "original_basename": "chapter0001.xhtml",
+            "original_filename": "Text/chapter0001.xhtml",
+            "output_file": "response_chapter0001.html",
+        },
+        {
+            "status": "not_translated",
+            "original_basename": "cover.xhtml",
+            "original_filename": "Text/cover.xhtml",
+            "output_file": "response_cover.html",
+            "is_special": True,
+        },
+        {
+            "status": "not_translated",
+            "original_basename": "chapter0002.xhtml",
+            "original_filename": "Text/chapter0002.xhtml",
+            "output_file": "response_chapter0002.html",
+        },
+    ]
+    events = []
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    monkeypatch.setenv("RETAIN_SOURCE_EXTENSION", "0")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    mixin.config = {}
+
+    stats = mixin._generate_sdlxliff_sidecars_from_untranslated_entries(
+        str(output_dir),
+        entries,
+        file_path=str(epub_path),
+        progress_callback=events.append,
+    )
+
+    assert stats["created"] == 3
+    created = [event for event in events if event["stage"] == "created"]
+    assert [event["output_name"] for event in created] == [
+        "response_cover.html",
+        "response_chapter0002.html",
+        "response_chapter0001.html",
+    ]
+    assert [event["opf_position"] for event in created] == [0, 1, 2]
+
+
+def test_sdlxliff_review_uses_opf_over_stale_progress_order_and_labels_special_as_zero(tmp_path):
+    (tmp_path / "content.opf").write_text(
+        """<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="info" href="Text/info.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c2" href="Text/chapter0002.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c1" href="Text/chapter0001.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="info"/><itemref idref="c2"/><itemref idref="c1"/></spine>
+</package>""",
+        encoding="utf-8",
+    )
+    progress = {"chapters": {}}
+    specs = [
+        ("info.xhtml", "response_info.html", 77, 2),
+        ("chapter0002.xhtml", "response_chapter0002.html", 2, 1),
+        ("chapter0001.xhtml", "response_chapter0001.html", 1, 0),
+    ]
+    for key, (source_name, output_name, actual_num, stale_position) in enumerate(specs):
+        _shared_write_html_sdlxliff_sidecar(
+            str(tmp_path),
+            output_name,
+            {"original_basename": source_name},
+            f"<html><body><p>{source_name}</p></body></html>",
+            f"<html><body><p>{source_name}</p></body></html>",
+            raise_errors=True,
+        )
+        progress["chapters"][str(key)] = {
+            "status": "completed",
+            "output_file": output_name,
+            "original_basename": source_name,
+            "actual_num": actual_num,
+            "opf_position": stale_position,
+        }
+    (tmp_path / "translation_progress.json").write_text(
+        json.dumps(progress),
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog.current_path = ""
+
+    pieces = dialog._load_pieces()
+
+    assert [piece["output_name"] for piece in pieces] == [
+        "response_info.html",
+        "response_chapter0002.html",
+        "response_chapter0001.html",
+    ]
+    assert [piece["opf_position"] for piece in pieces] == [0, 1, 2]
+    assert pieces[0]["chapter_num"] == 0
+    assert pieces[0]["review_label"] == "[001] Ch.000 |"
+
+
 def test_sdlxliff_review_treats_div_u_source_blocks_as_paragraph_units(tmp_path):
     source = """
 <html><body>
@@ -3557,7 +3823,7 @@ def test_sdlxliff_review_filters_empty_sidecars_from_piece_list(tmp_path):
 """,
         encoding="utf-8",
     )
-    manual_empty_sidecar = _shared_write_html_sdlxliff_sidecar(
+    _shared_write_html_sdlxliff_sidecar(
         str(tmp_path),
         "response_chapter0002.html",
         {"original_basename": "chapter0002.xhtml"},
@@ -3574,14 +3840,9 @@ def test_sdlxliff_review_filters_empty_sidecars_from_piece_list(tmp_path):
 
     assert [piece["name"] for piece in pieces] == [
         "response_chapter0001.html.sdlxliff",
-        "response_chapter0002.html.sdlxliff",
     ]
     assert pieces[0]["source_count"] == 1
     assert pieces[0]["target_count"] == 1
-    assert pieces[1]["path"] == manual_empty_sidecar
-    assert pieces[1]["source_count"] == 0
-    assert pieces[1]["target_count"] == 0
-    assert pieces[1]["manual_untranslated"] is True
 
 
 def test_sdlxliff_review_autorefresh_regenerates_sidecar_from_changed_output(tmp_path, monkeypatch):
