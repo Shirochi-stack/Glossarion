@@ -240,6 +240,151 @@ def test_gemini_free_html2text_prefers_browser_markdown(monkeypatch):
     assert content == "# Chapter Title\n\n**Bold** text."
 
 
+class TestCanonicalGeminiPolicyRefusal:
+    def test_requires_the_complete_canonical_message(self):
+        from gemini_policy import (
+            GOOGLE_PROHIBITED_USE_POLICY_MESSAGE,
+            is_google_prohibited_use_policy_refusal,
+        )
+
+        assert GOOGLE_PROHIBITED_USE_POLICY_MESSAGE == (
+            "The prompt could not be submitted. The prompt contains sensitive words that "
+            "violate Google's [Generative AI Prohibited Use policy]"
+            "(https://policies.google.com/terms/generative-ai/use-policy). Try rephrasing "
+            "the prompt. If you think this was an error, [send feedback]"
+            "(https://ai.google.dev/gemini-api/docs/troubleshooting)."
+        )
+        assert is_google_prohibited_use_policy_refusal(
+            f"\n{GOOGLE_PROHIBITED_USE_POLICY_MESSAGE}\n"
+        )
+        assert not is_google_prohibited_use_policy_refusal(
+            "The prompt could not be submitted."
+        )
+        assert not is_google_prohibited_use_policy_refusal(
+            GOOGLE_PROHIBITED_USE_POLICY_MESSAGE.replace(
+                "sensitive words", "unsafe words"
+            )
+        )
+
+    @pytest.mark.parametrize("provider_finish_reason", [None, "stop"])
+    def test_openai_compatible_maps_exact_refusal(
+        self, provider_finish_reason
+    ):
+        from gemini_policy import GOOGLE_PROHIBITED_USE_POLICY_MESSAGE
+        from unified_api_client import UnifiedClient
+
+        client = UnifiedClient.__new__(UnifiedClient)
+        response = {
+            "choices": [
+                {
+                    "message": {"content": GOOGLE_PROHIBITED_USE_POLICY_MESSAGE},
+                    "finish_reason": provider_finish_reason,
+                }
+            ]
+        }
+
+        content, finish_reason, _usage = client._extract_openai_json(response)
+
+        assert content == GOOGLE_PROHIBITED_USE_POLICY_MESSAGE
+        assert finish_reason == "content_filter"
+
+    def test_openai_compatible_does_not_classify_near_match(self):
+        from unified_api_client import UnifiedClient
+
+        client = UnifiedClient.__new__(UnifiedClient)
+        response = {
+            "choices": [
+                {
+                    "message": {"content": "The prompt could not be submitted."},
+                    "finish_reason": None,
+                }
+            ]
+        }
+
+        _content, finish_reason, _usage = client._extract_openai_json(response)
+
+        assert finish_reason == "stop"
+
+    def test_openai_responses_maps_exact_refusal(self):
+        from gemini_policy import GOOGLE_PROHIBITED_USE_POLICY_MESSAGE
+        from unified_api_client import UnifiedClient
+
+        client = UnifiedClient.__new__(UnifiedClient)
+        _content, finish_reason, _usage = client._extract_openai_responses_json(
+            {"output_text": GOOGLE_PROHIBITED_USE_POLICY_MESSAGE}
+        )
+
+        assert finish_reason == "content_filter"
+
+    def test_native_gemini_exact_refusal_is_prohibited_content(self):
+        from gemini_policy import GOOGLE_PROHIBITED_USE_POLICY_MESSAGE
+        from unified_api_client import UnifiedClient, UnifiedClientError
+
+        with pytest.raises(UnifiedClientError) as raised:
+            UnifiedClient._raise_for_canonical_gemini_policy_refusal(
+                GOOGLE_PROHIBITED_USE_POLICY_MESSAGE,
+                provider_finish_reason=None,
+                endpoint="native",
+            )
+
+        assert raised.value.error_type == "prohibited_content"
+        assert raised.value.details["provider_finish_reason"] is None
+        assert (
+            raised.value.details["provider_block_reason"]
+            == "GOOGLE_PROHIBITED_USE_POLICY_MESSAGE"
+        )
+
+    def test_native_gemini_does_not_classify_near_match(self):
+        from unified_api_client import UnifiedClient
+
+        UnifiedClient._raise_for_canonical_gemini_policy_refusal(
+            "The prompt could not be submitted.",
+            provider_finish_reason=None,
+            endpoint="native",
+        )
+
+    @staticmethod
+    def _grpc_response(text):
+        from types import SimpleNamespace
+
+        part = SimpleNamespace(text=text, thought=False)
+        content = SimpleNamespace(parts=[part])
+        candidate = SimpleNamespace(finish_reason=0, content=content)
+        return SimpleNamespace(
+            prompt_feedback=None,
+            candidates=[candidate],
+            usage_metadata=None,
+        )
+
+    def test_grpc_gemini_exact_refusal_is_prohibited_content(self):
+        from gemini_policy import GOOGLE_PROHIBITED_USE_POLICY_MESSAGE
+        from grpc_gemini_client import GrpcGeminiClient, GrpcGeminiError
+
+        client = GrpcGeminiClient.__new__(GrpcGeminiClient)
+        with pytest.raises(GrpcGeminiError) as raised:
+            client._parse_response(
+                self._grpc_response(GOOGLE_PROHIBITED_USE_POLICY_MESSAGE)
+            )
+
+        assert raised.value.error_type == "prohibited_content"
+        assert raised.value.details["provider_finish_reason"] is None
+        assert (
+            raised.value.details["provider_block_reason"]
+            == "GOOGLE_PROHIBITED_USE_POLICY_MESSAGE"
+        )
+
+    def test_grpc_gemini_does_not_classify_near_match(self):
+        from grpc_gemini_client import GrpcGeminiClient
+
+        client = GrpcGeminiClient.__new__(GrpcGeminiClient)
+        response = client._parse_response(
+            self._grpc_response("The prompt could not be submitted.")
+        )
+
+        assert response.text == "The prompt could not be submitted."
+        assert response.finish_reason == "stop"
+
+
 def test_gemini_free_html_split_keeps_instruction_prefix_with_body(monkeypatch):
     _clear_gemini_free_budget_env(monkeypatch)
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", "1000")

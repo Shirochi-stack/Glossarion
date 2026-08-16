@@ -24,6 +24,11 @@ import logging
 import threading
 from typing import Optional, List, Dict, Any, Tuple
 
+try:
+    from gemini_policy import is_google_prohibited_use_policy_refusal
+except ImportError:
+    from .gemini_policy import is_google_prohibited_use_policy_refusal
+
 logger = logging.getLogger(__name__)
 
 # gRPC availability flag
@@ -283,6 +288,25 @@ class GrpcGeminiClient:
         """Ensure the client is initialized and healthy"""
         if self._client is None:
             self._create_client()
+
+    @staticmethod
+    def _raise_for_canonical_policy_refusal(
+        text_content: Any,
+        provider_finish_reason: Any = None,
+        thinking_tokens: int = 0,
+    ) -> None:
+        """Raise only for Google's exact canonical prohibited-use response."""
+        if not is_google_prohibited_use_policy_refusal(text_content):
+            return
+        raise GrpcGeminiError(
+            "Content blocked: Google Generative AI Prohibited Use policy",
+            error_type="prohibited_content",
+            details={
+                "provider_finish_reason": provider_finish_reason,
+                "provider_block_reason": "GOOGLE_PROHIBITED_USE_POLICY_MESSAGE",
+                "thinking_tokens_wasted": thinking_tokens,
+            },
+        )
     
     def generate_content(
         self,
@@ -459,6 +483,7 @@ class GrpcGeminiClient:
             # Collect stream chunks
             text_parts = []
             finish_reason = "stop"
+            provider_finish_reason = None
             last_response = None
             thinking_tokens = 0
             log_buf = []
@@ -484,6 +509,7 @@ class GrpcGeminiClient:
                     
                     # Check finish reason (robust: handles int, proto-plus enum, or string)
                     if candidate.finish_reason:
+                        provider_finish_reason = candidate.finish_reason
                         finish_reason = _parse_finish_reason(candidate.finish_reason)
                     
                     # Extract text from parts
@@ -570,6 +596,12 @@ class GrpcGeminiClient:
             if not text_content and grpc_thinking_text_parts and finish_reason == "stop":
                 logger.debug("gRPC stream: text empty but thoughts present — using thought content")
                 text_content = "".join(grpc_thinking_text_parts)
+
+            self._raise_for_canonical_policy_refusal(
+                text_content,
+                provider_finish_reason=provider_finish_reason,
+                thinking_tokens=thinking_tokens,
+            )
             
             if not (stop_check_fn and stop_check_fn()):
                 print(f"🛰️ [gemini-grpc] Stream finished in {elapsed:.2f}s, tokens≈{len(text_content)//4}")
@@ -775,6 +807,7 @@ class GrpcGeminiClient:
         """Parse a gRPC GenerateContentResponse into GrpcGeminiResponse"""
         text_content = ""
         finish_reason = "stop"
+        provider_finish_reason = None
         thinking_tokens = 0
         raw_content_obj = None
         
@@ -794,6 +827,7 @@ class GrpcGeminiClient:
             
             # Check finish reason (robust: handles int, proto-plus enum, or string)
             if candidate.finish_reason:
+                provider_finish_reason = candidate.finish_reason
                 finish_reason = _parse_finish_reason(candidate.finish_reason)
             
             # Extract text from content parts (filter out thought parts)
@@ -841,6 +875,12 @@ class GrpcGeminiClient:
             if supports_thinking and hasattr(um, 'thoughts_token_count'):
                 thinking_tokens = um.thoughts_token_count or 0
                 usage["thinking_tokens"] = thinking_tokens
+
+        self._raise_for_canonical_policy_refusal(
+            text_content,
+            provider_finish_reason=provider_finish_reason,
+            thinking_tokens=thinking_tokens,
+        )
         
         # Check for prohibited content finish
         if finish_reason == "prohibited_content":

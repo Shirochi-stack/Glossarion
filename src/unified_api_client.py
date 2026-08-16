@@ -162,6 +162,10 @@ import hashlib
 import html
 import builtins as _builtins
 try:
+    from gemini_policy import is_google_prohibited_use_policy_refusal
+except ImportError:
+    from .gemini_policy import is_google_prohibited_use_policy_refusal
+try:
     from multi_api_key_manager import APIKeyPool, APIKeyEntry, RateLimitCache
 except ImportError:
     try:
@@ -2171,6 +2175,25 @@ class UnifiedClient:
         if ('max' in reason and 'token' in reason) or ('finish' in reason and 'length' in reason):
             return 'length'
         return reason
+
+    @staticmethod
+    def _raise_for_canonical_gemini_policy_refusal(
+        content: Any,
+        provider_finish_reason: Any = None,
+        endpoint: str = "native",
+    ) -> None:
+        """Raise only for Google's exact canonical prohibited-use response."""
+        if not is_google_prohibited_use_policy_refusal(content):
+            return
+        raise UnifiedClientError(
+            "Content blocked: Google Generative AI Prohibited Use policy",
+            error_type="prohibited_content",
+            details={
+                "endpoint": endpoint,
+                "provider_finish_reason": provider_finish_reason,
+                "provider_block_reason": "GOOGLE_PROHIBITED_USE_POLICY_MESSAGE",
+            },
+        )
 
     def _force_missing_finish_as_prohibited(self, finish_reason: Optional[Any]) -> bool:
         """Return True when configured to treat missing finish reasons as blocked."""
@@ -16690,11 +16713,11 @@ class UnifiedClient:
     def _extract_openai_json(self, json_resp: dict):
         """Extract content, finish_reason, and usage from OpenAI-compatible JSON."""
         content = ""
-        finish_reason = 'stop'
+        provider_finish_reason = None
         choices = json_resp.get('choices', [])
         if choices:
             choice = choices[0]
-            finish_reason = choice.get('finish_reason') or 'stop'
+            provider_finish_reason = choice.get('finish_reason')
             message = choice.get('message')
             if isinstance(message, dict):
                 content = message.get('content') or message.get('text') or ""
@@ -16703,7 +16726,10 @@ class UnifiedClient:
             else:
                 # As a fallback, try 'text' field directly on choice
                 content = choice.get('text', "")
-        finish_reason = self._normalize_finish_reason(finish_reason) or 'stop'
+        if is_google_prohibited_use_policy_refusal(content):
+            finish_reason = 'content_filter'
+        else:
+            finish_reason = self._normalize_finish_reason(provider_finish_reason) or 'stop'
         usage = None
         if 'usage' in json_resp:
             u = json_resp['usage'] or {}
@@ -16785,7 +16811,10 @@ class UnifiedClient:
         except Exception:
             usage = None
 
-        finish_reason = self._normalize_finish_reason(finish_reason) or 'stop'
+        if is_google_prohibited_use_policy_refusal(content):
+            finish_reason = 'content_filter'
+        else:
+            finish_reason = self._normalize_finish_reason(finish_reason) or 'stop'
         return content, finish_reason, usage
 
     def _with_sdk_retries(self, provider_name: str, max_retries: int, call):
@@ -20331,6 +20360,28 @@ class UnifiedClient:
                     if not thinking_tokens_displayed and supports_thinking:
                         logger.debug("Thinking tokens may have been used but are not reported via OpenAI endpoint")
                     
+                    if is_google_prohibited_use_policy_refusal(response.content):
+                        provider_finish_reason = None
+                        raw_response = getattr(response, "raw_response", None)
+                        try:
+                            if isinstance(raw_response, dict):
+                                raw_choices = raw_response.get("choices") or []
+                                if raw_choices:
+                                    provider_finish_reason = raw_choices[0].get("finish_reason")
+                            else:
+                                raw_choices = getattr(raw_response, "choices", None) or []
+                                if raw_choices:
+                                    provider_finish_reason = getattr(
+                                        raw_choices[0], "finish_reason", None
+                                    )
+                        except Exception:
+                            provider_finish_reason = None
+                        self._raise_for_canonical_gemini_policy_refusal(
+                            response.content,
+                            provider_finish_reason=provider_finish_reason,
+                            endpoint="openai-compatible",
+                        )
+
                     # Check finish reason for prohibited content
                     if response.finish_reason == 'content_filter' or response.finish_reason == 'prohibited_content':
                         raise UnifiedClientError(
@@ -20706,6 +20757,7 @@ class UnifiedClient:
                             raise UnifiedClientError("Gemini client not initialized - operation may have been cancelled", error_type="cancelled")
 
                         image_data = None
+                        provider_finish_reason = None
                         if use_streaming:
                             if not self._is_stop_requested():
                                 print(f"🛰️ [gemini-native] Stream start (model={self.model})")
@@ -20756,6 +20808,7 @@ class UnifiedClient:
                                         continue
                                     cand = cands[0]
                                     if hasattr(cand, 'finish_reason') and cand.finish_reason is not None:
+                                        provider_finish_reason = cand.finish_reason
                                         finish_reason = str(cand.finish_reason)
                                     content_obj = getattr(cand, 'content', None)
                                     if content_obj:
@@ -20882,6 +20935,8 @@ class UnifiedClient:
                     if hasattr(response, 'candidates') and response.candidates:
                         for candidate in response.candidates:
                             if hasattr(candidate, 'finish_reason'):
+                                if candidate.finish_reason is not None:
+                                    provider_finish_reason = candidate.finish_reason
                                 finish_reason_str = str(candidate.finish_reason)
                                 # Extract the enum name (e.g. "FinishReason.IMAGE_SAFETY" → "IMAGE_SAFETY")
                                 fr_name = finish_reason_str.rsplit('.', 1)[-1].strip().upper()
@@ -21016,6 +21071,12 @@ class UnifiedClient:
                             if not self._is_stop_requested():
                                 print(f"   ⚠️ No candidates found in response or candidates is None")
                     
+                    self._raise_for_canonical_gemini_policy_refusal(
+                        text_content,
+                        provider_finish_reason=provider_finish_reason,
+                        endpoint="native",
+                    )
+
                     # Save image if present
                     if image_data and enable_image_output:
                         try:
@@ -22409,8 +22470,11 @@ class UnifiedClient:
                             
                             # Extract response
                             content = response.choices[0].message.content if response.choices else ""
-                            finish_reason = response.choices[0].finish_reason if response.choices else "stop"
-                            finish_reason = self._normalize_finish_reason(finish_reason) or "stop"
+                            finish_reason = response.choices[0].finish_reason if response.choices else None
+                            if is_google_prohibited_use_policy_refusal(content):
+                                finish_reason = "content_filter"
+                            else:
+                                finish_reason = self._normalize_finish_reason(finish_reason) or "stop"
                             
                             return UnifiedResponse(
                                 content=content,
@@ -24105,7 +24169,9 @@ class UnifiedClient:
                         if log_stream and not self._is_stop_requested():
                             print()  # final newline
                         content = "".join(text_parts)
-                        if finish_reason is None:
+                        if is_google_prohibited_use_policy_refusal(content):
+                            finish_reason = 'content_filter'
+                        elif finish_reason is None:
                             finish_reason = 'incomplete'
                         finish_reason = self._normalize_finish_reason(finish_reason) or 'stop'
                         
@@ -24320,7 +24386,10 @@ class UnifiedClient:
                     else:
                         content = ""
                     
-                    finish_reason = self._normalize_finish_reason(finish_reason) or 'stop'
+                    if is_google_prohibited_use_policy_refusal(content):
+                        finish_reason = 'content_filter'
+                    else:
+                        finish_reason = self._normalize_finish_reason(finish_reason) or 'stop'
                     
                     usage = None
                     if hasattr(resp, 'usage') and resp.usage is not None:

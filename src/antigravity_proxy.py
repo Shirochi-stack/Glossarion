@@ -68,8 +68,8 @@ PROXY_GITHUB_RAW_PACKAGE_URL = (
 )
 PROXY_GITHUB_TAG_ARCHIVE_URL = f"{PROXY_REPO_URL}/archive/refs/tags/{{tag}}.zip"
 PROXY_GITHUB_REVISION_ARCHIVE_URL = f"{PROXY_REPO_URL}/archive/{{revision}}.zip"
-PROXY_DEFAULT_REVISION = "13404cce25545f70c1c5ffebc3527bda6df0567c"
-PROXY_DEFAULT_VERSION = "0.7.2"
+PROXY_DEFAULT_REVISION = "dcc517ee0c954bafd18aa611fcbeb2979f61eeeb"
+PROXY_DEFAULT_VERSION = "0.7.4"
 PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
 BUN_INSTALL_TIMEOUT_SECONDS = 300
@@ -552,8 +552,14 @@ def _patch_runtime_prompt_block_finish_reason(runtime_dir: str) -> bool:
         updated = updated.replace(old_empty_guard, new_empty_guard, 1)
         changed = True
 
-    mapping_marker = 'if (hasPromptBlock || hasBlockedCandidateSafetyRating) {'
-    if mapping_marker not in updated:
+    mapping_markers = (
+        'if (hasPromptBlock || hasBlockedCandidateSafetyRating) {',
+        (
+            'if (hasPromptBlock || hasBlockedCandidateSafetyRating || '
+            'hasCanonicalGooglePolicyBlock) {'
+        ),
+    )
+    if not any(marker in updated for marker in mapping_markers):
         mapping_patterns = (
             '  let openaiFinishReason: string | null = null;\n'
             '  if (finishReason !== undefined && finishReason !== null) {',
@@ -595,10 +601,12 @@ def _patch_runtime_prompt_block_finish_reason(runtime_dir: str) -> bool:
         no_candidate_marker,
         candidate_safety_marker,
         new_empty_guard,
-        mapping_marker,
         provider_metadata_marker,
     )
-    return all(marker in updated for marker in required_markers)
+    return (
+        all(marker in updated for marker in required_markers)
+        and any(marker in updated for marker in mapping_markers)
+    )
 
 
 def _patch_runtime_account_reset_support(runtime_dir: str) -> bool:
@@ -1662,18 +1670,25 @@ def _parse_openai_chat_response(data: Dict[str, Any]) -> Dict[str, Any]:
     message = choice.get("message") or {}
 
     content = message.get("content") or ""
-    provider_finish_reason = choice.get("finish_reason")
-    finish_reason = _normalize_proxy_finish_reason(provider_finish_reason)
+    reported_finish_reason = choice.get("finish_reason")
+    finish_reason = _normalize_proxy_finish_reason(reported_finish_reason)
     if finish_reason is None:
         raise RuntimeError(
             "Antigravity: response ended without an explicit finish_reason"
         )
+    provider_finish_reason = (
+        data.get("provider_finish_reason")
+        if "provider_finish_reason" in data
+        else reported_finish_reason
+    )
     usage = data.get("usage")
 
     return {
         "content": content,
         "finish_reason": finish_reason,
         "provider_finish_reason": provider_finish_reason,
+        "provider_block_reason": data.get("provider_block_reason"),
+        "provider_block_message": data.get("provider_block_message"),
         "finish_reason_observed": True,
         "usage": usage,
         "raw_response": data,
@@ -2614,6 +2629,13 @@ def reset_account_rankings(log_fn=None) -> Dict[str, Any]:
 # Send request helpers
 # ---------------------------------------------------------------------------
 
+def _ensure_proxy_for_request(log_fn=None) -> None:
+    """Run the fork update check before every new API request."""
+    status = ensure_proxy_running(log_fn=log_fn)
+    if not status.get("running"):
+        raise RuntimeError(status.get("error") or "Antigravity proxy is not running.")
+
+
 def _post_chat(
     payload: Dict[str, Any],
     timeout: float,
@@ -2832,6 +2854,7 @@ def send_message(
     payload = _payload_for_openai_chat(messages, model, temperature, max_tokens, stream=False)
 
     _log = log_fn or _log_noop
+    _ensure_proxy_for_request(_log)
     _ensure_proxy_log_forwarder(_log)
     _ensure_account_slot_available(account_id, proxy_url, _log)
     headers = _build_headers(account_id)
@@ -2939,6 +2962,8 @@ def _consume_openai_stream(
     collected_content: List[str] = []
     finish_reason = None
     provider_finish_reason = None
+    provider_block_reason = None
+    provider_block_message = None
     usage = None
     got_first_data = False
     saw_done_marker = False
@@ -2992,6 +3017,10 @@ def _consume_openai_stream(
 
             if event.get("usage"):
                 usage = event.get("usage")
+            if "provider_block_reason" in event:
+                provider_block_reason = event.get("provider_block_reason")
+            if "provider_block_message" in event:
+                provider_block_message = event.get("provider_block_message")
 
             choices = event.get("choices") or []
             if not choices:
@@ -3016,7 +3045,11 @@ def _consume_openai_stream(
             reported_finish_reason = choice.get("finish_reason")
             normalized_finish_reason = _normalize_proxy_finish_reason(reported_finish_reason)
             if normalized_finish_reason is not None:
-                provider_finish_reason = reported_finish_reason
+                provider_finish_reason = (
+                    event.get("provider_finish_reason")
+                    if "provider_finish_reason" in event
+                    else reported_finish_reason
+                )
                 finish_reason = normalized_finish_reason
 
         if log_stream and thinking_buf:
@@ -3054,6 +3087,7 @@ def _consume_openai_stream(
     _log(
         "Antigravity: terminal metadata "
         f"provider_finish_reason={provider_finish_reason!r}, "
+        f"provider_block_reason={provider_block_reason!r}, "
         f"finish_reason={finish_reason!r}, max_tokens={max_tokens!r}, "
         f"usage={terminal_usage!r}"
     )
@@ -3062,6 +3096,8 @@ def _consume_openai_stream(
         "content": "".join(collected_content),
         "finish_reason": finish_reason,
         "provider_finish_reason": provider_finish_reason,
+        "provider_block_reason": provider_block_reason,
+        "provider_block_message": provider_block_message,
         "finish_reason_observed": True,
         "stream_done_observed": saw_done_marker,
         "usage": usage,
@@ -3096,6 +3132,7 @@ def send_message_stream(
     payload = _payload_for_openai_chat(messages, model, temperature, max_tokens, stream=True)
 
     _log = log_fn or _log_noop
+    _ensure_proxy_for_request(_log)
     _ensure_proxy_log_forwarder(_log)
     _ensure_account_slot_available(
         account_id,

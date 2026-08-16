@@ -244,6 +244,25 @@ def test_parse_openai_chat_response_rejects_missing_finish_reason():
         antigravity_proxy._parse_openai_chat_response(data)
 
 
+def test_parse_openai_chat_response_preserves_missing_provider_reason():
+    data = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "blocked"},
+                "finish_reason": "content_filter",
+            }
+        ],
+        "provider_finish_reason": None,
+        "provider_block_reason": "GOOGLE_PROHIBITED_USE_POLICY_MESSAGE",
+    }
+
+    parsed = antigravity_proxy._parse_openai_chat_response(data)
+
+    assert parsed["finish_reason"] == "content_filter"
+    assert parsed["provider_finish_reason"] is None
+    assert parsed["provider_block_reason"] == "GOOGLE_PROHIBITED_USE_POLICY_MESSAGE"
+
+
 def test_consume_openai_stream_collects_content_and_usage():
     response = FakeStreamResponse(
         [
@@ -335,6 +354,36 @@ def test_consume_openai_stream_rejects_missing_finish_reason():
         )
 
     assert response.closed is True
+
+
+def test_consume_openai_stream_preserves_missing_provider_reason():
+    response = FakeStreamResponse(
+        [
+            _sse_event(
+                {
+                    "choices": [
+                        {
+                            "delta": {"content": "blocked"},
+                            "finish_reason": "content_filter",
+                        }
+                    ],
+                    "provider_finish_reason": None,
+                    "provider_block_reason": "GOOGLE_PROHIBITED_USE_POLICY_MESSAGE",
+                }
+            ),
+            "data: [DONE]",
+        ]
+    )
+
+    result = antigravity_proxy._consume_openai_stream(
+        response,
+        log_fn=lambda _: None,
+        log_stream=False,
+    )
+
+    assert result["finish_reason"] == "content_filter"
+    assert result["provider_finish_reason"] is None
+    assert result["provider_block_reason"] == "GOOGLE_PROHIBITED_USE_POLICY_MESSAGE"
 
 
 def test_forced_antigravity_stream_includes_reasoning_when_thinking_toggle_is_off(monkeypatch):
@@ -907,6 +956,11 @@ def test_antigravity_zero_prefix_reaches_proxy_without_forced_account(monkeypatc
                 ]
             }
 
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_ensure_proxy_for_request",
+        lambda _log: captured.setdefault("update_checked", True),
+    )
     monkeypatch.setattr(antigravity_proxy, "_ensure_proxy_log_forwarder", lambda _log: None)
     monkeypatch.setattr(
         antigravity_proxy,
@@ -927,11 +981,46 @@ def test_antigravity_zero_prefix_reaches_proxy_without_forced_account(monkeypatc
     )
 
     assert result["content"] == "rotated"
+    assert captured["update_checked"] is True
     assert captured["account_id"] == 0
     assert "X-Antigravity-Account" not in captured["headers"]
     assert "X-Client-Id" not in captured["headers"]
     client = _unified_antigravity_client("antigravity0/gemini-2.5-flash")
     assert client._extract_antigravity_account_id(client.model) == 0
+
+
+def test_stream_request_checks_proxy_updater_before_opening_http_stream(monkeypatch):
+    calls = []
+
+    def stop_after_update_check(_log):
+        calls.append("update")
+        raise RuntimeError("update-check-sentinel")
+
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_ensure_proxy_for_request",
+        stop_after_update_check,
+    )
+
+    with pytest.raises(RuntimeError, match="update-check-sentinel"):
+        antigravity_proxy.send_message_stream(
+            [{"role": "user", "content": "hello"}],
+            model="antigravity/gemini-3.7-flash-medium",
+            log_fn=lambda _message: None,
+        )
+
+    assert calls == ["update"]
+
+
+def test_proxy_request_readiness_propagates_update_failure(monkeypatch):
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "ensure_proxy_running",
+        lambda log_fn=None: {"running": False, "error": "download failed"},
+    )
+
+    with pytest.raises(RuntimeError, match="download failed"):
+        antigravity_proxy._ensure_proxy_for_request()
 
 
 def test_stream_chat_with_httpx_disables_compression(monkeypatch):
@@ -1336,6 +1425,29 @@ def test_patch_runtime_prompt_blocks_to_content_filter(tmp_path):
     assert "provider_block_reason: promptBlockReasonText" in patched
     assert "provider_block_reason: hasPromptBlock" in patched
     assert "} else if (finishReason) {" in patched
+
+
+def test_prompt_block_patch_accepts_native_canonical_policy_block(tmp_path):
+    transform_file = tmp_path / "src" / "utils" / "transform.ts"
+    transform_file.parent.mkdir(parents=True)
+    transform_file.write_text(
+        '''const hasPromptBlock = Boolean(promptBlockReasonText);
+provider_block_reason: promptBlockReasonText;
+const hasBlockedCandidateSafetyRating = true;
+  if (parts.length === 0 && !finishReason && !usage && !hasPromptBlock && !hasBlockedCandidateSafetyRating) return null;
+if (hasPromptBlock || hasBlockedCandidateSafetyRating || hasCanonicalGooglePolicyBlock) {
+  openaiFinishReason = "content_filter";
+}
+provider_block_reason: hasPromptBlock;
+''',
+        encoding="utf-8",
+    )
+
+    assert antigravity_proxy._patch_runtime_prompt_block_finish_reason(str(tmp_path))
+    assert antigravity_proxy._patch_runtime_prompt_block_finish_reason(str(tmp_path))
+
+    patched = transform_file.read_text(encoding="utf-8")
+    assert "hasCanonicalGooglePolicyBlock" in patched
 
 
 def test_patch_runtime_account_reset_support_clears_capabilities(tmp_path):
