@@ -11303,6 +11303,43 @@ class SDLXLIFFReviewDialog(QDialog):
                     return !!changed;
                 };
                 window.__sdlApplyInlineFormat = applyInlineFormat;
+                window.__sdlNotepadContextSnapshot = null;
+                document.addEventListener('contextmenu', event => {
+                    const element = event.target && event.target.nodeType === Node.ELEMENT_NODE
+                        ? event.target : event.target && event.target.parentElement;
+                    const sourceElement = element
+                        ? element.closest('[' + SOURCE_ATTR + ']') : null;
+                    const commandState = command => {
+                        try { return !!document.queryCommandState(command); }
+                        catch (_error) { return false; }
+                    };
+                    const tagged = selector => {
+                        try { return !!(element && element.closest(selector)); }
+                        catch (_error) { return false; }
+                    };
+                    const computed = element ? window.getComputedStyle(element) : null;
+                    const fontWeight = computed
+                        ? String(computed.fontWeight || '').toLowerCase() : '';
+                    const numericWeight = Number.parseInt(fontWeight, 10);
+                    const visuallyBold = fontWeight === 'bold'
+                        || (Number.isFinite(numericWeight) && numericWeight >= 600);
+                    const visuallyItalic = computed
+                        ? /^(italic|oblique)$/.test(String(computed.fontStyle || '').toLowerCase())
+                        : false;
+                    const visuallyUnderlined = computed
+                        ? String(computed.textDecorationLine || '').toLowerCase().includes('underline')
+                        : false;
+                    window.__sdlNotepadContextSnapshot = {
+                        source: sourceElement
+                            ? sourceElement.getAttribute(SOURCE_ATTR) || '' : '',
+                        formats: {
+                            bold: tagged('strong,b') || commandState('bold') || visuallyBold,
+                            italic: tagged('em,i') || commandState('italic') || visuallyItalic,
+                            underline: tagged('u') || commandState('underline')
+                                || visuallyUnderlined
+                        }
+                    };
+                }, true);
                 const originallyEditable = Array.from(
                     document.body.querySelectorAll('[contenteditable]')
                 );
@@ -11794,7 +11831,13 @@ class SDLXLIFFReviewDialog(QDialog):
                     f"SdlNotepadFormat{command.title()}Action"
                 )
                 action.setCheckable(True)
-                action.setChecked(bool(format_states.get(command, False)))
+                is_active = bool(format_states.get(command, False))
+                action.setChecked(is_active)
+                if is_active:
+                    # The app's dark QMenu stylesheet can suppress the native
+                    # platform check indicator, so keep an explicit visible
+                    # mark in addition to QAction's checked state.
+                    action.setText(f"✓ {label}")
                 shortcut = {
                     "bold": "Ctrl+B",
                     "italic": "Ctrl+I",
@@ -11840,6 +11883,11 @@ class SDLXLIFFReviewDialog(QDialog):
         y = int(pos.y())
         script = f"""
             (() => {{
+                const contextSnapshot = window.__sdlNotepadContextSnapshot;
+                if (contextSnapshot) {{
+                    window.__sdlNotepadContextSnapshot = null;
+                    return JSON.stringify(contextSnapshot);
+                }}
                 const element = document.elementFromPoint({x}, {y});
                 const sourceElement = element
                     ? element.closest('[data-sdl-notepad-source]') : null;
@@ -11847,20 +11895,64 @@ class SDLXLIFFReviewDialog(QDialog):
                     try {{ return !!document.queryCommandState(command); }}
                     catch (_error) {{ return false; }}
                 }};
-                return {{
+                const pointTagState = selector => {{
+                    try {{ return !!(element && element.closest(selector)); }}
+                    catch (_error) {{ return false; }}
+                }};
+                const selectionTagState = tagNames => {{
+                    const selection = window.getSelection();
+                    if (!selection || !selection.rangeCount) return false;
+                    const tags = new Set(tagNames.map(name => name.toUpperCase()));
+                    const insideTag = node => {{
+                        let current = node && node.nodeType === Node.ELEMENT_NODE
+                            ? node : node && node.parentElement;
+                        while (current && current !== document.body) {{
+                            if (tags.has(current.tagName.toUpperCase())) return true;
+                            current = current.parentElement;
+                        }}
+                        return false;
+                    }};
+                    if (selection.isCollapsed) return insideTag(selection.anchorNode);
+                    const range = selection.getRangeAt(0);
+                    const selectedTextNodes = [];
+                    const walker = document.createTreeWalker(
+                        document.body, NodeFilter.SHOW_TEXT
+                    );
+                    while (walker.nextNode()) {{
+                        const node = walker.currentNode;
+                        if (!node.nodeValue || !node.nodeValue.trim()) continue;
+                        try {{
+                            if (range.intersectsNode(node)) selectedTextNodes.push(node);
+                        }} catch (_error) {{}}
+                    }}
+                    return selectedTextNodes.length > 0
+                        && selectedTextNodes.every(insideTag);
+                }};
+                return JSON.stringify({{
                     source: sourceElement
                         ? sourceElement.getAttribute('data-sdl-notepad-source') || '' : '',
                     formats: {{
-                        bold: commandState('bold'),
-                        italic: commandState('italic'),
+                        bold: commandState('bold')
+                            || pointTagState('strong,b')
+                            || selectionTagState(['strong', 'b']),
+                        italic: commandState('italic')
+                            || pointTagState('em,i')
+                            || selectionTagState(['em', 'i']),
                         underline: commandState('underline')
+                            || pointTagState('u')
+                            || selectionTagState(['u'])
                     }}
-                }};
+                }});
             }})();
         """
 
         def _show(context):
             try:
+                if isinstance(context, str):
+                    try:
+                        context = json.loads(context)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        context = {}
                 context = context if isinstance(context, dict) else {}
                 self._show_notepad_browser_context_menu(
                     browser,

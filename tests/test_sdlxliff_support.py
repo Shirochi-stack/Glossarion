@@ -3406,17 +3406,79 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         """
     ) is True
     context_menu = dialog._show_notepad_browser_context_menu(
-        browser, browser.rect().center(), "Full wrapped source text for this sentence."
+        browser,
+        browser.rect().center(),
+        "Full wrapped source text for this sentence.",
+        {"bold": True, "italic": False, "underline": True},
     )
     assert "padding: 6px 18px 6px 6px" in context_menu.styleSheet()
     source_menu_label = context_menu.findChild(QLabel, "SdlNotepadContextSourceText")
     assert source_menu_label is not None
     assert source_menu_label.wordWrap() is True
     assert source_menu_label.text() == "Full wrapped source text for this sentence."
-    assert {action.text() for action in context_menu.actions()} >= {
-        "Bold", "Italic", "Underline"
+    menu_actions = {
+        action.objectName(): action for action in context_menu.actions()
+        if action.objectName()
     }
+    bold_action = menu_actions["SdlNotepadFormatBoldAction"]
+    italic_action = menu_actions["SdlNotepadFormatItalicAction"]
+    underline_action = menu_actions["SdlNotepadFormatUnderlineAction"]
+    assert bold_action.isCheckable() is True
+    assert bold_action.isChecked() is True
+    assert bold_action.text() == "✓ Bold"
+    assert italic_action.isCheckable() is True
+    assert italic_action.isChecked() is False
+    assert italic_action.text() == "Italic"
+    assert underline_action.isCheckable() is True
+    assert underline_action.isChecked() is True
+    assert underline_action.text() == "✓ Underline"
+    visible_action_order = [
+        action.text().removeprefix("✓ ")
+        for action in context_menu.actions() if action.text()
+    ]
+    assert visible_action_order.index("Bold") < visible_action_order.index("Undo")
+    assert visible_action_order.index("Italic") < visible_action_order.index("Undo")
+    assert visible_action_order.index("Underline") < visible_action_order.index("Undo")
     context_menu.close()
+    qtbot.waitUntil(
+        lambda: getattr(dialog, "_review_text_context_menu", None) is None,
+        timeout=2000,
+    )
+    assert js_value(
+        """
+        (() => {
+            const host = document.querySelector('strong [data-sdl-notepad-text]');
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(host);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const rect = host.getBoundingClientRect();
+            host.dispatchEvent(new MouseEvent('contextmenu', {
+                bubbles: true,
+                cancelable: true,
+                clientX: Math.round(rect.left + rect.width / 2),
+                clientY: Math.round(rect.top + rect.height / 2)
+            }));
+            return selection.toString() === 'protected';
+        })();
+        """
+    ) is True
+    dialog._request_notepad_browser_context_menu(browser, browser.rect().center())
+    qtbot.waitUntil(
+        lambda: getattr(dialog, "_review_text_context_menu", None) is not None,
+        timeout=5000,
+    )
+    detected_menu = dialog._review_text_context_menu
+    detected_actions = {
+        action.objectName(): action for action in detected_menu.actions()
+        if action.objectName()
+    }
+    assert detected_actions["SdlNotepadFormatBoldAction"].isChecked() is True
+    assert detected_actions["SdlNotepadFormatBoldAction"].text() == "✓ Bold"
+    assert detected_actions["SdlNotepadFormatItalicAction"].isChecked() is False
+    assert detected_actions["SdlNotepadFormatItalicAction"].text() == "Italic"
+    detected_menu.close()
     history_shortcut_result = js_value(
         """
         (() => { try {
