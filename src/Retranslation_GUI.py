@@ -15475,18 +15475,112 @@ class RetranslationMixin:
                     'not_translated', 'pending',
                 }:
                     continue
-                output_path = self._sdlxliff_autogen_output_path(
-                    current_output_dir,
-                    entry.get('output_file'),
-                )
-                if output_path and os.path.isfile(output_path):
-                    continue
                 manual_entry = dict(entry)
                 manual_entry['status'] = 'not_translated'
                 untranslated_entries.append(manual_entry)
             return untranslated_entries
 
-        def _generate_manual_editing_sidecars():
+        manual_generation_state = {
+            'running': False,
+            'callbacks': [],
+            'signature': None,
+            'last_stats': None,
+            'button_text': text_analysis_btn.text(),
+            'persist_token': 0,
+        }
+
+        def _manual_generation_signature(entries, current_output_dir):
+            output_names = tuple(sorted(
+                str(entry.get('output_file') or '').replace('\\', '/').lower()
+                for entry in (entries or [])
+                if isinstance(entry, dict) and entry.get('output_file')
+            ))
+            return (
+                os.path.normcase(os.path.abspath(current_output_dir or '')),
+                len(output_names),
+                hash(output_names),
+            )
+
+        def _show_generation_progress(payload):
+            try:
+                total = int(payload.get('total') or 0)
+                index = int(payload.get('index') or 0)
+                stage = str(payload.get('stage') or '')
+                if stage in ('checking', 'created', 'skipped', 'missing_source', 'failed') and total:
+                    text_analysis_btn.setText(f"Creating sidecars… {min(index, total)}/{total}")
+            except (RuntimeError, TypeError, ValueError):
+                pass
+
+        def _finish_manual_generation(stats):
+            stats = stats if isinstance(stats, dict) else {}
+            manual_generation_state['running'] = False
+            manual_generation_state['last_stats'] = stats
+            if not stats.get('errors') and not stats.get('failed') and not stats.get('missing_source'):
+                manual_generation_state['signature'] = stats.pop('_generation_signature', None)
+            else:
+                stats.pop('_generation_signature', None)
+                manual_generation_state['signature'] = None
+            try:
+                text_analysis_btn.setText(manual_generation_state['button_text'])
+            except RuntimeError:
+                pass
+
+            created = int(stats.get('created') or 0)
+            skipped_sidecars = int(stats.get('skipped') or 0)
+            missing_source = int(stats.get('missing_source') or 0)
+            errors = list(stats.get('errors') or [])
+            try:
+                if errors and not created:
+                    manual_editing_cb.setToolTip(f"Manual sidecar creation failed: {errors[0]}")
+                elif created:
+                    manual_editing_cb.setToolTip(
+                        f"Created {created} source-only manual sidecar{'s' if created != 1 else ''}.\n"
+                        "No HTML output is created until a target row is edited."
+                    )
+                elif skipped_sidecars:
+                    manual_editing_cb.setToolTip(
+                        "Manual sidecars already exist. No HTML output is created until a target row is edited."
+                    )
+                elif missing_source:
+                    manual_editing_cb.setToolTip(
+                        f"Could not locate source HTML for {missing_source} Not Translated entr{'ies' if missing_source != 1 else 'y'}."
+                    )
+            except RuntimeError:
+                pass
+            _queue_text_analysis_button_update()
+
+            callbacks = list(manual_generation_state['callbacks'])
+            manual_generation_state['callbacks'].clear()
+            for callback in callbacks:
+                try:
+                    callback(stats)
+                except Exception:
+                    pass
+
+        def _fail_manual_generation(message):
+            stats = {
+                'created': 0,
+                'paths': [],
+                'missing_source': 0,
+                'failed': 1,
+                'errors': [str(message or 'Unknown sidecar generation error')],
+            }
+            _finish_manual_generation(stats)
+
+        manual_generation_bridge = _GlossaryProgressAsyncBridge(
+            on_finished=_finish_manual_generation,
+            on_failed=_fail_manual_generation,
+            on_progress=_show_generation_progress,
+            parent=dialog,
+        )
+        manual_editing_cb._manual_sidecar_generation_bridge = manual_generation_bridge
+
+        def _generate_manual_editing_sidecars(on_finished=None):
+            if callable(on_finished):
+                manual_generation_state['callbacks'].append(on_finished)
+            if manual_generation_state['running']:
+                return
+
             untranslated_entries = _progress_manager_untranslated_entries()
             progress_data = getattr(manual_editing_cb, '_progress_data_ref', None)
             current_output_dir = (
@@ -15499,69 +15593,91 @@ class RetranslationMixin:
                 if isinstance(progress_data, dict)
                 else file_path
             )
-            original_button_text = text_analysis_btn.text()
-            stats = {
-                'created': 0,
-                'paths': [],
-                'missing_source': 0,
-                'errors': [],
-            }
+            signature = _manual_generation_signature(
+                untranslated_entries,
+                current_output_dir,
+            )
+            if manual_generation_state['signature'] == signature:
+                callbacks = list(manual_generation_state['callbacks'])
+                manual_generation_state['callbacks'].clear()
+                cached_stats = dict(manual_generation_state['last_stats'] or {})
+                for callback in callbacks:
+                    QTimer.singleShot(0, lambda cb=callback, result=cached_stats: cb(result))
+                return
 
-            def _show_generation_progress(payload):
-                try:
-                    total = int(payload.get('total') or 0)
-                    index = int(payload.get('index') or 0)
-                    stage = str(payload.get('stage') or '')
-                    if stage in ('checking', 'created', 'skipped', 'missing_source', 'failed') and total:
-                        text_analysis_btn.setText(f"Creating sidecars… {min(index, total)}/{total}")
-                    QApplication.processEvents(QEventLoop.ExcludeUserInputEvents, 5)
-                except Exception:
-                    pass
-
-            manual_editing_cb.setEnabled(False)
-            text_analysis_btn.setEnabled(False)
+            manual_generation_state['running'] = True
             try:
-                stats = self._generate_sdlxliff_sidecars_from_untranslated_entries(
-                    current_output_dir,
-                    untranslated_entries,
-                    file_path=current_file_path,
-                    progress_callback=_show_generation_progress,
-                )
-            except Exception as exc:
-                stats['errors'].append(str(exc))
-                manual_editing_cb.setToolTip(f"Manual sidecar creation failed: {exc}")
-            finally:
-                manual_editing_cb.setEnabled(True)
-                text_analysis_btn.setEnabled(True)
-                text_analysis_btn.setText(original_button_text)
+                text_analysis_btn.setText("Creating sidecars…")
+            except RuntimeError:
+                pass
 
-            created = int(stats.get('created') or 0)
-            skipped_sidecars = int(stats.get('skipped') or 0)
-            missing_source = int(stats.get('missing_source') or 0)
-            if created:
-                manual_editing_cb.setToolTip(
-                    f"Created {created} source-only manual sidecar{'s' if created != 1 else ''}.\n"
-                    "No HTML output is created until a target row is edited."
-                )
-            elif skipped_sidecars:
-                manual_editing_cb.setToolTip(
-                    "Manual sidecars already exist. No HTML output is created until a target row is edited."
-                )
-            elif missing_source:
-                manual_editing_cb.setToolTip(
-                    f"Could not locate source HTML for {missing_source} Not Translated entr{'ies' if missing_source != 1 else 'y'}."
-                )
-            _queue_text_analysis_button_update()
-            return stats
+            def _worker():
+                try:
+                    last_progress_emit = [0.0]
+
+                    def _emit_progress(payload):
+                        now = time.monotonic()
+                        stage = str((payload or {}).get('stage') or '')
+                        if (
+                            stage not in {'start', 'finished'}
+                            and now - last_progress_emit[0] < 0.1
+                        ):
+                            return
+                        last_progress_emit[0] = now
+                        manual_generation_bridge.progress.emit(payload)
+
+                    stats = self._generate_sdlxliff_sidecars_from_untranslated_entries(
+                        current_output_dir,
+                        untranslated_entries,
+                        file_path=current_file_path,
+                        progress_callback=_emit_progress,
+                    )
+                    stats = stats if isinstance(stats, dict) else {}
+                    stats['_generation_signature'] = signature
+                    manual_generation_bridge.finished.emit(stats)
+                except Exception as exc:
+                    try:
+                        manual_generation_bridge.failed.emit(str(exc))
+                    except RuntimeError:
+                        pass
+
+            threading.Thread(
+                target=_worker,
+                name="manual-sdlxliff-sidecar-generation",
+                daemon=True,
+            ).start()
 
         def _on_manual_editing_toggled(enabled):
             enabled = bool(enabled)
-            self._persist_retranslation_manual_editing_state(enabled)
+            try:
+                if not hasattr(self, 'config') or not isinstance(self.config, dict):
+                    self.config = {}
+                self.config[self._RETRANSLATION_MANUAL_EDITING_CONFIG_KEY] = enabled
+            except Exception:
+                pass
+            manual_generation_state['persist_token'] += 1
+            persist_token = manual_generation_state['persist_token']
+
+            def _persist_after_repaint():
+                if persist_token != manual_generation_state['persist_token']:
+                    return
+                self._persist_retranslation_manual_editing_state(enabled)
+
+            QTimer.singleShot(25, _persist_after_repaint)
             progress_data = getattr(manual_editing_cb, '_progress_data_ref', None)
             if isinstance(progress_data, dict):
                 progress_data['manual_editing_state'] = enabled
             if enabled:
-                _generate_manual_editing_sidecars()
+                # Return to Qt first so the checkmark paints immediately. The
+                # expensive EPUB scan and sidecar writes run on the worker.
+                QTimer.singleShot(
+                    0,
+                    lambda: (
+                        _generate_manual_editing_sidecars()
+                        if manual_editing_cb.isChecked()
+                        else None
+                    ),
+                )
 
         def _update_text_analysis_button():
             try:
@@ -15586,45 +15702,60 @@ class RetranslationMixin:
                 text_analysis_btn.setEnabled(True)
 
         def _show_text_analysis():
-            try:
-                if manual_editing_cb.isChecked():
-                    _generate_manual_editing_sidecars()
-                progress_data = getattr(manual_editing_cb, '_progress_data_ref', None)
-                current_output_dir = (
-                    progress_data.get('output_dir', output_dir)
-                    if isinstance(progress_data, dict)
-                    else output_dir
-                )
-                current_progress = (
-                    progress_data.get('prog', prog)
-                    if isinstance(progress_data, dict)
-                    else prog
-                )
-                review_dialog = self._open_or_reuse_sdlxliff_review(
-                    current_output_dir,
-                    None,
-                    dialog,
-                    autogen_file_path=file_path,
-                    autogen_progress_data=current_progress,
-                    autogen_manual_entries=_progress_manager_untranslated_entries(),
-                )
-                if review_dialog is None:
-                    return
+            def _open_after_manual_generation(_stats=None):
                 try:
-                    review_dialog.save_status_label.setText("Checking SDLXLIFF sidecars...")
-                except Exception:
-                    pass
-                _queue_text_analysis_button_update()
-            except Exception as e:
-                self._show_message('error', "Open Failed", str(e), parent=dialog)
+                    progress_data = getattr(manual_editing_cb, '_progress_data_ref', None)
+                    current_output_dir = (
+                        progress_data.get('output_dir', output_dir)
+                        if isinstance(progress_data, dict)
+                        else output_dir
+                    )
+                    current_progress = (
+                        progress_data.get('prog', prog)
+                        if isinstance(progress_data, dict)
+                        else prog
+                    )
+                    review_dialog = self._open_or_reuse_sdlxliff_review(
+                        current_output_dir,
+                        None,
+                        dialog,
+                        autogen_file_path=file_path,
+                        autogen_progress_data=current_progress,
+                        autogen_manual_entries=_progress_manager_untranslated_entries(),
+                    )
+                    if review_dialog is None:
+                        return
+                    try:
+                        review_dialog.save_status_label.setText("Checking SDLXLIFF sidecars...")
+                    except Exception:
+                        pass
+                    _queue_text_analysis_button_update()
+                except Exception as e:
+                    self._show_message('error', "Open Failed", str(e), parent=dialog)
+
+            if manual_editing_cb.isChecked():
+                _generate_manual_editing_sidecars(
+                    on_finished=_open_after_manual_generation,
+                )
+                return
+            _open_after_manual_generation()
 
         text_analysis_btn.clicked.connect(_show_text_analysis)
         manual_editing_cb.toggled.connect(_on_manual_editing_toggled)
         _update_text_analysis_button()
 
+        text_analysis_update_queued = [False]
+
         def _queue_text_analysis_button_update():
-            for delay in (0, 75, 250, 750):
-                QTimer.singleShot(delay, _update_text_analysis_button)
+            if text_analysis_update_queued[0]:
+                return
+            text_analysis_update_queued[0] = True
+
+            def _apply_queued_update():
+                text_analysis_update_queued[0] = False
+                _update_text_analysis_button()
+
+            QTimer.singleShot(0, _apply_queued_update)
         try:
             self._refresh_progress_text_analysis_button = _queue_text_analysis_button_update
         except Exception:
@@ -19120,8 +19251,6 @@ class RetranslationMixin:
         )
         show_model_info_cb._progress_data_ref = result
         manual_editing_cb._progress_data_ref = result
-        if manual_editing_cb.isChecked():
-            QTimer.singleShot(0, _generate_manual_editing_sidecars)
         
         # If standalone (no parent), add buttons and show dialog
         if not parent_dialog and not tab_frame:
@@ -20639,35 +20768,39 @@ class RetranslationMixin:
                 return False
 
         def _open_sdlxliff_review_for_item(display_info):
-            progress_entry = display_info.get('info', {}) or {}
-            output_file = display_info.get('output_file') or progress_entry.get('output_file')
+            def _finish_open(_stats=None):
+                progress_entry = display_info.get('info', {}) or {}
+                output_file = display_info.get('output_file') or progress_entry.get('output_file')
+                review_path = _sdlxliff_review_path_for_item(display_info) or _sdlxliff_expected_review_path_for_item(display_info)
+                try:
+                    review_dialog = self._open_or_reuse_sdlxliff_review(
+                        data['output_dir'],
+                        review_path,
+                        data.get('dialog', self),
+                        autogen_file_path=data.get('file_path'),
+                        autogen_progress_data=data.get('prog'),
+                        autogen_output_files=[output_file] if output_file else None,
+                        autogen_manual_entries=(
+                            data.get('manual_untranslated_entries_provider')()
+                            if callable(data.get('manual_untranslated_entries_provider'))
+                            else []
+                        ),
+                    )
+                    if review_dialog is None:
+                        return
+                    try:
+                        review_dialog.save_status_label.setText("Checking SDLXLIFF sidecar for selected entry...")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    self._show_message('error', "Open Failed", str(e), parent=data.get('dialog', self))
+
             if _manual_editing_enabled() and not _sdlxliff_review_path_for_item(display_info):
                 generate_sidecars = data.get('generate_manual_editing_sidecars')
                 if callable(generate_sidecars):
-                    generate_sidecars()
-            review_path = _sdlxliff_review_path_for_item(display_info) or _sdlxliff_expected_review_path_for_item(display_info)
-            try:
-                review_dialog = self._open_or_reuse_sdlxliff_review(
-                    data['output_dir'],
-                    review_path,
-                    data.get('dialog', self),
-                    autogen_file_path=data.get('file_path'),
-                    autogen_progress_data=data.get('prog'),
-                    autogen_output_files=[output_file] if output_file else None,
-                    autogen_manual_entries=(
-                        data.get('manual_untranslated_entries_provider')()
-                        if callable(data.get('manual_untranslated_entries_provider'))
-                        else []
-                    ),
-                )
-                if review_dialog is None:
+                    generate_sidecars(on_finished=_finish_open)
                     return
-                try:
-                    review_dialog.save_status_label.setText("Checking SDLXLIFF sidecar for selected entry...")
-                except Exception:
-                    pass
-            except Exception as e:
-                self._show_message('error', "Open Failed", str(e), parent=data.get('dialog', self))
+            _finish_open()
 
         def _open_file_for_item(display_info):
             """Open the output file for a chapter. Accepts pre-extracted display_info dict."""

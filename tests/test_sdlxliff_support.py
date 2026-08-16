@@ -2963,6 +2963,26 @@ def test_progress_manager_exposes_manual_editing_toggle_for_not_translated_rows(
     assert "if callable(generate_sidecars):" in source
 
 
+def test_progress_manager_manual_editing_generation_does_not_block_gui_thread():
+    source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
+    start = source.index("def _generate_manual_editing_sidecars(on_finished=None)")
+    end = source.index("def _bool_setting", start)
+    body = source[start:end]
+    toggle_start = source.index("def _on_manual_editing_toggled", start)
+    toggle_end = source.index("def _update_text_analysis_button", toggle_start)
+    toggle_body = source[toggle_start:toggle_end]
+
+    assert 'name="manual-sdlxliff-sidecar-generation"' in body
+    assert "manual_generation_state['running']" in body
+    assert "manual_generation_bridge.progress.emit" in body
+    assert "now - last_progress_emit[0] < 0.1" in body
+    assert "QApplication.processEvents" not in body
+    assert "manual_editing_cb.setEnabled(False)" not in body
+    assert "QTimer.singleShot(" in toggle_body
+    assert "QTimer.singleShot(0, _generate_manual_editing_sidecars)" not in source
+    assert "for delay in (0, 75, 250, 750)" not in source
+
+
 def test_manual_editing_preference_persists_through_app_config():
     class StubRetranslation(RetranslationMixin):
         def __init__(self):
