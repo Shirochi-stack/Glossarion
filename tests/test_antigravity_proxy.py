@@ -1316,6 +1316,63 @@ def test_cached_runtime_update_compares_running_proxy_version(tmp_path, monkeypa
     ) is True
 
 
+def test_failed_download_with_patched_cache_defers_immediate_second_restart(
+    tmp_path, monkeypatch
+):
+    existing_runtime = tmp_path / "runtime" / "main-old"
+    existing_runtime.mkdir(parents=True)
+    logs = []
+    release = {
+        "tag": "main-new",
+        "version": "0.7.7",
+        "resolved": True,
+    }
+
+    monkeypatch.setattr(antigravity_proxy, "_latest_proxy_release", lambda: release)
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_latest_antigravity_client_version",
+        lambda: "2.2.1",
+    )
+    monkeypatch.setattr(antigravity_proxy, "_write_proxy_runtime_package_json", lambda *_: None)
+    monkeypatch.setattr(antigravity_proxy, "_runtime_metadata_matches", lambda *_: False)
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_download_proxy_runtime",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("download timed out")),
+    )
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_latest_existing_runtime",
+        lambda _root: str(existing_runtime),
+    )
+    monkeypatch.setattr(antigravity_proxy, "_patch_cached_runtime", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(antigravity_proxy.time, "monotonic", lambda: 4321.0)
+
+    runtime = antigravity_proxy._ensure_proxy_runtime(
+        str(tmp_path),
+        log_fn=logs.append,
+        force_update=True,
+    )
+
+    assert runtime == str(existing_runtime)
+    assert antigravity_proxy._proxy_last_update_check_at == 4321.0
+    assert any("retrying in 5 minutes" in message for message in logs)
+
+    monkeypatch.setattr(antigravity_proxy, "_cached_runtime_needs_patch", lambda _data: False)
+    release_checks = []
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_latest_proxy_release",
+        lambda: release_checks.append(True) or release,
+    )
+
+    assert antigravity_proxy._cached_runtime_needs_update(
+        str(tmp_path), running_version="0.7.6"
+    ) is False
+    assert release_checks == []
+
+
 def test_latest_antigravity_client_version_uses_google_public_bundle(monkeypatch):
     def fake_get(url, timeout=15):
         if url == antigravity_proxy.ANTIGRAVITY_SITE_URL:

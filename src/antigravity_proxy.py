@@ -1281,6 +1281,13 @@ def _cached_runtime_needs_update(
     )
 
 
+def _defer_proxy_update_retry() -> None:
+    """Throttle update checks after a failed download uses the patched cache."""
+    global _proxy_last_update_check_at
+    with _proxy_update_check_lock:
+        _proxy_last_update_check_at = time.monotonic()
+
+
 def _patch_cached_runtime(
     runtime_dir: str,
     release: Dict[str, str],
@@ -1348,6 +1355,11 @@ def _ensure_proxy_runtime(data_dir: str, log_fn=None, force_update: bool = False
         existing = _latest_existing_runtime(runtime_root)
         if existing:
             if _patch_cached_runtime(existing, release, client_version, log_fn=log_fn):
+                _defer_proxy_update_retry()
+                (log_fn or _log_noop)(
+                    "⚠️ Antigravity: proxy download failed; using the patched cached "
+                    f"runtime and retrying in {PROXY_UPDATE_CHECK_INTERVAL_SECONDS // 60} minutes."
+                )
                 return existing
             (log_fn or _log_noop)(
                 f"Antigravity: using cached proxy runtime because update failed: {exc}"
