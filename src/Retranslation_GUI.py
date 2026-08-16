@@ -3492,8 +3492,12 @@ class SDLXLIFFReviewDialog(QDialog):
                 row_data.pop("_machine_accuracy_promoted", None)
                 row_data.pop("_machine_accuracy_previous_status", None)
                 row_data.pop("_machine_accuracy_previous_reason", None)
-                source_missing = not row_data.get("source_tag")
-                target_missing = not row_data.get("target_tag")
+                source_missing = bool(row_data.get(
+                    "source_missing", not row_data.get("source_tag")
+                ))
+                target_missing = bool(row_data.get(
+                    "target_missing", not row_data.get("target_tag")
+                ))
                 status, reason = self._row_status(
                     row_data.get("source", ""),
                     row_data.get("target", ""),
@@ -6828,19 +6832,59 @@ class SDLXLIFFReviewDialog(QDialog):
                     target_all_units = self._dedupe_heading_paragraph_units(target_all_units)
                     target_units = self._non_empty_text_units(target_all_units)
             source_review_units = self._annotate_review_tag_labels(self._non_empty_text_units(source_units))
+            translator_note_target_indexes = set()
+            if (
+                len(source_all_units) == len(target_all_units)
+                and all(
+                    self._review_units_are_compatible(source_unit, target_unit)
+                    for source_unit, target_unit in zip(
+                        source_all_units, target_all_units
+                    )
+                )
+            ):
+                translator_note_target_indexes = {
+                    target_unit.get("index")
+                    for source_unit, target_unit in zip(
+                        source_all_units, target_all_units
+                    )
+                    if not self._normalize_review_text(source_unit.get("text", ""))
+                    and self._normalize_review_text(target_unit.get("text", ""))
+                }
             if manual_editing:
                 source_review_indexes = {
                     unit.get("index") for unit in source_review_units
                 }
-                target_review_units = self._annotate_review_tag_labels([
+                target_review_units = [
                     unit for unit in target_units
                     if str(unit.get("text") or "").strip()
                     or unit.get("index") in source_review_indexes
-                ])
+                ]
             else:
-                target_review_units = self._annotate_review_tag_labels(
-                    self._non_empty_text_units(target_units)
-                )
+                target_review_units = self._non_empty_text_units(target_units)
+            def _annotate_target_units():
+                for unit in target_review_units:
+                    unit.pop("tag_label", None)
+                    unit.pop("tag_ordinal", None)
+                    unit.pop("translator_note", None)
+                    unit.pop("translator_note_ordinal", None)
+                self._annotate_review_tag_labels([
+                    unit for unit in target_review_units
+                    if unit.get("index") not in translator_note_target_indexes
+                ])
+                translator_note_ordinal = 0
+                for unit in target_review_units:
+                    if unit.get("index") not in translator_note_target_indexes:
+                        continue
+                    translator_note_ordinal += 1
+                    unit["tag_label"] = f"TN({translator_note_ordinal})"
+                    unit["tag_ordinal"] = None
+                    unit["translator_note"] = True
+                    unit["translator_note_ordinal"] = translator_note_ordinal
+
+            # Text added where the source has no text is a translator note,
+            # not a paragraph translation unit. Preserve its DOM index for
+            # write-back without letting its <p> consume a p ordinal.
+            _annotate_target_units()
             rows = []
             red_count = 0
             yellow_count = 0
@@ -6881,13 +6925,35 @@ class SDLXLIFFReviewDialog(QDialog):
                     source_review_units,
                     aligned_target_units,
                 )
+            if manual_editing:
+                # Pressing Enter in the rendered editor can create a genuinely
+                # new target <p>, rather than filling an existing empty one.
+                # Alignment correctly emits it as target-only; classify that
+                # node as a translator note as well, then recalculate the real
+                # target tag ordinals without allowing it to shift them.
+                translator_note_target_indexes.update(
+                    tgt.get("index")
+                    for src, tgt in aligned_units
+                    if src is None and tgt is not None
+                )
+                _annotate_target_units()
             for row_idx, (src, tgt) in enumerate(aligned_units):
+                translator_note = bool(
+                    tgt is not None and tgt.get("translator_note")
+                )
+                translator_note_label = (
+                    str(tgt.get("tag_label") or "") if translator_note else ""
+                )
+                source_missing = src is None and not translator_note
+                target_missing = tgt is None
                 status, reason = self._row_status(
                     src.get("text") if src else "",
                     tgt.get("text") if tgt else "",
-                    source_missing=src is None,
-                    target_missing=tgt is None,
+                    source_missing=source_missing,
+                    target_missing=target_missing,
                 )
+                if translator_note:
+                    reason = "translator note"
                 if src is not None and tgt is not None and src.get("tag") != tgt.get("tag"):
                     status, reason = self._tag_mismatch_status(src.get("tag"), tgt.get("tag"))
                 if status == "red":
@@ -6897,21 +6963,29 @@ class SDLXLIFFReviewDialog(QDialog):
                 rows.append({
                     "row_index": row_idx,
                     "source_tag": src.get("tag", "") if src else "",
-                    "source_tag_label": src.get("tag_label", "") if src else "",
+                    "source_tag_label": src.get("tag_label", "") if src else translator_note_label,
                     "source_tag_ordinal": src.get("tag_ordinal") if src else None,
                     "source": src.get("text", "") if src else "",
                     "source_index": src.get("index") if src else None,
-                    "target_tag": tgt.get("tag", "") if tgt else "",
-                    "target_tag_label": tgt.get("tag_label", "") if tgt else "",
-                    "target_tag_ordinal": tgt.get("tag_ordinal") if tgt else None,
+                    "target_tag": "" if translator_note else (tgt.get("tag", "") if tgt else ""),
+                    "target_dom_tag": tgt.get("tag", "") if tgt else "",
+                    "target_tag_label": translator_note_label if translator_note else (tgt.get("tag_label", "") if tgt else ""),
+                    "target_tag_ordinal": None if translator_note else (tgt.get("tag_ordinal") if tgt else None),
                     "target": tgt.get("text", "") if tgt else "",
                     "target_original": tgt.get("text", "") if tgt else "",
                     "target_index": tgt.get("index") if tgt else None,
+                    "source_missing": source_missing,
+                    "target_missing": target_missing,
+                    "translator_note": translator_note,
+                    "translator_note_ordinal": (
+                        tgt.get("translator_note_ordinal")
+                        if translator_note else None
+                    ),
                     "status": status,
                     "reason": reason,
                 })
-            source_count = len(source_review_units)
-            target_count = self._non_empty_text_unit_count(target_review_units)
+            source_count = self._review_piece_non_empty_count(rows, "source")
+            target_count = self._review_piece_non_empty_count(rows, "target")
             count_ratio = (target_count / source_count) if source_count else (1.0 if not target_count else 0.0)
             piece = {
                 "path": path,
@@ -7709,6 +7783,13 @@ class SDLXLIFFReviewDialog(QDialog):
             "target": str(row_data.get("target", "") or ""),
             "source_tag": str(row_data.get("source_tag", "") or ""),
             "target_tag": str(row_data.get("target_tag", "") or ""),
+            "source_missing": bool(row_data.get(
+                "source_missing", not row_data.get("source_tag")
+            )),
+            "target_missing": bool(row_data.get(
+                "target_missing", not row_data.get("target_tag")
+            )),
+            "translator_note": bool(row_data.get("translator_note")),
             "status": str(row_data.get("status", "green") or "green"),
             "tooltip_translation": str(row_data.get("tooltip_translation", "") or ""),
             "tooltip_translation_pending": bool(row_data.get("tooltip_translation_pending")),
@@ -7839,8 +7920,12 @@ class SDLXLIFFReviewDialog(QDialog):
                 two_column_layout=two_column_layout,
                 tooltip_preview_text=tooltip_preview,
             )
-            source_missing = not row.get("source_tag")
-            target_missing = not row.get("target_tag")
+            source_missing = bool(row.get(
+                "source_missing", not row.get("source_tag")
+            ))
+            target_missing = bool(row.get(
+                "target_missing", not row.get("target_tag")
+            ))
             row_models.append({
                 "source_text": source_text,
                 "target_text": target_text,
@@ -7849,6 +7934,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 "source_missing": source_missing,
                 "target_missing": target_missing,
                 "target_editable": (not source_missing or not target_missing),
+                "translator_note": bool(row.get("translator_note")),
                 "tooltip_translation": tooltip_translation,
                 "tooltip_pending": tooltip_pending,
                 "tooltip_preview": tooltip_preview,
@@ -8539,6 +8625,13 @@ class SDLXLIFFReviewDialog(QDialog):
         target_label = str(target_label or target_tag).strip()
         source_ordinal = re.search(r"\((\d+)\)", source_label)
         target_ordinal = re.search(r"\((\d+)\)", target_label)
+        if not source_tag and not target_tag:
+            for label in (target_label, source_label):
+                translator_note = re.fullmatch(
+                    r"tn\((\d+)\)", label, flags=re.IGNORECASE
+                )
+                if translator_note:
+                    return f"TN({translator_note.group(1)})"
         if source_tag and target_tag:
             return source_label if source_label == target_label else f"{source_label} -> {target_label}"
         elif source_tag:
@@ -8872,13 +8965,21 @@ class SDLXLIFFReviewDialog(QDialog):
                 tooltip_pending,
                 tooltip_preview_text=tooltip_preview,
             )
-            source_missing = not row_data.get("source_tag")
-            target_missing = not row_data.get("target_tag")
+            source_missing = bool(row_data.get(
+                "source_missing", not row_data.get("source_tag")
+            ))
+            target_missing = bool(row_data.get(
+                "target_missing", not row_data.get("target_tag")
+            ))
             target_editable = not source_missing or not target_missing
 
             source_label = self._text_label(
                 source_text,
                 missing=source_missing,
+                empty_placeholder=(
+                    "[translator note]"
+                    if row_data.get("translator_note") else None
+                ),
                 tooltip_translation=tooltip_preview,
                 tooltip_pending=tooltip_pending,
                 tooltip_state=tooltip_state,
@@ -10641,7 +10742,16 @@ class SDLXLIFFReviewDialog(QDialog):
         if manual_cleared:
             self._recompute_piece_row_statuses(piece)
         else:
-            status, reason = self._row_status(row_data.get("source", ""), row_data.get("target", ""))
+            status, reason = self._row_status(
+                row_data.get("source", ""),
+                row_data.get("target", ""),
+                source_missing=bool(row_data.get(
+                    "source_missing", not row_data.get("source_tag")
+                )),
+                target_missing=bool(row_data.get(
+                    "target_missing", not row_data.get("target_tag")
+                )),
+            )
             if row_data.get("source_tag") and row_data.get("target_tag") and row_data.get("source_tag") != row_data.get("target_tag"):
                 status, reason = self._tag_mismatch_status(row_data.get("source_tag"), row_data.get("target_tag"))
             row_data["status"] = status
@@ -10951,6 +11061,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self,
         text,
         missing=False,
+        empty_placeholder=None,
         tooltip_translation=None,
         tooltip_pending=False,
         tooltip_state=None,
@@ -10958,7 +11069,13 @@ class SDLXLIFFReviewDialog(QDialog):
         translate_tooltip_callback=None,
         inject_machine_translation_callback=None,
     ):
-        label = QLabel(text if text else ("[missing]" if missing else "[empty]"))
+        label = QLabel(
+            text if text else (
+                str(empty_placeholder)
+                if empty_placeholder is not None
+                else ("[missing]" if missing else "[empty]")
+            )
+        )
         label.setObjectName("SdlReviewSourceRawText")
         label.setTextFormat(Qt.PlainText)
         label.setWordWrap(True)
@@ -12355,6 +12472,10 @@ class SDLXLIFFReviewDialog(QDialog):
         source_label = self._text_label(
             source_text,
             missing=source_missing,
+            empty_placeholder=(
+                "[translator note]"
+                if row_model.get("translator_note") else None
+            ),
             tooltip_translation=tooltip_preview,
             tooltip_pending=tooltip_pending,
             tooltip_state=tooltip_state,

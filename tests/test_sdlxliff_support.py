@@ -871,7 +871,7 @@ def test_sdlxliff_review_user_text_in_empty_dom_slot_is_added_without_offset(tmp
     piece = dialog._build_piece(sidecar, 0, {"output_name": output_name})
 
     assert piece["source_count"] == 4
-    assert piece["target_count"] == 5
+    assert piece["target_count"] == 4
     assert [(row["source"], row["target"]) for row in piece["rows"]] == [
         ("Notice heading", "Notice heading"),
         ("First source paragraph.", "First source paragraph."),
@@ -881,9 +881,31 @@ def test_sdlxliff_review_user_text_in_empty_dom_slot_is_added_without_offset(tmp
     ]
     added = piece["rows"][2]
     assert added["source_tag"] == ""
-    assert added["target_tag"] == "p"
-    assert added["status"] == "red"
-    assert added["reason"] == "dropped/added"
+    assert added["target_tag"] == ""
+    assert added["target_dom_tag"] == "p"
+    assert added["source_tag_label"] == "TN(1)"
+    assert added["target_tag_label"] == "TN(1)"
+    assert added["source_missing"] is False
+    assert added["target_missing"] is False
+    assert added["translator_note"] is True
+    assert added["translator_note_ordinal"] == 1
+    assert added["status"] == "green"
+    assert added["reason"] == "translator note"
+    assert [row["source_tag_label"] for row in piece["rows"]] == [
+        "h1", "p", "TN(1)", "p(2)", "p(3)",
+    ]
+    assert [row["target_tag_label"] for row in piece["rows"]] == [
+        "h1", "p", "TN(1)", "p(2)", "p(3)",
+    ]
+    row_snapshot = dialog._review_row_snapshot(added)
+    row_model = dialog._build_review_piece_render_model_from_rows(
+        [row_snapshot],
+        1200,
+    )["rows"][0]
+    assert row_model["source_missing"] is False
+    assert row_model["target_missing"] is False
+    assert row_model["translator_note"] is True
+    assert dialog._tag_label_text("", "", "TN(1)", "TN(1)") == "TN(1)"
 
 
 def test_sdlxliff_review_inserted_target_node_uses_text_anchor_without_offset(tmp_path):
@@ -911,6 +933,62 @@ def test_sdlxliff_review_inserted_target_node_uses_text_anchor_without_offset(tm
         ("", "User addition."),
         ("Two.", "Two."),
         ("Three.", "Three."),
+    ]
+
+
+def test_sdlxliff_manual_inserted_paragraph_is_translator_note_and_does_not_shift_ordinals(tmp_path):
+    output_name = "response_chapter_manual_inserted.html"
+    source_html = (
+        "<html><body><p>One.</p><p>Two.</p><p>Three.</p></body></html>"
+    )
+    target_html = (
+        "<html><body><p>One.</p><p>User addition one.</p>"
+        "<p>User addition two.</p><p>Two.</p><p>Three.</p></body></html>"
+    )
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter_manual_inserted.xhtml"},
+        source_html,
+        target_html,
+        raise_errors=True,
+    )
+    tree = etree.parse(sidecar)
+    file_element = tree.xpath("//*[local-name()='file']")[0]
+    file_element.set("{urn:glossarion:sdlxliff}manual-editing", "true")
+    tree.write(sidecar, encoding="utf-8", xml_declaration=True)
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    piece = dialog._build_piece(sidecar, 0, {"output_name": output_name})
+
+    assert [(row["source"], row["target"]) for row in piece["rows"]] == [
+        ("One.", "One."),
+        ("", "User addition one."),
+        ("", "User addition two."),
+        ("Two.", "Two."),
+        ("Three.", "Three."),
+    ]
+    first_note, second_note = piece["rows"][1:3]
+    assert first_note["translator_note"] is True
+    assert first_note["translator_note_ordinal"] == 1
+    assert first_note["source_tag"] == ""
+    assert first_note["target_tag"] == ""
+    assert first_note["target_dom_tag"] == "p"
+    assert first_note["source_tag_label"] == "TN(1)"
+    assert first_note["target_tag_label"] == "TN(1)"
+    assert first_note["source_missing"] is False
+    assert first_note["status"] == "green"
+    assert second_note["translator_note"] is True
+    assert second_note["translator_note_ordinal"] == 2
+    assert second_note["source_tag_label"] == "TN(2)"
+    assert second_note["target_tag_label"] == "TN(2)"
+    assert piece["source_count"] == 3
+    assert piece["target_count"] == 3
+    assert [row["source_tag_label"] for row in piece["rows"]] == [
+        "p", "TN(1)", "TN(2)", "p(2)", "p(3)",
+    ]
+    assert [row["target_tag_label"] for row in piece["rows"]] == [
+        "p", "TN(1)", "TN(2)", "p(2)", "p(3)",
     ]
 
 
@@ -2600,6 +2678,18 @@ def test_sdlxliff_review_source_preview_marks_identical_machine_translation(qtbo
 
     labels = widget.findChildren(QLabel)
     assert any(label.text() == "Synthetic title row" for label in labels)
+
+
+def test_sdlxliff_review_translator_note_uses_note_placeholder(qtbot):
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    label = dialog._text_label(
+        "",
+        missing=False,
+        empty_placeholder="[translator note]",
+    )
+    qtbot.addWidget(label)
+
+    assert label.text() == "[translator note]"
 
 
 def test_sdlxliff_review_rejects_untranslated_google_preview_batch():
