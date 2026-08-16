@@ -1715,6 +1715,44 @@ def test_patch_runtime_forced_account_support(tmp_path):
     assert "export async function getAccountByEmail" in manager
 
 
+def test_patch_runtime_forced_account_support_preserves_round_robin_layout(tmp_path):
+    server_file = tmp_path / "src" / "server.ts"
+    manager_file = tmp_path / "src" / "auth" / "manager.ts"
+    server_file.parent.mkdir(parents=True)
+    manager_file.parent.mkdir(parents=True)
+    server_file.write_text(
+        'import { initManager, getBestAccount, getAccounts, removeAccount } from "./auth/manager";\n'
+        '      const requestedRotation = req.headers.get("x-antigravity-rotation")?.trim().toLowerCase();\n'
+        '      const forceRoundRobin = requestedRotation === "round-robin";\n'
+        '      const clientId = forceRoundRobin\n'
+        '        ? undefined\n'
+        '        : req.headers.get("x-client-id") || url.searchParams.get("client_id") || "unknown";\n'
+        '        while (attempts < MAX_ATTEMPTS) {\n'
+        '            let account = await getBestAccount(useCliPool ? "cli" : "sandbox", openaiBody.model, clientId, triedEmails, true, forceRoundRobin);\n'
+        '            if (!account && !isSandboxOnlyModel && !isCliOnlyModel) {\n'
+        '            }\n'
+        '            if (!account) {\n'
+        '                account = await getBestAccount(useCliPool ? "cli" : "sandbox", openaiBody.model, clientId, triedEmails, false, forceRoundRobin);\n'
+        '            }\n',
+        encoding="utf-8",
+    )
+    manager_file.write_text(
+        "export function getAccounts() { return accounts; }\n"
+        "async function ensureAccountReady(account: AntigravityAccount): Promise<AntigravityAccount | null> { return account; }\n",
+        encoding="utf-8",
+    )
+
+    assert antigravity_proxy._patch_runtime_forced_account_support(str(tmp_path))
+
+    server = server_file.read_text(encoding="utf-8")
+    assert "forcedAccountEmail" in server
+    assert "Forced account" in server
+    assert "true, forceRoundRobin" in server
+    assert "false, forceRoundRobin" in server
+    assert "!account && !forcedAccountEmail" in server
+    assert "while (attempts < (forcedAccountEmail ? 1 : MAX_ATTEMPTS))" in server
+
+
 def test_patch_runtime_selected_account_header(tmp_path):
     server_file = tmp_path / "src" / "server.ts"
     server_file.parent.mkdir(parents=True)

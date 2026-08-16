@@ -75,7 +75,7 @@ PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
 PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS = 90
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
 BUN_INSTALL_TIMEOUT_SECONDS = 300
-RUNTIME_PATCH_VERSION = "2026-08-17-round-robin-auto-account-v2"
+RUNTIME_PATCH_VERSION = "2026-08-17-round-robin-forced-account-v3"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -686,38 +686,78 @@ def _patch_runtime_forced_account_support(runtime_dir: str) -> bool:
         )
 
     if "forcedAccountEmail" not in server:
-        needle = '      const clientId = req.headers.get("x-client-id") || url.searchParams.get("client_id") || "unknown";'
-        replacement = (
-            needle
-            + '\n      const forcedAccountEmail = (req.headers.get("x-antigravity-account") '
-            + '|| url.searchParams.get("antigravity_account") || "").trim().toLowerCase();'
+        forced_declaration = (
+            '      const forcedAccountEmail = (req.headers.get("x-antigravity-account") '
+            '|| url.searchParams.get("antigravity_account") || "").trim().toLowerCase();'
         )
-        if needle not in server:
+        rotation_needle = (
+            '      const requestedRotation = req.headers.get("x-antigravity-rotation")'
+            '?.trim().toLowerCase();'
+        )
+        legacy_client_needle = (
+            '      const clientId = req.headers.get("x-client-id") || '
+            'url.searchParams.get("client_id") || "unknown";'
+        )
+        if rotation_needle in server:
+            server = server.replace(
+                rotation_needle,
+                forced_declaration + "\n" + rotation_needle,
+                1,
+            )
+        elif legacy_client_needle in server:
+            server = server.replace(
+                legacy_client_needle,
+                legacy_client_needle + "\n" + forced_declaration,
+                1,
+            )
+        else:
             return False
-        server = server.replace(needle, replacement, 1)
 
-    old_select = '            let account = await getBestAccount(useCliPool ? "cli" : "sandbox", openaiBody.model, clientId, triedEmails, true);'
-    new_select = (
-        '            let account = forcedAccountEmail\n'
-        '                ? await getAccountByEmail(forcedAccountEmail)\n'
-        '                : await getBestAccount(useCliPool ? "cli" : "sandbox", openaiBody.model, clientId, triedEmails, true);\n'
-        '            if (forcedAccountEmail && account) {\n'
-        '                console.log(`[Account] Forced account ${account.email} via X-Antigravity-Account`);\n'
-        '            }'
-    )
-    if old_select in server and "Forced account" not in server:
-        server = server.replace(old_select, new_select, 1)
+    if "Forced account" not in server:
+        account_select_variants = (
+            (
+                '            let account = await getBestAccount(useCliPool ? "cli" : "sandbox", openaiBody.model, clientId, triedEmails, true, forceRoundRobin);',
+                '                : await getBestAccount(useCliPool ? "cli" : "sandbox", openaiBody.model, clientId, triedEmails, true, forceRoundRobin);',
+            ),
+            (
+                '            let account = await getBestAccount(useCliPool ? "cli" : "sandbox", openaiBody.model, clientId, triedEmails, true);',
+                '                : await getBestAccount(useCliPool ? "cli" : "sandbox", openaiBody.model, clientId, triedEmails, true);',
+            ),
+        )
+        for old_select, fallback_select in account_select_variants:
+            if old_select not in server:
+                continue
+            new_select = (
+                '            let account = forcedAccountEmail\n'
+                '                ? await getAccountByEmail(forcedAccountEmail)\n'
+                f'{fallback_select}\n'
+                '            if (forcedAccountEmail && account) {\n'
+                '                console.log(`[Account] Forced account ${account.email} via X-Antigravity-Account`);\n'
+                '            }'
+            )
+            server = server.replace(old_select, new_select, 1)
+            break
 
     server = server.replace(
         "if (!account && !isSandboxOnlyModel && !isCliOnlyModel) {",
         "if (!account && !forcedAccountEmail && !isSandboxOnlyModel && !isCliOnlyModel) {",
         1,
     )
-    server = server.replace(
-        "if (!account) {\n                account = await getBestAccount(useCliPool ? \"cli\" : \"sandbox\", openaiBody.model, clientId, triedEmails, false);\n            }",
-        "if (!account && !forcedAccountEmail) {\n                account = await getBestAccount(useCliPool ? \"cli\" : \"sandbox\", openaiBody.model, clientId, triedEmails, false);\n            }",
-        1,
-    )
+    for fallback_suffix in (", forceRoundRobin", ""):
+        old_fallback = (
+            "if (!account) {\n"
+            "                account = await getBestAccount(useCliPool ? \"cli\" : \"sandbox\", "
+            "openaiBody.model, clientId, triedEmails, false"
+            f"{fallback_suffix});\n"
+            "            }"
+        )
+        if old_fallback in server:
+            server = server.replace(
+                old_fallback,
+                old_fallback.replace("if (!account)", "if (!account && !forcedAccountEmail)"),
+                1,
+            )
+            break
     # A forced account cannot rotate to another account, so repeating the same
     # exhausted request only delays the caller and creates a second retry count.
     server = server.replace(
@@ -731,7 +771,7 @@ def _patch_runtime_forced_account_support(runtime_dir: str) -> bool:
 
     return (
         manager_marker in manager
-        and "getAccountByEmail" in server
+        and "getAccounts, getAccountByEmail, removeAccount" in server
         and "forcedAccountEmail" in server
         and "Forced account" in server
         and "!account && !forcedAccountEmail" in server
