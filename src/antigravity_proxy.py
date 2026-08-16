@@ -3084,8 +3084,9 @@ def _consume_openai_stream(
             for key in ("prompt_tokens", "completion_tokens", "total_tokens")
             if key in usage
         }
+    terminal_metadata_emoji = "🛡️" if finish_reason == "content_filter" else "📊"
     _log(
-        "Antigravity: terminal metadata "
+        f"{terminal_metadata_emoji} Antigravity: terminal metadata "
         f"provider_finish_reason={provider_finish_reason!r}, "
         f"provider_block_reason={provider_block_reason!r}, "
         f"finish_reason={finish_reason!r}, max_tokens={max_tokens!r}, "

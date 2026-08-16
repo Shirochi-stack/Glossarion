@@ -357,6 +357,7 @@ def test_consume_openai_stream_rejects_missing_finish_reason():
 
 
 def test_consume_openai_stream_preserves_missing_provider_reason():
+    logs = []
     response = FakeStreamResponse(
         [
             _sse_event(
@@ -377,13 +378,14 @@ def test_consume_openai_stream_preserves_missing_provider_reason():
 
     result = antigravity_proxy._consume_openai_stream(
         response,
-        log_fn=lambda _: None,
+        log_fn=logs.append,
         log_stream=False,
     )
 
     assert result["finish_reason"] == "content_filter"
     assert result["provider_finish_reason"] is None
     assert result["provider_block_reason"] == "GOOGLE_PROHIBITED_USE_POLICY_MESSAGE"
+    assert any(log.startswith("🛡️ Antigravity: terminal metadata ") for log in logs)
 
 
 def test_forced_antigravity_stream_includes_reasoning_when_thinking_toggle_is_off(monkeypatch):
