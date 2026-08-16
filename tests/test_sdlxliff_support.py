@@ -2876,6 +2876,8 @@ def test_manual_untranslated_sidecar_is_dimmed_and_first_edit_creates_html(tmp_p
     dialog.output_dir = str(tmp_path)
     dialog._last_review_signature = None
     dialog._current_review_signature = lambda: ()
+    dialog._last_autogen_signature = None
+    dialog._current_review_autogen_signature = lambda: ("viewer-save",)
     piece = dialog._build_piece(
         sidecar,
         0,
@@ -2904,6 +2906,7 @@ def test_manual_untranslated_sidecar_is_dimmed_and_first_edit_creates_html(tmp_p
     assert piece["manual_untranslated"] is False
     assert not _is_manual_untranslated_sdlxliff(sidecar)
     assert _is_manual_editing_sdlxliff(sidecar)
+    assert dialog._last_autogen_signature == ("viewer-save",)
     _source, saved_target = dialog._read_sdlxliff_html_pair(sidecar)
     assert "Manually edited output." in saved_target
 
@@ -3412,6 +3415,7 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         {"bold": True, "italic": False, "underline": True},
     )
     assert "padding: 6px 18px 6px 6px" in context_menu.styleSheet()
+    assert "QMenu::indicator { width: 0px; height: 0px; }" in context_menu.styleSheet()
     source_menu_label = context_menu.findChild(QLabel, "SdlNotepadContextSourceText")
     assert source_menu_label is not None
     assert source_menu_label.wordWrap() is True
@@ -3948,6 +3952,74 @@ def test_sdlxliff_viewer_refresh_generates_manual_entries_without_output_html(tm
         manual_entries,
         str(tmp_path / "book.epub"),
     )]
+
+
+def test_sdlxliff_viewer_refresh_only_checks_missing_manual_entries(tmp_path):
+    existing_entry = {
+        "status": "not_translated",
+        "filename": "chapter0001.xhtml",
+        "output_file": "response_chapter0001.html",
+    }
+    missing_entry = {
+        "status": "not_translated",
+        "filename": "chapter0002.xhtml",
+        "output_file": "response_chapter0002.html",
+    }
+    (tmp_path / "response_chapter0001.html").write_text(
+        "<html><body><p>Already being edited.</p></body></html>",
+        encoding="utf-8",
+    )
+
+    class Owner:
+        config = {"retain_source_extension": False}
+
+        def __init__(self):
+            self.entries = []
+
+        def _generate_sdlxliff_sidecars_from_untranslated_entries(
+            self,
+            _output_dir,
+            entries,
+            file_path=None,
+            progress_callback=None,
+        ):
+            self.entries.extend(entries)
+            return {
+                "total": len(entries),
+                "considered": len(entries),
+                "created": len(entries),
+                "skipped": 0,
+                "missing_source": 0,
+                "missing_output": 0,
+                "failed": 0,
+                "paths": [],
+                "errors": [],
+            }
+
+    owner = Owner()
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._config = {dialog.MANUAL_EDITING_CONFIG_KEY: True}
+    dialog._sdlxliff_autogen_owner = owner
+    dialog._sdlxliff_autogen_file_path = None
+    dialog._sdlxliff_autogen_manual_entries = [existing_entry, missing_entry]
+    dialog._book_index = -1
+    dialog._book_entries = []
+
+    stats = dialog._regenerate_manual_review_sidecars_for_refresh_scan()
+
+    assert stats["total"] == 1
+    assert owner.entries == [missing_entry]
+
+    # Once the second output exists, an auto-refresh must not invoke the
+    # bulk generator at all (and therefore cannot flash skipped progress).
+    (tmp_path / "response_chapter0002.html").write_text(
+        "<html><body><p>Now being edited too.</p></body></html>",
+        encoding="utf-8",
+    )
+    owner.entries.clear()
+    assert dialog._regenerate_manual_review_sidecars_for_refresh_scan() is None
+    assert owner.entries == []
 
 
 def test_retranslation_sdlxliff_generation_skips_current_sidecar_even_with_overwrite(tmp_path, monkeypatch):

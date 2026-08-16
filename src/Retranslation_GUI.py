@@ -1930,6 +1930,54 @@ class SDLXLIFFReviewDialog(QDialog):
         generator = getattr(owner, "_generate_sdlxliff_sidecars_from_untranslated_entries", None)
         if not callable(generator):
             return None
+
+        # Auto-refresh runs every few seconds. Passing the full Progress
+        # Manager list here made every ordinary editor save replay a visible
+        # "Skipped SDLXLIFF n/total" sweep across the entire book. The manual
+        # generator never overwrites an existing output or sidecar, so filter
+        # those entries before invoking it instead of paying to rediscover the
+        # same fact one item at a time.
+        retain_source_extension = (
+            str(os.getenv("RETAIN_SOURCE_EXTENSION", "0")).strip().lower()
+            in {"1", "true", "yes", "on"}
+            or bool((getattr(owner, "config", {}) or {}).get(
+                "retain_source_extension",
+                False,
+            ))
+        )
+        existing_sidecars = _existing_sdlxliff_sidecars_by_logical_output(
+            self.output_dir
+        )
+        missing_entries = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            status = str(entry.get("status", "") or "").strip().lower()
+            if status not in {
+                "not_translated", "not translated", "not_completed", "pending",
+            }:
+                continue
+            output_name = _manual_editing_output_filename(
+                entry,
+                entry.get("output_file"),
+                retain_source_extension,
+            )
+            if not str(output_name or "").lower().endswith(
+                _PROGRESS_READER_HTML_EXTENSIONS
+            ):
+                continue
+            output_path = os.path.normpath(os.path.join(
+                self.output_dir or "",
+                str(output_name).replace("/", os.sep),
+            ))
+            if os.path.isfile(output_path):
+                continue
+            if _sdlxliff_logical_output_key(output_name) in existing_sidecars:
+                continue
+            missing_entries.append(entry)
+        if not missing_entries:
+            return None
+
         file_path = getattr(self, "_sdlxliff_autogen_file_path", None)
         try:
             if 0 <= self._book_index < len(self._book_entries):
@@ -1938,7 +1986,7 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
         return generator(
             self.output_dir,
-            entries,
+            missing_entries,
             file_path=file_path,
             progress_callback=self._emit_review_generation_progress,
         )
@@ -10519,6 +10567,14 @@ class SDLXLIFFReviewDialog(QDialog):
             self._last_review_signature = self._current_review_signature()
         except Exception:
             pass
+        try:
+            # This method writes both the sidecar and its output HTML. Record
+            # the resulting auto-generation signature so the background
+            # watcher does not mistake our own save for an external output
+            # change and immediately regenerate what was just edited.
+            self._last_autogen_signature = self._current_review_autogen_signature()
+        except Exception:
+            pass
         return target_html
 
     def _apply_target_edit(self, piece_index, row_index, text):
@@ -11778,6 +11834,7 @@ class SDLXLIFFReviewDialog(QDialog):
             }
             QMenu::item:selected { background: #34465a; }
             QMenu::item:disabled { color: #657180; }
+            QMenu::indicator { width: 0px; height: 0px; }
             QMenu::separator { height: 1px; background: #3f4956; margin: 6px 5px; }
         """)
 
