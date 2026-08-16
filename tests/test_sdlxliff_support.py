@@ -1749,8 +1749,7 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "QLineEdit.Password" in source
     assert "from google_free_translate import GoogleFreeTranslateNew" in source
     assert 'name="sdlxliff-machine-translation-preview"' in source
-    assert "batch_html = self._tooltip_batch_html(batch)" in source
-    assert "_translate_tooltip_work_with_retry" in source
+    assert "batch_html = self._tooltip_batch_html(work)" in source
     assert "result = translator.translate(batch_html)" in source
     assert 'data-sdl-tip="' in source
     assert "self._review_loading_minimum_ms = 10" in source
@@ -2909,8 +2908,6 @@ def test_manual_editing_sidecar_machine_translation_preview_button(tmp_path, mon
             soup = BeautifulSoup(batch_html, "html.parser")
             nodes = soup.find_all(attrs={"data-sdl-tip": True})
             cls.call_sizes.append(len(nodes))
-            if len(nodes) > 3:
-                return {"translatedText": batch_html}
             for node in nodes:
                 node.string = f"Manual sidecar preview {node['data-sdl-tip']}."
             return {"translatedText": str(soup)}
@@ -2937,8 +2934,7 @@ def test_manual_editing_sidecar_machine_translation_preview_button(tmp_path, mon
         lambda: not dialog._tooltip_translation_running,
         timeout=5000,
     )
-    assert Translator.call_sizes[0] == 12
-    assert max(Translator.call_sizes[1:]) <= 6
+    assert Translator.call_sizes == [12]
     assert all(
         row["tooltip_translation"].startswith("Manual sidecar preview ")
         for row in dialog.pieces[0]["rows"]

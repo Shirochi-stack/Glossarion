@@ -1274,9 +1274,6 @@ class SDLXLIFFReviewDialog(QDialog):
         while who whom whose will with would you your yours
     """.split())
     MACHINE_TRANSLATION_PENDING_TEXT = "⏳ Generating machine translation preview..."
-    MACHINE_TRANSLATION_MANUAL_BATCH_MAX_ROWS = 40
-    MACHINE_TRANSLATION_MANUAL_BATCH_MAX_CHARS = 3500
-    MACHINE_TRANSLATION_MANUAL_MAX_ATTEMPTS = 96
     MANUAL_REFRESH_BUTTON_TEXT = "↻ Refresh"
     MANUAL_EDITING_CONFIG_KEY = "retranslation_manual_editing"
     _SDLXLIFF_AUTOGEN_STATUSES = {
@@ -8690,113 +8687,6 @@ class SDLXLIFFReviewDialog(QDialog):
             )
         return valid, ""
 
-    def _translate_tooltip_work_with_retry(
-        self,
-        translator,
-        work,
-        adaptive=False,
-        progress_callback=None,
-    ):
-        """Translate preview rows, splitting provider-refused manual batches."""
-        work = list(work or [])
-        if not work:
-            return {}, ""
-
-        pending = []
-        if adaptive:
-            current_batch = []
-            current_chars = 0
-            for item in work:
-                source_chars = len(
-                    html_lib.escape(str(item[2] or ""), quote=False)
-                ) + 80
-                if current_batch and (
-                    len(current_batch) >= self.MACHINE_TRANSLATION_MANUAL_BATCH_MAX_ROWS
-                    or current_chars + source_chars
-                    > self.MACHINE_TRANSLATION_MANUAL_BATCH_MAX_CHARS
-                ):
-                    pending.append(current_batch)
-                    current_batch = []
-                    current_chars = 0
-                current_batch.append(item)
-                current_chars += source_chars
-            if current_batch:
-                pending.append(current_batch)
-        else:
-            pending = [work]
-        translated_by_key = {}
-        terminal_errors = []
-        result_notes = []
-        completed_batches = 0
-
-        while pending:
-            batch = pending.pop(0)
-            batch_html = self._tooltip_batch_html(batch)
-            result = translator.translate(batch_html)
-            result_error = (
-                str(result.get("error") or "").strip()
-                if isinstance(result, dict)
-                else ""
-            )
-            result_note = self._machine_translation_result_note(result)
-            if result_note and result_note not in result_notes:
-                result_notes.append(result_note)
-            translated_html = (
-                str(result.get("translatedText") or "").strip()
-                if isinstance(result, dict)
-                else ""
-            )
-            batch_translations = self._extract_tooltip_batch_translations(
-                translated_html,
-                batch,
-            )
-            batch_translations, validation_error = (
-                self._validate_tooltip_batch_translations(
-                    batch_translations,
-                    batch,
-                )
-            )
-            if result_error:
-                batch_translations = {}
-
-            translated_by_key.update(batch_translations)
-            missing = [
-                item for item in batch
-                if item[1] not in batch_translations
-            ]
-            retry_validation_failure = bool(
-                adaptive
-                and not result_error
-                and missing
-                and len(batch) > 1
-                and completed_batches + len(pending) + 2
-                <= self.MACHINE_TRANSLATION_MANUAL_MAX_ATTEMPTS
-                and (
-                    validation_error
-                    or len(batch_translations) < len(batch)
-                )
-            )
-            if retry_validation_failure:
-                midpoint = max(1, len(missing) // 2)
-                retry_batches = [missing[:midpoint], missing[midpoint:]]
-                pending[0:0] = [retry for retry in retry_batches if retry]
-            else:
-                batch_error = result_error or validation_error
-                if batch_error and batch_error not in terminal_errors:
-                    terminal_errors.append(batch_error)
-
-            completed_batches += 1
-            if callable(progress_callback):
-                progress_callback(
-                    completed_batches,
-                    completed_batches + len(pending),
-                )
-
-        error = " ".join(terminal_errors)
-        for note in result_notes:
-            error = self._append_machine_translation_note(error, note)
-        return translated_by_key, error
-
     def _current_piece_row(self):
         try:
             return self.piece_list.currentRow()
@@ -9158,7 +9048,6 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
         self._mark_tooltip_translation_pending(row, work)
-        adaptive = bool(self.pieces[row].get("manual_editing"))
 
         def _worker():
             translations = {}
@@ -9169,12 +9058,20 @@ class SDLXLIFFReviewDialog(QDialog):
                     self._tooltip_translation_status.emit(row, work_keys, str(message or ""))
 
                 translator = self._machine_translation_translator(target_code, status_callback=_status)
-                translations, error = self._translate_tooltip_work_with_retry(
-                    translator,
-                    work,
-                    adaptive=adaptive,
-                    progress_callback=lambda done, total: self._tooltip_translation_progress.emit(done, total),
-                )
+                batch_html = self._tooltip_batch_html(work)
+                result = translator.translate(batch_html)
+                result_error = str(result.get("error") or "").strip() if isinstance(result, dict) else ""
+                result_note = self._machine_translation_result_note(result)
+                translated_html = str(result.get("translatedText") or "").strip() if isinstance(result, dict) else ""
+                translations = self._extract_tooltip_batch_translations(translated_html, work)
+                translations, validation_error = self._validate_tooltip_batch_translations(translations, work)
+                if result_error:
+                    error = result_error
+                    translations = {}
+                elif validation_error:
+                    error = validation_error
+                error = self._append_machine_translation_note(error, result_note)
+                self._tooltip_translation_progress.emit(1, 1)
             except Exception as exc:
                 error = str(exc)
             self._tooltip_translation_finished.emit(row, translations, error)
@@ -9236,11 +9133,19 @@ class SDLXLIFFReviewDialog(QDialog):
                 translations = {}
                 error = ""
                 try:
-                    translations, error = self._translate_tooltip_work_with_retry(
-                        translator,
-                        work,
-                        adaptive=bool(self.pieces[piece_index].get("manual_editing")),
-                    )
+                    batch_html = self._tooltip_batch_html(work)
+                    result = translator.translate(batch_html)
+                    result_error = str(result.get("error") or "").strip() if isinstance(result, dict) else ""
+                    result_note = self._machine_translation_result_note(result)
+                    translated_html = str(result.get("translatedText") or "").strip() if isinstance(result, dict) else ""
+                    translations = self._extract_tooltip_batch_translations(translated_html, work)
+                    translations, validation_error = self._validate_tooltip_batch_translations(translations, work)
+                    if result_error:
+                        error = result_error
+                        translations = {}
+                    elif validation_error:
+                        error = validation_error
+                    error = self._append_machine_translation_note(error, result_note)
                     translated_count += len(translations)
                 except Exception as exc:
                     error = str(exc)
