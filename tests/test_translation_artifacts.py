@@ -1,11 +1,13 @@
 import json
 import os
+import threading
 from pathlib import Path
 
 import pytest
 
 import other_settings
 import Retranslation_GUI as retranslation_gui_module
+import TransateKRtoEN as translation_module
 from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS, mask_whitelisted_emoticons
 
 from Retranslation_GUI import (
@@ -13,6 +15,7 @@ from Retranslation_GUI import (
     _progress_entry_has_raw_foreign_text_qa,
 )
 from TransateKRtoEN import (
+    BatchTranslationProcessor,
     ProgressManager,
     _apply_partial_refinement_response,
     _append_partial_b_translation_artifact_chapters,
@@ -226,6 +229,208 @@ def test_preserved_source_wins_over_streamed_blocked_text(monkeypatch):
         error=error,
         fallback="[CONTENT BLOCKED]",
     ) == "raw source"
+
+
+def _run_batch_chapter_failure(
+    tmp_path,
+    monkeypatch,
+    *,
+    provider_text="streamed response",
+    finish_reason="prohibited_content",
+    raised_error=None,
+):
+    class Config:
+        MODEL = "gpt-test"
+        BATCH_SIZE = 1
+        CONTEXTUAL = False
+        HIST_LIMIT = 0
+        ENABLE_IMAGE_TRANSLATION = False
+        USE_ROLLING_SUMMARY = False
+        ASSISTANT_PROMPT = ""
+        INCLUDE_PREVIOUS_CHUNK = False
+        TEMP = 0
+        MAX_OUTPUT_TOKENS = 1024
+        MAX_RETRY_TOKENS = 1024
+
+        @staticmethod
+        def get_system_prompt(actual_merge_count=1):
+            return "Translate."
+
+        @staticmethod
+        def get_effective_output_limit():
+            return 4096
+
+        @staticmethod
+        def get_effective_compression_factor():
+            return 1
+
+    class Client:
+        def send(self, messages, temperature=None, max_tokens=None, context=None):
+            if raised_error is not None:
+                raise raised_error
+            return provider_text, finish_reason
+
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.setenv("SEND_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("ORDER_BATCH_REQUESTS_BY_SPINE", "0")
+    monkeypatch.setenv("CHAR_RATIO_TRUNCATION_ENABLED", "0")
+    monkeypatch.setenv("DIRECT_TEXT_ACTIVE", "0")
+    monkeypatch.setattr(
+        translation_module.ContentProcessor,
+        "image_processing_html",
+        staticmethod(lambda chapter: chapter["body"]),
+    )
+    monkeypatch.setattr(
+        translation_module.ContentProcessor,
+        "is_mostly_image_html",
+        staticmethod(lambda _body: False),
+    )
+    monkeypatch.setattr(
+        translation_module,
+        "_split_chapter_for_translation",
+        lambda _splitter, chapter, _tokens, filename=None: [
+            (chapter["body"], 1, 1)
+        ],
+    )
+    monkeypatch.setattr(translation_module, "find_glossary_file", lambda _out: None)
+    monkeypatch.setattr(
+        translation_module,
+        "build_system_prompt",
+        lambda base, *_args, **_kwargs: base,
+    )
+    monkeypatch.setattr(
+        translation_module,
+        "apply_emergency_glossary_compliance",
+        lambda text, _out: text,
+    )
+    monkeypatch.setattr(
+        translation_module,
+        "_build_translation_chunk_prompt_parts",
+        lambda system_prompt, chunk, *_args, **_kwargs: (
+            system_prompt,
+            [],
+            chunk,
+        ),
+    )
+
+    progress_updates = []
+    processor = BatchTranslationProcessor(
+        Config(),
+        Client(),
+        [],
+        str(tmp_path),
+        threading.RLock(),
+        lambda: None,
+        lambda *args, **kwargs: progress_updates.append((args, kwargs)),
+        lambda: False,
+    )
+    source = "<p>원문 그대로</p>"
+    result = processor.process_single_chapter(
+        (
+            0,
+            {
+                "num": 1,
+                "actual_chapter_num": 1,
+                "body": source,
+                "filename": "chapter001.xhtml",
+                "original_basename": "chapter001.xhtml",
+            },
+        )
+    )
+    output_files = [path for path in tmp_path.iterdir() if path.is_file()]
+    assert result[0] is False
+    assert progress_updates[-1][1]["status"] in {"qa_failed", "failed"}
+    assert len(output_files) == 1
+    return source, output_files[0].read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "save_partial", "save_prohibited"),
+    [
+        ("prohibited_content", "0", "1"),
+        ("length", "1", "0"),
+    ],
+)
+def test_batch_failure_toggles_save_provider_output(
+    tmp_path,
+    monkeypatch,
+    finish_reason,
+    save_partial,
+    save_prohibited,
+):
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "0")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", save_partial)
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", save_prohibited)
+    monkeypatch.setenv("RETRY_TRUNCATED", "1")
+
+    _source, saved = _run_batch_chapter_failure(
+        tmp_path,
+        monkeypatch,
+        finish_reason=finish_reason,
+    )
+
+    assert saved == "streamed response"
+
+
+@pytest.mark.parametrize(
+    "finish_reason",
+    ["prohibited_content", "length", "error"],
+)
+def test_batch_preserve_original_wins_for_every_returned_failure(
+    tmp_path,
+    monkeypatch,
+    finish_reason,
+):
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", "0")
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", "0")
+    monkeypatch.setenv("RETRY_TRUNCATED", "1")
+
+    source, saved = _run_batch_chapter_failure(
+        tmp_path,
+        monkeypatch,
+        finish_reason=finish_reason,
+    )
+
+    assert saved == source
+
+
+def test_batch_raised_api_error_saves_streamed_text(tmp_path, monkeypatch):
+    from unified_api_client import UnifiedClientError
+
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "0")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", "0")
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", "1")
+    error = UnifiedClientError(
+        "provider API error",
+        error_type="api_error",
+        details={"partial_content": "streamed before API error"},
+    )
+
+    _source, saved = _run_batch_chapter_failure(
+        tmp_path,
+        monkeypatch,
+        raised_error=error,
+    )
+
+    assert saved == "streamed before API error"
+
+
+def test_batch_preserve_original_handles_unclassified_exception(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", "0")
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", "0")
+
+    source, saved = _run_batch_chapter_failure(
+        tmp_path,
+        monkeypatch,
+        raised_error=RuntimeError("unexpected provider crash"),
+    )
+
+    assert saved == source
 
 
 def test_google_free_failure_is_preserved_and_stays_a_failure(monkeypatch):

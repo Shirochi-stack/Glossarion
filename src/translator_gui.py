@@ -33109,6 +33109,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SPLIT_FAILED_RETRY_ATTEMPTS': str(max(1, int(str(getattr(self, 'split_failed_retry_attempts_var', self.config.get('split_failed_retry_attempts', '1'))).strip() or "1"))),
             'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var else "0",
             'PRESERVE_ORIGINAL_TEXT_ON_FAILURE': "1" if self.preserve_original_text_var else "0",
+            'SAVE_PARTIAL_RESULTS': "1" if getattr(self, 'save_partial_results_var', True) else "0",
+            'SAVE_PROHIBITED_RESULTS': "1" if getattr(self, 'save_prohibited_results_var', False) else "0",
             'DISABLE_EMPTY_SAFETY_HEURISTIC': "1" if getattr(self, 'disable_empty_safety_heuristic_var', True) else "0",
             'DISABLE_QA_MARKER_CHECKS': "1" if getattr(self, 'disable_qa_marker_checks_var', True) else "0",
             'QA_MARKER_LENGTH_LIMIT': str(getattr(self, 'qa_marker_length_limit_var', '500')),
@@ -45419,6 +45421,7 @@ Important rules:
 
                 # Retry/network controls
                 ('RETRY_TRUNCATED', '1' if getattr(self, 'retry_truncated_var', False) else '0'),
+                ('PRESERVE_ORIGINAL_TEXT_ON_FAILURE', '1' if getattr(self, 'preserve_original_text_var', False) else '0'),
                 ('SAVE_PARTIAL_RESULTS', '1' if getattr(self, 'save_partial_results_var', True) else '0'),
                 ('SAVE_PROHIBITED_RESULTS', '1' if getattr(self, 'save_prohibited_results_var', False) else '0'),
                 ('DISABLE_EMPTY_SAFETY_HEURISTIC', '1' if getattr(self, 'disable_empty_safety_heuristic_var', True) else '0'),

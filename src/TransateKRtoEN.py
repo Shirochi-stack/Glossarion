@@ -1761,6 +1761,16 @@ class TranslationConfig:
         self.EMERGENCY_RESTORE = os.getenv("EMERGENCY_PARAGRAPH_RESTORE", "1") == "1"
         self.BATCH_TRANSLATION = os.getenv("BATCH_TRANSLATION", "0") == "1"  
         self.BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
+        # Snapshot failure-output settings on the run config as well as keeping
+        # their environment bridge. Batch workers run on nested threads, so the
+        # config object is the stable source of truth for the whole run.
+        self.preserve_original_text_on_failure = os.getenv(
+            "PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "0"
+        ) == "1"
+        self.save_partial_results = os.getenv("SAVE_PARTIAL_RESULTS", "0") == "1"
+        self.save_prohibited_results = os.getenv(
+            "SAVE_PROHIBITED_RESULTS", "0"
+        ) == "1"
         self.BATCHING_MODE = os.getenv("BATCHING_MODE", "aggressive")
         self.BATCH_GROUP_SIZE = int(os.getenv("BATCH_GROUP_SIZE", os.getenv("CONSERVATIVE_BATCH_GROUP_SIZE", "3")))
         try:
@@ -8584,6 +8594,14 @@ class BatchTranslationProcessor:
         chapter_truncated = False
         graceful_stop_qa_issue = None
         chap_num = chapter["num"]
+        # Keep an immutable snapshot for Preserve Original Text. Later image,
+        # glossary, and chunk preprocessing may mutate ``chapter`` or derive a
+        # different request body; failure preservation must still write the
+        # exact source chapter supplied to this worker.
+        original_chapter_body = chapter.get("body", "")
+        if not isinstance(original_chapter_body, str):
+            original_chapter_body = ""
+        chapter_body = original_chapter_body
         
         # Use the pre-calculated actual_chapter_num from the main loop
         actual_num = chapter.get('actual_chapter_num')
@@ -8717,9 +8735,14 @@ class BatchTranslationProcessor:
                 vision_qa_issues = _vision_finish_reason_qa_issues(vision_finish_reason)
                 if vision_qa_issues:
                     if _vision_should_save_partial_for_qa(vision_qa_issues, self.config):
+                        failure_output = _failure_output_for_save(
+                            chapter_body,
+                            original_chapter_body,
+                            self.config,
+                        )
                         try:
                             with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                                f.write(chapter_body if isinstance(chapter_body, str) else "")
+                                f.write(failure_output)
                         except Exception:
                             pass
                     with self.progress_lock:
@@ -8738,6 +8761,20 @@ class BatchTranslationProcessor:
                 )
                 if vision_combined_failure:
                     qa_issue = [str(vision_combined_failure or "EMPTY_OUTPUT").upper()]
+                    if _should_save_failure_response(
+                        config=self.config,
+                        qa_issue=qa_issue,
+                    ):
+                        failure_output = _failure_output_for_save(
+                            "",
+                            original_chapter_body,
+                            self.config,
+                        )
+                        try:
+                            with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                                f.write(failure_output)
+                        except Exception:
+                            pass
                     with self.progress_lock:
                         self.update_progress_fn(
                             chapter_progress_idx, actual_num, content_hash, fname,
@@ -9855,7 +9892,7 @@ class BatchTranslationProcessor:
                                 had_partial_content = isinstance(partial_content, str) and bool(partial_content)
                                 partial_content = _failure_output_for_save(
                                     partial_content,
-                                    chunk_html,
+                                    original_chapter_body,
                                     self.config,
                                 )
                                 if partial_content:
@@ -9920,7 +9957,7 @@ class BatchTranslationProcessor:
                             if save_failure_results:
                                 failure_output = _failure_output_for_save(
                                     result,
-                                    chunk_html,
+                                    original_chapter_body,
                                     self.config,
                                 )
                                 try:
@@ -9944,10 +9981,19 @@ class BatchTranslationProcessor:
                             chunk_abort_event.set()
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                             print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Timeout - aborting chapter")
-                            if _preserve_original_text_on_failure_enabled(self.config):
+                            if _should_save_failure_response(
+                                result,
+                                config=self.config,
+                                qa_issue=["TIMEOUT"],
+                            ):
+                                failure_output = _failure_output_for_save(
+                                    result,
+                                    original_chapter_body,
+                                    self.config,
+                                )
                                 try:
                                     with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                                        f.write(chunk_html if isinstance(chunk_html, str) else "")
+                                        f.write(failure_output)
                                 except Exception:
                                     pass
                             with self.progress_lock:
@@ -9972,7 +10018,7 @@ class BatchTranslationProcessor:
                             if save_truncated_result:
                                 failure_output = _failure_output_for_save(
                                     result,
-                                    chunk_html,
+                                    original_chapter_body,
                                     self.config,
                                 )
                                 try:
@@ -10207,9 +10253,25 @@ class BatchTranslationProcessor:
             
             # Check for empty or failed response BEFORE writing to disk
             if not cleaned or not str(cleaned).strip():
-                print(f"❌ Batch: Translation empty for chapter {actual_num} — skipping file write")
+                print(f"❌ Batch: Translation empty for chapter {actual_num}")
+                fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                if _should_save_failure_response(
+                    cleaned,
+                    config=self.config,
+                    qa_issue=["EMPTY_OUTPUT"],
+                ):
+                    failure_output = _failure_output_for_save(
+                        cleaned,
+                        original_chapter_body,
+                        self.config,
+                    )
+                    try:
+                        with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                            f.write(failure_output)
+                    except Exception:
+                        pass
                 with self.progress_lock:
-                    self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, None, status="qa_failed", qa_issues_found=["EMPTY_OUTPUT"])
+                    self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="qa_failed", qa_issues_found=["EMPTY_OUTPUT"])
                     self.save_progress_fn()
                 return False, actual_num, None, None, None
 
@@ -10227,13 +10289,11 @@ class BatchTranslationProcessor:
                         try:
                             failure_output = _failure_output_for_save(
                                 cleaned,
-                                chapter_body,
+                                original_chapter_body,
                                 self.config,
                             )
-                            write_utf8_html_file(
-                                os.path.join(self.out_dir, fname),
-                                failure_output,
-                            )
+                            with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                                f.write(failure_output)
                         except Exception:
                             pass
                     self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="qa_failed", ai_features=ai_features)
@@ -10302,14 +10362,11 @@ class BatchTranslationProcessor:
                 if should_save_result:
                     failure_output = _failure_output_for_save(
                         cleaned,
-                        chapter_body,
+                        original_chapter_body,
                         self.config,
                     )
-                    if self.is_text_file:
-                        with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                            f.write(failure_output)
-                    else:
-                        write_utf8_html_file(os.path.join(self.out_dir, fname), failure_output)
+                    with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                        f.write(failure_output)
                     print(f"💾 Saved Chapter {actual_num} ({qa_label}): {fname} ({len(failure_output)} chars)")
                 else:
                     print(f"⏭️ Chapter {actual_num} not saved ({qa_label}) — failure-output saving is OFF")
@@ -10447,44 +10504,31 @@ class BatchTranslationProcessor:
                     self.save_progress_fn()
                 return False, actual_num, None, None, None
 
+            qa_issue = _runtime_failure_qa_issue(e)
+            streamed_failure_content = _streamed_failure_content_from_error(e)
             with self.progress_lock:
                 # Use the same output filename so we can track failed chapters properly
                 fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                if _preserve_original_text_on_failure_enabled(self.config):
+                if _should_save_failure_response(
+                    streamed_failure_content,
+                    failure_reason=error_msg,
+                    config=self.config,
+                    qa_issue=qa_issue,
+                ):
+                    failure_output = _failure_output_for_save(
+                        streamed_failure_content,
+                        original_chapter_body,
+                        self.config,
+                    )
                     try:
-                        write_utf8_html_file(
-                            os.path.join(self.out_dir, fname),
-                            chapter_body if isinstance(chapter_body, str) else "",
-                        )
+                        with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                            f.write(failure_output)
                     except Exception:
                         pass
-                # Check if it's a timeout failure
-                if "[TIMEOUT]" in error_msg or error_type == 'timeout':
+                if qa_issue:
                     self.update_progress_fn(
                         chapter_progress_idx, actual_num, content_hash, fname,
-                        status="qa_failed", qa_issues_found=["TIMEOUT"], chapter_obj=chapter
-                    )
-                elif (
-                    "finish_reason='length'" in error_msg
-                    or 'finish_reason="length"' in error_msg
-                    or "finish_reason=max_tokens" in error_lower
-                    or "finish_reason='max_tokens'" in error_msg
-                    or "response was truncated" in error_lower
-                    or "max_tokens" in error_lower
-                ):
-                    self.update_progress_fn(
-                        chapter_progress_idx, actual_num, content_hash, fname,
-                        status="qa_failed", qa_issues_found=["TRUNCATED"], chapter_obj=chapter
-                    )
-                elif error_type == 'prohibited_content' or 'prohibited_content' in error_lower or 'content_filter' in error_lower:
-                    self.update_progress_fn(
-                        chapter_progress_idx, actual_num, content_hash, fname,
-                        status="qa_failed", qa_issues_found=["PROHIBITED_CONTENT"], chapter_obj=chapter
-                    )
-                elif error_type in ('api_error', 'validation') or 'api_error' in error_lower or 'invalid_argument' in error_lower:
-                    self.update_progress_fn(
-                        chapter_progress_idx, actual_num, content_hash, fname,
-                        status="qa_failed", qa_issues_found=["API_ERROR"], chapter_obj=chapter
+                        status="qa_failed", qa_issues_found=qa_issue, chapter_obj=chapter
                     )
                 else:
                     self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="failed")
@@ -10492,7 +10536,8 @@ class BatchTranslationProcessor:
 
             # Print consolidated error message
             if total_chunks > 1:
-                print(f"❌ Chapter {actual_num} failed (chunk {chunk_idx}/{total_chunks}): {e}")
+                failed_chunk_idx = locals().get("chunk_idx", "?")
+                print(f"❌ Chapter {actual_num} failed (chunk {failed_chunk_idx}/{total_chunks}): {e}")
             else:
                 print(f"❌ Chapter {actual_num} failed: {e}")
             # No history for failed chapters
@@ -11130,20 +11175,28 @@ class BatchTranslationProcessor:
                         or is_api_error_failure(cleaned, failure_reason)
                     )
                     if should_save:
-                        parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                        try:
-                            failure_output = _failure_output_for_save(
-                                cleaned,
-                                merged_content,
-                                self.config,
-                            )
-                            cleaned_to_save = ContentProcessor.strip_split_markers(failure_output)
-                            write_utf8_html_file(
-                                os.path.join(self.out_dir, parent_fname),
-                                cleaned_to_save if isinstance(cleaned_to_save, str) else "",
-                            )
-                        except Exception:
-                            pass
+                        if _preserve_original_text_on_failure_enabled(self.config):
+                            for actual_num, _, _, chapter, _ in chapters_data:
+                                chapter_fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                                raw_source = chapter.get("body", "")
+                                try:
+                                    with open(os.path.join(self.out_dir, chapter_fname), 'w', encoding='utf-8') as f:
+                                        f.write(raw_source if isinstance(raw_source, str) else "")
+                                except Exception:
+                                    pass
+                        else:
+                            parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                            try:
+                                failure_output = _failure_output_for_save(
+                                    cleaned,
+                                    merged_content,
+                                    self.config,
+                                )
+                                cleaned_to_save = ContentProcessor.strip_split_markers(failure_output)
+                                with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
+                                    f.write(cleaned_to_save if isinstance(cleaned_to_save, str) else "")
+                            except Exception:
+                                pass
                     elif not block_failure_debug_save and not is_only_error_marker and cleaned_stripped:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
@@ -11209,7 +11262,8 @@ class BatchTranslationProcessor:
                                 self.config,
                             )
                             cleaned_to_save = ContentProcessor.strip_split_markers(failure_output)
-                            write_utf8_html_file(os.path.join(self.out_dir, parent_fname), cleaned_to_save)
+                            with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
+                                f.write(cleaned_to_save)
                         except Exception:
                             pass
 
@@ -11270,6 +11324,9 @@ class BatchTranslationProcessor:
                         # Save the section
                         section_path = os.path.join(self.out_dir, fname)
                         if getattr(self, 'is_text_file', False):
+                            with open(section_path, 'w', encoding='utf-8') as f:
+                                f.write(section_content)
+                        elif merged_truncated:
                             with open(section_path, 'w', encoding='utf-8') as f:
                                 f.write(section_content)
                         else:
@@ -11338,7 +11395,8 @@ class BatchTranslationProcessor:
                             with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
                                 f.write(text_content)
                         else:
-                            write_utf8_html_file(os.path.join(self.out_dir, fname), failure_output)
+                            with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                                f.write(failure_output)
                         print(f"   💾 Saved merged content (truncated) to Chapter {parent_actual_num}: {saved_name} ({len(failure_output)} chars)")
                     else:
                         print(f"   ⏭️ Merged content for Chapter {parent_actual_num} not saved (truncated) — failure-output saving is OFF")
@@ -11446,12 +11504,67 @@ class BatchTranslationProcessor:
                 return results
 
             print(f"Merged group failed: {e} (NOTE: API Error triggered cancellation logic)")
-            # Mark all chapters as failed
+            qa_issue = _runtime_failure_qa_issue(e)
+            streamed_failure_content = _streamed_failure_content_from_error(e)
+            should_save_failure = _should_save_failure_response(
+                streamed_failure_content,
+                failure_reason=error_msg,
+                config=self.config,
+                qa_issue=qa_issue,
+            )
+
+            if _preserve_original_text_on_failure_enabled(self.config):
+                # A merged request still represents separate output chapters.
+                # Preserve each chapter's own raw body rather than one synthetic
+                # request containing split markers and preprocessing changes.
+                for actual_num, _, _, chapter, _ in chapters_data:
+                    fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                    raw_source = chapter.get("body", "")
+                    try:
+                        with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                            f.write(raw_source if isinstance(raw_source, str) else "")
+                    except Exception:
+                        pass
+            elif should_save_failure and chapters_data:
+                # Streamed text belongs to the combined request, so keep it in
+                # the parent artifact just as successful merged output is kept.
+                actual_num, source_content, _, chapter, _ = chapters_data[0]
+                fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                failure_output = _failure_output_for_save(
+                    streamed_failure_content,
+                    source_content,
+                    self.config,
+                )
+                try:
+                    with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                        f.write(failure_output)
+                except Exception:
+                    pass
+
+            # Mark all chapters with the same provider failure classification.
             results = []
             for actual_num, _, idx, chapter, content_hash in chapters_data:
                 with self.progress_lock:
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="failed", chapter_obj=chapter)
+                    if qa_issue:
+                        self.update_progress_fn(
+                            idx,
+                            actual_num,
+                            content_hash,
+                            fname,
+                            status="qa_failed",
+                            qa_issues_found=qa_issue,
+                            chapter_obj=chapter,
+                        )
+                    else:
+                        self.update_progress_fn(
+                            idx,
+                            actual_num,
+                            content_hash,
+                            fname,
+                            status="failed",
+                            chapter_obj=chapter,
+                        )
                     self.save_progress_fn()
                 results.append((False, actual_num, None, None, None))
             return results
@@ -13350,6 +13463,8 @@ def _vision_finish_reason_qa_issues(finish_reason):
 
 
 def _vision_should_save_partial_for_qa(qa_issues, config=None):
+    if _preserve_original_text_on_failure_enabled(config):
+        return True
     issues = set(qa_issues or [])
     if "PROHIBITED_CONTENT" in issues or "API_ERROR" in issues:
         return _save_prohibited_results_enabled(config)
@@ -13386,6 +13501,51 @@ def _failure_output_for_save(provider_content, source_content, config=None):
     if _preserve_original_text_on_failure_enabled(config):
         return source_content if isinstance(source_content, str) else ""
     return provider_content if isinstance(provider_content, str) else ""
+
+
+def _streamed_failure_content_from_error(error):
+    """Return provider text accumulated before a raised streaming failure."""
+    details = getattr(error, "details", None)
+    if not isinstance(details, dict):
+        return ""
+    for key in ("partial_content", "streamed_text"):
+        value = details.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _runtime_failure_qa_issue(error):
+    """Classify a raised batch-worker failure for saving and progress state."""
+    error_msg = str(error or "")
+    error_lower = error_msg.lower()
+    error_type = str(getattr(error, "error_type", "") or "").strip().lower()
+    if "[timeout]" in error_lower or error_type == "timeout" or "timed out" in error_lower:
+        return ["TIMEOUT"]
+    if (
+        error_type in {"truncated", "length", "max_tokens", "incomplete"}
+        or "finish_reason='length'" in error_lower
+        or 'finish_reason="length"' in error_lower
+        or "finish_reason=max_tokens" in error_lower
+        or "finish_reason='max_tokens'" in error_lower
+        or "response was truncated" in error_lower
+        or "max_tokens" in error_lower
+    ):
+        return ["TRUNCATED"]
+    if (
+        error_type == "prohibited_content"
+        or "prohibited_content" in error_lower
+        or "content_filter" in error_lower
+        or "content blocked" in error_lower
+    ):
+        return ["PROHIBITED_CONTENT"]
+    if (
+        error_type in {"api_error", "validation", "validation_error"}
+        or "api_error" in error_lower
+        or "invalid_argument" in error_lower
+    ):
+        return ["API_ERROR"]
+    return None
 
 
 def _normalize_qa_issue_set(qa_issue=None):
