@@ -3388,7 +3388,7 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert js_value("document.querySelector('[data-sdl-notepad-text]').isContentEditable") is True
     assert js_value(
         "document.querySelector('[data-sdl-notepad-text]').getAttribute('contenteditable')"
-    ) == "plaintext-only"
+    ) == "true"
     assert js_value(
         "document.querySelector('[data-sdl-notepad-text]').getAttribute('data-sdl-notepad-source')"
     ) == "Source line"
@@ -3413,6 +3413,9 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert source_menu_label is not None
     assert source_menu_label.wordWrap() is True
     assert source_menu_label.text() == "Full wrapped source text for this sentence."
+    assert {action.text() for action in context_menu.actions()} >= {
+        "Bold", "Italic", "Underline"
+    }
     context_menu.close()
     history_shortcut_result = js_value(
         """
@@ -3585,6 +3588,40 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         })();
         """
     ) is True
+    inline_format_result = js_value(
+        """
+        (() => { try {
+            const paragraph = document.querySelector('#empty');
+            const host = paragraph.querySelector('[data-sdl-notepad-text]');
+            host.textContent = 'Styled addition';
+            host.dispatchEvent(new InputEvent('input', {bubbles: true}));
+            const selectHost = () => {
+                host.focus();
+                const selection = window.getSelection();
+                const range = document.createRange();
+                range.selectNodeContents(host);
+                selection.removeAllRanges();
+                selection.addRange(range);
+            };
+            selectHost();
+            const bold = window.__sdlApplyInlineFormat('bold');
+            selectHost();
+            const italic = window.__sdlApplyInlineFormat('italic');
+            selectHost();
+            const underline = window.__sdlApplyInlineFormat('underline');
+            return JSON.stringify([
+                bold, italic, underline,
+                host.querySelectorAll('strong').length === 1,
+                host.querySelectorAll('em').length === 1,
+                host.querySelectorAll('u').length === 1,
+                paragraph.isConnected,
+                paragraph.textContent === 'Styled addition'
+            ]);
+        } catch (error) { return String(error && error.stack || error); }
+        })();
+        """
+    )
+    assert inline_format_result == "[true,true,true,true,true,true,true,true]"
     assert dialog.rows_widget.findChild(QPlainTextEdit, "SdlReviewNotepadEditor") is None
     assert dialog.rows_widget.findChildren(QFrame, "SdlReviewRow") == []
     assert dialog.rows_widget.findChildren(QPlainTextEdit, "SdlReviewTargetEdit") == []
@@ -3606,7 +3643,12 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     )
     saved_soup = BeautifulSoup(output_path.read_text(encoding="utf-8"), "html.parser")
     assert saved_soup.find("strong").get_text(strip=True) == "protected"
-    assert saved_soup.find("p", id="empty") is not None
+    saved_addition = saved_soup.find("p", id="empty")
+    assert saved_addition is not None
+    assert saved_addition.get_text(strip=True) == "Styled addition"
+    assert saved_addition.find("strong") is not None
+    assert saved_addition.find("em") is not None
+    assert saved_addition.find("u") is not None
     assert saved_soup.find(attrs={"data-sdl-notepad-text": True}) is None
     assert saved_soup.find(attrs={"data-sdl-notepad-source": True}) is None
     assert saved_soup.find(attrs={"data-sdl-notepad-original-editable": True}) is None
@@ -3615,9 +3657,15 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert saved_soup.find(id="sdl-notepad-source-tooltip") is None
     assert output_path.read_text(encoding="utf-8").count("Edited in the rendered page.") == 1
     assert output_path.read_text(encoding="utf-8").count("protected") == 1
-    assert dialog.pieces[0]["_notepad_tag_order"] == [
-        "html", "head", "meta", "title", "body", "div", "img", "p", "strong", "p", "br"
+    notepad_tag_order = dialog.pieces[0]["_notepad_tag_order"]
+    assert notepad_tag_order[:9] == [
+        "html", "head", "meta", "title", "body", "div", "img", "p", "strong"
     ]
+    assert notepad_tag_order.count("p") == 2
+    assert notepad_tag_order.count("strong") == 2
+    assert "em" in notepad_tag_order
+    assert "u" in notepad_tag_order
+    assert notepad_tag_order[-1] == "br"
 
     dialog.two_column_layout_btn.click()
     assert dialog.two_column_layout_btn.text() == "Compact"

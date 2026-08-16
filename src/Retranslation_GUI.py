@@ -11230,6 +11230,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 const PLACEHOLDER_ATTR = 'data-sdl-notepad-placeholder';
                 const SOURCE_ATTR = 'data-sdl-notepad-source';
                 const ORIGINAL_EDITABLE_ATTR = 'data-sdl-notepad-original-editable';
+                const ALLOWED_INLINE_TAGS = new Set(['STRONG', 'EM', 'U', 'B', 'I']);
                 const blockedParents = 'script,style,noscript,template,textarea,select,option,svg,math';
                 const editableHost = node => {
                     const element = node && node.nodeType === Node.ELEMENT_NODE
@@ -11262,6 +11263,46 @@ class SDLXLIFFReviewDialog(QDialog):
                     };
                 };
                 const markDirty = () => { window.__sdlNotepadDirty = true; };
+                const sanitizeHost = host => {
+                    if (!host) return;
+                    for (const element of Array.from(host.querySelectorAll('*'))) {
+                        const tagName = element.tagName.toUpperCase();
+                        if (!ALLOWED_INLINE_TAGS.has(tagName)) {
+                            element.replaceWith(...Array.from(element.childNodes));
+                            continue;
+                        }
+                        let canonicalName = '';
+                        if (tagName === 'B') canonicalName = 'strong';
+                        else if (tagName === 'I') canonicalName = 'em';
+                        if (canonicalName) {
+                            const replacement = document.createElement(canonicalName);
+                            while (element.firstChild) replacement.appendChild(element.firstChild);
+                            element.replaceWith(replacement);
+                        } else {
+                            for (const attribute of Array.from(element.attributes)) {
+                                element.removeAttribute(attribute.name);
+                            }
+                        }
+                    }
+                    host.normalize();
+                };
+                const applyInlineFormat = command => {
+                    const selection = window.getSelection();
+                    if (!selection || !selection.rangeCount) return false;
+                    const host = editableHost(selection.anchorNode);
+                    if (!host || editableHost(selection.focusNode) !== host
+                            || !selectionInside(host)) return false;
+                    const browserCommand = {
+                        bold: 'bold', italic: 'italic', underline: 'underline'
+                    }[String(command || '').toLowerCase()];
+                    if (!browserCommand) return false;
+                    document.execCommand('styleWithCSS', false, false);
+                    const changed = document.execCommand(browserCommand, false, null);
+                    sanitizeHost(host);
+                    markDirty();
+                    return !!changed;
+                };
+                window.__sdlApplyInlineFormat = applyInlineFormat;
                 const originallyEditable = Array.from(
                     document.body.querySelectorAll('[contenteditable]')
                 );
@@ -11277,7 +11318,10 @@ class SDLXLIFFReviewDialog(QDialog):
                 const makeHost = (textNode, placeholder=false, sourceText='') => {
                     const host = document.createElement('span');
                     host.setAttribute(EDIT_ATTR, '1');
-                    host.setAttribute('contenteditable', 'plaintext-only');
+                    // Rich editing is restricted to the three inline tags
+                    // accepted by sanitizeHost; surrounding EPUB markup stays
+                    // contenteditable=false and cannot be altered.
+                    host.setAttribute('contenteditable', 'true');
                     host.setAttribute('spellcheck', 'false');
                     if (placeholder) host.setAttribute(PLACEHOLDER_ATTR, '1');
                     if (sourceText) host.setAttribute(SOURCE_ATTR, sourceText);
@@ -11420,7 +11464,9 @@ class SDLXLIFFReviewDialog(QDialog):
                             event.data.replace(/[\r\n\u2028\u2029]+/g, ' ')
                         );
                         markDirty();
-                    } else if (inputType.startsWith('format') || inputType === 'insertOrderedList'
+                    } else if ((inputType.startsWith('format')
+                                && !['formatBold', 'formatItalic', 'formatUnderline'].includes(inputType))
+                            || inputType === 'insertOrderedList'
                             || inputType === 'insertUnorderedList' || inputType === 'insertHorizontalRule') {
                         event.preventDefault();
                     }
@@ -11440,6 +11486,15 @@ class SDLXLIFFReviewDialog(QDialog):
                         event.stopImmediatePropagation();
                         document.execCommand(historyCommand, false, null);
                         markDirty();
+                        return;
+                    }
+                    const formatCommand = (event.ctrlKey || event.metaKey) && !event.altKey
+                        ? ({b: 'bold', i: 'italic', u: 'underline'}[shortcutKey] || '')
+                        : '';
+                    if (formatCommand && shortcutHost && selectionInside(shortcutHost)) {
+                        event.preventDefault();
+                        event.stopImmediatePropagation();
+                        applyInlineFormat(formatCommand);
                         return;
                     }
                     if (event.key === 'Enter') {
@@ -11513,13 +11568,10 @@ class SDLXLIFFReviewDialog(QDialog):
                 document.addEventListener('input', event => {
                     const host = editableHost(event.target);
                     if (!host) return;
-                    // Even plaintext-only Chromium may briefly insert an
-                    // internal <br> when deleting. Collapse every edit back
-                    // to a single text node before it can affect neighbours.
-                    const plainText = host.textContent || '';
-                    if (host.childNodes.length !== 1 || host.firstChild.nodeType !== Node.TEXT_NODE) {
-                        host.textContent = plainText;
-                    }
+                    // Keep only intentional strong/em/u markup. Browser-created
+                    // blocks, spans, links, and other tags are unwrapped before
+                    // the document enters the save pipeline.
+                    sanitizeHost(host);
                     markDirty();
                 }, true);
 
@@ -11665,9 +11717,17 @@ class SDLXLIFFReviewDialog(QDialog):
         browser.findText("")
         browser.findText(query)
 
-    def _show_notepad_browser_context_menu(self, browser, pos, source_text=""):
+    def _show_notepad_browser_context_menu(
+        self,
+        browser,
+        pos,
+        source_text="",
+        format_states=None,
+    ):
         """Show browser edit actions plus the complete source text."""
         from PySide6.QtWebEngineCore import QWebEnginePage
+
+        format_states = format_states if isinstance(format_states, dict) else {}
 
         menu = QMenu(self)
         menu.setStyleSheet("""
@@ -11709,6 +11769,10 @@ class SDLXLIFFReviewDialog(QDialog):
         menu.addSeparator()
 
         action_specs = (
+            ("Bold", "format:bold"),
+            ("Italic", "format:italic"),
+            ("Underline", "format:underline"),
+            (None, None),
             ("Undo", QWebEnginePage.WebAction.Undo),
             ("Redo", QWebEnginePage.WebAction.Redo),
             (None, None),
@@ -11724,6 +11788,26 @@ class SDLXLIFFReviewDialog(QDialog):
                 menu.addSeparator()
                 continue
             action = menu.addAction(label)
+            if isinstance(web_action, str) and web_action.startswith("format:"):
+                command = web_action.split(":", 1)[1]
+                action.setObjectName(
+                    f"SdlNotepadFormat{command.title()}Action"
+                )
+                action.setCheckable(True)
+                action.setChecked(bool(format_states.get(command, False)))
+                shortcut = {
+                    "bold": "Ctrl+B",
+                    "italic": "Ctrl+I",
+                    "underline": "Ctrl+U",
+                }.get(command)
+                if shortcut:
+                    action.setShortcut(QKeySequence(shortcut))
+                    action.setShortcutVisibleInContextMenu(True)
+                action.triggered.connect(
+                    lambda _checked=False, selected_command=command, view=browser:
+                        self._apply_notepad_inline_format(view, selected_command)
+                )
+                continue
             try:
                 action.setEnabled(browser.page().action(web_action).isEnabled())
             except Exception:
@@ -11739,22 +11823,51 @@ class SDLXLIFFReviewDialog(QDialog):
         menu.popup(browser.mapToGlobal(pos))
         return menu
 
+    @staticmethod
+    def _apply_notepad_inline_format(browser, command):
+        """Apply one whitelisted inline HTML format to the browser selection."""
+        command_json = json.dumps(str(command or "").strip().lower())
+        try:
+            browser.page().runJavaScript(
+                f"window.__sdlApplyInlineFormat"
+                f" ? window.__sdlApplyInlineFormat({command_json}) : false;"
+            )
+        except RuntimeError:
+            pass
+
     def _request_notepad_browser_context_menu(self, browser, pos):
         x = int(pos.x())
         y = int(pos.y())
         script = f"""
             (() => {{
                 const element = document.elementFromPoint({x}, {y});
-                if (!element) return '';
-                const sourceElement = element.closest('[data-sdl-notepad-source]');
-                return sourceElement
-                    ? sourceElement.getAttribute('data-sdl-notepad-source') || '' : '';
+                const sourceElement = element
+                    ? element.closest('[data-sdl-notepad-source]') : null;
+                const commandState = command => {{
+                    try {{ return !!document.queryCommandState(command); }}
+                    catch (_error) {{ return false; }}
+                }};
+                return {{
+                    source: sourceElement
+                        ? sourceElement.getAttribute('data-sdl-notepad-source') || '' : '',
+                    formats: {{
+                        bold: commandState('bold'),
+                        italic: commandState('italic'),
+                        underline: commandState('underline')
+                    }}
+                }};
             }})();
         """
 
-        def _show(source_text):
+        def _show(context):
             try:
-                self._show_notepad_browser_context_menu(browser, pos, source_text)
+                context = context if isinstance(context, dict) else {}
+                self._show_notepad_browser_context_menu(
+                    browser,
+                    pos,
+                    context.get("source", ""),
+                    context.get("formats", {}),
+                )
             except RuntimeError:
                 pass
 
