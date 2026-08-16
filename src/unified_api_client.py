@@ -16220,15 +16220,15 @@ class UnifiedClient:
             )
         
         # Log stagger status — shows queued+delay or immediate in-progress
-        # (Skip for authgem, native gemini, vertex/ providers, and all
-        # SDK-routed providers — they emit this after their own config
-        # summary / route log so the "API call in progress" line appears
-        # right before the actual HTTP POST.)
+        # (Skip for authgem, native gemini, Antigravity, vertex/ providers,
+        # and all SDK-routed providers — they emit this after their own setup
+        # so the "API call in progress" line appears right before the POST.)
         _model_lower = getattr(self, 'model', '').lower()
         _is_authgem = _model_lower.startswith('authgem')
         _is_authnd = _model_lower.startswith('authnd')
         _is_search = _model_lower.startswith('search')
         _is_native_gemini = _model_lower.startswith('gemini')
+        _is_antigravity = _model_lower.startswith('antigravity')
         _is_vertex = (
             _model_lower.startswith('vertex/') or
             _model_lower.startswith('vertex_ai/')
@@ -16248,7 +16248,17 @@ class UnifiedClient:
                 _is_sdk_provider = True
         except Exception:
             pass
-        if not _is_authgem and not _is_authnd and not _is_search and not _is_native_gemini and not _is_vertex and not _is_sdk_provider and self._should_show_api_lifecycle_logs() and os.environ.get('GRACEFUL_STOP') != '1':
+        if (
+            not _is_authgem
+            and not _is_authnd
+            and not _is_search
+            and not _is_native_gemini
+            and not _is_antigravity
+            and not _is_vertex
+            and not _is_sdk_provider
+            and self._should_show_api_lifecycle_logs()
+            and os.environ.get('GRACEFUL_STOP') != '1'
+        ):
             try:
                 tls = self._get_thread_local_client()
                 label = getattr(tls, 'current_request_label', None) or 'request'
@@ -26944,6 +26954,24 @@ class UnifiedClient:
                 error_type="config_error"
             )
 
+        _thread_name = threading.current_thread().name
+        try:
+            _tls = self._get_thread_local_client()
+            _request_label = getattr(_tls, 'current_request_label', None) or 'request'
+            _request_context = getattr(_tls, 'current_request_context', None) or 'translation'
+        except Exception:
+            _request_label = 'request'
+            _request_context = 'translation'
+        _show_lifecycle = (
+            self._should_show_api_lifecycle_logs()
+            and os.environ.get('GRACEFUL_STOP') != '1'
+        )
+        if _show_lifecycle:
+            self._debug_log(
+                f"🔌 [{_thread_name}] {_request_label} ({_request_context}) "
+                "Connecting to Antigravity proxy..."
+            )
+
         # Auto-launch the proxy if it's not running
         if _antigravity_ensure_running is not None:
             proxy_status = _antigravity_ensure_running(log_fn=print)
@@ -26959,6 +26987,12 @@ class UnifiedClient:
             raise UnifiedClientError(
                 "Antigravity: Translation stopped by user",
                 error_type="cancelled",
+            )
+
+        if _show_lifecycle:
+            self._debug_log(
+                f"📤 [{_thread_name}] {_request_label} ({_request_context}) "
+                f"API call in progress{self._get_thinking_status_label()}"
             )
 
         account_id = self._extract_antigravity_account_id(self.model)

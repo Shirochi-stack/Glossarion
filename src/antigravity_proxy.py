@@ -66,8 +66,9 @@ PROXY_GITHUB_RAW_PACKAGE_URL = (
     "https://raw.githubusercontent.com/Shirochi-stack/antigravity-proxy/"
     "{revision}/package.json"
 )
-PROXY_GITHUB_TAG_ARCHIVE_URL = f"{PROXY_REPO_URL}/archive/refs/tags/{{tag}}.zip"
-PROXY_GITHUB_REVISION_ARCHIVE_URL = f"{PROXY_REPO_URL}/archive/{{revision}}.zip"
+PROXY_CODELOAD_URL = "https://codeload.github.com/Shirochi-stack/antigravity-proxy"
+PROXY_GITHUB_TAG_ARCHIVE_URL = f"{PROXY_CODELOAD_URL}/zip/refs/tags/{{tag}}"
+PROXY_GITHUB_REVISION_ARCHIVE_URL = f"{PROXY_CODELOAD_URL}/zip/{{revision}}"
 PROXY_DEFAULT_REVISION = "abc82ce6b756ee1c4d794b9f1599eda9b55730d8"
 PROXY_DEFAULT_VERSION = "0.7.7"
 PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
@@ -1166,6 +1167,71 @@ def _copy_runtime_tree(source_dir: str, target_dir: str) -> None:
     shutil.copytree(source_dir, target_dir)
 
 
+def _download_proxy_archive_bytes(url: str) -> bytes:
+    """Download a fork archive, preferring curl on systems where requests stalls."""
+    errors: List[str] = []
+    download_started = time.monotonic()
+    curl = _candidate_executable("curl")
+    if curl:
+        command = [
+            curl,
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--connect-timeout",
+            "30",
+            "--max-time",
+            str(PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS),
+            "--user-agent",
+            "Glossarion Antigravity Proxy Updater",
+            url,
+        ]
+        kwargs: Dict[str, Any] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "timeout": PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS + 10,
+        }
+        if sys.platform == "win32":
+            try:
+                from shutdown_utils import subprocess_no_window_kwargs
+                kwargs.update(subprocess_no_window_kwargs())
+            except Exception:
+                pass
+        try:
+            result = subprocess.run(command, **kwargs)
+            archive_data = bytes(result.stdout or b"")
+            if result.returncode == 0 and archive_data.startswith(b"PK"):
+                return archive_data
+            curl_error = bytes(result.stderr or b"").decode("utf-8", errors="replace").strip()
+            errors.append(f"curl failed ({result.returncode}): {curl_error or 'invalid ZIP data'}")
+        except Exception as exc:
+            errors.append(f"curl failed: {exc}")
+
+    remaining_timeout = max(
+        0.0,
+        PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS - (time.monotonic() - download_started),
+    )
+    if remaining_timeout <= 0:
+        raise RuntimeError("; ".join(errors) or "proxy archive download timed out")
+
+    try:
+        resp = requests.get(
+            url,
+            headers=_github_headers(),
+            timeout=remaining_timeout,
+        )
+        resp.raise_for_status()
+        archive_data = bytes(resp.content or b"")
+        if not archive_data.startswith(b"PK"):
+            raise RuntimeError("response was not a ZIP archive")
+        return archive_data
+    except Exception as exc:
+        errors.append(f"Python HTTPS failed: {exc}")
+
+    raise RuntimeError("; ".join(errors) or "proxy archive download failed")
+
+
 def _download_proxy_runtime(
     release: Dict[str, str],
     client_version: str,
@@ -1175,12 +1241,7 @@ def _download_proxy_runtime(
     _log = log_fn or _log_noop
     _log(f"⬇️ Antigravity: downloading {PROXY_PACKAGE_NAME} {release['tag']}...")
 
-    resp = requests.get(
-        release["archive_url"],
-        headers=_github_headers(),
-        timeout=PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS,
-    )
-    resp.raise_for_status()
+    archive_data = _download_proxy_archive_bytes(release["archive_url"])
 
     parent = os.path.dirname(runtime_dir)
     os.makedirs(parent, exist_ok=True)
@@ -1188,7 +1249,7 @@ def _download_proxy_runtime(
         extract_dir = os.path.join(tmp_dir, "extract")
         os.makedirs(extract_dir, exist_ok=True)
 
-        with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
+        with zipfile.ZipFile(io.BytesIO(archive_data)) as archive:
             archive.extractall(extract_dir)
 
         archive_root = _find_archive_root(extract_dir)
@@ -1377,7 +1438,7 @@ def _ensure_proxy_runtime(data_dir: str, log_fn=None, force_update: bool = False
                 (log_fn or _log_noop)(
                     "⚠️ Antigravity: proxy download failed; using the patched cached "
                     "runtime. The download will retry on the next Run Translation "
-                    "or Extract Glossary start."
+                    f"or Extract Glossary start. Download error: {str(exc)[:500]}"
                 )
                 return existing
             (log_fn or _log_noop)(

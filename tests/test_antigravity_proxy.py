@@ -151,6 +151,59 @@ def _unified_antigravity_client(model="antigravity/gemini-3.1-pro-low"):
     return client
 
 
+def test_proxy_archive_download_prefers_curl_and_uses_ninety_second_timeout(monkeypatch):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=b"PK\x03\x04archive",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_candidate_executable",
+        lambda name: "curl.exe" if name == "curl" else None,
+    )
+    monkeypatch.setattr(antigravity_proxy.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        antigravity_proxy.requests,
+        "get",
+        lambda *_args, **_kwargs: pytest.fail("requests fallback should not run"),
+    )
+
+    archive = antigravity_proxy._download_proxy_archive_bytes(
+        "https://codeload.github.com/example/repo/zip/revision"
+    )
+
+    assert archive == b"PK\x03\x04archive"
+    command = captured["command"]
+    assert command[command.index("--connect-timeout") + 1] == "30"
+    assert command[command.index("--max-time") + 1] == "90"
+    assert captured["kwargs"]["timeout"] == 100
+
+
+def test_proxy_archive_download_falls_back_to_requests(monkeypatch):
+    captured = {}
+
+    def fake_get(url, headers=None, timeout=None):
+        captured.update(url=url, headers=headers, timeout=timeout)
+        return FakeHTTPResponse(content=b"PK\x03\x04archive")
+
+    monkeypatch.setattr(antigravity_proxy, "_candidate_executable", lambda _name: None)
+    monkeypatch.setattr(antigravity_proxy.requests, "get", fake_get)
+
+    archive = antigravity_proxy._download_proxy_archive_bytes(
+        "https://codeload.github.com/example/repo/zip/revision"
+    )
+
+    assert archive == b"PK\x03\x04archive"
+    assert captured["timeout"] == pytest.approx(90, abs=0.1)
+
+
 def test_normalize_model_name_prefixes_gemini_ids_for_upstream_proxy():
     assert (
         antigravity_proxy._normalize_model_name("gemini-2.5-flash")
@@ -636,6 +689,54 @@ def test_antigravity_worker_never_resets_shared_cancel_event(monkeypatch):
 
     assert result.content == "ok"
     assert reset_calls == []
+
+
+def test_antigravity_lifecycle_logs_connect_before_ready_and_progress_after(monkeypatch):
+    client = _unified_antigravity_client("antigravity0/gemini-3.6-flash-low")
+    client.request_timeout = 300
+    client._is_stop_requested = lambda: False
+    client._should_abort_retry = lambda: False
+    client._get_max_retries = lambda: 1
+    client._should_show_api_lifecycle_logs = lambda: True
+    client._get_thinking_status_label = lambda: ""
+    client._get_thread_local_client = lambda: types.SimpleNamespace(
+        current_request_label="Chapter 12",
+        current_request_context="translation",
+        output_token_limit=None,
+        per_key_max_output_tokens=None,
+    )
+
+    events = []
+    client._debug_log = lambda message: events.append(message)
+
+    def ensure_running(log_fn=None):
+        events.append("proxy_ready")
+        return {"running": True}
+
+    def successful_send(**_kwargs):
+        events.append("send")
+        return {"content": "ok", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+    monkeypatch.setattr(unified_api_client, "ANTIGRAVITY_AVAILABLE", True)
+    monkeypatch.setattr(unified_api_client, "_antigravity_send", lambda **_kwargs: None)
+    monkeypatch.setattr(unified_api_client, "_antigravity_ensure_running", ensure_running)
+    monkeypatch.setattr(unified_api_client, "_antigravity_send_stream", successful_send)
+
+    result = client._send_antigravity([], 0.2, 64000, "response.txt")
+
+    connecting_index = next(
+        index for index, event in enumerate(events)
+        if "Connecting to Antigravity proxy" in event
+    )
+    progress_index = next(
+        index for index, event in enumerate(events)
+        if "API call in progress" in event
+    )
+    assert result.content == "ok"
+    assert connecting_index < events.index("proxy_ready")
+    assert events.index("proxy_ready") < progress_index < events.index("send")
 
 
 def test_antigravity_forced_stream_logs_ignore_general_streaming_toggle(monkeypatch):
@@ -1245,8 +1346,8 @@ def test_latest_proxy_release_uses_fork_main_revision_without_git(monkeypatch):
     assert release["tag"] == f"main-{'a' * 12}"
     assert release["resolved"] is True
     assert release["archive_url"] == (
-        "https://github.com/Shirochi-stack/antigravity-proxy/archive/"
-        f"{'a' * 40}.zip"
+        "https://codeload.github.com/Shirochi-stack/antigravity-proxy/zip/"
+        f"{'a' * 40}"
     )
 
 
