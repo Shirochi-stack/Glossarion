@@ -1999,6 +1999,7 @@ class UnifiedClient:
                 context,
                 provider_content=extracted_content,
                 fallback="",
+                failure_reason="length",
             ), 'length'
         return fallback, ('content_filter' if is_safety else 'error')
 
@@ -8659,8 +8660,12 @@ class UnifiedClient:
         except UnifiedClientError as exc:
             if getattr(exc, 'error_type', None) == 'cancelled' or 'cancelled' in str(exc).lower():
                 raise
-            preserved = self._preserved_original_failure_content(messages, effective_context)
             error_type = getattr(exc, 'error_type', None)
+            preserved = self._preserved_original_failure_content(
+                messages,
+                effective_context,
+                failure_reason=error_type,
+            )
             if preserved is not None:
                 finish_reason = (
                     'prohibited_content'
@@ -8669,19 +8674,39 @@ class UnifiedClient:
                 )
                 return preserved, finish_reason
             streamed_content = self._partial_content_from_error(exc)
-            if streamed_content and error_type == 'prohibited_content':
-                return streamed_content, 'prohibited_content'
+            if streamed_content and (
+                error_type == 'prohibited_content'
+                or self._failure_save_toggle_takes_priority(error_type)
+            ):
+                finish_reason = (
+                    'prohibited_content'
+                    if error_type == 'prohibited_content'
+                    else ('length' if self._is_truncation_finish_reason(error_type) else 'error')
+                )
+                return streamed_content, finish_reason
             raise
-        except Exception:
-            preserved = self._preserved_original_failure_content(messages, effective_context)
+        except Exception as exc:
+            error_type = getattr(exc, 'error_type', None) or 'error'
+            preserved = self._preserved_original_failure_content(
+                messages,
+                effective_context,
+                failure_reason=error_type,
+            )
             if preserved is None:
+                streamed_content = self._partial_content_from_error(exc)
+                if streamed_content and self._failure_save_toggle_takes_priority(error_type):
+                    return streamed_content, 'error'
                 raise
             return preserved, 'error'
 
         if isinstance(result, tuple) and len(result) >= 2:
             finish_reason = self._normalize_finish_reason(result[1]) or result[1]
             if self._is_failed_finish_reason(finish_reason):
-                preserved = self._preserved_original_failure_content(messages, effective_context)
+                preserved = self._preserved_original_failure_content(
+                    messages,
+                    effective_context,
+                    failure_reason=finish_reason,
+                )
                 if preserved is not None:
                     normalized_failure_reason = str(finish_reason or '').strip().lower()
                     if normalized_failure_reason in {'blocked', 'censorship_blocked'}:
@@ -9664,6 +9689,7 @@ class UnifiedClient:
                         messages,
                         context,
                         provider_content=extracted_content,
+                        failure_reason='error',
                     ), 'error'
 
                 # Handle empty responses
@@ -10374,6 +10400,7 @@ class UnifiedClient:
                         provider_content=extracted_content,
                         error=e,
                         fallback=fallback_content,
+                        failure_reason='prohibited_content',
                     ), 'prohibited_content'
                 
                 # Check for retryable server errors (500, 502, 503, 504)
@@ -10475,6 +10502,7 @@ class UnifiedClient:
                         provider_content=extracted_content,
                         error=e,
                         fallback=fallback_content,
+                        failure_reason='error',
                     ), 'error'
                 else:
                     # For other errors, try again with a short delay
@@ -10529,6 +10557,7 @@ class UnifiedClient:
                         provider_content=extracted_content,
                         error=e,
                         fallback=fallback_content,
+                        failure_reason='error',
                     ), 'error'
                 
                 # For unexpected errors, check if it's a timeout
@@ -10620,6 +10649,7 @@ class UnifiedClient:
                         provider_content=extracted_content,
                         error=e,
                         fallback=fallback_content,
+                        failure_reason='error',
                     ), 'error'
                 
                 # Check for retryable server errors
@@ -10704,6 +10734,7 @@ class UnifiedClient:
                         provider_content=extracted_content,
                         error=e,
                         fallback=fallback_content,
+                        failure_reason='error',
                     ), 'error'
                 else:
                     # In multi-key mode, try rotating keys before short backoff
@@ -12493,7 +12524,11 @@ class UnifiedClient:
             
         elif context == 'translation':
             # Check if user wants original text preserved on failure (disabled by default)
-            preserved = self._preserved_original_failure_content(messages, context)
+            preserved = self._preserved_original_failure_content(
+                messages,
+                context,
+                failure_reason=error_type,
+            )
             
             if preserved is not None:
                 # Return the source text verbatim. Failure state is carried by
@@ -13101,12 +13136,31 @@ class UnifiedClient:
             'network_error', 'parse_error',
         }
 
-    def _preserved_original_failure_content(self, messages, context):
+    @staticmethod
+    def _failure_save_toggle_takes_priority(failure_reason):
+        reason = str(failure_reason or '').strip().lower().replace('-', '_').replace(' ', '_')
+        if reason in {
+            'length', 'max_tokens', 'max_length', 'stop_sequence_limit',
+            'truncated', 'incomplete', 'partial', 'timeout',
+        }:
+            return os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1'
+        if reason in {
+            'error', 'content_filter', 'prohibited_content', 'blocked',
+            'censorship_blocked', 'rate_limit', 'rate_limited', 'api_error',
+            'validation', 'validation_error', 'extraction_error',
+            'server_error', 'network_error', 'parse_error',
+        }:
+            return os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1'
+        return False
+
+    def _preserved_original_failure_content(self, messages, context, failure_reason=None):
         """Return verbatim source text when the failure-preservation toggle applies."""
         context_norm = str(context or '').strip().lower().replace('-', '_').replace(' ', '_')
         if context_norm != 'translation':
             return None
         if os.getenv('PRESERVE_ORIGINAL_TEXT_ON_FAILURE', '0') != '1':
+            return None
+        if self._failure_save_toggle_takes_priority(failure_reason):
             return None
         return self._extract_user_content(messages)
 
@@ -13129,9 +13183,15 @@ class UnifiedClient:
         provider_content='',
         error=None,
         fallback='',
+        failure_reason=None,
     ):
-        """Choose source preservation, streamed provider text, or a marker in that order."""
-        preserved = self._preserved_original_failure_content(messages, context)
+        """Choose the matching failure output, preserved source, or a marker."""
+        effective_reason = failure_reason or getattr(error, 'error_type', None)
+        preserved = self._preserved_original_failure_content(
+            messages,
+            context,
+            failure_reason=effective_reason,
+        )
         if preserved is not None:
             return preserved
         if isinstance(provider_content, str) and provider_content:
@@ -30445,6 +30505,7 @@ class UnifiedClient:
                     'translation',
                     provider_content=provider_content,
                     fallback=f"[TRANSLATION FAILED: {free_error}]",
+                    failure_reason='error',
                 )
                 return UnifiedResponse(
                     content=failure_content,

@@ -7,6 +7,11 @@ use the exact same writer in source runs and frozen builds.
 import os
 
 
+GLOSSARION_SDLXLIFF_NS = "urn:glossarion:sdlxliff"
+MANUAL_UNTRANSLATED_ATTRIBUTE = f"{{{GLOSSARION_SDLXLIFF_NS}}}manual-untranslated"
+MANUAL_EDITING_ATTRIBUTE = f"{{{GLOSSARION_SDLXLIFF_NS}}}manual-editing"
+
+
 def _html_sdlxliff_enabled():
     return str(os.getenv("OUTPUT_SDLXLIFF", "1")).strip().lower() in {"1", "true", "yes", "on"}
 
@@ -31,7 +36,120 @@ def _html_sdlxliff_source_text(chapter, fallback=""):
     return fallback if isinstance(fallback, str) else str(fallback or "")
 
 
-def _write_html_sdlxliff_sidecar(output_dir, output_filename, chapter, source_html, target_html, raise_errors=False):
+def _html_sdlxliff_blank_manual_target(source_html):
+    """Keep the source document structure while blanking editable body text."""
+    source_html = source_html if isinstance(source_html, str) else str(source_html or "")
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(source_html, "html.parser")
+        container = soup.body or soup
+        for text_node in list(container.find_all(string=True)):
+            parent_name = str(getattr(getattr(text_node, "parent", None), "name", "") or "").lower()
+            if parent_name in {"script", "style"}:
+                continue
+            text_node.replace_with("")
+        return str(soup)
+    except Exception:
+        return ""
+
+
+def _is_manual_untranslated_sdlxliff(path_or_root):
+    """Return whether a sidecar is an untouched manual-editing placeholder."""
+    try:
+        import xml.etree.ElementTree as ET
+
+        root = path_or_root
+        if isinstance(path_or_root, (str, bytes, os.PathLike)):
+            root = ET.parse(path_or_root).getroot()
+        for element in root.iter():
+            if str(element.tag).rsplit("}", 1)[-1] != "file":
+                continue
+            return str(element.attrib.get(MANUAL_UNTRANSLATED_ATTRIBUTE, "")).lower() in {
+                "1", "true", "yes", "on"
+            }
+    except Exception:
+        pass
+    return False
+
+
+def _is_manual_editing_sdlxliff(path_or_root):
+    """Return whether a sidecar uses sparse, structurally indexed manual targets."""
+    try:
+        import xml.etree.ElementTree as ET
+
+        root = path_or_root
+        if isinstance(path_or_root, (str, bytes, os.PathLike)):
+            root = ET.parse(path_or_root).getroot()
+        for element in root.iter():
+            if str(element.tag).rsplit("}", 1)[-1] != "file":
+                continue
+            return str(element.attrib.get(MANUAL_EDITING_ATTRIBUTE, "")).lower() in {
+                "1", "true", "yes", "on"
+            }
+    except Exception:
+        pass
+    return False
+
+
+def _clear_manual_untranslated_sdlxliff(root):
+    """Promote a manual placeholder to an edited SDLXLIFF document."""
+    changed = False
+    for element in root.iter():
+        local_name = str(element.tag).rsplit("}", 1)[-1]
+        if local_name == "file" and MANUAL_UNTRANSLATED_ATTRIBUTE in element.attrib:
+            element.attrib.pop(MANUAL_UNTRANSLATED_ATTRIBUTE, None)
+            changed = True
+        elif local_name == "target" and element.attrib.get("state") == "new":
+            element.set("state", "translated")
+            changed = True
+    return changed
+
+
+def _blank_manual_untranslated_sdlxliff_target(path):
+    """Blank a legacy raw-filled manual target while retaining its HTML skeleton."""
+    try:
+        import xml.etree.ElementTree as ET
+
+        tree = ET.parse(path)
+        root = tree.getroot()
+        if not _is_manual_untranslated_sdlxliff(root):
+            return False
+        source_element = None
+        target_element = None
+        for element in root.iter():
+            local_name = str(element.tag).rsplit("}", 1)[-1]
+            if local_name == "source" and source_element is None:
+                source_element = element
+            elif local_name == "target" and target_element is None:
+                target_element = element
+        if source_element is None or target_element is None:
+            return False
+        blank_target = _html_sdlxliff_blank_manual_target(source_element.text or "")
+        if not list(target_element) and (target_element.text or "") == blank_target:
+            return False
+        for child in list(target_element):
+            target_element.remove(child)
+        target_element.text = blank_target
+        target_element.set("state", "new")
+        ET.register_namespace("", "urn:oasis:names:tc:xliff:document:1.2")
+        ET.register_namespace("sdl", "http://sdl.com/FileTypes/SdlXliff/1.0")
+        ET.register_namespace("glossarion", GLOSSARION_SDLXLIFF_NS)
+        tree.write(path, encoding="utf-8", xml_declaration=True)
+        return True
+    except Exception:
+        return False
+
+
+def _write_html_sdlxliff_sidecar(
+    output_dir,
+    output_filename,
+    chapter,
+    source_html,
+    target_html,
+    raise_errors=False,
+    manual_untranslated=False,
+):
     if not _html_sdlxliff_enabled():
         return None
     if not output_dir or not output_filename:
@@ -54,6 +172,7 @@ def _write_html_sdlxliff_sidecar(output_dir, output_filename, chapter, source_ht
         sdl_ns = "http://sdl.com/FileTypes/SdlXliff/1.0"
         ET.register_namespace("", xliff_ns)
         ET.register_namespace("sdl", sdl_ns)
+        ET.register_namespace("glossarion", GLOSSARION_SDLXLIFF_NS)
 
         source_name = (
             chapter.get("original_basename")
@@ -64,17 +183,29 @@ def _write_html_sdlxliff_sidecar(output_dir, output_filename, chapter, source_ht
         source_lang = _html_sdlxliff_lang_code(os.getenv("SOURCE_LANGUAGE") or os.getenv("SOURCE_LANGUAGE_CODE"), "und")
         target_lang = _html_sdlxliff_lang_code(os.getenv("OUTPUT_LANGUAGE"), "und")
 
+        source_payload = _html_sdlxliff_source_text(chapter, source_html)
+        target_payload = (
+            _html_sdlxliff_blank_manual_target(source_payload)
+            if manual_untranslated
+            else target_html
+        )
+
         root = ET.Element(f"{{{xliff_ns}}}xliff", {"version": "1.2"})
-        file_el = ET.SubElement(root, f"{{{xliff_ns}}}file", {
+        file_attributes = {
             "original": str(source_name),
             "datatype": "html",
             "source-language": source_lang,
             "target-language": target_lang,
-        })
+        }
+        if manual_untranslated:
+            file_attributes[MANUAL_UNTRANSLATED_ATTRIBUTE] = "true"
+            file_attributes[MANUAL_EDITING_ATTRIBUTE] = "true"
+        file_el = ET.SubElement(root, f"{{{xliff_ns}}}file", file_attributes)
         body_el = ET.SubElement(file_el, f"{{{xliff_ns}}}body")
         trans_unit = ET.SubElement(body_el, f"{{{xliff_ns}}}trans-unit", {"id": "1"})
-        ET.SubElement(trans_unit, f"{{{xliff_ns}}}source").text = _html_sdlxliff_source_text(chapter, source_html)
-        ET.SubElement(trans_unit, f"{{{xliff_ns}}}target").text = target_html
+        ET.SubElement(trans_unit, f"{{{xliff_ns}}}source").text = source_payload
+        target_attributes = {"state": "new"} if manual_untranslated else {}
+        ET.SubElement(trans_unit, f"{{{xliff_ns}}}target", target_attributes).text = target_payload
 
         sidecar_dir = os.path.join(output_dir, "SDLXLIFF")
         os.makedirs(sidecar_dir, exist_ok=True)

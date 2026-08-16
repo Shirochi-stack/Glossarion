@@ -77,7 +77,7 @@ def test_preserve_original_toggle_enables_failed_output_save(monkeypatch):
     ) is True
 
 
-def test_preserve_original_takes_priority_over_other_failure_save_toggles(monkeypatch):
+def test_failure_specific_save_toggles_take_priority_over_preserved_source(monkeypatch):
     monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
     monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", "1")
     monkeypatch.setenv("SAVE_PARTIAL_RESULTS", "1")
@@ -85,8 +85,33 @@ def test_preserve_original_takes_priority_over_other_failure_save_toggles(monkey
     assert _failure_output_for_save(
         "streamed or truncated translation",
         "raw source",
-    ) == "raw source"
+        qa_issue=["PROHIBITED_CONTENT"],
+    ) == "streamed or truncated translation"
+    assert _failure_output_for_save(
+        "truncated translation",
+        "raw source",
+        qa_issue=["TRUNCATED"],
+    ) == "truncated translation"
     assert _should_save_truncated_response() is True
+
+
+def test_unrelated_failure_toggle_does_not_override_preserved_source(monkeypatch):
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", "1")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", "0")
+    assert _failure_output_for_save(
+        "truncated translation",
+        "raw source",
+        qa_issue=["TRUNCATED"],
+    ) == "raw source"
+
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", "0")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", "1")
+    assert _failure_output_for_save(
+        "blocked translation",
+        "raw source",
+        qa_issue=["PROHIBITED_CONTENT"],
+    ) == "raw source"
 
 
 def test_truncated_save_gate_still_respects_legacy_toggle_without_preservation(
@@ -118,6 +143,8 @@ def test_preserve_original_returns_verbatim_text_for_all_failure_types(
     from unified_api_client import UnifiedClient
 
     monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", "0")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", "0")
     client = object.__new__(UnifiedClient)
     source = "<p>원문 그대로</p>"
 
@@ -145,6 +172,8 @@ def test_send_replaces_any_failed_result_with_original_text(
     from unified_api_client import UnifiedClient
 
     monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", "0")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", "0")
     client = object.__new__(UnifiedClient)
     monkeypatch.setattr(
         client,
@@ -210,7 +239,7 @@ def test_blocked_stream_text_is_recovered_from_provider_error(monkeypatch):
     ) == ("streamed response", "prohibited_content")
 
 
-def test_preserved_source_wins_over_streamed_blocked_text(monkeypatch):
+def test_save_prohibited_yields_preserved_source_to_streamed_blocked_text(monkeypatch):
     from unified_api_client import UnifiedClient, UnifiedClientError
 
     monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
@@ -225,10 +254,81 @@ def test_preserved_source_wins_over_streamed_blocked_text(monkeypatch):
     assert client._failure_response_content(
         [{"role": "user", "content": "raw source"}],
         "translation",
-        provider_content="provider response",
         error=error,
         fallback="[CONTENT BLOCKED]",
-    ) == "raw source"
+    ) == "streamed response"
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "save_prohibited", "save_partial"),
+    [
+        ("prohibited_content", "1", "0"),
+        ("error", "1", "0"),
+        ("length", "0", "1"),
+    ],
+)
+def test_send_failure_toggle_yields_preserved_source_to_provider_text(
+    monkeypatch,
+    finish_reason,
+    save_prohibited,
+    save_partial,
+):
+    from unified_api_client import UnifiedClient
+
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", save_prohibited)
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", save_partial)
+    client = object.__new__(UnifiedClient)
+    monkeypatch.setattr(
+        client,
+        "_send_core",
+        lambda *args, **kwargs: ("streamed provider text", finish_reason),
+    )
+
+    content, returned_reason = client.send(
+        [{"role": "user", "content": "raw source"}],
+        context="translation",
+    )
+
+    assert content == "streamed provider text"
+    assert returned_reason == finish_reason
+
+
+@pytest.mark.parametrize(
+    ("error_type", "save_prohibited", "save_partial", "expected_reason"),
+    [
+        ("api_error", "1", "0", "error"),
+        ("truncated", "0", "1", "length"),
+    ],
+)
+def test_send_raised_failure_toggle_recovers_stream_before_preserved_source(
+    monkeypatch,
+    error_type,
+    save_prohibited,
+    save_partial,
+    expected_reason,
+):
+    from unified_api_client import UnifiedClient, UnifiedClientError
+
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", save_prohibited)
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", save_partial)
+    client = object.__new__(UnifiedClient)
+    error = UnifiedClientError(
+        "stream failed",
+        error_type=error_type,
+        details={"partial_content": "streamed before failure"},
+    )
+    monkeypatch.setattr(
+        client,
+        "_send_core",
+        lambda *args, **kwargs: (_ for _ in ()).throw(error),
+    )
+
+    assert client.send(
+        [{"role": "user", "content": "raw source"}],
+        context="translation",
+    ) == ("streamed before failure", expected_reason)
 
 
 def _run_batch_chapter_failure(
@@ -395,6 +495,35 @@ def test_batch_preserve_original_wins_for_every_returned_failure(
     assert saved == source
 
 
+@pytest.mark.parametrize(
+    ("finish_reason", "save_partial", "save_prohibited"),
+    [
+        ("prohibited_content", "0", "1"),
+        ("error", "0", "1"),
+        ("length", "1", "0"),
+    ],
+)
+def test_batch_failure_toggle_yields_preserved_source_to_provider_output(
+    tmp_path,
+    monkeypatch,
+    finish_reason,
+    save_partial,
+    save_prohibited,
+):
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", save_partial)
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", save_prohibited)
+    monkeypatch.setenv("RETRY_TRUNCATED", "1")
+
+    _source, saved = _run_batch_chapter_failure(
+        tmp_path,
+        monkeypatch,
+        finish_reason=finish_reason,
+    )
+
+    assert saved == "streamed response"
+
+
 def test_batch_raised_api_error_saves_streamed_text(tmp_path, monkeypatch):
     from unified_api_client import UnifiedClientError
 
@@ -414,6 +543,40 @@ def test_batch_raised_api_error_saves_streamed_text(tmp_path, monkeypatch):
     )
 
     assert saved == "streamed before API error"
+
+
+@pytest.mark.parametrize(
+    ("error_type", "save_partial", "save_prohibited"),
+    [
+        ("api_error", "0", "1"),
+        ("truncated", "1", "0"),
+    ],
+)
+def test_batch_raised_failure_toggle_wins_over_preserved_source(
+    tmp_path,
+    monkeypatch,
+    error_type,
+    save_partial,
+    save_prohibited,
+):
+    from unified_api_client import UnifiedClientError
+
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "1")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", save_partial)
+    monkeypatch.setenv("SAVE_PROHIBITED_RESULTS", save_prohibited)
+    error = UnifiedClientError(
+        "provider stream failed",
+        error_type=error_type,
+        details={"partial_content": "streamed before raised failure"},
+    )
+
+    _source, saved = _run_batch_chapter_failure(
+        tmp_path,
+        monkeypatch,
+        raised_error=error,
+    )
+
+    assert saved == "streamed before raised failure"
 
 
 def test_batch_preserve_original_handles_unclassified_exception(

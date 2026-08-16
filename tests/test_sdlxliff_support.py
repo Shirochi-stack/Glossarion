@@ -13,11 +13,15 @@ sys.path.insert(0, str(SRC))
 
 from lxml import etree
 from bs4 import BeautifulSoup
-from PySide6.QtWidgets import QFrame, QLabel, QPlainTextEdit
+from PySide6.QtWidgets import QFrame, QLabel, QListWidgetItem, QPlainTextEdit
 
 from sdlxliff_converter import convert_sdlxliff
 from sdlxliff_extractor import extract_sdlxliff_to_chapters
-from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar as _shared_write_html_sdlxliff_sidecar
+from sdlxliff_sidecar_writer import (
+    _is_manual_editing_sdlxliff,
+    _is_manual_untranslated_sdlxliff,
+    _write_html_sdlxliff_sidecar as _shared_write_html_sdlxliff_sidecar,
+)
 from TransateKRtoEN import (
     _original_markup_for_copy,
     _refinement_raw_source_message,
@@ -2595,6 +2599,266 @@ def test_retranslation_autogenerates_sdlxliff_sidecars_from_completed_entries(tm
     assert "Target body." in target_html
 
 
+def test_manual_editing_generates_untranslated_and_pending_sidecars_without_output(tmp_path, monkeypatch):
+    untranslated_source = tmp_path / "chapter0001.xhtml"
+    completed_source = tmp_path / "chapter0002.xhtml"
+    pending_source = tmp_path / "chapter0003.xhtml"
+    untranslated_source.write_text("<h1>Source Title</h1><p>Source body.</p>", encoding="utf-8")
+    completed_source.write_text("<h1>Other Title</h1><p>Other body.</p>", encoding="utf-8")
+    pending_source.write_text("<h1>Pending Title</h1><p>Pending body.</p>", encoding="utf-8")
+    progress_manager_entries = [
+        {
+            "status": "not_translated",
+            "filename": untranslated_source.name,
+            "href": untranslated_source.name,
+            "output_file": "response_chapter0001.html",
+        },
+        {
+            "status": "completed",
+            "filename": completed_source.name,
+            "href": completed_source.name,
+            "output_file": "response_chapter0002.html",
+        },
+        {
+            "status": "pending",
+            "filename": pending_source.name,
+            "href": pending_source.name,
+            "output_file": "response_chapter0003.html",
+        },
+    ]
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+
+    stats = mixin._generate_sdlxliff_sidecars_from_untranslated_entries(
+        str(tmp_path),
+        progress_manager_entries,
+    )
+
+    sidecar = tmp_path / "SDLXLIFF" / "response_chapter0001.html.sdlxliff"
+    pending_sidecar = tmp_path / "SDLXLIFF" / "response_chapter0003.html.sdlxliff"
+    assert stats["total"] == 2
+    assert stats["created"] == 2
+    assert sidecar.is_file()
+    assert pending_sidecar.is_file()
+    assert not (tmp_path / "response_chapter0001.html").exists()
+    assert not (tmp_path / "SDLXLIFF" / "response_chapter0002.html.sdlxliff").exists()
+    assert _is_manual_untranslated_sdlxliff(sidecar)
+    assert _is_manual_editing_sdlxliff(sidecar)
+    assert _is_manual_untranslated_sdlxliff(pending_sidecar)
+    assert os.environ["OUTPUT_SDLXLIFF"] == "0"
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    source_html, target_html = dialog._read_sdlxliff_html_pair(str(sidecar))
+    assert source_html != target_html
+    assert "Source body." not in target_html
+    target_soup = BeautifulSoup(target_html, "html.parser")
+    assert target_soup.get_text(" ", strip=True) == ""
+    assert target_soup.find("h1") is not None
+    assert target_soup.find("p") is not None
+
+
+def test_manual_untranslated_sidecar_is_dimmed_and_first_edit_creates_html(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "1")
+    output_name = "response_chapter0001.html"
+    source_html = "<html><body><p>Untranslated source.</p></body></html>"
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0001.xhtml"},
+        source_html,
+        source_html,
+        raise_errors=True,
+        manual_untranslated=True,
+    )
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._last_review_signature = None
+    dialog._current_review_signature = lambda: ()
+    piece = dialog._build_piece(
+        sidecar,
+        0,
+        {"output_name": output_name},
+    )
+    item = QListWidgetItem("manual")
+
+    dialog._apply_piece_list_item_style(item, piece)
+    assert item.foreground().color().alpha() == 115
+    assert dialog._sdlxliff_sidecar_needs_source_regeneration(sidecar) is False
+    assert piece["source_count"] == 1
+    assert piece["target_count"] == 0
+    assert piece["rows"][0]["source"] == "Untranslated source."
+    assert piece["rows"][0]["target"] == ""
+    assert piece["rows"][0]["target_index"] == 0
+
+    edited_html = dialog._target_html_with_edit(
+        piece,
+        piece["rows"][0],
+        "Manually edited output.",
+    )
+    dialog._write_piece_target_html(piece, edited_html)
+
+    output_path = tmp_path / output_name
+    assert output_path.read_text(encoding="utf-8") == edited_html
+    assert piece["manual_untranslated"] is False
+    assert not _is_manual_untranslated_sdlxliff(sidecar)
+    assert _is_manual_editing_sdlxliff(sidecar)
+    _source, saved_target = dialog._read_sdlxliff_html_pair(sidecar)
+    assert "Manually edited output." in saved_target
+
+    reloaded_piece = dialog._build_piece(
+        sidecar,
+        0,
+        {"output_name": output_name},
+    )
+    assert reloaded_piece["manual_editing"] is True
+    assert reloaded_piece["target_count"] == 1
+    assert reloaded_piece["rows"][0]["target"] == "Manually edited output."
+    assert reloaded_piece["rows"][0]["target_index"] == 0
+
+
+def test_manual_editing_generated_html_applies_image_rename_map(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "1")
+    output_name = "response_chapter0001.html"
+    source_html = (
+        '<html><body><p>Untranslated source.</p>'
+        '<img src="../Images/original.png">'
+        '<svg><image href="../Images/diagram.svg"></image></svg>'
+        '<div style="background-image: url(\'../Images/background.webp\')"></div>'
+        '</body></html>'
+    )
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0001.xhtml"},
+        source_html,
+        source_html,
+        raise_errors=True,
+        manual_untranslated=True,
+    )
+    (tmp_path / "image_rename_map.json").write_text(
+        json.dumps(
+            {
+                "original.png": "chapter0001_img_1.png",
+                "diagram.svg": "chapter0001_img_2.svg",
+                "background.webp": "chapter0001_img_3.webp",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._last_review_signature = None
+    dialog._current_review_signature = lambda: ()
+    piece = dialog._build_piece(sidecar, 0, {"output_name": output_name})
+    edited_html = dialog._target_html_with_edit(
+        piece,
+        piece["rows"][0],
+        "Manually edited output.",
+    )
+
+    saved_html = dialog._write_piece_target_html(piece, edited_html)
+
+    output_html = (tmp_path / output_name).read_text(encoding="utf-8")
+    assert output_html == saved_html
+    assert '../Images/chapter0001_img_1.png' in output_html
+    assert '../Images/chapter0001_img_2.svg' in output_html
+    assert '../Images/chapter0001_img_3.webp' in output_html
+    assert "original.png" not in output_html
+    assert "diagram.svg" not in output_html
+    assert "background.webp" not in output_html
+    _source, saved_target = dialog._read_sdlxliff_html_pair(sidecar)
+    assert saved_target == output_html
+
+
+def test_progress_manager_exposes_manual_editing_toggle_for_not_translated_rows():
+    source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
+    assert 'QCheckBox("Manual editing")' in source
+    assert "manual_editing_cb.setChecked(self._get_retranslation_manual_editing_state())" in source
+    assert "self._persist_retranslation_manual_editing_state(enabled)" in source
+    assert "_progress_manager_untranslated_entries" in source
+    assert "_generate_sdlxliff_sidecars_from_untranslated_entries" in source
+    assert "'manual_editing_cb': manual_editing_cb" in source
+    assert "'generate_manual_editing_sidecars': _generate_manual_editing_sidecars" in source
+    assert "(_manual_editing_enabled() and _progress_item_is_html(display_info))" in source
+    assert "if callable(generate_sidecars):" in source
+
+
+def test_manual_editing_preference_persists_through_app_config():
+    class StubRetranslation(RetranslationMixin):
+        def __init__(self):
+            self.config = {}
+            self.saved = 0
+
+        def save_config(self, show_message=False):
+            self.saved += 1
+
+    stub = StubRetranslation()
+
+    assert stub._get_retranslation_manual_editing_state() is False
+    stub._persist_retranslation_manual_editing_state(True)
+
+    assert stub.config[stub._RETRANSLATION_MANUAL_EDITING_CONFIG_KEY] is True
+    assert stub._get_retranslation_manual_editing_state() is True
+    assert stub.saved == 1
+
+
+def test_sdlxliff_viewer_refresh_generates_manual_entries_without_output_html(tmp_path):
+    manual_entries = [{
+        "status": "not_translated",
+        "filename": "chapter0001.xhtml",
+        "output_file": "chapter0001.xhtml",
+    }]
+
+    class Owner:
+        def __init__(self):
+            self.calls = []
+
+        def _generate_sdlxliff_sidecars_from_untranslated_entries(
+            self,
+            output_dir,
+            entries,
+            file_path=None,
+            progress_callback=None,
+        ):
+            self.calls.append((output_dir, entries, file_path))
+            return {
+                "total": 1,
+                "considered": 1,
+                "created": 1,
+                "skipped": 0,
+                "missing_source": 0,
+                "missing_output": 0,
+                "failed": 0,
+                "paths": [str(tmp_path / "SDLXLIFF" / "chapter0001.xhtml.sdlxliff")],
+                "errors": [],
+            }
+
+    owner = Owner()
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._config = {dialog.MANUAL_EDITING_CONFIG_KEY: True}
+    dialog._sdlxliff_autogen_owner = owner
+    dialog._sdlxliff_autogen_file_path = str(tmp_path / "book.epub")
+    dialog._sdlxliff_autogen_manual_entries = manual_entries
+    dialog._book_index = -1
+    dialog._book_entries = []
+
+    signature = dialog._current_review_autogen_signature()
+    assert any(entry[0] == "manual_html" for entry in signature)
+    stats = dialog._regenerate_review_sidecars_for_refresh_scan(
+        current_signature=signature,
+    )
+
+    assert stats["created"] == 1
+    assert owner.calls == [(
+        str(tmp_path),
+        manual_entries,
+        str(tmp_path / "book.epub"),
+    )]
+
+
 def test_retranslation_sdlxliff_generation_skips_current_sidecar_even_with_overwrite(tmp_path, monkeypatch):
     source = tmp_path / "chapter0001.xhtml"
     output = tmp_path / "response_chapter0001.html"
@@ -3095,15 +3359,31 @@ def test_sdlxliff_review_filters_empty_sidecars_from_piece_list(tmp_path):
 """,
         encoding="utf-8",
     )
+    manual_empty_sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        "response_chapter0002.html",
+        {"original_basename": "chapter0002.xhtml"},
+        "<html><body></body></html>",
+        "<html><body></body></html>",
+        raise_errors=True,
+        manual_untranslated=True,
+    )
     dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     dialog.output_dir = str(tmp_path)
     dialog.current_path = ""
 
     pieces = dialog._load_pieces()
 
-    assert [piece["name"] for piece in pieces] == ["response_chapter0001.html.sdlxliff"]
+    assert [piece["name"] for piece in pieces] == [
+        "response_chapter0001.html.sdlxliff",
+        "response_chapter0002.html.sdlxliff",
+    ]
     assert pieces[0]["source_count"] == 1
     assert pieces[0]["target_count"] == 1
+    assert pieces[1]["path"] == manual_empty_sidecar
+    assert pieces[1]["source_count"] == 0
+    assert pieces[1]["target_count"] == 0
+    assert pieces[1]["manual_untranslated"] is True
 
 
 def test_sdlxliff_review_autorefresh_regenerates_sidecar_from_changed_output(tmp_path, monkeypatch):

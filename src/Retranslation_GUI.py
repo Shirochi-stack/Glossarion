@@ -34,6 +34,12 @@ import queue
 import hashlib
 import unicodedata
 from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar
+from sdlxliff_sidecar_writer import (
+    _blank_manual_untranslated_sdlxliff_target,
+    _clear_manual_untranslated_sdlxliff,
+    _is_manual_editing_sdlxliff,
+    _is_manual_untranslated_sdlxliff,
+)
 from glossary_usage import (
     CHECK_PREFIX,
     WARNING_PREFIX,
@@ -1269,13 +1275,13 @@ class SDLXLIFFReviewDialog(QDialog):
     """.split())
     MACHINE_TRANSLATION_PENDING_TEXT = "⏳ Generating machine translation preview..."
     MANUAL_REFRESH_BUTTON_TEXT = "↻ Refresh"
+    MANUAL_EDITING_CONFIG_KEY = "retranslation_manual_editing"
     _SDLXLIFF_AUTOGEN_STATUSES = {
         "completed",
         "qa_failed",
         "completed_empty",
         "completed_image_only",
     }
-
     def __init__(
         self,
         output_dir,
@@ -1286,6 +1292,7 @@ class SDLXLIFFReviewDialog(QDialog):
         autogen_file_path=None,
         autogen_progress_data=None,
         autogen_output_files=None,
+        autogen_manual_entries=None,
     ):
         super().__init__(parent)
         self.output_dir = output_dir
@@ -1297,6 +1304,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._sdlxliff_autogen_file_path = autogen_file_path
         self._sdlxliff_autogen_progress_data = autogen_progress_data
         self._sdlxliff_autogen_output_files = list(autogen_output_files or []) or None
+        self._sdlxliff_autogen_manual_entries = list(autogen_manual_entries or [])
         self._last_autogen_signature = None
         self._book_entries = self._discover_review_books(parent)
         self._book_index = self._initial_review_book_index()
@@ -1802,10 +1810,64 @@ class SDLXLIFFReviewDialog(QDialog):
                     continue
         return sorted(changed)
 
+    @staticmethod
+    def _merge_sdlxliff_generation_stats(*results):
+        results = [result for result in results if isinstance(result, dict)]
+        if not results:
+            return None
+        merged = {
+            "total": 0,
+            "considered": 0,
+            "created": 0,
+            "skipped": 0,
+            "missing_source": 0,
+            "missing_output": 0,
+            "failed": 0,
+            "paths": [],
+            "errors": [],
+        }
+        for result in results:
+            for key in (
+                "total", "considered", "created", "skipped",
+                "missing_source", "missing_output", "failed",
+            ):
+                merged[key] += int(result.get(key) or 0)
+            merged["paths"].extend(result.get("paths") or [])
+            merged["errors"].extend(result.get("errors") or [])
+        merged["paths"] = list(dict.fromkeys(merged["paths"]))
+        return merged
+
+    def _regenerate_manual_review_sidecars_for_refresh_scan(self):
+        if not bool(
+            isinstance(getattr(self, "_config", None), dict)
+            and self._config.get(self.MANUAL_EDITING_CONFIG_KEY, False)
+        ):
+            return None
+        entries = list(getattr(self, "_sdlxliff_autogen_manual_entries", None) or [])
+        if not entries:
+            return None
+        owner = getattr(self, "_sdlxliff_autogen_owner", None)
+        generator = getattr(owner, "_generate_sdlxliff_sidecars_from_untranslated_entries", None)
+        if not callable(generator):
+            return None
+        file_path = getattr(self, "_sdlxliff_autogen_file_path", None)
+        try:
+            if 0 <= self._book_index < len(self._book_entries):
+                file_path = file_path or self._book_entries[self._book_index].get("epub_path") or None
+        except Exception:
+            pass
+        return generator(
+            self.output_dir,
+            entries,
+            file_path=file_path,
+            progress_callback=self._emit_review_generation_progress,
+        )
+
     def _regenerate_review_sidecars_for_refresh_scan(self, force=False, previous_signature=None, current_signature=None, validate=False):
+        manual_stats = self._regenerate_manual_review_sidecars_for_refresh_scan()
         signature = current_signature or ()
         if not self._review_autogen_has_output_html(signature):
-            return None
+            return manual_stats
         missing_outputs = self._missing_review_sidecar_outputs(self.output_dir, signature)
         stale_outputs = self._stale_review_sidecar_outputs(self.output_dir, signature)
         invalid_outputs = []
@@ -1821,9 +1883,9 @@ class SDLXLIFFReviewDialog(QDialog):
         else:
             invalid_outputs = self._invalid_review_sidecar_outputs(self.output_dir)
         if not force and signature == previous_signature and not invalid_outputs and not missing_outputs and not stale_outputs:
-            return None
+            return manual_stats
         if not force and previous_signature is None and not invalid_outputs and not missing_outputs and not stale_outputs:
-            return None
+            return manual_stats
 
         owner = getattr(self, "_sdlxliff_autogen_owner", None)
         generator = getattr(owner, "_generate_sdlxliff_sidecars_from_completed_entries", None)
@@ -1871,9 +1933,9 @@ class SDLXLIFFReviewDialog(QDialog):
                 ] or requested_output_files
             output_files = generated_outputs or None
             if not output_files:
-                return None
+                return manual_stats
 
-        return generator(
+        completed_stats = generator(
             self.output_dir,
             file_path=file_path,
             progress_data=None,
@@ -1881,6 +1943,7 @@ class SDLXLIFFReviewDialog(QDialog):
             overwrite=True,
             progress_callback=self._emit_review_generation_progress,
         )
+        return self._merge_sdlxliff_generation_stats(manual_stats, completed_stats)
 
     def _emit_review_generation_progress(self, payload):
         try:
@@ -2984,6 +3047,32 @@ class SDLXLIFFReviewDialog(QDialog):
                     str(entry.get("source_filename") or ""),
                     str(entry.get("filename") or ""),
                 ) + self._review_file_signature(os.path.normpath(output_path)))
+
+        manual_editing_enabled = bool(
+            isinstance(getattr(self, "_config", None), dict)
+            and self._config.get(self.MANUAL_EDITING_CONFIG_KEY, False)
+        )
+        if manual_editing_enabled:
+            for entry_index, entry in enumerate(
+                getattr(self, "_sdlxliff_autogen_manual_entries", None) or []
+            ):
+                if not isinstance(entry, dict):
+                    continue
+                status = str(entry.get("status", "") or "").strip().lower()
+                if status not in {"not_translated", "not translated", "not_completed", "pending"}:
+                    continue
+                output_file = entry.get("output_file")
+                output_name = os.path.basename(str(output_file or "").replace("\\", "/"))
+                if not output_name.lower().endswith((".html", ".htm", ".xhtml")):
+                    continue
+                signature.append((
+                    "manual_html",
+                    str(entry_index),
+                    output_name.lower(),
+                    status,
+                    str(entry.get("original_basename") or entry.get("filename") or ""),
+                    str(entry.get("original_filename") or entry.get("href") or ""),
+                ))
         return tuple(sorted(signature))
 
     @staticmethod
@@ -3083,6 +3172,8 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _sdlxliff_sidecar_needs_source_regeneration(self, path):
         try:
+            if _is_manual_untranslated_sdlxliff(path):
+                return False
             source_html, target_html = self._read_sdlxliff_html_pair(path)
             source_texts = [
                 self._review_normalized_unit_text(unit.get("text"))
@@ -4752,16 +4843,16 @@ class SDLXLIFFReviewDialog(QDialog):
             return html_lib.unescape(text)
         return text
 
-    def _extract_text_units(self, html_text):
+    def _extract_text_units(self, html_text, include_empty=False):
         text = self._unescape_html_document(html_text)
         if self._review_lxml_available():
             try:
-                return self._extract_text_units_lxml(text)
+                return self._extract_text_units_lxml(text, include_empty=include_empty)
             except Exception:
                 pass  # fall back to the BeautifulSoup implementation below
-        return self._extract_text_units_bs4(text)
+        return self._extract_text_units_bs4(text, include_empty=include_empty)
 
-    def _extract_text_units_lxml(self, text):
+    def _extract_text_units_lxml(self, text, include_empty=False):
         """Native lxml extractor (C document tree end to end).
 
         Verified output-identical to the BeautifulSoup implementation on all
@@ -4807,7 +4898,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     )
                 )
             )
-            if not value:
+            if not value and not include_empty:
                 continue
             units.append({
                 "index": current_index,
@@ -4816,7 +4907,7 @@ class SDLXLIFFReviewDialog(QDialog):
             })
         return units
 
-    def _extract_text_units_bs4(self, text):
+    def _extract_text_units_bs4(self, text, include_empty=False):
         try:
             from bs4 import BeautifulSoup
         except Exception:
@@ -4845,7 +4936,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 if tag_name == "hr"
                 else self._normalize_review_text(tag.get_text(" ", strip=True))
             )
-            if not value:
+            if not value and not include_empty:
                 continue
             if tag_name in {"div", "hr"}:
                 tag_name = "p"
@@ -5746,7 +5837,11 @@ class SDLXLIFFReviewDialog(QDialog):
     def _apply_piece_list_item_style(self, item, piece):
         if item is None or not isinstance(piece, dict):
             return
-        if piece.get("mismatch"):
+        if piece.get("manual_untranslated"):
+            color = QColor(self.THEME["muted"])
+            color.setAlpha(115)
+            item.setForeground(color)
+        elif piece.get("mismatch"):
             item.setForeground(QColor(self.THEME["danger"]))
         elif piece.get("purple_count"):
             item.setForeground(QColor(self.THEME["purple"]))
@@ -5759,8 +5854,13 @@ class SDLXLIFFReviewDialog(QDialog):
         label = self._sidebar_label_for_piece(piece, row)
         output_name = self._output_name_for_piece(piece)
         item = QListWidgetItem(label)
+        manual_hint = (
+            "\nUntranslated manual sidecar; edit a target row to create its HTML output."
+            if piece.get("manual_untranslated")
+            else ""
+        )
         item.setToolTip(
-            f"{output_name}\nsource {piece['source_count']} -> output {piece['target_count']}\n{piece.get('path', '')}"
+            f"{output_name}\nsource {piece['source_count']} -> output {piece['target_count']}\n{piece.get('path', '')}{manual_hint}"
         )
         item.setData(Qt.UserRole, row)
         self._apply_piece_list_item_style(item, piece)
@@ -5926,16 +6026,39 @@ class SDLXLIFFReviewDialog(QDialog):
         metadata.setdefault("label", self._review_label_from_metadata(metadata))
         try:
             source_html, target_html = self._read_sdlxliff_html_pair(path)
+            manual_untranslated = _is_manual_untranslated_sdlxliff(path)
+            manual_editing = (
+                manual_untranslated
+                or _is_manual_editing_sdlxliff(path)
+            )
             source_units = self._extract_text_units(source_html)
-            target_units = self._extract_text_units(target_html)
+            target_units = self._extract_text_units(
+                target_html,
+                include_empty=manual_editing,
+            )
             if self._review_remove_duplicate_h1_p_enabled():
                 # Hide the same duplicate H1-H6 + <p> title echoes the header
                 # translation pipeline removes, so the surplus source unit no
                 # longer shows up as a flagged "Empty" row.
                 source_units = self._dedupe_heading_paragraph_units(source_units)
-                target_units = self._dedupe_heading_paragraph_units(target_units)
+                if not manual_editing:
+                    target_units = self._dedupe_heading_paragraph_units(target_units)
             source_review_units = self._annotate_review_tag_labels(self._non_empty_text_units(source_units))
-            target_review_units = self._annotate_review_tag_labels(self._non_empty_text_units(target_units))
+            if manual_editing:
+                target_units_by_index = {
+                    unit.get("index"): unit
+                    for unit in target_units
+                    if isinstance(unit, dict)
+                }
+                target_review_units = self._annotate_review_tag_labels([
+                    target_units_by_index[source_unit.get("index")]
+                    for source_unit in source_review_units
+                    if source_unit.get("index") in target_units_by_index
+                ])
+            else:
+                target_review_units = self._annotate_review_tag_labels(
+                    self._non_empty_text_units(target_units)
+                )
             rows = []
             red_count = 0
             yellow_count = 0
@@ -5971,7 +6094,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     "reason": reason,
                 })
             source_count = len(source_review_units)
-            target_count = len(target_review_units)
+            target_count = self._non_empty_text_unit_count(target_review_units)
             count_ratio = (target_count / source_count) if source_count else (1.0 if not target_count else 0.0)
             piece = {
                 "path": path,
@@ -5990,6 +6113,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 "yellow_count": yellow_count,
                 "purple_count": purple_count,
                 "mismatch": source_count != target_count or red_count > 0,
+                "manual_editing": manual_editing,
+                "manual_untranslated": manual_untranslated,
                 "rows": rows,
             }
             self._load_machine_translation_file_for_piece(piece)
@@ -6028,6 +6153,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 "yellow_count": 0,
                 "purple_count": 0,
                 "mismatch": True,
+                "manual_editing": _is_manual_editing_sdlxliff(path),
+                "manual_untranslated": _is_manual_untranslated_sdlxliff(path),
                 "error": str(exc),
                 "rows": [],
             }
@@ -6035,6 +6162,8 @@ class SDLXLIFFReviewDialog(QDialog):
     @staticmethod
     def _review_piece_is_empty_sidecar(piece):
         if not isinstance(piece, dict) or piece.get("error"):
+            return False
+        if piece.get("manual_untranslated"):
             return False
         return int(piece.get("source_count") or 0) == 0 and int(piece.get("target_count") or 0) == 0
 
@@ -9129,6 +9258,30 @@ class SDLXLIFFReviewDialog(QDialog):
             return None
         return os.path.join(self.output_dir or "", output_name)
 
+    def _html_with_output_image_renames(self, target_html):
+        """Apply the workspace's canonical image names to generated HTML."""
+        rename_map_path = os.path.join(
+            self.output_dir or "", "image_rename_map.json"
+        )
+        try:
+            with open(rename_map_path, "r", encoding="utf-8") as handle:
+                rename_map = json.load(handle)
+        except (OSError, ValueError, TypeError):
+            return target_html
+        if not isinstance(rename_map, dict) or not rename_map:
+            return target_html
+
+        try:
+            from bs4 import BeautifulSoup
+            from Chapter_Extractor import _update_image_refs_in_soup
+
+            soup = BeautifulSoup(target_html or "", "html.parser")
+            if _update_image_refs_in_soup(soup, rename_map):
+                return str(soup)
+        except Exception:
+            pass
+        return target_html
+
     def _target_html_with_edit(self, piece, row_data, text):
         try:
             from bs4 import BeautifulSoup
@@ -9181,6 +9334,7 @@ class SDLXLIFFReviewDialog(QDialog):
         sidecar_path = piece.get("path")
         if not sidecar_path:
             return
+        target_html = self._html_with_output_image_renames(target_html)
         tree = ET.parse(sidecar_path)
         root = tree.getroot()
         target_element = None
@@ -9193,21 +9347,27 @@ class SDLXLIFFReviewDialog(QDialog):
         for child in list(target_element):
             target_element.remove(child)
         target_element.text = target_html
+        was_manual_untranslated = _is_manual_untranslated_sdlxliff(root)
         try:
             ET.register_namespace("", "urn:oasis:names:tc:xliff:document:1.2")
             ET.register_namespace("sdl", "http://sdl.com/FileTypes/SdlXliff/1.0")
         except Exception:
             pass
         tree.write(sidecar_path, encoding="utf-8", xml_declaration=True)
-        try:
-            self._last_review_signature = self._current_review_signature()
-        except Exception:
-            pass
 
         output_path = self._output_path_for_piece(piece)
         if output_path:
             with open(output_path, "w", encoding="utf-8") as f:
                 f.write(target_html)
+        if was_manual_untranslated:
+            _clear_manual_untranslated_sdlxliff(root)
+            tree.write(sidecar_path, encoding="utf-8", xml_declaration=True)
+            piece["manual_untranslated"] = False
+        try:
+            self._last_review_signature = self._current_review_signature()
+        except Exception:
+            pass
+        return target_html
 
     def _apply_target_edit(self, piece_index, row_index, text):
         if piece_index < 0 or piece_index >= len(self.pieces):
@@ -9223,7 +9383,7 @@ class SDLXLIFFReviewDialog(QDialog):
             for existing in rows
         ]
         target_html = self._target_html_with_edit(piece, row_data, text)
-        self._write_piece_target_html(piece, target_html)
+        target_html = self._write_piece_target_html(piece, target_html)
         piece["target_html"] = target_html
         row_data["target"] = str(text or "")
         manual_cleared = self._clear_piece_manual_green_override(piece, persist=True)
@@ -10281,11 +10441,18 @@ class RetranslationMixin:
     """Mixin class containing retranslation methods for TranslatorGUI"""
 
     _RETRANSLATION_SHOW_MODEL_INFO_CONFIG_KEY = "retranslation_show_model_info"
+    _RETRANSLATION_MANUAL_EDITING_CONFIG_KEY = "retranslation_manual_editing"
     _SDLXLIFF_AUTOGEN_STATUSES = {
         "completed",
         "qa_failed",
         "completed_empty",
         "completed_image_only",
+    }
+    _SDLXLIFF_MANUAL_UNTRANSLATED_STATUSES = {
+        "not_translated",
+        "not translated",
+        "not_completed",
+        "pending",
     }
 
     @staticmethod
@@ -10655,6 +10822,105 @@ class RetranslationMixin:
                         continue
         return None, None
 
+    def _sdlxliff_autogen_bulk_read_sources(self, output_dir, work_entries, file_path=None):
+        """Resolve many source documents with one scan of each source EPUB."""
+        candidates_by_index = {
+            index: self._sdlxliff_autogen_source_candidates(entry, output_name, progress_key)
+            for index, (progress_key, entry, output_name) in enumerate(work_entries)
+        }
+        unresolved = set(candidates_by_index)
+        resolved = {}
+
+        def _resource_maps(resources):
+            exact = {}
+            basename_groups = {}
+            for normalized, resource in resources:
+                normalized = str(normalized or "").replace("\\", "/").lower().strip("/")
+                if not normalized:
+                    continue
+                exact.setdefault(normalized, resource)
+                basename_groups.setdefault(os.path.basename(normalized), []).append(resource)
+            by_basename = {
+                name: matches[0]
+                for name, matches in basename_groups.items()
+                if len(matches) == 1
+            }
+            return exact, by_basename
+
+        def _matching_resource(index, exact, by_basename):
+            for candidate in candidates_by_index.get(index, ()):
+                normalized = str(candidate or "").replace("\\", "/").lower().strip("/")
+                if not normalized:
+                    continue
+                resource = exact.get(normalized)
+                if resource is None:
+                    resource = by_basename.get(os.path.basename(normalized))
+                if resource is not None:
+                    return resource
+            return None
+
+        for epub_path in self._sdlxliff_autogen_epub_candidates(output_dir, file_path):
+            if not unresolved:
+                break
+            if os.path.isdir(epub_path):
+                resources = []
+                try:
+                    root_abs = os.path.abspath(epub_path)
+                    for dirpath, _dirs, files in os.walk(root_abs):
+                        for fname in files:
+                            path = os.path.join(dirpath, fname)
+                            relative = os.path.relpath(path, root_abs).replace("\\", "/")
+                            resources.append((relative, path))
+                except Exception:
+                    resources = []
+                exact, by_basename = _resource_maps(resources)
+                for index in list(unresolved):
+                    source_path = _matching_resource(index, exact, by_basename)
+                    if not source_path:
+                        continue
+                    try:
+                        with open(source_path, "rb") as source_file:
+                            source_html = self._sdlxliff_autogen_decode(source_file.read())
+                    except Exception:
+                        continue
+                    if source_html:
+                        resolved[index] = (source_html, source_path)
+                        unresolved.discard(index)
+                continue
+
+            try:
+                with zipfile.ZipFile(epub_path, "r") as source_zip:
+                    exact, by_basename = _resource_maps(
+                        (name, name) for name in source_zip.namelist()
+                    )
+                    for index in list(unresolved):
+                        member = _matching_resource(index, exact, by_basename)
+                        if not member:
+                            continue
+                        try:
+                            source_html = self._sdlxliff_autogen_decode(source_zip.read(member))
+                        except Exception:
+                            continue
+                        if source_html:
+                            resolved[index] = (source_html, f"{epub_path}!{member}")
+                            unresolved.discard(index)
+            except Exception:
+                continue
+
+        # Preserve the existing loose-file fallbacks for unusual workspaces.
+        for index in list(unresolved):
+            progress_key, entry, output_name = work_entries[index]
+            source_html, source_path = self._sdlxliff_autogen_read_source_html(
+                output_dir,
+                entry,
+                output_file=output_name,
+                progress_key=progress_key,
+                file_path=file_path,
+            )
+            if source_html:
+                resolved[index] = (source_html, source_path)
+        return resolved
+
     @staticmethod
     def _sdlxliff_sidecar_current_for_output(sidecar_path, output_path):
         try:
@@ -10843,6 +11109,155 @@ class RetranslationMixin:
         _notify("finished", total, path=stats["paths"][-1] if stats["paths"] else "")
         return stats
 
+    def _generate_sdlxliff_sidecars_from_untranslated_entries(
+        self,
+        output_dir,
+        untranslated_entries,
+        file_path=None,
+        progress_callback=None,
+    ):
+        """Create source-only manual sidecars from Progress Manager rows."""
+        stats = {
+            "total": 0,
+            "considered": 0,
+            "created": 0,
+            "skipped": 0,
+            "missing_source": 0,
+            "missing_output": 0,
+            "failed": 0,
+            "paths": [],
+            "errors": [],
+        }
+        if not output_dir or not os.path.isdir(output_dir):
+            stats["errors"].append(f"Output folder does not exist: {output_dir}")
+            return stats
+
+        entries = untranslated_entries
+        if isinstance(entries, dict):
+            entries = entries.get("chapters", entries)
+            entries = list(entries.items()) if isinstance(entries, dict) else list(entries or [])
+        else:
+            entries = list(enumerate(entries or []))
+
+        work_entries = []
+        seen_outputs = set()
+        for entry_key, entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            status = str(entry.get("status", "") or "").strip().lower()
+            if status not in self._SDLXLIFF_MANUAL_UNTRANSLATED_STATUSES:
+                continue
+            output_file = entry.get("output_file")
+            output_name = os.path.basename(str(output_file or "").replace("\\", "/"))
+            if not output_name.lower().endswith((".html", ".htm", ".xhtml")):
+                continue
+            output_key = output_name.lower()
+            if output_key in seen_outputs:
+                stats["skipped"] += 1
+                continue
+            seen_outputs.add(output_key)
+            manual_entry = dict(entry)
+            if not manual_entry.get("original_basename"):
+                manual_entry["original_basename"] = entry.get("filename")
+            if not manual_entry.get("original_filename"):
+                manual_entry["original_filename"] = entry.get("href")
+            work_entries.append((str(entry_key), manual_entry, output_name))
+
+        total = len(work_entries)
+        stats["total"] = total
+
+        def _notify(stage, index=0, output_name="", path="", message="", error=""):
+            if not callable(progress_callback):
+                return
+            try:
+                progress_callback({
+                    "stage": stage,
+                    "index": index,
+                    "total": total,
+                    "output_name": output_name,
+                    "path": path,
+                    "message": message,
+                    "error": error,
+                    "stats": dict(stats),
+                })
+            except Exception:
+                pass
+
+        _notify("start", message=f"Preparing {total} untranslated SDLXLIFF sidecar(s)")
+        pending_entries = []
+        for entry_index, work_entry in enumerate(work_entries, 1):
+            _entry_key, _entry, output_name = work_entry
+            output_path = self._sdlxliff_autogen_output_path(output_dir, output_name)
+            sidecar_path = os.path.join(output_dir, "SDLXLIFF", f"{output_name}.sdlxliff")
+            if (output_path and os.path.isfile(output_path)) or os.path.isfile(sidecar_path):
+                stats["considered"] += 1
+                stats["skipped"] += 1
+                if (
+                    os.path.isfile(sidecar_path)
+                    and _blank_manual_untranslated_sdlxliff_target(sidecar_path)
+                ):
+                    stats["paths"].append(sidecar_path)
+                _notify("checking", entry_index, output_name)
+                _notify("skipped", entry_index, output_name, path=sidecar_path)
+                continue
+            pending_entries.append((entry_index, work_entry))
+
+        source_pairs = self._sdlxliff_autogen_bulk_read_sources(
+            output_dir,
+            [work_entry for _entry_index, work_entry in pending_entries],
+            file_path=file_path,
+        )
+        old_output_sdlxliff = os.environ.get("OUTPUT_SDLXLIFF")
+        os.environ["OUTPUT_SDLXLIFF"] = "1"
+        try:
+            for pending_index, (entry_index, (entry_key, entry, output_name)) in enumerate(pending_entries):
+                stats["considered"] += 1
+                _notify("checking", entry_index, output_name)
+                source_html, source_path = source_pairs.get(pending_index, (None, None))
+                if not source_html:
+                    stats["missing_source"] += 1
+                    _notify(
+                        "missing_source",
+                        entry_index,
+                        output_name,
+                        message=f"Source HTML not found for {output_name}",
+                    )
+                    continue
+
+                chapter = dict(entry)
+                if not chapter.get("original_basename"):
+                    chapter["original_basename"] = os.path.basename(str(source_path or output_name).split("!", 1)[-1])
+                writer_error = ""
+                try:
+                    result_path = _write_html_sdlxliff_sidecar(
+                        output_dir,
+                        output_name,
+                        chapter,
+                        source_html,
+                        source_html,
+                        raise_errors=True,
+                        manual_untranslated=True,
+                    )
+                except Exception as exc:
+                    result_path = None
+                    writer_error = f"{type(exc).__name__}: {exc}"
+                    stats["errors"].append(f"{output_name}: {writer_error}")
+                if result_path:
+                    stats["created"] += 1
+                    stats["paths"].append(result_path)
+                    _notify("created", entry_index, output_name, path=result_path)
+                else:
+                    stats["failed"] += 1
+                    _notify("failed", entry_index, output_name, error=writer_error)
+        finally:
+            if old_output_sdlxliff is None:
+                os.environ.pop("OUTPUT_SDLXLIFF", None)
+            else:
+                os.environ["OUTPUT_SDLXLIFF"] = old_output_sdlxliff
+
+        _notify("finished", total, path=stats["paths"][-1] if stats["paths"] else "")
+        return stats
+
     def _open_or_reuse_sdlxliff_review(
         self,
         output_dir,
@@ -10851,12 +11266,15 @@ class RetranslationMixin:
         autogen_file_path=None,
         autogen_progress_data=None,
         autogen_output_files=None,
+        autogen_manual_entries=None,
     ):
         try:
             key = os.path.normcase(os.path.abspath(output_dir))
         except Exception:
             key = str(output_dir or "")
 
+        manual_entries = list(autogen_manual_entries or [])
+        manual_editing_enabled = self._get_retranslation_manual_editing_state()
         if (
             not self._output_dir_has_sdlxliff_sidecars(output_dir)
             and not self._output_dir_has_sdlxliff_generatable_html(
@@ -10864,6 +11282,7 @@ class RetranslationMixin:
                 progress_data=autogen_progress_data,
                 output_files=autogen_output_files,
             )
+            and not (manual_editing_enabled and manual_entries)
         ):
             self._show_no_sdlxliff_review_available(parent or self)
             return None
@@ -10891,6 +11310,7 @@ class RetranslationMixin:
                 autogen_file_path=autogen_file_path,
                 autogen_progress_data=autogen_progress_data,
                 autogen_output_files=autogen_output_files,
+                autogen_manual_entries=manual_entries,
             )
             review_dialog.setAttribute(Qt.WA_DeleteOnClose, False)
             cache[key] = review_dialog
@@ -10908,6 +11328,7 @@ class RetranslationMixin:
                 review_dialog._sdlxliff_autogen_file_path = autogen_file_path
                 review_dialog._sdlxliff_autogen_progress_data = autogen_progress_data
                 review_dialog._sdlxliff_autogen_output_files = list(autogen_output_files or []) or None
+                review_dialog._sdlxliff_autogen_manual_entries = manual_entries
             except Exception:
                 pass
             review_dialog.reopen_for_path(output_dir, review_path)
@@ -10952,6 +11373,32 @@ class RetranslationMixin:
         except Exception as exc:
             try:
                 print(f"⚠️ Could not persist Show Model Info state: {exc}")
+            except Exception:
+                pass
+
+    def _get_retranslation_manual_editing_state(self):
+        """Return the persisted Manual editing preference."""
+        try:
+            return bool(
+                getattr(self, 'config', {}).get(
+                    self._RETRANSLATION_MANUAL_EDITING_CONFIG_KEY,
+                    False,
+                )
+            )
+        except Exception:
+            return False
+
+    def _persist_retranslation_manual_editing_state(self, enabled):
+        """Persist Manual editing across Progress Manager sessions."""
+        try:
+            if not hasattr(self, 'config') or not isinstance(self.config, dict):
+                self.config = {}
+            self.config[self._RETRANSLATION_MANUAL_EDITING_CONFIG_KEY] = bool(enabled)
+            if hasattr(self, 'save_config') and callable(self.save_config):
+                self.save_config(show_message=False)
+        except Exception as exc:
+            try:
+                print(f"⚠️ Could not persist Manual editing state: {exc}")
             except Exception:
                 pass
 
@@ -13662,6 +14109,7 @@ class RetranslationMixin:
                                     spine_chapters.append({
                                         'id': idref,
                                         'filename': filename,
+                                        'href': chapter_info.get('href'),
                                         'position': len(spine_chapters),
                                         'file_chapter_num': file_chapter_num,
                                         'status': 'unknown',  # Will be updated
@@ -14722,6 +15170,139 @@ class RetranslationMixin:
         """)
         text_analysis_btn.setVisible(True)
 
+        manual_editing_cb = QCheckBox("Manual editing")
+        manual_editing_cb.setChecked(self._get_retranslation_manual_editing_state())
+        manual_editing_cb.setStyleSheet(show_special_files_cb.styleSheet())
+        manual_editing_cb.setToolTip(
+            "Create source-only SDLXLIFF sidecars for the Progress Manager's Not Translated entries.\n"
+            "No HTML output is created until a target row is edited."
+        )
+        manual_checkmark = QLabel("\u2713", manual_editing_cb)
+        manual_checkmark.setAlignment(Qt.AlignCenter)
+        manual_checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+        manual_checkmark.setStyleSheet(
+            "color: white; background: transparent; font-weight: bold; font-size: 11px;"
+        )
+
+        def _update_manual_checkmark():
+            try:
+                manual_checkmark.setGeometry(2, 1, 14, 14)
+                manual_checkmark.setVisible(manual_editing_cb.isChecked())
+            except RuntimeError:
+                pass
+
+        manual_editing_cb.stateChanged.connect(_update_manual_checkmark)
+        QTimer.singleShot(0, _update_manual_checkmark)
+
+        def _progress_manager_untranslated_entries():
+            progress_data = getattr(manual_editing_cb, '_progress_data_ref', None)
+            current_spine_chapters = (
+                progress_data.get('spine_chapters', spine_chapters)
+                if isinstance(progress_data, dict)
+                else spine_chapters
+            )
+            status_data = progress_data if isinstance(progress_data, dict) else {'prog': prog}
+            current_output_dir = (
+                progress_data.get('output_dir', output_dir)
+                if isinstance(progress_data, dict)
+                else output_dir
+            )
+            untranslated_entries = []
+            for entry in current_spine_chapters:
+                if not isinstance(entry, dict):
+                    continue
+                if self._progress_display_status(entry, status_data) not in {
+                    'not_translated', 'pending',
+                }:
+                    continue
+                output_path = self._sdlxliff_autogen_output_path(
+                    current_output_dir,
+                    entry.get('output_file'),
+                )
+                if output_path and os.path.isfile(output_path):
+                    continue
+                manual_entry = dict(entry)
+                manual_entry['status'] = 'not_translated'
+                untranslated_entries.append(manual_entry)
+            return untranslated_entries
+
+        def _generate_manual_editing_sidecars():
+            untranslated_entries = _progress_manager_untranslated_entries()
+            progress_data = getattr(manual_editing_cb, '_progress_data_ref', None)
+            current_output_dir = (
+                progress_data.get('output_dir', output_dir)
+                if isinstance(progress_data, dict)
+                else output_dir
+            )
+            current_file_path = (
+                progress_data.get('file_path', file_path)
+                if isinstance(progress_data, dict)
+                else file_path
+            )
+            original_button_text = text_analysis_btn.text()
+            stats = {
+                'created': 0,
+                'paths': [],
+                'missing_source': 0,
+                'errors': [],
+            }
+
+            def _show_generation_progress(payload):
+                try:
+                    total = int(payload.get('total') or 0)
+                    index = int(payload.get('index') or 0)
+                    stage = str(payload.get('stage') or '')
+                    if stage in ('checking', 'created', 'skipped', 'missing_source', 'failed') and total:
+                        text_analysis_btn.setText(f"Creating sidecars… {min(index, total)}/{total}")
+                    QApplication.processEvents(QEventLoop.ExcludeUserInputEvents, 5)
+                except Exception:
+                    pass
+
+            manual_editing_cb.setEnabled(False)
+            text_analysis_btn.setEnabled(False)
+            try:
+                stats = self._generate_sdlxliff_sidecars_from_untranslated_entries(
+                    current_output_dir,
+                    untranslated_entries,
+                    file_path=current_file_path,
+                    progress_callback=_show_generation_progress,
+                )
+            except Exception as exc:
+                stats['errors'].append(str(exc))
+                manual_editing_cb.setToolTip(f"Manual sidecar creation failed: {exc}")
+            finally:
+                manual_editing_cb.setEnabled(True)
+                text_analysis_btn.setEnabled(True)
+                text_analysis_btn.setText(original_button_text)
+
+            created = int(stats.get('created') or 0)
+            skipped_sidecars = int(stats.get('skipped') or 0)
+            missing_source = int(stats.get('missing_source') or 0)
+            if created:
+                manual_editing_cb.setToolTip(
+                    f"Created {created} source-only manual sidecar{'s' if created != 1 else ''}.\n"
+                    "No HTML output is created until a target row is edited."
+                )
+            elif skipped_sidecars:
+                manual_editing_cb.setToolTip(
+                    "Manual sidecars already exist. No HTML output is created until a target row is edited."
+                )
+            elif missing_source:
+                manual_editing_cb.setToolTip(
+                    f"Could not locate source HTML for {missing_source} Not Translated entr{'ies' if missing_source != 1 else 'y'}."
+                )
+            _queue_text_analysis_button_update()
+            return stats
+
+        def _on_manual_editing_toggled(enabled):
+            enabled = bool(enabled)
+            self._persist_retranslation_manual_editing_state(enabled)
+            progress_data = getattr(manual_editing_cb, '_progress_data_ref', None)
+            if isinstance(progress_data, dict):
+                progress_data['manual_editing_state'] = enabled
+            if enabled:
+                _generate_manual_editing_sidecars()
+
         def _update_text_analysis_button():
             try:
                 sidecars = _text_analysis_sidecars()
@@ -14746,12 +15327,26 @@ class RetranslationMixin:
 
         def _show_text_analysis():
             try:
+                if manual_editing_cb.isChecked():
+                    _generate_manual_editing_sidecars()
+                progress_data = getattr(manual_editing_cb, '_progress_data_ref', None)
+                current_output_dir = (
+                    progress_data.get('output_dir', output_dir)
+                    if isinstance(progress_data, dict)
+                    else output_dir
+                )
+                current_progress = (
+                    progress_data.get('prog', prog)
+                    if isinstance(progress_data, dict)
+                    else prog
+                )
                 review_dialog = self._open_or_reuse_sdlxliff_review(
-                    output_dir,
+                    current_output_dir,
                     None,
                     dialog,
                     autogen_file_path=file_path,
-                    autogen_progress_data=prog,
+                    autogen_progress_data=current_progress,
+                    autogen_manual_entries=_progress_manager_untranslated_entries(),
                 )
                 if review_dialog is None:
                     return
@@ -14764,6 +15359,7 @@ class RetranslationMixin:
                 self._show_message('error', "Open Failed", str(e), parent=dialog)
 
         text_analysis_btn.clicked.connect(_show_text_analysis)
+        manual_editing_cb.toggled.connect(_on_manual_editing_toggled)
         _update_text_analysis_button()
 
         def _queue_text_analysis_button_update():
@@ -18144,6 +18740,7 @@ class RetranslationMixin:
         
         
         stats_layout.addStretch()
+        stats_layout.addWidget(manual_editing_cb)
         stats_layout.addWidget(text_analysis_btn)
         
         # Show temporary "folder created" label in the stats row if a folder was just created
@@ -18250,7 +18847,11 @@ class RetranslationMixin:
             'show_special_files_state': show_special_files[0],  # Store current toggle state
             'show_special_files_cb': show_special_files_cb,  # Store checkbox reference
             'show_model_info_state': show_model_info[0],
-            'show_model_info_cb': show_model_info_cb
+            'show_model_info_cb': show_model_info_cb,
+            'manual_editing_cb': manual_editing_cb,
+            'manual_editing_state': manual_editing_cb.isChecked(),
+            'generate_manual_editing_sidecars': _generate_manual_editing_sidecars,
+            'manual_untranslated_entries_provider': _progress_manager_untranslated_entries,
         }
         result['_last_applied_snapshot_signatures'] = (
             _progress_path_signature(progress_file),
@@ -18258,6 +18859,9 @@ class RetranslationMixin:
             None,
         )
         show_model_info_cb._progress_data_ref = result
+        manual_editing_cb._progress_data_ref = result
+        if manual_editing_cb.isChecked():
+            QTimer.singleShot(0, _generate_manual_editing_sidecars)
         
         # If standalone (no parent), add buttons and show dialog
         if not parent_dialog and not tab_frame:
@@ -19767,9 +20371,20 @@ class RetranslationMixin:
             progress_entry = display_info.get('info', {}) or {}
             return _sdlxliff_sidecar_path_for_output_file(display_info.get('output_file') or progress_entry.get('output_file'))
 
+        def _manual_editing_enabled():
+            checkbox = data.get('manual_editing_cb')
+            try:
+                return bool(checkbox and checkbox.isChecked())
+            except RuntimeError:
+                return False
+
         def _open_sdlxliff_review_for_item(display_info):
             progress_entry = display_info.get('info', {}) or {}
             output_file = display_info.get('output_file') or progress_entry.get('output_file')
+            if _manual_editing_enabled() and not _sdlxliff_review_path_for_item(display_info):
+                generate_sidecars = data.get('generate_manual_editing_sidecars')
+                if callable(generate_sidecars):
+                    generate_sidecars()
             review_path = _sdlxliff_review_path_for_item(display_info) or _sdlxliff_expected_review_path_for_item(display_info)
             try:
                 review_dialog = self._open_or_reuse_sdlxliff_review(
@@ -19779,6 +20394,11 @@ class RetranslationMixin:
                     autogen_file_path=data.get('file_path'),
                     autogen_progress_data=data.get('prog'),
                     autogen_output_files=[output_file] if output_file else None,
+                    autogen_manual_entries=(
+                        data.get('manual_untranslated_entries_provider')()
+                        if callable(data.get('manual_untranslated_entries_provider'))
+                        else []
+                    ),
                 )
                 if review_dialog is None:
                     return
@@ -20395,8 +21015,11 @@ class RetranslationMixin:
                     f"⏭️ Do not skip (remove keyword '{_skip_keyword}')")
             else:
                 act_open = menu.addAction("📂 Open File")
-                if _source_exists_for_item(display_info) and qa_file_path:
-                    act_review_sdlxliff = menu.addAction(" 🔍Review source -> output")
+                if (
+                    (_manual_editing_enabled() and _progress_item_is_html(display_info))
+                    or (_source_exists_for_item(display_info) and qa_file_path)
+                ):
+                    act_review_sdlxliff = menu.addAction("🔍 Review source -> output")
                 if _find_audio_file_for_item(display_info):
                     act_open_audio = menu.addAction("🔊 Open Audio File")
                     act_delete_audio = menu.addAction("🗑️ Delete Audio File")
@@ -21149,7 +21772,7 @@ class RetranslationMixin:
                 # Fallback mode: REBUILD chapter_display_info from scratch to pick up new entries
                 # This is necessary for text files or EPUBs without OPF
                 self._rebuild_chapter_display_info(data)
-            
+
             # Note: chapter_display_info is already rebuilt/updated above
             # For OPF mode: _update_chapter_status_info updated existing entries
             # For fallback mode: _rebuild_chapter_display_info rebuilt from scratch

@@ -8739,6 +8739,7 @@ class BatchTranslationProcessor:
                             chapter_body,
                             original_chapter_body,
                             self.config,
+                            qa_issue=vision_qa_issues,
                         )
                         try:
                             with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
@@ -8769,6 +8770,7 @@ class BatchTranslationProcessor:
                             "",
                             original_chapter_body,
                             self.config,
+                            qa_issue=qa_issue,
                         )
                         try:
                             with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
@@ -9894,6 +9896,7 @@ class BatchTranslationProcessor:
                                     partial_content,
                                     original_chapter_body,
                                     self.config,
+                                    qa_issue=["TRUNCATED"] if had_partial_content else ["PARTIAL"],
                                 )
                                 if partial_content:
                                     try:
@@ -9959,6 +9962,7 @@ class BatchTranslationProcessor:
                                     result,
                                     original_chapter_body,
                                     self.config,
+                                    qa_issue=qa_issue,
                                 )
                                 try:
                                     with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
@@ -9990,6 +9994,7 @@ class BatchTranslationProcessor:
                                     result,
                                     original_chapter_body,
                                     self.config,
+                                    qa_issue=["TIMEOUT"],
                                 )
                                 try:
                                     with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
@@ -10020,6 +10025,7 @@ class BatchTranslationProcessor:
                                     result,
                                     original_chapter_body,
                                     self.config,
+                                    qa_issue=["TRUNCATED"],
                                 )
                                 try:
                                     with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
@@ -10291,6 +10297,7 @@ class BatchTranslationProcessor:
                                 cleaned,
                                 original_chapter_body,
                                 self.config,
+                                failure_reason=failure_reason,
                             )
                             with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                                 f.write(failure_output)
@@ -10364,6 +10371,7 @@ class BatchTranslationProcessor:
                         cleaned,
                         original_chapter_body,
                         self.config,
+                        qa_issue=qa_issue,
                     )
                     with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                         f.write(failure_output)
@@ -10519,6 +10527,8 @@ class BatchTranslationProcessor:
                         streamed_failure_content,
                         original_chapter_body,
                         self.config,
+                        failure_reason=error_msg,
+                        qa_issue=qa_issue,
                     )
                     try:
                         with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
@@ -11135,11 +11145,13 @@ class BatchTranslationProcessor:
 
                 if merged_truncated:
                     # Do this before split-the-merge so each saved section also
-                    # receives source text when preservation has priority.
+                    # receives the truncated output or preserved source selected
+                    # by the matching failure toggle.
                     cleaned = _failure_output_for_save(
                         cleaned,
                         merged_content,
                         self.config,
+                        qa_issue=["TRUNCATED"],
                     )
 
                 # Check for truncation / QA failures first. Preserve Original
@@ -11175,7 +11187,16 @@ class BatchTranslationProcessor:
                         or is_api_error_failure(cleaned, failure_reason)
                     )
                     if should_save:
-                        if _preserve_original_text_on_failure_enabled(self.config):
+                        dedicated_failure_save = _failure_output_toggle_enabled(
+                            cleaned,
+                            failure_reason=failure_reason,
+                            config=self.config,
+                            qa_issue=merged_failure_qa_issue,
+                        )
+                        if (
+                            _preserve_original_text_on_failure_enabled(self.config)
+                            and not dedicated_failure_save
+                        ):
                             for actual_num, _, _, chapter, _ in chapters_data:
                                 chapter_fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                                 raw_source = chapter.get("body", "")
@@ -11191,6 +11212,7 @@ class BatchTranslationProcessor:
                                     cleaned,
                                     merged_content,
                                     self.config,
+                                    qa_issue=merged_failure_qa_issue,
                                 )
                                 cleaned_to_save = ContentProcessor.strip_split_markers(failure_output)
                                 with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
@@ -11389,6 +11411,7 @@ class BatchTranslationProcessor:
                             cleaned_to_save,
                             merged_content,
                             self.config,
+                            qa_issue=["TRUNCATED"],
                         )
                         if getattr(self, 'is_text_file', False):
                             text_content = _content_for_text_output(failure_output)
@@ -11512,8 +11535,17 @@ class BatchTranslationProcessor:
                 config=self.config,
                 qa_issue=qa_issue,
             )
+            dedicated_failure_save = _failure_output_toggle_enabled(
+                streamed_failure_content,
+                failure_reason=error_msg,
+                config=self.config,
+                qa_issue=qa_issue,
+            )
 
-            if _preserve_original_text_on_failure_enabled(self.config):
+            if (
+                _preserve_original_text_on_failure_enabled(self.config)
+                and not dedicated_failure_save
+            ):
                 # A merged request still represents separate output chapters.
                 # Preserve each chapter's own raw body rather than one synthetic
                 # request containing split markers and preprocessing changes.
@@ -11534,6 +11566,8 @@ class BatchTranslationProcessor:
                     streamed_failure_content,
                     source_content,
                     self.config,
+                    failure_reason=error_msg,
+                    qa_issue=qa_issue,
                 )
                 try:
                     with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
@@ -13489,15 +13523,77 @@ def _preserve_original_text_on_failure_enabled(config=None):
 
 
 def _should_save_truncated_response(config=None):
-    """Preserved source text takes precedence over the truncated-output toggle."""
+    """Save truncation output or preserved source when either option is enabled."""
     return (
         _preserve_original_text_on_failure_enabled(config)
         or _save_partial_results_enabled(config)
     )
 
 
-def _failure_output_for_save(provider_content, source_content, config=None):
-    """Select the source verbatim before any failed provider/partial response."""
+def _failure_output_toggle_enabled(
+    content=None,
+    failure_reason=None,
+    config=None,
+    qa_issue=None,
+):
+    """Return whether this failure's dedicated save toggle overrides preservation."""
+    issues = _normalize_qa_issue_set(qa_issue)
+    reason = str(failure_reason or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if issues.intersection({"PROHIBITED_CONTENT", "API_ERROR"}):
+        return _save_prohibited_results_enabled(config)
+    if issues.intersection({"TRUNCATED", "PARTIAL", "TIMEOUT"}):
+        return _save_partial_results_enabled(config)
+    if reason in {
+        "blocked",
+        "censorship_blocked",
+        "content_filter",
+        "prohibited_content",
+        "api_error",
+        "error",
+        "validation",
+        "validation_error",
+        "rate_limit",
+        "rate_limited",
+        "server_error",
+        "network_error",
+        "parse_error",
+        "extraction_error",
+    }:
+        return _save_prohibited_results_enabled(config)
+    if reason in {
+        "length",
+        "max_tokens",
+        "max_length",
+        "stop_sequence_limit",
+        "truncated",
+        "incomplete",
+        "partial",
+        "timeout",
+    }:
+        return _save_partial_results_enabled(config)
+    if is_prohibited_failure(content, failure_reason) or is_api_error_failure(
+        content,
+        failure_reason,
+    ):
+        return _save_prohibited_results_enabled(config)
+    return False
+
+
+def _failure_output_for_save(
+    provider_content,
+    source_content,
+    config=None,
+    failure_reason=None,
+    qa_issue=None,
+):
+    """Select dedicated failure output first, then preserved source fallback."""
+    if _failure_output_toggle_enabled(
+        provider_content,
+        failure_reason=failure_reason,
+        config=config,
+        qa_issue=qa_issue,
+    ):
+        return provider_content if isinstance(provider_content, str) else ""
     if _preserve_original_text_on_failure_enabled(config):
         return source_content if isinstance(source_content, str) else ""
     return provider_content if isinstance(provider_content, str) else ""
@@ -13588,9 +13684,15 @@ def is_api_error_failure(content, failure_reason=None):
 
 def _should_save_failure_response(content=None, failure_reason=None, config=None, qa_issue=None):
     """Route failed-output saves to the matching user toggle."""
-    # Preserve Original Text is itself an opt-in to materialize failed
-    # translations. UnifiedClient has already replaced the failed provider
-    # output with the raw source text before this save gate is reached.
+    if _failure_output_toggle_enabled(
+        content,
+        failure_reason=failure_reason,
+        config=config,
+        qa_issue=qa_issue,
+    ):
+        return True
+    # Preservation remains an opt-in fallback for every failure whose own
+    # save toggle is disabled.
     if _preserve_original_text_on_failure_enabled(config):
         return True
     issues = _normalize_qa_issue_set(qa_issue)
@@ -27700,6 +27802,7 @@ def main(log_callback=None, stop_callback=None):
                             result,
                             chunk_html,
                             config,
+                            qa_issue=qa_issue,
                         )
                         try:
                             with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
@@ -27734,6 +27837,7 @@ def main(log_callback=None, stop_callback=None):
                             partial_content,
                             chunk_html,
                             config,
+                            qa_issue=["TRUNCATED"] if had_partial_content else ["PARTIAL"],
                         )
                         if partial_content:
                             try:
@@ -27802,6 +27906,7 @@ def main(log_callback=None, stop_callback=None):
                             result,
                             chunk_html,
                             config,
+                            qa_issue=qa_issue,
                         )
                         try:
                             with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
@@ -27884,6 +27989,7 @@ def main(log_callback=None, stop_callback=None):
                                             result,
                                             chunk_html,
                                             config,
+                                            qa_issue=["TRUNCATED"],
                                         )
                                         try:
                                             with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
@@ -28251,6 +28357,7 @@ def main(log_callback=None, stop_callback=None):
                             cleaned,
                             c.get("body", ""),
                             config,
+                            qa_issue=qa_issue,
                         )
                         try:
                             with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
@@ -28456,6 +28563,7 @@ def main(log_callback=None, stop_callback=None):
                         cleaned,
                         c.get("body", ""),
                         config,
+                        qa_issue=["TRUNCATED"],
                     )
 
                 # We may exit early on QA failure below, but we still want to strip
@@ -28494,6 +28602,7 @@ def main(log_callback=None, stop_callback=None):
                                 cleaned,
                                 c.get("body", ""),
                                 config,
+                                failure_reason=failure_reason,
                             )
                             cleaned_to_save = ContentProcessor.strip_split_markers(failure_output)
                             write_utf8_html_file(os.path.join(out, parent_fname), cleaned_to_save)
@@ -28752,6 +28861,7 @@ def main(log_callback=None, stop_callback=None):
                         cleaned,
                         c.get("body", ""),
                         config,
+                        qa_issue=qa_issue,
                     )
                     if is_text_file and not is_pdf_file:
                         fname_out = fname.replace('.html', '.txt')
