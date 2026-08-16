@@ -68,6 +68,7 @@ except:
 # Main application files
 app_files = [
     ('manga_ocr_io.py', '.'),
+    ('gemini_policy.py', '.'),
     # Core GUI
     ('translator_gui.py', '.'),
     ('parallel_epub_glossary.py', '.'),
@@ -219,6 +220,7 @@ datas.append(('enable_debug_mode.py', '.'))
 # Application modules
 app_modules = [
     'manga_ocr_io',
+    'gemini_policy',
     'TransateKRtoEN',
     'metadata_translation_worker',
     'subtitle_processor',
