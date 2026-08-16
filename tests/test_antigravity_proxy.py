@@ -18,9 +18,11 @@ from unified_api_client import UnifiedClient, UnifiedClientError
 def _reset_antigravity_cancel_state():
     antigravity_proxy.reset_cancel()
     antigravity_proxy.set_proxy_started_callback(None)
+    antigravity_proxy._proxy_last_update_check_at = 0.0
     yield
     antigravity_proxy.reset_cancel()
     antigravity_proxy.set_proxy_started_callback(None)
+    antigravity_proxy._proxy_last_update_check_at = 0.0
 
 
 def test_proxy_started_callback_is_optional_and_notified_once():
@@ -1097,10 +1099,12 @@ def test_model_options_match_current_antigravity_dashboard_catalog():
 
 def test_latest_proxy_release_uses_fork_main_revision_without_git(monkeypatch):
     def fake_get(url, headers=None, timeout=15):
-        assert url == antigravity_proxy.PROXY_GITHUB_API_MAIN
-        return FakeHTTPResponse(
-            json_data={"sha": "a" * 40}
+        if url == antigravity_proxy.PROXY_GITHUB_API_MAIN:
+            return FakeHTTPResponse(json_data={"sha": "a" * 40})
+        assert url == antigravity_proxy.PROXY_GITHUB_RAW_PACKAGE_URL.format(
+            revision="a" * 40
         )
+        return FakeHTTPResponse(json_data={"version": "0.7.2"})
 
     monkeypatch.delenv("ANTIGRAVITY_PROXY_TAG", raising=False)
     monkeypatch.delenv("ANTIGRAVITY_PROXY_VERSION", raising=False)
@@ -1108,12 +1112,81 @@ def test_latest_proxy_release_uses_fork_main_revision_without_git(monkeypatch):
 
     release = antigravity_proxy._latest_proxy_release()
 
-    assert release["version"] == "1.7.1"
+    assert release["version"] == "0.7.2"
     assert release["tag"] == f"main-{'a' * 12}"
+    assert release["resolved"] is True
     assert release["archive_url"] == (
         "https://github.com/Shirochi-stack/antigravity-proxy/archive/"
         f"{'a' * 40}.zip"
     )
+
+
+def test_cached_runtime_update_detects_new_fork_revision_once_per_interval(
+    tmp_path, monkeypatch
+):
+    runtime_dir = tmp_path / "runtime" / "main-old"
+    runtime_dir.mkdir(parents=True)
+    release_calls = []
+
+    monkeypatch.setattr(antigravity_proxy, "_cached_runtime_needs_patch", lambda _data: False)
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_latest_existing_runtime",
+        lambda _root: str(runtime_dir),
+    )
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_read_runtime_metadata",
+        lambda _runtime: {"tag": "main-old", "version": "0.7.1"},
+    )
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_latest_proxy_release",
+        lambda: release_calls.append(True) or {
+            "tag": "main-new",
+            "version": "0.7.2",
+            "resolved": True,
+        },
+    )
+    monkeypatch.setattr(antigravity_proxy.time, "monotonic", lambda: 1000.0)
+
+    assert antigravity_proxy._cached_runtime_needs_update(str(tmp_path)) is True
+    assert antigravity_proxy._cached_runtime_needs_update(str(tmp_path)) is False
+    assert len(release_calls) == 1
+
+
+def test_cached_runtime_update_ignores_unresolved_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(antigravity_proxy, "_cached_runtime_needs_patch", lambda _data: False)
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_latest_proxy_release",
+        lambda: {
+            "tag": "main-fallback",
+            "version": "0.7.2",
+            "resolved": False,
+        },
+    )
+    monkeypatch.setattr(antigravity_proxy.time, "monotonic", lambda: 1000.0)
+
+    assert antigravity_proxy._cached_runtime_needs_update(str(tmp_path)) is False
+
+
+def test_cached_runtime_update_compares_running_proxy_version(tmp_path, monkeypatch):
+    monkeypatch.setattr(antigravity_proxy, "_cached_runtime_needs_patch", lambda _data: False)
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_latest_proxy_release",
+        lambda: {
+            "tag": "main-current",
+            "version": "0.7.2",
+            "resolved": True,
+        },
+    )
+    monkeypatch.setattr(antigravity_proxy.time, "monotonic", lambda: 1000.0)
+
+    assert antigravity_proxy._cached_runtime_needs_update(
+        str(tmp_path), running_version="0.7.1"
+    ) is True
 
 
 def test_latest_antigravity_client_version_uses_google_public_bundle(monkeypatch):
@@ -1178,6 +1251,44 @@ def test_runtime_fork_feature_check_accepts_native_model_routing(tmp_path):
     )
 
     assert antigravity_proxy._runtime_has_fork_features(str(tmp_path))
+
+
+def test_finish_reason_patch_accepts_native_prompt_block_wrapper(tmp_path):
+    transform_file = tmp_path / "src" / "utils" / "transform.ts"
+    transform_file.parent.mkdir(parents=True)
+    transform_file.write_text(
+        '''  const candidate = data.candidates[0];
+  const finishReason = candidate.finishReason;
+  let openaiFinishReason: string | null = null;
+  if (hasPromptBlock || hasBlockedCandidateSafetyRating) {
+    openaiFinishReason = "content_filter";
+  } else if (finishReason) {
+    if (toolCalls.length > 0 || hasPriorToolCalls) {
+      openaiFinishReason = "tool_calls";
+    } else if (finishReason === "STOP") {
+      openaiFinishReason = "stop";
+    } else if (finishReason === "MAX_TOKENS") {
+      openaiFinishReason = "length";
+    } else if (finishReason === "SAFETY") {
+      openaiFinishReason = "content_filter";
+    } else if (finishReason === "MALFORMED_FUNCTION_CALL") {
+      openaiFinishReason = "tool_calls";
+    } else {
+      openaiFinishReason = "stop";
+    }
+  }
+''',
+        encoding="utf-8",
+    )
+
+    assert antigravity_proxy._patch_runtime_finish_reason_mapping(str(tmp_path))
+    assert antigravity_proxy._patch_runtime_finish_reason_mapping(str(tmp_path))
+
+    patched = transform_file.read_text(encoding="utf-8")
+    assert "if (hasPromptBlock || hasBlockedCandidateSafetyRating)" in patched
+    assert "candidate.finishReason ?? candidate.finish_reason" in patched
+    assert "const finishReasonCode = Number(finishReason);" in patched
+    assert "} else if (finishReason !== undefined && finishReason !== null)" in patched
 
 
 def test_patch_runtime_prompt_blocks_to_content_filter(tmp_path):
@@ -1571,6 +1682,55 @@ def test_installer_runner_reports_timeout_without_waiting_for_child():
 
     assert result["timed_out"] is True
     assert result["returncode"] != 0
+
+
+def test_ensure_proxy_running_restarts_healthy_stale_runtime(tmp_path, monkeypatch):
+    health_checks = iter([
+        {"healthy": True},
+        {"healthy": False},
+        {"healthy": True},
+    ])
+    killed_ports = []
+    runtime_calls = []
+
+    class FakeProcess:
+        pid = 4321
+
+        @staticmethod
+        def poll():
+            return None
+
+    monkeypatch.setattr(antigravity_proxy, "_proxy_process", None)
+    monkeypatch.setattr(antigravity_proxy, "_ensure_proxy_config", lambda: str(tmp_path))
+    monkeypatch.setattr(antigravity_proxy, "check_proxy_health", lambda: next(health_checks))
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_cached_runtime_needs_update",
+        lambda _data, _running_version=None: True,
+    )
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_kill_proxy_by_port",
+        lambda port: killed_ports.append(port),
+    )
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_ensure_proxy_runtime",
+        lambda *_args, **kwargs: runtime_calls.append(kwargs) or str(tmp_path),
+    )
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_find_proxy_launch_command",
+        lambda _runtime_dir: ["bun", "run", "server.ts"],
+    )
+    monkeypatch.setattr(antigravity_proxy.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(antigravity_proxy.time, "sleep", lambda _seconds: None)
+
+    status = antigravity_proxy.ensure_proxy_running(log_fn=lambda _message: None)
+
+    assert status == {"running": True, "auto_launched": True}
+    assert killed_ports == [3000]
+    assert runtime_calls[0]["force_update"] is True
 
 
 def test_ensure_proxy_running_installs_bun_when_no_launcher_exists(tmp_path, monkeypatch):

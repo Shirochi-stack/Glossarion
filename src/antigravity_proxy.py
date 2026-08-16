@@ -62,10 +62,15 @@ PROXY_REPO_URL = "https://github.com/Shirochi-stack/antigravity-proxy"
 PROXY_GITHUB_API_MAIN = (
     "https://api.github.com/repos/Shirochi-stack/antigravity-proxy/commits/main"
 )
+PROXY_GITHUB_RAW_PACKAGE_URL = (
+    "https://raw.githubusercontent.com/Shirochi-stack/antigravity-proxy/"
+    "{revision}/package.json"
+)
 PROXY_GITHUB_TAG_ARCHIVE_URL = f"{PROXY_REPO_URL}/archive/refs/tags/{{tag}}.zip"
 PROXY_GITHUB_REVISION_ARCHIVE_URL = f"{PROXY_REPO_URL}/archive/{{revision}}.zip"
-PROXY_DEFAULT_REVISION = "f2f621db4bc1bf0ff5d4fe9bfcf2a0e3d9889486"
-PROXY_DEFAULT_VERSION = "1.7.1"
+PROXY_DEFAULT_REVISION = "13404cce25545f70c1c5ffebc3527bda6df0567c"
+PROXY_DEFAULT_VERSION = "0.7.2"
+PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
 BUN_INSTALL_TIMEOUT_SECONDS = 300
 RUNTIME_PATCH_VERSION = "2026-08-16-prompt-block-finish-reason-v4"
@@ -92,6 +97,8 @@ _active_responses: Dict[int, Any] = {}
 # Module-level proxy subprocess tracking.
 _proxy_process: Optional[subprocess.Popen] = None
 _proxy_launch_lock = threading.Lock()
+_proxy_update_check_lock = threading.Lock()
+_proxy_last_update_check_at = 0.0
 _proxy_started_callback: Optional[Callable[[], None]] = None
 _proxy_started_callback_lock = threading.Lock()
 
@@ -161,7 +168,7 @@ def _github_headers() -> Dict[str, str]:
     }
 
 
-def _latest_proxy_release() -> Dict[str, str]:
+def _latest_proxy_release() -> Dict[str, Any]:
     """Return the current Shirochi-stack fork revision via GitHub HTTPS APIs."""
     override = os.environ.get("ANTIGRAVITY_PROXY_TAG", "").strip()
     if not override:
@@ -175,6 +182,7 @@ def _latest_proxy_release() -> Dict[str, str]:
             "tag": tag,
             "version": _version_to_str(_parse_semver(tag)),
             "archive_url": PROXY_GITHUB_TAG_ARCHIVE_URL.format(tag=tag),
+            "resolved": True,
         }
 
     try:
@@ -183,10 +191,28 @@ def _latest_proxy_release() -> Dict[str, str]:
         payload = resp.json()
         revision = str(payload.get("sha") or "").strip() if isinstance(payload, dict) else ""
         if re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+            version = PROXY_DEFAULT_VERSION
+            try:
+                package_resp = requests.get(
+                    PROXY_GITHUB_RAW_PACKAGE_URL.format(revision=revision),
+                    headers=_github_headers(),
+                    timeout=15,
+                )
+                package_resp.raise_for_status()
+                package_payload = package_resp.json()
+                package_version = str(
+                    package_payload.get("version") or ""
+                ).strip() if isinstance(package_payload, dict) else ""
+                parsed_version = _parse_semver(package_version)
+                if parsed_version != (0, 0, 0):
+                    version = _version_to_str(parsed_version)
+            except Exception as exc:
+                logger.debug("Could not resolve Antigravity proxy package version: %s", exc)
             return {
                 "tag": f"main-{revision[:12]}",
-                "version": PROXY_DEFAULT_VERSION,
+                "version": version,
                 "archive_url": PROXY_GITHUB_REVISION_ARCHIVE_URL.format(revision=revision),
+                "resolved": True,
             }
     except Exception as exc:
         logger.debug("Could not resolve the latest Antigravity proxy fork revision: %s", exc)
@@ -197,6 +223,7 @@ def _latest_proxy_release() -> Dict[str, str]:
         "archive_url": PROXY_GITHUB_REVISION_ARCHIVE_URL.format(
             revision=PROXY_DEFAULT_REVISION
         ),
+        "resolved": False,
     }
 
 
@@ -398,6 +425,37 @@ def _patch_runtime_finish_reason_mapping(runtime_dir: str) -> bool:
             count=1,
         )
         changed = changed or count > 0
+
+        if count == 0:
+            # Newer fork revisions may already wrap the provider finish reason
+            # with an explicit prompt-block branch. Patch the nested candidate
+            # mapping without removing that concrete content-filter handling.
+            nested_replacement = replacement.replace(
+                "  let openaiFinishReason: string | null = null;\n  if",
+                "  } else if",
+                1,
+            )
+            updated, count = re.subn(
+                r'  \} else if \(finishReason\) \{\n'
+                r'    if \(toolCalls\.length > 0 \|\| hasPriorToolCalls\) \{\n'
+                r'      openaiFinishReason = "tool_calls";\n'
+                r'    \} else if \(finishReason === "STOP"\) \{\n'
+                r'      openaiFinishReason = "stop";\n'
+                r'    \} else if \(finishReason === "MAX_TOKENS"\) \{\n'
+                r'      openaiFinishReason = "length";\n'
+                r'    \} else if \(finishReason === "SAFETY"\) \{\n'
+                r'      openaiFinishReason = "content_filter";\n'
+                r'    \} else if \(finishReason === "MALFORMED_FUNCTION_CALL"\) \{\n'
+                r'      openaiFinishReason = "tool_calls";\n'
+                r'    \} else \{\n'
+                r'      openaiFinishReason = "stop";\n'
+                r'    \}\n'
+                r'  \}',
+                nested_replacement,
+                updated,
+                count=1,
+            )
+            changed = changed or count > 0
 
     if changed:
         with open(transform_path, "w", encoding="utf-8") as f:
@@ -1029,6 +1087,48 @@ def _cached_runtime_needs_patch(data_dir: str) -> bool:
     return (
         metadata.get("patch_version") != RUNTIME_PATCH_VERSION
         or not _runtime_has_fork_features(runtime_dir)
+    )
+
+
+def _cached_runtime_needs_update(
+    data_dir: str,
+    running_version: Optional[str] = None,
+) -> bool:
+    """Check periodically whether a healthy cached runtime trails the fork's main branch."""
+    global _proxy_last_update_check_at
+
+    if _cached_runtime_needs_patch(data_dir):
+        return True
+
+    now = time.monotonic()
+    with _proxy_update_check_lock:
+        if (
+            _proxy_last_update_check_at
+            and now - _proxy_last_update_check_at < PROXY_UPDATE_CHECK_INTERVAL_SECONDS
+        ):
+            return False
+        _proxy_last_update_check_at = now
+
+    release = _latest_proxy_release()
+    # A network failure returns the embedded fallback. Never downgrade a healthy
+    # runtime merely because GitHub could not be reached for an update check.
+    if not release.get("resolved"):
+        return False
+
+    if running_version and str(running_version).strip() != str(release.get("version") or ""):
+        return True
+
+    runtime_dir = _latest_existing_runtime(_get_proxy_runtime_root(data_dir))
+    if not runtime_dir:
+        return False
+    try:
+        metadata = _read_runtime_metadata(runtime_dir)
+    except Exception:
+        return True
+
+    return (
+        metadata.get("tag") != release.get("tag")
+        or metadata.get("version") != release.get("version")
     )
 
 
@@ -2181,8 +2281,9 @@ def ensure_proxy_running(log_fn=None, notify_started: bool = True) -> Dict[str, 
 
     health = check_proxy_health()
     if health.get("healthy"):
-        if _cached_runtime_needs_patch(data_dir):
-            _log("Antigravity proxy runtime patch changed; restarting with updated local runtime...")
+        running_version = (health.get("details") or {}).get("version")
+        if _cached_runtime_needs_update(data_dir, running_version):
+            _log("Antigravity proxy update detected; restarting with the latest fork runtime...")
             _kill_proxy_by_port(_get_proxy_port())
             force_update = True
             time.sleep(2)
@@ -2192,8 +2293,9 @@ def ensure_proxy_running(log_fn=None, notify_started: bool = True) -> Dict[str, 
     with _proxy_launch_lock:
         health = check_proxy_health()
         if health.get("healthy"):
-            if _cached_runtime_needs_patch(data_dir):
-                _log("Antigravity proxy runtime patch changed; restarting with updated local runtime...")
+            running_version = (health.get("details") or {}).get("version")
+            if _cached_runtime_needs_update(data_dir, running_version):
+                _log("Antigravity proxy update detected; restarting with the latest fork runtime...")
                 _kill_proxy_by_port(_get_proxy_port())
                 force_update = True
                 time.sleep(2)
