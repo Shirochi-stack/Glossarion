@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -3099,12 +3100,21 @@ def test_manual_editing_sidecar_machine_translation_preview_button(tmp_path, mon
 
 
 def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot):
+    from PySide6.QtWebEngineCore import QWebEngineSettings
     from PySide6.QtWebEngineWidgets import QWebEngineView
 
     output_name = "response_chapter0001.html"
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    (images_dir / "chapter0001_img_1.png").write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    ))
+    (tmp_path / "image_rename_map.json").write_text(
+        json.dumps({"cover.png": "chapter0001_img_1.png"}), encoding="utf-8"
+    )
     html = (
         '<html><head><meta charset="utf-8"><title></title></head>'
-        '<body><div><img src="cover.jpg"><p>Translated line '
+        '<body><div><img src="../Images/cover.png"><p>Translated line '
         '<strong>protected</strong></p><p id="empty"></p><br></div></body></html>'
     )
     sidecar = _shared_write_html_sdlxliff_sidecar(
@@ -3152,6 +3162,23 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert "<html" not in visible_text
     assert "<p>" not in visible_text
     assert js_value("document.querySelectorAll('img').length") == 1
+    assert browser.settings().testAttribute(QWebEngineSettings.AutoLoadImages) is True
+    assert browser.settings().testAttribute(
+        QWebEngineSettings.LocalContentCanAccessRemoteUrls
+    ) is True
+    assert browser.settings().testAttribute(
+        QWebEngineSettings.LocalContentCanAccessFileUrls
+    ) is True
+    assert js_value("document.querySelector('img').src").startswith("file:")
+    assert js_value(
+        "document.querySelector('img').getAttribute('data-sdl-notepad-original-src')"
+    ) == "../Images/cover.png"
+    qtbot.waitUntil(
+        lambda: js_value(
+            "document.querySelector('img').complete && document.querySelector('img').naturalWidth > 0"
+        ) is True,
+        timeout=5000,
+    )
     assert js_value("getComputedStyle(document.querySelector('p')).display") == "block"
     assert js_value("document.designMode") == "off"
     assert js_value("getComputedStyle(document.body).backgroundColor") == "rgb(30, 30, 30)"
@@ -3189,6 +3216,44 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert source_menu_label.wordWrap() is True
     assert source_menu_label.text() == "Full wrapped source text for this sentence."
     context_menu.close()
+    history_shortcut_result = js_value(
+        """
+        (() => { try {
+            const host = document.querySelector('p > [data-sdl-notepad-text]');
+            host.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(host);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            document.execCommand('insertText', false, 'Undo candidate');
+            const undo = new KeyboardEvent('keydown', {
+                key: 'z', ctrlKey: true, bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(undo);
+            const textAfterUndo = host.textContent;
+            const redo = new KeyboardEvent('keydown', {
+                key: 'y', ctrlKey: true, bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(redo);
+            const textAfterRedo = host.textContent;
+            const cleanup = new KeyboardEvent('keydown', {
+                key: 'z', ctrlKey: true, bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(cleanup);
+            return JSON.stringify([
+                undo.defaultPrevented,
+                textAfterUndo === 'Translated line ',
+                redo.defaultPrevented,
+                textAfterRedo === 'Undo candidate',
+                cleanup.defaultPrevented,
+                host.textContent === 'Translated line '
+            ]);
+        } catch (error) { return String(error && error.stack || error); }
+        })();
+        """
+    )
+    assert history_shortcut_result == "[true,true,true,true,true,true]"
     enter_result = js_value(
         """
         (() => { try {
@@ -3347,6 +3412,8 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert saved_soup.find(attrs={"data-sdl-notepad-text": True}) is None
     assert saved_soup.find(attrs={"data-sdl-notepad-source": True}) is None
     assert saved_soup.find(attrs={"data-sdl-notepad-original-editable": True}) is None
+    assert saved_soup.find(attrs={"data-sdl-notepad-original-src": True}) is None
+    assert saved_soup.find("img").get("src") == "../Images/chapter0001_img_1.png"
     assert saved_soup.find(id="sdl-notepad-source-tooltip") is None
     assert output_path.read_text(encoding="utf-8").count("Edited in the rendered page.") == 1
     assert output_path.read_text(encoding="utf-8").count("protected") == 1
@@ -3444,6 +3511,8 @@ def test_notepad_browser_cleanup_removes_only_editor_scaffolding():
     document = (
         '<!DOCTYPE html><html><head><style id="sdl-notepad-guard-style">x</style></head>'
         '<body contenteditable="false" data-sdl-notepad-original-editable="true">'
+        '<img src="file:///tmp/rendered.png" '
+        'data-sdl-notepad-original-src="../Images/original.png">'
         '<p data-sdl-notepad-source="Full source"><span contenteditable="plaintext-only" '
         'data-sdl-notepad-text="1" data-sdl-notepad-source="Full source">Edited </span>'
         '<strong><span contenteditable="true" data-sdl-notepad-text="1">bold</span></strong>'
@@ -3459,6 +3528,8 @@ def test_notepad_browser_cleanup_removes_only_editor_scaffolding():
     assert soup.find(attrs={"data-sdl-notepad-source": True}) is None
     assert soup.find(attrs={"data-sdl-notepad-original-editable": True}) is None
     assert soup.find("body").get("contenteditable") == "true"
+    assert soup.find("img").get("src") == "../Images/original.png"
+    assert soup.find("img").get("data-sdl-notepad-original-src") is None
     assert soup.find("p").get_text(" ", strip=True) == "Edited bold"
     assert soup.find("strong").get_text(strip=True) == "bold"
     assert soup.find("br") is not None

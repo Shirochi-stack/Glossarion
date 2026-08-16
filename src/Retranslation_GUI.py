@@ -10877,9 +10877,101 @@ class SDLXLIFFReviewDialog(QDialog):
         base_dir = os.path.dirname(output_path) if output_path else (self.output_dir or "")
         return QUrl.fromLocalFile(os.path.join(os.path.abspath(base_dir or "."), ""))
 
+    def _notepad_renderable_document_html(self, piece, html_text):
+        """Resolve workspace image references for display without changing saved HTML."""
+        document = str(html_text or "")
+        try:
+            from bs4 import BeautifulSoup
+
+            rename_map = {}
+            try:
+                with open(
+                    os.path.join(self.output_dir or "", "image_rename_map.json"),
+                    "r",
+                    encoding="utf-8",
+                ) as handle:
+                    loaded_map = json.load(handle)
+                if isinstance(loaded_map, dict):
+                    rename_map = {
+                        os.path.basename(str(original)).casefold(): os.path.basename(str(renamed))
+                        for original, renamed in loaded_map.items()
+                        if original and renamed
+                    }
+            except (OSError, ValueError, TypeError):
+                pass
+
+            output_path = self._output_path_for_piece(piece) or ""
+            document_dir = os.path.dirname(os.path.abspath(output_path)) if output_path else ""
+            output_dir = os.path.abspath(self.output_dir) if self.output_dir else document_dir
+            image_dirs = [
+                os.path.join(output_dir, "images"),
+                os.path.join(output_dir, "Images"),
+                os.path.join(output_dir, "translated_images"),
+            ]
+
+            def _resolved_file_url(reference):
+                raw_reference = html_lib.unescape(str(reference or "")).strip()
+                if not raw_reference or raw_reference.startswith("//"):
+                    return ""
+                is_windows_absolute = bool(re.match(r"^[A-Za-z]:[\\/]", raw_reference))
+                if not is_windows_absolute:
+                    scheme = QUrl(raw_reference).scheme().casefold()
+                    if scheme in {"http", "https", "data", "blob", "file", "qrc"}:
+                        return ""
+
+                clean_reference = unquote(re.split(r"[?#]", raw_reference, maxsplit=1)[0])
+                filesystem_reference = clean_reference.replace("/", os.sep)
+                basename = os.path.basename(filesystem_reference)
+                renamed_basename = rename_map.get(basename.casefold(), "")
+                basenames = [name for name in (renamed_basename, basename) if name]
+                candidates = []
+                if os.path.isabs(filesystem_reference) or is_windows_absolute:
+                    candidates.append(os.path.normpath(filesystem_reference))
+                else:
+                    for root in (document_dir, output_dir):
+                        if root:
+                            candidates.append(os.path.normpath(os.path.join(root, filesystem_reference)))
+                for image_dir in image_dirs:
+                    for name in basenames:
+                        candidates.append(os.path.join(image_dir, name))
+
+                seen = set()
+                for candidate in candidates:
+                    normalized = os.path.normcase(os.path.abspath(candidate))
+                    if normalized in seen:
+                        continue
+                    seen.add(normalized)
+                    if os.path.isfile(candidate):
+                        return QUrl.fromLocalFile(os.path.abspath(candidate)).toString()
+                return ""
+
+            soup = BeautifulSoup(document, "html.parser")
+            media_attributes = (
+                ("img", "src"),
+                ("image", "href"),
+                ("image", "xlink:href"),
+                ("object", "data"),
+                ("video", "poster"),
+            )
+            for tag_name, attribute in media_attributes:
+                marker = "data-sdl-notepad-original-" + attribute.replace(":", "-")
+                for element in soup.find_all(tag_name):
+                    original = element.get(attribute)
+                    resolved = _resolved_file_url(original)
+                    if not resolved:
+                        continue
+                    element[marker] = original
+                    element[attribute] = resolved
+            return str(soup)
+        except Exception:
+            return document
+
     def _set_notepad_browser_html(self, browser, piece, html_text):
         browser._sdl_document_prefix = self._notepad_document_prefix(html_text)
-        browser.setHtml(str(html_text or ""), self._notepad_browser_base_url(piece))
+        browser.setHtml(
+            self._notepad_renderable_document_html(piece, html_text),
+            self._notepad_browser_base_url(piece),
+        )
 
     def _install_notepad_browser_editing(self, browser):
         """Expose text-only edit islands while keeping the HTML tree immutable."""
@@ -10995,6 +11087,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     ' background-color: #242424 !important; color: #d8dee9 !important;' +
                     ' border-color: #4a5568 !important; }' +
                     'body table, body td, body th, body hr { border-color: #4a5568 !important; }' +
+                    'body img, body video, body object, body svg {' +
+                    ' max-width: 100% !important; height: auto; }' +
                     'body input, body textarea, body select, body button {' +
                     ' background: #242424 !important; color: #e8edf2 !important;' +
                     ' border-color: #4a5568 !important; }' +
@@ -11090,6 +11184,21 @@ class SDLXLIFFReviewDialog(QDialog):
                 }, true);
 
                 document.addEventListener('keydown', event => {
+                    const shortcutKey = String(event.key || '').toLowerCase();
+                    const shortcutHost = editableHost(event.target);
+                    const historyCommand = (event.ctrlKey || event.metaKey) && !event.altKey
+                        ? (shortcutKey === 'z' && !event.shiftKey
+                            ? 'undo'
+                            : (shortcutKey === 'y' || (shortcutKey === 'z' && event.shiftKey)
+                                ? 'redo' : ''))
+                        : '';
+                    if (historyCommand && shortcutHost && selectionInside(shortcutHost)) {
+                        event.preventDefault();
+                        event.stopImmediatePropagation();
+                        document.execCommand(historyCommand, false, null);
+                        markDirty();
+                        return;
+                    }
                     if (event.key === 'Enter') {
                         event.preventDefault();
                         event.stopImmediatePropagation();
@@ -11206,6 +11315,18 @@ class SDLXLIFFReviewDialog(QDialog):
                     element["contenteditable"] = original
             for element in soup.find_all(attrs={"data-sdl-notepad-source": True}):
                 element.attrs.pop("data-sdl-notepad-source", None)
+            media_attributes = (
+                ("data-sdl-notepad-original-src", "src"),
+                ("data-sdl-notepad-original-href", "href"),
+                ("data-sdl-notepad-original-xlink-href", "xlink:href"),
+                ("data-sdl-notepad-original-data", "data"),
+                ("data-sdl-notepad-original-poster", "poster"),
+            )
+            for marker, attribute in media_attributes:
+                for element in soup.find_all(attrs={marker: True}):
+                    original = element.attrs.pop(marker, None)
+                    if original is not None:
+                        element[attribute] = original
             return str(soup)
         except Exception:
             return document
@@ -11402,9 +11523,20 @@ class SDLXLIFFReviewDialog(QDialog):
     def _add_notepad_document_editor(self, piece, layout):
         """Add one rendered, editable browser document—never visible markup."""
         from PySide6.QtWebEngineWidgets import QWebEngineView
+        from PySide6.QtWebEngineCore import QWebEngineSettings
 
         browser = QWebEngineView()
         browser.setObjectName("SdlReviewNotepadBrowser")
+        try:
+            browser.settings().setAttribute(QWebEngineSettings.AutoLoadImages, True)
+            browser.settings().setAttribute(
+                QWebEngineSettings.LocalContentCanAccessRemoteUrls, True
+            )
+            browser.settings().setAttribute(
+                QWebEngineSettings.LocalContentCanAccessFileUrls, True
+            )
+        except Exception:
+            pass
         try:
             viewport_height = int(self.scroll.viewport().height())
         except Exception:
