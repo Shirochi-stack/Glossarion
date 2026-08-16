@@ -3098,17 +3098,20 @@ def test_manual_editing_sidecar_machine_translation_preview_button(tmp_path, mon
     assert len(preview_data["entries"]) == 12
 
 
-def test_sdlxliff_notepad_mode_is_one_raw_html_code_editor(tmp_path, qtbot):
+def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot):
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+
     output_name = "response_chapter0001.html"
     html = (
         '<html><head><meta charset="utf-8"><title></title></head>'
-        '<body><div><img src="cover.jpg"><p>Translated line</p><br></div></body></html>'
+        '<body><div><img src="cover.jpg"><p>Translated line '
+        '<strong>protected</strong></p><p id="empty"></p><br></div></body></html>'
     )
     sidecar = _shared_write_html_sdlxliff_sidecar(
         str(tmp_path),
         output_name,
         {"original_basename": "chapter0001.xhtml"},
-        "<html><body><p>Source line</p></body></html>",
+        '<html><body><p>Source line</p><p id="empty"></p></body></html>',
         html,
         raise_errors=True,
     )
@@ -3127,45 +3130,239 @@ def test_sdlxliff_notepad_mode_is_one_raw_html_code_editor(tmp_path, qtbot):
         lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
         timeout=5000,
     )
-    editor = dialog.rows_widget.findChild(QPlainTextEdit, "SdlReviewNotepadEditor")
-    initial_document = editor.toPlainText()
+    browser = dialog.rows_widget.findChild(QWebEngineView, "SdlReviewNotepadBrowser")
+
+    def js_value(script):
+        values = []
+        browser.page().runJavaScript(script, values.append)
+        qtbot.waitUntil(lambda: bool(values), timeout=5000)
+        return values[0]
 
     assert dialog.two_column_layout_btn.text() == "Notepad"
-    assert editor is not None
-    assert BeautifulSoup(initial_document, "html.parser").find("p").get_text(strip=True) == "Translated line"
-    assert "\n" in initial_document
-    assert len(initial_document.splitlines()) > 9
-    assert "<meta charset=\"utf-8\"/>" in initial_document
-    assert "<title>" in initial_document
-    assert "</title>" in initial_document
-    assert "<br/>" in initial_document
-    assert editor.lineWrapMode() == QPlainTextEdit.LineWrapMode.NoWrap
-    assert editor.line_number_area_width() > 0
-    assert editor.highlighter is not None
+    assert browser is not None
+    assert browser.toolTip() == ""
+    qtbot.waitUntil(
+        lambda: js_value("document.querySelectorAll('[data-sdl-notepad-text]').length") >= 2,
+        timeout=5000,
+    )
+    assert browser._sdl_edit_poll_timer.isActive()
+    visible_text = js_value("document.body.innerText")
+    assert "Translated line" in visible_text
+    assert "protected" in visible_text
+    assert "<html" not in visible_text
+    assert "<p>" not in visible_text
+    assert js_value("document.querySelectorAll('img').length") == 1
+    assert js_value("getComputedStyle(document.querySelector('p')).display") == "block"
+    assert js_value("document.designMode") == "off"
+    assert js_value("getComputedStyle(document.body).backgroundColor") == "rgb(30, 30, 30)"
+    assert js_value("getComputedStyle(document.body).color") == "rgb(232, 237, 242)"
+    assert js_value("document.body.isContentEditable") is False
+    assert js_value("document.body.getAttribute('contenteditable')") == "false"
+    assert js_value("document.querySelector('p').isContentEditable") is False
+    assert js_value("document.querySelector('strong').isContentEditable") is False
+    assert js_value("document.querySelector('[data-sdl-notepad-text]').isContentEditable") is True
+    assert js_value(
+        "document.querySelector('[data-sdl-notepad-text]').getAttribute('contenteditable')"
+    ) == "plaintext-only"
+    assert js_value(
+        "document.querySelector('[data-sdl-notepad-text]').getAttribute('data-sdl-notepad-source')"
+    ) == "Source line"
+    assert js_value("getComputedStyle(document.querySelector('#sdl-notepad-source-tooltip')).whiteSpace") == "pre-wrap"
+    assert js_value(
+        """
+        (() => {
+            const host = document.querySelector('[data-sdl-notepad-text]');
+            host.dispatchEvent(new MouseEvent('mouseover', {
+                bubbles: true, clientX: 20, clientY: 20
+            }));
+            const tooltip = document.querySelector('#sdl-notepad-source-tooltip');
+            return tooltip.style.display === 'block' && tooltip.textContent === 'Source line';
+        })();
+        """
+    ) is True
+    context_menu = dialog._show_notepad_browser_context_menu(
+        browser, browser.rect().center(), "Full wrapped source text for this sentence."
+    )
+    assert "padding: 6px 18px 6px 6px" in context_menu.styleSheet()
+    source_menu_label = context_menu.findChild(QLabel, "SdlNotepadContextSourceText")
+    assert source_menu_label is not None
+    assert source_menu_label.wordWrap() is True
+    assert source_menu_label.text() == "Full wrapped source text for this sentence."
+    context_menu.close()
+    enter_result = js_value(
+        """
+        (() => { try {
+            const hosts = Array.from(document.querySelectorAll('[data-sdl-notepad-text]'));
+            const first = hosts[0];
+            first.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(first);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const before = document.body.innerHTML;
+            const event = new KeyboardEvent('keydown', {
+                key: 'Enter', bubbles: true, cancelable: true
+            });
+            first.dispatchEvent(event);
+            return JSON.stringify([
+                event.defaultPrevented,
+                before === document.body.innerHTML,
+                document.activeElement === hosts[1]
+            ]);
+        } catch (error) { return String(error && error.stack || error); }
+        })();
+        """
+    )
+    assert enter_result == "[true,true,true]"
+    boundary_delete_result = js_value(
+        """
+        (() => { try {
+            const host = document.querySelector('p > [data-sdl-notepad-text]');
+            const selection = window.getSelection();
+            const placeCaret = atStart => {
+                host.focus();
+                const range = document.createRange();
+                range.selectNodeContents(host);
+                range.collapse(atStart);
+                selection.removeAllRanges();
+                selection.addRange(range);
+            };
+            placeCaret(true);
+            const beforeBackspace = document.body.innerHTML;
+            const backspace = new KeyboardEvent('keydown', {
+                key: 'Backspace', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(backspace);
+            const backspaceUnchanged = beforeBackspace === document.body.innerHTML;
+            placeCaret(false);
+            const beforeDelete = document.body.innerHTML;
+            const forwardDelete = new KeyboardEvent('keydown', {
+                key: 'Delete', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(forwardDelete);
+            return JSON.stringify([
+                backspace.defaultPrevented,
+                backspaceUnchanged,
+                forwardDelete.defaultPrevented,
+                beforeDelete === document.body.innerHTML
+            ]);
+        } catch (error) { return String(error && error.stack || error); }
+        })();
+        """
+    )
+    assert boundary_delete_result == "[true,true,true,true]"
+    empty_paragraph_result = js_value(
+        """
+        (() => { try {
+            const paragraph = document.querySelector('#empty');
+            const host = paragraph.querySelector('[data-sdl-notepad-text]');
+            host.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(host);
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const event = new KeyboardEvent('keydown', {
+                key: 'Backspace', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(event);
+            return JSON.stringify([
+                event.defaultPrevented,
+                document.querySelector('#empty') === paragraph,
+                paragraph.isConnected
+            ]);
+        } catch (error) { return String(error && error.stack || error); }
+        })();
+        """
+    )
+    assert empty_paragraph_result == "[true,true,true]"
+    assert js_value(
+        """
+        (() => {
+            const host = document.querySelector('p > [data-sdl-notepad-text]');
+            host.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(host);
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const event = new InputEvent('beforeinput', {
+                inputType: 'deleteContentBackward', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(event);
+            return event.defaultPrevented;
+        })();
+        """
+    ) is True
+    assert js_value(
+        """
+        (() => {
+            const host = document.querySelector('[data-sdl-notepad-text]');
+            const event = new InputEvent('beforeinput', {
+                inputType: 'insertParagraph', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(event);
+            return event.defaultPrevented;
+        })();
+        """
+    ) is True
+    assert js_value(
+        """
+        (() => {
+            const host = document.querySelector('[data-sdl-notepad-text]');
+            const event = new InputEvent('beforeinput', {
+                inputType: 'insertLineBreak', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(event);
+            return event.defaultPrevented;
+        })();
+        """
+    ) is True
+    assert dialog.rows_widget.findChild(QPlainTextEdit, "SdlReviewNotepadEditor") is None
     assert dialog.rows_widget.findChildren(QFrame, "SdlReviewRow") == []
     assert dialog.rows_widget.findChildren(QPlainTextEdit, "SdlReviewTargetEdit") == []
 
-    edited_html = initial_document.replace(
-        "Translated line",
-        "Edited directly in raw HTML.\n   <span></span>",
+    browser.page().runJavaScript(
+        """
+        (() => {
+            const editor = document.querySelector('p > [data-sdl-notepad-text]');
+            editor.textContent = 'Edited in the rendered page. ';
+            editor.dispatchEvent(new InputEvent('input', {bubbles: true}));
+        })();
+        """
     )
-    editor.setPlainText(edited_html)
     output_path = tmp_path / output_name
     qtbot.waitUntil(
-        lambda: output_path.is_file() and output_path.read_text(encoding="utf-8") == edited_html,
+        lambda: output_path.is_file()
+        and "Edited in the rendered page." in output_path.read_text(encoding="utf-8"),
         timeout=5000,
     )
+    saved_soup = BeautifulSoup(output_path.read_text(encoding="utf-8"), "html.parser")
+    assert saved_soup.find("strong").get_text(strip=True) == "protected"
+    assert saved_soup.find("p", id="empty") is not None
+    assert saved_soup.find(attrs={"data-sdl-notepad-text": True}) is None
+    assert saved_soup.find(attrs={"data-sdl-notepad-source": True}) is None
+    assert saved_soup.find(attrs={"data-sdl-notepad-original-editable": True}) is None
+    assert saved_soup.find(id="sdl-notepad-source-tooltip") is None
+    assert output_path.read_text(encoding="utf-8").count("Edited in the rendered page.") == 1
+    assert output_path.read_text(encoding="utf-8").count("protected") == 1
     assert dialog.pieces[0]["_notepad_tag_order"] == [
-        "html", "head", "meta", "title", "body", "div", "img", "p", "span", "br"
+        "html", "head", "meta", "title", "body", "div", "img", "p", "strong", "p", "br"
     ]
 
     dialog.two_column_layout_btn.click()
     assert dialog.two_column_layout_btn.text() == "Compact"
 
 
-def test_manual_untranslated_notepad_edits_raw_skeleton_and_creates_output(tmp_path, qtbot):
+def test_manual_untranslated_notepad_renders_source_fallback_and_creates_output(tmp_path, qtbot):
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+
     output_name = "response_chapter0001.html"
-    source_html = "<html><body><p>원문은 편집기에 자동 입력되면 안 됩니다.</p></body></html>"
+    source_html = "<html><body><p>아직 번역되지 않은 원문입니다.</p></body></html>"
     sidecar = _shared_write_html_sdlxliff_sidecar(
         str(tmp_path),
         output_name,
@@ -3186,20 +3383,30 @@ def test_manual_untranslated_notepad_edits_raw_skeleton_and_creates_output(tmp_p
         lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
         timeout=5000,
     )
-    editor = dialog.rows_widget.findChild(QPlainTextEdit, "SdlReviewNotepadEditor")
-    raw_skeleton = editor.toPlainText()
+    browser = dialog.rows_widget.findChild(QWebEngineView, "SdlReviewNotepadBrowser")
 
-    assert "원문은 편집기에 자동 입력되면 안 됩니다." in raw_skeleton
-    assert "<html>" in raw_skeleton
-    assert "<body>" in raw_skeleton
-    assert "<p>" in raw_skeleton
-    assert "</p>" in raw_skeleton
-    assert len(raw_skeleton.splitlines()) >= 7
-    edited_html = raw_skeleton.replace(
-        "원문은 편집기에 자동 입력되면 안 됩니다.",
-        "Manually translated.",
+    def js_value(script):
+        values = []
+        browser.page().runJavaScript(script, values.append)
+        qtbot.waitUntil(lambda: bool(values), timeout=5000)
+        return values[0]
+
+    assert browser is not None
+    qtbot.waitUntil(
+        lambda: js_value("document.querySelectorAll('[data-sdl-notepad-text]').length") >= 1,
+        timeout=5000,
     )
-    editor.setPlainText(edited_html)
+    assert "아직 번역되지 않은 원문입니다." in js_value("document.body.innerText")
+    assert "<p>" not in js_value("document.body.innerText")
+    browser.page().runJavaScript(
+        """
+        (() => {
+            const editor = document.querySelector('p > [data-sdl-notepad-text]');
+            editor.textContent = 'Manually translated.';
+            editor.dispatchEvent(new InputEvent('input', {bubbles: true}));
+        })();
+        """
+    )
     output_path = tmp_path / output_name
     qtbot.waitUntil(
         lambda: output_path.is_file() and "Manually translated." in output_path.read_text(encoding="utf-8"),
@@ -3225,12 +3432,36 @@ def test_notepad_initial_html_keeps_translation_and_expands_source_markup_for_em
     paragraphs = soup.find_all("p")
 
     assert paragraphs[0].get_text(" ", strip=True) == "Translated one"
-    assert "Source one" not in document
+    assert paragraphs[0].get("data-sdl-notepad-source") == "Source one"
     assert paragraphs[1].get_text(" ", strip=True) == "Source two ruby base"
     assert paragraphs[1].find("strong") is not None
     assert paragraphs[1].find("br") is not None
     assert paragraphs[1].find("rb") is not None
-    assert len(document.splitlines()) >= 12
+    assert "<strong>two</strong><br/><rb>ruby base</rb>" in document
+
+
+def test_notepad_browser_cleanup_removes_only_editor_scaffolding():
+    document = (
+        '<!DOCTYPE html><html><head><style id="sdl-notepad-guard-style">x</style></head>'
+        '<body contenteditable="false" data-sdl-notepad-original-editable="true">'
+        '<p data-sdl-notepad-source="Full source"><span contenteditable="plaintext-only" '
+        'data-sdl-notepad-text="1" data-sdl-notepad-source="Full source">Edited </span>'
+        '<strong><span contenteditable="true" data-sdl-notepad-text="1">bold</span></strong>'
+        '<br></p><div id="sdl-notepad-source-tooltip">Full source</div></body></html>'
+    )
+
+    cleaned = SDLXLIFFReviewDialog._clean_notepad_browser_html(document)
+    soup = BeautifulSoup(cleaned, "html.parser")
+
+    assert soup.find("style", id="sdl-notepad-guard-style") is None
+    assert soup.find(id="sdl-notepad-source-tooltip") is None
+    assert soup.find(attrs={"data-sdl-notepad-text": True}) is None
+    assert soup.find(attrs={"data-sdl-notepad-source": True}) is None
+    assert soup.find(attrs={"data-sdl-notepad-original-editable": True}) is None
+    assert soup.find("body").get("contenteditable") == "true"
+    assert soup.find("p").get_text(" ", strip=True) == "Edited bold"
+    assert soup.find("strong").get_text(strip=True) == "bold"
+    assert soup.find("br") is not None
 
 
 def test_progress_manager_exposes_manual_editing_toggle_for_not_translated_rows():

@@ -18,10 +18,10 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
                                 QPlainTextEdit, QTextBrowser, QStackedWidget, QComboBox, QInputDialog,
-                                QLineEdit, QProgressBar, QGraphicsOpacityEffect,
+                                QLineEdit, QProgressBar, QGraphicsOpacityEffect, QWidgetAction,
                                 QApplication)
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent, QObject, QRect
-from PySide6.QtGui import QFont, QFontMetricsF, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut, QPainter, QTextCharFormat, QSyntaxHighlighter, QTextCursor
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent, QObject
+from PySide6.QtGui import QFont, QFontMetricsF, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut
 import xml.etree.ElementTree as ET
 import zipfile
 import shutil
@@ -86,124 +86,6 @@ _MISSING_IMAGE_QA_RE = re.compile(
     r"(?:^|[^a-z0-9])missing[_\s-]*images?(?=$|[^a-z0-9])",
     re.IGNORECASE,
 )
-
-
-class _HtmlLineNumberArea(QWidget):
-    """Line-number gutter owned by the raw HTML editor."""
-
-    def __init__(self, editor):
-        super().__init__(editor)
-        self.editor = editor
-
-    def sizeHint(self):
-        return QSize(self.editor.line_number_area_width(), 0)
-
-    def paintEvent(self, event):
-        self.editor.paint_line_number_area(event)
-
-
-class _HtmlCodeHighlighter(QSyntaxHighlighter):
-    """Lightweight HTML highlighting that never rewrites the document."""
-
-    def __init__(self, document):
-        super().__init__(document)
-        self.tag_format = QTextCharFormat()
-        self.tag_format.setForeground(QColor("#7dd3fc"))
-        self.tag_format.setFontWeight(QFont.DemiBold)
-        self.attribute_format = QTextCharFormat()
-        self.attribute_format.setForeground(QColor("#c4b5fd"))
-        self.string_format = QTextCharFormat()
-        self.string_format.setForeground(QColor("#fcd34d"))
-        self.comment_format = QTextCharFormat()
-        self.comment_format.setForeground(QColor("#6b7280"))
-        self.entity_format = QTextCharFormat()
-        self.entity_format.setForeground(QColor("#86efac"))
-
-    def highlightBlock(self, text):
-        for match in re.finditer(r"</?[A-Za-z][^>]*>|<!DOCTYPE[^>]*>|<\?[^>]*\?>", text, re.IGNORECASE):
-            start, end = match.span()
-            self.setFormat(start, end - start, self.tag_format)
-            tag_text = match.group(0)
-            for attr in re.finditer(r"\b([A-Za-z_:][-A-Za-z0-9_:.]*)(?=\s*=)", tag_text):
-                self.setFormat(start + attr.start(1), len(attr.group(1)), self.attribute_format)
-            for quoted in re.finditer(r'''("[^"]*"|'[^']*')''', tag_text):
-                self.setFormat(start + quoted.start(), len(quoted.group(0)), self.string_format)
-        for match in re.finditer(r"&(?:#\d+|#x[0-9a-f]+|[A-Za-z][A-Za-z0-9]+);", text, re.IGNORECASE):
-            self.setFormat(match.start(), len(match.group(0)), self.entity_format)
-        for match in re.finditer(r"<!--.*?-->", text):
-            self.setFormat(match.start(), len(match.group(0)), self.comment_format)
-
-
-class _HtmlCodeEditor(QPlainTextEdit):
-    """A Notepad++-style raw HTML buffer with a native line-number gutter."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("SdlReviewNotepadEditor")
-        self.line_number_area = _HtmlLineNumberArea(self)
-        self.blockCountChanged.connect(self._update_line_number_area_width)
-        self.updateRequest.connect(self._update_line_number_area)
-        self.cursorPositionChanged.connect(self.line_number_area.update)
-        self._update_line_number_area_width()
-        font = QFont("Consolas", 10)
-        font.setStyleHint(QFont.Monospace)
-        self.setFont(font)
-        try:
-            self.setTabStopDistance(QFontMetricsF(font).horizontalAdvance(" ") * 4)
-        except Exception:
-            pass
-        try:
-            self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        except Exception:
-            self.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.highlighter = _HtmlCodeHighlighter(self.document())
-
-    def line_number_area_width(self):
-        digits = max(2, len(str(max(1, self.blockCount()))))
-        return 14 + int(QFontMetricsF(self.font()).horizontalAdvance("9") * digits)
-
-    def _update_line_number_area_width(self, _count=0):
-        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
-
-    def _update_line_number_area(self, rect, dy):
-        if dy:
-            self.line_number_area.scroll(0, dy)
-        else:
-            self.line_number_area.update(0, rect.y(), self.line_number_area.width(), rect.height())
-        if rect.contains(self.viewport().rect()):
-            self._update_line_number_area_width()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        contents = self.contentsRect()
-        self.line_number_area.setGeometry(
-            QRect(contents.left(), contents.top(), self.line_number_area_width(), contents.height())
-        )
-
-    def paint_line_number_area(self, event):
-        painter = QPainter(self.line_number_area)
-        painter.fillRect(event.rect(), QColor("#171a1f"))
-        block = self.firstVisibleBlock()
-        block_number = block.blockNumber()
-        top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
-        bottom = top + int(self.blockBoundingRect(block).height())
-        painter.setFont(self.font())
-        while block.isValid() and top <= event.rect().bottom():
-            if block.isVisible() and bottom >= event.rect().top():
-                color = QColor("#8da0b8") if block_number == self.textCursor().blockNumber() else QColor("#596675")
-                painter.setPen(color)
-                painter.drawText(
-                    0,
-                    top,
-                    self.line_number_area.width() - 6,
-                    int(self.fontMetrics().height()),
-                    Qt.AlignRight,
-                    str(block_number + 1),
-                )
-            block = block.next()
-            top = bottom
-            bottom = top + int(self.blockBoundingRect(block).height())
-            block_number += 1
 
 
 def _is_progress_sidecar_entry(entry=None, output_file=None):
@@ -9926,9 +9808,15 @@ class SDLXLIFFReviewDialog(QDialog):
                 if error:
                     message = f"{message}. {self._compact_machine_translation_error(error)}"
                 self.save_status_label.setText(message)
-                QTimer.singleShot(2500, lambda: self.save_status_label.setText(""))
+                QTimer.singleShot(2500, self._clear_review_save_status)
             except Exception:
                 pass
+
+    def _clear_review_save_status(self):
+        try:
+            self.save_status_label.setText("")
+        except RuntimeError:
+            pass
 
     def _finish_piece_list_tooltip_translations(self, translated_count, piece_count, error):
         self._tooltip_translation_batch_active = False
@@ -9950,7 +9838,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 if error:
                     message = f"{message}. {self._compact_machine_translation_error(error)}"
                 self.save_status_label.setText(message)
-                QTimer.singleShot(2500, lambda: self.save_status_label.setText(""))
+                QTimer.singleShot(2500, self._clear_review_save_status)
             elif error:
                 self.save_status_label.setText(
                     f"Machine translation preview failed: {self._compact_machine_translation_error(error)}"
@@ -10160,7 +10048,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self.save_status_label.setText(f"Save failed: {exc}")
 
     def _apply_notepad_document_edit(self, piece_index, html_text):
-        """Save one raw HTML buffer and rebuild analysis from that document."""
+        """Save one browser-edited HTML document and rebuild its analysis."""
         if piece_index < 0 or piece_index >= len(self.pieces):
             return False
         piece = self.pieces[piece_index]
@@ -10168,8 +10056,8 @@ class SDLXLIFFReviewDialog(QDialog):
         if html_text == self._unescape_html_document(piece.get("target_html") or ""):
             return True
 
-        # Parse without serializing: Notepad mode preserves the user's exact
-        # whitespace/formatting while still tracking live DOM tag order.
+        # Track the current browser DOM order independently from the SDLXLIFF
+        # text-unit rows.  This also includes empty/structural elements.
         tag_order = []
         try:
             from bs4 import BeautifulSoup
@@ -10209,20 +10097,12 @@ class SDLXLIFFReviewDialog(QDialog):
         self._refresh_piece_list_item(piece_index)
         self._refresh_piece_header(piece_index)
 
-        # Image rename normalization can legitimately alter the buffer during
-        # save. Reflect that exact saved document without triggering a loop.
+        # Image rename normalization can legitimately alter the document
+        # during save. Reflect it in the active rendered surface.
         page = self._piece_pages.get(piece_index)
-        editor = page.findChild(_HtmlCodeEditor, "SdlReviewNotepadEditor") if page is not None else None
-        if editor is not None and editor.toPlainText() != saved_html:
-            cursor_position = editor.textCursor().position()
-            editor.blockSignals(True)
-            editor.setPlainText(saved_html)
-            cursor = editor.textCursor()
-            cursor.setPosition(min(cursor_position, len(saved_html)))
-            editor.setTextCursor(cursor)
-            editor.blockSignals(False)
-        if editor is not None:
-            editor.document().setModified(False)
+        browser = page.findChild(QWidget, "SdlReviewNotepadBrowser") if page is not None else None
+        if browser is not None and saved_html != html_text and hasattr(browser, "setHtml"):
+            self._set_notepad_browser_html(browser, piece, saved_html)
         try:
             self._last_review_signature = self._current_review_signature()
         except Exception:
@@ -10442,6 +10322,16 @@ class SDLXLIFFReviewDialog(QDialog):
     def closeEvent(self, event):
         try:
             self._save_current_review_scroll()
+            current_row = self.piece_list.currentRow()
+            current_page = self._piece_pages.get(current_row)
+            browser = (
+                current_page.findChild(QWidget, "SdlReviewNotepadBrowser")
+                if current_page is not None else None
+            )
+            if browser is not None:
+                self._capture_notepad_browser_html(
+                    browser, current_row, only_dirty=False, flush=True
+                )
             if self._edit_save_timer.isActive():
                 self._edit_save_timer.stop()
             self._flush_target_edits()
@@ -10913,53 +10803,18 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             return False
 
-    def _find_in_notepad_editor(self, editor):
-        if not isinstance(editor, _HtmlCodeEditor):
+    def _save_notepad_editor_now(self, browser=None, piece_index=None):
+        if browser is not None and piece_index is not None:
+            self._capture_notepad_browser_html(
+                browser, int(piece_index), only_dirty=False, flush=True
+            )
             return
-        query, accepted = QInputDialog.getText(
-            self,
-            "Find in HTML",
-            "Find:",
-            text=str(editor.property("sdl_last_find") or ""),
-        )
-        if not accepted or not query:
-            return
-        editor.setProperty("sdl_last_find", query)
-        if not editor.find(query):
-            cursor = editor.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.Start)
-            editor.setTextCursor(cursor)
-            editor.find(query)
-
-    def _save_notepad_editor_now(self):
         try:
             if self._edit_save_timer.isActive():
                 self._edit_save_timer.stop()
             self._flush_target_edits()
         except Exception as exc:
             self.save_status_label.setText(f"Save failed: {exc}")
-
-    def _show_notepad_editor_context_menu(self, editor, pos):
-        menu = editor.createStandardContextMenu()
-        menu.setParent(self)
-        menu.setStyleSheet("""
-            QMenu { background: #1e1e2e; border: 1px solid #3a3a5e; border-radius: 4px;
-                color: #e0e0e0; font-size: 9pt; padding: 4px; }
-            QMenu::item { padding: 6px 20px; border-radius: 3px; }
-            QMenu::item:selected { background: #3a3a5e; }
-            QMenu::item:disabled { color: #555; }
-        """)
-        menu.addSeparator()
-        find_action = menu.addAction("Find…")
-        find_action.setShortcut("Ctrl+F")
-        find_action.triggered.connect(lambda: self._find_in_notepad_editor(editor))
-        save_action = menu.addAction("Save HTML")
-        save_action.setShortcut("Ctrl+S")
-        save_action.triggered.connect(self._save_notepad_editor_now)
-        self._review_text_context_menu = menu
-        self._set_review_context_menu_open(True)
-        menu.aboutToHide.connect(lambda m=menu: self._clear_review_text_context_menu(m))
-        menu.popup(editor.mapToGlobal(pos))
 
     def _notepad_initial_document_html(self, piece):
         """Return readable target HTML with source markup in untranslated nodes."""
@@ -10987,57 +10842,619 @@ class SDLXLIFFReviewDialog(QDialog):
             for node_index, target_node in enumerate(target_nodes):
                 if node_index >= len(source_nodes):
                     break
+                source_node = source_nodes[node_index]
+                source_text = self._normalize_review_text(
+                    source_node.get_text(" ", strip=True)
+                )
                 target_text = self._normalize_review_text(
                     target_node.get_text(" ", strip=True)
                 )
                 if target_text:
+                    target_node["data-sdl-notepad-source"] = source_text
                     continue
                 # Replace the blank target node with the complete source node,
                 # not only get_text(), so inline/void markup remains visible.
-                target_node.replace_with(copy.copy(source_nodes[node_index]))
+                replacement = copy.copy(source_node)
+                replacement["data-sdl-notepad-source"] = source_text
+                target_node.replace_with(replacement)
 
-            rendered = target_soup.prettify(formatter="minimal")
+            # Browser mode does its own rendering. Avoid prettify(), which can
+            # insert meaningful whitespace into inline/preformatted content.
+            rendered = str(target_soup)
             return rendered if rendered.strip() else (target_html or source_html)
         except Exception:
             return target_html or source_html
 
+    @staticmethod
+    def _notepad_document_prefix(html_text):
+        """Preserve declarations/doctype omitted by documentElement.outerHTML."""
+        text = str(html_text or "")
+        match = re.search(r"<html(?:\s|>)", text, flags=re.IGNORECASE)
+        return text[:match.start()] if match else ""
+
+    def _notepad_browser_base_url(self, piece):
+        output_path = self._output_path_for_piece(piece)
+        base_dir = os.path.dirname(output_path) if output_path else (self.output_dir or "")
+        return QUrl.fromLocalFile(os.path.join(os.path.abspath(base_dir or "."), ""))
+
+    def _set_notepad_browser_html(self, browser, piece, html_text):
+        browser._sdl_document_prefix = self._notepad_document_prefix(html_text)
+        browser.setHtml(str(html_text or ""), self._notepad_browser_base_url(piece))
+
+    def _install_notepad_browser_editing(self, browser):
+        """Expose text-only edit islands while keeping the HTML tree immutable."""
+        script = r"""
+            (() => {
+                if (!document.body) return false;
+                document.designMode = 'off';
+                window.__sdlNotepadDirty = false;
+                if (window.__sdlNotepadGuardsInstalled) return true;
+                window.__sdlNotepadGuardsInstalled = true;
+
+                const EDIT_ATTR = 'data-sdl-notepad-text';
+                const PLACEHOLDER_ATTR = 'data-sdl-notepad-placeholder';
+                const SOURCE_ATTR = 'data-sdl-notepad-source';
+                const ORIGINAL_EDITABLE_ATTR = 'data-sdl-notepad-original-editable';
+                const blockedParents = 'script,style,noscript,template,textarea,select,option,svg,math';
+                const editableHost = node => {
+                    const element = node && node.nodeType === Node.ELEMENT_NODE
+                        ? node : node && node.parentElement;
+                    return element ? element.closest('[' + EDIT_ATTR + ']') : null;
+                };
+                const selectionInside = host => {
+                    const selection = window.getSelection();
+                    return !!(selection && selection.rangeCount && host
+                        && host.contains(selection.anchorNode)
+                        && host.contains(selection.focusNode));
+                };
+                const selectionBoundary = host => {
+                    const selection = window.getSelection();
+                    if (!selection || !selection.rangeCount || !selection.isCollapsed
+                            || !selectionInside(host)) {
+                        return { collapsed: false, atStart: false, atEnd: false };
+                    }
+                    const range = selection.getRangeAt(0);
+                    const before = range.cloneRange();
+                    before.selectNodeContents(host);
+                    before.setEnd(range.startContainer, range.startOffset);
+                    const after = range.cloneRange();
+                    after.selectNodeContents(host);
+                    after.setStart(range.endContainer, range.endOffset);
+                    return {
+                        collapsed: true,
+                        atStart: before.toString().length === 0,
+                        atEnd: after.toString().length === 0
+                    };
+                };
+                const markDirty = () => { window.__sdlNotepadDirty = true; };
+                const originallyEditable = Array.from(
+                    document.body.querySelectorAll('[contenteditable]')
+                );
+                if (!originallyEditable.includes(document.body)) originallyEditable.unshift(document.body);
+                for (const element of originallyEditable) {
+                    element.setAttribute(
+                        ORIGINAL_EDITABLE_ATTR,
+                        element.hasAttribute('contenteditable')
+                            ? element.getAttribute('contenteditable') : '__sdl_missing__'
+                    );
+                    element.setAttribute('contenteditable', 'false');
+                }
+                const makeHost = (textNode, placeholder=false, sourceText='') => {
+                    const host = document.createElement('span');
+                    host.setAttribute(EDIT_ATTR, '1');
+                    host.setAttribute('contenteditable', 'plaintext-only');
+                    host.setAttribute('spellcheck', 'false');
+                    if (placeholder) host.setAttribute(PLACEHOLDER_ATTR, '1');
+                    if (sourceText) host.setAttribute(SOURCE_ATTR, sourceText);
+                    if (textNode) textNode.parentNode.replaceChild(host, textNode);
+                    if (textNode) host.appendChild(textNode);
+                    return host;
+                };
+
+                const textNodes = [];
+                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                while (walker.nextNode()) textNodes.push(walker.currentNode);
+                for (const node of textNodes) {
+                    const parent = node.parentElement;
+                    if (!parent || parent.closest(blockedParents) || parent.closest('[' + EDIT_ATTR + ']')) continue;
+                    if (!node.nodeValue.trim() && !parent.closest('pre')) continue;
+                    const sourceContainer = parent.closest('[' + SOURCE_ATTR + ']');
+                    makeHost(
+                        node,
+                        false,
+                        sourceContainer ? sourceContainer.getAttribute(SOURCE_ATTR) || '' : ''
+                    );
+                }
+
+                // Empty rendered text containers still need a caret target.
+                document.body.querySelectorAll(
+                    'p,h1,h2,h3,h4,h5,h6,li,td,th,caption,figcaption,blockquote'
+                ).forEach(element => {
+                    if (!element.querySelector('[' + EDIT_ATTR + ']')) {
+                        element.insertBefore(
+                            makeHost(null, true, element.getAttribute(SOURCE_ATTR) || ''),
+                            element.firstChild
+                        );
+                    }
+                });
+
+                const style = document.createElement('style');
+                style.id = 'sdl-notepad-guard-style';
+                style.textContent =
+                    ':root { color-scheme: dark !important; background: #1e1e1e !important; }' +
+                    'html, body { background-color: #1e1e1e !important; color: #e8edf2 !important; }' +
+                    'body { caret-color: #7dd3fc !important; }' +
+                    'body, body p, body h1, body h2, body h3, body h4, body h5, body h6,' +
+                    'body li, body div, body span, body strong, body b, body em, body i,' +
+                    'body ruby, body rb, body rt, body td, body th, body blockquote,' +
+                    'body figcaption { color: #e8edf2 !important; }' +
+                    'body article, body section, body main, body header, body footer, body nav,' +
+                    'body aside { background-color: transparent !important; }' +
+                    'body a, body a * { color: #69b7ff !important; }' +
+                    'body pre, body code, body kbd, body samp {' +
+                    ' background-color: #242424 !important; color: #d8dee9 !important;' +
+                    ' border-color: #4a5568 !important; }' +
+                    'body table, body td, body th, body hr { border-color: #4a5568 !important; }' +
+                    'body input, body textarea, body select, body button {' +
+                    ' background: #242424 !important; color: #e8edf2 !important;' +
+                    ' border-color: #4a5568 !important; }' +
+                    'body mark { background: #806b16 !important; color: #fff !important; }' +
+                    '::selection { background: #315d82 !important; color: #fff !important; }' +
+                    '::-webkit-scrollbar { width: 12px; height: 12px; background: #1e1e1e; }' +
+                    '::-webkit-scrollbar-thumb { background: #56606d; border-radius: 6px;' +
+                    ' border: 2px solid #1e1e1e; }' +
+                    '::-webkit-scrollbar-thumb:hover { background: #6b7787; }' +
+                    '[' + EDIT_ATTR + '] { outline: none; cursor: text; }' +
+                    '[' + EDIT_ATTR + '][' + PLACEHOLDER_ATTR + '] {' +
+                    ' display: inline-block; min-width: .65em; min-height: 1em; vertical-align: baseline; }' +
+                    '[' + EDIT_ATTR + ']:focus { box-shadow: inset 0 -1px rgba(70,150,220,.55); }' +
+                    '#sdl-notepad-source-tooltip { position: fixed; display: none; z-index: 2147483647;' +
+                    ' max-width: min(560px, calc(100vw - 32px)); padding: 9px 12px;' +
+                    ' border: 1px solid #526173; border-radius: 6px; background: #15191f;' +
+                    ' color: #eef2f7 !important; font: 13px/1.45 sans-serif; white-space: pre-wrap;' +
+                    ' overflow-wrap: anywhere; box-shadow: 0 5px 18px rgba(0,0,0,.55);' +
+                    ' pointer-events: none; }';
+                (document.head || document.documentElement).appendChild(style);
+
+                const sourceTooltip = document.createElement('div');
+                sourceTooltip.id = 'sdl-notepad-source-tooltip';
+                document.body.appendChild(sourceTooltip);
+                const tooltipSource = target => {
+                    const element = target && target.nodeType === Node.ELEMENT_NODE
+                        ? target : target && target.parentElement;
+                    if (!element) return '';
+                    const sourceElement = element.closest('[' + SOURCE_ATTR + ']');
+                    return sourceElement ? sourceElement.getAttribute(SOURCE_ATTR) || '' : '';
+                };
+                const positionTooltip = event => {
+                    const margin = 12;
+                    const left = Math.min(
+                        event.clientX + 14,
+                        window.innerWidth - sourceTooltip.offsetWidth - margin
+                    );
+                    const top = Math.min(
+                        event.clientY + 18,
+                        window.innerHeight - sourceTooltip.offsetHeight - margin
+                    );
+                    sourceTooltip.style.left = Math.max(margin, left) + 'px';
+                    sourceTooltip.style.top = Math.max(margin, top) + 'px';
+                };
+                document.addEventListener('mouseover', event => {
+                    const source = tooltipSource(event.target);
+                    if (!source) return;
+                    sourceTooltip.textContent = source;
+                    sourceTooltip.style.display = 'block';
+                    positionTooltip(event);
+                }, true);
+                document.addEventListener('mousemove', event => {
+                    if (sourceTooltip.style.display === 'block') positionTooltip(event);
+                }, true);
+                document.addEventListener('mouseout', event => {
+                    const nextSource = tooltipSource(event.relatedTarget);
+                    if (!nextSource) sourceTooltip.style.display = 'none';
+                }, true);
+
+                document.addEventListener('beforeinput', event => {
+                    const inputType = String(event.inputType || '');
+                    if (inputType === 'insertParagraph' || inputType === 'insertLineBreak') {
+                        event.preventDefault();
+                        return;
+                    }
+                    const host = editableHost(event.target);
+                    if (!host || !selectionInside(host)) {
+                        event.preventDefault();
+                        return;
+                    }
+                    const boundary = selectionBoundary(host);
+                    const deletesBackward = inputType.endsWith('Backward');
+                    const deletesForward = inputType.endsWith('Forward');
+                    if (boundary.collapsed
+                            && ((deletesBackward && boundary.atStart)
+                                || (deletesForward && boundary.atEnd))) {
+                        event.preventDefault();
+                        event.stopImmediatePropagation();
+                        return;
+                    }
+                    if (inputType === 'insertText' && typeof event.data === 'string'
+                            && /[\r\n\u2028\u2029]/.test(event.data)) {
+                        event.preventDefault();
+                        document.execCommand(
+                            'insertText', false,
+                            event.data.replace(/[\r\n\u2028\u2029]+/g, ' ')
+                        );
+                        markDirty();
+                    } else if (inputType.startsWith('format') || inputType === 'insertOrderedList'
+                            || inputType === 'insertUnorderedList' || inputType === 'insertHorizontalRule') {
+                        event.preventDefault();
+                    }
+                }, true);
+
+                document.addEventListener('keydown', event => {
+                    if (event.key === 'Enter') {
+                        event.preventDefault();
+                        event.stopImmediatePropagation();
+                        const current = editableHost(event.target);
+                        if (!current) return;
+                        const hosts = Array.from(
+                            document.body.querySelectorAll('[' + EDIT_ATTR + ']')
+                        );
+                        const index = hosts.indexOf(current);
+                        const nextIndex = event.shiftKey ? index - 1 : index + 1;
+                        const next = hosts[nextIndex];
+                        if (next) {
+                            next.focus();
+                            const selection = window.getSelection();
+                            const range = document.createRange();
+                            range.selectNodeContents(next);
+                            range.collapse(!event.shiftKey);
+                            selection.removeAllRanges();
+                            selection.addRange(range);
+                        }
+                        return;
+                    }
+                    if (event.key !== 'Backspace' && event.key !== 'Delete') return;
+                    const host = editableHost(event.target);
+                    if (!host || !selectionInside(host)) {
+                        event.preventDefault();
+                        return;
+                    }
+                    const selection = window.getSelection();
+                    if (!selection || !selection.isCollapsed) return;
+                    const boundary = selectionBoundary(host);
+                    const crossesBoundary = event.key === 'Backspace'
+                        ? boundary.atStart : boundary.atEnd;
+                    let sibling = event.key === 'Backspace' && boundary.atStart
+                        ? host.previousSibling
+                        : event.key === 'Delete' && boundary.atEnd ? host.nextSibling : null;
+                    while (sibling && sibling.nodeType === Node.TEXT_NODE && !sibling.nodeValue.trim()) {
+                        sibling = event.key === 'Backspace' ? sibling.previousSibling : sibling.nextSibling;
+                    }
+                    if (sibling && sibling.nodeType === Node.ELEMENT_NODE
+                            && sibling.tagName.toLowerCase() === 'br') {
+                        event.preventDefault();
+                        sibling.remove();
+                        markDirty();
+                        return;
+                    }
+                    if (crossesBoundary) {
+                        event.preventDefault();
+                        event.stopImmediatePropagation();
+                    }
+                }, true);
+
+                document.addEventListener('paste', event => {
+                    const host = editableHost(event.target);
+                    if (!host || !selectionInside(host)) {
+                        event.preventDefault();
+                        return;
+                    }
+                    event.preventDefault();
+                    const pastedText = event.clipboardData
+                        ? event.clipboardData.getData('text/plain') : '';
+                    document.execCommand(
+                        'insertText', false,
+                        pastedText.replace(/[\r\n\u2028\u2029]+/g, ' ')
+                    );
+                    markDirty();
+                }, true);
+                document.addEventListener('drop', event => event.preventDefault(), true);
+                document.addEventListener('input', event => {
+                    const host = editableHost(event.target);
+                    if (!host) return;
+                    // Even plaintext-only Chromium may briefly insert an
+                    // internal <br> when deleting. Collapse every edit back
+                    // to a single text node before it can affect neighbours.
+                    const plainText = host.textContent || '';
+                    if (host.childNodes.length !== 1 || host.firstChild.nodeType !== Node.TEXT_NODE) {
+                        host.textContent = plainText;
+                    }
+                    markDirty();
+                }, true);
+
+                const firstHost = document.body.querySelector('[' + EDIT_ATTR + ']');
+                if (firstHost) firstHost.focus();
+                else document.body.focus();
+                return true;
+            })();
+        """
+        try:
+            browser.page().runJavaScript(script)
+        except RuntimeError:
+            pass
+
+    @staticmethod
+    def _clean_notepad_browser_html(document_html):
+        """Remove editor-only wrappers while retaining their edited contents."""
+        document = str(document_html or "")
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(document, "html.parser")
+            guard_style = soup.find("style", id="sdl-notepad-guard-style")
+            if guard_style is not None:
+                guard_style.decompose()
+            source_tooltip = soup.find(id="sdl-notepad-source-tooltip")
+            if source_tooltip is not None:
+                source_tooltip.decompose()
+            for wrapper in list(soup.find_all(attrs={"data-sdl-notepad-text": True})):
+                wrapper.unwrap()
+            for element in soup.find_all(attrs={"data-sdl-notepad-original-editable": True}):
+                original = element.attrs.pop("data-sdl-notepad-original-editable", "__sdl_missing__")
+                if original == "__sdl_missing__":
+                    element.attrs.pop("contenteditable", None)
+                else:
+                    element["contenteditable"] = original
+            for element in soup.find_all(attrs={"data-sdl-notepad-source": True}):
+                element.attrs.pop("data-sdl-notepad-source", None)
+            return str(soup)
+        except Exception:
+            return document
+
+    def _notepad_browser_load_finished(self, browser):
+        # A JavaScript callback issued during navigation may be discarded by
+        # Chromium. Reset the in-flight guard before starting dirty polling.
+        browser._sdl_capture_in_progress = False
+        self._install_notepad_browser_editing(browser)
+        poll_timer = getattr(browser, "_sdl_edit_poll_timer", None)
+        if poll_timer is not None and not poll_timer.isActive():
+            poll_timer.start()
+
+    def _poll_notepad_browser_html(self, browser, piece_index):
+        # Cached and hidden browser pages must not keep doing Chromium work.
+        try:
+            if not self.isVisible() or not browser.isVisible():
+                return
+        except RuntimeError:
+            return
+        self._capture_notepad_browser_html(browser, piece_index, only_dirty=True)
+
+    def _capture_notepad_browser_html(
+        self, browser, piece_index, *, only_dirty=True, flush=False
+    ):
+        """Pull the editable browser DOM back into the normal save pipeline."""
+        if browser is None:
+            return
+        if bool(getattr(browser, "_sdl_capture_in_progress", False)):
+            if flush:
+                QTimer.singleShot(
+                    40,
+                    lambda b=browser, pi=piece_index: self._capture_notepad_browser_html(
+                        b, pi, only_dirty=False, flush=True
+                    ),
+                )
+            return
+        browser._sdl_capture_in_progress = True
+
+        def _received(document_html):
+            try:
+                browser._sdl_capture_in_progress = False
+                if document_html is None:
+                    return
+                prefix = str(getattr(browser, "_sdl_document_prefix", "") or "")
+                document = self._clean_notepad_browser_html(document_html)
+                if prefix:
+                    html_start = re.search(r"<html(?:\s|>)", document, flags=re.IGNORECASE)
+                    document = prefix + (document[html_start.start():] if html_start else document)
+                self._schedule_notepad_document_edit(piece_index, document)
+                if flush:
+                    if self._edit_save_timer.isActive():
+                        self._edit_save_timer.stop()
+                    self._flush_target_edits()
+            except RuntimeError:
+                pass
+
+        def _export_html():
+            try:
+                browser.page().toHtml(_received)
+            except RuntimeError:
+                browser._sdl_capture_in_progress = False
+
+        def _dirty_received(is_dirty):
+            if not bool(is_dirty):
+                browser._sdl_capture_in_progress = False
+                return
+            _export_html()
+
+        try:
+            if only_dirty:
+                browser.page().runJavaScript(
+                    "(() => { const dirty = !!window.__sdlNotepadDirty; "
+                    "window.__sdlNotepadDirty = false; return dirty; })();",
+                    _dirty_received,
+                )
+            else:
+                browser.page().runJavaScript("window.__sdlNotepadDirty = false;")
+                _export_html()
+        except RuntimeError:
+            browser._sdl_capture_in_progress = False
+
+    def _find_in_notepad_browser(self, browser):
+        query, accepted = QInputDialog.getText(
+            self,
+            "Find in page",
+            "Find:",
+            text=str(browser.property("sdl_last_find") or ""),
+        )
+        if not accepted or not query:
+            return
+        browser.setProperty("sdl_last_find", query)
+        browser.findText("")
+        browser.findText(query)
+
+    def _show_notepad_browser_context_menu(self, browser, pos, source_text=""):
+        """Show browser edit actions plus the complete source text."""
+        from PySide6.QtWebEngineCore import QWebEnginePage
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background: #1e1e1e; color: #eef2f7; border: 1px solid #4a5568;
+                border-radius: 7px; padding: 6px 18px 6px 6px;
+            }
+            QMenu::item {
+                padding: 7px 34px 7px 10px; margin: 1px 0;
+                border-radius: 4px;
+            }
+            QMenu::item:selected { background: #34465a; }
+            QMenu::item:disabled { color: #657180; }
+            QMenu::separator { height: 1px; background: #3f4956; margin: 6px 5px; }
+        """)
+
+        source_panel = QWidget(menu)
+        source_layout = QVBoxLayout(source_panel)
+        source_layout.setContentsMargins(10, 7, 24, 8)
+        source_layout.setSpacing(4)
+        source_header = QLabel("Source text", source_panel)
+        source_header.setStyleSheet("color: #7dd3fc; font-weight: bold; font-size: 9pt;")
+        source_label = QLabel(str(source_text or "No source text is available for this element."), source_panel)
+        source_label.setObjectName("SdlNotepadContextSourceText")
+        source_label.setTextFormat(Qt.PlainText)
+        source_label.setWordWrap(True)
+        source_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        source_label.setMinimumWidth(320)
+        source_label.setMaximumWidth(560)
+        source_label.setStyleSheet(
+            "color: #e8edf2; background: #171b21; border: 1px solid #354252; "
+            "border-radius: 4px; padding: 8px 14px 8px 9px;"
+        )
+        source_layout.addWidget(source_header)
+        source_layout.addWidget(source_label)
+        source_action = QWidgetAction(menu)
+        source_action.setDefaultWidget(source_panel)
+        menu.addAction(source_action)
+        menu.addSeparator()
+
+        action_specs = (
+            ("Undo", QWebEnginePage.WebAction.Undo),
+            ("Redo", QWebEnginePage.WebAction.Redo),
+            (None, None),
+            ("Cut", QWebEnginePage.WebAction.Cut),
+            ("Copy", QWebEnginePage.WebAction.Copy),
+            ("Paste", QWebEnginePage.WebAction.Paste),
+            ("Paste and match style", QWebEnginePage.WebAction.PasteAndMatchStyle),
+            (None, None),
+            ("Select all", QWebEnginePage.WebAction.SelectAll),
+        )
+        for label, web_action in action_specs:
+            if label is None:
+                menu.addSeparator()
+                continue
+            action = menu.addAction(label)
+            try:
+                action.setEnabled(browser.page().action(web_action).isEnabled())
+            except Exception:
+                pass
+            action.triggered.connect(
+                lambda _checked=False, selected_action=web_action, view=browser:
+                    view.page().triggerAction(selected_action)
+            )
+
+        self._review_text_context_menu = menu
+        self._set_review_context_menu_open(True)
+        menu.aboutToHide.connect(lambda m=menu: self._clear_review_text_context_menu(m))
+        menu.popup(browser.mapToGlobal(pos))
+        return menu
+
+    def _request_notepad_browser_context_menu(self, browser, pos):
+        x = int(pos.x())
+        y = int(pos.y())
+        script = f"""
+            (() => {{
+                const element = document.elementFromPoint({x}, {y});
+                if (!element) return '';
+                const sourceElement = element.closest('[data-sdl-notepad-source]');
+                return sourceElement
+                    ? sourceElement.getAttribute('data-sdl-notepad-source') || '' : '';
+            }})();
+        """
+
+        def _show(source_text):
+            try:
+                self._show_notepad_browser_context_menu(browser, pos, source_text)
+            except RuntimeError:
+                pass
+
+        try:
+            browser.page().runJavaScript(script, _show)
+        except RuntimeError:
+            pass
+
     def _add_notepad_document_editor(self, piece, layout):
-        """Add one raw, full-document HTML editor—never per-tag widgets."""
-        editor = _HtmlCodeEditor()
-        editor.setPlainText(self._notepad_initial_document_html(piece))
-        editor.document().setModified(False)
+        """Add one rendered, editable browser document—never visible markup."""
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+
+        browser = QWebEngineView()
+        browser.setObjectName("SdlReviewNotepadBrowser")
         try:
             viewport_height = int(self.scroll.viewport().height())
         except Exception:
             viewport_height = 640
-        editor.setMinimumHeight(max(420, viewport_height - 18))
-        editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        editor.setStyleSheet(
-            "QPlainTextEdit#SdlReviewNotepadEditor { background-color: #1b1e23; color: #e5e7eb; "
-            "border: 1px solid #4a5568; border-radius: 2px; padding: 7px 8px; "
-            "selection-background-color: #315d82; selection-color: #ffffff; }"
-            "QPlainTextEdit#SdlReviewNotepadEditor:focus { border-color: #5a9fd4; }"
+        browser.setMinimumHeight(max(420, viewport_height - 18))
+        browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        browser.setStyleSheet(
+            "QWebEngineView#SdlReviewNotepadBrowser { border: 1px solid #4a5568; "
+            "border-radius: 2px; background: #1e1e1e; }"
         )
-        editor.setToolTip("Raw output HTML. Tags, whitespace, nesting, and empty elements are edited directly.")
-        editor.setContextMenuPolicy(Qt.CustomContextMenu)
-        editor.customContextMenuRequested.connect(
-            lambda pos, ed=editor: self._show_notepad_editor_context_menu(ed, pos)
+        try:
+            browser.page().setBackgroundColor(QColor(self.THEME["bg"]))
+        except Exception:
+            pass
+        # Source tooltips are rendered inside the page; a widget-level tooltip
+        # would cover them with the old generic editor help text.
+        browser.setToolTip("")
+        browser.setContextMenuPolicy(Qt.CustomContextMenu)
+        browser.customContextMenuRequested.connect(
+            lambda pos, view=browser: self._request_notepad_browser_context_menu(view, pos)
         )
-        editor.textChanged.connect(
-            lambda pi=piece["index"], ed=editor: self._schedule_notepad_document_edit(
-                pi, ed.toPlainText()
+        poll_timer = QTimer(browser)
+        poll_timer.setInterval(350)
+        poll_timer.timeout.connect(
+            lambda view=browser, pi=piece["index"]: self._poll_notepad_browser_html(
+                view, pi
             )
         )
-        find_shortcut = QShortcut(QKeySequence("Ctrl+F"), editor)
+        browser._sdl_edit_poll_timer = poll_timer
+        browser.loadFinished.connect(
+            lambda _ok, view=browser: self._notepad_browser_load_finished(view)
+        )
+
+        find_shortcut = QShortcut(QKeySequence("Ctrl+F"), browser)
         find_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-        find_shortcut.activated.connect(lambda ed=editor: self._find_in_notepad_editor(ed))
-        editor._sdl_find_shortcut = find_shortcut
-        save_shortcut = QShortcut(QKeySequence("Ctrl+S"), editor)
+        find_shortcut.activated.connect(
+            lambda view=browser: self._find_in_notepad_browser(view)
+        )
+        browser._sdl_find_shortcut = find_shortcut
+        save_shortcut = QShortcut(QKeySequence("Ctrl+S"), browser)
         save_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-        save_shortcut.activated.connect(self._save_notepad_editor_now)
-        editor._sdl_save_shortcut = save_shortcut
-        layout.addWidget(editor, 1)
-        return editor
+        save_shortcut.activated.connect(
+            lambda view=browser, pi=piece["index"]: self._save_notepad_editor_now(view, pi)
+        )
+        browser._sdl_save_shortcut = save_shortcut
+        self._set_notepad_browser_html(
+            browser, piece, self._notepad_initial_document_html(piece)
+        )
+        layout.addWidget(browser, 1)
+        return browser
 
     def _add_notepad_review_row(self, piece, row_data, idx, updates_enabled=True):
         """Render one DOM-ordered line in the continuous Notepad layout."""
@@ -11450,7 +11867,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 return
             except Exception as exc:
                 self._clear_rows(layout)
-                error = QLabel(f"Could not open raw HTML editor:\n{exc}")
+                error = QLabel(f"Could not open rendered HTML editor:\n{exc}")
                 error.setTextFormat(Qt.PlainText)
                 error.setStyleSheet(f"color: {self.THEME['danger']}; font-size: 11pt; padding: 12px;")
                 layout.addWidget(error)
