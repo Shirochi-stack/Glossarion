@@ -11545,6 +11545,44 @@ class SDLXLIFFReviewDialog(QDialog):
                     markDirty();
                     return true;
                 };
+                const adjacentEditableBreak = (host, backwards) => {
+                    const selection = window.getSelection();
+                    if (!host || !selection || !selection.rangeCount
+                            || !selection.isCollapsed || !selectionInside(host)) return null;
+                    const range = selection.getRangeAt(0);
+                    let current = range.startContainer;
+                    let candidate = null;
+                    if (current.nodeType === Node.TEXT_NODE) {
+                        const textLength = current.nodeValue.length;
+                        if ((backwards && range.startOffset > 0)
+                                || (!backwards && range.startOffset < textLength)) return null;
+                    } else if (current.nodeType === Node.ELEMENT_NODE) {
+                        candidate = backwards
+                            ? current.childNodes[range.startOffset - 1]
+                            : current.childNodes[range.startOffset];
+                    }
+                    while (!candidate && current && current !== host) {
+                        candidate = backwards ? current.previousSibling : current.nextSibling;
+                        current = current.parentNode;
+                    }
+                    while (candidate && candidate.nodeType === Node.ELEMENT_NODE
+                            && candidate.tagName.toUpperCase() !== 'BR'
+                            && candidate.childNodes.length) {
+                        candidate = backwards
+                            ? candidate.lastChild : candidate.firstChild;
+                    }
+                    return candidate && candidate.nodeType === Node.ELEMENT_NODE
+                            && candidate.tagName.toUpperCase() === 'BR'
+                            && host.contains(candidate)
+                        ? candidate : null;
+                };
+                const deleteAdjacentEditableBreak = (host, backwards) => {
+                    const lineBreak = adjacentEditableBreak(host, backwards);
+                    if (!lineBreak) return false;
+                    lineBreak.remove();
+                    markDirty();
+                    return true;
+                };
                 const sanitizeHost = host => {
                     if (!host) return;
                     for (const element of Array.from(host.querySelectorAll('*'))) {
@@ -11836,6 +11874,15 @@ class SDLXLIFFReviewDialog(QDialog):
                     const deletesBackward = inputType.endsWith('Backward');
                     const deletesForward = inputType.endsWith('Forward');
                     if (boundary.collapsed
+                            && ((deletesBackward
+                                    && deleteAdjacentEditableBreak(host, true))
+                                || (deletesForward
+                                    && deleteAdjacentEditableBreak(host, false)))) {
+                        event.preventDefault();
+                        event.stopImmediatePropagation();
+                        return;
+                    }
+                    if (boundary.collapsed
                             && ((deletesBackward && boundary.atStart)
                                 || (deletesForward && boundary.atEnd))) {
                         event.preventDefault();
@@ -11898,6 +11945,11 @@ class SDLXLIFFReviewDialog(QDialog):
                     }
                     const selection = window.getSelection();
                     if (!selection || !selection.isCollapsed) return;
+                    if (deleteAdjacentEditableBreak(host, event.key === 'Backspace')) {
+                        event.preventDefault();
+                        event.stopImmediatePropagation();
+                        return;
+                    }
                     const boundary = selectionBoundary(host);
                     const crossesBoundary = event.key === 'Backspace'
                         ? boundary.atStart : boundary.atEnd;

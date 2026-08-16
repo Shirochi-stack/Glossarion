@@ -3639,6 +3639,48 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         """
     )
     assert enter_result == "[true,true,true]"
+    user_break_delete_result = js_value(
+        """
+        (() => { try {
+            const host = document.querySelector('p > [data-sdl-notepad-text]');
+            const before = host.querySelectorAll('br').length;
+            const backspace = new KeyboardEvent('keydown', {
+                key: 'Backspace', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(backspace);
+            const deleted = host.querySelectorAll('br').length === before - 1;
+            const recreate = new KeyboardEvent('keydown', {
+                key: 'Enter', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(recreate);
+            const recreatedBreak = host.querySelector('br');
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.setStartBefore(recreatedBreak);
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const forwardDelete = new KeyboardEvent('keydown', {
+                key: 'Delete', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(forwardDelete);
+            const forwardDeleted = host.querySelectorAll('br').length === before - 1;
+            host.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Enter', bubbles: true, cancelable: true
+            }));
+            return JSON.stringify([
+                backspace.defaultPrevented,
+                deleted,
+                recreate.defaultPrevented,
+                forwardDelete.defaultPrevented,
+                forwardDeleted,
+                host.querySelectorAll('br').length === before
+            ]);
+        } catch (error) { return String(error && error.stack || error); }
+        })();
+        """
+    )
+    assert user_break_delete_result == "[true,true,true,true,true,true]"
     boundary_delete_result = js_value(
         """
         (() => { try {

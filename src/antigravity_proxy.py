@@ -73,7 +73,7 @@ PROXY_DEFAULT_VERSION = "0.7.4"
 PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
 BUN_INSTALL_TIMEOUT_SECONDS = 300
-RUNTIME_PATCH_VERSION = "2026-08-16-prompt-block-finish-reason-v4"
+RUNTIME_PATCH_VERSION = "2026-08-17-auto-account-log-v1"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -736,6 +736,40 @@ def _patch_runtime_forced_account_support(runtime_dir: str) -> bool:
     )
 
 
+def _patch_runtime_selected_account_header(runtime_dir: str) -> bool:
+    """Expose the account selected by automatic rotation on proxy responses."""
+    server_path = os.path.join(runtime_dir, "src", "server.ts")
+    if not os.path.exists(server_path):
+        return False
+
+    with open(server_path, "r", encoding="utf-8") as f:
+        server = f.read()
+
+    marker = '"X-Antigravity-Account": account.email'
+    streaming_needle = '                    "X-Antigravity-Attempts": attempts.toString()\n'
+    streaming_replacement = (
+        '                    "X-Antigravity-Attempts": attempts.toString(),\n'
+        '                    "X-Antigravity-Account": account.email\n'
+    )
+    if marker not in server and streaming_needle in server:
+        server = server.replace(streaming_needle, streaming_replacement, 1)
+
+    non_streaming_needle = (
+        '                       "X-Antigravity-Attempts": attempts.toString()\n'
+    )
+    non_streaming_replacement = (
+        '                       "X-Antigravity-Attempts": attempts.toString(),\n'
+        '                       "X-Antigravity-Account": account.email\n'
+    )
+    if server.count(marker) < 2 and non_streaming_needle in server:
+        server = server.replace(non_streaming_needle, non_streaming_replacement, 1)
+
+    with open(server_path, "w", encoding="utf-8") as f:
+        f.write(server)
+
+    return server.count(marker) >= 2
+
+
 def _patch_runtime_verbose_access_denied(runtime_dir: str) -> bool:
     """Return the upstream Google error details instead of only unknown_error."""
     server_path = os.path.join(runtime_dir, "src", "server.ts")
@@ -1062,6 +1096,8 @@ def _download_proxy_runtime(
             raise RuntimeError("Downloaded proxy archive could not be patched for account reset")
         if not _patch_runtime_forced_account_support(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for forced account routing")
+        if not _patch_runtime_selected_account_header(archive_root):
+            raise RuntimeError("Downloaded proxy archive could not expose selected account headers")
         if not _patch_runtime_verbose_access_denied(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for verbose access-denied errors")
         _write_runtime_metadata(archive_root, release, client_version)
@@ -1163,6 +1199,8 @@ def _patch_cached_runtime(
         if not _patch_runtime_account_reset_support(runtime_dir):
             return False
         if not _patch_runtime_forced_account_support(runtime_dir):
+            return False
+        if not _patch_runtime_selected_account_header(runtime_dir):
             return False
         if not _patch_runtime_verbose_access_denied(runtime_dir):
             return False
@@ -1317,6 +1355,45 @@ def _account_slot_log_message(account_id: int, headers: Dict[str, str]) -> str:
     if email:
         return f"🧭 Antigravity: using account slot #{account_id} ({email})"
     return f"🧭 Antigravity: using account slot #{account_id}"
+
+
+def _account_slot_for_email(email: str) -> Optional[int]:
+    normalized = str(email or "").strip().casefold()
+    if not normalized:
+        return None
+    try:
+        summary = get_stored_account_summary()
+        accounts = summary.get("accounts") if isinstance(summary, dict) else None
+    except Exception:
+        accounts = None
+    if not isinstance(accounts, list):
+        return None
+    for slot, account in enumerate(accounts, start=1):
+        if not isinstance(account, dict):
+            continue
+        if str(account.get("email") or "").strip().casefold() == normalized:
+            return slot
+    return None
+
+
+def _log_proxy_selected_account(resp: Any, log_fn, account_id: Optional[int]) -> None:
+    """Log the account chosen by the proxy for antigravity0/ rotation."""
+    if account_id != 0:
+        return
+    try:
+        headers = getattr(resp, "headers", None)
+        email = str(headers.get("X-Antigravity-Account") or "").strip()
+    except Exception:
+        email = ""
+    if not email:
+        return
+    slot = _account_slot_for_email(email)
+    if slot:
+        (log_fn or _log_noop)(
+            f"🧭 Antigravity: automatic rotation selected account slot #{slot} ({email})"
+        )
+    else:
+        (log_fn or _log_noop)(f"🧭 Antigravity: automatic rotation selected account ({email})")
 
 
 def invalidate_api_key_cache() -> None:
@@ -2899,6 +2976,8 @@ def send_message(
     if resp.status_code != 200:
         _raise_for_proxy_status(resp, payload=payload, account_id=account_id, log_fn=_log)
 
+    _log_proxy_selected_account(resp, _log, account_id)
+
     try:
         data = resp.json()
     except Exception as exc:
@@ -2957,6 +3036,7 @@ def _consume_openai_stream(
     log_stream: bool = True,
     cancel_generation: Optional[int] = None,
     max_tokens: Any = None,
+    account_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     _log = log_fn or _log_noop
     collected_content: List[str] = []
@@ -2978,6 +3058,7 @@ def _consume_openai_stream(
     if cancel_generation is None:
         cancel_generation = capture_cancel_generation()
     _raise_if_cancelled(cancel_generation)
+    _log_proxy_selected_account(resp, _log, account_id)
     _register_active_response(resp)
     try:
         try:
@@ -3183,6 +3264,7 @@ def send_message_stream(
                             log_stream=log_stream,
                             cancel_generation=request_cancel_generation,
                             max_tokens=payload.get("max_tokens"),
+                            account_id=account_id,
                         )
                     _raise_if_cancelled(request_cancel_generation)
                     raise RuntimeError(
@@ -3207,6 +3289,7 @@ def send_message_stream(
                     log_stream=log_stream,
                     cancel_generation=request_cancel_generation,
                     max_tokens=payload.get("max_tokens"),
+                    account_id=account_id,
                 )
             except RuntimeError as stream_exc:
                 error_text = str(stream_exc)
@@ -3230,6 +3313,7 @@ def send_message_stream(
                             log_stream=log_stream,
                             cancel_generation=request_cancel_generation,
                             max_tokens=payload.get("max_tokens"),
+                            account_id=account_id,
                         )
                     raise RuntimeError(
                         f"Antigravity: authentication timed out.\n"
@@ -3320,6 +3404,7 @@ def send_message_stream(
             log_stream=log_stream,
             cancel_generation=request_cancel_generation,
             max_tokens=payload.get("max_tokens"),
+            account_id=account_id,
         )
     except RuntimeError as stream_exc:
         error_text = str(stream_exc)
@@ -3342,6 +3427,7 @@ def send_message_stream(
                     log_stream=log_stream,
                     cancel_generation=request_cancel_generation,
                     max_tokens=payload.get("max_tokens"),
+                    account_id=account_id,
                 )
             raise RuntimeError(
                 f"Antigravity: authentication timed out.\n"

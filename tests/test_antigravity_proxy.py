@@ -289,6 +289,40 @@ def test_consume_openai_stream_collects_content_and_usage():
     assert response.closed is True
 
 
+def test_consume_openai_stream_logs_account_selected_by_auto_rotation(monkeypatch):
+    response = FakeStreamResponse(
+        [
+            _sse_event({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}),
+            "data: [DONE]",
+        ]
+    )
+    response.headers = {"X-Antigravity-Account": "auto@example.test"}
+    logs = []
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "get_stored_account_summary",
+        lambda: {
+            "accounts": [
+                {"email": "first@example.test"},
+                {"email": "auto@example.test"},
+            ]
+        },
+    )
+
+    result = antigravity_proxy._consume_openai_stream(
+        response,
+        log_fn=logs.append,
+        log_stream=False,
+        account_id=0,
+    )
+
+    assert result["content"] == "ok"
+    assert (
+        "🧭 Antigravity: automatic rotation selected account slot #2 "
+        "(auto@example.test)"
+    ) in logs
+
+
 @pytest.mark.parametrize("provider_finish_reason", ["length", "MAX_TOKENS", 2])
 def test_consume_openai_stream_detects_only_explicit_length(provider_finish_reason):
     response = FakeStreamResponse(
@@ -1510,6 +1544,33 @@ def test_patch_runtime_forced_account_support(tmp_path):
     assert "!account && !forcedAccountEmail" in server
     assert "while (attempts < (forcedAccountEmail ? 1 : MAX_ATTEMPTS))" in server
     assert "export async function getAccountByEmail" in manager
+
+
+def test_patch_runtime_selected_account_header(tmp_path):
+    server_file = tmp_path / "src" / "server.ts"
+    server_file.parent.mkdir(parents=True)
+    server_file.write_text(
+        '                return new Response(readable, {\n'
+        '                  status: 200,\n'
+        '                  headers: {\n'
+        '                    "Content-Type": "text/event-stream",\n'
+        '                    "X-Antigravity-Attempts": attempts.toString()\n'
+        '                  }\n'
+        '                });\n'
+        '                 return new Response(JSON.stringify(responseBody), {\n'
+        '                   status: 200,\n'
+        '                   headers: {\n'
+        '                       "Content-Type": "application/json",\n'
+        '                       "X-Antigravity-Attempts": attempts.toString()\n'
+        '                   }\n'
+        '                 });\n',
+        encoding="utf-8",
+    )
+
+    assert antigravity_proxy._patch_runtime_selected_account_header(str(tmp_path))
+
+    server = server_file.read_text(encoding="utf-8")
+    assert server.count('"X-Antigravity-Account": account.email') == 2
 
 
 def test_antigravity_exhausted_quota_is_not_retried(monkeypatch):
