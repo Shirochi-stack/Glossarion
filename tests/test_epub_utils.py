@@ -1404,6 +1404,80 @@ def test_epub_html_discovery_never_uses_unrefined_backup(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    ("first_html_has_image", "expected_cover"),
+    [
+        (True, None),
+        (False, "cover.jpg"),
+    ],
+)
+def test_automatic_cover_skips_only_for_image_in_first_opf_spine_html(
+    tmp_path,
+    monkeypatch,
+    first_html_has_image,
+    expected_cover,
+):
+    monkeypatch.setenv("DISABLE_AUTOMATIC_COVER_CREATION", "0")
+    monkeypatch.setenv("EXTRACTION_WORKERS", "1")
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "cover.jpg").write_bytes(b"cover bytes")
+
+    # Put the later document first in the manifest to prove that OPF spine
+    # order, rather than manifest order or directory order, is authoritative.
+    (tmp_path / "content.opf").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="chapter" href="Text/chapter.xhtml" media-type="application/xhtml+xml"/>
+    <item id="front" href="Text/front.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="front"/>
+    <itemref idref="chapter"/>
+  </spine>
+</package>
+""",
+        encoding="utf-8",
+    )
+    front_body = (
+        '&lt;img src="images/cover.jpg" alt="Cover" /&gt;'
+        if first_html_has_image
+        else "<p>Front matter without an image.</p>"
+    )
+    chapter_body = (
+        "<p>Chapter text.</p>"
+        if first_html_has_image
+        else '<img src="images/cover.jpg" alt="Later image" />'
+    )
+    (tmp_path / "response_front.html").write_text(
+        f"<html><body>{front_body}</body></html>",
+        encoding="utf-8",
+    )
+    (tmp_path / "response_chapter.html").write_text(
+        f"<html><body>{chapter_body}</body></html>",
+        encoding="utf-8",
+    )
+
+    logs = []
+    compiler = EPUBCompiler(str(tmp_path), log_callback=logs.append)
+    html_files = ["response_front.html", "response_chapter.html"]
+    skip_automatic_cover = compiler._first_opf_spine_html_contains_image(
+        html_files
+    )
+    processed_images, cover_file = compiler._process_images(
+        skip_automatic_cover=skip_automatic_cover
+    )
+
+    assert skip_automatic_cover is first_html_has_image
+    assert processed_images == {"cover.jpg": "cover.jpg"}
+    assert cover_file == expected_cover
+    if first_html_has_image:
+        assert any(
+            "first content.opf spine document already contains an image" in log
+            for log in logs
+        )
+
+
 def test_epub_chapter_processing_does_not_rewrite_manual_source_html(tmp_path):
     filename = "response_chapter_notice0002.html"
     source_path = tmp_path / filename

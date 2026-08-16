@@ -1360,6 +1360,40 @@ def _token_count_or_none(value: Any) -> Optional[int]:
         return None
 
 
+def _normalize_proxy_finish_reason(value: Any) -> Optional[str]:
+    """Normalize only concrete finish reasons reported by the proxy.
+
+    Missing/unspecified metadata deliberately remains ``None``. In particular,
+    this function must never infer a token-limit finish from response size or
+    token usage.
+    """
+    if value is None:
+        return None
+
+    reason = str(value).strip()
+    if not reason:
+        return None
+
+    reason_upper = reason.upper()
+    reason_code = _token_count_or_none(value)
+    if reason_code == 0 or "UNSPECIFIED" in reason_upper:
+        return None
+    if reason_code == 2 or reason_upper == "LENGTH" or (
+        "MAX" in reason_upper and "TOKEN" in reason_upper
+    ):
+        return "length"
+    if reason_code == 1 or reason_upper == "STOP" or reason_upper.endswith("_STOP"):
+        return "stop"
+    if reason_code in {3, 4, 6, 7, 8} or any(
+        marker in reason_upper
+        for marker in ("SAFETY", "RECITATION", "BLOCK", "PROHIBITED", "SPII")
+    ):
+        return "content_filter"
+    if reason_code == 9 or "MALFORMED_FUNCTION_CALL" in reason_upper:
+        return "tool_calls"
+    return reason.lower()
+
+
 def _log_payload_token_limit(log_fn, requested_max_tokens: Any, payload: Dict[str, Any]) -> None:
     if log_fn is None:
         return
@@ -1387,12 +1421,19 @@ def _parse_openai_chat_response(data: Dict[str, Any]) -> Dict[str, Any]:
     message = choice.get("message") or {}
 
     content = message.get("content") or ""
-    finish_reason = choice.get("finish_reason") or "stop"
+    provider_finish_reason = choice.get("finish_reason")
+    finish_reason = _normalize_proxy_finish_reason(provider_finish_reason)
+    if finish_reason is None:
+        raise RuntimeError(
+            "Antigravity: response ended without an explicit finish_reason"
+        )
     usage = data.get("usage")
 
     return {
         "content": content,
         "finish_reason": finish_reason,
+        "provider_finish_reason": provider_finish_reason,
+        "finish_reason_observed": True,
         "usage": usage,
         "raw_response": data,
     }
@@ -2652,9 +2693,11 @@ def _consume_openai_stream(
 ) -> Dict[str, Any]:
     _log = log_fn or _log_noop
     collected_content: List[str] = []
-    finish_reason = "stop"
+    finish_reason = None
+    provider_finish_reason = None
     usage = None
     got_first_data = False
+    saw_done_marker = False
     t_start = time.time()
     log_buf: List[str] = []
     thinking_buf: List[str] = []
@@ -2687,6 +2730,7 @@ def _consume_openai_stream(
 
             data_str = line[6:].strip()
             if data_str == "[DONE]":
+                saw_done_marker = True
                 break
 
             try:
@@ -2725,9 +2769,11 @@ def _consume_openai_stream(
                 if log_stream:
                     _log_text_stream(text, log_buf, _log)
 
-            stop = choice.get("finish_reason")
-            if stop:
-                finish_reason = stop
+            reported_finish_reason = choice.get("finish_reason")
+            normalized_finish_reason = _normalize_proxy_finish_reason(reported_finish_reason)
+            if normalized_finish_reason is not None:
+                provider_finish_reason = reported_finish_reason
+                finish_reason = normalized_finish_reason
 
         if log_stream and thinking_buf:
             remainder = "".join(thinking_buf).strip()
@@ -2748,10 +2794,19 @@ def _consume_openai_stream(
         except Exception:
             pass
 
+    if finish_reason is None:
+        _log("❌ Antigravity: stream ended without an explicit finish_reason")
+        raise RuntimeError(
+            "Antigravity: stream ended without an explicit finish_reason"
+        )
+
     _log(f"Antigravity: stream finished in {time.time() - t_start:.1f}s")
     return {
         "content": "".join(collected_content),
         "finish_reason": finish_reason,
+        "provider_finish_reason": provider_finish_reason,
+        "finish_reason_observed": True,
+        "stream_done_observed": saw_done_marker,
         "usage": usage,
         "raw_response": None,
     }

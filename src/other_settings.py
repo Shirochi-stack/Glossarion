@@ -11003,7 +11003,11 @@ def _create_processing_options_section(self, parent):
     # Disable Image Gallery
     gallery_cb = self._create_styled_checkbox("Disable Image Gallery in EPUB")
     try:
-        gallery_cb.setChecked(bool(self.disable_epub_gallery_var))
+        gallery_cb.setChecked(bool(getattr(
+            self,
+            'disable_epub_gallery_var',
+            self.config.get('disable_epub_gallery', True),
+        )))
     except Exception:
         pass
     def _on_gallery_toggle(checked):
@@ -11025,7 +11029,11 @@ def _create_processing_options_section(self, parent):
     # Disable Automatic Cover Creation
     cover_cb = self._create_styled_checkbox("Disable Automatic Cover Creation")
     try:
-        cover_cb.setChecked(bool(self.disable_automatic_cover_creation_var))
+        cover_cb.setChecked(bool(getattr(
+            self,
+            'disable_automatic_cover_creation_var',
+            self.config.get('disable_automatic_cover_creation', True),
+        )))
     except Exception:
         pass
     def _on_cover_toggle(checked):

@@ -208,8 +208,38 @@ def test_parse_openai_chat_response():
 
     assert parsed["content"] == "translated text"
     assert parsed["finish_reason"] == "stop"
+    assert parsed["provider_finish_reason"] == "stop"
+    assert parsed["finish_reason_observed"] is True
     assert parsed["usage"]["total_tokens"] == 5
     assert parsed["raw_response"] is data
+
+
+@pytest.mark.parametrize("provider_finish_reason", ["length", "MAX_TOKENS", 2])
+def test_parse_openai_chat_response_detects_explicit_length(provider_finish_reason):
+    data = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "partial"},
+                "finish_reason": provider_finish_reason,
+            }
+        ]
+    }
+
+    parsed = antigravity_proxy._parse_openai_chat_response(data)
+
+    assert parsed["finish_reason"] == "length"
+    assert parsed["provider_finish_reason"] == provider_finish_reason
+
+
+def test_parse_openai_chat_response_rejects_missing_finish_reason():
+    data = {
+        "choices": [
+            {"message": {"role": "assistant", "content": "partial"}}
+        ]
+    }
+
+    with pytest.raises(RuntimeError, match="without an explicit finish_reason"):
+        antigravity_proxy._parse_openai_chat_response(data)
 
 
 def test_consume_openai_stream_collects_content_and_usage():
@@ -231,7 +261,77 @@ def test_consume_openai_stream_collects_content_and_usage():
 
     assert result["content"] == "Hello"
     assert result["finish_reason"] == "stop"
+    assert result["provider_finish_reason"] == "stop"
+    assert result["finish_reason_observed"] is True
+    assert result["stream_done_observed"] is True
     assert result["usage"]["total_tokens"] == 5
+    assert response.closed is True
+
+
+@pytest.mark.parametrize("provider_finish_reason", ["length", "MAX_TOKENS", 2])
+def test_consume_openai_stream_detects_only_explicit_length(provider_finish_reason):
+    response = FakeStreamResponse(
+        [
+            _sse_event({"choices": [{"delta": {"content": "partial"}, "finish_reason": None}]}),
+            _sse_event({"choices": [{"delta": {}, "finish_reason": provider_finish_reason}]}),
+            "data: [DONE]",
+        ]
+    )
+
+    result = antigravity_proxy._consume_openai_stream(
+        response,
+        log_fn=lambda _: None,
+        log_stream=False,
+    )
+
+    assert result["content"] == "partial"
+    assert result["finish_reason"] == "length"
+    assert result["provider_finish_reason"] == provider_finish_reason
+    assert response.closed is True
+
+
+def test_consume_openai_stream_does_not_guess_length_from_usage():
+    response = FakeStreamResponse(
+        [
+            _sse_event(
+                {
+                    "choices": [{"delta": {"content": "partial"}, "finish_reason": "stop"}],
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 1000,
+                        "total_tokens": 1100,
+                    },
+                }
+            ),
+            "data: [DONE]",
+        ]
+    )
+
+    result = antigravity_proxy._consume_openai_stream(
+        response,
+        log_fn=lambda _: None,
+        log_stream=False,
+    )
+
+    assert result["finish_reason"] == "stop"
+    assert result["provider_finish_reason"] == "stop"
+
+
+def test_consume_openai_stream_rejects_missing_finish_reason():
+    response = FakeStreamResponse(
+        [
+            _sse_event({"choices": [{"delta": {"content": "partial"}, "finish_reason": None}]}),
+            "data: [DONE]",
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="without an explicit finish_reason"):
+        antigravity_proxy._consume_openai_stream(
+            response,
+            log_fn=lambda _: None,
+            log_stream=False,
+        )
+
     assert response.closed is True
 
 

@@ -26910,7 +26910,12 @@ class UnifiedClient:
                 )
 
                 content = result.get("content", "")
-                finish_reason = self._normalize_finish_reason(result.get("finish_reason", "stop")) or "stop"
+                provider_finish_reason = result.get("finish_reason")
+                finish_reason = self._normalize_finish_reason(provider_finish_reason)
+                if finish_reason is None:
+                    raise RuntimeError(
+                        "Antigravity: response ended without an explicit finish_reason"
+                    )
                 if finish_reason == "stop" and not str(content or "").strip():
                     result["original_finish_reason"] = finish_reason
                     result["finish_reason"] = "prohibited_content"

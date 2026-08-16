@@ -15900,9 +15900,9 @@ Recent translations to summarize:
             ('hide_image_translation_label_var', 'hide_image_translation_label', True),
             ('retry_timeout_var', 'retry_timeout', False),
             ('batch_translation_var', 'batch_translation', True),
-            ('disable_epub_gallery_var', 'disable_epub_gallery', False),
+            ('disable_epub_gallery_var', 'disable_epub_gallery', True),
             # NEW: Disable automatic cover creation (affects extraction and EPUB cover page)
-            ('disable_automatic_cover_creation_var', 'disable_automatic_cover_creation', False),
+            ('disable_automatic_cover_creation_var', 'disable_automatic_cover_creation', True),
             ('disable_zero_detection_var', 'disable_zero_detection', True),
             ('use_header_as_output_var', 'use_header_as_output', False),
             ('emergency_restore_var', 'emergency_paragraph_restore', False),
@@ -33308,7 +33308,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'DISABLE_MERGE_FALLBACK': "1" if getattr(self, 'disable_merge_fallback_var', False) else "0",
             'SYNTHETIC_MERGE_HEADERS': "1" if getattr(self, 'synthetic_merge_headers_var', True) else "0",
             'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var else "0",
-            'DISABLE_AUTOMATIC_COVER_CREATION': "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0",
+            'DISABLE_AUTOMATIC_COVER_CREATION': "1" if getattr(self, 'disable_automatic_cover_creation_var', True) else "0",
             'TRANSLATE_SPECIAL_FILES': "1" if getattr(self, 'translate_special_files_var', False) else "0",
             'TRANSLATE_ALL_NUMBERED_HTML': "1" if getattr(self, 'translate_all_numbered_html_var', True) else "0",
             'USE_P_TAG_TOC_FALLBACK': "1" if getattr(self, 'use_p_tag_toc_fallback_var', False) else "0",
@@ -35403,7 +35403,7 @@ Important rules:
             
             # Set environment variables for EPUB converter
             os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var else "0"
-            os.environ['DISABLE_AUTOMATIC_COVER_CREATION'] = "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0"
+            os.environ['DISABLE_AUTOMATIC_COVER_CREATION'] = "1" if getattr(self, 'disable_automatic_cover_creation_var', True) else "0"
             os.environ['TRANSLATE_SPECIAL_FILES'] = "1" if getattr(self, 'translate_special_files_var', False) else "0"
             os.environ['REMOVE_DUPLICATE_H1_P'] = "1" if getattr(
                 self,
@@ -44017,8 +44017,8 @@ Important rules:
                 ('token_limit_disabled', ['token_limit_disabled'], False, bool),
                 ('enable_thoughts', ['enable_thoughts_var'], True, bool),
                 ('translation_history_rolling', ['translation_history_rolling_var'], True, bool),
-                ('disable_epub_gallery', ['disable_epub_gallery_var'], False, bool),
-                ('disable_automatic_cover_creation', ['disable_automatic_cover_creation_var'], False, bool),
+                ('disable_epub_gallery', ['disable_epub_gallery_var'], True, bool),
+                ('disable_automatic_cover_creation', ['disable_automatic_cover_creation_var'], True, bool),
                 ('use_toc_ncx', ['use_toc_ncx_var'], True, bool),
                 ('translate_toc_ncx', ['translate_toc_ncx_var'], True, bool),
                 ('use_p_tag_toc_fallback', ['use_p_tag_toc_fallback_var'], False, bool),
@@ -45492,8 +45492,8 @@ Important rules:
                 ('IMAGE_CHUNK_HEIGHT', str(getattr(self, 'image_chunk_height_var', '1500'))),
                 ('MAX_OUTPUT_TOKENS', str(getattr(self, 'max_output_tokens', 128000))),
                 ('HIDE_IMAGE_TRANSLATION_LABEL', '1' if getattr(self, 'hide_image_translation_label_var', True) else '0'),
-                ('DISABLE_EPUB_GALLERY', '1' if getattr(self, 'disable_epub_gallery_var', False) else '0'),
-                ('DISABLE_AUTOMATIC_COVER_CREATION', '1' if getattr(self, 'disable_automatic_cover_creation_var', False) else '0'),
+                ('DISABLE_EPUB_GALLERY', '1' if getattr(self, 'disable_epub_gallery_var', True) else '0'),
+                ('DISABLE_AUTOMATIC_COVER_CREATION', '1' if getattr(self, 'disable_automatic_cover_creation_var', True) else '0'),
                 # EPUB layout mode (auto / epub2 / epub3)
                 ('EPUB_LAYOUT_MODE', getattr(self, 'epub_layout_mode_var', self.config.get('epub_layout_mode', 'auto')) or 'auto'),
                 ('LEGACY_EPUB_STRUCTURE', '1' if getattr(self, 'epub_layout_mode_var', self.config.get('epub_layout_mode', 'auto')) == 'epub2' else '0'),

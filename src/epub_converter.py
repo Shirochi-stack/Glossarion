@@ -2614,8 +2614,15 @@ class EPUBCompiler:
                 self.log("🛑 EPUB converter stopped by user")
                 return
             
-            # Process images and cover
-            processed_images, cover_file = self._process_images()
+            # Process images and cover. If the first HTML document in the OPF
+            # spine already contains an image, leave that document at the front
+            # of the book instead of manufacturing another cover page.
+            first_opf_html_has_image = self._first_opf_spine_html_contains_image(
+                html_files
+            )
+            processed_images, cover_file = self._process_images(
+                skip_automatic_cover=first_opf_html_has_image
+            )
             
             # Compress images if enabled (before adding to EPUB)
             if os.environ.get('ENABLE_IMAGE_COMPRESSION', '0') == '1':
@@ -3720,6 +3727,77 @@ class EPUBCompiler:
         except Exception as e:
             self.log(f"⚠️ Error extracting from EPUB: {e}")
             return None
+
+    def _first_opf_spine_html_contains_image(
+        self,
+        html_files: Optional[List[str]] = None,
+    ) -> bool:
+        """Return whether the first OPF spine HTML has an ``img`` element.
+
+        The translated files are normally flattened and prefixed with
+        ``response_``, so match them to the first content.opf spine entry by
+        normalized basename rather than assuming the OPF href still exists on
+        disk. Without a readable content.opf and matching translated document,
+        retain the existing automatic-cover behavior.
+        """
+        opf_path = os.path.join(self.output_dir, "content.opf")
+        if not os.path.isfile(opf_path):
+            return False
+
+        opf_order = self._parse_opf_file(opf_path)
+        if not opf_order:
+            return False
+
+        try:
+            first_opf_name = min(opf_order.items(), key=lambda item: item[1])[0]
+        except (TypeError, ValueError):
+            return False
+
+        first_core = self._normalize_core_name(first_opf_name)
+        if not first_core:
+            return False
+
+        candidates = list(html_files or [])
+        if not candidates:
+            try:
+                candidates = [
+                    name
+                    for name in os.listdir(self.output_dir)
+                    if name.lower().endswith((".html", ".htm", ".xhtml"))
+                ]
+            except OSError:
+                return False
+
+        disk_filename = next(
+            (
+                name
+                for name in candidates
+                if self._normalize_core_name(name) == first_core
+            ),
+            None,
+        )
+        if not disk_filename:
+            return False
+
+        disk_path = os.path.join(self.output_dir, disk_filename)
+        try:
+            with open(disk_path, "r", encoding="utf-8") as f:
+                source_html = f.read()
+        except (OSError, UnicodeError):
+            return False
+
+        # The translation pipeline can temporarily encode valid HTML tags as
+        # entities. Decode only recognized tags before inspecting the document.
+        inspectable_html = _unescape_valid_html_tag_entities(source_html)
+        soup = BeautifulSoup(inspectable_html, "html.parser")
+        if soup.find("img") is None:
+            return False
+
+        self.log(
+            "📔 Automatic cover creation skipped — first content.opf "
+            f"spine document already contains an image: {disk_filename}"
+        )
+        return True
 
     def _find_html_files(self) -> List[str]:
         """Find HTML files using OPF-based ordering when available"""
@@ -4985,8 +5063,12 @@ img {
             except Exception as e:
                 self.log(f"[WARNING] Failed to add font {font_file}: {e}")
     
-    def _process_images(self) -> Tuple[Dict[str, str], Optional[str]]:
-        """Process images using parallel processing"""
+    def _process_images(
+        self,
+        *,
+        skip_automatic_cover: bool = False,
+    ) -> Tuple[Dict[str, str], Optional[str]]:
+        """Process images, optionally leaving cover selection to the first HTML."""
         processed_images = {}
         cover_file = None
         
@@ -5133,7 +5215,7 @@ img {
             # Find cover (sequential - quick operation)
             # Respect user preference to disable automatic cover creation
             disable_auto_cover = os.environ.get('DISABLE_AUTOMATIC_COVER_CREATION', '0') == '1'
-            if processed_images and not disable_auto_cover:
+            if processed_images and not disable_auto_cover and not skip_automatic_cover:
                 cover_prefixes = ['cover', 'front']
                 for original_name, safe_name in processed_images.items():
                     name_lower = original_name.lower()
