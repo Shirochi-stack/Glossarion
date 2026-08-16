@@ -20,8 +20,8 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QPlainTextEdit, QTextBrowser, QStackedWidget, QComboBox, QInputDialog,
                                 QLineEdit, QProgressBar, QGraphicsOpacityEffect,
                                 QApplication)
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent, QObject
-from PySide6.QtGui import QFont, QFontMetricsF, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent, QObject, QRect
+from PySide6.QtGui import QFont, QFontMetricsF, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut, QPainter, QTextCharFormat, QSyntaxHighlighter, QTextCursor
 import xml.etree.ElementTree as ET
 import zipfile
 import shutil
@@ -86,6 +86,124 @@ _MISSING_IMAGE_QA_RE = re.compile(
     r"(?:^|[^a-z0-9])missing[_\s-]*images?(?=$|[^a-z0-9])",
     re.IGNORECASE,
 )
+
+
+class _HtmlLineNumberArea(QWidget):
+    """Line-number gutter owned by the raw HTML editor."""
+
+    def __init__(self, editor):
+        super().__init__(editor)
+        self.editor = editor
+
+    def sizeHint(self):
+        return QSize(self.editor.line_number_area_width(), 0)
+
+    def paintEvent(self, event):
+        self.editor.paint_line_number_area(event)
+
+
+class _HtmlCodeHighlighter(QSyntaxHighlighter):
+    """Lightweight HTML highlighting that never rewrites the document."""
+
+    def __init__(self, document):
+        super().__init__(document)
+        self.tag_format = QTextCharFormat()
+        self.tag_format.setForeground(QColor("#7dd3fc"))
+        self.tag_format.setFontWeight(QFont.DemiBold)
+        self.attribute_format = QTextCharFormat()
+        self.attribute_format.setForeground(QColor("#c4b5fd"))
+        self.string_format = QTextCharFormat()
+        self.string_format.setForeground(QColor("#fcd34d"))
+        self.comment_format = QTextCharFormat()
+        self.comment_format.setForeground(QColor("#6b7280"))
+        self.entity_format = QTextCharFormat()
+        self.entity_format.setForeground(QColor("#86efac"))
+
+    def highlightBlock(self, text):
+        for match in re.finditer(r"</?[A-Za-z][^>]*>|<!DOCTYPE[^>]*>|<\?[^>]*\?>", text, re.IGNORECASE):
+            start, end = match.span()
+            self.setFormat(start, end - start, self.tag_format)
+            tag_text = match.group(0)
+            for attr in re.finditer(r"\b([A-Za-z_:][-A-Za-z0-9_:.]*)(?=\s*=)", tag_text):
+                self.setFormat(start + attr.start(1), len(attr.group(1)), self.attribute_format)
+            for quoted in re.finditer(r'''("[^"]*"|'[^']*')''', tag_text):
+                self.setFormat(start + quoted.start(), len(quoted.group(0)), self.string_format)
+        for match in re.finditer(r"&(?:#\d+|#x[0-9a-f]+|[A-Za-z][A-Za-z0-9]+);", text, re.IGNORECASE):
+            self.setFormat(match.start(), len(match.group(0)), self.entity_format)
+        for match in re.finditer(r"<!--.*?-->", text):
+            self.setFormat(match.start(), len(match.group(0)), self.comment_format)
+
+
+class _HtmlCodeEditor(QPlainTextEdit):
+    """A Notepad++-style raw HTML buffer with a native line-number gutter."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("SdlReviewNotepadEditor")
+        self.line_number_area = _HtmlLineNumberArea(self)
+        self.blockCountChanged.connect(self._update_line_number_area_width)
+        self.updateRequest.connect(self._update_line_number_area)
+        self.cursorPositionChanged.connect(self.line_number_area.update)
+        self._update_line_number_area_width()
+        font = QFont("Consolas", 10)
+        font.setStyleHint(QFont.Monospace)
+        self.setFont(font)
+        try:
+            self.setTabStopDistance(QFontMetricsF(font).horizontalAdvance(" ") * 4)
+        except Exception:
+            pass
+        try:
+            self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        except Exception:
+            self.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.highlighter = _HtmlCodeHighlighter(self.document())
+
+    def line_number_area_width(self):
+        digits = max(2, len(str(max(1, self.blockCount()))))
+        return 14 + int(QFontMetricsF(self.font()).horizontalAdvance("9") * digits)
+
+    def _update_line_number_area_width(self, _count=0):
+        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+
+    def _update_line_number_area(self, rect, dy):
+        if dy:
+            self.line_number_area.scroll(0, dy)
+        else:
+            self.line_number_area.update(0, rect.y(), self.line_number_area.width(), rect.height())
+        if rect.contains(self.viewport().rect()):
+            self._update_line_number_area_width()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        contents = self.contentsRect()
+        self.line_number_area.setGeometry(
+            QRect(contents.left(), contents.top(), self.line_number_area_width(), contents.height())
+        )
+
+    def paint_line_number_area(self, event):
+        painter = QPainter(self.line_number_area)
+        painter.fillRect(event.rect(), QColor("#171a1f"))
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + int(self.blockBoundingRect(block).height())
+        painter.setFont(self.font())
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                color = QColor("#8da0b8") if block_number == self.textCursor().blockNumber() else QColor("#596675")
+                painter.setPen(color)
+                painter.drawText(
+                    0,
+                    top,
+                    self.line_number_area.width() - 6,
+                    int(self.fontMetrics().height()),
+                    Qt.AlignRight,
+                    str(block_number + 1),
+                )
+            block = block.next()
+            top = bottom
+            bottom = top + int(self.blockBoundingRect(block).height())
+            block_number += 1
 
 
 def _is_progress_sidecar_entry(entry=None, output_file=None):
@@ -582,6 +700,31 @@ def _normalize_progress_match_name(name):
             break
         base = new_base
     return base
+
+
+def _sdlxliff_logical_output_key(path_or_name):
+    """Return one identity for retained- and response-named sidecars."""
+    name = os.path.basename(str(path_or_name or "").replace("\\", "/"))
+    if name.casefold().endswith(".sdlxliff"):
+        name = name[:-len(".sdlxliff")]
+    return _normalize_progress_match_name(name).casefold()
+
+
+def _existing_sdlxliff_sidecars_by_logical_output(output_dir):
+    """Index sidecars without treating a filename-mode change as new work."""
+    sidecar_dir = os.path.join(str(output_dir or ""), "SDLXLIFF")
+    indexed = {}
+    try:
+        with os.scandir(sidecar_dir) as entries:
+            for entry in entries:
+                if not entry.is_file() or not entry.name.casefold().endswith(".sdlxliff"):
+                    continue
+                logical_key = _sdlxliff_logical_output_key(entry.name)
+                if logical_key:
+                    indexed.setdefault(logical_key, entry.path)
+    except OSError:
+        pass
+    return indexed
 
 
 _PROGRESS_READER_HTML_EXTENSIONS = (".html", ".htm", ".xhtml")
@@ -1273,6 +1416,7 @@ class SDLXLIFFReviewDialog(QDialog):
     TRANSLATE_TOOLTIPS_BUTTON_TEXT = "🌐 Generate Machine Translation Preview"
     FLAG_ACCURACY_BUTTON_TEXT = "🟣 Flag Inaccurate"
     TWO_COLUMN_LAYOUT_BUTTON_TEXT = "Compact"
+    NOTEPAD_LAYOUT_BUTTON_TEXT = "Notepad"
     TWO_COLUMN_LAYOUT_CONFIG_KEY = "sdlxliff_two_column_layout"
     LEGACY_ONE_COLUMN_LAYOUT_CONFIG_KEY = "sdlxliff_one_column_layout"
     LEGACY_ONE_ROW_LAYOUT_CONFIG_KEY = "sdlxliff_one_row_layout"
@@ -1347,6 +1491,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self.current_path = current_book.get("current_path") or self.current_path
         self.pieces = []
         self._pending_target_edits = {}
+        self._pending_notepad_edits = {}
         self._edit_save_timer = QTimer(self)
         self._edit_save_timer.setSingleShot(True)
         self._edit_save_timer.timeout.connect(self._flush_target_edits)
@@ -1519,7 +1664,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self.two_column_layout_btn.setCursor(Qt.PointingHandCursor)
         self.two_column_layout_btn.setCheckable(True)
         self.two_column_layout_btn.setChecked(bool(self._two_column_layout_enabled))
-        self.two_column_layout_btn.setToolTip("Show text in the first column and row actions/status markers in the second column.")
+        self._update_review_layout_button()
         self.two_column_layout_btn.setStyleSheet(
             "QPushButton { background-color:#253241; color:#d7ecff; border:1px solid #547596; "
             "border-radius:4px; padding:4px 10px; font-size:9pt; font-weight:bold; }"
@@ -3866,6 +4011,12 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _set_review_two_column_layout(self, enabled):
         enabled = bool(enabled)
+        try:
+            if self._edit_save_timer.isActive():
+                self._edit_save_timer.stop()
+            self._flush_target_edits()
+        except Exception:
+            pass
         self._two_column_layout_enabled = enabled
         try:
             if getattr(self, "two_column_layout_btn", None) is not None and self.two_column_layout_btn.isChecked() != enabled:
@@ -3874,6 +4025,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 self.two_column_layout_btn.blockSignals(False)
         except Exception:
             pass
+        self._update_review_layout_button()
         self._persist_review_config_value(self.TWO_COLUMN_LAYOUT_CONFIG_KEY, enabled)
         try:
             self._cancel_active_review_render()
@@ -4323,7 +4475,11 @@ class SDLXLIFFReviewDialog(QDialog):
                 return
             if self._active_render_timer is not None or self._active_render_page is not None:
                 return
-            if self._edit_save_timer.isActive() or self._pending_target_edits:
+            if (
+                self._edit_save_timer.isActive()
+                or self._pending_target_edits
+                or self._pending_notepad_edits
+            ):
                 return
             if self._tooltip_translation_running:
                 return
@@ -4950,7 +5106,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._apply_review_widget_background(page)
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setSpacing(4 if bool(getattr(self, "_two_column_layout_enabled", True)) else 0)
         return page, layout
 
     def _create_review_loading_page(self):
@@ -6647,6 +6803,68 @@ class SDLXLIFFReviewDialog(QDialog):
             piece["index"] = index
         return filtered
 
+    def _deduplicate_review_sidecar_paths(self, paths, progress_map=None):
+        """Choose one sidecar for each logical chapter without deleting files.
+
+        A filename-mode change can leave both ``response_chapter.html`` and
+        ``chapter.xhtml`` sidecars behind. They describe one Progress Manager
+        entry and must occupy one spine position in the reviewer.
+        """
+        progress_map = progress_map if isinstance(progress_map, dict) else {}
+        current_norm = ""
+        try:
+            if self.current_path:
+                current_norm = os.path.normcase(os.path.abspath(self.current_path))
+        except Exception:
+            current_norm = ""
+
+        grouped = {}
+        passthrough = []
+        for order, path in enumerate(paths or []):
+            logical_key = _sdlxliff_logical_output_key(path)
+            if logical_key:
+                grouped.setdefault(logical_key, []).append((order, path))
+            else:
+                passthrough.append((order, path))
+
+        selected = list(passthrough)
+        for logical_key, candidates in grouped.items():
+            if len(candidates) == 1:
+                selected.append(candidates[0])
+                continue
+            progress_entry = progress_map.get(f"logical:{logical_key}", {})
+            expected_name = self._canonical_basename(
+                progress_entry.get("output_file") if isinstance(progress_entry, dict) else ""
+            )
+
+            def _candidate_score(candidate):
+                order, path = candidate
+                output_name = self._canonical_basename(self._sidecar_output_name(path))
+                try:
+                    path_norm = os.path.normcase(os.path.abspath(path))
+                except Exception:
+                    path_norm = ""
+                try:
+                    edited = not _is_manual_untranslated_sdlxliff(path)
+                except Exception:
+                    edited = False
+                try:
+                    modified = os.path.getmtime(path)
+                except OSError:
+                    modified = 0.0
+                return (
+                    edited,
+                    path_norm == current_norm,
+                    bool(expected_name and output_name == expected_name),
+                    modified,
+                    -order,
+                )
+
+            selected.append(max(candidates, key=_candidate_score))
+
+        selected.sort(key=lambda item: item[0])
+        return [path for _order, path in selected]
+
     def _load_pieces(self, stream_sidebar=False):
         trace_started = time.perf_counter()
         sidecar_dir = os.path.join(self.output_dir or "", "SDLXLIFF")
@@ -6672,6 +6890,7 @@ class SDLXLIFFReviewDialog(QDialog):
         )
         metadata_started = time.perf_counter()
         progress_map = self._read_progress_metadata()
+        paths = self._deduplicate_review_sidecar_paths(paths, progress_map)
         spine_positions = self._read_spine_positions(allow_deep_search=not stream_sidebar)
         work_items = []
         for fallback_index, path in enumerate(paths):
@@ -7457,14 +7676,142 @@ class SDLXLIFFReviewDialog(QDialog):
             "rows": row_models,
         }
 
-    def _piece_render_snapshot(self, piece):
+    @classmethod
+    def _build_notepad_review_rows(cls, piece):
+        """Map every target HTML element to one continuous notepad line."""
+        try:
+            from bs4 import BeautifulSoup
+        except Exception:
+            return list(piece.get("rows") or [])
+
+        review_rows = list(piece.get("rows") or [])
+        by_target_index = {
+            row.get("target_index"): (row_index, row)
+            for row_index, row in enumerate(review_rows)
+            if isinstance(row.get("target_index"), int)
+        }
+        html_text = cls._unescape_html_document(piece.get("target_html") or "")
+        if not str(html_text or "").strip():
+            html_text = cls._unescape_html_document(piece.get("source_html") or "")
+        soup = BeautifulSoup(html_text, "html.parser")
+        text_tags = set(cls.TEXT_TAGS)
+        consumed_rows = set()
+        notepad_rows = []
+        text_unit_index = 0
+
+        def _is_text_unit(tag):
+            name = str(getattr(tag, "name", "") or "").casefold()
+            if name in text_tags:
+                return True
+            if name != "div":
+                return False
+            classes = tag.get("class") or []
+            if isinstance(classes, str):
+                classes = classes.split()
+            return "u" in {str(value).casefold() for value in classes} and not tag.find(cls.TEXT_TAGS)
+
+        def _tag_caption(tag, depth):
+            name = str(getattr(tag, "name", "") or "").casefold() or "?"
+            attributes = []
+            for key, value in list((getattr(tag, "attrs", {}) or {}).items()):
+                if isinstance(value, (list, tuple)):
+                    value = " ".join(str(item) for item in value)
+                if value in (None, ""):
+                    attributes.append(str(key))
+                else:
+                    attributes.append(f'{key}="{value}"')
+            suffix = (" " + " ".join(attributes)) if attributes else ""
+            if len(suffix) > 100:
+                suffix = suffix[:97] + "..."
+            is_empty = not tag.find(True, recursive=False) and not tag.get_text(" ", strip=True)
+            void = name in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+            close = " />" if void or is_empty else f"> … </{name}>"
+            return f'{"  " * min(max(0, depth), 10)}<{name}{suffix}{close}', is_empty or void
+
+        for dom_order, tag in enumerate(soup.find_all(True)):
+            depth = sum(
+                1 for parent in getattr(tag, "parents", [])
+                if str(getattr(parent, "name", "") or "") not in {"", "[document]"}
+            )
+            caption, is_empty = _tag_caption(tag, depth)
+            direct_text = cls._normalize_review_text(
+                " ".join(
+                    str(child).strip()
+                    for child in list(getattr(tag, "contents", []) or [])
+                    if getattr(child, "name", None) is None and str(child).strip()
+                )
+            )
+            match = None
+            if _is_text_unit(tag):
+                match = by_target_index.get(text_unit_index)
+                text_unit_index += 1
+            if match is not None:
+                row_index, review_row = match
+                item = dict(review_row)
+                item.update({
+                    "notepad_dom_order": dom_order,
+                    "notepad_tag_caption": caption,
+                    "notepad_depth": depth,
+                    "notepad_empty": is_empty,
+                    "notepad_inline_text": direct_text,
+                    "notepad_structural": False,
+                    "review_row_index": row_index,
+                })
+                consumed_rows.add(row_index)
+            else:
+                item = {
+                    "source": "",
+                    "target": "",
+                    "source_tag": "",
+                    "target_tag": str(getattr(tag, "name", "") or "").casefold(),
+                    "status": "structural",
+                    "reason": "Empty or structural HTML element",
+                    "notepad_dom_order": dom_order,
+                    "notepad_tag_caption": caption,
+                    "notepad_depth": depth,
+                    "notepad_empty": is_empty,
+                    "notepad_inline_text": direct_text,
+                    "notepad_structural": True,
+                    "review_row_index": -1,
+                }
+            notepad_rows.append(item)
+
+        # A malformed/incomplete target can omit a source unit entirely. Keep
+        # it editable after the parsed target sequence instead of hiding it.
+        for row_index, review_row in enumerate(review_rows):
+            if row_index in consumed_rows:
+                continue
+            item = dict(review_row)
+            tag_name = review_row.get("source_tag") or review_row.get("target_tag") or "p"
+            item.update({
+                "notepad_dom_order": len(notepad_rows),
+                "notepad_tag_caption": f"<{tag_name}> … </{tag_name}>",
+                "notepad_depth": 0,
+                "notepad_empty": not bool(review_row.get("target")),
+                "notepad_inline_text": "",
+                "notepad_structural": False,
+                "review_row_index": row_index,
+            })
+            notepad_rows.append(item)
+        return notepad_rows
+
+    def _review_rows_for_current_layout(self, piece):
+        if bool(getattr(self, "_two_column_layout_enabled", True)):
+            return piece.get("rows") or []
+        cached = piece.get("_notepad_rows") if isinstance(piece, dict) else None
+        if not isinstance(cached, list):
+            cached = self._build_notepad_review_rows(piece)
+            piece["_notepad_rows"] = cached
+        return cached
+
+    def _piece_render_snapshot(self, piece, rows=None):
         return [
             self._review_row_snapshot(row_data)
-            for row_data in (piece.get("rows") or [])
+            for row_data in (rows if rows is not None else (piece.get("rows") or []))
         ]
 
     def _review_piece_render_model(self, piece):
-        rows = piece.get("rows") or []
+        rows = self._review_rows_for_current_layout(piece)
         viewport_width = self._review_render_viewport_width()
         two_column_layout = bool(getattr(self, "_two_column_layout_enabled", True))
         model = piece.get("_render_model") if isinstance(piece, dict) else None
@@ -7476,7 +7823,7 @@ class SDLXLIFFReviewDialog(QDialog):
         ):
             return model
         model = self._build_review_piece_render_model_from_rows(
-            self._piece_render_snapshot(piece),
+            self._piece_render_snapshot(piece, rows=rows),
             viewport_width,
             two_column_layout=two_column_layout,
         )
@@ -7487,6 +7834,7 @@ class SDLXLIFFReviewDialog(QDialog):
         try:
             if isinstance(piece, dict):
                 piece.pop("_render_model", None)
+                piece.pop("_notepad_rows", None)
             self._review_data_preload_token = int(getattr(self, "_review_data_preload_token", 0)) + 1
             if restart_preload and getattr(self, "_review_data_loaded", False):
                 self._queue_review_data_preload(delay_ms=250)
@@ -7514,6 +7862,10 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _start_review_data_preload(self):
         if not getattr(self, "_review_data_loaded", False) or not self.pieces:
+            return
+        if not bool(getattr(self, "_two_column_layout_enabled", True)):
+            # Notepad rows depend on the parsed DOM, not only the text-unit
+            # snapshots used by this background size-model preloader.
             return
         if getattr(self, "_review_data_preload_running", False):
             self._review_data_preload_requested = True
@@ -7616,6 +7968,8 @@ class SDLXLIFFReviewDialog(QDialog):
         try:
             if not self.isVisible() or not self._review_data_loaded:
                 return
+            if not bool(getattr(self, "_two_column_layout_enabled", True)):
+                return
             if self._review_context_menu_is_open():
                 return
             self._queue_review_page_cache_trim(current_row)
@@ -7681,7 +8035,7 @@ class SDLXLIFFReviewDialog(QDialog):
             QTimer.singleShot(60, self._start_next_review_preload)
             return
 
-        rows = piece.get("rows") or []
+        rows = self._review_rows_for_current_layout(piece)
         if not rows:
             empty = QLabel("No p/h1-h6 text units found in this sidecar.")
             empty.setTextFormat(Qt.PlainText)
@@ -8122,6 +8476,31 @@ class SDLXLIFFReviewDialog(QDialog):
                 return
             colors = self._review_status_colors()
             bg, _source_bar, _target_bar, dot_color, border_color = colors.get(row_data["status"], colors["green"])
+            if bool(frame.property("sdl_notepad_layout")):
+                status_color = {
+                    "green": self.THEME["success"],
+                    "yellow": self.THEME["warning"],
+                    "purple": self.THEME["purple"],
+                    "red": self.THEME["danger"],
+                }.get(row_data["status"], self.THEME["border"])
+                row_style = (
+                    f"QFrame#SdlReviewRow {{ background-color: {self.THEME['panel_alt']}; border: 0; "
+                    f"border-left: 3px solid {status_color}; border-bottom: 1px solid #363c46; "
+                    "border-radius: 0; }}"
+                )
+                frame.setProperty("sdl_status", row_data["status"])
+                frame.setProperty("sdl_base_style", row_style)
+                frame.setStyleSheet(row_style)
+                tag_label = frame.findChild(QLabel, "SdlReviewNotepadTag")
+                if tag_label is not None:
+                    tag_label.setStyleSheet(
+                        f"color: {status_color}; background-color: #20242a; border: 0; "
+                        "border-right: 1px solid #404854; padding: 3px 8px; "
+                        "font: 9pt Consolas, 'Courier New', monospace;"
+                    )
+                self._status_jump_indices.clear()
+                frame.update()
+                return
             row_style = f"QFrame#SdlReviewRow {{ background-color: {bg}; border: 1px solid {border_color}; border-radius: 3px; }}"
             frame.setProperty("sdl_status", row_data["status"])
             frame.setProperty("sdl_base_style", row_style)
@@ -8277,6 +8656,15 @@ class SDLXLIFFReviewDialog(QDialog):
                 or row_data.get("tooltip_translation_status")
                 or ""
             )
+            if bool(frame.property("sdl_notepad_layout")):
+                preview_text = str(tooltip_preview or "").strip()
+                details = f"Source:\n{source_text}\n\nOutput:\n{target_text}"
+                if preview_text:
+                    details += f"\n\nMachine translation preview:\n{preview_text}"
+                if target_widget is not None:
+                    target_widget.setToolTip(self._wrapped_tooltip(details))
+                row_data.pop("_source_preview_dirty", None)
+                return True
             row_height = self._review_row_height(
                 source_text,
                 target_text,
@@ -9124,6 +9512,22 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
+    def _update_review_layout_button(self):
+        button = getattr(self, "two_column_layout_btn", None)
+        if button is None:
+            return
+        compact = bool(getattr(self, "_two_column_layout_enabled", True))
+        button.setText(
+            self.TWO_COLUMN_LAYOUT_BUTTON_TEXT
+            if compact
+            else self.NOTEPAD_LAYOUT_BUTTON_TEXT
+        )
+        button.setToolTip(
+            "Compact: source and output cards with row actions. Click for Notepad."
+            if compact
+            else "Notepad: edit the complete raw output HTML document in one code buffer. Click for Compact."
+        )
+
     def _undo_review_sidecars_completed(self, piece_rows):
         rows = sorted({row for row in (piece_rows or []) if 0 <= row < len(self.pieces)})
         if not rows:
@@ -9729,19 +10133,101 @@ class SDLXLIFFReviewDialog(QDialog):
         self.save_status_label.setText("Unsaved")
         self._edit_save_timer.start(500)
 
+    def _schedule_notepad_document_edit(self, piece_index, text):
+        if piece_index < 0 or piece_index >= len(self.pieces):
+            return
+        self._pending_notepad_edits[piece_index] = str(text or "")
+        self.save_status_label.setText("Unsaved HTML")
+        self._edit_save_timer.start(500)
+
     def _flush_target_edits(self):
         pending = dict(self._pending_target_edits)
         self._pending_target_edits.clear()
-        if not pending:
+        pending_notepad = dict(self._pending_notepad_edits)
+        self._pending_notepad_edits.clear()
+        if not pending and not pending_notepad:
             return
         saved = 0
         try:
             for (piece_index, row_index), text in pending.items():
                 if self._apply_target_edit(piece_index, row_index, text):
                     saved += 1
+            for piece_index, html_text in pending_notepad.items():
+                if self._apply_notepad_document_edit(piece_index, html_text):
+                    saved += 1
             self.save_status_label.setText("Saved" if saved else "")
         except Exception as exc:
             self.save_status_label.setText(f"Save failed: {exc}")
+
+    def _apply_notepad_document_edit(self, piece_index, html_text):
+        """Save one raw HTML buffer and rebuild analysis from that document."""
+        if piece_index < 0 or piece_index >= len(self.pieces):
+            return False
+        piece = self.pieces[piece_index]
+        html_text = str(html_text or "")
+        if html_text == self._unescape_html_document(piece.get("target_html") or ""):
+            return True
+
+        # Parse without serializing: Notepad mode preserves the user's exact
+        # whitespace/formatting while still tracking live DOM tag order.
+        tag_order = []
+        try:
+            from bs4 import BeautifulSoup
+            parsed = BeautifulSoup(self._unescape_html_document(html_text), "html.parser")
+            tag_order = [str(tag.name or "").casefold() for tag in parsed.find_all(True)]
+        except Exception:
+            tag_order = []
+
+        saved_html = self._write_piece_target_html(piece, html_text)
+        piece["target_html"] = saved_html
+        metadata = {
+            "output_name": piece.get("output_name"),
+            "original_name": piece.get("original_name"),
+            "progress_key": piece.get("progress_key"),
+            "opf_position": piece.get("opf_position"),
+            "chapter_num": piece.get("chapter_num"),
+            "sort_key": piece.get("sort_key"),
+            "display_position": (
+                int(piece.get("opf_position")) + 1
+                if piece.get("opf_position") is not None
+                else piece_index + 1
+            ),
+            "label": piece.get("review_label"),
+            "progress_entry": {
+                "manual_editing_pending": piece.get("manual_editing_pending", False),
+            },
+        }
+        rebuilt = self._build_piece(piece.get("path"), piece_index, metadata)
+        rebuilt["_notepad_tag_order"] = tag_order
+        old_rows = piece.get("rows") or []
+        for row_index, row_data in enumerate(rebuilt.get("rows") or []):
+            if row_index < len(old_rows):
+                row_data["target_original"] = old_rows[row_index].get(
+                    "target_original", row_data.get("target_original", "")
+                )
+        self.pieces[piece_index] = rebuilt
+        self._refresh_piece_list_item(piece_index)
+        self._refresh_piece_header(piece_index)
+
+        # Image rename normalization can legitimately alter the buffer during
+        # save. Reflect that exact saved document without triggering a loop.
+        page = self._piece_pages.get(piece_index)
+        editor = page.findChild(_HtmlCodeEditor, "SdlReviewNotepadEditor") if page is not None else None
+        if editor is not None and editor.toPlainText() != saved_html:
+            cursor_position = editor.textCursor().position()
+            editor.blockSignals(True)
+            editor.setPlainText(saved_html)
+            cursor = editor.textCursor()
+            cursor.setPosition(min(cursor_position, len(saved_html)))
+            editor.setTextCursor(cursor)
+            editor.blockSignals(False)
+        if editor is not None:
+            editor.document().setModified(False)
+        try:
+            self._last_review_signature = self._current_review_signature()
+        except Exception:
+            pass
+        return True
 
     def _output_name_for_piece(self, piece):
         output_name = piece.get("output_name") or self._sidecar_output_name(piece.get("path") or piece.get("name") or "")
@@ -9790,7 +10276,19 @@ class SDLXLIFFReviewDialog(QDialog):
         # to the sidecar, that would permanently bake the corruption in.
         target_html = self._unescape_html_document(piece.get("target_html"))
         soup = BeautifulSoup(target_html, "html.parser")
-        tag_nodes = list(soup.find_all(self.TEXT_TAGS))
+
+        def _is_editable_node(tag):
+            name = str(getattr(tag, "name", "") or "").casefold()
+            if name in self.TEXT_TAGS:
+                return True
+            if name != "div":
+                return False
+            classes = tag.get("class") or []
+            if isinstance(classes, str):
+                classes = classes.split()
+            return "u" in {str(value).casefold() for value in classes} and not tag.find(self.TEXT_TAGS)
+
+        tag_nodes = list(soup.find_all(_is_editable_node))
         target_index = row_data.get("target_index")
         node = None
         if isinstance(target_index, int) and 0 <= target_index < len(tag_nodes):
@@ -9812,7 +10310,7 @@ class SDLXLIFFReviewDialog(QDialog):
             # Mirror the source label (with its ordinal) so the row caption
             # renders as e.g. "p(3)" instead of "p(3) -> p" after the edit.
             row_data["target_tag_label"] = row_data.get("source_tag_label") or tag_name
-            row_data["target_index"] = len(list(soup.find_all(self.TEXT_TAGS))) - 1
+            row_data["target_index"] = len(list(soup.find_all(_is_editable_node))) - 1
 
         # <hr> is exposed to the reviewer as a paragraph-like ***** unit. If
         # the user edits that unit, replace the void element with a real <p>
@@ -10415,9 +10913,269 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             return False
 
+    def _find_in_notepad_editor(self, editor):
+        if not isinstance(editor, _HtmlCodeEditor):
+            return
+        query, accepted = QInputDialog.getText(
+            self,
+            "Find in HTML",
+            "Find:",
+            text=str(editor.property("sdl_last_find") or ""),
+        )
+        if not accepted or not query:
+            return
+        editor.setProperty("sdl_last_find", query)
+        if not editor.find(query):
+            cursor = editor.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            editor.setTextCursor(cursor)
+            editor.find(query)
+
+    def _save_notepad_editor_now(self):
+        try:
+            if self._edit_save_timer.isActive():
+                self._edit_save_timer.stop()
+            self._flush_target_edits()
+        except Exception as exc:
+            self.save_status_label.setText(f"Save failed: {exc}")
+
+    def _show_notepad_editor_context_menu(self, editor, pos):
+        menu = editor.createStandardContextMenu()
+        menu.setParent(self)
+        menu.setStyleSheet("""
+            QMenu { background: #1e1e2e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #e0e0e0; font-size: 9pt; padding: 4px; }
+            QMenu::item { padding: 6px 20px; border-radius: 3px; }
+            QMenu::item:selected { background: #3a3a5e; }
+            QMenu::item:disabled { color: #555; }
+        """)
+        menu.addSeparator()
+        find_action = menu.addAction("Find…")
+        find_action.setShortcut("Ctrl+F")
+        find_action.triggered.connect(lambda: self._find_in_notepad_editor(editor))
+        save_action = menu.addAction("Save HTML")
+        save_action.setShortcut("Ctrl+S")
+        save_action.triggered.connect(self._save_notepad_editor_now)
+        self._review_text_context_menu = menu
+        self._set_review_context_menu_open(True)
+        menu.aboutToHide.connect(lambda m=menu: self._clear_review_text_context_menu(m))
+        menu.popup(editor.mapToGlobal(pos))
+
+    def _notepad_initial_document_html(self, piece):
+        """Return readable target HTML with source markup in untranslated nodes."""
+        source_html = self._unescape_html_document(piece.get("source_html") or "")
+        target_html = self._unescape_html_document(piece.get("target_html") or "")
+        try:
+            from bs4 import BeautifulSoup
+
+            source_soup = BeautifulSoup(source_html, "html.parser")
+            target_soup = BeautifulSoup(target_html or source_html, "html.parser")
+
+            def _is_review_text_node(tag):
+                name = str(getattr(tag, "name", "") or "").casefold()
+                if name in self.TEXT_TAGS:
+                    return True
+                if name != "div":
+                    return False
+                classes = tag.get("class") or []
+                if isinstance(classes, str):
+                    classes = classes.split()
+                return "u" in {str(value).casefold() for value in classes} and not tag.find(self.TEXT_TAGS)
+
+            source_nodes = list(source_soup.find_all(_is_review_text_node))
+            target_nodes = list(target_soup.find_all(_is_review_text_node))
+            for node_index, target_node in enumerate(target_nodes):
+                if node_index >= len(source_nodes):
+                    break
+                target_text = self._normalize_review_text(
+                    target_node.get_text(" ", strip=True)
+                )
+                if target_text:
+                    continue
+                # Replace the blank target node with the complete source node,
+                # not only get_text(), so inline/void markup remains visible.
+                target_node.replace_with(copy.copy(source_nodes[node_index]))
+
+            rendered = target_soup.prettify(formatter="minimal")
+            return rendered if rendered.strip() else (target_html or source_html)
+        except Exception:
+            return target_html or source_html
+
+    def _add_notepad_document_editor(self, piece, layout):
+        """Add one raw, full-document HTML editor—never per-tag widgets."""
+        editor = _HtmlCodeEditor()
+        editor.setPlainText(self._notepad_initial_document_html(piece))
+        editor.document().setModified(False)
+        try:
+            viewport_height = int(self.scroll.viewport().height())
+        except Exception:
+            viewport_height = 640
+        editor.setMinimumHeight(max(420, viewport_height - 18))
+        editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        editor.setStyleSheet(
+            "QPlainTextEdit#SdlReviewNotepadEditor { background-color: #1b1e23; color: #e5e7eb; "
+            "border: 1px solid #4a5568; border-radius: 2px; padding: 7px 8px; "
+            "selection-background-color: #315d82; selection-color: #ffffff; }"
+            "QPlainTextEdit#SdlReviewNotepadEditor:focus { border-color: #5a9fd4; }"
+        )
+        editor.setToolTip("Raw output HTML. Tags, whitespace, nesting, and empty elements are edited directly.")
+        editor.setContextMenuPolicy(Qt.CustomContextMenu)
+        editor.customContextMenuRequested.connect(
+            lambda pos, ed=editor: self._show_notepad_editor_context_menu(ed, pos)
+        )
+        editor.textChanged.connect(
+            lambda pi=piece["index"], ed=editor: self._schedule_notepad_document_edit(
+                pi, ed.toPlainText()
+            )
+        )
+        find_shortcut = QShortcut(QKeySequence("Ctrl+F"), editor)
+        find_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        find_shortcut.activated.connect(lambda ed=editor: self._find_in_notepad_editor(ed))
+        editor._sdl_find_shortcut = find_shortcut
+        save_shortcut = QShortcut(QKeySequence("Ctrl+S"), editor)
+        save_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        save_shortcut.activated.connect(self._save_notepad_editor_now)
+        editor._sdl_save_shortcut = save_shortcut
+        layout.addWidget(editor, 1)
+        return editor
+
+    def _add_notepad_review_row(self, piece, row_data, idx, updates_enabled=True):
+        """Render one DOM-ordered line in the continuous Notepad layout."""
+        structural = bool(row_data.get("notepad_structural"))
+        review_row_index = int(row_data.get("review_row_index", -1))
+        status = str(row_data.get("status") or "structural")
+        status_color = {
+            "green": self.THEME["success"],
+            "yellow": self.THEME["warning"],
+            "purple": self.THEME["purple"],
+            "red": self.THEME["danger"],
+        }.get(status, self.THEME["border"])
+        target_text = str(row_data.get("target") or "")
+        source_text = str(row_data.get("source") or "")
+        if structural:
+            row_height = 29
+        else:
+            wrapped_lines = max(
+                1,
+                target_text.count("\n") + 1,
+                (len(target_text) // 105) + 1,
+            )
+            row_height = max(38, min(320, wrapped_lines * 21 + 15))
+
+        frame = QFrame()
+        frame.setObjectName("SdlReviewNotepadStructuralRow" if structural else "SdlReviewRow")
+        frame.setProperty("sdl_notepad_layout", True)
+        frame.setProperty("sdl_status", status if not structural else "structural")
+        frame.setProperty("sdl_row_index", review_row_index)
+        frame.setFixedHeight(row_height)
+        frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        frame.setUpdatesEnabled(bool(updates_enabled))
+        row_style = (
+            f"QFrame#{frame.objectName()} {{ background-color: {self.THEME['panel_alt']}; "
+            f"border: 0; border-left: 3px solid {status_color}; "
+            f"border-bottom: 1px solid #363c46; border-radius: 0; }}"
+        )
+        frame.setProperty("sdl_base_style", row_style)
+        frame.setStyleSheet(row_style)
+
+        grid = QGridLayout(frame)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(0)
+        grid.setVerticalSpacing(0)
+        grid.setColumnMinimumWidth(0, 280)
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 1)
+
+        tag_label = QLabel(str(row_data.get("notepad_tag_caption") or ""))
+        tag_label.setObjectName("SdlReviewNotepadTag")
+        tag_label.setTextFormat(Qt.PlainText)
+        tag_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        tag_label.setFixedWidth(280)
+        tag_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        tag_label.setToolTip(
+            self._wrapped_tooltip(
+                f"DOM position {int(row_data.get('notepad_dom_order', idx)) + 1}\n"
+                f"{row_data.get('notepad_tag_caption') or ''}"
+            )
+        )
+        tag_label.setStyleSheet(
+            f"color: {status_color if not structural else self.THEME['muted']}; "
+            "background-color: #20242a; border: 0; border-right: 1px solid #404854; "
+            "padding: 3px 8px; font: 9pt Consolas, 'Courier New', monospace;"
+        )
+        grid.addWidget(tag_label, 0, 0)
+
+        if structural:
+            inline_text = str(row_data.get("notepad_inline_text") or "")
+            content = QLabel(inline_text)
+            content.setObjectName("SdlReviewNotepadStructuralText")
+            content.setTextFormat(Qt.PlainText)
+            content.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            content.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            content.setToolTip(self._wrapped_tooltip(inline_text))
+            content.setStyleSheet(
+                f"color: {self.THEME['muted']}; background: transparent; border: 0; "
+                "padding: 2px 10px; font: 9pt Consolas, 'Courier New', monospace;"
+            )
+            grid.addWidget(content, 0, 1)
+        else:
+            editor = self._target_display_widget(
+                piece["index"],
+                review_row_index,
+                target_text,
+                editable=True,
+                height=row_height,
+            )
+            editor.setPlaceholderText("Type translation…")
+            editor.setToolTip(
+                self._wrapped_tooltip(
+                    f"Source:\n{source_text}\n\nOutput:\n{target_text}"
+                )
+            )
+            editor.setStyleSheet(
+                "QPlainTextEdit#SdlReviewTargetEdit { background: transparent; color: #f8fafc; "
+                "border: 0; border-radius: 0; padding: 6px 10px; "
+                "font: 10pt Consolas, 'Courier New', monospace; "
+                "selection-background-color: #5a9fd4; }"
+                "QPlainTextEdit#SdlReviewTargetEdit:focus { background-color: #202b36; "
+                "border: 0; border-bottom: 1px solid #5a9fd4; }"
+            )
+            try:
+                editor.customContextMenuRequested.disconnect()
+            except Exception:
+                pass
+            tooltip_translation = self._row_tooltip_translation(piece, row_data)
+            editor.customContextMenuRequested.connect(
+                lambda pos, ed=editor, pi=piece["index"], ri=review_row_index,
+                translated=tooltip_translation: self._show_review_text_context_menu(
+                    ed,
+                    pos,
+                    translate_tooltip_callback=lambda: self._translate_single_row_tooltip(pi, ri),
+                    inject_machine_translation_callback=(
+                        lambda: self._inject_current_machine_translation_to_target(pi, ri, ed)
+                    ) if translated else None,
+                )
+            )
+            grid.addWidget(editor, 0, 1)
+
+        stretch_index = self._review_layout_trailing_stretch_index(self.rows_layout)
+        if stretch_index >= 0:
+            self.rows_layout.insertWidget(stretch_index, frame)
+        else:
+            self.rows_layout.addWidget(frame)
+        return frame
+
     def _add_review_row(self, piece, row_data, idx, max_len, colors, row_model=None, updates_enabled=True):
-        bg, source_bar, target_bar, dot_color, border_color = colors.get(row_data["status"], colors["green"])
         row_model = row_model if isinstance(row_model, dict) else {}
+        two_column_layout = bool(row_model.get("two_column_layout", row_model.get("one_column_layout", row_model.get("one_row_layout", getattr(self, "_two_column_layout_enabled", True)))))
+        if not two_column_layout:
+            return self._add_notepad_review_row(
+                piece,
+                row_data,
+                idx,
+                updates_enabled=updates_enabled,
+            )
+        bg, source_bar, target_bar, dot_color, border_color = colors.get(row_data["status"], colors["green"])
         source_text = row_model.get("source_text", row_data.get("source", ""))
         target_text = row_model.get("target_text", row_data.get("target", ""))
         tooltip_translation = row_model.get("tooltip_translation", self._row_tooltip_translation(piece, row_data))
@@ -10445,7 +11203,6 @@ class SDLXLIFFReviewDialog(QDialog):
                 tooltip_preview_text=tooltip_preview,
             )
         )
-        two_column_layout = bool(row_model.get("two_column_layout", row_model.get("one_column_layout", row_model.get("one_row_layout", getattr(self, "_two_column_layout_enabled", True)))))
         frame = QFrame()
         frame.setObjectName("SdlReviewRow")
         frame.setProperty("sdl_status", row_data["status"])
@@ -10672,9 +11429,44 @@ class SDLXLIFFReviewDialog(QDialog):
             )
             return
 
-        rows = piece.get("rows") or []
+        if not bool(getattr(self, "_two_column_layout_enabled", True)):
+            try:
+                self._add_notepad_document_editor(piece, layout)
+                self._piece_render_complete.add(row)
+                self._active_render_row = None
+                self._active_render_page = None
+                self.rows_stack.setCurrentWidget(page)
+                self._finish_seamless_review_swap(page)
+                self._finish_rows_rebuild(final=True)
+                self._restore_review_scroll(row)
+                self._start_review_page_transition(transition_pixmap)
+                self._trace_review_perf(
+                    "render_piece_notepad_done",
+                    trace_started,
+                    force=True,
+                    row=row,
+                    chars=len(str(piece.get("target_html") or "")),
+                )
+                return
+            except Exception as exc:
+                self._clear_rows(layout)
+                error = QLabel(f"Could not open raw HTML editor:\n{exc}")
+                error.setTextFormat(Qt.PlainText)
+                error.setStyleSheet(f"color: {self.THEME['danger']}; font-size: 11pt; padding: 12px;")
+                layout.addWidget(error)
+                layout.addStretch(1)
+                self._piece_render_complete.add(row)
+                self._active_render_row = None
+                self._active_render_page = None
+                self.rows_stack.setCurrentWidget(page)
+                self._finish_seamless_review_swap(page)
+                self._finish_rows_rebuild(final=True)
+                self._restore_review_scroll(row)
+                return
+
+        rows = self._review_rows_for_current_layout(piece)
         if not rows:
-            empty = QLabel("No p/h1-h6 text units found in this sidecar.")
+            empty = QLabel("No reviewable HTML elements found in this sidecar.")
             empty.setTextFormat(Qt.PlainText)
             empty.setStyleSheet(f"color: {self.THEME['muted']}; padding: 12px;")
             layout.addWidget(empty)
@@ -11640,10 +12432,11 @@ class RetranslationMixin:
                 continue
             if requested is not None and output_name.lower() not in requested:
                 continue
-            if output_name.lower() in seen_outputs:
+            output_identity = _sdlxliff_logical_output_key(output_name)
+            if output_identity in seen_outputs:
                 stats["skipped"] += 1
                 continue
-            seen_outputs.add(output_name.lower())
+            seen_outputs.add(output_identity)
             work_entries.append((progress_key, entry, output_name))
 
         total = len(work_entries)
@@ -11669,6 +12462,7 @@ class RetranslationMixin:
                 pass
 
         _notify("start", total and 1 or 0, message=f"Preparing {total} SDLXLIFF sidecar(s)")
+        existing_sidecars = _existing_sdlxliff_sidecars_by_logical_output(output_dir)
         old_output_sdlxliff = os.environ.get("OUTPUT_SDLXLIFF")
         os.environ["OUTPUT_SDLXLIFF"] = "1"
         try:
@@ -11677,7 +12471,15 @@ class RetranslationMixin:
                 stats["considered"] += 1
                 _notify("checking", entry_index, output_name)
 
-                sidecar_path = os.path.join(output_dir, "SDLXLIFF", f"{output_name}.sdlxliff")
+                logical_key = _sdlxliff_logical_output_key(output_name)
+                sidecar_path = existing_sidecars.get(logical_key) or os.path.join(
+                    output_dir, "SDLXLIFF", f"{output_name}.sdlxliff"
+                )
+                writer_output_name = (
+                    SDLXLIFFReviewDialog._sidecar_output_name(sidecar_path)
+                    if os.path.isfile(sidecar_path)
+                    else output_name
+                )
                 output_path = self._sdlxliff_autogen_output_path(output_dir, output_file)
                 if not output_path or not os.path.isfile(output_path):
                     stats["missing_output"] += 1
@@ -11722,7 +12524,7 @@ class RetranslationMixin:
                 try:
                     result_path = _write_html_sdlxliff_sidecar(
                         output_dir,
-                        output_name,
+                        writer_output_name,
                         chapter,
                         source_html,
                         target_html,
@@ -11733,6 +12535,7 @@ class RetranslationMixin:
                     writer_error = f"{type(exc).__name__}: {exc}"
                     stats["errors"].append(f"{output_name}: {writer_error}")
                 if result_path:
+                    existing_sidecars[logical_key] = result_path
                     stats["created"] += 1
                     stats["paths"].append(result_path)
                     _notify("created", entry_index, output_name, path=result_path)
@@ -11809,7 +12612,7 @@ class RetranslationMixin:
             )
             if not output_name.lower().endswith((".html", ".htm", ".xhtml")):
                 continue
-            output_key = output_name.lower()
+            output_key = _sdlxliff_logical_output_key(output_name)
             if output_key in seen_outputs:
                 stats["skipped"] += 1
                 continue
@@ -11863,11 +12666,14 @@ class RetranslationMixin:
                 pass
 
         _notify("start", message=f"Preparing {total} untranslated SDLXLIFF sidecar(s)")
+        existing_sidecars = _existing_sdlxliff_sidecars_by_logical_output(output_dir)
         pending_entries = []
         for entry_index, work_entry in enumerate(work_entries, 1):
             _entry_key, _entry, output_name = work_entry
             output_path = self._sdlxliff_autogen_output_path(output_dir, output_name)
-            sidecar_path = os.path.join(output_dir, "SDLXLIFF", f"{output_name}.sdlxliff")
+            sidecar_path = existing_sidecars.get(
+                _sdlxliff_logical_output_key(output_name)
+            ) or os.path.join(output_dir, "SDLXLIFF", f"{output_name}.sdlxliff")
             if (output_path and os.path.isfile(output_path)) or os.path.isfile(sidecar_path):
                 stats["considered"] += 1
                 stats["skipped"] += 1
@@ -11922,6 +12728,7 @@ class RetranslationMixin:
                     writer_error = f"{type(exc).__name__}: {exc}"
                     stats["errors"].append(f"{output_name}: {writer_error}")
                 if result_path:
+                    existing_sidecars[_sdlxliff_logical_output_key(output_name)] = result_path
                     stats["created"] += 1
                     stats["paths"].append(result_path)
                     _notify(

@@ -3098,6 +3098,141 @@ def test_manual_editing_sidecar_machine_translation_preview_button(tmp_path, mon
     assert len(preview_data["entries"]) == 12
 
 
+def test_sdlxliff_notepad_mode_is_one_raw_html_code_editor(tmp_path, qtbot):
+    output_name = "response_chapter0001.html"
+    html = (
+        '<html><head><meta charset="utf-8"><title></title></head>'
+        '<body><div><img src="cover.jpg"><p>Translated line</p><br></div></body></html>'
+    )
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0001.xhtml"},
+        "<html><body><p>Source line</p></body></html>",
+        html,
+        raise_errors=True,
+    )
+    dialog = SDLXLIFFReviewDialog(
+        str(tmp_path),
+        sidecar,
+        config={
+            "output_language": "English",
+            SDLXLIFFReviewDialog.TWO_COLUMN_LAYOUT_CONFIG_KEY: False,
+        },
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    qtbot.waitUntil(
+        lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
+        timeout=5000,
+    )
+    editor = dialog.rows_widget.findChild(QPlainTextEdit, "SdlReviewNotepadEditor")
+    initial_document = editor.toPlainText()
+
+    assert dialog.two_column_layout_btn.text() == "Notepad"
+    assert editor is not None
+    assert BeautifulSoup(initial_document, "html.parser").find("p").get_text(strip=True) == "Translated line"
+    assert "\n" in initial_document
+    assert len(initial_document.splitlines()) > 9
+    assert "<meta charset=\"utf-8\"/>" in initial_document
+    assert "<title>" in initial_document
+    assert "</title>" in initial_document
+    assert "<br/>" in initial_document
+    assert editor.lineWrapMode() == QPlainTextEdit.LineWrapMode.NoWrap
+    assert editor.line_number_area_width() > 0
+    assert editor.highlighter is not None
+    assert dialog.rows_widget.findChildren(QFrame, "SdlReviewRow") == []
+    assert dialog.rows_widget.findChildren(QPlainTextEdit, "SdlReviewTargetEdit") == []
+
+    edited_html = initial_document.replace(
+        "Translated line",
+        "Edited directly in raw HTML.\n   <span></span>",
+    )
+    editor.setPlainText(edited_html)
+    output_path = tmp_path / output_name
+    qtbot.waitUntil(
+        lambda: output_path.is_file() and output_path.read_text(encoding="utf-8") == edited_html,
+        timeout=5000,
+    )
+    assert dialog.pieces[0]["_notepad_tag_order"] == [
+        "html", "head", "meta", "title", "body", "div", "img", "p", "span", "br"
+    ]
+
+    dialog.two_column_layout_btn.click()
+    assert dialog.two_column_layout_btn.text() == "Compact"
+
+
+def test_manual_untranslated_notepad_edits_raw_skeleton_and_creates_output(tmp_path, qtbot):
+    output_name = "response_chapter0001.html"
+    source_html = "<html><body><p>원문은 편집기에 자동 입력되면 안 됩니다.</p></body></html>"
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0001.xhtml"},
+        source_html,
+        source_html,
+        raise_errors=True,
+        manual_untranslated=True,
+    )
+    dialog = SDLXLIFFReviewDialog(
+        str(tmp_path),
+        sidecar,
+        config={SDLXLIFFReviewDialog.TWO_COLUMN_LAYOUT_CONFIG_KEY: False},
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(
+        lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
+        timeout=5000,
+    )
+    editor = dialog.rows_widget.findChild(QPlainTextEdit, "SdlReviewNotepadEditor")
+    raw_skeleton = editor.toPlainText()
+
+    assert "원문은 편집기에 자동 입력되면 안 됩니다." in raw_skeleton
+    assert "<html>" in raw_skeleton
+    assert "<body>" in raw_skeleton
+    assert "<p>" in raw_skeleton
+    assert "</p>" in raw_skeleton
+    assert len(raw_skeleton.splitlines()) >= 7
+    edited_html = raw_skeleton.replace(
+        "원문은 편집기에 자동 입력되면 안 됩니다.",
+        "Manually translated.",
+    )
+    editor.setPlainText(edited_html)
+    output_path = tmp_path / output_name
+    qtbot.waitUntil(
+        lambda: output_path.is_file() and "Manually translated." in output_path.read_text(encoding="utf-8"),
+        timeout=5000,
+    )
+
+    assert dialog.pieces[0]["manual_untranslated"] is False
+    assert "Manually translated." in dialog.pieces[0]["target_html"]
+
+
+def test_notepad_initial_html_keeps_translation_and_expands_source_markup_for_empty_nodes():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    document = dialog._notepad_initial_document_html({
+        "source_html": (
+            "<html><body><p>Source one</p>"
+            "<p>Source <strong>two</strong><br/><rb>ruby base</rb></p></body></html>"
+        ),
+        "target_html": (
+            "<html><body><p>Translated one</p><p><br/></p></body></html>"
+        ),
+    })
+    soup = BeautifulSoup(document, "html.parser")
+    paragraphs = soup.find_all("p")
+
+    assert paragraphs[0].get_text(" ", strip=True) == "Translated one"
+    assert "Source one" not in document
+    assert paragraphs[1].get_text(" ", strip=True) == "Source two ruby base"
+    assert paragraphs[1].find("strong") is not None
+    assert paragraphs[1].find("br") is not None
+    assert paragraphs[1].find("rb") is not None
+    assert len(document.splitlines()) >= 12
+
+
 def test_progress_manager_exposes_manual_editing_toggle_for_not_translated_rows():
     source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
     assert 'QCheckBox("Manual editing")' in source
@@ -3613,6 +3748,91 @@ def test_sdlxliff_review_uses_opf_over_stale_progress_order_and_labels_special_a
     assert [piece["opf_position"] for piece in pieces] == [0, 1, 2]
     assert pieces[0]["chapter_num"] == 0
     assert pieces[0]["review_label"] == "[001] Ch.000 |"
+
+
+def test_sdlxliff_review_deduplicates_retained_and_response_named_sidecars(tmp_path):
+    retained_name = "chapter0001.xhtml"
+    response_name = "response_chapter0001.html"
+    for output_name in (retained_name, response_name):
+        _shared_write_html_sdlxliff_sidecar(
+            str(tmp_path),
+            output_name,
+            {"original_basename": retained_name},
+            "<html><body><p>Source</p></body></html>",
+            "<html><body><p>Translated</p></body></html>",
+            raise_errors=True,
+        )
+    (tmp_path / "translation_progress.json").write_text(
+        json.dumps({
+            "chapters": {
+                "1": {
+                    "status": "completed",
+                    "output_file": response_name,
+                    "original_basename": retained_name,
+                    "actual_num": 1,
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog.current_path = ""
+
+    pieces = dialog._load_pieces()
+
+    assert len(pieces) == 1
+    assert pieces[0]["output_name"] == response_name
+
+
+def test_manual_sidecar_generation_recognizes_alternate_filename_mode(tmp_path, monkeypatch):
+    source_name = "chapter0001.xhtml"
+    (tmp_path / source_name).write_text("<html><body><p>Source</p></body></html>", encoding="utf-8")
+    _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        source_name,
+        {"original_basename": source_name},
+        "<html><body><p>Source</p></body></html>",
+        "<html><body><p></p></body></html>",
+        raise_errors=True,
+        manual_untranslated=True,
+    )
+    monkeypatch.setenv("RETAIN_SOURCE_EXTENSION", "0")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    mixin.config = {}
+
+    stats = mixin._generate_sdlxliff_sidecars_from_untranslated_entries(
+        str(tmp_path),
+        [{
+            "status": "not_translated",
+            "original_basename": source_name,
+            "output_file": "response_chapter0001.html",
+        }],
+    )
+
+    assert stats["created"] == 0
+    assert stats["skipped"] == 1
+    assert not (tmp_path / "SDLXLIFF" / "response_chapter0001.html.sdlxliff").exists()
+
+
+def test_sdlxliff_notepad_edit_updates_div_u_in_place():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    piece = {
+        "target_html": '<html><body><div class="u">Old output</div></body></html>',
+    }
+    row = {
+        "row_index": 0,
+        "source_tag": "p",
+        "target_tag": "p",
+        "source_tag_label": "p",
+        "target_index": 0,
+    }
+
+    edited = dialog._target_html_with_edit(piece, row, "New output")
+    soup = BeautifulSoup(edited, "html.parser")
+
+    assert soup.find("div", class_="u").get_text(strip=True) == "New output"
+    assert soup.find("p") is None
 
 
 def test_sdlxliff_review_treats_div_u_source_blocks_as_paragraph_units(tmp_path):
