@@ -1180,6 +1180,53 @@ def test_runtime_fork_feature_check_accepts_native_model_routing(tmp_path):
     assert antigravity_proxy._runtime_has_fork_features(str(tmp_path))
 
 
+def test_patch_runtime_prompt_blocks_to_content_filter(tmp_path):
+    transform_file = tmp_path / "src" / "utils" / "transform.ts"
+    transform_file.parent.mkdir(parents=True)
+    transform_file.write_text(
+        '''export function transformGoogleEventToOpenAI(googleData: any, model: string, requestId?: string) {
+  const data = googleData.response || googleData;
+  const requestIdActual = requestId || "chatcmpl-" + Math.random().toString(36).substring(7);
+  const usage = data.usageMetadata ? {} : undefined;
+  if (!data.candidates || data.candidates.length === 0) {
+    if (usage) return { choices: [], usage: usage };
+    return null;
+  }
+  const candidate = data.candidates[0];
+  const parts = candidate.content?.parts || [];
+  const finishReason = candidate.finishReason;
+  if (parts.length === 0 && !finishReason && !usage) return null;
+  const toolCalls: any[] = [];
+  const hasPriorToolCalls = false;
+  let openaiFinishReason: string | null = null;
+  if (finishReason) {
+    if (toolCalls.length > 0 || hasPriorToolCalls) openaiFinishReason = "tool_calls";
+  }
+  const extractedSignature = undefined;
+  const extractedThought = undefined;
+  return {
+    choices: [{ finish_reason: openaiFinishReason }],
+    usage: usage,
+    _signature: extractedSignature,
+    _thought: extractedThought
+  };
+}
+''',
+        encoding="utf-8",
+    )
+
+    assert antigravity_proxy._patch_runtime_prompt_block_finish_reason(str(tmp_path))
+    assert antigravity_proxy._patch_runtime_prompt_block_finish_reason(str(tmp_path))
+
+    patched = transform_file.read_text(encoding="utf-8")
+    assert "data.promptFeedback || data.prompt_feedback" in patched
+    assert 'finish_reason: "content_filter"' in patched
+    assert "hasBlockedCandidateSafetyRating" in patched
+    assert "provider_block_reason: promptBlockReasonText" in patched
+    assert "provider_block_reason: hasPromptBlock" in patched
+    assert "} else if (finishReason) {" in patched
+
+
 def test_patch_runtime_account_reset_support_clears_capabilities(tmp_path):
     server_file = tmp_path / "src" / "server.ts"
     manager_file = tmp_path / "src" / "auth" / "manager.ts"

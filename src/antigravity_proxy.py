@@ -68,7 +68,7 @@ PROXY_DEFAULT_REVISION = "f2f621db4bc1bf0ff5d4fe9bfcf2a0e3d9889486"
 PROXY_DEFAULT_VERSION = "1.7.1"
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
 BUN_INSTALL_TIMEOUT_SECONDS = 300
-RUNTIME_PATCH_VERSION = "2026-08-16-fork-native-routing-v3"
+RUNTIME_PATCH_VERSION = "2026-08-16-prompt-block-finish-reason-v4"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -404,6 +404,143 @@ def _patch_runtime_finish_reason_mapping(runtime_dir: str) -> bool:
             f.write(updated)
 
     return marker in updated and finish_reason_source in updated
+
+
+def _patch_runtime_prompt_block_finish_reason(runtime_dir: str) -> bool:
+    """Map Google's concrete prompt-block metadata to content_filter."""
+    transform_path = os.path.join(runtime_dir, "src", "utils", "transform.ts")
+    if not os.path.exists(transform_path):
+        return False
+
+    with open(transform_path, "r", encoding="utf-8") as f:
+        updated = f.read()
+
+    changed = False
+    prompt_block_marker = "const hasPromptBlock = Boolean(promptBlockReasonText)"
+    if prompt_block_marker not in updated:
+        needle = (
+            '  const requestIdActual = requestId || "chatcmpl-" + '
+            'Math.random().toString(36).substring(7);\n'
+        )
+        insertion = needle + '''  const promptFeedback = data.promptFeedback || data.prompt_feedback ||
+                         googleData.promptFeedback || googleData.prompt_feedback;
+  const promptBlockReason = promptFeedback?.blockReason ?? promptFeedback?.block_reason;
+  const promptBlockReasonText = promptBlockReason === undefined || promptBlockReason === null
+    ? ""
+    : String(promptBlockReason).trim();
+  const promptBlockReasonUpper = promptBlockReasonText.toUpperCase();
+  const promptBlockReasonCode = Number(promptBlockReason);
+  const hasPromptBlock = Boolean(promptBlockReasonText) &&
+                         promptBlockReasonCode !== 0 &&
+                         !promptBlockReasonUpper.includes("UNSPECIFIED");
+  const promptBlockMessage = promptFeedback?.blockReasonMessage ?? promptFeedback?.block_reason_message;
+'''
+        if needle in updated:
+            updated = updated.replace(needle, insertion, 1)
+            changed = True
+
+    no_candidate_marker = 'provider_block_reason: promptBlockReasonText'
+    if no_candidate_marker not in updated:
+        needle = '  if (!data.candidates || data.candidates.length === 0) {\n'
+        insertion = needle + '''    if (hasPromptBlock) {
+      return {
+        id: requestIdActual,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: model,
+        choices: [{
+          index: 0,
+          delta: {},
+          finish_reason: "content_filter"
+        }],
+        usage: usage,
+        provider_finish_reason: null,
+        provider_block_reason: promptBlockReasonText,
+        provider_block_message: promptBlockMessage
+      };
+    }
+'''
+        if needle in updated:
+            updated = updated.replace(needle, insertion, 1)
+            changed = True
+
+    candidate_safety_marker = "const hasBlockedCandidateSafetyRating"
+    if candidate_safety_marker not in updated:
+        finish_reason_line = re.search(
+            r'^(  const finishReason = candidate\.[^\n]+;\n)',
+            updated,
+            re.MULTILINE,
+        )
+        if finish_reason_line:
+            insertion = finish_reason_line.group(1) + '''  const candidateSafetyRatings = candidate.safetyRatings || candidate.safety_ratings || [];
+  const hasBlockedCandidateSafetyRating = Array.isArray(candidateSafetyRatings) &&
+    candidateSafetyRatings.some((rating: any) =>
+      rating?.blocked === true || String(rating?.blocked).toLowerCase() === "true"
+    );
+'''
+            updated = (
+                updated[:finish_reason_line.start()]
+                + insertion
+                + updated[finish_reason_line.end():]
+            )
+            changed = True
+
+    old_empty_guard = "  if (parts.length === 0 && !finishReason && !usage) return null;"
+    new_empty_guard = (
+        "  if (parts.length === 0 && !finishReason && !usage && "
+        "!hasPromptBlock && !hasBlockedCandidateSafetyRating) return null;"
+    )
+    if new_empty_guard not in updated and old_empty_guard in updated:
+        updated = updated.replace(old_empty_guard, new_empty_guard, 1)
+        changed = True
+
+    mapping_marker = 'if (hasPromptBlock || hasBlockedCandidateSafetyRating) {'
+    if mapping_marker not in updated:
+        mapping_patterns = (
+            '  let openaiFinishReason: string | null = null;\n'
+            '  if (finishReason !== undefined && finishReason !== null) {',
+            '  let openaiFinishReason: string | null = null;\n'
+            '  if (finishReason) {',
+        )
+        for needle in mapping_patterns:
+            if needle in updated:
+                replacement = (
+                    '  let openaiFinishReason: string | null = null;\n'
+                    '  if (hasPromptBlock || hasBlockedCandidateSafetyRating) {\n'
+                    '    openaiFinishReason = "content_filter";\n'
+                    '  } else if' + needle.split('\n  if', 1)[1]
+                )
+                updated = updated.replace(needle, replacement, 1)
+                changed = True
+                break
+
+    provider_metadata_marker = "provider_block_reason: hasPromptBlock"
+    if provider_metadata_marker not in updated:
+        needle = "    usage: usage,\n    _signature: extractedSignature,"
+        replacement = '''    usage: usage,
+    provider_finish_reason: finishReason ?? null,
+    provider_block_reason: hasPromptBlock
+      ? promptBlockReasonText
+      : (hasBlockedCandidateSafetyRating ? "SAFETY_RATING_BLOCKED" : null),
+    provider_block_message: promptBlockMessage,
+    _signature: extractedSignature,'''
+        if needle in updated:
+            updated = updated.replace(needle, replacement, 1)
+            changed = True
+
+    if changed:
+        with open(transform_path, "w", encoding="utf-8") as f:
+            f.write(updated)
+
+    required_markers = (
+        prompt_block_marker,
+        no_candidate_marker,
+        candidate_safety_marker,
+        new_empty_guard,
+        mapping_marker,
+        provider_metadata_marker,
+    )
+    return all(marker in updated for marker in required_markers)
 
 
 def _patch_runtime_account_reset_support(runtime_dir: str) -> bool:
@@ -853,6 +990,8 @@ def _download_proxy_runtime(
             raise RuntimeError("Downloaded proxy archive lacks the fork's native model routing")
         if not _patch_runtime_finish_reason_mapping(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for finish reason mapping")
+        if not _patch_runtime_prompt_block_finish_reason(archive_root):
+            raise RuntimeError("Downloaded proxy archive could not be patched for prompt block finish reasons")
         if not _patch_runtime_account_reset_support(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for account reset")
         if not _patch_runtime_forced_account_support(archive_root):
@@ -910,6 +1049,8 @@ def _patch_cached_runtime(
         if not _patch_runtime_antigravity_client_version(runtime_dir, client_version):
             return False
         if not _patch_runtime_finish_reason_mapping(runtime_dir):
+            return False
+        if not _patch_runtime_prompt_block_finish_reason(runtime_dir):
             return False
         if not _patch_runtime_account_reset_support(runtime_dir):
             return False
@@ -2690,6 +2831,7 @@ def _consume_openai_stream(
     log_fn=None,
     log_stream: bool = True,
     cancel_generation: Optional[int] = None,
+    max_tokens: Any = None,
 ) -> Dict[str, Any]:
     _log = log_fn or _log_noop
     collected_content: List[str] = []
@@ -2800,6 +2942,19 @@ def _consume_openai_stream(
             "Antigravity: stream ended without an explicit finish_reason"
         )
 
+    terminal_usage = {}
+    if isinstance(usage, dict):
+        terminal_usage = {
+            key: usage.get(key)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+            if key in usage
+        }
+    _log(
+        "Antigravity: terminal metadata "
+        f"provider_finish_reason={provider_finish_reason!r}, "
+        f"finish_reason={finish_reason!r}, max_tokens={max_tokens!r}, "
+        f"usage={terminal_usage!r}"
+    )
     _log(f"Antigravity: stream finished in {time.time() - t_start:.1f}s")
     return {
         "content": "".join(collected_content),
@@ -2887,6 +3042,7 @@ def send_message_stream(
                             log_fn=log_fn,
                             log_stream=log_stream,
                             cancel_generation=request_cancel_generation,
+                            max_tokens=payload.get("max_tokens"),
                         )
                     _raise_if_cancelled(request_cancel_generation)
                     raise RuntimeError(
@@ -2910,6 +3066,7 @@ def send_message_stream(
                     log_fn=log_fn,
                     log_stream=log_stream,
                     cancel_generation=request_cancel_generation,
+                    max_tokens=payload.get("max_tokens"),
                 )
             except RuntimeError as stream_exc:
                 error_text = str(stream_exc)
@@ -2932,6 +3089,7 @@ def send_message_stream(
                             log_fn=log_fn,
                             log_stream=log_stream,
                             cancel_generation=request_cancel_generation,
+                            max_tokens=payload.get("max_tokens"),
                         )
                     raise RuntimeError(
                         f"Antigravity: authentication timed out.\n"
@@ -3021,6 +3179,7 @@ def send_message_stream(
             log_fn=log_fn,
             log_stream=log_stream,
             cancel_generation=request_cancel_generation,
+            max_tokens=payload.get("max_tokens"),
         )
     except RuntimeError as stream_exc:
         error_text = str(stream_exc)
@@ -3042,6 +3201,7 @@ def send_message_stream(
                     log_fn=log_fn,
                     log_stream=log_stream,
                     cancel_generation=request_cancel_generation,
+                    max_tokens=payload.get("max_tokens"),
                 )
             raise RuntimeError(
                 f"Antigravity: authentication timed out.\n"
