@@ -17,10 +17,12 @@ from unified_api_client import UnifiedClient, UnifiedClientError
 @pytest.fixture(autouse=True)
 def _reset_antigravity_cancel_state():
     antigravity_proxy.reset_cancel()
+    antigravity_proxy.allow_proxy_update_retry_for_new_run()
     antigravity_proxy.set_proxy_started_callback(None)
     antigravity_proxy._proxy_last_update_check_at = 0.0
     yield
     antigravity_proxy.reset_cancel()
+    antigravity_proxy.allow_proxy_update_retry_for_new_run()
     antigravity_proxy.set_proxy_started_callback(None)
     antigravity_proxy._proxy_last_update_check_at = 0.0
 
@@ -1316,7 +1318,7 @@ def test_cached_runtime_update_compares_running_proxy_version(tmp_path, monkeypa
     ) is True
 
 
-def test_failed_download_with_patched_cache_defers_immediate_second_restart(
+def test_failed_download_with_patched_cache_retries_only_on_next_gui_run(
     tmp_path, monkeypatch
 ):
     existing_runtime = tmp_path / "runtime" / "main-old"
@@ -1356,8 +1358,8 @@ def test_failed_download_with_patched_cache_defers_immediate_second_restart(
     )
 
     assert runtime == str(existing_runtime)
-    assert antigravity_proxy._proxy_last_update_check_at == 4321.0
-    assert any("retrying in 5 minutes" in message for message in logs)
+    assert antigravity_proxy._proxy_update_retry_blocked is True
+    assert any("next Run Translation or Extract Glossary" in message for message in logs)
 
     monkeypatch.setattr(antigravity_proxy, "_cached_runtime_needs_patch", lambda _data: False)
     release_checks = []
@@ -1371,6 +1373,13 @@ def test_failed_download_with_patched_cache_defers_immediate_second_restart(
         str(tmp_path), running_version="0.7.6"
     ) is False
     assert release_checks == []
+
+    antigravity_proxy.allow_proxy_update_retry_for_new_run()
+
+    assert antigravity_proxy._cached_runtime_needs_update(
+        str(tmp_path), running_version="0.7.6"
+    ) is True
+    assert release_checks == [True]
 
 
 def test_latest_antigravity_client_version_uses_google_public_bundle(monkeypatch):
@@ -1999,6 +2008,74 @@ def test_ensure_proxy_running_restarts_healthy_stale_runtime(tmp_path, monkeypat
     assert status == {"running": True, "auto_launched": True}
     assert killed_ports == [3000]
     assert runtime_calls[0]["force_update"] is True
+
+
+def test_parallel_proxy_checks_share_one_update_and_restart(tmp_path, monkeypatch):
+    state = {"running": True, "update_needed": True}
+    killed_ports = []
+    runtime_calls = []
+    results = []
+    start_barrier = threading.Barrier(3)
+
+    class FakeProcess:
+        pid = 4321
+
+        @staticmethod
+        def poll():
+            return None
+
+    def fake_health():
+        return {
+            "healthy": state["running"],
+            "details": {"version": "0.7.6"},
+        }
+
+    def fake_kill(port):
+        killed_ports.append(port)
+        state["running"] = False
+
+    def fake_runtime(*_args, **_kwargs):
+        runtime_calls.append(True)
+        state["update_needed"] = False
+        return str(tmp_path)
+
+    def fake_popen(*_args, **_kwargs):
+        state["running"] = True
+        return FakeProcess()
+
+    def worker():
+        start_barrier.wait()
+        results.append(antigravity_proxy.ensure_proxy_running(log_fn=lambda _message: None))
+
+    monkeypatch.setattr(antigravity_proxy, "_proxy_process", None)
+    monkeypatch.setattr(antigravity_proxy, "_ensure_proxy_config", lambda: str(tmp_path))
+    monkeypatch.setattr(antigravity_proxy, "check_proxy_health", fake_health)
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_cached_runtime_needs_update",
+        lambda *_args, **_kwargs: state["update_needed"],
+    )
+    monkeypatch.setattr(antigravity_proxy, "_kill_proxy_by_port", fake_kill)
+    monkeypatch.setattr(antigravity_proxy, "_ensure_proxy_runtime", fake_runtime)
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_find_proxy_launch_command",
+        lambda _runtime_dir: ["bun", "run", "server.ts"],
+    )
+    monkeypatch.setattr(antigravity_proxy.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(antigravity_proxy.time, "sleep", lambda _seconds: None)
+
+    workers = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in workers:
+        thread.start()
+    start_barrier.wait()
+    for thread in workers:
+        thread.join(2)
+
+    assert len(results) == 2
+    assert killed_ports == [3000]
+    assert runtime_calls == [True]
+    assert sum(result["auto_launched"] for result in results) == 1
 
 
 def test_ensure_proxy_running_installs_bun_when_no_launcher_exists(tmp_path, monkeypatch):

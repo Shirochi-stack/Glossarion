@@ -29768,6 +29768,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.thread_complete_signal.emit()
         
         thread_name = f"TranslationThread_{int(time.time())}"
+        try:
+            from antigravity_proxy import allow_proxy_update_retry_for_new_run
+            allow_proxy_update_retry_for_new_run()
+        except Exception:
+            pass
         self.translation_thread = threading.Thread(
             target=simple_thread_target,
             name=thread_name,
@@ -33564,6 +33569,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
             pass
         
         # Use shared executor
+        try:
+            from antigravity_proxy import allow_proxy_update_retry_for_new_run
+            allow_proxy_update_retry_for_new_run()
+        except Exception:
+            pass
         self._ensure_executor()
         if self.executor:
             self.glossary_future = self.executor.submit(self.run_glossary_extraction_direct)

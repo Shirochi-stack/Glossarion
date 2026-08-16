@@ -71,6 +71,7 @@ PROXY_GITHUB_REVISION_ARCHIVE_URL = f"{PROXY_REPO_URL}/archive/{{revision}}.zip"
 PROXY_DEFAULT_REVISION = "abc82ce6b756ee1c4d794b9f1599eda9b55730d8"
 PROXY_DEFAULT_VERSION = "0.7.7"
 PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
+PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS = 90
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
 BUN_INSTALL_TIMEOUT_SECONDS = 300
 RUNTIME_PATCH_VERSION = "2026-08-17-round-robin-auto-account-v2"
@@ -99,6 +100,7 @@ _proxy_process: Optional[subprocess.Popen] = None
 _proxy_launch_lock = threading.Lock()
 _proxy_update_check_lock = threading.Lock()
 _proxy_last_update_check_at = 0.0
+_proxy_update_retry_blocked = False
 _proxy_started_callback: Optional[Callable[[], None]] = None
 _proxy_started_callback_lock = threading.Lock()
 
@@ -1173,7 +1175,11 @@ def _download_proxy_runtime(
     _log = log_fn or _log_noop
     _log(f"⬇️ Antigravity: downloading {PROXY_PACKAGE_NAME} {release['tag']}...")
 
-    resp = requests.get(release["archive_url"], headers=_github_headers(), timeout=60)
+    resp = requests.get(
+        release["archive_url"],
+        headers=_github_headers(),
+        timeout=PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS,
+    )
     resp.raise_for_status()
 
     parent = os.path.dirname(runtime_dir)
@@ -1246,6 +1252,10 @@ def _cached_runtime_needs_update(
     """Check periodically whether a healthy cached runtime trails the fork's main branch."""
     global _proxy_last_update_check_at
 
+    with _proxy_update_check_lock:
+        if _proxy_update_retry_blocked:
+            return False
+
     if _cached_runtime_needs_patch(data_dir):
         return True
 
@@ -1281,11 +1291,19 @@ def _cached_runtime_needs_update(
     )
 
 
-def _defer_proxy_update_retry() -> None:
-    """Throttle update checks after a failed download uses the patched cache."""
-    global _proxy_last_update_check_at
+def allow_proxy_update_retry_for_new_run() -> None:
+    """Allow one failed proxy download to be retried by a new GUI run."""
+    global _proxy_last_update_check_at, _proxy_update_retry_blocked
     with _proxy_update_check_lock:
-        _proxy_last_update_check_at = time.monotonic()
+        _proxy_update_retry_blocked = False
+        _proxy_last_update_check_at = 0.0
+
+
+def _block_proxy_update_retry_until_new_run() -> None:
+    """Suppress failed-download retries for the remainder of the current run."""
+    global _proxy_update_retry_blocked
+    with _proxy_update_check_lock:
+        _proxy_update_retry_blocked = True
 
 
 def _patch_cached_runtime(
@@ -1355,10 +1373,11 @@ def _ensure_proxy_runtime(data_dir: str, log_fn=None, force_update: bool = False
         existing = _latest_existing_runtime(runtime_root)
         if existing:
             if _patch_cached_runtime(existing, release, client_version, log_fn=log_fn):
-                _defer_proxy_update_retry()
+                _block_proxy_update_retry_until_new_run()
                 (log_fn or _log_noop)(
                     "⚠️ Antigravity: proxy download failed; using the patched cached "
-                    f"runtime and retrying in {PROXY_UPDATE_CHECK_INTERVAL_SECONDS // 60} minutes."
+                    "runtime. The download will retry on the next Run Translation "
+                    "or Extract Glossary start."
                 )
                 return existing
             (log_fn or _log_noop)(
@@ -2491,17 +2510,6 @@ def ensure_proxy_running(log_fn=None, notify_started: bool = True) -> Dict[str, 
     _log = log_fn or _log_noop
     data_dir = _ensure_proxy_config()
     force_update = False
-
-    health = check_proxy_health()
-    if health.get("healthy"):
-        running_version = (health.get("details") or {}).get("version")
-        if _cached_runtime_needs_update(data_dir, running_version):
-            _log("🔄 Antigravity proxy update detected; restarting with the latest fork runtime...")
-            _kill_proxy_by_port(_get_proxy_port())
-            force_update = True
-            time.sleep(2)
-        else:
-            return {"running": True, "auto_launched": False}
 
     with _proxy_launch_lock:
         health = check_proxy_health()
