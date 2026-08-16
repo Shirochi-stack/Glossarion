@@ -1325,6 +1325,16 @@ def prepare_epub_image_assets(epub_path, output_dir, progress_callback=None):
         "renamed": 0,
         "error": "",
     }
+
+    def _report(message):
+        if not callable(progress_callback):
+            return
+        try:
+            progress_callback(str(message))
+        except Exception:
+            # Status reporting must never prevent image preparation.
+            pass
+
     epub_path = os.path.abspath(str(epub_path or ""))
     output_dir = os.path.abspath(str(output_dir or ""))
     if not os.path.isfile(epub_path) or not epub_path.lower().endswith(".epub"):
@@ -1333,6 +1343,8 @@ def prepare_epub_image_assets(epub_path, output_dir, progress_callback=None):
     if not os.path.isdir(output_dir):
         result["error"] = "Output folder was not found"
         return result
+
+    _report("🖼️ Preparing EPUB image assets for SDLXLIFF review...")
 
     images_dir = os.path.join(output_dir, "images")
     rename_map_path = os.path.join(output_dir, "image_rename_map.json")
@@ -1358,6 +1370,9 @@ def prepare_epub_image_assets(epub_path, output_dir, progress_callback=None):
             "ready": True,
             "renamed": len(loaded_map),
         })
+        _report(
+            f"✅ EPUB image assets are already prepared ({len(loaded_map)} file(s))"
+        )
         return result
 
     try:
@@ -1374,6 +1389,7 @@ def prepare_epub_image_assets(epub_path, output_dir, progress_callback=None):
             result["source_images"] = len(image_members)
             if not image_members:
                 result["ready"] = True
+                _report("ℹ️ Source EPUB contains no image assets to prepare")
                 return result
 
             os.makedirs(images_dir, exist_ok=True)
@@ -1398,6 +1414,12 @@ def prepare_epub_image_assets(epub_path, output_dir, progress_callback=None):
                 with source_zip.open(member, "r") as source, open(destination, "wb") as target:
                     shutil.copyfileobj(source, target)
                 result["extracted"] += 1
+
+            if result["extracted"]:
+                _report(
+                    f"📥 Extracted {result['extracted']} of {result['source_images']} "
+                    "EPUB image asset(s)"
+                )
 
             spine_members = []
             try:
@@ -1439,6 +1461,7 @@ def prepare_epub_image_assets(epub_path, output_dir, progress_callback=None):
         # These legacy routines print emoji and source-language filenames.
         # The standalone SDLXLIFF viewer may inherit a narrow Windows console
         # encoding, where logging itself would otherwise abort preparation.
+        _report("🔄 Applying chapter image rename map for SDLXLIFF review...")
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             if not loaded_map and not existing_before:
                 _rename_images_to_chapter_format(chapters, output_dir, progress_callback)
@@ -1461,12 +1484,13 @@ def prepare_epub_image_assets(epub_path, output_dir, progress_callback=None):
         )
         result["ready"] = bool(final_map) and result["renamed"] == len(final_map)
         result["prepared"] = bool(result["extracted"] or final_map != loaded_map)
-        if result["ready"] and callable(progress_callback):
-            progress_callback(
-                f"Prepared {result['renamed']} EPUB image asset(s) for SDLXLIFF review"
+        if result["ready"]:
+            _report(
+                f"✅ Prepared {result['renamed']} EPUB image asset(s) for SDLXLIFF review"
             )
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
+        _report(f"❌ EPUB image asset preparation failed: {result['error']}")
     return result
 
 

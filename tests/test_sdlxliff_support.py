@@ -63,7 +63,12 @@ def test_sdlxliff_image_asset_preparation_runs_without_chapter_extraction(tmp_pa
     output_html = workspace / "response_chapter_notice0002.html"
     output_html.write_text(source_html, encoding="utf-8")
 
-    result = prepare_epub_image_assets(str(epub_path), str(workspace))
+    progress_messages = []
+    result = prepare_epub_image_assets(
+        str(epub_path),
+        str(workspace),
+        progress_callback=progress_messages.append,
+    )
 
     assert result["ready"] is True
     assert result["prepared"] is True
@@ -79,10 +84,41 @@ def test_sdlxliff_image_asset_preparation_runs_without_chapter_extraction(tmp_pa
     )
     assert not (workspace / "metadata.json").exists()
     assert not (workspace / "chapters_info.json").exists()
+    assert progress_messages[0] == "🖼️ Preparing EPUB image assets for SDLXLIFF review..."
+    assert any(message.startswith("📥 Extracted 1 of 1") for message in progress_messages)
+    assert any("Applying chapter image rename map" in message for message in progress_messages)
+    assert progress_messages[-1] == "✅ Prepared 1 EPUB image asset(s) for SDLXLIFF review"
 
     second_result = prepare_epub_image_assets(str(epub_path), str(workspace))
     assert second_result["ready"] is True
     assert second_result["prepared"] is False
+
+
+def test_sdlxliff_image_asset_status_is_forwarded_to_translator_log(tmp_path, monkeypatch):
+    epub_path = tmp_path / "source.epub"
+    epub_path.write_bytes(b"epub")
+    logged = []
+
+    def fake_prepare(_epub_path, _output_dir, progress_callback=None):
+        progress_callback("🖼️ Preparing EPUB image assets for SDLXLIFF review...")
+        progress_callback("✅ Prepared 3 EPUB image asset(s) for SDLXLIFF review")
+        return {"ready": True, "prepared": True, "renamed": 3}
+
+    monkeypatch.setattr("Chapter_Extractor.prepare_epub_image_assets", fake_prepare)
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._context_parent = SimpleNamespace(
+        append_log=lambda message, source_thread=None: logged.append(message)
+    )
+    dialog._review_source_epub_for_image_assets = lambda: str(epub_path)
+
+    result = dialog._ensure_review_image_assets()
+
+    assert result["ready"] is True
+    assert logged == [
+        "🖼️ Preparing EPUB image assets for SDLXLIFF review...",
+        "✅ Prepared 3 EPUB image asset(s) for SDLXLIFF review",
+    ]
 
 
 def test_html_sdlxliff_writer_is_shared_between_translation_and_review_paths():
@@ -800,6 +836,125 @@ def test_sdlxliff_review_ignores_empty_source_paragraphs_for_alignment(tmp_path)
         "Next time, I will return with the adult version cover.",
     ]
     assert all(row["source"] for row in piece["rows"])
+
+
+def test_sdlxliff_review_user_text_in_empty_dom_slot_is_added_without_offset(tmp_path):
+    output_name = "response_chapter_notice0003.html"
+    source_html = (
+        "<html><body>"
+        "<h1>Notice heading</h1>"
+        "<p>First source paragraph.</p>"
+        "<p><br/></p>"
+        "<p>Second source paragraph.</p>"
+        "<p>Third source paragraph.</p>"
+        "</body></html>"
+    )
+    target_html = (
+        "<html><body>"
+        "<h1>Notice heading</h1>"
+        "<p>First source paragraph.</p>"
+        "<p>ss</p>"
+        "<p>Second source paragraph.</p>"
+        "<p>Third source paragraph.</p>"
+        "</body></html>"
+    )
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter_notice0003.xhtml"},
+        source_html,
+        target_html,
+        raise_errors=True,
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(sidecar, 0, {"output_name": output_name})
+
+    assert piece["source_count"] == 4
+    assert piece["target_count"] == 5
+    assert [(row["source"], row["target"]) for row in piece["rows"]] == [
+        ("Notice heading", "Notice heading"),
+        ("First source paragraph.", "First source paragraph."),
+        ("", "ss"),
+        ("Second source paragraph.", "Second source paragraph."),
+        ("Third source paragraph.", "Third source paragraph."),
+    ]
+    added = piece["rows"][2]
+    assert added["source_tag"] == ""
+    assert added["target_tag"] == "p"
+    assert added["status"] == "red"
+    assert added["reason"] == "dropped/added"
+
+
+def test_sdlxliff_review_inserted_target_node_uses_text_anchor_without_offset(tmp_path):
+    output_name = "response_chapter_inserted.html"
+    source_html = (
+        "<html><body><p>One.</p><p>Two.</p><p>Three.</p></body></html>"
+    )
+    target_html = (
+        "<html><body><p>One.</p><p>User addition.</p><p>Two.</p><p>Three.</p></body></html>"
+    )
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter_inserted.xhtml"},
+        source_html,
+        target_html,
+        raise_errors=True,
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(sidecar, 0, {"output_name": output_name})
+
+    assert [(row["source"], row["target"]) for row in piece["rows"]] == [
+        ("One.", "One."),
+        ("", "User addition."),
+        ("Two.", "Two."),
+        ("Three.", "Three."),
+    ]
+
+
+def test_sdlxliff_notepad_added_row_does_not_offset_original_edit_history(tmp_path):
+    output_name = "response_chapter_history.html"
+    source_html = (
+        "<html><body><p>One.</p><p><br/></p><p>Two.</p><p>Three.</p></body></html>"
+    )
+    initial_target = (
+        "<html><body><p>One.</p><p><br/></p><p>Two.</p><p>Three.</p></body></html>"
+    )
+    edited_target = (
+        "<html><body><p>One.</p><p>User addition.</p><p>Two.</p><p>Three.</p></body></html>"
+    )
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter_history.xhtml"},
+        source_html,
+        initial_target,
+        raise_errors=True,
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    piece = dialog._build_piece(sidecar, 0, {"output_name": output_name})
+    for row in piece["rows"]:
+        row["target_original"] = f"original:{row['source']}"
+
+    dialog.pieces = [piece]
+    dialog._piece_pages = {}
+    dialog._refresh_piece_list_item = lambda _index: None
+    dialog._refresh_piece_header = lambda _index: None
+    dialog._current_review_signature = lambda: ()
+
+    assert dialog._apply_notepad_document_edit(0, edited_target) is True
+
+    rebuilt_rows = dialog.pieces[0]["rows"]
+    added = next(row for row in rebuilt_rows if row["target"] == "User addition.")
+    second = next(row for row in rebuilt_rows if row["source"] == "Two.")
+    third = next(row for row in rebuilt_rows if row["source"] == "Three.")
+    assert added["source"] == ""
+    assert added["target_original"] == "User addition."
+    assert second["target_original"] == "original:Two."
+    assert third["target_original"] == "original:Three."
 
 
 def test_sdlxliff_review_ignores_invisible_empty_html_tags(tmp_path):

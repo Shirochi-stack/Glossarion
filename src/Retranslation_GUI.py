@@ -2031,6 +2031,35 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
+    def _emit_review_log_message(self, message):
+        """Send worker-safe viewer status to the Translator GUI log."""
+        message = str(message or "").strip()
+        if not message:
+            return
+        candidates = (
+            getattr(self, "_sdlxliff_autogen_owner", None),
+            getattr(self, "_context_parent", None),
+        )
+        seen = set()
+        for candidate in candidates:
+            if candidate is None or id(candidate) in seen:
+                continue
+            seen.add(id(candidate))
+            append_log = getattr(candidate, "append_log", None)
+            if not callable(append_log):
+                continue
+            try:
+                append_log(message, source_thread=threading.current_thread())
+                return
+            except TypeError:
+                try:
+                    append_log(message)
+                    return
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
     def _prepare_generation_streaming_piece_list(self, total=0):
         try:
             if getattr(self, "_generation_streaming_active", False):
@@ -3588,11 +3617,27 @@ class SDLXLIFFReviewDialog(QDialog):
         source_epub = self._review_source_epub_for_image_assets()
         if not source_epub or not self.output_dir:
             return None
+
+        def _progress(message):
+            message = str(message or "").strip()
+            if not message:
+                return
+            self._emit_review_log_message(message)
+            self._emit_review_generation_progress({
+                "stage": "image_assets",
+                "message": message,
+            })
+
         try:
             from Chapter_Extractor import prepare_epub_image_assets
 
-            return prepare_epub_image_assets(source_epub, self.output_dir)
+            return prepare_epub_image_assets(
+                source_epub,
+                self.output_dir,
+                progress_callback=_progress,
+            )
         except Exception as exc:
+            _progress(f"❌ EPUB image asset preparation failed: {type(exc).__name__}: {exc}")
             return {
                 "ready": False,
                 "prepared": False,
@@ -6066,6 +6111,41 @@ class SDLXLIFFReviewDialog(QDialog):
             source_remaining = len(source_units) - i
             target_remaining = len(target_units) - j
 
+            # A user can turn a formerly empty target container into a real
+            # text unit in rendered Notepad mode. If the next target is the
+            # current source text, the current target is an insertion, not the
+            # translation for this source row. Emit it as target-only so every
+            # following source/target pair keeps its correct position.
+            if target_remaining > source_remaining:
+                target_surplus = target_remaining - source_remaining
+                for lookahead in range(1, min(target_surplus, len(target_units) - j - 1) + 1):
+                    future_target = target_units[j + lookahead]
+                    if _same_text(src, future_target) and self._review_units_are_compatible(src, future_target):
+                        rows.append((None, tgt))
+                        last_tgt = tgt
+                        j += 1
+                        break
+                else:
+                    lookahead = 0
+                if lookahead:
+                    continue
+
+            if source_remaining > target_remaining:
+                source_surplus = source_remaining - target_remaining
+                for lookahead in range(1, min(source_surplus, len(source_units) - i - 1) + 1):
+                    future_source = source_units[i + lookahead]
+                    if _same_text(future_source, tgt) and self._review_units_are_compatible(future_source, tgt):
+                        rows.append((src, None))
+                        last_src = src
+                        if self._review_unit_is_heading(src):
+                            last_src_heading = src
+                        i += 1
+                        break
+                else:
+                    lookahead = 0
+                if lookahead:
+                    continue
+
             if self._review_unit_is_heading(src) and self._review_unit_is_paragraph(tgt):
                 if source_remaining > target_remaining and next_src is not None and self._review_units_are_compatible(next_src, tgt):
                     rows.append((src, None))
@@ -6116,6 +6196,54 @@ class SDLXLIFFReviewDialog(QDialog):
                 last_src_heading = src
             i += 1
             j += 1
+        return rows
+
+    def _align_review_units_by_dom_position(
+        self,
+        source_all_units,
+        target_all_units,
+        source_review_units,
+        target_review_units,
+        *,
+        include_empty_target=False,
+    ):
+        """Align equal HTML text-unit structures without collapsing empty slots.
+
+        Empty slots are important in the rendered editor: when a user types in
+        one, it becomes a target-only Added row. Positional alignment prevents
+        that new row from stealing the next source paragraph.
+        """
+        source_all_units = list(source_all_units or [])
+        target_all_units = list(target_all_units or [])
+        if not source_all_units or len(source_all_units) != len(target_all_units):
+            return None
+        if not all(
+            self._review_units_are_compatible(source_unit, target_unit)
+            for source_unit, target_unit in zip(source_all_units, target_all_units)
+        ):
+            return None
+
+        source_by_index = {
+            unit.get("index"): unit
+            for unit in source_review_units or []
+            if isinstance(unit, dict)
+        }
+        target_by_index = {
+            unit.get("index"): unit
+            for unit in target_review_units or []
+            if isinstance(unit, dict)
+        }
+        rows = []
+        for source_all, target_all in zip(source_all_units, target_all_units):
+            source_index = source_all.get("index")
+            target_index = target_all.get("index")
+            source_unit = source_by_index.get(source_index)
+            target_unit = target_by_index.get(target_index)
+            if target_unit is not None and not str(target_unit.get("text") or "").strip():
+                if not include_empty_target or source_unit is None:
+                    target_unit = None
+            if source_unit is not None or target_unit is not None:
+                rows.append((source_unit, target_unit))
         return rows
 
     @staticmethod
@@ -6591,29 +6719,32 @@ class SDLXLIFFReviewDialog(QDialog):
                 manual_untranslated
                 or _is_manual_editing_sdlxliff(path)
             )
-            source_units = self._extract_text_units(source_html)
-            target_units = self._extract_text_units(
-                target_html,
-                include_empty=manual_editing,
+            source_all_units = self._extract_text_units(source_html, include_empty=True)
+            target_all_units = self._extract_text_units(target_html, include_empty=True)
+            source_units = self._non_empty_text_units(source_all_units)
+            target_units = (
+                target_all_units
+                if manual_editing
+                else self._non_empty_text_units(target_all_units)
             )
             if self._review_remove_duplicate_h1_p_enabled():
                 # Hide the same duplicate H1-H6 + <p> title echoes the header
                 # translation pipeline removes, so the surplus source unit no
                 # longer shows up as a flagged "Empty" row.
-                source_units = self._dedupe_heading_paragraph_units(source_units)
+                source_all_units = self._dedupe_heading_paragraph_units(source_all_units)
+                source_units = self._non_empty_text_units(source_all_units)
                 if not manual_editing:
-                    target_units = self._dedupe_heading_paragraph_units(target_units)
+                    target_all_units = self._dedupe_heading_paragraph_units(target_all_units)
+                    target_units = self._non_empty_text_units(target_all_units)
             source_review_units = self._annotate_review_tag_labels(self._non_empty_text_units(source_units))
             if manual_editing:
-                target_units_by_index = {
-                    unit.get("index"): unit
-                    for unit in target_units
-                    if isinstance(unit, dict)
+                source_review_indexes = {
+                    unit.get("index") for unit in source_review_units
                 }
                 target_review_units = self._annotate_review_tag_labels([
-                    target_units_by_index[source_unit.get("index")]
-                    for source_unit in source_review_units
-                    if source_unit.get("index") in target_units_by_index
+                    unit for unit in target_units
+                    if str(unit.get("text") or "").strip()
+                    or unit.get("index") in source_review_indexes
                 ])
             else:
                 target_review_units = self._annotate_review_tag_labels(
@@ -6623,7 +6754,42 @@ class SDLXLIFFReviewDialog(QDialog):
             red_count = 0
             yellow_count = 0
             purple_count = 0
-            aligned_units = self._align_review_units(source_review_units, target_review_units)
+            aligned_units = self._align_review_units_by_dom_position(
+                source_all_units,
+                target_all_units,
+                source_review_units,
+                target_review_units,
+                include_empty_target=manual_editing,
+            )
+            if aligned_units is None:
+                if manual_editing:
+                    # Preserve the original manual-sidecar behavior when the
+                    # two DOMs genuinely differ, while retaining non-empty
+                    # target-only units so user additions remain visible.
+                    target_units_by_index = {
+                        unit.get("index"): unit
+                        for unit in target_review_units
+                        if isinstance(unit, dict)
+                    }
+                    source_indexes = {
+                        unit.get("index") for unit in source_review_units
+                    }
+                    aligned_target_units = [
+                        target_units_by_index[source_unit.get("index")]
+                        for source_unit in source_review_units
+                        if source_unit.get("index") in target_units_by_index
+                    ]
+                    aligned_target_units.extend(
+                        unit for unit in target_review_units
+                        if unit.get("index") not in source_indexes
+                        and str(unit.get("text") or "").strip()
+                    )
+                else:
+                    aligned_target_units = target_review_units
+                aligned_units = self._align_review_units(
+                    source_review_units,
+                    aligned_target_units,
+                )
             for row_idx, (src, tgt) in enumerate(aligned_units):
                 status, reason = self._row_status(
                     src.get("text") if src else "",
@@ -10149,9 +10315,25 @@ class SDLXLIFFReviewDialog(QDialog):
         rebuilt = self._build_piece(piece.get("path"), piece_index, metadata)
         rebuilt["_notepad_tag_order"] = tag_order
         old_rows = piece.get("rows") or []
-        for row_index, row_data in enumerate(rebuilt.get("rows") or []):
-            if row_index < len(old_rows):
-                row_data["target_original"] = old_rows[row_index].get(
+        old_rows_by_source_index = {
+            row.get("source_index"): row
+            for row in old_rows
+            if row.get("source_index") is not None
+        }
+        old_added_rows_by_target_index = {
+            row.get("target_index"): row
+            for row in old_rows
+            if row.get("source_index") is None and row.get("target_index") is not None
+        }
+        for row_data in rebuilt.get("rows") or []:
+            old_row = None
+            source_index = row_data.get("source_index")
+            if source_index is not None:
+                old_row = old_rows_by_source_index.get(source_index)
+            elif row_data.get("target_index") is not None:
+                old_row = old_added_rows_by_target_index.get(row_data.get("target_index"))
+            if old_row is not None:
+                row_data["target_original"] = old_row.get(
                     "target_original", row_data.get("target_original", "")
                 )
         self.pieces[piece_index] = rebuilt
