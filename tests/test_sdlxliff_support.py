@@ -2685,11 +2685,11 @@ def test_sdlxliff_review_translator_note_uses_note_placeholder(qtbot):
     label = dialog._text_label(
         "",
         missing=False,
-        empty_placeholder="[translator note]",
+        empty_placeholder="[Translator Note]",
     )
     qtbot.addWidget(label)
 
-    assert label.text() == "[translator note]"
+    assert label.text() == "[Translator Note]"
 
 
 def test_sdlxliff_review_rejects_untranslated_google_preview_batch():
@@ -3760,16 +3760,19 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
                 selection.addRange(range);
             };
             selectHost();
-            const bold = window.__sdlApplyInlineFormat('bold');
-            selectHost();
-            const italic = window.__sdlApplyInlineFormat('italic');
-            selectHost();
-            const underline = window.__sdlApplyInlineFormat('underline');
+            host.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true}));
+            window.getSelection().removeAllRanges();
+            const bold = window.__sdlApplyInlineFormat('bold', true);
+            window.getSelection().removeAllRanges();
+            const italic = window.__sdlApplyInlineFormat('italic', true);
+            window.getSelection().removeAllRanges();
+            const underline = window.__sdlApplyInlineFormat('underline', true);
             return JSON.stringify([
                 bold, italic, underline,
                 host.querySelectorAll('strong').length === 1,
                 host.querySelectorAll('em').length === 1,
                 host.querySelectorAll('u').length === 1,
+                window.getSelection().toString() === 'Styled addition',
                 paragraph.isConnected,
                 paragraph.textContent === 'Styled addition'
             ]);
@@ -3777,7 +3780,7 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         })();
         """
     )
-    assert inline_format_result == "[true,true,true,true,true,true,true,true]"
+    assert inline_format_result == "[true,true,true,true,true,true,true,true,true]"
     assert dialog.rows_widget.findChild(QPlainTextEdit, "SdlReviewNotepadEditor") is None
     assert dialog.rows_widget.findChildren(QFrame, "SdlReviewRow") == []
     assert dialog.rows_widget.findChildren(QPlainTextEdit, "SdlReviewTargetEdit") == []

@@ -8977,7 +8977,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 source_text,
                 missing=source_missing,
                 empty_placeholder=(
-                    "[translator note]"
+                    "[Translator Note]"
                     if row_data.get("translator_note") else None
                 ),
                 tooltip_translation=tooltip_preview,
@@ -11459,6 +11459,55 @@ class SDLXLIFFReviewDialog(QDialog):
                         && host.contains(selection.anchorNode)
                         && host.contains(selection.focusNode));
                 };
+                const selectionOffsets = host => {
+                    const selection = window.getSelection();
+                    if (!selection || !selection.rangeCount || !host
+                            || editableHost(selection.anchorNode) !== host
+                            || editableHost(selection.focusNode) !== host
+                            || !selectionInside(host)) return null;
+                    const range = selection.getRangeAt(0);
+                    const before = document.createRange();
+                    before.selectNodeContents(host);
+                    before.setEnd(range.startContainer, range.startOffset);
+                    const start = before.toString().length;
+                    return {
+                        host,
+                        start,
+                        end: start + range.toString().length
+                    };
+                };
+                const restoreSelection = snapshot => {
+                    const host = snapshot && snapshot.host;
+                    if (!host || !host.isConnected) return false;
+                    const nodes = [];
+                    const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+                    while (walker.nextNode()) nodes.push(walker.currentNode);
+                    if (!nodes.length) {
+                        host.appendChild(document.createTextNode(''));
+                        nodes.push(host.firstChild);
+                    }
+                    const boundaryAt = rawOffset => {
+                        let offset = Math.max(0, Number(rawOffset) || 0);
+                        for (const node of nodes) {
+                            const length = node.nodeValue.length;
+                            if (offset <= length) return [node, offset];
+                            offset -= length;
+                        }
+                        const last = nodes[nodes.length - 1];
+                        return [last, last.nodeValue.length];
+                    };
+                    const start = boundaryAt(snapshot.start);
+                    const end = boundaryAt(snapshot.end);
+                    const range = document.createRange();
+                    range.setStart(start[0], start[1]);
+                    range.setEnd(end[0], end[1]);
+                    try { host.focus({preventScroll: true}); }
+                    catch (_error) { host.focus(); }
+                    const selection = window.getSelection();
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    return true;
+                };
                 const selectionBoundary = host => {
                     const selection = window.getSelection();
                     if (!selection || !selection.rangeCount || !selection.isCollapsed
@@ -11484,7 +11533,39 @@ class SDLXLIFFReviewDialog(QDialog):
                     for (const element of Array.from(host.querySelectorAll('*'))) {
                         const tagName = element.tagName.toUpperCase();
                         if (!ALLOWED_INLINE_TAGS.has(tagName)) {
-                            element.replaceWith(...Array.from(element.childNodes));
+                            // Chromium sometimes emits styled spans even with
+                            // styleWithCSS disabled. Preserve all three active
+                            // styles instead of unwrapping whichever was added
+                            // last and silently losing it.
+                            const style = element.style || {};
+                            const weight = String(style.fontWeight || '').toLowerCase();
+                            const numericWeight = Number.parseInt(weight, 10);
+                            const decoration = String(
+                                style.textDecorationLine || style.textDecoration || ''
+                            ).toLowerCase();
+                            const wrappers = [];
+                            if (weight === 'bold'
+                                    || (Number.isFinite(numericWeight) && numericWeight >= 600)) {
+                                wrappers.push('strong');
+                            }
+                            if (/^(italic|oblique)$/.test(
+                                    String(style.fontStyle || '').toLowerCase())) {
+                                wrappers.push('em');
+                            }
+                            if (decoration.includes('underline')) wrappers.push('u');
+                            if (!wrappers.length) {
+                                element.replaceWith(...Array.from(element.childNodes));
+                                continue;
+                            }
+                            const content = document.createDocumentFragment();
+                            while (element.firstChild) content.appendChild(element.firstChild);
+                            let replacement = content;
+                            for (const wrapperName of wrappers.slice().reverse()) {
+                                const wrapper = document.createElement(wrapperName);
+                                wrapper.appendChild(replacement);
+                                replacement = wrapper;
+                            }
+                            element.replaceWith(replacement);
                             continue;
                         }
                         let canonicalName = '';
@@ -11502,7 +11583,10 @@ class SDLXLIFFReviewDialog(QDialog):
                     }
                     host.normalize();
                 };
-                const applyInlineFormat = command => {
+                const applyInlineFormat = (command, preferRemembered=false) => {
+                    if (preferRemembered && window.__sdlNotepadFormatSelection) {
+                        restoreSelection(window.__sdlNotepadFormatSelection);
+                    }
                     const selection = window.getSelection();
                     if (!selection || !selection.rangeCount) return false;
                     const host = editableHost(selection.anchorNode);
@@ -11512,13 +11596,19 @@ class SDLXLIFFReviewDialog(QDialog):
                         bold: 'bold', italic: 'italic', underline: 'underline'
                     }[String(command || '').toLowerCase()];
                     if (!browserCommand) return false;
+                    const snapshot = selectionOffsets(host);
                     document.execCommand('styleWithCSS', false, false);
                     const changed = document.execCommand(browserCommand, false, null);
                     sanitizeHost(host);
+                    if (snapshot) {
+                        restoreSelection(snapshot);
+                        window.__sdlNotepadFormatSelection = snapshot;
+                    }
                     markDirty();
                     return !!changed;
                 };
                 window.__sdlApplyInlineFormat = applyInlineFormat;
+                window.__sdlNotepadFormatSelection = null;
                 window.__sdlNotepadContextSnapshot = null;
                 document.addEventListener('contextmenu', event => {
                     const element = event.target && event.target.nodeType === Node.ELEMENT_NODE
@@ -11534,6 +11624,11 @@ class SDLXLIFFReviewDialog(QDialog):
                         catch (_error) { return false; }
                     };
                     const computed = element ? window.getComputedStyle(element) : null;
+                    const contextHost = editableHost(element);
+                    const formatSelection = selectionOffsets(contextHost);
+                    if (formatSelection) {
+                        window.__sdlNotepadFormatSelection = formatSelection;
+                    }
                     const fontWeight = computed
                         ? String(computed.fontWeight || '').toLowerCase() : '';
                     const numericWeight = Number.parseInt(fontWeight, 10);
@@ -12090,7 +12185,7 @@ class SDLXLIFFReviewDialog(QDialog):
         try:
             browser.page().runJavaScript(
                 f"window.__sdlApplyInlineFormat"
-                f" ? window.__sdlApplyInlineFormat({command_json}) : false;"
+                f" ? window.__sdlApplyInlineFormat({command_json}, true) : false;"
             )
         except RuntimeError:
             pass
@@ -12473,7 +12568,7 @@ class SDLXLIFFReviewDialog(QDialog):
             source_text,
             missing=source_missing,
             empty_placeholder=(
-                "[translator note]"
+                "[Translator Note]"
                 if row_model.get("translator_note") else None
             ),
             tooltip_translation=tooltip_preview,
