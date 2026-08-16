@@ -9333,7 +9333,7 @@ class SDLXLIFFReviewDialog(QDialog):
     def _write_piece_target_html(self, piece, target_html):
         sidecar_path = piece.get("path")
         if not sidecar_path:
-            return
+            return target_html
         target_html = self._html_with_output_image_renames(target_html)
         tree = ET.parse(sidecar_path)
         root = tree.getroot()
