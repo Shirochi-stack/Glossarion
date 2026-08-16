@@ -29115,6 +29115,17 @@ If you see multiple p-b cookies, use the one with the longest value."""
         if self.translation_thread and self.translation_thread.is_alive():
             self.stop_translation()
             return
+
+        # Immediate Stop performs connection teardown on a helper thread. Do
+        # not clear cancellation state for a new run while that older cleanup
+        # can still close transports underneath it.
+        previous_stop_cleanup = getattr(self, '_translation_stop_cleanup_thread', None)
+        if previous_stop_cleanup is not None and previous_stop_cleanup.is_alive():
+            self.append_log("⏳ Waiting for the previous translation HTTP session to close...")
+            previous_stop_cleanup.join(timeout=3.0)
+            if previous_stop_cleanup.is_alive():
+                self.append_log("⏹️ Previous translation is still stopping; try Start again shortly.")
+                return
         
         # Double-click force stop: if a graceful stop just finished (thread no longer
         # alive) but the user clicks again within 2 seconds, treat it as a force-stop
@@ -29327,7 +29338,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
             import unified_api_client
             # Close lingering streams/sessions from any previous run
             # (hard_cancel_all also resets the watchdog internally)
-            if hasattr(unified_api_client, 'UnifiedClient'):
+            if hasattr(unified_api_client, 'hard_cancel_all'):
+                try:
+                    # Use the provider-aware wrapper. The class method does not
+                    # own Antigravity's adapter-level HTTP response registry.
+                    unified_api_client.hard_cancel_all()
+                except Exception:
+                    pass
+            elif hasattr(unified_api_client, 'UnifiedClient'):
                 try:
                     unified_api_client.UnifiedClient.hard_cancel_all()
                 except Exception:
@@ -36411,7 +36429,13 @@ Important rules:
                     print(f"Error terminating helper child processes: {e}")
             
             import threading
-            threading.Thread(target=_stop_heavy_work, daemon=True, name="translation-stop-cleanup").start()
+            stop_cleanup_thread = threading.Thread(
+                target=_stop_heavy_work,
+                daemon=True,
+                name="translation-stop-cleanup",
+            )
+            self._translation_stop_cleanup_thread = stop_cleanup_thread
+            stop_cleanup_thread.start()
         
         # Only poke the EPUB converter stop flag when the converter itself is
         # running. Translation/image stop should not wake or dirty converter

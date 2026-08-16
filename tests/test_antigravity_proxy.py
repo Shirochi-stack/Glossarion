@@ -1,5 +1,6 @@
 import json
 import sys
+import threading
 import time
 import types
 
@@ -314,6 +315,54 @@ def test_cancel_stream_closes_registered_active_response():
     assert antigravity_proxy.is_cancelled() is True
 
 
+def test_cancelled_stream_cannot_revive_after_new_run_resets_cancel_flag():
+    entered_stream = threading.Event()
+    release_stream = threading.Event()
+    errors = []
+    logs = []
+
+    class DelayedOldResponse(FakeStreamResponse):
+        def iter_lines(self, decode_unicode=True, chunk_size=1):
+            entered_stream.set()
+            release_stream.wait(2)
+            yield _sse_event({
+                "choices": [{"delta": {"content": "STALE OUTPUT"}, "finish_reason": "stop"}]
+            })
+            yield "data: [DONE]"
+
+    response = DelayedOldResponse([])
+    old_generation = antigravity_proxy.capture_cancel_generation()
+
+    def consume_old_stream():
+        try:
+            antigravity_proxy._consume_openai_stream(
+                response,
+                log_fn=logs.append,
+                log_stream=True,
+                cancel_generation=old_generation,
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=consume_old_stream)
+    worker.start()
+    assert entered_stream.wait(1)
+
+    antigravity_proxy.cancel_stream()
+    assert response.closed is True
+    antigravity_proxy.reset_cancel()
+    assert antigravity_proxy.is_cancelled() is False
+
+    release_stream.set()
+    worker.join(2)
+
+    assert worker.is_alive() is False
+    assert len(errors) == 1
+    assert "cancelled by user" in str(errors[0]).lower()
+    assert all("STALE OUTPUT" not in line for line in logs)
+    assert antigravity_proxy.is_cancel_generation_cancelled(old_generation) is True
+
+
 def test_cancelled_chat_preflight_never_posts(monkeypatch):
     post_calls = []
     monkeypatch.setattr(
@@ -432,8 +481,8 @@ def test_antigravity_forced_stream_logs_ignore_general_streaming_toggle(monkeypa
     assert captured["log_stream"] is True
 
 
-def test_antigravity_fresh_request_clears_orphaned_adapter_cancel(monkeypatch):
-    """An adapter-only cancel from an older run must not kill a fresh request."""
+def test_antigravity_fresh_request_uses_explicit_lifecycle_cancel_reset(monkeypatch):
+    """Only the new-run lifecycle reset may enable a fresh request."""
     client = _unified_antigravity_client("antigravity/claude-opus-4-6-thinking")
     client.request_timeout = 300
     client._is_stop_requested = lambda: False
@@ -458,12 +507,49 @@ def test_antigravity_fresh_request_clears_orphaned_adapter_cancel(monkeypatch):
     monkeypatch.setattr(unified_api_client, "_antigravity_send_stream", successful_send)
     antigravity_proxy.cancel_stream()
     assert antigravity_proxy.is_cancelled() is True
+    unified_api_client.set_stop_flag(False)
+    assert antigravity_proxy.is_cancelled() is False
 
     result = client._send_antigravity([], 0.2, 64000, "response.txt")
 
     assert result.content == "ok"
     assert send_cancel_states == [False]
     assert antigravity_proxy.is_cancelled() is False
+
+
+def test_antigravity_cancelled_generation_cannot_retry_after_reset(monkeypatch):
+    client = _unified_antigravity_client("antigravity/gemini-3.7-flash-high")
+    client.request_timeout = 300
+    client._is_stop_requested = lambda: False
+    client._should_abort_retry = lambda: False
+    client._get_max_retries = lambda: 2
+    client._get_send_interval = lambda: 0
+    client._sleep_with_cancel = lambda *_args, **_kwargs: True
+
+    monkeypatch.setattr(unified_api_client, "ANTIGRAVITY_AVAILABLE", True)
+    monkeypatch.setattr(
+        unified_api_client,
+        "_antigravity_ensure_running",
+        lambda log_fn=None: {"running": True},
+    )
+    monkeypatch.setattr(unified_api_client, "_antigravity_send", lambda **_kwargs: None)
+
+    send_calls = []
+
+    def interrupted_send(**kwargs):
+        send_calls.append(kwargs["cancel_generation"])
+        antigravity_proxy.cancel_stream()
+        antigravity_proxy.reset_cancel()
+        raise RuntimeError("socket interrupted")
+
+    monkeypatch.setattr(unified_api_client, "_antigravity_send_stream", interrupted_send)
+
+    with pytest.raises(UnifiedClientError) as exc_info:
+        client._send_antigravity([], 0.2, 64000, "response.txt")
+
+    assert exc_info.value.error_type == "cancelled"
+    assert len(send_calls) == 1
+    assert antigravity_proxy.is_cancel_generation_cancelled(send_calls[0]) is True
 
 
 def test_should_abort_retry_treats_graceful_stop_as_retry_only_cancel(monkeypatch):
@@ -796,7 +882,11 @@ def test_wait_for_auth_keeps_httpx_stream_open_until_consumer_closes(monkeypatch
     context = FakeStreamContext()
 
     monkeypatch.setattr(antigravity_proxy, "httpx", object())
-    monkeypatch.setattr(antigravity_proxy, "_wait_for_cancel", lambda _seconds: False)
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_wait_for_cancel",
+        lambda _seconds, _generation=None: False,
+    )
     monkeypatch.setattr(antigravity_proxy, "_open_auth_browser_once", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(antigravity_proxy, "_proxy_has_accounts", lambda: True)
     monkeypatch.setattr(antigravity_proxy, "_proxy_account_count", lambda: 1)
@@ -837,7 +927,7 @@ def test_wait_for_auth_cancel_does_not_launch_retry_post(monkeypatch):
     monkeypatch.setattr(
         antigravity_proxy,
         "_wait_for_cancel",
-        lambda _seconds: (antigravity_proxy.cancel_stream() or True),
+        lambda _seconds, _generation=None: (antigravity_proxy.cancel_stream() or True),
     )
     monkeypatch.setattr(
         antigravity_proxy.requests,

@@ -1235,6 +1235,8 @@ try:
     from antigravity_proxy import cancel_stream as _antigravity_cancel_stream
     from antigravity_proxy import reset_cancel as _antigravity_reset_cancel
     from antigravity_proxy import is_cancelled as _antigravity_is_cancelled
+    from antigravity_proxy import capture_cancel_generation as _antigravity_capture_cancel_generation
+    from antigravity_proxy import is_cancel_generation_cancelled as _antigravity_generation_cancelled
     from antigravity_proxy import check_proxy_health as _antigravity_health_check
     from antigravity_proxy import ensure_proxy_running as _antigravity_ensure_running
     from antigravity_proxy import CLAUDE_MAX_OUTPUT_TOKENS as _ANTIGRAVITY_CLAUDE_MAX_OUTPUT_TOKENS
@@ -1246,6 +1248,8 @@ except ImportError:
     _antigravity_cancel_stream = None
     _antigravity_reset_cancel = None
     _antigravity_is_cancelled = None
+    _antigravity_capture_cancel_generation = None
+    _antigravity_generation_cancelled = None
     _antigravity_health_check = None
     _antigravity_ensure_running = None
     _ANTIGRAVITY_CLAUDE_MAX_OUTPUT_TOKENS = 64000
@@ -26779,7 +26783,24 @@ class UnifiedClient:
         The unnumbered prefix forces account #1; positive numbered variants
         force subsequent account slots; antigravity0/ uses automatic rotation.
         """
-        if self._should_abort_retry():
+        antigravity_cancel_generation = (
+            _antigravity_capture_cancel_generation()
+            if _antigravity_capture_cancel_generation is not None
+            else None
+        )
+
+        def antigravity_operation_cancelled() -> bool:
+            if self._should_abort_retry():
+                return True
+            try:
+                return bool(
+                    _antigravity_generation_cancelled is not None
+                    and _antigravity_generation_cancelled(antigravity_cancel_generation)
+                )
+            except Exception:
+                return False
+
+        if antigravity_operation_cancelled():
             if _antigravity_cancel_stream is not None:
                 _antigravity_cancel_stream()
             raise UnifiedClientError(
@@ -26803,7 +26824,7 @@ class UnifiedClient:
                     f"Antigravity proxy could not be started: {error_msg}",
                     error_type="config_error"
                 )
-        if self._should_abort_retry():
+        if antigravity_operation_cancelled():
             if _antigravity_cancel_stream is not None:
                 _antigravity_cancel_stream()
             raise UnifiedClientError(
@@ -26836,7 +26857,7 @@ class UnifiedClient:
 
         for attempt in range(max_retries):
             # Retry attempts must stop for both immediate and graceful Stop.
-            if self._should_abort_retry():
+            if antigravity_operation_cancelled():
                 # Also signal the antigravity cancel event so any in-flight stream aborts
                 if _antigravity_cancel_stream is not None:
                     _antigravity_cancel_stream()
@@ -26857,7 +26878,7 @@ class UnifiedClient:
                 # Never clear Antigravity's process-wide cancel event from a
                 # worker. Recheck immediately before the POST so a Stop racing
                 # request setup cannot launch another retry.
-                if self._should_abort_retry():
+                if antigravity_operation_cancelled():
                     if _antigravity_cancel_stream is not None:
                         _antigravity_cancel_stream()
                     raise UnifiedClientError(
@@ -26865,34 +26886,10 @@ class UnifiedClient:
                         error_type="cancelled",
                     )
 
-                # Antigravity's adapter owns a process-wide event in addition
-                # to UnifiedClient's authoritative stop flags. A delayed
-                # cleanup from an older operation can set only that adapter
-                # event after the new run has already reset its GUI/client
-                # flags. Clear that orphaned event immediately before a fresh
-                # POST, but never clear it while any real Stop signal is set.
-                try:
-                    stale_adapter_cancel = bool(
-                        _antigravity_is_cancelled is not None
-                        and _antigravity_is_cancelled()
-                    )
-                except Exception:
-                    stale_adapter_cancel = False
-                if stale_adapter_cancel:
-                    if self._should_abort_retry():
-                        if _antigravity_cancel_stream is not None:
-                            _antigravity_cancel_stream()
-                        raise UnifiedClientError(
-                            "Antigravity: Translation stopped by user",
-                            error_type="cancelled",
-                        )
-                    if _antigravity_reset_cancel is not None:
-                        _antigravity_reset_cancel()
-
-                # Close the small race between the guarded adapter reset and
-                # the actual request. A real Stop always wins and reasserts the
-                # adapter event before returning to the caller.
-                if self._should_abort_retry():
+                # This request keeps the generation captured when it entered
+                # the provider. A new translation may clear the shared event,
+                # but it cannot make this older operation valid again.
+                if antigravity_operation_cancelled():
                     if _antigravity_cancel_stream is not None:
                         _antigravity_cancel_stream()
                     raise UnifiedClientError(
@@ -26909,6 +26906,7 @@ class UnifiedClient:
                     log_fn=print,
                     log_stream=log_stream,
                     account_id=account_id,
+                    cancel_generation=antigravity_cancel_generation,
                 )
 
                 content = result.get("content", "")
@@ -26940,7 +26938,7 @@ class UnifiedClient:
                         error_type="cancelled"
                     )
 
-                if self._should_abort_retry():
+                if antigravity_operation_cancelled():
                     raise UnifiedClientError(
                         "Antigravity: Translation stopped by user",
                         error_type="cancelled",
@@ -26992,7 +26990,7 @@ class UnifiedClient:
                         continue
 
                 # Bail on stop request
-                if self._should_abort_retry():
+                if antigravity_operation_cancelled():
                     raise UnifiedClientError(
                         "Antigravity: Translation stopped by user",
                         error_type="cancelled"
@@ -27010,7 +27008,7 @@ class UnifiedClient:
 
             except Exception as exc:
                 error_str = str(exc)
-                if self._should_abort_retry():
+                if antigravity_operation_cancelled():
                     raise UnifiedClientError(
                         "Antigravity: Translation stopped by user",
                         error_type="cancelled"
@@ -27025,7 +27023,7 @@ class UnifiedClient:
                         )
                     continue
 
-        if self._should_abort_retry():
+        if antigravity_operation_cancelled():
             raise UnifiedClientError(
                 "Antigravity: Translation stopped by user",
                 error_type="cancelled",

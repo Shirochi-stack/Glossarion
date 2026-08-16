@@ -84,6 +84,8 @@ GEMINI_MAX_OUTPUT_TOKENS = 64000
 
 # Module-level cancellation flag.
 _cancel_event = threading.Event()
+_cancel_state_lock = threading.Lock()
+_cancel_generation = 0
 _active_response_lock = threading.Lock()
 _active_responses: Dict[int, Any] = {}
 
@@ -1079,7 +1081,13 @@ def invalidate_api_key_cache() -> None:
 
 def cancel_stream() -> None:
     """Signal any active Antigravity proxy stream to abort."""
-    _cancel_event.set()
+    global _cancel_generation
+    with _cancel_state_lock:
+        # Advancing the generation permanently invalidates requests that were
+        # active at Stop time. Clearing the event for a later run must never
+        # revive one of those older HTTP streams.
+        _cancel_generation += 1
+        _cancel_event.set()
     # Closing the live response wakes a thread blocked in SSE iteration instead
     # of waiting for the proxy/model to yield another line.
     with _active_response_lock:
@@ -1092,8 +1100,9 @@ def cancel_stream() -> None:
 
 
 def reset_cancel() -> None:
-    """Clear the cancellation flag before a new request."""
-    _cancel_event.clear()
+    """Allow new requests without reviving an older cancelled generation."""
+    with _cancel_state_lock:
+        _cancel_event.clear()
     reset_auth_browser()
 
 
@@ -1108,14 +1117,34 @@ def is_cancelled() -> bool:
     return _cancel_event.is_set()
 
 
-def _raise_if_cancelled() -> None:
-    if _cancel_event.is_set():
+def capture_cancel_generation() -> int:
+    """Return the generation a new Antigravity operation belongs to."""
+    with _cancel_state_lock:
+        return _cancel_generation
+
+
+def is_cancel_generation_cancelled(cancel_generation: Optional[int]) -> bool:
+    """Return whether Stop invalidated a particular request generation."""
+    with _cancel_state_lock:
+        if _cancel_event.is_set():
+            return True
+        return (
+            cancel_generation is not None
+            and int(cancel_generation) != _cancel_generation
+        )
+
+
+def _raise_if_cancelled(cancel_generation: Optional[int] = None) -> None:
+    if is_cancel_generation_cancelled(cancel_generation):
         raise RuntimeError("Antigravity: stream cancelled by user")
 
 
-def _wait_for_cancel(timeout: float) -> bool:
+def _wait_for_cancel(timeout: float, cancel_generation: Optional[int] = None) -> bool:
     """Wait up to *timeout*, returning immediately when cancellation is set."""
-    return _cancel_event.wait(max(0.0, float(timeout)))
+    if is_cancel_generation_cancelled(cancel_generation):
+        return True
+    _cancel_event.wait(max(0.0, float(timeout)))
+    return is_cancel_generation_cancelled(cancel_generation)
 
 
 def _register_active_response(response: Any) -> None:
@@ -1623,6 +1652,7 @@ def _wait_for_auth(
     request_timeout: float = 300,
     prefer_httpx_stream: bool = False,
     min_account_count: int = 1,
+    cancel_generation: Optional[int] = None,
 ):
     """Open OAuth and poll until an account is linked or timeout is reached."""
     _open_auth_browser_once(proxy_url, log_fn)
@@ -1635,19 +1665,25 @@ def _wait_for_auth(
 
     elapsed = 0
     while elapsed < max_wait:
-        _raise_if_cancelled()
-        if _wait_for_cancel(poll_interval):
-            _raise_if_cancelled()
+        _raise_if_cancelled(cancel_generation)
+        if _wait_for_cancel(poll_interval, cancel_generation):
+            _raise_if_cancelled(cancel_generation)
         elapsed += poll_interval
 
         if _proxy_account_count() >= max(1, int(min_account_count or 1)):
             _log("Antigravity: account detected, retrying request...")
             retry_resp = None
             try:
-                _raise_if_cancelled()
+                _raise_if_cancelled(cancel_generation)
                 if stream and prefer_httpx_stream and httpx is not None:
                     retry_resp = _HttpxStreamResponseAdapter(
-                        _stream_chat_with_httpx(url, payload, headers, request_timeout)
+                        _stream_chat_with_httpx(
+                            url,
+                            payload,
+                            headers,
+                            request_timeout,
+                            cancel_generation=cancel_generation,
+                        )
                     )
                 else:
                     retry_resp = requests.post(
@@ -1657,6 +1693,7 @@ def _wait_for_auth(
                         timeout=request_timeout,
                         stream=stream,
                     )
+                    _raise_if_cancelled(cancel_generation)
                 if retry_resp.status_code < 400:
                     return retry_resp
             except Exception:
@@ -1678,6 +1715,7 @@ def _ensure_account_slot_available(
     log_fn=None,
     max_wait: float = 180,
     poll_interval: float = 2,
+    cancel_generation: Optional[int] = None,
 ) -> None:
     """Open OAuth and wait until the requested antigravityN/ account slot exists."""
     if not account_id:
@@ -1695,9 +1733,9 @@ def _ensure_account_slot_available(
 
     elapsed = 0.0
     while elapsed < max_wait:
-        _raise_if_cancelled()
-        if _wait_for_cancel(poll_interval):
-            _raise_if_cancelled()
+        _raise_if_cancelled(cancel_generation)
+        if _wait_for_cancel(poll_interval, cancel_generation):
+            _raise_if_cancelled(cancel_generation)
         elapsed += poll_interval
         if _proxy_account_count() >= account_id:
             _log(f"✅ Antigravity: account slot #{account_id} detected.")
@@ -2297,8 +2335,9 @@ def _post_chat(
     timeout: float,
     stream: bool,
     headers: Optional[Dict[str, str]] = None,
+    cancel_generation: Optional[int] = None,
 ) -> requests.Response:
-    _raise_if_cancelled()
+    _raise_if_cancelled(cancel_generation)
     return requests.post(
         f"{get_proxy_url()}{CHAT_COMPLETIONS_ENDPOINT}",
         json=payload,
@@ -2313,8 +2352,9 @@ def _stream_chat_with_httpx(
     payload: Dict[str, Any],
     headers: Dict[str, str],
     timeout: float,
+    cancel_generation: Optional[int] = None,
 ):
-    _raise_if_cancelled()
+    _raise_if_cancelled(cancel_generation)
     if httpx is None:
         raise ImportError("httpx is not installed")
 
@@ -2604,7 +2644,12 @@ def _stream_error_message(event: Dict[str, Any]) -> str:
     return ""
 
 
-def _consume_openai_stream(resp: Any, log_fn=None, log_stream: bool = True) -> Dict[str, Any]:
+def _consume_openai_stream(
+    resp: Any,
+    log_fn=None,
+    log_stream: bool = True,
+    cancel_generation: Optional[int] = None,
+) -> Dict[str, Any]:
     _log = log_fn or _log_noop
     collected_content: List[str] = []
     finish_reason = "stop"
@@ -2618,7 +2663,9 @@ def _consume_openai_stream(resp: Any, log_fn=None, log_stream: bool = True) -> D
     # part of that same forced stream rather than a separately gated channel.
     stream_thinking = bool(log_stream)
 
-    _raise_if_cancelled()
+    if cancel_generation is None:
+        cancel_generation = capture_cancel_generation()
+    _raise_if_cancelled(cancel_generation)
     _register_active_response(resp)
     try:
         try:
@@ -2627,7 +2674,7 @@ def _consume_openai_stream(resp: Any, log_fn=None, log_stream: bool = True) -> D
             pass
 
         for line in _iter_stream_lines(resp):
-            if _cancel_event.is_set():
+            if is_cancel_generation_cancelled(cancel_generation):
                 resp.close()
                 raise RuntimeError("Antigravity: stream cancelled by user")
 
@@ -2692,7 +2739,7 @@ def _consume_openai_stream(resp: Any, log_fn=None, log_stream: bool = True) -> D
             if remainder:
                 _log(remainder)
 
-        _raise_if_cancelled()
+        _raise_if_cancelled(cancel_generation)
 
     finally:
         _unregister_active_response(resp)
@@ -2719,9 +2766,15 @@ def send_message_stream(
     log_fn=None,
     log_stream: bool = True,
     account_id: Optional[int] = None,
+    cancel_generation: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Send a streaming message to Shirochi-stack/antigravity-proxy."""
-    _raise_if_cancelled()
+    request_cancel_generation = (
+        capture_cancel_generation()
+        if cancel_generation is None
+        else int(cancel_generation)
+    )
+    _raise_if_cancelled(request_cancel_generation)
     proxy_url = get_proxy_url()
     url = f"{proxy_url}{CHAT_COMPLETIONS_ENDPOINT}"
     if account_id is None:
@@ -2732,7 +2785,12 @@ def send_message_stream(
 
     _log = log_fn or _log_noop
     _ensure_proxy_log_forwarder(_log)
-    _ensure_account_slot_available(account_id, proxy_url, _log)
+    _ensure_account_slot_available(
+        account_id,
+        proxy_url,
+        _log,
+        cancel_generation=request_cancel_generation,
+    )
     headers = _build_headers(account_id)
     _log(f"🌊 Antigravity: streaming from {proxy_url} (model={payload['model']})")
     if account_id:
@@ -2740,9 +2798,15 @@ def send_message_stream(
     _log_payload_token_limit(_log, max_tokens, payload)
 
     try:
-        _raise_if_cancelled()
-        with _stream_chat_with_httpx(url, payload, headers, timeout) as resp:
-            _raise_if_cancelled()
+        _raise_if_cancelled(request_cancel_generation)
+        with _stream_chat_with_httpx(
+            url,
+            payload,
+            headers,
+            timeout,
+            cancel_generation=request_cancel_generation,
+        ) as resp:
+            _raise_if_cancelled(request_cancel_generation)
             if resp.status_code != 200:
                 try:
                     error_text = resp.read().decode("utf-8", errors="replace")[:20000]
@@ -2760,10 +2824,16 @@ def send_message_stream(
                         request_timeout=timeout,
                         prefer_httpx_stream=True,
                         min_account_count=_min_accounts_for_auth_retry(error_text, account_id),
+                        cancel_generation=request_cancel_generation,
                     )
                     if auth_resp is not None:
-                        return _consume_openai_stream(auth_resp, log_fn=log_fn, log_stream=log_stream)
-                    _raise_if_cancelled()
+                        return _consume_openai_stream(
+                            auth_resp,
+                            log_fn=log_fn,
+                            log_stream=log_stream,
+                            cancel_generation=request_cancel_generation,
+                        )
+                    _raise_if_cancelled(request_cancel_generation)
                     raise RuntimeError(
                         f"Antigravity: authentication timed out.\n"
                         f"Open {proxy_url} and add your Google account, then try again."
@@ -2780,7 +2850,12 @@ def send_message_stream(
                 raise RuntimeError(message)
 
             try:
-                return _consume_openai_stream(resp, log_fn=log_fn, log_stream=log_stream)
+                return _consume_openai_stream(
+                    resp,
+                    log_fn=log_fn,
+                    log_stream=log_stream,
+                    cancel_generation=request_cancel_generation,
+                )
             except RuntimeError as stream_exc:
                 error_text = str(stream_exc)
                 if _error_text_suggests_account_setup(error_text):
@@ -2794,9 +2869,15 @@ def send_message_stream(
                         request_timeout=timeout,
                         prefer_httpx_stream=True,
                         min_account_count=_min_accounts_for_auth_retry(error_text, account_id),
+                        cancel_generation=request_cancel_generation,
                     )
                     if auth_resp is not None:
-                        return _consume_openai_stream(auth_resp, log_fn=log_fn, log_stream=log_stream)
+                        return _consume_openai_stream(
+                            auth_resp,
+                            log_fn=log_fn,
+                            log_stream=log_stream,
+                            cancel_generation=request_cancel_generation,
+                        )
                     raise RuntimeError(
                         f"Antigravity: authentication timed out.\n"
                         f"Open {proxy_url} and add your Google account, then try again."
@@ -2813,14 +2894,27 @@ def send_message_stream(
         raise
 
     try:
-        _raise_if_cancelled()
-        resp = _post_chat(payload, timeout=timeout, stream=True, headers=headers)
+        _raise_if_cancelled(request_cancel_generation)
+        resp = _post_chat(
+            payload,
+            timeout=timeout,
+            stream=True,
+            headers=headers,
+            cancel_generation=request_cancel_generation,
+        )
     except requests.ConnectionError:
         _raise_connection_refused()
     except requests.Timeout:
         raise RuntimeError(f"Antigravity proxy streaming request timed out after {timeout}s.")
 
-    _raise_if_cancelled()
+    try:
+        _raise_if_cancelled(request_cancel_generation)
+    except Exception:
+        try:
+            resp.close()
+        except Exception:
+            pass
+        raise
     if _should_wait_for_auth(resp):
         error_text = _extract_error_message(resp)
         try:
@@ -2836,11 +2930,12 @@ def send_message_stream(
             stream=True,
             request_timeout=timeout,
             min_account_count=_min_accounts_for_auth_retry(error_text, account_id),
+            cancel_generation=request_cancel_generation,
         )
         if auth_resp is not None:
             resp = auth_resp
         else:
-            _raise_if_cancelled()
+            _raise_if_cancelled(request_cancel_generation)
             raise RuntimeError(
                 f"Antigravity: authentication timed out.\n"
                 f"Open {proxy_url} and add your Google account, then try again."
@@ -2866,7 +2961,12 @@ def send_message_stream(
         raise RuntimeError(message)
 
     try:
-        return _consume_openai_stream(resp, log_fn=log_fn, log_stream=log_stream)
+        return _consume_openai_stream(
+            resp,
+            log_fn=log_fn,
+            log_stream=log_stream,
+            cancel_generation=request_cancel_generation,
+        )
     except RuntimeError as stream_exc:
         error_text = str(stream_exc)
         if _error_text_suggests_account_setup(error_text):
@@ -2879,9 +2979,15 @@ def send_message_stream(
                 stream=True,
                 request_timeout=timeout,
                 min_account_count=_min_accounts_for_auth_retry(error_text, account_id),
+                cancel_generation=request_cancel_generation,
             )
             if auth_resp is not None:
-                return _consume_openai_stream(auth_resp, log_fn=log_fn, log_stream=log_stream)
+                return _consume_openai_stream(
+                    auth_resp,
+                    log_fn=log_fn,
+                    log_stream=log_stream,
+                    cancel_generation=request_cancel_generation,
+                )
             raise RuntimeError(
                 f"Antigravity: authentication timed out.\n"
                 f"Open {proxy_url} and add your Google account, then try again."
