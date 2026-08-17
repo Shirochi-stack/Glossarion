@@ -12094,8 +12094,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     if (sourceText) host.setAttribute(SOURCE_ATTR, sourceText);
                     if (textNode) textNode.parentNode.replaceChild(host, textNode);
                     if (textNode) host.appendChild(textNode);
-                    if ((textNode && textNode.nodeValue.trim())
-                            || String(sourceText || '').trim()) {
+                    if (String(sourceText || '').trim()) {
                         const container = userTagContainer(host);
                         if (container) container.setAttribute(ORIGINAL_TEXT_CONTAINER_ATTR, '1');
                     }

@@ -3731,17 +3731,28 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
             const originalEmptyStayedNeutral = !document.querySelector('#empty').hasAttribute(
                 'data-sdl-notepad-user-empty-container'
             );
+            const userAddedHost = document.querySelector(
+                '#empty [data-sdl-notepad-text]'
+            );
+            userAddedHost.textContent = 'Temporary translator note';
+            userAddedHost.dispatchEvent(new InputEvent('input', {bubbles: true}));
+            userAddedHost.textContent = '';
+            userAddedHost.dispatchEvent(new InputEvent('input', {bubbles: true}));
+            const deletedUserAdditionStayedNeutral = !document.querySelector(
+                '#empty'
+            ).hasAttribute('data-sdl-notepad-user-empty-container');
             hosts[0].textContent = 'Translated line ';
             hosts[1].textContent = 'protected';
             hosts[0].dispatchEvent(new InputEvent('input', {bubbles: true}));
             return JSON.stringify([
                 markedRed,
                 originalEmptyStayedNeutral,
+                deletedUserAdditionStayedNeutral,
                 !paragraph.hasAttribute('data-sdl-notepad-user-empty-container')
             ]);
         })();
         """
-    ) == "[true,true,true]"
+    ) == "[true,true,true,true]"
     assert js_value(
         """
         (() => {
