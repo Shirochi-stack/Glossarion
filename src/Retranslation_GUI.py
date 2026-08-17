@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import re
+import importlib.util
 import html as html_lib
 import copy
 from collections import Counter
@@ -1806,7 +1807,12 @@ class SDLXLIFFReviewDialog(QDialog):
         self._last_review_signature = None
         self._last_machine_translation_signature = None
         self._review_image_assets_output = ""
+        self._notepad_mode_supported = self._detect_notepad_mode_support()
         self._two_column_layout_enabled = self._review_two_column_layout_enabled()
+        if not self._notepad_mode_supported:
+            # A full-build Notepad preference may be shared with a Lite build.
+            # Keep it intact in config, but never enter the unavailable mode.
+            self._two_column_layout_enabled = True
         self._auto_refresh_timer = None
         self._refreshing_review_data = False
         self._review_data_loaded = False
@@ -4561,8 +4567,53 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             return True
 
+    @staticmethod
+    def _detect_notepad_mode_support():
+        """Check Lite/full package capability without importing Qt WebEngine."""
+        try:
+            for module_name in (
+                "PySide6.QtWebEngineCore",
+                "PySide6.QtWebEngineWidgets",
+            ):
+                if module_name in sys.modules:
+                    continue
+                if importlib.util.find_spec(module_name) is None:
+                    return False
+            return True
+        except (ImportError, ModuleNotFoundError, ValueError):
+            return False
+
+    def _review_notepad_mode_is_available(self):
+        supported = getattr(self, "_notepad_mode_supported", None)
+        if supported is None:
+            supported = self._detect_notepad_mode_support()
+            self._notepad_mode_supported = bool(supported)
+        return bool(supported)
+
+    def _reject_unavailable_notepad_mode(self):
+        """Restore Compact immediately without triggering a page rebuild."""
+        self._two_column_layout_enabled = True
+        try:
+            button = getattr(self, "two_column_layout_btn", None)
+            if button is not None and not button.isChecked():
+                button.blockSignals(True)
+                button.setChecked(True)
+                button.blockSignals(False)
+        except Exception:
+            pass
+        self._update_review_layout_button()
+        try:
+            self.save_status_label.setText(
+                "Notepad mode is unavailable in this Lite package because Qt WebEngine is not included; Compact mode remains active."
+            )
+        except Exception:
+            pass
+
     def _set_review_two_column_layout(self, enabled):
         enabled = bool(enabled)
+        if not enabled and not self._review_notepad_mode_is_available():
+            self._reject_unavailable_notepad_mode()
+            return
         try:
             if self._edit_save_timer.isActive():
                 self._edit_save_timer.stop()
@@ -10543,7 +10594,11 @@ class SDLXLIFFReviewDialog(QDialog):
             else self.NOTEPAD_LAYOUT_BUTTON_TEXT
         )
         button.setToolTip(
-            "Compact: source and output cards with row actions. Click for Notepad."
+            (
+                "Compact: source and output cards with row actions. Click for Notepad."
+                if self._review_notepad_mode_is_available()
+                else "Compact mode. Notepad is unavailable because this Lite package does not include Qt WebEngine."
+            )
             if compact
             else "Notepad: edit the complete raw output HTML document in one code buffer. Click for Compact."
         )

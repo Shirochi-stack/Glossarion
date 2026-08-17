@@ -1960,6 +1960,58 @@ def test_sdlxliff_review_two_column_layout_toggle_saves_to_parent_config():
     assert parent.save_calls == 1
 
 
+def test_sdlxliff_review_lite_build_rejects_notepad_before_rebuild():
+    class Button:
+        def __init__(self):
+            self.checked = False
+            self.blocked = []
+
+        def isChecked(self):
+            return self.checked
+
+        def blockSignals(self, blocked):
+            self.blocked.append(blocked)
+
+        def setChecked(self, checked):
+            self.checked = checked
+
+    class Status:
+        def setText(self, text):
+            self.text = text
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog._notepad_mode_supported = False
+    dialog._two_column_layout_enabled = True
+    dialog.two_column_layout_btn = Button()
+    dialog.save_status_label = Status()
+    dialog._update_review_layout_button = lambda: None
+    dialog._flush_target_edits = lambda: (_ for _ in ()).throw(
+        AssertionError("Notepad rejection must happen before flushing or rebuilding")
+    )
+
+    dialog._set_review_two_column_layout(False)
+
+    assert dialog._two_column_layout_enabled is True
+    assert dialog.two_column_layout_btn.checked is True
+    assert dialog.two_column_layout_btn.blocked == [True, False]
+    assert "Lite package" in dialog.save_status_label.text
+
+
+def test_sdlxliff_review_notepad_support_probe_does_not_import_webengine(monkeypatch):
+    checked = []
+
+    def fake_find_spec(module_name):
+        checked.append(module_name)
+        return None
+
+    monkeypatch.delitem(sys.modules, "PySide6.QtWebEngineCore", raising=False)
+    monkeypatch.delitem(sys.modules, "PySide6.QtWebEngineWidgets", raising=False)
+    monkeypatch.setattr(retranslation_gui_module.importlib.util, "find_spec", fake_find_spec)
+
+    assert SDLXLIFFReviewDialog._detect_notepad_mode_support() is False
+    assert checked == ["PySide6.QtWebEngineCore"]
+
+
 def test_sdlxliff_review_layout_toggle_holds_viewport_snapshot_and_discards_tall_page():
     dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     visible_page = object()
