@@ -4279,6 +4279,85 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert dialog.two_column_layout_btn.text() == "Compact"
 
 
+def test_notepad_applies_persisted_edge_markers_before_user_interaction(tmp_path, qtbot):
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+
+    output_name = "response_chapter0001.html"
+    source_html = (
+        '<html><body><p id="manual">Source line<br/></p>'
+        '<p id="deleted">Deleted source line.</p></body></html>'
+    )
+    target_html = (
+        '<html><body><p id="manual">Translator<br/><br/></p>'
+        '<p id="deleted"></p></body></html>'
+    )
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0001.xhtml"},
+        source_html,
+        target_html,
+        raise_errors=True,
+    )
+    dialog = SDLXLIFFReviewDialog(
+        str(tmp_path),
+        sidecar,
+        config={SDLXLIFFReviewDialog.TWO_COLUMN_LAYOUT_CONFIG_KEY: False},
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(
+        lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
+        timeout=5000,
+    )
+    browser = dialog.rows_widget.findChild(QWebEngineView, "SdlReviewNotepadBrowser")
+    assert browser is not None
+
+    def js_value(script):
+        values = []
+        browser.page().runJavaScript(script, values.append)
+        qtbot.waitUntil(lambda: bool(values), timeout=5000)
+        return values[0]
+
+    qtbot.waitUntil(
+        lambda: js_value(
+            "document.querySelector('#manual')?.hasAttribute("
+            "'data-sdl-notepad-user-tag-container') === true"
+        ) is True,
+        timeout=5000,
+    )
+    assert js_value(
+        "getComputedStyle(document.querySelector('#manual')).boxShadow"
+        ".includes('rgb(215, 168, 0)')"
+    ) is True
+
+    # Reopen the saved blank target without source fallback. This is the same
+    # initialization path used when a normalization reload preserves a row the
+    # user deliberately emptied.
+    piece = dialog.pieces[0]
+    dialog._set_notepad_browser_html(
+        browser,
+        piece,
+        dialog._notepad_initial_document_html(piece, fill_untranslated=False),
+    )
+    qtbot.waitUntil(
+        lambda: js_value(
+            "document.querySelector('#deleted')?.hasAttribute("
+            "'data-sdl-notepad-user-empty-container') === true"
+        ) is True,
+        timeout=5000,
+    )
+    assert js_value(
+        "getComputedStyle(document.querySelector('#deleted')).boxShadow"
+        ".includes('rgb(220, 53, 69)')"
+    ) is True
+    assert js_value(
+        "document.querySelector('#manual')?.hasAttribute("
+        "'data-sdl-notepad-user-tag-container') === true"
+    ) is True
+    assert js_value("window.__sdlNotepadDirty") is False
+
+
 def test_manual_untranslated_notepad_renders_source_fallback_and_creates_output(tmp_path, qtbot):
     from PySide6.QtWebEngineWidgets import QWebEngineView
 

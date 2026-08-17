@@ -12094,7 +12094,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     if (sourceText) host.setAttribute(SOURCE_ATTR, sourceText);
                     if (textNode) textNode.parentNode.replaceChild(host, textNode);
                     if (textNode) host.appendChild(textNode);
-                    if (textNode && textNode.nodeValue.trim()) {
+                    if ((textNode && textNode.nodeValue.trim())
+                            || String(sourceText || '').trim()) {
                         const container = userTagContainer(host);
                         if (container) container.setAttribute(ORIGINAL_TEXT_CONTAINER_ATTR, '1');
                     }
@@ -12157,6 +12158,27 @@ class SDLXLIFFReviewDialog(QDialog):
                             element.firstChild
                         );
                     }
+                });
+
+                // Apply persisted marker state immediately. Previously these
+                // container attributes were only refreshed by edit/history
+                // handlers, so their yellow/red edge styles appeared only
+                // after the user interacted with the loaded document.
+                const initialIndicatorContainers = new Set();
+                document.body.querySelectorAll(
+                    '[' + EDIT_ATTR + '],[' + USER_TAG_ATTR + ']'
+                ).forEach(element => {
+                    const container = userTagContainer(element);
+                    if (!container) return;
+                    if (element.hasAttribute(EDIT_ATTR)
+                            && String(element.getAttribute(SOURCE_ATTR) || '').trim()) {
+                        container.setAttribute(ORIGINAL_TEXT_CONTAINER_ATTR, '1');
+                    }
+                    initialIndicatorContainers.add(container);
+                });
+                initialIndicatorContainers.forEach(container => {
+                    refreshUserTagIndicator(container);
+                    refreshUserEmptyIndicator(container);
                 });
 
                 const style = document.createElement('style');
