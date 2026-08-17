@@ -12155,6 +12155,22 @@ class SDLXLIFFReviewDialog(QDialog):
                 const navigationBreaksIn = container => Array.from(
                     container.querySelectorAll('br')
                 );
+                const trailingUserBreakIn = container => {
+                    if (!container) return null;
+                    const breaks = Array.from(container.querySelectorAll(
+                        'br[' + USER_TAG_ATTR + ']'
+                    ));
+                    const lineBreak = breaks.length ? breaks[breaks.length - 1] : null;
+                    if (!lineBreak) return null;
+                    try {
+                        const afterBreak = document.createRange();
+                        afterBreak.selectNodeContents(container);
+                        afterBreak.setStartAfter(lineBreak);
+                        return afterBreak.toString().trim() ? null : lineBreak;
+                    } catch (_error) {
+                        return null;
+                    }
+                };
                 const visualLineCount = container => {
                     if (!container || !container.isConnected) return 0;
                     try {
@@ -12236,10 +12252,41 @@ class SDLXLIFFReviewDialog(QDialog):
                     }
                     setActiveNavigationContainer(event.target);
                 }, true);
-                document.addEventListener('mousedown', () => {
+                document.addEventListener('mousedown', event => {
                     if (wholeSelectionContainer && !settingWholeSelection) {
                         clearWholeContainerSelection();
                     }
+                    const element = event.target && event.target.nodeType === Node.ELEMENT_NODE
+                        ? event.target : event.target && event.target.parentElement;
+                    if (!element) return;
+                    const directHost = editableHost(element);
+                    const container = navigationContainer(directHost)
+                        || userTagContainer(element);
+                    const lineBreak = trailingUserBreakIn(container);
+                    const owner = editableHost(lineBreak);
+                    if (!container || !lineBreak || !owner) return;
+                    const containerRect = container.getBoundingClientRect();
+                    const ownerStyle = window.getComputedStyle(owner);
+                    const fontSize = Number.parseFloat(ownerStyle.fontSize) || 16;
+                    const parsedLineHeight = Number.parseFloat(ownerStyle.lineHeight);
+                    const lineHeight = Number.isFinite(parsedLineHeight)
+                        ? parsedLineHeight : fontSize * 1.2;
+                    const inTrailingBlankLine = event.clientX >= containerRect.left
+                        && event.clientX <= containerRect.right
+                        && event.clientY >= containerRect.bottom - (lineHeight * 1.25)
+                        && event.clientY <= containerRect.bottom + 2;
+                    if (!inTrailingBlankLine) return;
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    try { owner.focus({preventScroll: true}); }
+                    catch (_error) { owner.focus(); }
+                    const range = document.createRange();
+                    range.setStartAfter(lineBreak);
+                    range.collapse(true);
+                    const selection = window.getSelection();
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    setActiveNavigationContainer(owner);
                 }, true);
                 document.addEventListener('selectionchange', () => {
                     const selection = window.getSelection();
@@ -12986,7 +13033,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     ' outline: 1px solid rgba(70,150,220,.72) !important;' +
                     ' outline-offset: 2px; border-radius: 2px; }' +
                     '[' + EDIT_ATTR + ']:has(br[' + USER_TAG_ATTR + ']:last-child)::after {' +
-                    ' content: "\\00a0"; opacity: 0; pointer-events: none; }' +
+                    ' content: "\\00a0"; opacity: 0; }' +
                     '[' + EDIT_ATTR + '][' + PLACEHOLDER_ATTR + ']:focus,' +
                     '[' + EDIT_ATTR + '][' + BREAK_ATTR + ']:focus { box-shadow: none; }' +
                     '[' + USER_TAG_CONTAINER_ATTR + '] {' +

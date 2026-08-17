@@ -3899,12 +3899,33 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
             });
             host.dispatchEvent(enter);
             const afterHeight = paragraph.getBoundingClientRect().height;
+            const paragraphRect = paragraph.getBoundingClientRect();
+            const hit = document.elementFromPoint(
+                paragraphRect.left + 2,
+                paragraphRect.bottom - (beforeHeight / 2)
+            );
+            const hitOwner = hit && hit.closest
+                ? hit.closest('[data-sdl-notepad-text]') : null;
+            const blankLineMouseDown = new MouseEvent('mousedown', {
+                clientX: paragraphRect.left + 2,
+                clientY: paragraphRect.bottom - (beforeHeight / 2),
+                bubbles: true,
+                cancelable: true
+            });
+            hit.dispatchEvent(blankLineMouseDown);
+            const backspace = new KeyboardEvent('keydown', {
+                key: 'Backspace', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(backspace);
             const result = enter.defaultPrevented
                 && host.querySelectorAll(
                     'br[data-sdl-notepad-user-tag="br"]'
-                ).length === 1
+                ).length === 0
                 && afterHeight > beforeHeight + 2
-                && paragraph.hasAttribute('data-sdl-notepad-multiline-container');
+                && hitOwner === host
+                && blankLineMouseDown.defaultPrevented
+                && backspace.defaultPrevented
+                && !paragraph.hasAttribute('data-sdl-notepad-user-tag-container');
             paragraph.remove();
             return result;
         })();
@@ -4920,6 +4941,131 @@ def test_notepad_erasing_translated_row_keeps_visible_red_empty_row(tmp_path, qt
         })();
         """
     ) is True
+
+
+def test_notepad_loaded_target_only_trailing_break_deletes_from_blank_line(
+    tmp_path, qtbot
+):
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+
+    output_name = "response_p-008.html"
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "p-008.xhtml"},
+        "<html><body><p>Original source paragraph.</p></body></html>",
+        (
+            "<html><body><p>All at is known is that the super-large type is "
+            "slowly moving toward the royal capital<br/></p></body></html>"
+        ),
+        raise_errors=True,
+    )
+    dialog = SDLXLIFFReviewDialog(
+        str(tmp_path),
+        sidecar,
+        config={SDLXLIFFReviewDialog.TWO_COLUMN_LAYOUT_CONFIG_KEY: False},
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(
+        lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
+        timeout=5000,
+    )
+    browser = dialog.rows_widget.findChild(QWebEngineView, "SdlReviewNotepadBrowser")
+    assert browser is not None
+
+    def js_value(script):
+        values = []
+        browser.page().runJavaScript(script, values.append)
+        qtbot.waitUntil(lambda: bool(values), timeout=5000)
+        return values[0]
+
+    qtbot.waitUntil(
+        lambda: js_value(
+            "!!document.querySelector('br[data-sdl-notepad-user-tag]')"
+        )
+        is True,
+        timeout=5000,
+    )
+    loaded_dom = js_value("document.querySelector('p').outerHTML")
+    assert "data-sdl-notepad-text" in loaded_dom, loaded_dom
+    result = json.loads(js_value(
+        """
+        JSON.stringify((() => { try {
+            const paragraph = document.querySelector('p');
+            const lineBreak = paragraph.querySelector(
+                'br[data-sdl-notepad-user-tag]'
+            );
+            const host = lineBreak.closest('[data-sdl-notepad-text]');
+            if (!paragraph || !lineBreak || !host) {
+                return {
+                    missing: true,
+                    body: document.body.outerHTML,
+                };
+            }
+            const rect = paragraph.getBoundingClientRect();
+            const style = getComputedStyle(host);
+            const fontSize = Number.parseFloat(style.fontSize) || 16;
+            const parsedLineHeight = Number.parseFloat(style.lineHeight);
+            const lineHeight = Number.isFinite(parsedLineHeight)
+                ? parsedLineHeight : fontSize * 1.2;
+            const x = rect.left + 8;
+            const y = rect.bottom - (lineHeight / 2);
+            const hit = document.elementFromPoint(x, y);
+            if (!hit) {
+                return {
+                    missing: true,
+                    body: document.body.outerHTML,
+                    coordinates: [x, y],
+                };
+            }
+            const down = new MouseEvent('mousedown', {
+                bubbles: true,
+                cancelable: true,
+                clientX: x,
+                clientY: y,
+            });
+            hit.dispatchEvent(down);
+            const backspace = new KeyboardEvent('keydown', {
+                bubbles: true,
+                cancelable: true,
+                key: 'Backspace',
+            });
+            host.dispatchEvent(backspace);
+            return {
+                hitInsideParagraph: paragraph.contains(hit),
+                mouseHandled: down.defaultPrevented,
+                backspaceHandled: backspace.defaultPrevented,
+                breakDeleted: !paragraph.querySelector(
+                    'br[data-sdl-notepad-user-tag]'
+                ),
+                yellowMarkerCleared: !paragraph.hasAttribute(
+                    'data-sdl-notepad-user-tag-container'
+                ),
+            };
+        } catch (error) {
+            return {error: String(error), stack: String(error.stack || '')};
+        }
+        })());
+        """
+    ))
+    assert result == {
+        "hitInsideParagraph": True,
+        "mouseHandled": True,
+        "backspaceHandled": True,
+        "breakDeleted": True,
+        "yellowMarkerCleared": True,
+    }
+
+    output_path = tmp_path / output_name
+    qtbot.waitUntil(lambda: output_path.is_file(), timeout=5000)
+    qtbot.waitUntil(
+        lambda: BeautifulSoup(
+            output_path.read_text(encoding="utf-8"), "html.parser"
+        ).find("p").find("br")
+        is None,
+        timeout=5000,
+    )
 
 
 def test_notepad_context_menu_previews_injects_and_flags_machine_translation(tmp_path, qtbot):
