@@ -5141,7 +5141,8 @@ def test_notepad_user_break_positions_round_trip_through_sidecar(tmp_path):
     output_name = "response_user-break.html"
     source_html = "<html><body><p>Source<br/>line</p></body></html>"
     target_html = (
-        "<html><body><p>Translated<br/>user line<br/>line</p></body></html>"
+        "<html><body><p>Translated<br/>user line<br/>line</p>"
+        "<p>Persistent translator note.</p></body></html>"
     )
     sidecar = _shared_write_html_sdlxliff_sidecar(
         str(tmp_path),
@@ -5163,7 +5164,7 @@ def test_notepad_user_break_positions_round_trip_through_sidecar(tmp_path):
     dialog._write_piece_target_html(
         piece,
         target_html,
-        user_added_target_indexes=[],
+        user_added_target_indexes=[1],
         user_added_break_positions={0: [1]},
     )
 
@@ -5173,7 +5174,7 @@ def test_notepad_user_break_positions_round_trip_through_sidecar(tmp_path):
     )
     assert source == source_html
     assert target == target_html
-    assert user_blocks == set()
+    assert user_blocks == {1}
     assert user_breaks == {0: [1]}
     rendered = BeautifulSoup(
         dialog._notepad_initial_document_html(
@@ -5191,6 +5192,41 @@ def test_notepad_user_break_positions_round_trip_through_sidecar(tmp_path):
     breaks = rendered.find("p").find_all("br")
     assert breaks[0].get("data-sdl-notepad-user-tag") is None
     assert breaks[1].get("data-sdl-notepad-user-tag") == "br"
+
+    # Background freshness regeneration rebuilds the SDLXLIFF from the saved
+    # output HTML. It must carry forward reviewer-only TN/break metadata.
+    _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "user-break.xhtml"},
+        source_html,
+        target_html,
+        raise_errors=True,
+        record_freshness=False,
+        preserve_review_metadata=True,
+    )
+    source, target, user_blocks, user_breaks = dialog._read_sdlxliff_html_pair(
+        sidecar,
+        include_user_added_indexes=True,
+    )
+    assert user_blocks == {1}
+    assert user_breaks == {0: [1]}
+
+    reopened_dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    reopened_dialog.output_dir = str(tmp_path)
+    reopened_dialog._config = {}
+    reopened_piece = reopened_dialog._build_piece(
+        sidecar,
+        0,
+        {"output_name": output_name},
+    )
+    note_rows = [
+        row for row in reopened_piece["rows"]
+        if row.get("target") == "Persistent translator note."
+    ]
+    assert len(note_rows) == 1
+    assert note_rows[0]["translator_note"] is True
+    assert note_rows[0]["target_tag_label"] == "TN(1)"
 
 
 def test_notepad_applies_persisted_edge_markers_before_user_interaction(tmp_path, qtbot):

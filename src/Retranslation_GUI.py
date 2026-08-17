@@ -16488,6 +16488,7 @@ class RetranslationMixin:
                         target_html,
                         raise_errors=True,
                         record_freshness=False,
+                        preserve_review_metadata=True,
                     )
                 except Exception as exc:
                     result_path = None

@@ -369,6 +369,7 @@ def _write_html_sdlxliff_sidecar(
     raise_errors=False,
     manual_untranslated=False,
     record_freshness=True,
+    preserve_review_metadata=False,
 ):
     if not _html_sdlxliff_enabled():
         return None
@@ -384,6 +385,9 @@ def _write_html_sdlxliff_sidecar(
     output_name = os.path.basename(str(output_filename).replace("\\", "/"))
     if not output_name.lower().endswith((".html", ".htm", ".xhtml")):
         return None
+
+    sidecar_dir = os.path.join(output_dir, "SDLXLIFF")
+    sidecar_path = os.path.join(sidecar_dir, f"{output_name}.sdlxliff")
 
     try:
         import xml.etree.ElementTree as ET
@@ -410,6 +414,24 @@ def _write_html_sdlxliff_sidecar(
             else target_html
         )
 
+        preserved_review_attributes = {}
+        if preserve_review_metadata and os.path.isfile(sidecar_path):
+            try:
+                existing_root = ET.parse(sidecar_path).getroot()
+                review_prefix = f"{{{GLOSSARION_SDLXLIFF_NS}}}"
+                for existing_element in existing_root.iter():
+                    if str(existing_element.tag).rsplit("}", 1)[-1] != "file":
+                        continue
+                    preserved_review_attributes = {
+                        key: value
+                        for key, value in existing_element.attrib.items()
+                        if key.startswith(review_prefix)
+                        and key != MANUAL_UNTRANSLATED_ATTRIBUTE
+                    }
+                    break
+            except Exception:
+                preserved_review_attributes = {}
+
         root = ET.Element(f"{{{xliff_ns}}}xliff", {"version": "1.2"})
         file_attributes = {
             "original": str(source_name),
@@ -417,6 +439,7 @@ def _write_html_sdlxliff_sidecar(
             "source-language": source_lang,
             "target-language": target_lang,
         }
+        file_attributes.update(preserved_review_attributes)
         if manual_untranslated:
             file_attributes[MANUAL_UNTRANSLATED_ATTRIBUTE] = "true"
             file_attributes[MANUAL_EDITING_ATTRIBUTE] = "true"
@@ -427,9 +450,7 @@ def _write_html_sdlxliff_sidecar(
         target_attributes = {"state": "new"} if manual_untranslated else {}
         ET.SubElement(trans_unit, f"{{{xliff_ns}}}target", target_attributes).text = target_payload
 
-        sidecar_dir = os.path.join(output_dir, "SDLXLIFF")
         os.makedirs(sidecar_dir, exist_ok=True)
-        sidecar_path = os.path.join(sidecar_dir, f"{output_name}.sdlxliff")
         ET.ElementTree(root).write(sidecar_path, encoding="utf-8", xml_declaration=True)
         if not manual_untranslated and record_freshness:
             try:
