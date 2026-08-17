@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +24,7 @@ from sdlxliff_extractor import extract_sdlxliff_to_chapters
 from sdlxliff_sidecar_writer import (
     _is_manual_editing_sdlxliff,
     _is_manual_untranslated_sdlxliff,
+    _reset_sdlxliff_target_for_manual_retranslation,
     _write_html_sdlxliff_sidecar as _shared_write_html_sdlxliff_sidecar,
 )
 import sdlxliff_sidecar_writer as sidecar_writer_module
@@ -2906,6 +2908,112 @@ def test_retranslation_cleanup_deletes_machine_translation_preview_with_sdlxliff
     assert "Deleted Machine Translation preview" in retranslate_body
 
 
+def test_manual_retranslation_reset_retains_sidecar_and_is_parallel_safe(tmp_path):
+    source_html = (
+        "<html><body><h1>Source title</h1><p>Source paragraph.</p></body></html>"
+    )
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        "response_chapter0001.html",
+        {"original_basename": "chapter0001.xhtml"},
+        source_html,
+        "<html><body><h1>Target title</h1><p>Target paragraph.</p></body></html>",
+        raise_errors=True,
+        record_freshness=False,
+    )
+
+    # Multiple Progress Manager instances may reset the same selected chapter.
+    # Every operation is intentionally idempotent and the final XML must remain
+    # complete and parseable.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(
+                _reset_sdlxliff_target_for_manual_retranslation,
+                [sidecar] * 16,
+            )
+        )
+
+    assert all(results)
+    assert Path(sidecar).is_file()
+    tree = etree.parse(sidecar)
+    file_element = tree.xpath("//*[local-name()='file']")[0]
+    source_element = tree.xpath("//*[local-name()='source']")[0]
+    target_element = tree.xpath("//*[local-name()='target']")[0]
+    target_html = target_element.text or ""
+    target_soup = BeautifulSoup(target_html, "html.parser")
+
+    assert source_element.text == source_html
+    assert target_element.get("state") == "new"
+    assert target_soup.get_text(" ", strip=True) == ""
+    assert target_soup.find("h1") is not None
+    assert target_soup.find("p") is not None
+    assert file_element.get(
+        "{urn:glossarion:sdlxliff}manual-untranslated"
+    ) == "true"
+    assert file_element.get(
+        "{urn:glossarion:sdlxliff}manual-editing"
+    ) == "true"
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._config = {"output_language": "English"}
+    piece = dialog._build_piece(
+        sidecar,
+        0,
+        {"output_name": "response_chapter0001.html"},
+    )
+    assert piece["manual_untranslated"] is True
+    assert piece["manual_editing"] is True
+    assert piece["source_count"] == 2
+    assert piece["target_count"] == 0
+    assert [row["target"] for row in piece["rows"]] == ["", ""]
+
+
+def test_parallel_retranslation_progress_updates_merge_disjoint_selections(tmp_path):
+    progress_path = tmp_path / "translation_progress.json"
+    original = {
+        "chapters": {
+            "1": {"status": "completed", "output_file": "response_1.html"},
+            "2": {"status": "completed", "output_file": "response_2.html"},
+        },
+        "completed_list": [1, 2],
+    }
+    progress_path.write_text(json.dumps(original), encoding="utf-8")
+
+    def reset_chapter(key):
+        baseline = json.loads(json.dumps(original))
+        changed = json.loads(json.dumps(original))
+        changed["chapters"][key]["status"] = "pending"
+        changed["chapters"][key]["manual_editing_pending"] = True
+        return retranslation_gui_module._merge_and_write_retranslation_progress(
+            str(progress_path),
+            baseline,
+            changed,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(reset_chapter, ["1", "2"]))
+
+    saved = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert saved["chapters"]["1"]["status"] == "pending"
+    assert saved["chapters"]["2"]["status"] == "pending"
+    assert saved["chapters"]["1"]["manual_editing_pending"] is True
+    assert saved["chapters"]["2"]["manual_editing_pending"] is True
+    assert saved["completed_list"] == [1, 2]
+
+
+def test_retranslate_selected_uses_manual_sidecar_reset_only_when_toggle_is_on():
+    source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
+    retranslate_start = source.index("def retranslate_selected")
+    retranslate_body = source[retranslate_start:source.index("# Add buttons", retranslate_start)]
+
+    assert "manual_editing_retranslation = _manual_editing_enabled()" in retranslate_body
+    assert "_reset_sdlxliff_target_for_manual_retranslation(sidecar_path)" in retranslate_body
+    assert 'ch_entry["manual_editing_pending"] = True' in retranslate_body
+    assert 'ch_entry.pop("manual_editing_pending", None)' in retranslate_body
+    assert "_merge_and_write_retranslation_progress" in retranslate_body
+
+
 def test_sdlxliff_review_summary_updates_when_target_row_is_emptied():
     dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     rows = [
@@ -3697,6 +3805,29 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert js_value(
         """
         (() => {
+            const paragraph = document.querySelector('p');
+            const hosts = Array.from(
+                paragraph.querySelectorAll('[data-sdl-notepad-text]')
+            );
+            hosts[0].focus();
+            const firstSelectedWholeParagraph = paragraph.matches(':focus-within')
+                && getComputedStyle(hosts[0]).boxShadow === 'none';
+            hosts[hosts.length - 1].focus();
+            const secondHostKeepsSameParagraph = paragraph.matches(':focus-within');
+            const style = getComputedStyle(paragraph);
+            return JSON.stringify([
+                firstSelectedWholeParagraph,
+                secondHostKeepsSameParagraph,
+                style.outlineStyle === 'solid',
+                style.outlineColor.includes('70, 150, 220'),
+                style.boxShadow.includes('70, 150, 220')
+            ]);
+        })();
+        """
+    ) == "[true,true,true,true,true]"
+    assert js_value(
+        """
+        (() => {
             const hosts = Array.from(document.querySelectorAll('[data-sdl-notepad-text]'));
             const first = hosts[0];
             const second = document.querySelector('#empty [data-sdl-notepad-text]');
@@ -3803,6 +3934,67 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         })();
         """
     ) == "[true,true,true,true,true,true,true,true,true,true]"
+    assert js_value(
+        """
+        (() => {
+            const fixture = document.createElement('div');
+            const makeHost = text => {
+                const host = document.createElement('span');
+                host.setAttribute('data-sdl-notepad-text', '1');
+                host.setAttribute('contenteditable', 'true');
+                host.appendChild(document.createTextNode(text));
+                return host;
+            };
+            const paragraph = document.createElement('p');
+            const firstSentence = makeHost('First protected sentence.');
+            const protectedBreak = document.createElement('br');
+            const secondSentence = makeHost('Second protected sentence.');
+            paragraph.append(firstSentence, protectedBreak, secondSentence);
+            const followingParagraph = document.createElement('p');
+            const followingSentence = makeHost('Following paragraph.');
+            followingParagraph.appendChild(followingSentence);
+            fixture.append(paragraph, followingParagraph);
+            document.body.appendChild(fixture);
+
+            const selection = window.getSelection();
+            const placeAtEnd = host => {
+                host.focus();
+                const range = document.createRange();
+                range.selectNodeContents(host);
+                range.collapse(false);
+                selection.removeAllRanges();
+                selection.addRange(range);
+            };
+            const press = (host, key) => {
+                const event = new KeyboardEvent('keydown', {
+                    key, bubbles: true, cancelable: true
+                });
+                host.dispatchEvent(event);
+                return event.defaultPrevented;
+            };
+
+            placeAtEnd(firstSentence);
+            const down = press(firstSentence, 'ArrowDown');
+            const reachedSecondSentence = document.activeElement === secondSentence;
+            const wholeParagraphStillActive = paragraph.matches(':focus-within')
+                || paragraph.hasAttribute('data-sdl-notepad-active-container');
+            const up = press(secondSentence, 'ArrowUp');
+            const returnedToFirstSentence = document.activeElement === firstSentence;
+            const protectedBreakStayedProtected = !protectedBreak.hasAttribute(
+                'data-sdl-notepad-user-tag'
+            );
+            fixture.remove();
+            return JSON.stringify([
+                down,
+                reachedSecondSentence,
+                wholeParagraphStillActive,
+                up,
+                returnedToFirstSentence,
+                protectedBreakStayedProtected
+            ]);
+        })();
+        """
+    ) == "[true,true,true,true,true,true]"
     assert js_value(
         """
         (() => {
@@ -4019,6 +4211,10 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
                 key: 'Enter', bubbles: true, cancelable: true
             });
             first.dispatchEvent(event);
+            const companion = new InputEvent('beforeinput', {
+                inputType: 'insertParagraph', bubbles: true, cancelable: true
+            });
+            first.dispatchEvent(companion);
             const created = first.querySelectorAll('br').length === 1;
             const indicator = first.closest('p');
             const marked = first.querySelector('br').getAttribute(
@@ -4038,6 +4234,7 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
             first.dispatchEvent(redo);
             return JSON.stringify([
                 event.defaultPrevented,
+                companion.defaultPrevented,
                 created,
                 marked,
                 undo.defaultPrevented,
@@ -4052,7 +4249,7 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         })();
         """
     )
-    assert enter_result == "[true,true,true,true,true,true,true,true,true,true]"
+    assert enter_result == "[true,true,true,true,true,true,true,true,true,true,true]"
     user_break_delete_result = js_value(
         """
         (() => { try {
@@ -4352,6 +4549,7 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert saved_soup.find(attrs={"data-sdl-notepad-user-tag-container": True}) is None
     assert saved_soup.find(attrs={"data-sdl-notepad-original-had-text": True}) is None
     assert saved_soup.find(attrs={"data-sdl-notepad-user-empty-container": True}) is None
+    assert saved_soup.find(attrs={"data-sdl-notepad-active-container": True}) is None
     assert saved_soup.find("img").get("src") == "../Images/chapter0001_img_1.png"
     assert saved_soup.find(id="sdl-notepad-source-tooltip") is None
     assert output_path.read_text(encoding="utf-8").count("Edited in the rendered page.") == 1
@@ -4528,6 +4726,16 @@ def test_notepad_erasing_translated_row_keeps_visible_red_empty_row(tmp_path, qt
     browser = dialog.rows_widget.findChild(QWebEngineView, "SdlReviewNotepadBrowser")
     assert browser is not None
 
+    machine_preview = (
+        "Machine preview that must remain available after the translated row is erased."
+    )
+    dialog._set_row_tooltip_translation(
+        dialog.pieces[0],
+        dialog.pieces[0]["rows"][0],
+        machine_preview,
+        persist=False,
+    )
+
     def js_value(script):
         values = []
         browser.page().runJavaScript(script, values.append)
@@ -4567,6 +4775,22 @@ def test_notepad_erasing_translated_row_keeps_visible_red_empty_row(tmp_path, qt
     assert erased["target_index"] == 0
     assert erased["target_missing"] is False
     assert erased["reason"] == "empty"
+    assert dialog._row_tooltip_translation(dialog.pieces[0], erased) == machine_preview
+    context_menu = dialog._show_notepad_browser_context_menu(
+        browser,
+        browser.rect().center(),
+        erased["source"],
+        {},
+        0,
+        0,
+    )
+    assert context_menu.findChild(
+        QLabel, "SdlNotepadContextMachineTranslationText"
+    ).text() == machine_preview
+    assert context_menu.findChild(
+        QAction, "SdlNotepadInjectMachineTranslationAction"
+    ).isEnabled() is True
+    context_menu.close()
     assert dialog.pieces[0]["rows"][1]["target"] == (
         "Keep this following translated row."
     )
@@ -4662,6 +4886,11 @@ def test_notepad_context_menu_previews_injects_and_flags_machine_translation(tmp
     assert preview_label is not None
     assert preview_label.wordWrap() is True
     assert preview_label.text() == preview
+    generate_action = context_menu.findChild(
+        QAction, "SdlNotepadGenerateMachineTranslationAction"
+    )
+    assert generate_action is not None
+    assert generate_action.isEnabled() is True
     inject_action = context_menu.findChild(
         QAction, "SdlNotepadInjectMachineTranslationAction"
     )
@@ -4672,8 +4901,18 @@ def test_notepad_context_menu_previews_injects_and_flags_machine_translation(tmp
         for action in context_menu.actions() if action.text()
     ]
     assert visible_action_order.index("Underline") < visible_action_order.index(
+        "🌐  Generate Machine Translation Preview"
+    ) < visible_action_order.index(
         "📥  Inject Machine Translation"
     ) < visible_action_order.index("Undo")
+    generated_rows = []
+    dialog._translate_single_row_tooltip = (
+        lambda piece_index, row_index: generated_rows.append(
+            (piece_index, row_index)
+        )
+    )
+    generate_action.trigger()
+    assert generated_rows == [(0, 0)]
     context_menu.close()
     qtbot.waitUntil(
         lambda: getattr(dialog, "_review_text_context_menu", None) is None,

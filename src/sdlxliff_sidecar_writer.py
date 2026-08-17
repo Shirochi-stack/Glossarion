@@ -16,6 +16,37 @@ MANUAL_UNTRANSLATED_ATTRIBUTE = f"{{{GLOSSARION_SDLXLIFF_NS}}}manual-untranslate
 MANUAL_EDITING_ATTRIBUTE = f"{{{GLOSSARION_SDLXLIFF_NS}}}manual-editing"
 _SIDECAR_FRESHNESS_MANIFEST_TYPE = "html_sdlxliff_sidecar_freshness"
 _SIDECAR_FRESHNESS_MANIFEST_LOCK = threading.RLock()
+_SIDECAR_MUTATION_LOCKS_GUARD = threading.Lock()
+_SIDECAR_MUTATION_LOCKS = {}
+
+
+def _sdlxliff_mutation_lock(path):
+    """Return one in-process lock for mutations of a specific sidecar."""
+    key = os.path.normcase(os.path.abspath(os.fspath(path)))
+    with _SIDECAR_MUTATION_LOCKS_GUARD:
+        lock = _SIDECAR_MUTATION_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _SIDECAR_MUTATION_LOCKS[key] = lock
+        return lock
+
+
+def _write_sdlxliff_tree_atomically(tree, path):
+    """Replace one sidecar from a unique same-directory temporary file."""
+    path = os.fspath(path)
+    temp_path = (
+        f"{path}.{os.getpid()}.{threading.get_ident()}."
+        f"{time.time_ns()}.tmp"
+    )
+    try:
+        tree.write(temp_path, encoding="utf-8", xml_declaration=True)
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 
 def _sidecar_freshness_logical_key(output_name):
@@ -228,34 +259,97 @@ def _blank_manual_untranslated_sdlxliff_target(path):
     try:
         import xml.etree.ElementTree as ET
 
+        with _sdlxliff_mutation_lock(path):
+            tree = ET.parse(path)
+            root = tree.getroot()
+            if not _is_manual_untranslated_sdlxliff(root):
+                return False
+            source_element = None
+            target_element = None
+            for element in root.iter():
+                local_name = str(element.tag).rsplit("}", 1)[-1]
+                if local_name == "source" and source_element is None:
+                    source_element = element
+                elif local_name == "target" and target_element is None:
+                    target_element = element
+            if source_element is None or target_element is None:
+                return False
+            blank_target = _html_sdlxliff_blank_manual_target(source_element.text or "")
+            if not list(target_element) and (target_element.text or "") == blank_target:
+                return False
+            for child in list(target_element):
+                target_element.remove(child)
+            target_element.text = blank_target
+            target_element.set("state", "new")
+            ET.register_namespace("", "urn:oasis:names:tc:xliff:document:1.2")
+            ET.register_namespace("sdl", "http://sdl.com/FileTypes/SdlXliff/1.0")
+            ET.register_namespace("glossarion", GLOSSARION_SDLXLIFF_NS)
+            _write_sdlxliff_tree_atomically(tree, path)
+            return True
+    except Exception:
+        return False
+
+
+def _reset_sdlxliff_target_for_manual_retranslation(path):
+    """Turn a translated HTML sidecar into a source-only manual placeholder.
+
+    Every target keeps the corresponding source document's tag skeleton, but
+    all editable text is removed.  A path-scoped lock plus atomic replacement
+    makes repeated or concurrent resets idempotent and prevents partial XML.
+    """
+    import xml.etree.ElementTree as ET
+
+    if not path or not os.path.isfile(path):
+        return False
+
+    with _sdlxliff_mutation_lock(path):
+        # Recheck after acquiring the lock in case another reset replaced it.
+        if not os.path.isfile(path):
+            return False
         tree = ET.parse(path)
         root = tree.getroot()
-        if not _is_manual_untranslated_sdlxliff(root):
-            return False
-        source_element = None
-        target_element = None
-        for element in root.iter():
-            local_name = str(element.tag).rsplit("}", 1)[-1]
-            if local_name == "source" and source_element is None:
-                source_element = element
-            elif local_name == "target" and target_element is None:
-                target_element = element
-        if source_element is None or target_element is None:
-            return False
-        blank_target = _html_sdlxliff_blank_manual_target(source_element.text or "")
-        if not list(target_element) and (target_element.text or "") == blank_target:
-            return False
-        for child in list(target_element):
-            target_element.remove(child)
-        target_element.text = blank_target
-        target_element.set("state", "new")
+        file_elements = [
+            element
+            for element in root.iter()
+            if str(element.tag).rsplit("}", 1)[-1] == "file"
+        ]
+        if not file_elements:
+            raise ValueError("SDLXLIFF file element not found")
+        for file_element in file_elements:
+            file_element.set(MANUAL_UNTRANSLATED_ATTRIBUTE, "true")
+            file_element.set(MANUAL_EDITING_ATTRIBUTE, "true")
+
+        reset_count = 0
+        for trans_unit in root.iter():
+            if str(trans_unit.tag).rsplit("}", 1)[-1] != "trans-unit":
+                continue
+            source_element = None
+            target_element = None
+            for child in list(trans_unit):
+                local_name = str(child.tag).rsplit("}", 1)[-1]
+                if local_name == "source" and source_element is None:
+                    source_element = child
+                elif local_name == "target" and target_element is None:
+                    target_element = child
+            if target_element is None:
+                continue
+            blank_target = _html_sdlxliff_blank_manual_target(
+                source_element.text if source_element is not None else ""
+            )
+            for child in list(target_element):
+                target_element.remove(child)
+            target_element.text = blank_target
+            target_element.set("state", "new")
+            reset_count += 1
+
+        if not reset_count:
+            raise ValueError("SDLXLIFF target element not found")
+
         ET.register_namespace("", "urn:oasis:names:tc:xliff:document:1.2")
         ET.register_namespace("sdl", "http://sdl.com/FileTypes/SdlXliff/1.0")
         ET.register_namespace("glossarion", GLOSSARION_SDLXLIFF_NS)
-        tree.write(path, encoding="utf-8", xml_declaration=True)
+        _write_sdlxliff_tree_atomically(tree, path)
         return True
-    except Exception:
-        return False
 
 
 def _write_html_sdlxliff_sidecar(

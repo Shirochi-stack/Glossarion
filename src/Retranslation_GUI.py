@@ -41,6 +41,7 @@ from sdlxliff_sidecar_writer import (
     _clear_manual_untranslated_sdlxliff,
     _is_manual_editing_sdlxliff,
     _is_manual_untranslated_sdlxliff,
+    _reset_sdlxliff_target_for_manual_retranslation,
 )
 from glossary_usage import (
     CHECK_PREFIX,
@@ -1123,6 +1124,78 @@ def _write_progress_snapshot_atomic(path, payload):
                 os.remove(temp_path)
             except OSError:
                 pass
+
+
+_RETRANSLATION_PROGRESS_LOCKS_GUARD = threading.Lock()
+_RETRANSLATION_PROGRESS_LOCKS = {}
+
+
+def _retranslation_progress_lock(path):
+    """Return one in-process lock for a Progress Manager JSON file."""
+    key = os.path.normcase(os.path.abspath(os.fspath(path)))
+    with _RETRANSLATION_PROGRESS_LOCKS_GUARD:
+        lock = _RETRANSLATION_PROGRESS_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _RETRANSLATION_PROGRESS_LOCKS[key] = lock
+        return lock
+
+
+def _merge_retranslation_progress_changes(baseline, changed, latest):
+    """Apply only this retranslation action's JSON changes to ``latest``.
+
+    Progress Manager windows can start from different snapshots.  A normal
+    full-file write would let the last window overwrite changes made by the
+    others.  This recursive three-way merge preserves fields that this action
+    did not change while applying its selected chapter resets.
+    """
+    if baseline == changed:
+        return copy.deepcopy(latest)
+    if isinstance(baseline, dict) and isinstance(changed, dict):
+        merged = copy.deepcopy(latest) if isinstance(latest, dict) else {}
+        ordered_keys = list(baseline)
+        ordered_keys.extend(key for key in changed if key not in baseline)
+        for key in ordered_keys:
+            in_baseline = key in baseline
+            in_changed = key in changed
+            in_latest = isinstance(latest, dict) and key in latest
+            if in_baseline and not in_changed:
+                # Do not remove a value another action changed after our
+                # snapshot; this matters for merged-child chapter entries.
+                if not in_latest or latest.get(key) == baseline.get(key):
+                    merged.pop(key, None)
+                continue
+            if not in_baseline:
+                merged[key] = copy.deepcopy(changed[key])
+                continue
+            if not in_latest:
+                merged[key] = copy.deepcopy(changed[key])
+                continue
+            merged[key] = _merge_retranslation_progress_changes(
+                baseline[key],
+                changed[key],
+                latest[key],
+            )
+        return merged
+    return copy.deepcopy(changed)
+
+
+def _merge_and_write_retranslation_progress(path, baseline, changed):
+    """Merge one selection reset into the newest progress file atomically."""
+    with _retranslation_progress_lock(path):
+        latest = copy.deepcopy(baseline)
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as progress_file:
+                disk_progress = json.load(progress_file)
+            if isinstance(disk_progress, dict):
+                latest = disk_progress
+        merged = _merge_retranslation_progress_changes(
+            baseline,
+            changed,
+            latest,
+        )
+        _write_progress_snapshot_atomic(path, merged)
+        return merged
 
 
 def _persist_progress_manager_source_link(file_path, output_dir):
@@ -10955,6 +11028,22 @@ class SDLXLIFFReviewDialog(QDialog):
                 row_data["target_original"] = old_row.get(
                     "target_original", row_data.get("target_original", "")
                 )
+                # Notepad saves rebuild the complete piece from its SDLXLIFF
+                # and output HTML. Keep the live machine-preview state on the
+                # replacement row just as compact-mode target edits do. The
+                # JSON sidecar remains the durable cache, but an editor save
+                # must not make the visible preview depend on another disk
+                # read (or discard an in-flight/error state).
+                for field in (
+                    "tooltip_translation",
+                    "tooltip_translation_pending",
+                    "tooltip_translation_status",
+                    "tooltip_translation_error",
+                    "tooltip_translation_error_detail",
+                    "_source_preview_dirty",
+                ):
+                    if field in old_row:
+                        row_data[field] = old_row[field]
         self.pieces[piece_index] = rebuilt
         self._refresh_piece_list_item(piece_index)
         self._refresh_piece_header(piece_index)
@@ -11933,6 +12022,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 const SOURCE_ATTR = 'data-sdl-notepad-source';
                 const ROW_ATTR = 'data-sdl-notepad-row-index';
                 const STATUS_ATTR = 'data-sdl-notepad-status';
+                const ACTIVE_CONTAINER_ATTR = 'data-sdl-notepad-active-container';
                 const ORIGINAL_EDITABLE_ATTR = 'data-sdl-notepad-original-editable';
                 const ALLOWED_INLINE_TAGS = new Set(['STRONG', 'EM', 'U', 'B', 'I', 'BR']);
                 const blockedParents = 'script,style,noscript,template,textarea,select,option,svg,math';
@@ -12057,9 +12147,41 @@ class SDLXLIFFReviewDialog(QDialog):
                     }
                     return containers;
                 };
-                const userBreaksIn = container => Array.from(
-                    container.querySelectorAll('br[' + USER_TAG_ATTR + ']')
+                // Navigation treats every <br> as a visual line boundary. Only
+                // user-tagged breaks remain deletable; source EPUB breaks stay
+                // protected even though Up/Down can move across them.
+                const navigationBreaksIn = container => Array.from(
+                    container.querySelectorAll('br')
                 );
+                let activeNavigationContainer = null;
+                const setActiveNavigationContainer = node => {
+                    const host = editableHost(node);
+                    const container = navigationContainer(host);
+                    if (container === activeNavigationContainer) return container;
+                    if (activeNavigationContainer && activeNavigationContainer.isConnected) {
+                        activeNavigationContainer.removeAttribute(ACTIVE_CONTAINER_ATTR);
+                    }
+                    activeNavigationContainer = container || null;
+                    if (activeNavigationContainer) {
+                        activeNavigationContainer.setAttribute(ACTIVE_CONTAINER_ATTR, '1');
+                    }
+                    return activeNavigationContainer;
+                };
+                document.addEventListener('focusin', event => {
+                    setActiveNavigationContainer(event.target);
+                }, true);
+                document.addEventListener('selectionchange', () => {
+                    const selection = window.getSelection();
+                    if (selection && selection.rangeCount) {
+                        const selectionHost = editableHost(selection.anchorNode);
+                        // Programmatic focus can briefly leave Chromium's old
+                        // selection behind. Do not let that stale range move
+                        // the paragraph marker away from the focused host.
+                        if (selectionHost && document.activeElement === selectionHost) {
+                            setActiveNavigationContainer(selectionHost);
+                        }
+                    }
+                });
                 const navigationPosition = (host, container) => {
                     const selection = window.getSelection();
                     if (!selection || !selection.rangeCount || !container) {
@@ -12067,7 +12189,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     }
                     const caret = selection.getRangeAt(0).cloneRange();
                     caret.collapse(true);
-                    const breaks = userBreaksIn(container);
+                    const breaks = navigationBreaksIn(container);
                     let segment = 0;
                     try {
                         const beforeCaret = document.createRange();
@@ -12094,7 +12216,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 };
                 const restoreNavigationPosition = (container, rawSegment, rawColumn) => {
                     if (!container || !container.isConnected) return false;
-                    const breaks = userBreaksIn(container);
+                    const breaks = navigationBreaksIn(container);
                     const segment = Math.max(
                         0, Math.min(breaks.length, Number(rawSegment) || 0)
                     );
@@ -12136,7 +12258,15 @@ class SDLXLIFFReviewDialog(QDialog):
                         range.setStartAfter(previousBreak);
                     } else if (breaks.length) {
                         targetHost = editableHost(breaks[0]);
-                        range.setStartBefore(breaks[0]);
+                        let caretNode = breaks[0].previousSibling;
+                        if (!caretNode || caretNode.nodeType !== Node.TEXT_NODE) {
+                            caretNode = document.createTextNode('');
+                            breaks[0].parentNode.insertBefore(caretNode, breaks[0]);
+                        }
+                        range.setStart(
+                            caretNode,
+                            String(caretNode.nodeValue || '').length
+                        );
                     } else {
                         targetHost = container.matches('[' + EDIT_ATTR + ']')
                             ? container
@@ -12148,6 +12278,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     }
                     if (!targetHost) return false;
                     range.collapse(true);
+                    setActiveNavigationContainer(targetHost);
                     try { targetHost.focus({preventScroll: true}); }
                     catch (_error) { targetHost.focus(); }
                     const selection = window.getSelection();
@@ -12162,13 +12293,13 @@ class SDLXLIFFReviewDialog(QDialog):
                     const containerIndex = containers.indexOf(container);
                     if (containerIndex < 0) return false;
                     const position = navigationPosition(host, container);
-                    const breaks = userBreaksIn(container);
+                    const breaks = navigationBreaksIn(container);
                     let targetContainer = container;
                     let targetSegment = position.segment + (upwards ? -1 : 1);
                     if (targetSegment < 0) {
                         targetContainer = containers[containerIndex - 1];
                         if (!targetContainer) return false;
-                        targetSegment = userBreaksIn(targetContainer).length;
+                        targetSegment = navigationBreaksIn(targetContainer).length;
                     } else if (targetSegment > breaks.length) {
                         targetContainer = containers[containerIndex + 1];
                         if (!targetContainer) return false;
@@ -12199,6 +12330,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 let breakRedoStack = [];
                 let breakUndoReady = false;
                 let breakRedoReady = false;
+                let enterKeyInsertionHost = null;
                 let injectionUndoStack = [];
                 let injectionRedoStack = [];
                 let injectionUndoReady = false;
@@ -12562,6 +12694,9 @@ class SDLXLIFFReviewDialog(QDialog):
                     // contenteditable=false and cannot be altered.
                     host.setAttribute('contenteditable', 'true');
                     host.setAttribute('spellcheck', 'false');
+                    host.addEventListener('focus', () => {
+                        setActiveNavigationContainer(host);
+                    });
                     if (placeholder) host.setAttribute(PLACEHOLDER_ATTR, '1');
                     if (sourceText) host.setAttribute(SOURCE_ATTR, sourceText);
                     if (textNode) textNode.parentNode.replaceChild(host, textNode);
@@ -12714,7 +12849,15 @@ class SDLXLIFFReviewDialog(QDialog):
                     '[' + EDIT_ATTR + '] { outline: none; cursor: text; }' +
                     '[' + EDIT_ATTR + '][' + PLACEHOLDER_ATTR + '] {' +
                     ' display: inline-block; min-width: .65em; min-height: 1em; vertical-align: baseline; }' +
-                    '[' + EDIT_ATTR + ']:focus { box-shadow: inset 0 -1px rgba(70,150,220,.55); }' +
+                    '[' + EDIT_ATTR + ']:focus { box-shadow: none; }' +
+                    '[' + ACTIVE_CONTAINER_ATTR + '],' +
+                    'p:focus-within,h1:focus-within,h2:focus-within,h3:focus-within,' +
+                    'h4:focus-within,h5:focus-within,h6:focus-within,li:focus-within,' +
+                    'td:focus-within,th:focus-within,caption:focus-within,' +
+                    'figcaption:focus-within,blockquote:focus-within {' +
+                    ' outline: 1px solid rgba(70,150,220,.72) !important;' +
+                    ' outline-offset: 2px; border-radius: 2px;' +
+                    ' box-shadow: inset 0 -1px rgba(70,150,220,.72); }' +
                     '[' + EDIT_ATTR + '][' + PLACEHOLDER_ATTR + ']:focus,' +
                     '[' + EDIT_ATTR + '][' + BREAK_ATTR + ']:focus { box-shadow: none; }' +
                     '[' + USER_TAG_CONTAINER_ATTR + '] {' +
@@ -12778,7 +12921,16 @@ class SDLXLIFFReviewDialog(QDialog):
                         event.preventDefault();
                         event.stopImmediatePropagation();
                         const host = editableHost(event.target);
-                        if (host && selectionInside(host)) insertBreak(host);
+                        if (host && selectionInside(host)) {
+                            // Some Chromium builds emit beforeinput even after
+                            // the Enter keydown was cancelled. Consume that
+                            // companion event instead of inserting a second BR.
+                            if (enterKeyInsertionHost === host) {
+                                enterKeyInsertionHost = null;
+                            } else {
+                                insertBreak(host);
+                            }
+                        }
                         return;
                     }
                     const host = editableHost(event.target);
@@ -12884,7 +13036,15 @@ class SDLXLIFFReviewDialog(QDialog):
                         event.preventDefault();
                         event.stopImmediatePropagation();
                         const current = editableHost(event.target);
-                        if (current) insertBreak(current);
+                        if (current) {
+                            enterKeyInsertionHost = current;
+                            window.setTimeout(() => {
+                                if (enterKeyInsertionHost === current) {
+                                    enterKeyInsertionHost = null;
+                                }
+                            }, 0);
+                            insertBreak(current);
+                        }
                         return;
                     }
                     if (event.key !== 'Backspace' && event.key !== 'Delete') return;
@@ -12991,6 +13151,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 "data-sdl-notepad-row-index",
                 "data-sdl-notepad-status",
                 "data-sdl-notepad-status-reason",
+                "data-sdl-notepad-active-container",
             ):
                 for element in soup.find_all(attrs={marker: True}):
                     element.attrs.pop(marker, None)
@@ -13224,6 +13385,7 @@ class SDLXLIFFReviewDialog(QDialog):
             ("Italic", "format:italic"),
             ("Underline", "format:underline"),
             (None, None),
+            ("\U0001f310  Generate Machine Translation Preview", "generate:machine-translation"),
             ("\U0001f4e5  Inject Machine Translation", "inject:machine-translation"),
             (None, None),
             ("Undo", QWebEnginePage.WebAction.Undo),
@@ -13241,6 +13403,22 @@ class SDLXLIFFReviewDialog(QDialog):
                 menu.addSeparator()
                 continue
             action = menu.addAction(label)
+            if web_action == "generate:machine-translation":
+                action.setObjectName("SdlNotepadGenerateMachineTranslationAction")
+                action.setEnabled(
+                    not self._tooltip_translation_running
+                    and piece is not None
+                    and row_data is not None
+                    and bool(str(row_data.get("source") or "").strip())
+                )
+                action.setToolTip(
+                    "Generate a machine translation preview for this row."
+                )
+                action.triggered.connect(
+                    lambda _checked=False, pi=piece_index, ri=row_index:
+                        self._translate_single_row_tooltip(pi, ri)
+                )
+                continue
             if web_action == "inject:machine-translation":
                 action.setObjectName("SdlNotepadInjectMachineTranslationAction")
                 action.setEnabled(
@@ -23624,6 +23802,7 @@ class RetranslationMixin:
             # Count different types
             missing_count = sum(1 for ch in selected_chapters if ch['status'] == 'not_translated')
             existing_count = sum(1 for ch in selected_chapters if ch['status'] != 'not_translated')
+            manual_editing_retranslation = _manual_editing_enabled()
             
             count = len(selected_chapters)
             if metadata_selected and len(metadata_selected) == count:
@@ -23647,11 +23826,24 @@ class RetranslationMixin:
                     )
             elif count > 10:
                 if missing_count > 0 and existing_count > 0:
-                    confirm_msg = f"This will:\n• Mark {missing_count} missing chapters for translation\n• Delete and retranslate {existing_count} existing chapters and their SDLXLIFF sidecars\n\nTotal: {count} chapters\n\nContinue?"
+                    existing_action = (
+                        f"Delete {existing_count} existing chapter output file(s), retain their "
+                        "SDLXLIFF sidecars, and clear the translated targets for manual editing"
+                        if manual_editing_retranslation
+                        else f"Delete and retranslate {existing_count} existing chapters and their SDLXLIFF sidecars"
+                    )
+                    confirm_msg = f"This will:\n• Mark {missing_count} missing chapters for translation\n• {existing_action}\n\nTotal: {count} chapters\n\nContinue?"
                 elif missing_count > 0:
                     confirm_msg = f"This will mark {missing_count} missing chapters for translation.\n\nContinue?"
                 else:
-                    confirm_msg = f"This will delete {existing_count} translated chapters and their SDLXLIFF sidecars, then mark them for retranslation.\n\nContinue?"
+                    if manual_editing_retranslation:
+                        confirm_msg = (
+                            f"This will delete {existing_count} translated chapter output file(s), "
+                            "retain their SDLXLIFF sidecars, clear the translated targets, and mark "
+                            "them pending for manual editing.\n\nContinue?"
+                        )
+                    else:
+                        confirm_msg = f"This will delete {existing_count} translated chapters and their SDLXLIFF sidecars, then mark them for retranslation.\n\nContinue?"
             else:
                 chapters = [
                     (
@@ -23671,7 +23863,14 @@ class RetranslationMixin:
                 if missing_count > 0:
                     confirm_msg += f"• {missing_count} missing chapters will be marked for translation\n"
                 if existing_count > 0:
-                    confirm_msg += f"• {existing_count} existing chapters and SDLXLIFF sidecars will be deleted and retranslated\n"
+                    if manual_editing_retranslation:
+                        confirm_msg += (
+                            f"• {existing_count} existing chapter output file(s) will be deleted; "
+                            "their SDLXLIFF sidecars will be retained with translated targets "
+                            "cleared for manual editing\n"
+                        )
+                    else:
+                        confirm_msg += f"• {existing_count} existing chapters and SDLXLIFF sidecars will be deleted and retranslated\n"
                 confirm_msg += "\nContinue?"
             
             delete_both_linked_artifacts = False
@@ -23729,6 +23928,11 @@ class RetranslationMixin:
                 if reply != QMessageBox.Yes:
                     return
             
+            # Capture this window's starting snapshot.  The final save merges
+            # only our changes into the newest on-disk progress so concurrent
+            # Retranslate Selected actions do not clobber one another.
+            progress_baseline = copy.deepcopy(data['prog'])
+
             # Process chapters - DELETE FILES AND UPDATE PROGRESS
             deleted_count = 0
             marked_count = 0
@@ -23736,6 +23940,7 @@ class RetranslationMixin:
             refinement_cleared_count = 0
             merged_cleared_count = 0
             sidecar_deleted_count = 0
+            sidecar_cleared_count = 0
             sidecar_failed_count = 0
             machine_translation_deleted_count = 0
             machine_translation_failed_count = 0
@@ -23917,14 +24122,30 @@ class RetranslationMixin:
                                     seen_machine_translation.add(machine_translation_key)
                                     machine_translation_paths.append(machine_translation_path)
                         for sidecar_path in sidecar_paths:
-                            try:
-                                if os.path.exists(sidecar_path):
-                                    os.remove(sidecar_path)
-                                    sidecar_deleted_count += 1
-                                    print(f"Deleted SDLXLIFF sidecar: {sidecar_path}")
-                            except Exception as e:
-                                sidecar_failed_count += 1
-                                print(f"Failed to delete SDLXLIFF sidecar {sidecar_path}: {e}")
+                            if manual_editing_retranslation:
+                                try:
+                                    if os.path.exists(sidecar_path):
+                                        if _reset_sdlxliff_target_for_manual_retranslation(sidecar_path):
+                                            sidecar_cleared_count += 1
+                                            print(
+                                                "Retained SDLXLIFF sidecar and cleared translated "
+                                                f"target for manual editing: {sidecar_path}"
+                                            )
+                                except Exception as e:
+                                    sidecar_failed_count += 1
+                                    print(
+                                        "Failed to clear translated target in retained SDLXLIFF "
+                                        f"sidecar {sidecar_path}: {e}"
+                                    )
+                            else:
+                                try:
+                                    if os.path.exists(sidecar_path):
+                                        os.remove(sidecar_path)
+                                        sidecar_deleted_count += 1
+                                        print(f"Deleted SDLXLIFF sidecar: {sidecar_path}")
+                                except Exception as e:
+                                    sidecar_failed_count += 1
+                                    print(f"Failed to delete SDLXLIFF sidecar {sidecar_path}: {e}")
                         for machine_translation_path in machine_translation_paths:
                             try:
                                 if os.path.exists(machine_translation_path):
@@ -23939,6 +24160,10 @@ class RetranslationMixin:
                         ch_entry["status"] = "pending"
                         ch_entry["failure_reason"] = ""
                         ch_entry["error_message"] = ""
+                        if manual_editing_retranslation:
+                            ch_entry["manual_editing_pending"] = True
+                        else:
+                            ch_entry.pop("manual_editing_pending", None)
                         if self._is_translation_artifact_progress_info(ch_info):
                             ch_entry["content_hash"] = ""
                             ch_entry.pop("model_name", None)
@@ -23969,8 +24194,13 @@ class RetranslationMixin:
             # Save the updated progress if we made changes
             if progress_updated:
                 try:
-                    with open(data['progress_file'], 'w', encoding='utf-8') as f:
-                        json.dump(data['prog'], f, ensure_ascii=False, indent=2)
+                    merged_progress = _merge_and_write_retranslation_progress(
+                        data['progress_file'],
+                        progress_baseline,
+                        data['prog'],
+                    )
+                    data['prog'].clear()
+                    data['prog'].update(merged_progress)
                     print(f"Updated progress tracking file - reset {status_reset_count} chapter statuses to pending")
                 except Exception as e:
                     print(f"Failed to update progress file: {e}")
@@ -23985,6 +24215,10 @@ class RetranslationMixin:
                 success_parts.append(f"Deleted {deleted_count} files")
             if sidecar_deleted_count > 0:
                 success_parts.append(f"deleted {sidecar_deleted_count} SDLXLIFF sidecar(s)")
+            if sidecar_cleared_count > 0:
+                success_parts.append(
+                    f"retained {sidecar_cleared_count} SDLXLIFF sidecar(s) and cleared their translated targets"
+                )
             if machine_translation_deleted_count > 0:
                 success_parts.append(f"deleted {machine_translation_deleted_count} Machine Translation preview file(s)")
             if marked_count > 0:
@@ -23996,7 +24230,8 @@ class RetranslationMixin:
             if merged_cleared_count > 0:
                 success_parts.append(f"cleared {merged_cleared_count} merged child chapters")
             if sidecar_failed_count > 0:
-                success_parts.append(f"failed to delete {sidecar_failed_count} SDLXLIFF sidecar(s)")
+                failed_action = "clear" if manual_editing_retranslation else "delete"
+                success_parts.append(f"failed to {failed_action} {sidecar_failed_count} SDLXLIFF sidecar(s)")
             if machine_translation_failed_count > 0:
                 success_parts.append(f"failed to delete {machine_translation_failed_count} Machine Translation preview file(s)")
             
