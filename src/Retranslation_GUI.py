@@ -12073,6 +12073,12 @@ class SDLXLIFFReviewDialog(QDialog):
                 for line_break in target_breaks[:extra_break_count]:
                     line_break["data-sdl-notepad-user-tag"] = "br"
                 target_node["data-sdl-notepad-source"] = source_text
+                if source_node is not None and not source_text:
+                    # Preserve the fact that this DOM slot has no source text.
+                    # A structural <br> (or other text-empty inline markup)
+                    # does not make it a translated paragraph. If the user
+                    # types here, Notepad promotes the slot to a TN(N).
+                    target_node["data-sdl-notepad-source-empty"] = "1"
                 if (
                     node_index in user_added_indexes
                     or bool(row_data and row_data.get("translator_note"))
@@ -12087,7 +12093,12 @@ class SDLXLIFFReviewDialog(QDialog):
                     reason = str(row_data.get("reason") or "")
                     if reason:
                         target_node["data-sdl-notepad-status-reason"] = reason
-                if target_text or not fill_untranslated or source_node is None:
+                if (
+                    target_text
+                    or not fill_untranslated
+                    or source_node is None
+                    or not source_text
+                ):
                     continue
                 # Replace the blank target node with the complete source node,
                 # not only get_text(), so inline/void markup remains visible.
@@ -12233,6 +12244,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 const USER_TAG_ATTR = 'data-sdl-notepad-user-tag';
                 const USER_TAG_CONTAINER_ATTR = 'data-sdl-notepad-user-tag-container';
                 const USER_BLOCK_ATTR = 'data-sdl-notepad-user-block';
+                const SOURCE_EMPTY_ATTR = 'data-sdl-notepad-source-empty';
                 const ORIGINAL_TEXT_CONTAINER_ATTR = 'data-sdl-notepad-original-had-text';
                 const USER_EMPTY_CONTAINER_ATTR = 'data-sdl-notepad-user-empty-container';
                 const SOURCE_ATTR = 'data-sdl-notepad-source';
@@ -12750,6 +12762,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 const refreshUserTagIndicator = container => {
                     if (!container || !container.isConnected) return;
                     if (container.hasAttribute(USER_BLOCK_ATTR)
+                            || (container.hasAttribute(SOURCE_EMPTY_ATTR)
+                                && !!container.textContent.trim())
                             || container.querySelector('[' + USER_TAG_ATTR + ']')) {
                         container.setAttribute(USER_TAG_CONTAINER_ATTR, '1');
                     } else {
@@ -13732,11 +13746,18 @@ class SDLXLIFFReviewDialog(QDialog):
                     and not tag.find(cls.TEXT_TAGS)
                 )
 
-            return [
-                index
-                for index, element in enumerate(soup.find_all(_is_review_text_node))
-                if element.has_attr("data-sdl-notepad-user-block")
-            ]
+            indexes = []
+            for index, element in enumerate(soup.find_all(_is_review_text_node)):
+                user_block = element.has_attr("data-sdl-notepad-user-block")
+                filled_empty_source_slot = bool(
+                    element.has_attr("data-sdl-notepad-source-empty")
+                    and cls._normalize_review_text(
+                        element.get_text(" ", strip=True)
+                    )
+                )
+                if user_block or filled_empty_source_slot:
+                    indexes.append(index)
+            return indexes
         except Exception:
             return []
 
@@ -13785,6 +13806,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 "data-sdl-notepad-user-tag",
                 "data-sdl-notepad-user-tag-container",
                 "data-sdl-notepad-user-block",
+                "data-sdl-notepad-source-empty",
                 "data-sdl-notepad-original-had-text",
                 "data-sdl-notepad-user-empty-container",
             ):

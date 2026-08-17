@@ -5229,6 +5229,145 @@ def test_notepad_enter_at_paragraph_end_saves_a_separate_empty_paragraph(
     ) is None
 
 
+def test_notepad_filled_text_empty_source_paragraph_becomes_translator_note(
+    tmp_path, qtbot
+):
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+
+    output_name = "response_empty_source_slot.html"
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "empty_source_slot.xhtml"},
+        (
+            "<html><body><h2>原題</h2><p><br/></p>"
+            "<p>最初の原文。</p><p>次の原文。</p></body></html>"
+        ),
+        (
+            "<html><body><h2>Heading</h2><p><br/></p>"
+            "<p>First translation.</p><p>Following translation.</p>"
+            "<p>Unrelated legacy target-only paragraph.</p></body></html>"
+        ),
+        raise_errors=True,
+    )
+    dialog = SDLXLIFFReviewDialog(
+        str(tmp_path),
+        sidecar,
+        config={SDLXLIFFReviewDialog.TWO_COLUMN_LAYOUT_CONFIG_KEY: False},
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(
+        lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
+        timeout=5000,
+    )
+    browser = dialog.rows_widget.findChild(
+        QWebEngineView, "SdlReviewNotepadBrowser"
+    )
+    assert browser is not None
+
+    def js_value(script):
+        values = []
+        browser.page().runJavaScript(script, values.append)
+        qtbot.waitUntil(lambda: bool(values), timeout=5000)
+        return values[0]
+
+    qtbot.waitUntil(
+        lambda: js_value(
+            "!!document.querySelector('p[data-sdl-notepad-source-empty] "
+            "[data-sdl-notepad-text]')"
+        ) is True,
+        timeout=5000,
+    )
+    assert js_value(
+        """
+        (() => {
+            const paragraph = document.querySelector(
+                'p[data-sdl-notepad-source-empty]'
+            );
+            return paragraph.querySelector('br') !== null
+                && !paragraph.hasAttribute('data-sdl-notepad-user-tag-container')
+                && paragraph.textContent.trim() === '';
+        })();
+        """
+    ) is True
+
+    note_text = "Translator note above the first paragraph."
+    assert js_value(
+        f"""
+        (() => {{
+            const paragraph = document.querySelector(
+                'p[data-sdl-notepad-source-empty]'
+            );
+            const host = paragraph.querySelector('[data-sdl-notepad-text]');
+            host.textContent = {json.dumps(note_text)};
+            host.dispatchEvent(new InputEvent('input', {{bubbles: true}}));
+            return paragraph.hasAttribute(
+                'data-sdl-notepad-user-tag-container'
+            );
+        }})();
+        """
+    ) is True
+    qtbot.waitUntil(
+        lambda: any(
+            row.get("target") == note_text and row.get("translator_note")
+            for row in (dialog.pieces[0].get("rows") or [])
+        ),
+        timeout=5000,
+    )
+    note_row = next(
+        row for row in dialog.pieces[0]["rows"]
+        if row.get("target") == note_text
+    )
+    assert note_row["source_index"] is None
+    assert note_row["target_index"] == 1
+    assert note_row["source_tag_label"] == "TN(1)"
+    assert note_row["target_tag_label"] == "TN(1)"
+
+    output_path = tmp_path / output_name
+    qtbot.waitUntil(
+        lambda: output_path.is_file()
+        and note_text in output_path.read_text(encoding="utf-8"),
+        timeout=5000,
+    )
+    saved_soup = BeautifulSoup(
+        output_path.read_text(encoding="utf-8"), "html.parser"
+    )
+    assert saved_soup.find_all("p")[0].get_text(strip=True) == note_text
+    assert saved_soup.find(attrs={"data-sdl-notepad-source-empty": True}) is None
+    stored_file = etree.parse(sidecar).xpath("//*[local-name()='file']")[0]
+    assert json.loads(
+        stored_file.get("{urn:glossarion:sdlxliff}user-added-target-indexes")
+    ) == [1]
+
+    assert js_value(
+        """
+        (() => {
+            const paragraph = document.querySelector(
+                'p[data-sdl-notepad-source-empty]'
+            );
+            const host = paragraph.querySelector('[data-sdl-notepad-text]');
+            host.textContent = '';
+            host.dispatchEvent(new InputEvent('input', {bubbles: true}));
+            return !paragraph.hasAttribute(
+                'data-sdl-notepad-user-tag-container'
+            );
+        })();
+        """
+    ) is True
+    qtbot.waitUntil(
+        lambda: all(
+            row.get("target") != note_text
+            for row in (dialog.pieces[0].get("rows") or [])
+        ),
+        timeout=5000,
+    )
+    stored_file = etree.parse(sidecar).xpath("//*[local-name()='file']")[0]
+    assert stored_file.get(
+        "{urn:glossarion:sdlxliff}user-added-target-indexes"
+    ) is None
+
+
 def test_notepad_loaded_target_only_trailing_break_deletes_from_blank_line(
     tmp_path, qtbot
 ):
