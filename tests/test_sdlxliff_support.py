@@ -5814,6 +5814,117 @@ def test_notepad_filled_text_empty_source_paragraph_becomes_translator_note(
     ) is None
 
 
+def test_notepad_persisted_middle_user_break_deletes_after_reopen(tmp_path, qtbot):
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+
+    output_name = "response_persisted-middle-break.html"
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "persisted-middle-break.xhtml"},
+        "<html><body><p>Original source paragraph.</p></body></html>",
+        (
+            "<html><body><p>First visible line.<br/>"
+            "Second visible line.</p></body></html>"
+        ),
+        raise_errors=True,
+    )
+    tree = etree.parse(sidecar)
+    file_element = tree.xpath("//*[local-name()='file']")[0]
+    file_element.set(
+        "{urn:glossarion:sdlxliff}user-added-break-positions", '{"0":[0]}'
+    )
+    tree.write(sidecar, encoding="utf-8", xml_declaration=True)
+
+    dialog = SDLXLIFFReviewDialog(
+        str(tmp_path),
+        sidecar,
+        config={SDLXLIFFReviewDialog.TWO_COLUMN_LAYOUT_CONFIG_KEY: False},
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(
+        lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
+        timeout=5000,
+    )
+    browser = dialog.rows_widget.findChild(QWebEngineView, "SdlReviewNotepadBrowser")
+    assert browser is not None
+
+    def js_value(script):
+        values = []
+        browser.page().runJavaScript(script, values.append)
+        qtbot.waitUntil(lambda: bool(values), timeout=5000)
+        return values[0]
+
+    qtbot.waitUntil(
+        lambda: js_value(
+            "!!document.querySelector('br[data-sdl-notepad-user-tag]')"
+        ) is True,
+        timeout=5000,
+    )
+    result = json.loads(js_value(
+        """
+        JSON.stringify((() => {
+            const paragraph = document.querySelector('p');
+            const lineBreak = paragraph.querySelector(
+                'br[data-sdl-notepad-user-tag]'
+            );
+            const hosts = Array.from(paragraph.querySelectorAll(
+                '[data-sdl-notepad-text]'
+            ));
+            const followingHost = hosts.find(host =>
+                host.textContent.includes('Second visible line.')
+            );
+            if (!lineBreak || !followingHost) {
+                return {missing: true, html: paragraph.outerHTML};
+            }
+            followingHost.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(followingHost);
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const backspace = new KeyboardEvent('keydown', {
+                key: 'Backspace', bubbles: true, cancelable: true
+            });
+            followingHost.dispatchEvent(backspace);
+            return {
+                backspaceHandled: backspace.defaultPrevented,
+                breakDeleted: !paragraph.querySelector('br'),
+                markerCleared: !paragraph.hasAttribute(
+                    'data-sdl-notepad-user-tag-container'
+                ),
+                followingTextKept: paragraph.textContent.includes(
+                    'Second visible line.'
+                )
+            };
+        })());
+        """
+    ))
+    assert result == {
+        "backspaceHandled": True,
+        "breakDeleted": True,
+        "markerCleared": True,
+        "followingTextKept": True,
+    }
+
+    output_path = tmp_path / output_name
+    qtbot.waitUntil(
+        lambda: output_path.is_file()
+        and BeautifulSoup(
+            output_path.read_text(encoding="utf-8"), "html.parser"
+        ).find("br") is None,
+        timeout=5000,
+    )
+    qtbot.waitUntil(
+        lambda: etree.parse(sidecar).xpath("//*[local-name()='file']")[0].get(
+            "{urn:glossarion:sdlxliff}user-added-break-positions"
+        ) is None,
+        timeout=5000,
+    )
+
+
 def test_notepad_loaded_target_only_trailing_break_deletes_from_blank_line(
     tmp_path, qtbot
 ):

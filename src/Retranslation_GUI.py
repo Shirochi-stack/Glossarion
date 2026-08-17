@@ -13464,12 +13464,25 @@ class SDLXLIFFReviewDialog(QDialog):
                         document.body.querySelectorAll('[' + EDIT_ATTR + ']')
                     );
                     const previousHost = hosts[hosts.indexOf(host) - 1];
-                    if (!previousHost || previousHost.textContent.trim()) return null;
+                    if (!previousHost
+                            || userTagContainer(previousHost) !== userTagContainer(host)) {
+                        return null;
+                    }
                     const breaks = previousHost.querySelectorAll(
                         'br[' + USER_TAG_ATTR + '],br['
                             + LOADED_EXTRA_BREAK_ATTR + ']'
                     );
-                    return breaks.length ? breaks[breaks.length - 1] : null;
+                    const lineBreak = breaks.length ? breaks[breaks.length - 1] : null;
+                    if (!lineBreak) return null;
+                    try {
+                        const afterBreak = document.createRange();
+                        afterBreak.selectNodeContents(previousHost);
+                        afterBreak.setStartAfter(lineBreak);
+                        if (afterBreak.toString().trim()) return null;
+                    } catch (_error) {
+                        return null;
+                    }
+                    return lineBreak;
                 };
                 const deleteAdjacentEditableBreak = (host, backwards) => {
                     const lineBreak = adjacentEditableBreak(host, backwards)
