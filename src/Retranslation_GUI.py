@@ -3206,13 +3206,19 @@ class SDLXLIFFReviewDialog(QDialog):
     def _mark_piece_progress_pending(self, piece, previous_output_name=None):
         """Keep manually authored HTML pending until its explicit completion action."""
         progress_path = self._progress_path_for_review_piece(piece)
-        if not os.path.isfile(progress_path):
-            return False
-        try:
-            with open(progress_path, "r", encoding="utf-8") as progress_file:
-                progress_data = json.load(progress_file)
-        except Exception:
-            return False
+        if os.path.isfile(progress_path):
+            try:
+                with open(progress_path, "r", encoding="utf-8") as progress_file:
+                    progress_data = json.load(progress_file)
+            except Exception:
+                return False
+        else:
+            progress_data = {
+                "chapters": {},
+                "chapter_chunks": {},
+                "completed_list": [],
+                "version": "2.1",
+            }
         if not isinstance(progress_data, dict):
             return False
 
@@ -3224,7 +3230,45 @@ class SDLXLIFFReviewDialog(QDialog):
             output_name,
         )
         if not matches:
-            return False
+            chapters = self._review_progress_chapters(progress_data)
+            if not isinstance(chapters, dict):
+                return False
+            original_name = (
+                (piece or {}).get("original_name")
+                or (piece or {}).get("original_basename")
+                or os.path.basename(output_name)
+            )
+            actual_num = (piece or {}).get("chapter_num")
+            if actual_num is None:
+                actual_num = self._chapter_number_from_name(
+                    original_name or output_name
+                )
+            try:
+                actual_num = int(actual_num)
+            except (TypeError, ValueError):
+                actual_num = self._chapter_number_from_name(output_name)
+
+            preferred_key = str((piece or {}).get("progress_key") or "").strip()
+            if not preferred_key:
+                preferred_key = str(actual_num) if actual_num else (
+                    f"manual:{self._canonical_basename(output_name)}"
+                )
+            new_key = preferred_key
+            suffix = 2
+            while new_key in chapters:
+                new_key = f"{preferred_key}:manual:{suffix}"
+                suffix += 1
+            new_entry = {
+                "actual_num": actual_num,
+                "status": "pending",
+                "output_file": output_name,
+                "original_basename": os.path.basename(str(original_name)),
+                "manual_editing_pending": True,
+                "last_updated": time.time(),
+            }
+            chapters[new_key] = new_entry
+            piece["progress_key"] = str(new_key)
+            matches = [(new_key, new_entry)]
 
         now = time.time()
         for key, entry in matches:
@@ -11318,6 +11362,17 @@ class SDLXLIFFReviewDialog(QDialog):
                 target_text = self._normalize_review_text(
                     target_node.get_text(" ", strip=True)
                 )
+                source_break_count = len(source_node.find_all("br"))
+                target_breaks = list(target_node.find_all("br"))
+                extra_break_count = max(
+                    0, len(target_breaks) - source_break_count
+                )
+                # Source EPUBs commonly end every paragraph with one
+                # structural <br>. Notepad Enter inserts before that trailing
+                # break. Re-identify the excess prefix even for older sidecars
+                # that predate the manual-editing metadata flag.
+                for line_break in target_breaks[:extra_break_count]:
+                    line_break["data-sdl-notepad-user-tag"] = "br"
                 target_node["data-sdl-notepad-source"] = source_text
                 if target_text or not fill_untranslated:
                     continue
@@ -11556,6 +11611,154 @@ class SDLXLIFFReviewDialog(QDialog):
                         'p,h1,h2,h3,h4,h5,h6,li,td,th,caption,figcaption,blockquote,' +
                         'section,article,div,body'
                     ) || editableHost(element);
+                };
+                const navigationContainer = host => {
+                    if (!host) return null;
+                    const rowContainer = host.closest(
+                        'p,h1,h2,h3,h4,h5,h6,li,td,th,caption,figcaption,blockquote'
+                    );
+                    if (rowContainer) return rowContainer;
+                    const broadContainer = host.closest('div,section,article');
+                    if (broadContainer && !broadContainer.querySelector(
+                            'p,h1,h2,h3,h4,h5,h6,li,td,th,caption,' +
+                            'figcaption,blockquote')) {
+                        return broadContainer;
+                    }
+                    return host;
+                };
+                const navigationContainers = () => {
+                    const containers = [];
+                    const seen = new Set();
+                    for (const host of document.body.querySelectorAll(
+                            '[' + EDIT_ATTR + ']')) {
+                        const container = navigationContainer(host);
+                        if (container && !seen.has(container)) {
+                            seen.add(container);
+                            containers.push(container);
+                        }
+                    }
+                    return containers;
+                };
+                const userBreaksIn = container => Array.from(
+                    container.querySelectorAll('br[' + USER_TAG_ATTR + ']')
+                );
+                const navigationPosition = (host, container) => {
+                    const selection = window.getSelection();
+                    if (!selection || !selection.rangeCount || !container) {
+                        return {segment: 0, column: 0};
+                    }
+                    const caret = selection.getRangeAt(0).cloneRange();
+                    caret.collapse(true);
+                    const breaks = userBreaksIn(container);
+                    let segment = 0;
+                    try {
+                        const beforeCaret = document.createRange();
+                        beforeCaret.selectNodeContents(container);
+                        beforeCaret.setEnd(caret.startContainer, caret.startOffset);
+                        for (const lineBreak of breaks) {
+                            if (beforeCaret.intersectsNode(lineBreak)) segment += 1;
+                        }
+                    } catch (_error) {
+                        segment = 0;
+                    }
+                    let column = 0;
+                    try {
+                        const lineRange = document.createRange();
+                        if (segment > 0) lineRange.setStartAfter(breaks[segment - 1]);
+                        else lineRange.setStart(container, 0);
+                        lineRange.setEnd(caret.startContainer, caret.startOffset);
+                        column = lineRange.toString().length;
+                    } catch (_error) {
+                        const snapshot = selectionOffsets(host);
+                        column = snapshot ? snapshot.start : 0;
+                    }
+                    return {segment, column};
+                };
+                const restoreNavigationPosition = (container, rawSegment, rawColumn) => {
+                    if (!container || !container.isConnected) return false;
+                    const breaks = userBreaksIn(container);
+                    const segment = Math.max(
+                        0, Math.min(breaks.length, Number(rawSegment) || 0)
+                    );
+                    const segmentRange = document.createRange();
+                    segmentRange.selectNodeContents(container);
+                    if (segment > 0) segmentRange.setStartAfter(breaks[segment - 1]);
+                    if (segment < breaks.length) segmentRange.setEndBefore(breaks[segment]);
+
+                    const textNodes = [];
+                    const walker = document.createTreeWalker(
+                        container, NodeFilter.SHOW_TEXT
+                    );
+                    while (walker.nextNode()) {
+                        const node = walker.currentNode;
+                        if (!editableHost(node)) continue;
+                        try {
+                            if (segmentRange.intersectsNode(node)) textNodes.push(node);
+                        } catch (_error) {}
+                    }
+
+                    let targetNode = null;
+                    let targetOffset = 0;
+                    let remaining = Math.max(0, Number(rawColumn) || 0);
+                    for (const node of textNodes) {
+                        const length = String(node.nodeValue || '').length;
+                        targetNode = node;
+                        targetOffset = Math.min(remaining, length);
+                        if (remaining <= length) break;
+                        remaining -= length;
+                    }
+
+                    const range = document.createRange();
+                    let targetHost = editableHost(targetNode);
+                    if (targetNode) {
+                        range.setStart(targetNode, targetOffset);
+                    } else if (segment > 0) {
+                        const previousBreak = breaks[segment - 1];
+                        targetHost = editableHost(previousBreak);
+                        range.setStartAfter(previousBreak);
+                    } else if (breaks.length) {
+                        targetHost = editableHost(breaks[0]);
+                        range.setStartBefore(breaks[0]);
+                    } else {
+                        targetHost = container.matches('[' + EDIT_ATTR + ']')
+                            ? container
+                            : container.querySelector('[' + EDIT_ATTR + ']');
+                        if (!targetHost) return false;
+                        const caretNode = document.createTextNode('');
+                        targetHost.insertBefore(caretNode, targetHost.firstChild);
+                        range.setStart(caretNode, 0);
+                    }
+                    if (!targetHost) return false;
+                    range.collapse(true);
+                    try { targetHost.focus({preventScroll: true}); }
+                    catch (_error) { targetHost.focus(); }
+                    const selection = window.getSelection();
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    return true;
+                };
+                const moveVertical = (host, upwards) => {
+                    const container = navigationContainer(host);
+                    if (!container) return false;
+                    const containers = navigationContainers();
+                    const containerIndex = containers.indexOf(container);
+                    if (containerIndex < 0) return false;
+                    const position = navigationPosition(host, container);
+                    const breaks = userBreaksIn(container);
+                    let targetContainer = container;
+                    let targetSegment = position.segment + (upwards ? -1 : 1);
+                    if (targetSegment < 0) {
+                        targetContainer = containers[containerIndex - 1];
+                        if (!targetContainer) return false;
+                        targetSegment = userBreaksIn(targetContainer).length;
+                    } else if (targetSegment > breaks.length) {
+                        targetContainer = containers[containerIndex + 1];
+                        if (!targetContainer) return false;
+                        targetSegment = 0;
+                    }
+                    return restoreNavigationPosition(
+                        targetContainer, targetSegment, position.column
+                    );
                 };
                 const refreshUserTagIndicator = container => {
                     if (!container || !container.isConnected) return;
@@ -12141,17 +12344,9 @@ class SDLXLIFFReviewDialog(QDialog):
                     if ((event.key === 'ArrowUp' || event.key === 'ArrowDown')
                             && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
                             && shortcutHost && selectionInside(shortcutHost)) {
-                        const hosts = Array.from(
-                            document.body.querySelectorAll('[' + EDIT_ATTR + ']')
-                        );
-                        const index = hosts.indexOf(shortcutHost);
-                        const target = hosts[index + (event.key === 'ArrowUp' ? -1 : 1)];
-                        if (target) {
-                            const snapshot = selectionOffsets(shortcutHost);
-                            const column = snapshot ? snapshot.start : 0;
+                        if (moveVertical(shortcutHost, event.key === 'ArrowUp')) {
                             event.preventDefault();
                             event.stopImmediatePropagation();
-                            restoreSelection({host: target, start: column, end: column});
                             return;
                         }
                     }

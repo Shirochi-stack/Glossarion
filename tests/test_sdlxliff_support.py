@@ -3141,6 +3141,68 @@ def test_manual_edit_save_stays_pending_until_explicitly_completed(tmp_path, mon
     assert "manual_editing_pending" not in completed_entry
 
 
+def test_manual_edit_save_seeds_pending_progress_before_creating_html(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "1")
+    monkeypatch.setenv("RETAIN_SOURCE_EXTENSION", "0")
+    output_name = "response_chapter0019.html"
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0019.xhtml"},
+        "<html><body><p>Source.</p></body></html>",
+        "<html><body><p>Source.</p></body></html>",
+        raise_errors=True,
+        manual_untranslated=True,
+    )
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog.current_path = sidecar
+    dialog._config = {"retain_source_extension": False}
+    dialog._last_review_signature = None
+    dialog._current_review_signature = lambda: ()
+    dialog._last_autogen_signature = None
+    dialog._current_review_autogen_signature = lambda: ("manual-save",)
+    piece = dialog._build_piece(
+        sidecar,
+        0,
+        {
+            "output_name": output_name,
+            "original_name": "chapter0019.xhtml",
+            "chapter_num": 19,
+        },
+    )
+    output_path = tmp_path / output_name
+    progress_write_preceded_output = []
+    real_write = dialog._write_review_progress_data
+
+    def traced_progress_write(path, progress_data):
+        progress_write_preceded_output.append(not output_path.exists())
+        return real_write(path, progress_data)
+
+    dialog._write_review_progress_data = traced_progress_write
+    edited_html = dialog._target_html_with_edit(
+        piece, piece["rows"][0], "Manual target."
+    )
+
+    dialog._write_piece_target_html(piece, edited_html)
+
+    progress_path = tmp_path / "translation_progress.json"
+    progress_data = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert progress_write_preceded_output == [True]
+    assert output_path.is_file()
+    assert list(progress_data["chapters"]) == ["19"]
+    pending_entry = progress_data["chapters"]["19"]
+    assert pending_entry["actual_num"] == 19
+    assert pending_entry["status"] == "pending"
+    assert pending_entry["manual_editing_pending"] is True
+    assert pending_entry["output_file"] == output_name
+    assert pending_entry["original_basename"] == "chapter0019.xhtml"
+    assert progress_data["completed_list"] == []
+    assert piece["progress_key"] == "19"
+    assert piece["manual_editing_pending"] is True
+
+
 def test_manual_edit_save_retains_source_name_and_extension_when_enabled(tmp_path, monkeypatch):
     monkeypatch.setenv("OUTPUT_SDLXLIFF", "1")
     monkeypatch.setenv("RETAIN_SOURCE_EXTENSION", "1")
@@ -3516,7 +3578,7 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         (() => {
             const hosts = Array.from(document.querySelectorAll('[data-sdl-notepad-text]'));
             const first = hosts[0];
-            const second = hosts[1];
+            const second = document.querySelector('#empty [data-sdl-notepad-text]');
             first.focus();
             const selection = window.getSelection();
             const range = document.createRange();
@@ -3542,6 +3604,84 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         })();
         """
     ) == "[true,true,true,true]"
+    assert js_value(
+        """
+        (() => {
+            const fixture = document.createElement('div');
+            const makeHost = text => {
+                const host = document.createElement('span');
+                host.setAttribute('data-sdl-notepad-text', '1');
+                host.setAttribute('contenteditable', 'true');
+                host.appendChild(document.createTextNode(text));
+                return host;
+            };
+            const splitRow = document.createElement('p');
+            const splitLeft = makeHost('[');
+            const splitRight = makeHost('same visible row]');
+            splitRow.append(splitLeft, splitRight);
+            const manualBreakRow = document.createElement('p');
+            const manualHost = makeHost('Translator');
+            const firstBreak = document.createElement('br');
+            const secondBreak = document.createElement('br');
+            firstBreak.setAttribute('data-sdl-notepad-user-tag', 'br');
+            secondBreak.setAttribute('data-sdl-notepad-user-tag', 'br');
+            manualHost.append(firstBreak, secondBreak);
+            manualBreakRow.appendChild(manualHost);
+            const followingRow = document.createElement('p');
+            const followingHost = makeHost('Following row');
+            followingRow.appendChild(followingHost);
+            fixture.append(splitRow, manualBreakRow, followingRow);
+            document.body.appendChild(fixture);
+
+            splitLeft.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(splitLeft);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const press = (host, key) => {
+                const event = new KeyboardEvent('keydown', {
+                    key, bubbles: true, cancelable: true
+                });
+                host.dispatchEvent(event);
+                return event.defaultPrevented;
+            };
+            const afterBreak = lineBreak => {
+                const current = selection.rangeCount ? selection.getRangeAt(0) : null;
+                return !!current
+                    && current.startContainer === lineBreak.parentNode
+                    && current.startOffset === Array.from(
+                        lineBreak.parentNode.childNodes
+                    ).indexOf(lineBreak) + 1;
+            };
+
+            const firstDown = press(splitLeft, 'ArrowDown');
+            const skippedInlineSibling = document.activeElement === manualHost;
+            const secondDown = press(manualHost, 'ArrowDown');
+            const selectedFirstEmptyLine = afterBreak(firstBreak);
+            const thirdDown = press(manualHost, 'ArrowDown');
+            const selectedSecondEmptyLine = afterBreak(secondBreak);
+            const fourthDown = press(manualHost, 'ArrowDown');
+            const reachedFollowingRow = document.activeElement === followingHost;
+            const up = press(followingHost, 'ArrowUp');
+            const returnedToLastEmptyLine = afterBreak(secondBreak);
+            fixture.remove();
+            return JSON.stringify([
+                firstDown,
+                skippedInlineSibling,
+                secondDown,
+                selectedFirstEmptyLine,
+                thirdDown,
+                selectedSecondEmptyLine,
+                fourthDown,
+                reachedFollowingRow,
+                up,
+                returnedToLastEmptyLine
+            ]);
+        })();
+        """
+    ) == "[true,true,true,true,true,true,true,true,true,true]"
     assert js_value(
         """
         (() => {
@@ -4101,7 +4241,11 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     qtbot.waitUntil(
         lambda: js_value(
             "document.querySelector('p').getAttribute('data-sdl-notepad-source')"
-        ) == "Source line",
+            " === 'Source line' && !!document.querySelector('#sdl-notepad-source-tooltip')"
+            " && document.querySelector('img').getAttribute("
+            "'data-sdl-notepad-original-src')"
+            " === '../Images/chapter0001_img_1.png'"
+        ) is True,
         timeout=5000,
     )
     assert js_value(
@@ -4230,6 +4374,24 @@ def test_notepad_initial_html_keeps_translation_and_expands_source_markup_for_em
     unfilled_paragraph = BeautifulSoup(unfilled_document, "html.parser").find("p")
     assert unfilled_paragraph.get_text(strip=True) == ""
     assert unfilled_paragraph["data-sdl-notepad-source"] == "Source only"
+
+    reopened_manual_document = dialog._notepad_initial_document_html(
+        {
+            "source_html": "<html><body><p>&nbsp;<br/></p></body></html>",
+            "target_html": (
+                "<html><body><p>&nbsp;Translator<br/><br/><br/></p></body></html>"
+            ),
+        },
+        fill_untranslated=False,
+    )
+    reopened_breaks = BeautifulSoup(
+        reopened_manual_document, "html.parser"
+    ).find_all("br")
+    assert [line_break.get("data-sdl-notepad-user-tag") for line_break in reopened_breaks] == [
+        "br",
+        "br",
+        None,
+    ]
 
 
 def test_notepad_browser_cleanup_removes_only_editor_scaffolding():
