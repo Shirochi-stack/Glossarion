@@ -1824,6 +1824,10 @@ class SDLXLIFFReviewDialog(QDialog):
         self._review_piece_reload_running = False
         self._review_piece_reload_requested = False
         self._seamless_review_old_page = None
+        self._review_transition_overlay = None
+        self._review_transition_anim = None
+        self._review_transition_held = False
+        self._pending_review_transition_pixmap = None
         self._review_context_menu_open = False
         self._review_text_context_menu = None
         self._piece_list_context_menu = None
@@ -4576,20 +4580,20 @@ class SDLXLIFFReviewDialog(QDialog):
         self._update_review_layout_button()
         self._persist_review_config_value(self.TWO_COLUMN_LAYOUT_CONFIG_KEY, enabled)
         try:
-            # Keep the currently painted mode in place while its replacement
-            # is built.  _render_piece() snapshots it before the swap and the
-            # existing page transition then fades that snapshot away over the
-            # completed Compact/Notepad page.  Removing it here used to expose
-            # the loading page for the full (and very noticeable) rebuild.
-            old_visible_page = self._retain_visible_review_page_for_seamless_swap()
-            self._cancel_active_review_render(defer_visible_discard=True)
+            # Freeze only the visible viewport for the transition. Keeping the
+            # live Compact page here also kept its full document-height stack;
+            # the new QWebEngineView then inherited that height and Qt tried to
+            # allocate backing textures taller than the GPU's 16384px limit.
+            transition_pixmap = self._capture_review_transition_snapshot()
+            self._hold_review_page_transition(transition_pixmap)
+            self._cancel_active_review_render()
             self._cancel_review_preload(discard_page=True)
             for row, page in list(self._piece_pages.items()):
-                if page is old_visible_page:
-                    continue
                 self._discard_piece_page(row, page)
             self._piece_pages.clear()
             self._piece_render_complete.clear()
+            self._finish_seamless_review_swap(self.loading_page)
+            self._reset_review_stack_for_mode_transition()
             for piece in self.pieces:
                 if isinstance(piece, dict):
                     piece.pop("_render_model", None)
@@ -8134,21 +8138,6 @@ class SDLXLIFFReviewDialog(QDialog):
             return
         self._remove_review_page_widget(old_page)
 
-    def _retain_visible_review_page_for_seamless_swap(self):
-        """Keep the visible review page alive until its replacement is ready."""
-        try:
-            old_page = self.rows_stack.currentWidget()
-            if old_page is None or old_page is self.loading_page:
-                return None
-        except Exception:
-            return None
-
-        previous = getattr(self, "_seamless_review_old_page", None)
-        if previous is not None and previous is not old_page:
-            self._remove_review_page_widget(previous)
-        self._seamless_review_old_page = old_page
-        return old_page
-
     def _capture_review_transition_snapshot(self):
         """Grab what the user currently sees so the next page can fade in over it."""
         try:
@@ -8164,6 +8153,8 @@ class SDLXLIFFReviewDialog(QDialog):
     def _cancel_review_page_transition(self):
         anim = getattr(self, "_review_transition_anim", None)
         self._review_transition_anim = None
+        self._review_transition_held = False
+        self._pending_review_transition_pixmap = None
         if anim is not None:
             try:
                 anim.stop()
@@ -8179,28 +8170,98 @@ class SDLXLIFFReviewDialog(QDialog):
             except Exception:
                 pass
 
+    def _create_review_transition_overlay(self, pixmap):
+        if pixmap is None or pixmap.isNull():
+            return None, None
+        viewport = self.scroll.viewport()
+        if viewport is None:
+            return None, None
+        overlay = QLabel(viewport)
+        overlay.setObjectName("SdlReviewTransitionOverlay")
+        overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        overlay.setPixmap(pixmap)
+        overlay.setScaledContents(False)
+        overlay.setGeometry(0, 0, viewport.width(), viewport.height())
+        effect = QGraphicsOpacityEffect(overlay)
+        effect.setOpacity(1.0)
+        overlay.setGraphicsEffect(effect)
+        overlay.show()
+        overlay.raise_()
+        self._review_transition_overlay = overlay
+        return overlay, effect
+
+    def _hold_review_page_transition(self, pixmap):
+        """Hold a viewport-sized snapshot while a replacement mode is built."""
+        try:
+            self._cancel_review_page_transition()
+            overlay, _effect = self._create_review_transition_overlay(pixmap)
+            if overlay is None:
+                return False
+            self._review_transition_held = True
+            self._pending_review_transition_pixmap = pixmap
+            # Paint the snapshot before the zero-delay rebuild callback runs.
+            overlay.repaint()
+            return True
+        except Exception:
+            self._cancel_review_page_transition()
+            return False
+
+    def _take_review_transition_snapshot(self, show_loading=True):
+        if not show_loading:
+            return None
+        pixmap = getattr(self, "_pending_review_transition_pixmap", None)
+        self._pending_review_transition_pixmap = None
+        try:
+            if pixmap is not None and not pixmap.isNull():
+                return pixmap
+        except Exception:
+            pass
+        return self._capture_review_transition_snapshot()
+
+    def _reset_review_stack_for_mode_transition(self):
+        """Release the old document height before creating a browser-backed page."""
+        try:
+            viewport = self.scroll.viewport()
+            viewport_width = max(1, int(viewport.width()))
+            viewport_height = max(1, int(viewport.height()))
+            self.rows_stack.setCurrentWidget(self.loading_page)
+            self.rows_widget = self.loading_page
+            self.rows_layout = self.loading_page.layout()
+            for widget in (self.loading_page, self.rows_stack):
+                widget.setMinimumHeight(viewport_height)
+                widget.setMaximumHeight(viewport_height)
+                widget.resize(viewport_width, viewport_height)
+                widget.updateGeometry()
+            overlay = getattr(self, "_review_transition_overlay", None)
+            if overlay is not None:
+                overlay.setGeometry(0, 0, viewport_width, viewport_height)
+                overlay.raise_()
+        except Exception:
+            pass
+
     def _start_review_page_transition(self, pixmap, duration_ms=140):
         """Crossfade entry switches: fade a static snapshot of the old content
         out over the new page. Only the snapshot is animated, so the live rows
         underneath render at full speed."""
         try:
-            self._cancel_review_page_transition()
             if pixmap is None or pixmap.isNull():
+                self._cancel_review_page_transition()
                 return
-            viewport = self.scroll.viewport()
-            if viewport is None:
-                return
-            overlay = QLabel(viewport)
-            overlay.setObjectName("SdlReviewTransitionOverlay")
-            overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            overlay.setPixmap(pixmap)
-            overlay.setScaledContents(False)
-            overlay.setGeometry(0, 0, viewport.width(), viewport.height())
-            effect = QGraphicsOpacityEffect(overlay)
-            effect.setOpacity(1.0)
-            overlay.setGraphicsEffect(effect)
-            overlay.show()
-            overlay.raise_()
+            overlay = getattr(self, "_review_transition_overlay", None)
+            held = bool(getattr(self, "_review_transition_held", False))
+            effect = overlay.graphicsEffect() if held and overlay is not None else None
+            if not held or overlay is None or not isinstance(effect, QGraphicsOpacityEffect):
+                self._cancel_review_page_transition()
+                overlay, effect = self._create_review_transition_overlay(pixmap)
+                if overlay is None or effect is None:
+                    return
+            else:
+                viewport = self.scroll.viewport()
+                overlay.setGeometry(0, 0, viewport.width(), viewport.height())
+                effect.setOpacity(1.0)
+                overlay.show()
+                overlay.raise_()
+            self._review_transition_held = False
             anim = QPropertyAnimation(effect, b"opacity", overlay)
             anim.setDuration(max(35, int(duration_ms)))
             anim.setStartValue(1.0)
@@ -8213,6 +8274,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 if getattr(self, "_review_transition_overlay", None) is overlay:
                     self._review_transition_overlay = None
                     self._review_transition_anim = None
+                    self._review_transition_held = False
                 try:
                     overlay.hide()
                     overlay.setParent(None)
@@ -14802,9 +14864,9 @@ class SDLXLIFFReviewDialog(QDialog):
         self._status_jump_indices.clear()
         render_token = self._render_token
         self._cancel_active_review_render(defer_visible_discard=True)
-        # Snapshot the current view now (before any geometry churn) so the
-        # new entry can crossfade in over it at swap time.
-        transition_pixmap = self._capture_review_transition_snapshot() if show_loading else None
+        # A mode switch installs its viewport snapshot before destroying the
+        # old page. Normal entry changes capture here before geometry churn.
+        transition_pixmap = self._take_review_transition_snapshot(show_loading)
 
         piece = self.pieces[row]
         try:
@@ -14871,6 +14933,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._finish_seamless_review_swap(page)
             self._finish_rows_rebuild(final=True)
             self._restore_review_scroll(row)
+            self._start_review_page_transition(transition_pixmap)
             self._queue_review_page_preloads(row)
             self._trace_review_perf(
                 "render_piece_error_done",
@@ -14913,6 +14976,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._finish_seamless_review_swap(page)
                 self._finish_rows_rebuild(final=True)
                 self._restore_review_scroll(row)
+                self._start_review_page_transition(transition_pixmap)
                 return
 
         rows = self._review_rows_for_current_layout(piece)
@@ -14929,6 +14993,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._finish_seamless_review_swap(page)
             self._finish_rows_rebuild(final=True)
             self._restore_review_scroll(row)
+            self._start_review_page_transition(transition_pixmap)
             self._queue_review_page_preloads(row)
             self._trace_review_perf(
                 "render_piece_empty_done",
@@ -14957,6 +15022,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._finish_seamless_review_swap(page)
             self._finish_rows_rebuild(final=True)
             self._restore_review_scroll(row)
+            self._start_review_page_transition(transition_pixmap)
             self._queue_review_page_preloads(row)
             self._trace_review_perf(
                 "render_piece_model_failed_done",
@@ -15005,6 +15071,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._finish_seamless_review_swap(page)
                 self._finish_rows_rebuild(final=True)
                 self._restore_review_scroll(row)
+                self._start_review_page_transition(transition_pixmap)
                 self._queue_review_page_preloads(row)
                 self._trace_review_perf(
                     "render_piece_sync_failed_done",
@@ -15193,6 +15260,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     self._finish_seamless_review_swap(page)
                     self._finish_rows_rebuild(final=True)
                     self._restore_review_scroll(row)
+                    self._start_review_page_transition(transition_pixmap)
                     self._queue_review_page_preloads(row)
                 if self._active_render_page is page:
                     self._active_render_row = None
@@ -18292,7 +18360,7 @@ class RetranslationMixin:
         except Exception as e:
             print(f"⚠️ Could not flash PM button: {e}")
 
-    def _create_retranslation_shell_dialog(self, title="Progress Manager", width_ratio=0.38, height_ratio=0.4):
+    def _create_retranslation_shell_dialog(self, title="Progress Manager", width_ratio=0.40, height_ratio=0.4):
         from PySide6.QtWidgets import QApplication
         if not QApplication.instance():
             QApplication(sys.argv)

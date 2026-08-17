@@ -1960,23 +1960,19 @@ def test_sdlxliff_review_two_column_layout_toggle_saves_to_parent_config():
     assert parent.save_calls == 1
 
 
-def test_sdlxliff_review_layout_toggle_keeps_visible_page_until_replacement_is_ready():
-    class Stack:
-        def __init__(self, current):
-            self.current = current
-
-        def currentWidget(self):
-            return self.current
-
+def test_sdlxliff_review_layout_toggle_holds_viewport_snapshot_and_discards_tall_page():
     dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     visible_page = object()
     cached_page = object()
+    snapshot = object()
     discarded = []
     cancel_args = []
+    held = []
+    finish_calls = []
+    reset_calls = []
     dialog._config = {}
     dialog._context_parent = None
     dialog.two_column_layout_btn = None
-    dialog.rows_stack = Stack(visible_page)
     dialog.loading_page = object()
     dialog._seamless_review_old_page = None
     dialog._piece_pages = {0: visible_page, 1: cached_page}
@@ -1985,18 +1981,76 @@ def test_sdlxliff_review_layout_toggle_keeps_visible_page_until_replacement_is_r
     dialog.pieces = []
     dialog.piece_list = None
     dialog._update_review_layout_button = lambda: None
+    dialog._capture_review_transition_snapshot = lambda: snapshot
+    dialog._hold_review_page_transition = lambda pixmap: held.append(pixmap)
     dialog._cancel_active_review_render = (
         lambda defer_visible_discard=False: cancel_args.append(defer_visible_discard)
     )
     dialog._cancel_review_preload = lambda discard_page=True: None
     dialog._discard_piece_page = lambda row, page: discarded.append((row, page))
+    dialog._finish_seamless_review_swap = lambda page: finish_calls.append(page)
+    dialog._reset_review_stack_for_mode_transition = lambda: reset_calls.append(True)
 
     dialog._set_review_two_column_layout(False)
 
-    assert cancel_args == [True]
-    assert dialog._seamless_review_old_page is visible_page
-    assert discarded == [(1, cached_page)]
+    assert held == [snapshot]
+    assert cancel_args == [False]
+    assert dialog._seamless_review_old_page is None
+    assert discarded == [(0, visible_page), (1, cached_page)]
     assert dialog._piece_pages == {}
+    assert finish_calls == [dialog.loading_page]
+    assert reset_calls == [True]
+
+
+def test_sdlxliff_review_mode_transition_resets_stack_to_viewport_height():
+    class SizedWidget:
+        def __init__(self):
+            self.minimum_height = None
+            self.maximum_height = None
+            self.size = None
+
+        def setMinimumHeight(self, height):
+            self.minimum_height = height
+
+        def setMaximumHeight(self, height):
+            self.maximum_height = height
+
+        def resize(self, width, height):
+            self.size = (width, height)
+
+        def updateGeometry(self):
+            pass
+
+    class LoadingPage(SizedWidget):
+        def layout(self):
+            return "loading-layout"
+
+    class Stack(SizedWidget):
+        def setCurrentWidget(self, page):
+            self.current = page
+
+    class Viewport:
+        def width(self):
+            return 2047
+
+        def height(self):
+            return 900
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.loading_page = LoadingPage()
+    dialog.rows_stack = Stack()
+    dialog.scroll = SimpleNamespace(viewport=lambda: Viewport())
+    dialog._review_transition_overlay = None
+
+    dialog._reset_review_stack_for_mode_transition()
+
+    assert dialog.rows_stack.current is dialog.loading_page
+    assert dialog.rows_widget is dialog.loading_page
+    assert dialog.rows_layout == "loading-layout"
+    for widget in (dialog.loading_page, dialog.rows_stack):
+        assert widget.minimum_height == 900
+        assert widget.maximum_height == 900
+        assert widget.size == (2047, 900)
 
 
 def test_sdlxliff_review_two_column_layout_defaults_on_and_reads_legacy_config():
@@ -5933,6 +5987,12 @@ def test_progress_manager_exposes_manual_editing_toggle_for_not_translated_rows(
     assert "'generate_manual_editing_sidecars': _generate_manual_editing_sidecars" in source
     assert "(_manual_editing_enabled() and _progress_item_is_html(display_info))" in source
     assert "if callable(generate_sidecars):" in source
+
+
+def test_progress_manager_shell_uses_slightly_wider_default():
+    default_width = RetranslationMixin._create_retranslation_shell_dialog.__defaults__[1]
+
+    assert default_width == 0.40
 
 
 def test_progress_manager_manual_editing_generation_does_not_block_gui_thread():
