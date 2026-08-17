@@ -5044,10 +5044,6 @@ def test_notepad_enter_at_paragraph_end_saves_a_separate_empty_paragraph(
         "<html><body><p>Translated paragraph.</p></body></html>",
         raise_errors=True,
     )
-    tree = etree.parse(sidecar)
-    file_element = tree.xpath("//*[local-name()='file']")[0]
-    file_element.set("{urn:glossarion:sdlxliff}manual-editing", "true")
-    tree.write(sidecar, encoding="utf-8", xml_declaration=True)
     dialog = SDLXLIFFReviewDialog(
         str(tmp_path),
         sidecar,
@@ -5059,6 +5055,7 @@ def test_notepad_enter_at_paragraph_end_saves_a_separate_empty_paragraph(
         lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
         timeout=5000,
     )
+    assert dialog.pieces[0]["manual_editing"] is False
     browser = dialog.rows_widget.findChild(QWebEngineView, "SdlReviewNotepadBrowser")
     assert browser is not None
 
@@ -5358,6 +5355,7 @@ def test_notepad_loaded_target_only_trailing_break_deletes_from_blank_line(
 
 
 def test_notepad_context_menu_previews_injects_and_flags_machine_translation(tmp_path, qtbot):
+    from PySide6.QtTest import QTest
     from PySide6.QtWebEngineWidgets import QWebEngineView
 
     output_name = "response_chapter0001.html"
@@ -5409,17 +5407,27 @@ def test_notepad_context_menu_previews_injects_and_flags_machine_translation(tmp
     preview = "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu."
     dialog._set_row_tooltip_translation(piece, row_data, preview)
 
-    assert js_value(
+    context_snapshot = json.loads(js_value(
         """
-        (() => {
-            const host = document.querySelector('p [data-sdl-notepad-text]');
+        JSON.stringify((() => {
+            try {
+            const paragraph = document.querySelector('p');
+            const host = paragraph.querySelector('[data-sdl-notepad-text]');
+            paragraph.setAttribute('data-sdl-notepad-row-index', '999');
             host.dispatchEvent(new MouseEvent('contextmenu', {
                 bubbles: true, cancelable: true
             }));
-            return window.__sdlNotepadContextSnapshot?.rowIndex;
-        })();
+            return {
+                rowIndex: window.__sdlNotepadContextSnapshot?.rowIndex,
+                targetIndex: window.__sdlNotepadContextSnapshot?.targetIndex
+            };
+            } catch (error) {
+                return {error: String(error), stack: String(error.stack || '')};
+            }
+        })());
         """
-    ) == 0
+    ))
+    assert context_snapshot == {"rowIndex": 999, "targetIndex": 0}
     dialog._request_notepad_browser_context_menu(browser, browser.rect().center())
     qtbot.waitUntil(
         lambda: getattr(dialog, "_review_text_context_menu", None) is not None,
@@ -5457,9 +5465,51 @@ def test_notepad_context_menu_previews_injects_and_flags_machine_translation(tmp
             (piece_index, row_index)
         )
     )
-    generate_action.trigger()
+    QTest.mouseClick(
+        context_menu,
+        Qt.LeftButton,
+        pos=context_menu.actionGeometry(generate_action).center(),
+    )
     assert generated_rows == [(0, 0)]
+    assert context_menu.isVisible() is True
+
+    dialog._tooltip_translation_running = True
+    dialog._mark_tooltip_translation_pending(
+        0,
+        [(
+            0,
+            dialog._tooltip_translation_key(piece, row_data),
+            row_data["source"],
+            row_data["source_tag"],
+        )],
+    )
+    assert context_menu.isVisible() is True
+    assert preview_label.text() == dialog._machine_translation_pending_text()
+    assert generate_action.isEnabled() is False
+    assert inject_action.isEnabled() is False
+
+    updated_preview = "A newly generated in-place machine translation preview."
+    dialog._tooltip_translation_running = False
+    row_data.pop("tooltip_translation_pending", None)
+    row_data.pop("tooltip_translation_status", None)
+    dialog._set_row_tooltip_translation(
+        piece, row_data, updated_preview, persist=False
+    )
+    dialog._refresh_open_notepad_machine_translation_context()
+    assert context_menu.isVisible() is True
+    assert preview_label.text() == updated_preview
+    assert generate_action.isEnabled() is True
+    assert inject_action.isEnabled() is True
+
+    dialog._set_row_tooltip_translation(piece, row_data, preview, persist=False)
+    dialog._refresh_open_notepad_machine_translation_context()
+    assert preview_label.text() == preview
+
     context_menu.close()
+    assert js_value(
+        "document.querySelector('p').setAttribute("
+        "'data-sdl-notepad-row-index', '0'); true"
+    ) is True
     qtbot.waitUntil(
         lambda: getattr(dialog, "_review_text_context_menu", None) is None,
         timeout=2000,

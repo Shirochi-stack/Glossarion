@@ -96,6 +96,43 @@ _MISSING_IMAGE_QA_RE = re.compile(
 )
 
 
+class _KeepOpenActionMenu(QMenu):
+    """QMenu that leaves explicitly persistent actions open after activation."""
+
+    KEEP_OPEN_PROPERTY = "sdl_keep_menu_open"
+
+    @classmethod
+    def _keeps_open(cls, action):
+        return bool(
+            action is not None
+            and action.isEnabled()
+            and action.property(cls.KEEP_OPEN_PROPERTY)
+        )
+
+    def mouseReleaseEvent(self, event):
+        try:
+            position = event.position().toPoint()
+        except AttributeError:
+            position = event.pos()
+        action = self.actionAt(position)
+        if self._keeps_open(action):
+            self.setActiveAction(action)
+            action.trigger()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if (
+            event.key() in {Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space}
+            and self._keeps_open(self.activeAction())
+        ):
+            self.activeAction().trigger()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 def _is_progress_sidecar_entry(entry=None, output_file=None):
     """Return whether a progress row points at an internal workspace sidecar."""
     entry = entry if isinstance(entry, dict) else {}
@@ -7326,7 +7363,11 @@ class SDLXLIFFReviewDialog(QDialog):
             target_units = (
                 target_all_units
                 if manual_editing
-                else self._non_empty_text_units(target_all_units)
+                else [
+                    unit for unit in target_all_units
+                    if self._normalize_review_text(unit.get("text", ""))
+                    or unit.get("user_added")
+                ]
             )
             if self._review_remove_duplicate_h1_p_enabled():
                 # Hide the same duplicate H1-H6 + <p> title echoes the header
@@ -7338,7 +7379,10 @@ class SDLXLIFFReviewDialog(QDialog):
                     target_all_units = self._dedupe_heading_paragraph_units(target_all_units)
                     target_units = self._non_empty_text_units(target_all_units)
             source_review_units = self._annotate_review_tag_labels(self._non_empty_text_units(source_units))
-            translator_note_target_indexes = set()
+            # An explicitly Notepad-created target block is a translator note
+            # regardless of whether the SDLXLIFF itself is in manual-editing
+            # mode. Feed it into the one existing TN(N) annotation path.
+            translator_note_target_indexes = set(user_added_target_indexes)
             if (
                 len(source_all_units) == len(target_all_units)
                 and all(
@@ -7348,14 +7392,14 @@ class SDLXLIFFReviewDialog(QDialog):
                     )
                 )
             ):
-                translator_note_target_indexes = {
+                translator_note_target_indexes.update({
                     target_unit.get("index")
                     for source_unit, target_unit in zip(
                         source_all_units, target_all_units
                     )
                     if not self._normalize_review_text(source_unit.get("text", ""))
                     and self._normalize_review_text(target_unit.get("text", ""))
-                }
+                })
             if manual_editing:
                 source_review_indexes = {
                     unit.get("index") for unit in source_review_units
@@ -7367,7 +7411,11 @@ class SDLXLIFFReviewDialog(QDialog):
                     or unit.get("user_added")
                 ]
             else:
-                target_review_units = self._non_empty_text_units(target_units)
+                target_review_units = [
+                    unit for unit in target_units
+                    if self._normalize_review_text(unit.get("text", ""))
+                    or unit.get("user_added")
+                ]
 
             # Positional alignment must retain an empty target element even
             # for an ordinary translated sidecar. Notepad edits leave the
@@ -10512,6 +10560,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     pending_rows.append(row_idx)
             if pending_rows:
                 self._invalidate_piece_render_model(self.pieces[piece_index], restart_preload=False)
+                self._refresh_open_notepad_machine_translation_context()
             if refresh and pending_rows:
                 if self._review_context_menu_is_open():
                     self._queue_refresh_current_visible_dirty_source_previews()
@@ -10542,6 +10591,7 @@ class SDLXLIFFReviewDialog(QDialog):
             if not changed_rows:
                 return
             self._invalidate_piece_render_model(piece, restart_preload=False)
+            self._refresh_open_notepad_machine_translation_context()
             if piece_index == self._displayed_piece_row():
                 if self._review_context_menu_is_open():
                     self._queue_refresh_current_visible_dirty_source_previews()
@@ -10797,6 +10847,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     self._last_machine_translation_signature = self._current_machine_translation_signature()
                 except Exception:
                     pass
+            self._refresh_open_notepad_machine_translation_context()
         if batch_active:
             return
         if error and not translations:
@@ -10826,6 +10877,7 @@ class SDLXLIFFReviewDialog(QDialog):
     def _finish_piece_list_tooltip_translations(self, translated_count, piece_count, error):
         self._tooltip_translation_batch_active = False
         self._tooltip_translation_running = False
+        self._refresh_open_notepad_machine_translation_context()
         try:
             self.translate_tooltips_btn.setEnabled(True)
             self.translate_tooltips_btn.setText("Preview Ready")
@@ -12190,8 +12242,24 @@ class SDLXLIFFReviewDialog(QDialog):
                 const MULTILINE_CONTAINER_ATTR = 'data-sdl-notepad-multiline-container';
                 const WHOLE_SELECTION_ATTR = 'data-sdl-notepad-whole-selection';
                 const ORIGINAL_EDITABLE_ATTR = 'data-sdl-notepad-original-editable';
+                const TEXT_UNIT_SELECTOR = 'h1,h2,h3,h4,h5,h6,p,li,hr,div.u';
+                const NESTED_TEXT_UNIT_SELECTOR = 'h1,h2,h3,h4,h5,h6,p,li,hr';
                 const ALLOWED_INLINE_TAGS = new Set(['STRONG', 'EM', 'U', 'B', 'I', 'BR']);
                 const blockedParents = 'script,style,noscript,template,textarea,select,option,svg,math';
+                const reviewTextElements = () => Array.from(
+                    document.body.querySelectorAll(TEXT_UNIT_SELECTOR)
+                ).filter(candidate => candidate.tagName.toUpperCase() !== 'DIV'
+                    || !candidate.querySelector(NESTED_TEXT_UNIT_SELECTOR));
+                const reviewTextElement = node => {
+                    const element = node && node.nodeType === Node.ELEMENT_NODE
+                        ? node : node && node.parentElement;
+                    if (!element) return null;
+                    const candidate = element.closest(TEXT_UNIT_SELECTOR);
+                    if (!candidate) return null;
+                    if (candidate.tagName.toUpperCase() === 'DIV'
+                            && candidate.querySelector(NESTED_TEXT_UNIT_SELECTOR)) return null;
+                    return candidate;
+                };
                 const editableHost = node => {
                     const element = node && node.nodeType === Node.ELEMENT_NODE
                         ? node : node && node.parentElement;
@@ -13096,6 +13164,7 @@ class SDLXLIFFReviewDialog(QDialog):
                         ? element.closest('[' + SOURCE_ATTR + ']') : null;
                     const rowElement = element
                         ? element.closest('[' + ROW_ATTR + ']') : null;
+                    const targetElement = reviewTextElement(element);
                     const commandState = command => {
                         try { return !!document.queryCommandState(command); }
                         catch (_error) { return false; }
@@ -13126,6 +13195,8 @@ class SDLXLIFFReviewDialog(QDialog):
                             ? sourceElement.getAttribute(SOURCE_ATTR) || '' : '',
                         rowIndex: rowElement
                             ? Number.parseInt(rowElement.getAttribute(ROW_ATTR), 10) : -1,
+                        targetIndex: targetElement
+                            ? reviewTextElements().indexOf(targetElement) : -1,
                         formats: {
                             bold: tagged('strong,b') || commandState('bold') || visuallyBold,
                             italic: tagged('em,i') || commandState('italic') || visuallyItalic,
@@ -13841,6 +13912,7 @@ class SDLXLIFFReviewDialog(QDialog):
         format_states=None,
         piece_index=None,
         row_index=None,
+        target_index=None,
     ):
         """Show browser edit actions plus source and machine-preview context."""
         from PySide6.QtWebEngineCore import QWebEnginePage
@@ -13848,11 +13920,31 @@ class SDLXLIFFReviewDialog(QDialog):
         format_states = format_states if isinstance(format_states, dict) else {}
         try:
             piece_index = int(piece_index)
-            row_index = int(row_index)
-            if piece_index < 0 or row_index < 0:
+            if piece_index < 0:
                 raise IndexError
             piece = self.pieces[piece_index]
-            row_data = (piece.get("rows") or [])[row_index]
+            rows = piece.get("rows") or []
+            resolved_row_index = None
+            try:
+                wanted_target_index = int(target_index)
+            except (TypeError, ValueError):
+                wanted_target_index = -1
+            if wanted_target_index >= 0:
+                resolved_row_index = next(
+                    (
+                        candidate_index
+                        for candidate_index, candidate in enumerate(rows)
+                        if candidate.get("target_index") == wanted_target_index
+                    ),
+                    None,
+                )
+            if resolved_row_index is None:
+                fallback_row_index = int(row_index)
+                if fallback_row_index < 0:
+                    raise IndexError
+                resolved_row_index = fallback_row_index
+            row_index = resolved_row_index
+            row_data = rows[row_index]
         except (TypeError, ValueError, IndexError):
             piece = None
             row_data = None
@@ -13875,7 +13967,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 or ""
             )
 
-        menu = QMenu(self)
+        menu = _KeepOpenActionMenu(self)
         menu.setStyleSheet("""
             QMenu {
                 background: #1e1e1e; color: #eef2f7; border: 1px solid #4a5568;
@@ -13913,11 +14005,6 @@ class SDLXLIFFReviewDialog(QDialog):
 
         machine_header = QLabel("Machine translation preview", source_panel)
         machine_header.setObjectName("SdlNotepadContextMachineTranslationHeader")
-        machine_header.setStyleSheet(
-            "color: #d8c99b; font-weight: bold; font-size: 9pt;"
-            if machine_state in {"pending", "error"}
-            else "color: #93c5fd; font-weight: bold; font-size: 9pt;"
-        )
         machine_label = QLabel(str(machine_preview), source_panel)
         machine_label.setObjectName("SdlNotepadContextMachineTranslationText")
         machine_label.setTextFormat(Qt.PlainText)
@@ -13925,15 +14012,13 @@ class SDLXLIFFReviewDialog(QDialog):
         machine_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         machine_label.setMinimumWidth(320)
         machine_label.setMaximumWidth(560)
-        machine_label.setToolTip(
-            self._wrapped_tooltip(machine_detail or machine_translation)
-        )
-        machine_label.setStyleSheet(
-            "color: #d8c99b; background: #2a2518; border: 1px dashed #8a6f2a; "
-            "border-left: 3px solid #d39e00; border-radius: 4px; padding: 8px 14px 8px 9px;"
-            if machine_state in {"pending", "error"}
-            else "color: #dbeafe; background: #172536; border: 1px solid #37536d; "
-            "border-left: 3px solid #5aa7d8; border-radius: 4px; padding: 8px 14px 8px 9px;"
+        self._update_notepad_machine_translation_context_widgets(
+            machine_header,
+            machine_label,
+            machine_state,
+            machine_preview,
+            machine_detail,
+            machine_translation,
         )
         source_layout.addSpacing(5)
         source_layout.addWidget(machine_header)
@@ -13968,6 +14053,7 @@ class SDLXLIFFReviewDialog(QDialog):
             action = menu.addAction(label)
             if web_action == "generate:machine-translation":
                 action.setObjectName("SdlNotepadGenerateMachineTranslationAction")
+                action.setProperty(_KeepOpenActionMenu.KEEP_OPEN_PROPERTY, True)
                 action.setEnabled(
                     not self._tooltip_translation_running
                     and piece is not None
@@ -14032,10 +14118,96 @@ class SDLXLIFFReviewDialog(QDialog):
             )
 
         self._review_text_context_menu = menu
+        menu.setProperty("sdl_notepad_piece_index", piece_index)
+        menu.setProperty("sdl_notepad_row_index", row_index)
         self._set_review_context_menu_open(True)
         menu.aboutToHide.connect(lambda m=menu: self._clear_review_text_context_menu(m))
         menu.popup(browser.mapToGlobal(pos))
         return menu
+
+    def _update_notepad_machine_translation_context_widgets(
+        self,
+        machine_header,
+        machine_label,
+        machine_state,
+        machine_preview,
+        machine_detail="",
+        machine_translation="",
+    ):
+        """Update the machine-preview panel without replacing its open menu."""
+        machine_state = str(machine_state or "").strip().lower()
+        machine_header.setStyleSheet(
+            "color: #d8c99b; font-weight: bold; font-size: 9pt;"
+            if machine_state in {"pending", "error"}
+            else "color: #93c5fd; font-weight: bold; font-size: 9pt;"
+        )
+        machine_label.setText(str(machine_preview or ""))
+        machine_label.setToolTip(
+            self._wrapped_tooltip(machine_detail or machine_translation)
+        )
+        machine_label.setStyleSheet(
+            "color: #d8c99b; background: #2a2518; border: 1px dashed #8a6f2a; "
+            "border-left: 3px solid #d39e00; border-radius: 4px; padding: 8px 14px 8px 9px;"
+            if machine_state in {"pending", "error"}
+            else "color: #dbeafe; background: #172536; border: 1px solid #37536d; "
+            "border-left: 3px solid #5aa7d8; border-radius: 4px; padding: 8px 14px 8px 9px;"
+        )
+
+    def _refresh_open_notepad_machine_translation_context(self):
+        """Refresh a persistent Notepad context menu's preview and actions."""
+        menu = getattr(self, "_review_text_context_menu", None)
+        if menu is None or not isinstance(menu, _KeepOpenActionMenu):
+            return
+        try:
+            piece_index = int(menu.property("sdl_notepad_piece_index"))
+            row_index = int(menu.property("sdl_notepad_row_index"))
+            piece = self.pieces[piece_index]
+            row_data = (piece.get("rows") or [])[row_index]
+        except (TypeError, ValueError, IndexError, RuntimeError):
+            return
+        machine_translation = self._row_tooltip_translation(piece, row_data)
+        row_snapshot = self._review_row_snapshot(row_data)
+        machine_state = self._row_machine_translation_preview_state(row_snapshot)
+        machine_preview = (
+            self._row_machine_translation_preview_from_snapshot(row_snapshot)
+            or "No machine translation preview is available for this row."
+        )
+        machine_detail = str(
+            row_data.get("tooltip_translation_error_detail")
+            or row_data.get("tooltip_translation_status")
+            or ""
+        )
+        machine_header = menu.findChild(
+            QLabel, "SdlNotepadContextMachineTranslationHeader"
+        )
+        machine_label = menu.findChild(
+            QLabel, "SdlNotepadContextMachineTranslationText"
+        )
+        if machine_header is not None and machine_label is not None:
+            self._update_notepad_machine_translation_context_widgets(
+                machine_header,
+                machine_label,
+                machine_state,
+                machine_preview,
+                machine_detail,
+                machine_translation,
+            )
+        actions = {
+            action.objectName(): action
+            for action in menu.actions()
+            if action.objectName()
+        }
+        generate_action = actions.get("SdlNotepadGenerateMachineTranslationAction")
+        if generate_action is not None:
+            generate_action.setEnabled(
+                not self._tooltip_translation_running
+                and bool(str(row_data.get("source") or "").strip())
+            )
+        inject_action = actions.get("SdlNotepadInjectMachineTranslationAction")
+        if inject_action is not None:
+            inject_action.setEnabled(
+                bool(machine_translation) and machine_state == "translation"
+            )
 
     def _inject_notepad_machine_translation(self, browser, piece_index, row_index):
         """Inject a row preview into the live Notepad DOM, then save normally."""
@@ -14106,6 +14278,17 @@ class SDLXLIFFReviewDialog(QDialog):
                     ? element.closest('[data-sdl-notepad-source]') : null;
                 const rowElement = element
                     ? element.closest('[data-sdl-notepad-row-index]') : null;
+                const textUnitSelector = 'h1,h2,h3,h4,h5,h6,p,li,hr,div.u';
+                const nestedTextUnitSelector = 'h1,h2,h3,h4,h5,h6,p,li,hr';
+                const targetElement = element ? element.closest(textUnitSelector) : null;
+                const targetElements = Array.from(
+                    document.body.querySelectorAll(textUnitSelector)
+                ).filter(candidate => candidate.tagName.toUpperCase() !== 'DIV'
+                    || !candidate.querySelector(nestedTextUnitSelector));
+                const targetIndex = targetElement
+                    && (targetElement.tagName.toUpperCase() !== 'DIV'
+                        || !targetElement.querySelector(nestedTextUnitSelector))
+                    ? targetElements.indexOf(targetElement) : -1;
                 const commandState = command => {{
                     try {{ return !!document.queryCommandState(command); }}
                     catch (_error) {{ return false; }}
@@ -14148,6 +14331,7 @@ class SDLXLIFFReviewDialog(QDialog):
                         ? sourceElement.getAttribute('data-sdl-notepad-source') || '' : '',
                     rowIndex: rowElement
                         ? Number.parseInt(rowElement.getAttribute('data-sdl-notepad-row-index'), 10) : -1,
+                    targetIndex,
                     formats: {{
                         bold: commandState('bold')
                             || pointTagState('strong,b')
@@ -14178,6 +14362,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     context.get("formats", {}),
                     browser.property("sdl_piece_index"),
                     context.get("rowIndex", -1),
+                    context.get("targetIndex", -1),
                 )
             except RuntimeError:
                 pass
