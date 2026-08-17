@@ -4,12 +4,129 @@ This module intentionally stays small so both translation and review UI paths ca
 use the exact same writer in source runs and frozen builds.
 """
 
+import hashlib
+import json
 import os
+import threading
+import time
 
 
 GLOSSARION_SDLXLIFF_NS = "urn:glossarion:sdlxliff"
 MANUAL_UNTRANSLATED_ATTRIBUTE = f"{{{GLOSSARION_SDLXLIFF_NS}}}manual-untranslated"
 MANUAL_EDITING_ATTRIBUTE = f"{{{GLOSSARION_SDLXLIFF_NS}}}manual-editing"
+_SIDECAR_FRESHNESS_MANIFEST_TYPE = "html_sdlxliff_sidecar_freshness"
+_SIDECAR_FRESHNESS_MANIFEST_LOCK = threading.RLock()
+
+
+def _sidecar_freshness_logical_key(output_name):
+    name = os.path.basename(str(output_name or "").replace("\\", "/"))
+    if name.casefold().endswith(".sdlxliff"):
+        name = name[:-len(".sdlxliff")]
+    if name.startswith("response_"):
+        name = name[len("response_"):]
+    while True:
+        stem, extension = os.path.splitext(name)
+        if not extension:
+            break
+        name = stem
+    return name.casefold()
+
+
+def _sidecar_freshness_file_hash(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        while True:
+            block = source.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _sidecar_freshness_file_stat(path):
+    stat = os.stat(path)
+    return {
+        "size": int(stat.st_size),
+        "mtime_ns": int(getattr(
+            stat,
+            "st_mtime_ns",
+            int(stat.st_mtime * 1000000000),
+        )),
+    }
+
+
+def _record_html_sdlxliff_freshness(
+    output_dir,
+    output_name,
+    sidecar_path,
+    source_payload,
+):
+    """Record a sidecar created by the live translation pipeline.
+
+    The final HTML is already on disk when the shared writer is called.  If a
+    caller uses the writer only to create a manual/source-only sidecar, there
+    is no output file and no freshness record is needed.
+    """
+    output_path = os.path.join(output_dir, output_name)
+    if not os.path.isfile(output_path):
+        return False
+    logical_key = _sidecar_freshness_logical_key(output_name)
+    if not logical_key:
+        return False
+    manifest_dir = os.path.join(output_dir, "SDLXLIFF")
+    manifest_path = os.path.join(manifest_dir, "sdlxliff_manifest.json")
+    output_stat = _sidecar_freshness_file_stat(output_path)
+    record = {
+        "output_name": output_name,
+        "sidecar_name": os.path.basename(sidecar_path),
+        "output_sha256": _sidecar_freshness_file_hash(output_path),
+        "output_size": output_stat["size"],
+        "output_mtime_ns": output_stat["mtime_ns"],
+        "source_sha256": hashlib.sha256(
+            str(source_payload or "").encode("utf-8")
+        ).hexdigest(),
+        "source": None,
+    }
+    with _SIDECAR_FRESHNESS_MANIFEST_LOCK:
+        manifest = None
+        try:
+            if os.path.isfile(manifest_path):
+                with open(manifest_path, "r", encoding="utf-8") as source:
+                    candidate = json.load(source)
+                if (
+                    isinstance(candidate, dict)
+                    and candidate.get("type") == _SIDECAR_FRESHNESS_MANIFEST_TYPE
+                    and isinstance(candidate.get("entries"), dict)
+                ):
+                    manifest = candidate
+        except Exception:
+            manifest = None
+        if manifest is None:
+            manifest = {
+                "version": 1,
+                "type": _SIDECAR_FRESHNESS_MANIFEST_TYPE,
+                "hash_algorithm": "sha256",
+                "entries": {},
+            }
+        manifest["entries"][logical_key] = record
+        manifest["version"] = 1
+        manifest["type"] = _SIDECAR_FRESHNESS_MANIFEST_TYPE
+        manifest["hash_algorithm"] = "sha256"
+        temp_path = (
+            f"{manifest_path}.{os.getpid()}.{threading.get_ident()}."
+            f"{time.time_ns()}.tmp"
+        )
+        try:
+            with open(temp_path, "w", encoding="utf-8") as target:
+                json.dump(manifest, target, ensure_ascii=False, indent=2)
+            os.replace(temp_path, manifest_path)
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+    return True
 
 
 def _html_sdlxliff_enabled():
@@ -211,6 +328,19 @@ def _write_html_sdlxliff_sidecar(
         os.makedirs(sidecar_dir, exist_ok=True)
         sidecar_path = os.path.join(sidecar_dir, f"{output_name}.sdlxliff")
         ET.ElementTree(root).write(sidecar_path, encoding="utf-8", xml_declaration=True)
+        if not manual_untranslated:
+            try:
+                _record_html_sdlxliff_freshness(
+                    output_dir,
+                    output_name,
+                    sidecar_path,
+                    source_payload,
+                )
+            except Exception:
+                # Hash tracking must never turn a valid translation sidecar
+                # into a failed chapter save.  Without a record, the reviewer
+                # intentionally falls back to the legacy mtime check.
+                pass
         return sidecar_path
     except Exception as exc:
         if raise_errors:

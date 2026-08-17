@@ -1696,6 +1696,54 @@ def test_managed_artifact_rows_do_not_use_special_file_keywords():
     }) == "toc"
 
 
+def test_do_not_skip_updates_live_other_settings_keyword_editors(monkeypatch):
+    class FakeKeywordEditor:
+        def __init__(self, text):
+            self.text = text
+            self.signals_blocked = False
+
+        def toPlainText(self):
+            return self.text
+
+        def setPlainText(self, text):
+            self.text = text
+
+        def blockSignals(self, blocked):
+            previous = self.signals_blocked
+            self.signals_blocked = bool(blocked)
+            return previous
+
+    substring_text = "title, toc, colophon, appendix"
+    exact_text = "index, glossary, glossary_extension"
+    gui = RetranslationMixin()
+    gui.config = {
+        "special_file_keywords": substring_text,
+        "special_file_exact": exact_text,
+    }
+    gui.special_file_keywords_var = substring_text
+    gui.special_file_exact_var = exact_text
+    gui._special_file_keywords_edit = FakeKeywordEditor(substring_text)
+    gui._special_file_exact_edit = FakeKeywordEditor(exact_text)
+    saved = []
+    gui.save_config = lambda show_message=False: saved.append(show_message)
+    monkeypatch.setenv("SPECIAL_FILE_KEYWORDS", substring_text)
+    monkeypatch.setenv("SPECIAL_FILE_EXACT", exact_text)
+
+    assert gui._remove_special_skip_keyword("colophon") is True
+    assert gui.special_file_keywords_var == "title, toc, appendix"
+    assert gui.config["special_file_keywords"] == "title, toc, appendix"
+    assert os.environ["SPECIAL_FILE_KEYWORDS"] == "title, toc, appendix"
+    assert gui._special_file_keywords_edit.toPlainText() == "title, toc, appendix"
+    assert gui._special_file_exact_edit.toPlainText() == exact_text
+
+    assert gui._remove_special_skip_keyword("index") is True
+    assert gui.special_file_exact_var == "glossary, glossary_extension"
+    assert gui.config["special_file_exact"] == "glossary, glossary_extension"
+    assert os.environ["SPECIAL_FILE_EXACT"] == "glossary, glossary_extension"
+    assert gui._special_file_exact_edit.toPlainText() == "glossary, glossary_extension"
+    assert saved == [False, False]
+
+
 def test_scanner_progress_updates_all_three_artifacts_and_metadata_siblings(
     tmp_path,
 ):

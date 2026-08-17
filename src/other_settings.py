@@ -10879,6 +10879,10 @@ def _create_processing_options_section(self, parent):
         except Exception:
             pass
     kw_substr_edit.textChanged.connect(_on_substr_keywords_changed)
+    # The Progress Manager's "Do not skip" context-menu action can change
+    # this setting while Other Settings is already open (or hidden for reuse).
+    # Keep a live reference so that action can update the displayed text too.
+    self._special_file_keywords_edit = kw_substr_edit
     keywords_panel_v.addWidget(kw_substr_edit)
     
     kw_substr_hint = QLabel("Files whose name contains any of these words will be treated as special.")
@@ -10918,6 +10922,7 @@ def _create_processing_options_section(self, parent):
         except Exception:
             pass
     kw_exact_edit.textChanged.connect(_on_exact_keywords_changed)
+    self._special_file_exact_edit = kw_exact_edit
     keywords_panel_v.addWidget(kw_exact_edit)
     
     kw_exact_hint = QLabel("Files whose name (without extension) exactly matches one of these will be treated as special.\nUse this for names like 'index' that shouldn't match substrings (e.g. 'reindex').")

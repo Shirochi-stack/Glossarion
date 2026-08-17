@@ -575,6 +575,40 @@ def test_html2text_output_writes_sdlxliff_sidecar(tmp_path, monkeypatch):
     assert _visible_text(target_elem) == target_html
 
 
+def test_shared_sdlxliff_writer_records_live_translation_freshness(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "1")
+    output_name = "response_chapter001.html"
+    output_path = tmp_path / output_name
+    source_html = "<html><body><p>Source</p></body></html>"
+    target_html = "<html><body><p>Target</p></body></html>"
+    output_path.write_text(target_html, encoding="utf-8")
+
+    sidecar_path = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_filename": "chapter001.xhtml"},
+        source_html,
+        target_html,
+    )
+    manifest_path = tmp_path / "SDLXLIFF" / "sdlxliff_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    record = manifest["entries"]["chapter001"]
+
+    assert Path(sidecar_path).is_file()
+    assert manifest["type"] == "html_sdlxliff_sidecar_freshness"
+    assert len(record["output_sha256"]) == 64
+    assert len(record["source_sha256"]) == 64
+
+    sidecar = Path(sidecar_path)
+    newer_ns = max(sidecar.stat().st_mtime_ns, output_path.stat().st_mtime_ns) + 5_000_000_000
+    os.utime(output_path, ns=(newer_ns, newer_ns))
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    assert mixin._sdlxliff_sidecar_current_for_output(
+        str(sidecar),
+        str(output_path),
+    ) is True
+
+
 def test_html_sdlxliff_sidecar_respects_output_toggle(tmp_path, monkeypatch):
     monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
 
@@ -4758,6 +4792,195 @@ def test_retranslation_sdlxliff_generation_skips_current_sidecar_even_with_overw
     assert sidecar.read_text(encoding="utf-8") == "existing sidecar must not be rewritten"
     assert [event["stage"] for event in progress_events] == ["start", "checking", "skipped", "finished"]
     assert os.environ["OUTPUT_SDLXLIFF"] == "0"
+
+
+def test_retranslation_sdlxliff_manifest_reuses_unchanged_output_after_newer_touch(tmp_path, monkeypatch):
+    source = tmp_path / "chapter0001.xhtml"
+    output = tmp_path / "response_chapter0001.html"
+    source.write_text("<h1>Source Title</h1><p>Source body.</p>", encoding="utf-8")
+    output.write_text("<h1>Target Title</h1><p>Target body.</p>", encoding="utf-8")
+    progress = {
+        "chapters": {
+            "1": {
+                "actual_num": 1,
+                "status": "completed",
+                "output_file": output.name,
+                "original_basename": source.name,
+            }
+        }
+    }
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+
+    first_stats = mixin._generate_sdlxliff_sidecars_from_completed_entries(
+        str(tmp_path),
+        progress_data=progress,
+    )
+    sidecar = tmp_path / "SDLXLIFF" / f"{output.name}.sdlxliff"
+    manifest_path = tmp_path / "SDLXLIFF" / "sdlxliff_manifest.json"
+    first_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    first_record = first_manifest["entries"]["chapter0001"]
+    sidecar_payload = sidecar.read_bytes()
+
+    newer_ns = max(sidecar.stat().st_mtime_ns, output.stat().st_mtime_ns) + 5_000_000_000
+    os.utime(output, ns=(newer_ns, newer_ns))
+    assert output.stat().st_mtime_ns > sidecar.stat().st_mtime_ns
+
+    second_stats = mixin._generate_sdlxliff_sidecars_from_completed_entries(
+        str(tmp_path),
+        progress_data=progress,
+        overwrite=True,
+    )
+    refreshed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    refreshed_record = refreshed_manifest["entries"]["chapter0001"]
+
+    assert first_stats["created"] == 1
+    assert second_stats["created"] == 0
+    assert second_stats["skipped"] == 1
+    assert sidecar.read_bytes() == sidecar_payload
+    assert refreshed_record["output_sha256"] == first_record["output_sha256"]
+    assert refreshed_record["output_mtime_ns"] == newer_ns
+
+
+def test_sdlxliff_review_stale_scan_ignores_timestamp_only_output_change_with_manifest(tmp_path, monkeypatch):
+    source = tmp_path / "chapter0001.xhtml"
+    output = tmp_path / "response_chapter0001.html"
+    source.write_text("<h1>Source Title</h1>", encoding="utf-8")
+    output.write_text("<h1>Target Title</h1>", encoding="utf-8")
+    progress = {
+        "chapters": {
+            "1": {
+                "status": "completed",
+                "output_file": output.name,
+                "original_basename": source.name,
+            }
+        }
+    }
+    (tmp_path / "translation_progress.json").write_text(
+        json.dumps(progress),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    mixin._generate_sdlxliff_sidecars_from_completed_entries(
+        str(tmp_path),
+        progress_data=progress,
+    )
+    sidecar = tmp_path / "SDLXLIFF" / f"{output.name}.sdlxliff"
+    newer_ns = max(sidecar.stat().st_mtime_ns, output.stat().st_mtime_ns) + 5_000_000_000
+    os.utime(output, ns=(newer_ns, newer_ns))
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._book_entries = []
+    dialog._book_index = 0
+    signature = dialog._current_review_autogen_signature()
+
+    assert dialog._stale_review_sidecar_outputs(str(tmp_path), signature) == []
+    manifest = json.loads(
+        (tmp_path / "SDLXLIFF" / "sdlxliff_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["entries"]["chapter0001"]["output_mtime_ns"] == newer_ns
+
+
+def test_retranslation_sdlxliff_manifest_detects_content_change_even_when_sidecar_is_newer(tmp_path, monkeypatch):
+    source = tmp_path / "chapter0001.xhtml"
+    output = tmp_path / "response_chapter0001.html"
+    source.write_text("<h1>Source Title</h1><p>Source body.</p>", encoding="utf-8")
+    output.write_text("<h1>Old Target</h1>", encoding="utf-8")
+    progress = {
+        "chapters": {
+            "1": {
+                "status": "completed",
+                "output_file": output.name,
+                "original_basename": source.name,
+            }
+        }
+    }
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+
+    mixin._generate_sdlxliff_sidecars_from_completed_entries(
+        str(tmp_path),
+        progress_data=progress,
+    )
+    sidecar = tmp_path / "SDLXLIFF" / f"{output.name}.sdlxliff"
+    output.write_text("<h1>New Target</h1>", encoding="utf-8")
+    future_ns = output.stat().st_mtime_ns + 5_000_000_000
+    os.utime(sidecar, ns=(future_ns, future_ns))
+
+    stats = mixin._generate_sdlxliff_sidecars_from_completed_entries(
+        str(tmp_path),
+        progress_data=progress,
+        overwrite=True,
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    _source_html, target_html = dialog._read_sdlxliff_html_pair(str(sidecar))
+
+    assert sidecar.stat().st_mtime_ns > output.stat().st_mtime_ns
+    assert stats["created"] == 1
+    assert "New Target" in target_html
+    assert "Old Target" not in target_html
+
+
+def test_retranslation_sdlxliff_missing_manifest_uses_legacy_mtime_freshness(tmp_path):
+    output = tmp_path / "response_chapter0001.html"
+    sidecar_dir = tmp_path / "SDLXLIFF"
+    sidecar = sidecar_dir / f"{output.name}.sdlxliff"
+    output.write_text("<h1>Target</h1>", encoding="utf-8")
+    sidecar_dir.mkdir()
+    sidecar.write_text("legacy sidecar", encoding="utf-8")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    old_ns = 1_700_000_000_000_000_000
+    new_ns = old_ns + 5_000_000_000
+
+    os.utime(output, ns=(old_ns, old_ns))
+    os.utime(sidecar, ns=(new_ns, new_ns))
+    assert not (sidecar_dir / "sdlxliff_manifest.json").exists()
+    assert mixin._sdlxliff_sidecar_current_for_output(str(sidecar), str(output)) is True
+
+    os.utime(output, ns=(new_ns, new_ns))
+    os.utime(sidecar, ns=(old_ns, old_ns))
+    assert mixin._sdlxliff_sidecar_current_for_output(str(sidecar), str(output)) is False
+
+
+def test_retranslation_sdlxliff_manifest_detects_changed_source_html(tmp_path, monkeypatch):
+    source = tmp_path / "chapter0001.xhtml"
+    output = tmp_path / "response_chapter0001.html"
+    source.write_text("<h1>Old Source</h1>", encoding="utf-8")
+    output.write_text("<h1>Target</h1>", encoding="utf-8")
+    progress = {
+        "chapters": {
+            "1": {
+                "status": "completed",
+                "output_file": output.name,
+                "original_basename": source.name,
+            }
+        }
+    }
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+
+    mixin._generate_sdlxliff_sidecars_from_completed_entries(
+        str(tmp_path),
+        progress_data=progress,
+    )
+    sidecar = tmp_path / "SDLXLIFF" / f"{output.name}.sdlxliff"
+    source.write_text("<h1>New Source</h1>", encoding="utf-8")
+    future_ns = max(source.stat().st_mtime_ns, sidecar.stat().st_mtime_ns) + 5_000_000_000
+    os.utime(sidecar, ns=(future_ns, future_ns))
+
+    stats = mixin._generate_sdlxliff_sidecars_from_completed_entries(
+        str(tmp_path),
+        progress_data=progress,
+        overwrite=True,
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    source_html, _target_html = dialog._read_sdlxliff_html_pair(str(sidecar))
+
+    assert stats["created"] == 1
+    assert "New Source" in source_html
+    assert "Old Source" not in source_html
 
 
 def test_retranslation_sdlxliff_generation_reports_missing_source_counts(tmp_path, monkeypatch):

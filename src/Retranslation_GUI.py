@@ -35,6 +35,8 @@ import hashlib
 import unicodedata
 from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar
 from sdlxliff_sidecar_writer import (
+    _SIDECAR_FRESHNESS_MANIFEST_LOCK,
+    _SIDECAR_FRESHNESS_MANIFEST_TYPE,
     _blank_manual_untranslated_sdlxliff_target,
     _clear_manual_untranslated_sdlxliff,
     _is_manual_editing_sdlxliff,
@@ -611,6 +613,257 @@ def _existing_sdlxliff_sidecars_by_logical_output(output_dir):
     except OSError:
         pass
     return indexed
+
+
+_SDLXLIFF_SIDECAR_MANIFEST_VERSION = 1
+_SDLXLIFF_SIDECAR_MANIFEST_TYPE = _SIDECAR_FRESHNESS_MANIFEST_TYPE
+_SDLXLIFF_SIDECAR_MANIFEST_LOCK = _SIDECAR_FRESHNESS_MANIFEST_LOCK
+
+
+def _sdlxliff_sidecar_manifest_path(output_dir):
+    return os.path.join(
+        str(output_dir or ""),
+        "SDLXLIFF",
+        "sdlxliff_manifest.json",
+    )
+
+
+def _read_sdlxliff_sidecar_manifest(output_dir):
+    """Read the optional sidecar freshness manifest.
+
+    ``None`` deliberately means "use the legacy mtime check".  This applies
+    to missing and unreadable manifests so older workspaces remain usable.
+    """
+    manifest_path = _sdlxliff_sidecar_manifest_path(output_dir)
+    if not os.path.isfile(manifest_path):
+        return None
+    try:
+        with _SDLXLIFF_SIDECAR_MANIFEST_LOCK:
+            with open(manifest_path, "r", encoding="utf-8") as source:
+                manifest = json.load(source)
+        if not isinstance(manifest, dict):
+            return None
+        if manifest.get("type") != _SDLXLIFF_SIDECAR_MANIFEST_TYPE:
+            return None
+        if not isinstance(manifest.get("entries"), dict):
+            return None
+        return manifest
+    except Exception:
+        return None
+
+
+def _update_sdlxliff_sidecar_manifest(output_dir, entry_updates):
+    """Merge successful sidecar hash records and replace the manifest atomically."""
+    updates = {
+        str(key): value
+        for key, value in (entry_updates or {}).items()
+        if key and isinstance(value, dict)
+    }
+    if not updates:
+        return False
+    manifest_path = _sdlxliff_sidecar_manifest_path(output_dir)
+    try:
+        with _SDLXLIFF_SIDECAR_MANIFEST_LOCK:
+            current = _read_sdlxliff_sidecar_manifest(output_dir)
+            if current is None:
+                current = {
+                    "version": _SDLXLIFF_SIDECAR_MANIFEST_VERSION,
+                    "type": _SDLXLIFF_SIDECAR_MANIFEST_TYPE,
+                    "hash_algorithm": "sha256",
+                    "entries": {},
+                }
+            entries = current.setdefault("entries", {})
+            entries.update(updates)
+            current["version"] = _SDLXLIFF_SIDECAR_MANIFEST_VERSION
+            current["type"] = _SDLXLIFF_SIDECAR_MANIFEST_TYPE
+            current["hash_algorithm"] = "sha256"
+            _write_progress_snapshot_atomic(manifest_path, current)
+        return True
+    except Exception:
+        return False
+
+
+def _sdlxliff_sha256_bytes(payload):
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _sdlxliff_sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        while True:
+            block = source.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _sdlxliff_file_stat_record(path):
+    stat = os.stat(path)
+    return {
+        "size": int(stat.st_size),
+        "mtime_ns": int(getattr(
+            stat,
+            "st_mtime_ns",
+            int(stat.st_mtime * 1000000000),
+        )),
+    }
+
+
+def _sdlxliff_source_record(source_path):
+    """Describe the loose file or EPUB member used as the sidecar source."""
+    location = str(source_path or "")
+    if not location:
+        return None
+    container_path = ""
+    member = ""
+    if "!" in location:
+        possible_container, possible_member = location.rsplit("!", 1)
+        if os.path.isfile(possible_container):
+            container_path = os.path.abspath(possible_container)
+            member = possible_member
+    if container_path:
+        record = {
+            "kind": "epub_member",
+            "container": container_path,
+            "member": member,
+        }
+        try:
+            record.update(_sdlxliff_file_stat_record(container_path))
+        except OSError:
+            pass
+        return record
+    if os.path.isfile(location):
+        file_path = os.path.abspath(location)
+        record = {"kind": "file", "path": file_path}
+        try:
+            record.update(_sdlxliff_file_stat_record(file_path))
+        except OSError:
+            pass
+        return record
+    return {"kind": "unresolved", "location": location}
+
+
+def _sdlxliff_decode_html_bytes(payload):
+    for encoding in ("utf-8", "utf-8-sig", "cp949", "latin-1"):
+        try:
+            return payload.decode(encoding)
+        except Exception:
+            continue
+    return payload.decode("utf-8", errors="replace")
+
+
+def _sdlxliff_source_record_payload(source_record):
+    if not isinstance(source_record, dict):
+        return None
+    kind = source_record.get("kind")
+    try:
+        if kind == "file":
+            source_path = source_record.get("path")
+            if not source_path or not os.path.isfile(source_path):
+                return None
+            with open(source_path, "rb") as source:
+                return _sdlxliff_decode_html_bytes(source.read())
+        if kind == "epub_member":
+            container = source_record.get("container")
+            member = source_record.get("member")
+            if not container or not member or not os.path.isfile(container):
+                return None
+            with zipfile.ZipFile(container, "r") as source_zip:
+                return _sdlxliff_decode_html_bytes(source_zip.read(member))
+    except Exception:
+        return None
+    return None
+
+
+def _sdlxliff_manifest_freshness_record(
+    output_name,
+    sidecar_path,
+    output_path,
+    source_html,
+    source_path,
+):
+    output_stat = _sdlxliff_file_stat_record(output_path)
+    source_record = _sdlxliff_source_record(source_path)
+    return {
+        "output_name": os.path.basename(str(output_name or "").replace("\\", "/")),
+        "sidecar_name": os.path.basename(str(sidecar_path or "").replace("\\", "/")),
+        "output_sha256": _sdlxliff_sha256_file(output_path),
+        "output_size": output_stat["size"],
+        "output_mtime_ns": output_stat["mtime_ns"],
+        "source_sha256": _sdlxliff_sha256_bytes(str(source_html or "").encode("utf-8")),
+        "source": source_record,
+    }
+
+
+def _sdlxliff_manifest_record_current(record, output_path):
+    """Return ``(is_current, refreshed_record)`` for a usable hash record."""
+    if not isinstance(record, dict):
+        return None, None
+    expected_output_hash = str(record.get("output_sha256") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_output_hash):
+        return None, None
+    try:
+        output_stat = _sdlxliff_file_stat_record(output_path)
+    except OSError:
+        return False, None
+
+    try:
+        recorded_output_size = int(record["output_size"])
+        recorded_output_mtime = int(record["output_mtime_ns"])
+    except (KeyError, TypeError, ValueError):
+        return None, None
+    refreshed = None
+    output_signature_matches = (
+        recorded_output_size == output_stat["size"]
+        and recorded_output_mtime == output_stat["mtime_ns"]
+    )
+    if not output_signature_matches:
+        try:
+            if _sdlxliff_sha256_file(output_path) != expected_output_hash:
+                return False, None
+        except OSError:
+            return False, None
+        refreshed = dict(record)
+        refreshed["output_size"] = output_stat["size"]
+        refreshed["output_mtime_ns"] = output_stat["mtime_ns"]
+
+    expected_source_hash = str(record.get("source_sha256") or "").lower()
+    source_record = record.get("source")
+    if re.fullmatch(r"[0-9a-f]{64}", expected_source_hash) and isinstance(source_record, dict):
+        source_kind = source_record.get("kind")
+        tracked_path = (
+            source_record.get("path")
+            if source_kind == "file"
+            else source_record.get("container") if source_kind == "epub_member" else None
+        )
+        # A moved or temporarily unavailable source must not invalidate a
+        # perfectly usable existing sidecar.  If it is available, however,
+        # verify any changed source signature by content.
+        if tracked_path and os.path.isfile(tracked_path):
+            try:
+                source_stat = _sdlxliff_file_stat_record(tracked_path)
+                recorded_source_size = int(source_record["size"])
+                recorded_source_mtime = int(source_record["mtime_ns"])
+                source_signature_matches = (
+                    recorded_source_size == source_stat["size"]
+                    and recorded_source_mtime == source_stat["mtime_ns"]
+                )
+                if not source_signature_matches:
+                    source_payload = _sdlxliff_source_record_payload(source_record)
+                    if source_payload is None:
+                        return False, None
+                    current_source_hash = _sdlxliff_sha256_bytes(source_payload.encode("utf-8"))
+                    if current_source_hash != expected_source_hash:
+                        return False, None
+                    refreshed = dict(refreshed or record)
+                    refreshed_source = dict(source_record)
+                    refreshed_source.update(source_stat)
+                    refreshed["source"] = refreshed_source
+            except (KeyError, OSError, TypeError, ValueError):
+                pass
+
+    return True, refreshed
 
 
 _PROGRESS_READER_HTML_EXTENSIONS = (".html", ".htm", ".xhtml")
@@ -3826,21 +4079,19 @@ class SDLXLIFFReviewDialog(QDialog):
         return sorted(name for name in expected if name.lower() not in existing)
 
     def _stale_review_sidecar_outputs(self, output_dir, autogen_signature):
-        sidecar_mtimes = {}
+        sidecar_paths = {}
         for path in self._sdlxliff_sidecar_paths_for_output_dir(output_dir):
             output_name = self._sidecar_output_name(path)
             if not output_name:
                 continue
-            try:
-                stat = os.stat(path)
-                sidecar_mtimes[output_name.lower()] = getattr(
-                    stat,
-                    "st_mtime_ns",
-                    int(stat.st_mtime * 1000000000),
-                )
-            except Exception:
-                sidecar_mtimes[output_name.lower()] = -1
+            logical_key = _sdlxliff_logical_output_key(output_name)
+            if logical_key:
+                sidecar_paths.setdefault(logical_key, path)
 
+        # Use an empty in-memory manifest when none exists so a legacy folder
+        # does not perform one filesystem lookup per chapter.
+        manifest = _read_sdlxliff_sidecar_manifest(output_dir) or {}
+        manifest_updates = {}
         stale = []
         for entry in autogen_signature or ():
             if not entry or entry[0] != "output_html":
@@ -3850,12 +4101,26 @@ class SDLXLIFFReviewDialog(QDialog):
                 continue
             try:
                 output_size = int(entry[10]) if len(entry) > 10 else -1
-                output_mtime = int(entry[11]) if len(entry) > 11 else -1
             except Exception:
                 continue
-            sidecar_mtime = sidecar_mtimes.get(str(output_name).lower())
-            if output_size >= 0 and sidecar_mtime is not None and sidecar_mtime >= 0 and sidecar_mtime < output_mtime:
+            logical_key = _sdlxliff_logical_output_key(output_name)
+            sidecar_path = sidecar_paths.get(logical_key)
+            output_path = entry[9] if len(entry) > 9 else ""
+            if (
+                output_size >= 0
+                and sidecar_path
+                and not RetranslationMixin._sdlxliff_sidecar_current_for_output(
+                    sidecar_path,
+                    output_path,
+                    output_dir=output_dir,
+                    output_name=output_name,
+                    manifest=manifest,
+                    manifest_updates=manifest_updates,
+                )
+            ):
                 stale.append(output_name)
+        if manifest_updates:
+            _update_sdlxliff_sidecar_manifest(output_dir, manifest_updates)
         return sorted(set(stale))
 
     @staticmethod
@@ -14158,12 +14423,47 @@ class RetranslationMixin:
         return resolved
 
     @staticmethod
-    def _sdlxliff_sidecar_current_for_output(sidecar_path, output_path):
+    def _sdlxliff_sidecar_current_for_output(
+        sidecar_path,
+        output_path,
+        output_dir=None,
+        output_name=None,
+        manifest=None,
+        manifest_updates=None,
+    ):
+        """Prefer hash freshness, falling back to the legacy mtime rule.
+
+        The fallback is intentionally per record: a pre-manifest workspace, a
+        malformed manifest, or an old sidecar missing its record behaves
+        exactly as it did before hash tracking was introduced.
+        """
         try:
             if not sidecar_path or not output_path:
                 return False
             if not os.path.isfile(sidecar_path) or not os.path.isfile(output_path):
                 return False
+            if output_dir is None:
+                output_dir = os.path.dirname(os.path.dirname(os.path.abspath(sidecar_path)))
+            if manifest is None:
+                manifest = _read_sdlxliff_sidecar_manifest(output_dir)
+            logical_key = _sdlxliff_logical_output_key(output_name or sidecar_path)
+            entries = manifest.get("entries") if isinstance(manifest, dict) else None
+            record = entries.get(logical_key) if isinstance(entries, dict) else None
+            hash_current, refreshed_record = _sdlxliff_manifest_record_current(
+                record,
+                output_path,
+            )
+            if hash_current is not None:
+                if refreshed_record is not None:
+                    if isinstance(manifest_updates, dict):
+                        manifest_updates[logical_key] = refreshed_record
+                    else:
+                        _update_sdlxliff_sidecar_manifest(
+                            output_dir,
+                            {logical_key: refreshed_record},
+                        )
+                return hash_current
+
             sidecar_stat = os.stat(sidecar_path)
             output_stat = os.stat(output_path)
             sidecar_mtime = getattr(sidecar_stat, "st_mtime_ns", int(sidecar_stat.st_mtime * 1000000000))
@@ -14268,6 +14568,8 @@ class RetranslationMixin:
 
         _notify("start", total and 1 or 0, message=f"Preparing {total} SDLXLIFF sidecar(s)")
         existing_sidecars = _existing_sdlxliff_sidecars_by_logical_output(output_dir)
+        sidecar_manifest = _read_sdlxliff_sidecar_manifest(output_dir) or {}
+        sidecar_manifest_updates = {}
         old_output_sdlxliff = os.environ.get("OUTPUT_SDLXLIFF")
         os.environ["OUTPUT_SDLXLIFF"] = "1"
         try:
@@ -14296,7 +14598,14 @@ class RetranslationMixin:
                         stats["paths"].append(sidecar_path)
                         _notify("skipped", entry_index, output_name, path=sidecar_path)
                         continue
-                    if requested is None and self._sdlxliff_sidecar_current_for_output(sidecar_path, output_path):
+                    if requested is None and self._sdlxliff_sidecar_current_for_output(
+                        sidecar_path,
+                        output_path,
+                        output_dir=output_dir,
+                        output_name=output_name,
+                        manifest=sidecar_manifest,
+                        manifest_updates=sidecar_manifest_updates,
+                    ):
                         stats["skipped"] += 1
                         _notify("skipped", entry_index, output_name, path=sidecar_path)
                         continue
@@ -14341,6 +14650,20 @@ class RetranslationMixin:
                     stats["errors"].append(f"{output_name}: {writer_error}")
                 if result_path:
                     existing_sidecars[logical_key] = result_path
+                    try:
+                        sidecar_manifest_updates[logical_key] = (
+                            _sdlxliff_manifest_freshness_record(
+                                output_name,
+                                result_path,
+                                output_path,
+                                source_html,
+                                source_path,
+                            )
+                        )
+                    except Exception:
+                        # The sidecar remains valid.  A failed record update
+                        # simply preserves the legacy mtime fallback.
+                        pass
                     stats["created"] += 1
                     stats["paths"].append(result_path)
                     _notify("created", entry_index, output_name, path=result_path)
@@ -14348,6 +14671,11 @@ class RetranslationMixin:
                     stats["failed"] += 1
                     _notify("failed", entry_index, output_name, error=writer_error)
         finally:
+            if sidecar_manifest_updates:
+                _update_sdlxliff_sidecar_manifest(
+                    output_dir,
+                    sidecar_manifest_updates,
+                )
             if old_output_sdlxliff is None:
                 os.environ.pop("OUTPUT_SDLXLIFF", None)
             else:
@@ -16258,11 +16586,13 @@ class RetranslationMixin:
         cfg = getattr(self, 'config', None)
         cfg = cfg if isinstance(cfg, dict) else None
         removed = False
-        for cfg_key, var_attr, env_key, default in (
+        for cfg_key, var_attr, editor_attr, env_key, default in (
             ('special_file_keywords', 'special_file_keywords_var',
-             'SPECIAL_FILE_KEYWORDS', self._SPECIAL_KEYWORDS_DEFAULT),
+             '_special_file_keywords_edit', 'SPECIAL_FILE_KEYWORDS',
+             self._SPECIAL_KEYWORDS_DEFAULT),
             ('special_file_exact', 'special_file_exact_var',
-             'SPECIAL_FILE_EXACT', self._SPECIAL_EXACT_DEFAULT),
+             '_special_file_exact_edit', 'SPECIAL_FILE_EXACT',
+             self._SPECIAL_EXACT_DEFAULT),
         ):
             raw = (os.environ.get(env_key)
                    or (cfg.get(cfg_key) if cfg else None)
@@ -16280,6 +16610,21 @@ class RetranslationMixin:
             except Exception:
                 pass
             os.environ[env_key] = new_text
+            editor = getattr(self, editor_attr, None)
+            try:
+                if (
+                    editor is not None
+                    and editor.toPlainText().strip() != new_text
+                ):
+                    previously_blocked = editor.blockSignals(True)
+                    try:
+                        editor.setPlainText(new_text)
+                    finally:
+                        editor.blockSignals(previously_blocked)
+            except (AttributeError, RuntimeError):
+                # The dialog may not have been built yet, or Qt may already
+                # have destroyed an old editor during application shutdown.
+                pass
             removed = True
         if removed:
             try:
