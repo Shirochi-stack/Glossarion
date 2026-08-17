@@ -266,6 +266,7 @@ def _write_html_sdlxliff_sidecar(
     target_html,
     raise_errors=False,
     manual_untranslated=False,
+    record_freshness=True,
 ):
     if not _html_sdlxliff_enabled():
         return None
@@ -328,7 +329,7 @@ def _write_html_sdlxliff_sidecar(
         os.makedirs(sidecar_dir, exist_ok=True)
         sidecar_path = os.path.join(sidecar_dir, f"{output_name}.sdlxliff")
         ET.ElementTree(root).write(sidecar_path, encoding="utf-8", xml_declaration=True)
-        if not manual_untranslated:
+        if not manual_untranslated and record_freshness:
             try:
                 _record_html_sdlxliff_freshness(
                     output_dir,

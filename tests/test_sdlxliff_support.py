@@ -23,12 +23,14 @@ from sdlxliff_sidecar_writer import (
     _is_manual_untranslated_sdlxliff,
     _write_html_sdlxliff_sidecar as _shared_write_html_sdlxliff_sidecar,
 )
+import sdlxliff_sidecar_writer as sidecar_writer_module
 from TransateKRtoEN import (
     _original_markup_for_copy,
     _refinement_raw_source_message,
     _write_html_sdlxliff_sidecar,
     should_skip_configured_special_file_for_translation,
 )
+import Retranslation_GUI as retranslation_gui_module
 from Retranslation_GUI import RetranslationMixin, SDLXLIFFReviewDialog, _sdlxliff_machine_translation_path
 from qa_scan_runtime import default_qa_scan_settings
 from Chapter_Extractor import prepare_epub_image_assets
@@ -4810,6 +4812,13 @@ def test_retranslation_sdlxliff_manifest_reuses_unchanged_output_after_newer_tou
         }
     }
     monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    monkeypatch.setattr(
+        sidecar_writer_module,
+        "_record_html_sdlxliff_freshness",
+        lambda *_args, **_kwargs: pytest.fail(
+            "bulk generation must not persist the manifest once per sidecar"
+        ),
+    )
     mixin = RetranslationMixin.__new__(RetranslationMixin)
 
     first_stats = mixin._generate_sdlxliff_sidecars_from_completed_entries(
@@ -4840,6 +4849,58 @@ def test_retranslation_sdlxliff_manifest_reuses_unchanged_output_after_newer_tou
     assert sidecar.read_bytes() == sidecar_payload
     assert refreshed_record["output_sha256"] == first_record["output_sha256"]
     assert refreshed_record["output_mtime_ns"] == newer_ns
+
+
+def test_retranslation_bulk_sdlxliff_generation_flushes_manifest_in_chunks(tmp_path, monkeypatch):
+    progress = {"chapters": {}}
+    for index in range(101):
+        output = tmp_path / f"response_chapter{index:04d}.html"
+        output.write_text(f"<p>Target {index}</p>", encoding="utf-8")
+        progress["chapters"][str(index)] = {
+            "status": "completed",
+            "output_file": output.name,
+            "original_basename": f"chapter{index:04d}.xhtml",
+        }
+
+    writer_calls = []
+    manifest_flush_sizes = []
+
+    def fake_writer(output_dir, output_name, *_args, **kwargs):
+        writer_calls.append(kwargs.get("record_freshness"))
+        return os.path.join(output_dir, "SDLXLIFF", f"{output_name}.sdlxliff")
+
+    def fake_manifest_update(_output_dir, updates):
+        manifest_flush_sizes.append(len(updates))
+        return True
+
+    monkeypatch.setattr(
+        retranslation_gui_module,
+        "_write_html_sdlxliff_sidecar",
+        fake_writer,
+    )
+    monkeypatch.setattr(
+        retranslation_gui_module,
+        "_sdlxliff_manifest_freshness_record",
+        lambda output_name, *_args: {"output_name": output_name},
+    )
+    monkeypatch.setattr(
+        retranslation_gui_module,
+        "_update_sdlxliff_sidecar_manifest",
+        fake_manifest_update,
+    )
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    mixin._sdlxliff_autogen_read_source_html = (
+        lambda *_args, **_kwargs: ("<p>Source</p>", "source.xhtml")
+    )
+
+    stats = mixin._generate_sdlxliff_sidecars_from_completed_entries(
+        str(tmp_path),
+        progress_data=progress,
+    )
+
+    assert stats["created"] == 101
+    assert writer_calls == [False] * 101
+    assert manifest_flush_sizes == [100, 1]
 
 
 def test_sdlxliff_review_stale_scan_ignores_timestamp_only_output_change_with_manifest(tmp_path, monkeypatch):
@@ -4876,7 +4937,22 @@ def test_sdlxliff_review_stale_scan_ignores_timestamp_only_output_change_with_ma
     dialog._book_index = 0
     signature = dialog._current_review_autogen_signature()
 
+    real_stat = os.stat
+    explicit_stat_paths = []
+
+    def counted_stat(path, *args, **kwargs):
+        try:
+            explicit_stat_paths.append(
+                os.path.normcase(os.path.abspath(os.fspath(path)))
+            )
+        except Exception:
+            pass
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(retranslation_gui_module.os, "stat", counted_stat)
     assert dialog._stale_review_sidecar_outputs(str(tmp_path), signature) == []
+    output_norm = os.path.normcase(os.path.abspath(str(output)))
+    assert explicit_stat_paths.count(output_norm) == 0
     manifest = json.loads(
         (tmp_path / "SDLXLIFF" / "sdlxliff_manifest.json").read_text(encoding="utf-8")
     )

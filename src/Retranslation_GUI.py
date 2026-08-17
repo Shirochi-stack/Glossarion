@@ -796,17 +796,23 @@ def _sdlxliff_manifest_freshness_record(
     }
 
 
-def _sdlxliff_manifest_record_current(record, output_path):
+def _sdlxliff_manifest_record_current(
+    record,
+    output_path,
+    output_stat=None,
+    source_stat_cache=None,
+):
     """Return ``(is_current, refreshed_record)`` for a usable hash record."""
     if not isinstance(record, dict):
         return None, None
     expected_output_hash = str(record.get("output_sha256") or "").lower()
     if not re.fullmatch(r"[0-9a-f]{64}", expected_output_hash):
         return None, None
-    try:
-        output_stat = _sdlxliff_file_stat_record(output_path)
-    except OSError:
-        return False, None
+    if not isinstance(output_stat, dict):
+        try:
+            output_stat = _sdlxliff_file_stat_record(output_path)
+        except OSError:
+            return False, None
 
     try:
         recorded_output_size = int(record["output_size"])
@@ -840,9 +846,24 @@ def _sdlxliff_manifest_record_current(record, output_path):
         # A moved or temporarily unavailable source must not invalidate a
         # perfectly usable existing sidecar.  If it is available, however,
         # verify any changed source signature by content.
-        if tracked_path and os.path.isfile(tracked_path):
+        if tracked_path:
             try:
-                source_stat = _sdlxliff_file_stat_record(tracked_path)
+                if isinstance(source_stat_cache, dict):
+                    source_cache_key = os.path.normcase(
+                        os.path.abspath(tracked_path)
+                    )
+                    if source_cache_key not in source_stat_cache:
+                        try:
+                            source_stat_cache[source_cache_key] = (
+                                _sdlxliff_file_stat_record(tracked_path)
+                            )
+                        except OSError:
+                            source_stat_cache[source_cache_key] = None
+                    source_stat = source_stat_cache.get(source_cache_key)
+                    if not isinstance(source_stat, dict):
+                        return True, refreshed
+                else:
+                    source_stat = _sdlxliff_file_stat_record(tracked_path)
                 recorded_source_size = int(source_record["size"])
                 recorded_source_mtime = int(source_record["mtime_ns"])
                 source_signature_matches = (
@@ -4079,19 +4100,29 @@ class SDLXLIFFReviewDialog(QDialog):
         return sorted(name for name in expected if name.lower() not in existing)
 
     def _stale_review_sidecar_outputs(self, output_dir, autogen_signature):
-        sidecar_paths = {}
+        sidecars = {}
         for path in self._sdlxliff_sidecar_paths_for_output_dir(output_dir):
             output_name = self._sidecar_output_name(path)
             if not output_name:
                 continue
             logical_key = _sdlxliff_logical_output_key(output_name)
             if logical_key:
-                sidecar_paths.setdefault(logical_key, path)
+                try:
+                    sidecar_stat = os.stat(path)
+                    sidecar_mtime = int(getattr(
+                        sidecar_stat,
+                        "st_mtime_ns",
+                        int(sidecar_stat.st_mtime * 1000000000),
+                    ))
+                except OSError:
+                    sidecar_mtime = -1
+                sidecars.setdefault(logical_key, (path, sidecar_mtime))
 
         # Use an empty in-memory manifest when none exists so a legacy folder
         # does not perform one filesystem lookup per chapter.
         manifest = _read_sdlxliff_sidecar_manifest(output_dir) or {}
         manifest_updates = {}
+        source_stat_cache = {}
         stale = []
         for entry in autogen_signature or ():
             if not entry or entry[0] != "output_html":
@@ -4101,14 +4132,19 @@ class SDLXLIFFReviewDialog(QDialog):
                 continue
             try:
                 output_size = int(entry[10]) if len(entry) > 10 else -1
+                output_mtime = int(entry[11]) if len(entry) > 11 else -1
             except Exception:
                 continue
             logical_key = _sdlxliff_logical_output_key(output_name)
-            sidecar_path = sidecar_paths.get(logical_key)
+            sidecar_path, sidecar_mtime = sidecars.get(
+                logical_key,
+                (None, -1),
+            )
             output_path = entry[9] if len(entry) > 9 else ""
             if (
                 output_size >= 0
                 and sidecar_path
+                and sidecar_mtime >= 0
                 and not RetranslationMixin._sdlxliff_sidecar_current_for_output(
                     sidecar_path,
                     output_path,
@@ -4116,6 +4152,12 @@ class SDLXLIFFReviewDialog(QDialog):
                     output_name=output_name,
                     manifest=manifest,
                     manifest_updates=manifest_updates,
+                    output_stat={
+                        "size": output_size,
+                        "mtime_ns": output_mtime,
+                    },
+                    sidecar_mtime_ns=sidecar_mtime,
+                    source_stat_cache=source_stat_cache,
                 )
             ):
                 stale.append(output_name)
@@ -14430,6 +14472,9 @@ class RetranslationMixin:
         output_name=None,
         manifest=None,
         manifest_updates=None,
+        output_stat=None,
+        sidecar_mtime_ns=None,
+        source_stat_cache=None,
     ):
         """Prefer hash freshness, falling back to the legacy mtime rule.
 
@@ -14440,7 +14485,9 @@ class RetranslationMixin:
         try:
             if not sidecar_path or not output_path:
                 return False
-            if not os.path.isfile(sidecar_path) or not os.path.isfile(output_path):
+            if sidecar_mtime_ns is None and not os.path.isfile(sidecar_path):
+                return False
+            if output_stat is None and not os.path.isfile(output_path):
                 return False
             if output_dir is None:
                 output_dir = os.path.dirname(os.path.dirname(os.path.abspath(sidecar_path)))
@@ -14452,6 +14499,8 @@ class RetranslationMixin:
             hash_current, refreshed_record = _sdlxliff_manifest_record_current(
                 record,
                 output_path,
+                output_stat=output_stat,
+                source_stat_cache=source_stat_cache,
             )
             if hash_current is not None:
                 if refreshed_record is not None:
@@ -14464,10 +14513,24 @@ class RetranslationMixin:
                         )
                 return hash_current
 
-            sidecar_stat = os.stat(sidecar_path)
-            output_stat = os.stat(output_path)
-            sidecar_mtime = getattr(sidecar_stat, "st_mtime_ns", int(sidecar_stat.st_mtime * 1000000000))
-            output_mtime = getattr(output_stat, "st_mtime_ns", int(output_stat.st_mtime * 1000000000))
+            if sidecar_mtime_ns is None:
+                sidecar_stat = os.stat(sidecar_path)
+                sidecar_mtime = getattr(
+                    sidecar_stat,
+                    "st_mtime_ns",
+                    int(sidecar_stat.st_mtime * 1000000000),
+                )
+            else:
+                sidecar_mtime = int(sidecar_mtime_ns)
+            if isinstance(output_stat, dict):
+                output_mtime = int(output_stat.get("mtime_ns", -1))
+            else:
+                output_file_stat = os.stat(output_path)
+                output_mtime = getattr(
+                    output_file_stat,
+                    "st_mtime_ns",
+                    int(output_file_stat.st_mtime * 1000000000),
+                )
             return sidecar_mtime >= output_mtime
         except Exception:
             return False
@@ -14570,6 +14633,7 @@ class RetranslationMixin:
         existing_sidecars = _existing_sdlxliff_sidecars_by_logical_output(output_dir)
         sidecar_manifest = _read_sdlxliff_sidecar_manifest(output_dir) or {}
         sidecar_manifest_updates = {}
+        sidecar_manifest_chunk_flush_failed = False
         old_output_sdlxliff = os.environ.get("OUTPUT_SDLXLIFF")
         os.environ["OUTPUT_SDLXLIFF"] = "1"
         try:
@@ -14643,6 +14707,7 @@ class RetranslationMixin:
                         source_html,
                         target_html,
                         raise_errors=True,
+                        record_freshness=False,
                     )
                 except Exception as exc:
                     result_path = None
@@ -14664,6 +14729,21 @@ class RetranslationMixin:
                         # The sidecar remains valid.  A failed record update
                         # simply preserves the legacy mtime fallback.
                         pass
+                    # The shared writer normally persists one live-translation
+                    # record immediately.  Bulk reviewer generation disables
+                    # that per-file write and flushes records in chunks instead
+                    # of rewriting a growing JSON document thousands of times.
+                    if (
+                        len(sidecar_manifest_updates) >= 100
+                        and not sidecar_manifest_chunk_flush_failed
+                    ):
+                        if _update_sdlxliff_sidecar_manifest(
+                            output_dir,
+                            sidecar_manifest_updates,
+                        ):
+                            sidecar_manifest_updates.clear()
+                        else:
+                            sidecar_manifest_chunk_flush_failed = True
                     stats["created"] += 1
                     stats["paths"].append(result_path)
                     _notify("created", entry_index, output_name, path=result_path)
