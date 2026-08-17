@@ -1473,9 +1473,150 @@ def test_automatic_cover_skips_only_for_image_in_first_opf_spine_html(
     assert cover_file == expected_cover
     if first_html_has_image:
         assert any(
-            "first content.opf spine document already contains an image" in log
+            "first OPF spine document already contains an image" in log
             for log in logs
         )
+
+
+@pytest.mark.parametrize("disable_automatic_cover", ["0", "1"])
+def test_opf_cover_image_and_svg_cover_page_override_automatic_setting(
+    tmp_path,
+    monkeypatch,
+    disable_automatic_cover,
+):
+    monkeypatch.setenv(
+        "DISABLE_AUTOMATIC_COVER_CREATION",
+        disable_automatic_cover,
+    )
+    monkeypatch.setenv("EXTRACTION_WORKERS", "1")
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "p-cover_img_1.jpg").write_bytes(b"cover bytes")
+    (tmp_path / "images" / "p-000_img_1.jpg").write_bytes(b"chapter bytes")
+    (tmp_path / "container.xml").write_text(
+        """<?xml version="1.0"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="item/standard.opf"
+              media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "standard.opf").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="cover" href="image/cover.jpg" media-type="image/jpeg"
+          properties="cover-image"/>
+    <item id="p-cover" href="xhtml/p-cover.xhtml"
+          media-type="application/xhtml+xml" properties="svg"/>
+    <item id="p-000" href="xhtml/p-000.xhtml"
+          media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="p-cover"/>
+    <itemref idref="p-000"/>
+  </spine>
+</package>
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "image_rename_map.json").write_text(
+        json.dumps({"cover.jpg": "p-cover_img_1.jpg"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "response_p-cover.html").write_text(
+        """<html xmlns:epub="http://www.idpf.org/2007/ops">
+<body epub:type="cover"><svg><image
+xlink:href="../image/p-cover_img_1.jpg"/></svg></body></html>""",
+        encoding="utf-8",
+    )
+    (tmp_path / "response_p-000.html").write_text(
+        '<html><body><img src="images/p-000_img_1.jpg"/></body></html>',
+        encoding="utf-8",
+    )
+
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _msg: None)
+    html_files = compiler._find_html_files()
+    designation = compiler._get_opf_cover_designation()
+    existing_page = compiler._find_existing_cover_html(html_files, designation)
+    processed, cover_file = compiler._process_images(
+        preferred_cover_names=[designation["image_href"]],
+    )
+
+    assert compiler._find_opf_path() == str(tmp_path / "standard.opf")
+    assert designation["image_href"] == "image/cover.jpg"
+    assert designation["method"] == "EPUB 3 cover-image property"
+    assert existing_page == "response_p-cover.html"
+    assert processed["p-cover_img_1.jpg"] == "p-cover_img_1.jpg"
+    assert cover_file == "p-cover_img_1.jpg"
+
+    filename_map = compiler._build_opf_filename_map()
+    assert compiler._restore_opf_filename(
+        "response_p-cover.html",
+        filename_map,
+    ) == "p-cover.xhtml"
+    assert compiler._restore_opf_filename(
+        "response_p-000.html",
+        filename_map,
+    ) == "p-000.xhtml"
+
+    # Verify the restoration is applied to the actual EpubHtml item, not only
+    # exposed as a cosmetic workspace-name helper.
+    compiler._opf_filename_map = filename_map
+    book = epub_converter.epub.EpubBook()
+    spine = []
+    toc = []
+    assert compiler._process_chapters(
+        book,
+        ["response_p-000.html"],
+        {0: ("Chapter", 1.0, "test")},
+        [],
+        processed,
+        spine,
+        toc,
+        {"language": "en"},
+    ) == 1
+    assert [item.file_name for item in spine] == ["p-000.xhtml"]
+
+
+def test_cover_html_fallback_accepts_cover_substring_only_with_image(tmp_path):
+    (tmp_path / "response_cover-notes.html").write_text(
+        "<html><body><p>Not a cover image.</p></body></html>",
+        encoding="utf-8",
+    )
+    (tmp_path / "response_p-cover.xhtml").write_text(
+        '<html><body><img src="images/cover.jpg"/></body></html>',
+        encoding="utf-8",
+    )
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _msg: None)
+
+    assert compiler._find_existing_cover_html(
+        ["response_cover-notes.html", "response_p-cover.xhtml"],
+        {},
+    ) == "response_p-cover.xhtml"
+
+
+def test_epub2_cover_metadata_resolves_manifest_image(tmp_path):
+    (tmp_path / "content.opf").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata><meta name="cover" content="cover-art"/></metadata>
+  <manifest>
+    <item id="cover-art" href="Images/book-art.jpg" media-type="image/jpeg"/>
+  </manifest>
+</package>
+""",
+        encoding="utf-8",
+    )
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _msg: None)
+
+    designation = compiler._get_opf_cover_designation()
+
+    assert designation["image_id"] == "cover-art"
+    assert designation["image_href"] == "Images/book-art.jpg"
+    assert designation["method"] == "EPUB 2 cover metadata"
 
 
 def test_epub_chapter_processing_does_not_rewrite_manual_source_html(tmp_path):
