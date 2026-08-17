@@ -38,6 +38,7 @@ from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar
 from sdlxliff_sidecar_writer import (
     _SIDECAR_FRESHNESS_MANIFEST_LOCK,
     _SIDECAR_FRESHNESS_MANIFEST_TYPE,
+    USER_ADDED_BREAK_POSITIONS_ATTRIBUTE,
     USER_ADDED_TARGET_INDEXES_ATTRIBUTE,
     _blank_manual_untranslated_sdlxliff_target,
     _clear_manual_untranslated_sdlxliff,
@@ -5925,6 +5926,7 @@ class SDLXLIFFReviewDialog(QDialog):
         target_parts = []
         root = ET.parse(path).getroot()
         user_added_indexes = set()
+        user_added_break_positions = {}
         for element in root.iter():
             name = self._local_name(element.tag)
             if name == "source":
@@ -5943,9 +5945,27 @@ class SDLXLIFFReviewDialog(QDialog):
                     )
                 except (TypeError, ValueError, json.JSONDecodeError):
                     pass
+                try:
+                    stored_positions = json.loads(
+                        element.attrib.get(USER_ADDED_BREAK_POSITIONS_ATTRIBUTE, "{}")
+                    )
+                    if isinstance(stored_positions, dict):
+                        for raw_index, raw_positions in stored_positions.items():
+                            index = int(raw_index)
+                            if index < 0 or not isinstance(raw_positions, list):
+                                continue
+                            positions = sorted({
+                                int(position)
+                                for position in raw_positions
+                                if int(position) >= 0
+                            })
+                            if positions:
+                                user_added_break_positions[index] = positions
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
         html_pair = ("\n".join(source_parts), "\n".join(target_parts))
         if include_user_added_indexes:
-            return (*html_pair, user_added_indexes)
+            return (*html_pair, user_added_indexes, user_added_break_positions)
         return html_pair
 
     def _legend_status_label(self, text, status):
@@ -7449,7 +7469,12 @@ class SDLXLIFFReviewDialog(QDialog):
         metadata.setdefault("display_position", index + 1)
         metadata.setdefault("label", self._review_label_from_metadata(metadata))
         try:
-            source_html, target_html, user_added_target_indexes = (
+            (
+                source_html,
+                target_html,
+                user_added_target_indexes,
+                user_added_break_positions,
+            ) = (
                 self._read_sdlxliff_html_pair(
                     path,
                     include_user_added_indexes=True,
@@ -7695,6 +7720,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 "source_html": source_html,
                 "target_html": target_html,
                 "user_added_target_indexes": sorted(user_added_target_indexes),
+                "user_added_break_positions": dict(user_added_break_positions),
                 "source_count": source_count,
                 "target_count": target_count,
                 "count_ratio": count_ratio,
@@ -8565,6 +8591,15 @@ class SDLXLIFFReviewDialog(QDialog):
             "tooltip_translation_error": str(row_data.get("tooltip_translation_error", "") or ""),
             "tooltip_translation_error_detail": str(row_data.get("tooltip_translation_error_detail", "") or ""),
         }
+
+    @classmethod
+    def _compact_review_row_visible(cls, row_data):
+        """Hide only empty translator-note placeholders from Compact mode."""
+        row_data = row_data if isinstance(row_data, dict) else {}
+        return not (
+            bool(row_data.get("translator_note"))
+            and not cls._normalize_review_text(row_data.get("target", ""))
+        )
 
     @staticmethod
     def _review_wrapped_lines(value, line_chars):
@@ -11273,6 +11308,7 @@ class SDLXLIFFReviewDialog(QDialog):
         piece_index,
         text,
         user_added_target_indexes=None,
+        user_added_break_positions=None,
     ):
         if piece_index < 0 or piece_index >= len(self.pieces):
             return
@@ -11283,6 +11319,20 @@ class SDLXLIFFReviewDialog(QDialog):
                 for value in (user_added_target_indexes or [])
                 if int(value) >= 0
             })),
+            tuple(sorted(
+                (
+                    int(raw_index),
+                    tuple(sorted({
+                        int(position)
+                        for position in raw_positions
+                        if int(position) >= 0
+                    })),
+                )
+                for raw_index, raw_positions in dict(
+                    user_added_break_positions or {}
+                ).items()
+                if int(raw_index) >= 0
+            )),
         )
         self.save_status_label.setText("Unsaved HTML")
         self._edit_save_timer.start(500)
@@ -11300,14 +11350,24 @@ class SDLXLIFFReviewDialog(QDialog):
                 if self._apply_target_edit(piece_index, row_index, text):
                     saved += 1
             for piece_index, notepad_edit in pending_notepad.items():
-                if isinstance(notepad_edit, tuple):
+                if isinstance(notepad_edit, tuple) and len(notepad_edit) == 3:
+                    (
+                        html_text,
+                        user_added_target_indexes,
+                        stored_break_positions,
+                    ) = notepad_edit
+                    user_added_break_positions = dict(stored_break_positions)
+                elif isinstance(notepad_edit, tuple):
                     html_text, user_added_target_indexes = notepad_edit
+                    user_added_break_positions = None
                 else:
                     html_text, user_added_target_indexes = notepad_edit, None
+                    user_added_break_positions = None
                 if self._apply_notepad_document_edit(
                     piece_index,
                     html_text,
                     user_added_target_indexes=user_added_target_indexes,
+                    user_added_break_positions=user_added_break_positions,
                 ):
                     saved += 1
             self.save_status_label.setText("Saved" if saved else "")
@@ -11320,13 +11380,36 @@ class SDLXLIFFReviewDialog(QDialog):
         html_text,
         *,
         user_added_target_indexes=None,
+        user_added_break_positions=None,
     ):
         """Save one browser-edited HTML document and rebuild its analysis."""
         if piece_index < 0 or piece_index >= len(self.pieces):
             return False
         piece = self.pieces[piece_index]
         html_text = str(html_text or "")
-        if html_text == self._unescape_html_document(piece.get("target_html") or ""):
+        normalized_user_indexes = sorted({
+            int(value)
+            for value in (user_added_target_indexes or [])
+            if int(value) >= 0
+        })
+        normalized_break_positions = {
+            int(raw_index): sorted({
+                int(position)
+                for position in raw_positions
+                if int(position) >= 0
+            })
+            for raw_index, raw_positions in dict(
+                user_added_break_positions or {}
+            ).items()
+            if int(raw_index) >= 0
+        }
+        if (
+            html_text == self._unescape_html_document(piece.get("target_html") or "")
+            and normalized_user_indexes
+                == sorted(piece.get("user_added_target_indexes") or [])
+            and normalized_break_positions
+                == dict(piece.get("user_added_break_positions") or {})
+        ):
             return True
 
         # Track the current browser DOM order independently from the SDLXLIFF
@@ -11343,6 +11426,7 @@ class SDLXLIFFReviewDialog(QDialog):
             piece,
             html_text,
             user_added_target_indexes=user_added_target_indexes,
+            user_added_break_positions=user_added_break_positions,
         )
         piece["target_html"] = saved_html
         metadata = {
@@ -11541,6 +11625,7 @@ class SDLXLIFFReviewDialog(QDialog):
         target_html,
         *,
         user_added_target_indexes=None,
+        user_added_break_positions=None,
     ):
         sidecar_path = piece.get("path")
         if not sidecar_path:
@@ -11578,6 +11663,30 @@ class SDLXLIFFReviewDialog(QDialog):
                     )
                 else:
                     element.attrib.pop(USER_ADDED_TARGET_INDEXES_ATTRIBUTE, None)
+                break
+        if user_added_break_positions is not None:
+            stored_positions = {}
+            for raw_index, raw_positions in dict(
+                user_added_break_positions or {}
+            ).items():
+                index = int(raw_index)
+                positions = sorted({
+                    int(position)
+                    for position in raw_positions
+                    if int(position) >= 0
+                })
+                if index >= 0 and positions:
+                    stored_positions[str(index)] = positions
+            for element in root.iter():
+                if self._local_name(element.tag) != "file":
+                    continue
+                if stored_positions:
+                    element.set(
+                        USER_ADDED_BREAK_POSITIONS_ATTRIBUTE,
+                        json.dumps(stored_positions, separators=(",", ":")),
+                    )
+                else:
+                    element.attrib.pop(USER_ADDED_BREAK_POSITIONS_ATTRIBUTE, None)
                 break
         was_manual_untranslated = _is_manual_untranslated_sdlxliff(root)
         is_manual_editing = (
@@ -12223,6 +12332,21 @@ class SDLXLIFFReviewDialog(QDialog):
                 if isinstance(row_data.get("target_index"), int)
             }
             user_added_indexes = set(piece.get("user_added_target_indexes") or [])
+            user_added_break_positions = {}
+            for raw_index, raw_positions in dict(
+                piece.get("user_added_break_positions") or {}
+            ).items():
+                try:
+                    index = int(raw_index)
+                    positions = {
+                        int(position)
+                        for position in raw_positions
+                        if int(position) >= 0
+                    }
+                except (TypeError, ValueError):
+                    continue
+                if index >= 0 and positions:
+                    user_added_break_positions[index] = positions
 
             def _remove_user_block_trailing_breaks(target_node):
                 """Drop BR-only tails; Enter-at-end is represented by a sibling P."""
@@ -12287,7 +12411,14 @@ class SDLXLIFFReviewDialog(QDialog):
                     # must remain deletable, even when it reused a source slot.
                     source_break_count = 0
                 target_breaks = list(target_node.find_all("br"))
-                extra_break_count = max(
+                explicit_user_break_ids = {
+                    id(target_breaks[position])
+                    for position in user_added_break_positions.get(
+                        node_index, set()
+                    )
+                    if 0 <= position < len(target_breaks)
+                }
+                legacy_extra_break_count = max(
                     0, len(target_breaks) - source_break_count
                 )
                 if (
@@ -12300,23 +12431,34 @@ class SDLXLIFFReviewDialog(QDialog):
                     # empty-block placeholder. Once that slot contains a
                     # translator note, retaining the placeholder creates a
                     # phantom trailing line every time Notepad is reopened.
-                    placeholder_end = min(
-                        len(target_breaks), extra_break_count + source_break_count
-                    )
-                    for placeholder_break in target_breaks[
-                        extra_break_count:placeholder_end
-                    ]:
+                    if explicit_user_break_ids:
+                        placeholder_breaks = [
+                            line_break for line_break in target_breaks
+                            if id(line_break) not in explicit_user_break_ids
+                        ][-source_break_count:]
+                    else:
+                        placeholder_end = min(
+                            len(target_breaks),
+                            legacy_extra_break_count + source_break_count,
+                        )
+                        placeholder_breaks = target_breaks[
+                            legacy_extra_break_count:placeholder_end
+                        ]
+                    for placeholder_break in placeholder_breaks:
                         placeholder_break.decompose()
-                    target_breaks = (
-                        target_breaks[:extra_break_count]
-                        + target_breaks[placeholder_end:]
-                    )
-                # Source EPUBs commonly end every paragraph with one
-                # structural <br>. Notepad Enter inserts before that trailing
-                # break. Re-identify the excess prefix even for older sidecars
-                # that predate the manual-editing metadata flag.
-                for line_break in target_breaks[:extra_break_count]:
-                    line_break["data-sdl-notepad-user-tag"] = "br"
+                    target_breaks = [
+                        line_break for line_break in target_breaks
+                        if line_break.parent is not None
+                    ]
+                # Yellow means an explicitly user-created empty line. Older
+                # sidecars have no durable break metadata, so their target-only
+                # breaks remain deletable but are deliberately not presented as
+                # user-created merely because source/target BR counts differ.
+                for break_index, line_break in enumerate(target_breaks):
+                    if id(line_break) in explicit_user_break_ids:
+                        line_break["data-sdl-notepad-user-tag"] = "br"
+                    elif break_index < legacy_extra_break_count:
+                        line_break["data-sdl-notepad-loaded-extra-break"] = "br"
                 target_node["data-sdl-notepad-source"] = source_text
                 if source_node is not None and not source_text:
                     # Preserve the fact that this DOM slot has no source text.
@@ -12484,6 +12626,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 const PLACEHOLDER_ATTR = 'data-sdl-notepad-placeholder';
                 const BREAK_ATTR = 'data-sdl-notepad-break';
                 const USER_TAG_ATTR = 'data-sdl-notepad-user-tag';
+                const LOADED_EXTRA_BREAK_ATTR = 'data-sdl-notepad-loaded-extra-break';
                 const USER_TAG_CONTAINER_ATTR = 'data-sdl-notepad-user-tag-container';
                 const USER_BLOCK_ATTR = 'data-sdl-notepad-user-block';
                 const SOURCE_EMPTY_ATTR = 'data-sdl-notepad-source-empty';
@@ -12622,10 +12765,13 @@ class SDLXLIFFReviewDialog(QDialog):
                     const element = node && node.nodeType === Node.ELEMENT_NODE
                         ? node : node && node.parentElement;
                     if (!element) return null;
-                    return element.closest(
-                        'p,h1,h2,h3,h4,h5,h6,li,td,th,caption,figcaption,blockquote,' +
-                        'section,article,div,body'
-                    ) || editableHost(element);
+                    const candidate = element.closest(
+                        'p,h1,h2,h3,h4,h5,h6,li,td,th,caption,figcaption,blockquote,div.u'
+                    );
+                    if (!candidate) return null;
+                    if (candidate.tagName.toUpperCase() === 'DIV'
+                            && candidate.querySelector(NESTED_TEXT_UNIT_SELECTOR)) return null;
+                    return candidate;
                 };
                 const navigationContainer = host => {
                     if (!host) return null;
@@ -12655,7 +12801,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     return containers;
                 };
                 // Navigation treats every <br> as a visual line boundary. Only
-                // user-tagged breaks remain deletable; source EPUB breaks stay
+                // explicitly inserted and legacy target-only breaks remain
+                // deletable; source EPUB breaks stay
                 // protected even though Up/Down can move across them.
                 const navigationBreaksIn = container => Array.from(
                     container.querySelectorAll('br')
@@ -12663,7 +12810,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 const trailingUserBreakIn = container => {
                     if (!container) return null;
                     const breaks = Array.from(container.querySelectorAll(
-                        'br[' + USER_TAG_ATTR + ']'
+                        'br[' + USER_TAG_ATTR + '],br['
+                            + LOADED_EXTRA_BREAK_ATTR + ']'
                     ));
                     const lineBreak = breaks.length ? breaks[breaks.length - 1] : null;
                     if (!lineBreak) return null;
@@ -13005,10 +13153,12 @@ class SDLXLIFFReviewDialog(QDialog):
                 };
                 const refreshUserTagIndicator = container => {
                     if (!container || !container.isConnected) return;
-                    if (container.hasAttribute(USER_BLOCK_ATTR)
-                            || (container.hasAttribute(SOURCE_EMPTY_ATTR)
-                                && !!container.textContent.trim())
-                            || container.querySelector('[' + USER_TAG_ATTR + ']')) {
+                    const userCreatedBlock = container.hasAttribute(USER_BLOCK_ATTR);
+                    const filledSourceEmptySlot = container.hasAttribute(SOURCE_EMPTY_ATTR)
+                        && !!container.textContent.trim();
+                    if (userCreatedBlock
+                            || filledSourceEmptySlot
+                            || container.querySelector('br[' + USER_TAG_ATTR + ']')) {
                         container.setAttribute(USER_TAG_CONTAINER_ATTR, '1');
                     } else {
                         container.removeAttribute(USER_TAG_CONTAINER_ATTR);
@@ -13019,7 +13169,8 @@ class SDLXLIFFReviewDialog(QDialog):
                             || !container.hasAttribute(SOURCE_EMPTY_ATTR)
                             || !container.textContent.trim()) return false;
                     const placeholders = Array.from(container.querySelectorAll(
-                        'br:not([' + USER_TAG_ATTR + '])'
+                        'br:not([' + USER_TAG_ATTR + ']):not(['
+                            + LOADED_EXTRA_BREAK_ATTR + '])'
                     ));
                     placeholders.forEach(lineBreak => lineBreak.remove());
                     return placeholders.length > 0;
@@ -13256,12 +13407,16 @@ class SDLXLIFFReviewDialog(QDialog):
                 };
                 const adjacentEditableBreak = (host, backwards) => {
                     const lineBreak = adjacentBreakAtCaret(host, backwards);
-                    return lineBreak && lineBreak.hasAttribute(USER_TAG_ATTR)
+                    return lineBreak && (
+                            lineBreak.hasAttribute(USER_TAG_ATTR)
+                            || lineBreak.hasAttribute(LOADED_EXTRA_BREAK_ATTR))
                         ? lineBreak : null;
                 };
                 const adjacentProtectedBreak = (host, backwards) => {
                     const lineBreak = adjacentBreakAtCaret(host, backwards);
-                    return lineBreak && !lineBreak.hasAttribute(USER_TAG_ATTR)
+                    return lineBreak
+                            && !lineBreak.hasAttribute(USER_TAG_ATTR)
+                            && !lineBreak.hasAttribute(LOADED_EXTRA_BREAK_ATTR)
                         ? lineBreak : null;
                 };
                 const selectionContainsProtectedBreak = host => {
@@ -13269,7 +13424,10 @@ class SDLXLIFFReviewDialog(QDialog):
                     if (!selection || !selection.rangeCount || selection.isCollapsed
                             || !selectionInside(host)) return false;
                     const range = selection.getRangeAt(0);
-                    return Array.from(host.querySelectorAll('br:not([' + USER_TAG_ATTR + '])'))
+                    return Array.from(host.querySelectorAll(
+                        'br:not([' + USER_TAG_ATTR + ']):not(['
+                            + LOADED_EXTRA_BREAK_ATTR + '])'
+                    ))
                         .some(lineBreak => {
                             try { return range.intersectsNode(lineBreak); }
                             catch (_error) { return false; }
@@ -13284,7 +13442,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     const previousHost = hosts[hosts.indexOf(host) - 1];
                     if (!previousHost || previousHost.textContent.trim()) return null;
                     const breaks = previousHost.querySelectorAll(
-                        'br[' + USER_TAG_ATTR + ']'
+                        'br[' + USER_TAG_ATTR + '],br['
+                            + LOADED_EXTRA_BREAK_ATTR + ']'
                     );
                     return breaks.length ? breaks[breaks.length - 1] : null;
                 };
@@ -13391,7 +13550,10 @@ class SDLXLIFFReviewDialog(QDialog):
                         } else {
                             for (const attribute of Array.from(element.attributes)) {
                                 if (tagName === 'BR'
-                                        && attribute.name === USER_TAG_ATTR) continue;
+                                        && (attribute.name === USER_TAG_ATTR
+                                            || attribute.name === LOADED_EXTRA_BREAK_ATTR)) {
+                                    continue;
+                                }
                                 element.removeAttribute(attribute.name);
                             }
                         }
@@ -14028,6 +14190,43 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             return []
 
+    @classmethod
+    def _notepad_user_added_break_positions(cls, document_html):
+        """Return exact BR ordinals explicitly inserted by the Notepad editor."""
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(str(document_html or ""), "html.parser")
+
+            def _is_review_text_node(tag):
+                name = str(getattr(tag, "name", "") or "").casefold()
+                if name in cls.TEXT_TAGS:
+                    return True
+                if name != "div":
+                    return False
+                classes = tag.get("class") or []
+                if isinstance(classes, str):
+                    classes = classes.split()
+                return (
+                    "u" in {str(value).casefold() for value in classes}
+                    and not tag.find(cls.TEXT_TAGS)
+                )
+
+            stored_positions = {}
+            for index, element in enumerate(soup.find_all(_is_review_text_node)):
+                positions = [
+                    position
+                    for position, line_break in enumerate(
+                        element.find_all("br")
+                    )
+                    if line_break.has_attr("data-sdl-notepad-user-tag")
+                ]
+                if positions:
+                    stored_positions[index] = positions
+            return stored_positions
+        except Exception:
+            return {}
+
     @staticmethod
     def _clean_notepad_browser_html(document_html):
         """Remove editor-only wrappers while retaining their edited contents."""
@@ -14073,6 +14272,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     element.attrs.pop(marker, None)
             for marker in (
                 "data-sdl-notepad-user-tag",
+                "data-sdl-notepad-loaded-extra-break",
                 "data-sdl-notepad-user-tag-container",
                 "data-sdl-notepad-user-block",
                 "data-sdl-notepad-source-empty",
@@ -14141,6 +14341,9 @@ class SDLXLIFFReviewDialog(QDialog):
                 user_added_target_indexes = (
                     self._notepad_user_added_target_indexes(document_html)
                 )
+                user_added_break_positions = (
+                    self._notepad_user_added_break_positions(document_html)
+                )
                 document = self._clean_notepad_browser_html(document_html)
                 if prefix:
                     html_start = re.search(r"<html(?:\s|>)", document, flags=re.IGNORECASE)
@@ -14149,6 +14352,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     piece_index,
                     document,
                     user_added_target_indexes=user_added_target_indexes,
+                    user_added_break_positions=user_added_break_positions,
                 )
                 if flush:
                     if self._edit_save_timer.isActive():
@@ -14868,6 +15072,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 idx,
                 updates_enabled=updates_enabled,
             )
+        if not self._compact_review_row_visible(row_data):
+            return None
         bg, source_bar, target_bar, dot_color, border_color = colors.get(row_data["status"], colors["green"])
         source_text = row_model.get("source_text", row_data.get("source", ""))
         target_text = row_model.get("target_text", row_data.get("target", ""))

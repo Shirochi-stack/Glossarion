@@ -17,6 +17,9 @@ MANUAL_EDITING_ATTRIBUTE = f"{{{GLOSSARION_SDLXLIFF_NS}}}manual-editing"
 USER_ADDED_TARGET_INDEXES_ATTRIBUTE = (
     f"{{{GLOSSARION_SDLXLIFF_NS}}}user-added-target-indexes"
 )
+USER_ADDED_BREAK_POSITIONS_ATTRIBUTE = (
+    f"{{{GLOSSARION_SDLXLIFF_NS}}}user-added-break-positions"
+)
 _SIDECAR_FRESHNESS_MANIFEST_TYPE = "html_sdlxliff_sidecar_freshness"
 _SIDECAR_FRESHNESS_MANIFEST_LOCK = threading.RLock()
 _SIDECAR_MUTATION_LOCKS_GUARD = threading.Lock()
@@ -321,6 +324,8 @@ def _reset_sdlxliff_target_for_manual_retranslation(path):
         for file_element in file_elements:
             file_element.set(MANUAL_UNTRANSLATED_ATTRIBUTE, "true")
             file_element.set(MANUAL_EDITING_ATTRIBUTE, "true")
+            file_element.attrib.pop(USER_ADDED_TARGET_INDEXES_ATTRIBUTE, None)
+            file_element.attrib.pop(USER_ADDED_BREAK_POSITIONS_ATTRIBUTE, None)
 
         reset_count = 0
         for trans_unit in root.iter():

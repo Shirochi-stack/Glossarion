@@ -990,6 +990,57 @@ def test_sdlxliff_review_user_text_in_empty_dom_slot_is_added_without_offset(tmp
     assert row_model["target_missing"] is False
     assert row_model["translator_note"] is True
     assert dialog._tag_label_text("", "", "TN(1)", "TN(1)") == "TN(1)"
+    assert dialog._compact_review_row_visible(added) is True
+    assert dialog._compact_review_row_visible({
+        "translator_note": True,
+        "target": " \u00a0\u200b ",
+    }) is False
+    assert dialog._compact_review_row_visible({
+        "translator_note": False,
+        "target": "",
+    }) is True
+
+
+def test_compact_mode_hides_empty_translator_note_without_deleting_it(
+    tmp_path, qtbot
+):
+    output_name = "response_empty-tn.html"
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "empty-tn.xhtml"},
+        "<html><body><p>Source paragraph.</p></body></html>",
+        "<html><body><p>Translated paragraph.</p><p></p></body></html>",
+        raise_errors=True,
+    )
+    tree = etree.parse(sidecar)
+    file_element = tree.xpath("//*[local-name()='file']")[0]
+    file_element.set(
+        "{urn:glossarion:sdlxliff}user-added-target-indexes", "[1]"
+    )
+    tree.write(sidecar, encoding="utf-8", xml_declaration=True)
+
+    dialog = SDLXLIFFReviewDialog(
+        str(tmp_path),
+        sidecar,
+        config={SDLXLIFFReviewDialog.TWO_COLUMN_LAYOUT_CONFIG_KEY: True},
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(
+        lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
+        timeout=5000,
+    )
+
+    assert len(dialog.pieces[0]["rows"]) == 2
+    empty_note = dialog.pieces[0]["rows"][1]
+    assert empty_note["translator_note"] is True
+    assert empty_note["target"] == ""
+    compact_rows = dialog.rows_widget.findChildren(QFrame, "SdlReviewRow")
+    assert len(compact_rows) == 1
+    assert compact_rows[0].property("sdl_row_index") == 0
+    saved_target = dialog._read_sdlxliff_html_pair(sidecar)[1]
+    assert len(BeautifulSoup(saved_target, "html.parser").find_all("p")) == 2
 
 
 def test_sdlxliff_review_inserted_target_node_uses_text_anchor_without_offset(tmp_path):
@@ -3131,6 +3182,15 @@ def test_manual_retranslation_reset_retains_sidecar_and_is_parallel_safe(tmp_pat
         raise_errors=True,
         record_freshness=False,
     )
+    tree = etree.parse(sidecar)
+    file_element = tree.xpath("//*[local-name()='file']")[0]
+    file_element.set(
+        "{urn:glossarion:sdlxliff}user-added-target-indexes", "[1]"
+    )
+    file_element.set(
+        "{urn:glossarion:sdlxliff}user-added-break-positions", '{"0":[0]}'
+    )
+    tree.write(sidecar, encoding="utf-8", xml_declaration=True)
 
     # Multiple Progress Manager instances may reset the same selected chapter.
     # Every operation is intentionally idempotent and the final XML must remain
@@ -3163,6 +3223,12 @@ def test_manual_retranslation_reset_retains_sidecar_and_is_parallel_safe(tmp_pat
     assert file_element.get(
         "{urn:glossarion:sdlxliff}manual-editing"
     ) == "true"
+    assert file_element.get(
+        "{urn:glossarion:sdlxliff}user-added-target-indexes"
+    ) is None
+    assert file_element.get(
+        "{urn:glossarion:sdlxliff}user-added-break-positions"
+    ) is None
 
     dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     dialog.output_dir = str(tmp_path)
@@ -5008,6 +5074,125 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert dialog.two_column_layout_btn.text() == "Compact"
 
 
+def test_notepad_preexisting_break_differences_do_not_get_yellow_markers(
+    tmp_path, qtbot
+):
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+
+    output_name = "response_p-caution.html"
+    source_html = (
+        '<html><body><div id="wrapper">&lt;!-- source notice --&gt;'
+        '<p id="notice">Source one<br/>Source two<br/>Source three</p>'
+        '<p id="preexisting-empty"><br/></p></div></body></html>'
+    )
+    target_html = (
+        '<html><body><div id="wrapper">&lt;!-- source notice --&gt;'
+        '<p id="notice">Translated one<br/>wrapped line<br/>'
+        'Translated two<br/>Translated three</p>'
+        '<p id="preexisting-empty"><br/></p></div></body></html>'
+    )
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "p-caution.xhtml"},
+        source_html,
+        target_html,
+        raise_errors=True,
+    )
+    dialog = SDLXLIFFReviewDialog(
+        str(tmp_path),
+        sidecar,
+        config={SDLXLIFFReviewDialog.TWO_COLUMN_LAYOUT_CONFIG_KEY: False},
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(
+        lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
+        timeout=5000,
+    )
+    browser = dialog.rows_widget.findChild(QWebEngineView, "SdlReviewNotepadBrowser")
+    assert browser is not None
+
+    def js_value(script):
+        values = []
+        browser.page().runJavaScript(script, values.append)
+        qtbot.waitUntil(lambda: bool(values), timeout=5000)
+        return values[0]
+
+    qtbot.waitUntil(
+        lambda: js_value(
+            "!!document.querySelector('br[data-sdl-notepad-loaded-extra-break]')"
+        ) is True,
+        timeout=5000,
+    )
+    assert js_value(
+        "document.querySelector('[data-sdl-notepad-user-tag]') === null"
+    ) is True
+    assert js_value(
+        "document.querySelector('[data-sdl-notepad-user-tag-container]') === null"
+    ) is True
+    assert js_value(
+        "!document.querySelector('#wrapper').hasAttribute("
+        "'data-sdl-notepad-user-tag-container')"
+    ) is True
+
+
+def test_notepad_user_break_positions_round_trip_through_sidecar(tmp_path):
+    output_name = "response_user-break.html"
+    source_html = "<html><body><p>Source<br/>line</p></body></html>"
+    target_html = (
+        "<html><body><p>Translated<br/>user line<br/>line</p></body></html>"
+    )
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "user-break.xhtml"},
+        source_html,
+        target_html,
+        raise_errors=True,
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog.current_path = ""
+    piece = {
+        "path": sidecar,
+        "output_name": output_name,
+        "target_html": target_html,
+    }
+
+    dialog._write_piece_target_html(
+        piece,
+        target_html,
+        user_added_target_indexes=[],
+        user_added_break_positions={0: [1]},
+    )
+
+    source, target, user_blocks, user_breaks = dialog._read_sdlxliff_html_pair(
+        sidecar,
+        include_user_added_indexes=True,
+    )
+    assert source == source_html
+    assert target == target_html
+    assert user_blocks == set()
+    assert user_breaks == {0: [1]}
+    rendered = BeautifulSoup(
+        dialog._notepad_initial_document_html(
+            {
+                "source_html": source,
+                "target_html": target,
+                "rows": [],
+                "user_added_target_indexes": user_blocks,
+                "user_added_break_positions": user_breaks,
+            },
+            fill_untranslated=False,
+        ),
+        "html.parser",
+    )
+    breaks = rendered.find("p").find_all("br")
+    assert breaks[0].get("data-sdl-notepad-user-tag") is None
+    assert breaks[1].get("data-sdl-notepad-user-tag") == "br"
+
+
 def test_notepad_applies_persisted_edge_markers_before_user_interaction(tmp_path, qtbot):
     from PySide6.QtWebEngineWidgets import QWebEngineView
 
@@ -5028,6 +5213,13 @@ def test_notepad_applies_persisted_edge_markers_before_user_interaction(tmp_path
         target_html,
         raise_errors=True,
     )
+    tree = etree.parse(sidecar)
+    file_element = tree.xpath("//*[local-name()='file']")[0]
+    file_element.set(
+        "{urn:glossarion:sdlxliff}user-added-break-positions",
+        '{"0":[1]}',
+    )
+    tree.write(sidecar, encoding="utf-8", xml_declaration=True)
     dialog = SDLXLIFFReviewDialog(
         str(tmp_path),
         sidecar,
@@ -5378,7 +5570,10 @@ def test_notepad_enter_at_paragraph_end_saves_a_separate_empty_paragraph(
             );
             host.textContent = '';
             host.dispatchEvent(new InputEvent('input', {bubbles: true}));
-            return host.hasAttribute('data-sdl-notepad-placeholder');
+            return host.hasAttribute('data-sdl-notepad-placeholder')
+                && host.closest('p').hasAttribute(
+                    'data-sdl-notepad-user-tag-container'
+                );
         })();
         """
     ) is True
@@ -5500,7 +5695,9 @@ def test_notepad_filled_text_empty_source_paragraph_becomes_translator_note(
             host.dispatchEvent(new InputEvent('input', {{bubbles: true}}));
             return paragraph.hasAttribute(
                 'data-sdl-notepad-user-tag-container'
-            ) && paragraph.querySelector('br:not([data-sdl-notepad-user-tag])') === null;
+            ) && paragraph.querySelector(
+                'br:not([data-sdl-notepad-user-tag]):not([data-sdl-notepad-loaded-extra-break])'
+            ) === null;
         }})();
         """
     ) is True
@@ -5603,7 +5800,7 @@ def test_notepad_loaded_target_only_trailing_break_deletes_from_blank_line(
 
     qtbot.waitUntil(
         lambda: js_value(
-            "!!document.querySelector('br[data-sdl-notepad-user-tag]')"
+            "!!document.querySelector('br[data-sdl-notepad-loaded-extra-break]')"
         )
         is True,
         timeout=5000,
@@ -5615,7 +5812,7 @@ def test_notepad_loaded_target_only_trailing_break_deletes_from_blank_line(
         JSON.stringify((() => { try {
             const paragraph = document.querySelector('p');
             const lineBreak = paragraph.querySelector(
-                'br[data-sdl-notepad-user-tag]'
+                'br[data-sdl-notepad-loaded-extra-break]'
             );
             const host = lineBreak.closest('[data-sdl-notepad-text]');
             if (!paragraph || !lineBreak || !host) {
@@ -5658,7 +5855,7 @@ def test_notepad_loaded_target_only_trailing_break_deletes_from_blank_line(
                 mouseHandled: down.defaultPrevented,
                 backspaceHandled: backspace.defaultPrevented,
                 breakDeleted: !paragraph.querySelector(
-                    'br[data-sdl-notepad-user-tag]'
+                    'br[data-sdl-notepad-loaded-extra-break]'
                 ),
                 yellowMarkerCleared: !paragraph.hasAttribute(
                     'data-sdl-notepad-user-tag-container'
@@ -6033,6 +6230,7 @@ def test_notepad_initial_html_keeps_translation_and_expands_source_markup_for_em
             "target_html": (
                 "<html><body><p>&nbsp;Translator<br/><br/><br/></p></body></html>"
             ),
+            "user_added_break_positions": {0: [0, 1]},
         },
         fill_untranslated=False,
     )
@@ -6056,6 +6254,7 @@ def test_notepad_filled_empty_source_slot_drops_only_structural_placeholder_brea
             ),
             "rows": [],
             "user_added_target_indexes": [0, 1],
+            "user_added_break_positions": {1: [0]},
         },
         fill_untranslated=False,
     )
