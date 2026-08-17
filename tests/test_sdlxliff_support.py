@@ -1076,6 +1076,40 @@ def test_sdlxliff_manual_inserted_paragraph_is_translator_note_and_does_not_shif
     ]
 
 
+def test_sdlxliff_legacy_empty_added_paragraph_recovers_tn_and_marker(tmp_path):
+    output_name = "response_chapter_empty_note.html"
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter_empty_note.xhtml"},
+        "<html><body><p>One.</p></body></html>",
+        "<html><body><p>One.</p><p></p></body></html>",
+        raise_errors=True,
+    )
+    tree = etree.parse(sidecar)
+    file_element = tree.xpath("//*[local-name()='file']")[0]
+    file_element.set("{urn:glossarion:sdlxliff}manual-editing", "true")
+    tree.write(sidecar, encoding="utf-8", xml_declaration=True)
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    piece = dialog._build_piece(sidecar, 0, {"output_name": output_name})
+
+    assert len(piece["rows"]) == 2
+    added = piece["rows"][1]
+    assert added["source_index"] is None
+    assert added["target_index"] == 1
+    assert added["translator_note"] is True
+    assert added["source_tag_label"] == "TN(1)"
+    assert added["target_tag_label"] == "TN(1)"
+    assert piece["user_added_target_indexes"] == [1]
+    rendered = BeautifulSoup(
+        dialog._notepad_initial_document_html(piece), "html.parser"
+    )
+    paragraphs = rendered.find_all("p")
+    assert paragraphs[0].get("data-sdl-notepad-user-block") is None
+    assert paragraphs[1].get("data-sdl-notepad-user-block") == "1"
+
+
 def test_sdlxliff_notepad_added_row_does_not_offset_original_edit_history(tmp_path):
     output_name = "response_chapter_history.html"
     source_html = (
@@ -3848,7 +3882,7 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
                 secondHostKeepsSameParagraph,
                 !paragraph.hasAttribute('data-sdl-notepad-multiline-container'),
                 style.outlineStyle !== 'solid',
-                hosts.every(host => getComputedStyle(host).boxShadow.includes(
+                hosts.every(host => getComputedStyle(host).backgroundImage.includes(
                     '70, 150, 220'
                 )),
                 !style.borderBottomColor.includes('70, 150, 220')
@@ -3856,11 +3890,52 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         })();
         """
     ) == "[true,true,true,true,true,true]"
+    leading_underline_result = js_value(
+        """
+        (() => {
+            const paragraph = document.createElement('p');
+            const host = document.createElement('span');
+            host.setAttribute('data-sdl-notepad-text', '1');
+            host.setAttribute('contenteditable', 'true');
+            host.textContent = '\u3000\u3000Indented text';
+            paragraph.appendChild(host);
+            document.body.appendChild(paragraph);
+            host.focus();
+            host.dispatchEvent(new FocusEvent('focusin', {bubbles: true}));
+            const leadingRange = document.createRange();
+            leadingRange.setStart(host.firstChild, 0);
+            leadingRange.setEnd(host.firstChild, 2);
+            const measuredLeadingWidth = leadingRange.getBoundingClientRect().width;
+            const configuredOffset = Number.parseFloat(
+                host.style.getPropertyValue('--sdl-notepad-leading-space-width')
+            );
+            const style = getComputedStyle(host);
+            const result = JSON.stringify([
+                configuredOffset,
+                measuredLeadingWidth,
+                style.backgroundImage,
+                style.boxShadow,
+                paragraph.getAttribute('data-sdl-notepad-active-container'),
+                paragraph.getAttribute('data-sdl-notepad-multiline-container')
+            ]);
+            paragraph.remove();
+            return result;
+        })();
+        """
+    )
+    leading_underline_values = json.loads(leading_underline_result)
+    assert leading_underline_values[0] is not None, leading_underline_values
+    assert leading_underline_values[0] > 0
+    assert abs(leading_underline_values[0] - leading_underline_values[1]) < 1
+    assert "70, 150, 220" in leading_underline_values[2]
+    assert "70, 150, 220" not in leading_underline_values[3]
     assert js_value(
         """
         (() => {
             const paragraph = document.querySelector('p');
             const host = paragraph.querySelector('[data-sdl-notepad-text]');
+            host.focus();
+            host.dispatchEvent(new FocusEvent('focusin', {bubbles: true}));
             paragraph.style.width = '90px';
             window.dispatchEvent(new Event('resize'));
             const wrappedStyle = getComputedStyle(paragraph);
@@ -3887,7 +3962,6 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
             paragraph.appendChild(host);
             document.body.appendChild(paragraph);
             host.focus();
-            const beforeHeight = paragraph.getBoundingClientRect().height;
             const selection = window.getSelection();
             const range = document.createRange();
             range.selectNodeContents(host);
@@ -3898,34 +3972,47 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
                 key: 'Enter', bubbles: true, cancelable: true
             });
             host.dispatchEvent(enter);
-            const afterHeight = paragraph.getBoundingClientRect().height;
-            const paragraphRect = paragraph.getBoundingClientRect();
-            const hit = document.elementFromPoint(
-                paragraphRect.left + 2,
-                paragraphRect.bottom - (beforeHeight / 2)
-            );
-            const hitOwner = hit && hit.closest
-                ? hit.closest('[data-sdl-notepad-text]') : null;
-            const blankLineMouseDown = new MouseEvent('mousedown', {
-                clientX: paragraphRect.left + 2,
-                clientY: paragraphRect.bottom - (beforeHeight / 2),
-                bubbles: true,
-                cancelable: true
+            const companion = new InputEvent('beforeinput', {
+                inputType: 'insertParagraph', bubbles: true, cancelable: true
             });
-            hit.dispatchEvent(blankLineMouseDown);
+            host.dispatchEvent(companion);
+            const emptyParagraph = paragraph.nextElementSibling;
+            const emptyHost = emptyParagraph && emptyParagraph.querySelector(
+                '[data-sdl-notepad-text]'
+            );
+            const createdSeparateLine = !!emptyHost
+                && emptyParagraph.tagName === 'P'
+                && emptyParagraph.hasAttribute('data-sdl-notepad-user-block')
+                && emptyParagraph.textContent === ''
+                && document.activeElement === emptyHost
+                && emptyParagraph.getBoundingClientRect().height > 0;
+            const undo = new KeyboardEvent('keydown', {
+                key: 'z', ctrlKey: true, bubbles: true, cancelable: true
+            });
+            emptyHost.dispatchEvent(undo);
+            const undone = !emptyParagraph.isConnected
+                && document.activeElement === host;
+            const redo = new KeyboardEvent('keydown', {
+                key: 'y', ctrlKey: true, bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(redo);
+            const redone = emptyParagraph.isConnected
+                && document.activeElement === emptyHost;
             const backspace = new KeyboardEvent('keydown', {
                 key: 'Backspace', bubbles: true, cancelable: true
             });
-            host.dispatchEvent(backspace);
+            emptyHost.dispatchEvent(backspace);
             const result = enter.defaultPrevented
-                && host.querySelectorAll(
-                    'br[data-sdl-notepad-user-tag="br"]'
-                ).length === 0
-                && afterHeight > beforeHeight + 2
-                && hitOwner === host
-                && blankLineMouseDown.defaultPrevented
+                && companion.defaultPrevented
+                && createdSeparateLine
+                && paragraph.querySelector('br') === null
+                && !paragraph.hasAttribute('data-sdl-notepad-user-tag-container')
+                && undo.defaultPrevented
+                && undone
+                && redo.defaultPrevented
+                && redone
                 && backspace.defaultPrevented
-                && !paragraph.hasAttribute('data-sdl-notepad-user-tag-container');
+                && !emptyParagraph.isConnected;
             paragraph.remove();
             return result;
         })();
@@ -4309,8 +4396,8 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
             first.focus();
             const selection = window.getSelection();
             const range = document.createRange();
-            range.selectNodeContents(first);
-            range.collapse(false);
+            range.setStart(first.firstChild, Math.min(4, first.firstChild.length - 1));
+            range.collapse(true);
             selection.removeAllRanges();
             selection.addRange(range);
             const event = new KeyboardEvent('keydown', {
@@ -4941,6 +5028,208 @@ def test_notepad_erasing_translated_row_keeps_visible_red_empty_row(tmp_path, qt
         })();
         """
     ) is True
+
+
+def test_notepad_enter_at_paragraph_end_saves_a_separate_empty_paragraph(
+    tmp_path, qtbot
+):
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+
+    output_name = "response_end-enter.html"
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "end-enter.xhtml"},
+        "<html><body><p>Original source paragraph.</p></body></html>",
+        "<html><body><p>Translated paragraph.</p></body></html>",
+        raise_errors=True,
+    )
+    tree = etree.parse(sidecar)
+    file_element = tree.xpath("//*[local-name()='file']")[0]
+    file_element.set("{urn:glossarion:sdlxliff}manual-editing", "true")
+    tree.write(sidecar, encoding="utf-8", xml_declaration=True)
+    dialog = SDLXLIFFReviewDialog(
+        str(tmp_path),
+        sidecar,
+        config={SDLXLIFFReviewDialog.TWO_COLUMN_LAYOUT_CONFIG_KEY: False},
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(
+        lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
+        timeout=5000,
+    )
+    browser = dialog.rows_widget.findChild(QWebEngineView, "SdlReviewNotepadBrowser")
+    assert browser is not None
+
+    def js_value(script):
+        values = []
+        browser.page().runJavaScript(script, values.append)
+        qtbot.waitUntil(lambda: bool(values), timeout=5000)
+        return values[0]
+
+    qtbot.waitUntil(
+        lambda: js_value("!!document.querySelector('p [data-sdl-notepad-text]')")
+        is True,
+        timeout=5000,
+    )
+    assert js_value(
+        """
+        (() => {
+            const paragraph = document.querySelector('p');
+            const host = paragraph.querySelector('[data-sdl-notepad-text]');
+            host.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(host);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const enter = new KeyboardEvent('keydown', {
+                key: 'Enter', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(enter);
+            const companion = new InputEvent('beforeinput', {
+                inputType: 'insertParagraph', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(companion);
+            const emptyParagraph = paragraph.nextElementSibling;
+            return enter.defaultPrevented
+                && companion.defaultPrevented
+                && paragraph.querySelector('br') === null
+                && !paragraph.hasAttribute('data-sdl-notepad-user-tag-container')
+                && emptyParagraph?.tagName === 'P'
+                && emptyParagraph.textContent === ''
+                && !!emptyParagraph.querySelector('[data-sdl-notepad-text]');
+        })();
+        """
+    ) is True
+
+    qtbot.waitUntil(
+        lambda: len(dialog.pieces[0].get("rows") or []) == 2
+        and dialog.pieces[0]["rows"][1].get("translator_note") is True,
+        timeout=5000,
+    )
+    added_row = dialog.pieces[0]["rows"][1]
+    assert added_row["source_index"] is None
+    assert added_row["target_index"] == 1
+    assert added_row["source_tag_label"] == "TN(1)"
+    assert added_row["target_tag_label"] == "TN(1)"
+    assert added_row["target_dom_tag"] == "p"
+    assert dialog.pieces[0]["rows"][0]["target_index"] == 0
+
+    output_path = Path(dialog._output_path_for_piece(dialog.pieces[0]))
+
+    def saved_paragraphs():
+        if not output_path.is_file():
+            return []
+        return BeautifulSoup(
+            output_path.read_text(encoding="utf-8"), "html.parser"
+        ).find_all("p")
+
+    qtbot.waitUntil(lambda: len(saved_paragraphs()) == 2, timeout=5000)
+    paragraphs = saved_paragraphs()
+    assert paragraphs[0].get_text(strip=True) == "Translated paragraph."
+    assert paragraphs[0].find("br") is None
+    assert paragraphs[1].get_text(strip=True) == ""
+    assert paragraphs[1].find("br") is None
+    assert paragraphs[1].get("data-sdl-notepad-user-block") is None
+    stored_file = etree.parse(sidecar).xpath("//*[local-name()='file']")[0]
+    assert json.loads(
+        stored_file.get("{urn:glossarion:sdlxliff}user-added-target-indexes")
+    ) == [1]
+
+    assert js_value(
+        """
+        (() => {
+            const paragraphs = document.querySelectorAll('p');
+            return paragraphs.length === 2
+                && !paragraphs[0].hasAttribute(
+                    'data-sdl-notepad-user-tag-container'
+                )
+                && paragraphs[1].hasAttribute('data-sdl-notepad-user-block')
+                && paragraphs[1].hasAttribute(
+                    'data-sdl-notepad-user-tag-container'
+                );
+        })();
+        """
+    ) is True
+
+    assert js_value(
+        """
+        (() => {
+            const paragraph = document.querySelectorAll('p')[1];
+            const host = paragraph.querySelector('[data-sdl-notepad-text]');
+            host.textContent = 'User-added note.';
+            host.dispatchEvent(new InputEvent('input', {bubbles: true}));
+            return !host.hasAttribute('data-sdl-notepad-placeholder')
+                && paragraph.hasAttribute('data-sdl-notepad-user-block')
+                && paragraph.hasAttribute('data-sdl-notepad-user-tag-container');
+        })();
+        """
+    ) is True
+    qtbot.waitUntil(
+        lambda: len(dialog.pieces[0].get("rows") or []) == 2
+        and dialog.pieces[0]["rows"][1].get("target") == "User-added note."
+        and dialog.pieces[0]["rows"][1].get("target_tag_label") == "TN(1)",
+        timeout=5000,
+    )
+    qtbot.waitUntil(
+        lambda: len(saved_paragraphs()) == 2
+        and saved_paragraphs()[1].get_text(strip=True) == "User-added note.",
+        timeout=5000,
+    )
+    assert js_value(
+        """
+        (() => {
+            const host = document.querySelectorAll('p')[1].querySelector(
+                '[data-sdl-notepad-text]'
+            );
+            host.textContent = '';
+            host.dispatchEvent(new InputEvent('input', {bubbles: true}));
+            return host.hasAttribute('data-sdl-notepad-placeholder');
+        })();
+        """
+    ) is True
+    qtbot.waitUntil(
+        lambda: len(dialog.pieces[0].get("rows") or []) == 2
+        and dialog.pieces[0]["rows"][1].get("target") == "",
+        timeout=5000,
+    )
+
+    qtbot.waitUntil(
+        lambda: js_value("document.querySelectorAll('p').length") == 2,
+        timeout=5000,
+    )
+    assert js_value(
+        """
+        (() => {
+            const paragraph = document.querySelectorAll('p')[1];
+            const host = paragraph.querySelector('[data-sdl-notepad-text]');
+            host.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(host);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const backspace = new KeyboardEvent('keydown', {
+                key: 'Backspace', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(backspace);
+            return backspace.defaultPrevented && !paragraph.isConnected;
+        })();
+        """
+    ) is True
+    qtbot.waitUntil(lambda: len(saved_paragraphs()) == 1, timeout=5000)
+    qtbot.waitUntil(
+        lambda: len(dialog.pieces[0].get("rows") or []) == 1,
+        timeout=5000,
+    )
+    stored_file = etree.parse(sidecar).xpath("//*[local-name()='file']")[0]
+    assert stored_file.get(
+        "{urn:glossarion:sdlxliff}user-added-target-indexes"
+    ) is None
 
 
 def test_notepad_loaded_target_only_trailing_break_deletes_from_blank_line(

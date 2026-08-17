@@ -14,6 +14,9 @@ import time
 GLOSSARION_SDLXLIFF_NS = "urn:glossarion:sdlxliff"
 MANUAL_UNTRANSLATED_ATTRIBUTE = f"{{{GLOSSARION_SDLXLIFF_NS}}}manual-untranslated"
 MANUAL_EDITING_ATTRIBUTE = f"{{{GLOSSARION_SDLXLIFF_NS}}}manual-editing"
+USER_ADDED_TARGET_INDEXES_ATTRIBUTE = (
+    f"{{{GLOSSARION_SDLXLIFF_NS}}}user-added-target-indexes"
+)
 _SIDECAR_FRESHNESS_MANIFEST_TYPE = "html_sdlxliff_sidecar_freshness"
 _SIDECAR_FRESHNESS_MANIFEST_LOCK = threading.RLock()
 _SIDECAR_MUTATION_LOCKS_GUARD = threading.Lock()

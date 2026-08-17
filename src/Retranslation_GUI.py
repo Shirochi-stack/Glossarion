@@ -37,6 +37,7 @@ from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar
 from sdlxliff_sidecar_writer import (
     _SIDECAR_FRESHNESS_MANIFEST_LOCK,
     _SIDECAR_FRESHNESS_MANIFEST_TYPE,
+    USER_ADDED_TARGET_INDEXES_ATTRIBUTE,
     _blank_manual_untranslated_sdlxliff_target,
     _clear_manual_untranslated_sdlxliff,
     _is_manual_editing_sdlxliff,
@@ -5819,17 +5820,33 @@ class SDLXLIFFReviewDialog(QDialog):
                 parts.append(child.tail)
         return "".join(parts)
 
-    def _read_sdlxliff_html_pair(self, path):
+    def _read_sdlxliff_html_pair(self, path, *, include_user_added_indexes=False):
         source_parts = []
         target_parts = []
         root = ET.parse(path).getroot()
+        user_added_indexes = set()
         for element in root.iter():
             name = self._local_name(element.tag)
             if name == "source":
                 source_parts.append(self._inner_xml_or_text(element))
             elif name == "target":
                 target_parts.append(self._inner_xml_or_text(element))
-        return "\n".join(source_parts), "\n".join(target_parts)
+            elif name == "file" and include_user_added_indexes:
+                try:
+                    stored_indexes = json.loads(
+                        element.attrib.get(USER_ADDED_TARGET_INDEXES_ATTRIBUTE, "[]")
+                    )
+                    user_added_indexes.update(
+                        int(value)
+                        for value in stored_indexes
+                        if int(value) >= 0
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+        html_pair = ("\n".join(source_parts), "\n".join(target_parts))
+        if include_user_added_indexes:
+            return (*html_pair, user_added_indexes)
+        return html_pair
 
     def _legend_status_label(self, text, status):
         color = {
@@ -6631,6 +6648,11 @@ class SDLXLIFFReviewDialog(QDialog):
         while i < len(source_units) or j < len(target_units):
             src = source_units[i] if i < len(source_units) else None
             tgt = target_units[j] if j < len(target_units) else None
+            if tgt is not None and tgt.get("user_added"):
+                rows.append((None, tgt))
+                last_tgt = tgt
+                j += 1
+                continue
             if src is None:
                 rows.append((None, tgt))
                 last_tgt = tgt
@@ -6735,6 +6757,43 @@ class SDLXLIFFReviewDialog(QDialog):
             j += 1
         return rows
 
+    def _infer_user_added_empty_target_indexes(
+        self,
+        source_all_units,
+        target_all_units,
+    ):
+        """Recover legacy empty Notepad paragraphs created before index metadata."""
+        source_all_units = list(source_all_units or [])
+        target_all_units = list(target_all_units or [])
+        surplus = len(target_all_units) - len(source_all_units)
+        if surplus <= 0:
+            return set()
+        inferred = set()
+        source_index = 0
+        target_index = 0
+        while target_index < len(target_all_units) and surplus > 0:
+            target_unit = target_all_units[target_index]
+            source_unit = (
+                source_all_units[source_index]
+                if source_index < len(source_all_units)
+                else None
+            )
+            target_empty = not self._normalize_review_text(
+                target_unit.get("text", "")
+            )
+            source_empty = bool(
+                source_unit is not None
+                and not self._normalize_review_text(source_unit.get("text", ""))
+            )
+            if target_empty and (source_unit is None or not source_empty):
+                inferred.add(target_unit.get("index"))
+                target_index += 1
+                surplus -= 1
+                continue
+            source_index += 1
+            target_index += 1
+        return {value for value in inferred if isinstance(value, int) and value >= 0}
+
     def _align_review_units_by_dom_position(
         self,
         source_all_units,
@@ -6752,6 +6811,12 @@ class SDLXLIFFReviewDialog(QDialog):
         """
         source_all_units = list(source_all_units or [])
         target_all_units = list(target_all_units or [])
+        if any(unit.get("user_added") for unit in target_review_units or []):
+            # A recorded user insertion is a real target-only slot even when
+            # the total source/target counts happen to match after some other
+            # deletion. Positional zip alignment must never consume a source
+            # row with that inserted paragraph.
+            return None
         if not source_all_units or len(source_all_units) != len(target_all_units):
             return None
         if not all(
@@ -7234,7 +7299,12 @@ class SDLXLIFFReviewDialog(QDialog):
         metadata.setdefault("display_position", index + 1)
         metadata.setdefault("label", self._review_label_from_metadata(metadata))
         try:
-            source_html, target_html = self._read_sdlxliff_html_pair(path)
+            source_html, target_html, user_added_target_indexes = (
+                self._read_sdlxliff_html_pair(
+                    path,
+                    include_user_added_indexes=True,
+                )
+            )
             manual_untranslated = _is_manual_untranslated_sdlxliff(path)
             manual_editing = (
                 manual_untranslated
@@ -7242,6 +7312,16 @@ class SDLXLIFFReviewDialog(QDialog):
             )
             source_all_units = self._extract_text_units(source_html, include_empty=True)
             target_all_units = self._extract_text_units(target_html, include_empty=True)
+            if manual_editing and not user_added_target_indexes:
+                user_added_target_indexes.update(
+                    self._infer_user_added_empty_target_indexes(
+                        source_all_units,
+                        target_all_units,
+                    )
+                )
+            for target_unit in target_all_units:
+                if target_unit.get("index") in user_added_target_indexes:
+                    target_unit["user_added"] = True
             source_units = self._non_empty_text_units(source_all_units)
             target_units = (
                 target_all_units
@@ -7284,6 +7364,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     unit for unit in target_units
                     if str(unit.get("text") or "").strip()
                     or unit.get("index") in source_review_indexes
+                    or unit.get("user_added")
                 ]
             else:
                 target_review_units = self._non_empty_text_units(target_units)
@@ -7303,6 +7384,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     unit for unit in target_all_units
                     if str(unit.get("text") or "").strip()
                     or unit.get("index") in source_review_indexes
+                    or unit.get("user_added")
                 ]
 
             target_annotation_units = positional_target_review_units
@@ -7349,24 +7431,27 @@ class SDLXLIFFReviewDialog(QDialog):
                     # Preserve the original manual-sidecar behavior when the
                     # two DOMs genuinely differ, while retaining non-empty
                     # target-only units so user additions remain visible.
-                    target_units_by_index = {
-                        unit.get("index"): unit
-                        for unit in target_review_units
-                        if isinstance(unit, dict)
-                    }
-                    source_indexes = {
-                        unit.get("index") for unit in source_review_units
-                    }
-                    aligned_target_units = [
-                        target_units_by_index[source_unit.get("index")]
-                        for source_unit in source_review_units
-                        if source_unit.get("index") in target_units_by_index
-                    ]
-                    aligned_target_units.extend(
-                        unit for unit in target_review_units
-                        if unit.get("index") not in source_indexes
-                        and str(unit.get("text") or "").strip()
-                    )
+                    if user_added_target_indexes:
+                        aligned_target_units = target_review_units
+                    else:
+                        target_units_by_index = {
+                            unit.get("index"): unit
+                            for unit in target_review_units
+                            if isinstance(unit, dict)
+                        }
+                        source_indexes = {
+                            unit.get("index") for unit in source_review_units
+                        }
+                        aligned_target_units = [
+                            target_units_by_index[source_unit.get("index")]
+                            for source_unit in source_review_units
+                            if source_unit.get("index") in target_units_by_index
+                        ]
+                        aligned_target_units.extend(
+                            unit for unit in target_review_units
+                            if unit.get("index") not in source_indexes
+                            and str(unit.get("text") or "").strip()
+                        )
                 else:
                     aligned_target_units = target_review_units
                 aligned_units = self._align_review_units(
@@ -7448,6 +7533,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 "sort_key": metadata.get("sort_key"),
                 "source_html": source_html,
                 "target_html": target_html,
+                "user_added_target_indexes": sorted(user_added_target_indexes),
                 "source_count": source_count,
                 "target_count": target_count,
                 "count_ratio": count_ratio,
@@ -10940,10 +11026,22 @@ class SDLXLIFFReviewDialog(QDialog):
         self.save_status_label.setText("Unsaved")
         self._edit_save_timer.start(500)
 
-    def _schedule_notepad_document_edit(self, piece_index, text):
+    def _schedule_notepad_document_edit(
+        self,
+        piece_index,
+        text,
+        user_added_target_indexes=None,
+    ):
         if piece_index < 0 or piece_index >= len(self.pieces):
             return
-        self._pending_notepad_edits[piece_index] = str(text or "")
+        self._pending_notepad_edits[piece_index] = (
+            str(text or ""),
+            tuple(sorted({
+                int(value)
+                for value in (user_added_target_indexes or [])
+                if int(value) >= 0
+            })),
+        )
         self.save_status_label.setText("Unsaved HTML")
         self._edit_save_timer.start(500)
 
@@ -10959,14 +11057,28 @@ class SDLXLIFFReviewDialog(QDialog):
             for (piece_index, row_index), text in pending.items():
                 if self._apply_target_edit(piece_index, row_index, text):
                     saved += 1
-            for piece_index, html_text in pending_notepad.items():
-                if self._apply_notepad_document_edit(piece_index, html_text):
+            for piece_index, notepad_edit in pending_notepad.items():
+                if isinstance(notepad_edit, tuple):
+                    html_text, user_added_target_indexes = notepad_edit
+                else:
+                    html_text, user_added_target_indexes = notepad_edit, None
+                if self._apply_notepad_document_edit(
+                    piece_index,
+                    html_text,
+                    user_added_target_indexes=user_added_target_indexes,
+                ):
                     saved += 1
             self.save_status_label.setText("Saved" if saved else "")
         except Exception as exc:
             self.save_status_label.setText(f"Save failed: {exc}")
 
-    def _apply_notepad_document_edit(self, piece_index, html_text):
+    def _apply_notepad_document_edit(
+        self,
+        piece_index,
+        html_text,
+        *,
+        user_added_target_indexes=None,
+    ):
         """Save one browser-edited HTML document and rebuild its analysis."""
         if piece_index < 0 or piece_index >= len(self.pieces):
             return False
@@ -10985,7 +11097,11 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             tag_order = []
 
-        saved_html = self._write_piece_target_html(piece, html_text)
+        saved_html = self._write_piece_target_html(
+            piece,
+            html_text,
+            user_added_target_indexes=user_added_target_indexes,
+        )
         piece["target_html"] = saved_html
         metadata = {
             "output_name": piece.get("output_name"),
@@ -11177,7 +11293,13 @@ class SDLXLIFFReviewDialog(QDialog):
         node.append(str(text or ""))
         return str(soup)
 
-    def _write_piece_target_html(self, piece, target_html):
+    def _write_piece_target_html(
+        self,
+        piece,
+        target_html,
+        *,
+        user_added_target_indexes=None,
+    ):
         sidecar_path = piece.get("path")
         if not sidecar_path:
             return target_html
@@ -11198,6 +11320,23 @@ class SDLXLIFFReviewDialog(QDialog):
         for child in list(target_element):
             target_element.remove(child)
         target_element.text = target_html
+        if user_added_target_indexes is not None:
+            stored_indexes = sorted({
+                int(value)
+                for value in user_added_target_indexes
+                if int(value) >= 0
+            })
+            for element in root.iter():
+                if self._local_name(element.tag) != "file":
+                    continue
+                if stored_indexes:
+                    element.set(
+                        USER_ADDED_TARGET_INDEXES_ATTRIBUTE,
+                        json.dumps(stored_indexes, separators=(",", ":")),
+                    )
+                else:
+                    element.attrib.pop(USER_ADDED_TARGET_INDEXES_ATTRIBUTE, None)
+                break
         was_manual_untranslated = _is_manual_untranslated_sdlxliff(root)
         is_manual_editing = (
             was_manual_untranslated
@@ -11207,6 +11346,7 @@ class SDLXLIFFReviewDialog(QDialog):
         try:
             ET.register_namespace("", "urn:oasis:names:tc:xliff:document:1.2")
             ET.register_namespace("sdl", "http://sdl.com/FileTypes/SdlXliff/1.0")
+            ET.register_namespace("glossarion", "urn:glossarion:sdlxliff")
         except Exception:
             pass
         tree.write(sidecar_path, encoding="utf-8", xml_declaration=True)
@@ -11840,17 +11980,36 @@ class SDLXLIFFReviewDialog(QDialog):
                 for row_index, row_data in enumerate(piece.get("rows") or [])
                 if isinstance(row_data.get("target_index"), int)
             }
+            user_added_indexes = set(piece.get("user_added_target_indexes") or [])
             for node_index, target_node in enumerate(target_nodes):
-                if node_index >= len(source_nodes):
-                    break
-                source_node = source_nodes[node_index]
-                source_text = self._normalize_review_text(
-                    source_node.get_text(" ", strip=True)
+                row_match = rows_by_target_index.get(node_index)
+                row_data = row_match[1] if row_match is not None else None
+                source_index = (
+                    row_data.get("source_index")
+                    if row_data is not None
+                    else node_index
+                )
+                source_node = (
+                    source_nodes[source_index]
+                    if isinstance(source_index, int)
+                    and 0 <= source_index < len(source_nodes)
+                    else None
+                )
+                source_text = (
+                    str(row_data.get("source") or "")
+                    if row_data is not None
+                    else self._normalize_review_text(
+                        source_node.get_text(" ", strip=True)
+                    ) if source_node is not None else ""
                 )
                 target_text = self._normalize_review_text(
                     target_node.get_text(" ", strip=True)
                 )
-                source_break_count = len(source_node.find_all("br"))
+                source_break_count = (
+                    len(source_node.find_all("br"))
+                    if source_node is not None
+                    else 0
+                )
                 target_breaks = list(target_node.find_all("br"))
                 extra_break_count = max(
                     0, len(target_breaks) - source_break_count
@@ -11862,7 +12021,11 @@ class SDLXLIFFReviewDialog(QDialog):
                 for line_break in target_breaks[:extra_break_count]:
                     line_break["data-sdl-notepad-user-tag"] = "br"
                 target_node["data-sdl-notepad-source"] = source_text
-                row_match = rows_by_target_index.get(node_index)
+                if (
+                    node_index in user_added_indexes
+                    or bool(row_data and row_data.get("translator_note"))
+                ):
+                    target_node["data-sdl-notepad-user-block"] = "1"
                 if row_match is not None:
                     row_index, row_data = row_match
                     target_node["data-sdl-notepad-row-index"] = str(row_index)
@@ -11872,7 +12035,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     reason = str(row_data.get("reason") or "")
                     if reason:
                         target_node["data-sdl-notepad-status-reason"] = reason
-                if target_text or not fill_untranslated:
+                if target_text or not fill_untranslated or source_node is None:
                     continue
                 # Replace the blank target node with the complete source node,
                 # not only get_text(), so inline/void markup remains visible.
@@ -12017,6 +12180,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 const BREAK_ATTR = 'data-sdl-notepad-break';
                 const USER_TAG_ATTR = 'data-sdl-notepad-user-tag';
                 const USER_TAG_CONTAINER_ATTR = 'data-sdl-notepad-user-tag-container';
+                const USER_BLOCK_ATTR = 'data-sdl-notepad-user-block';
                 const ORIGINAL_TEXT_CONTAINER_ATTR = 'data-sdl-notepad-original-had-text';
                 const USER_EMPTY_CONTAINER_ATTR = 'data-sdl-notepad-user-empty-container';
                 const SOURCE_ATTR = 'data-sdl-notepad-source';
@@ -12112,6 +12276,23 @@ class SDLXLIFFReviewDialog(QDialog):
                         atEnd: after.toString().length === 0
                     };
                 };
+                const selectionAtContainerEnd = (host, container) => {
+                    const selection = window.getSelection();
+                    if (!selection || !selection.rangeCount || !selection.isCollapsed
+                            || !selectionInside(host) || !container) return false;
+                    try {
+                        const selected = selection.getRangeAt(0);
+                        const tail = selected.cloneRange();
+                        tail.setEnd(container, container.childNodes.length);
+                        const remaining = tail.cloneContents();
+                        if (String(remaining.textContent || '').trim()) return false;
+                        return !remaining.querySelector(
+                            'br,img,image,object,video,audio,svg,math,hr,iframe'
+                        );
+                    } catch (_error) {
+                        return false;
+                    }
+                };
                 const markDirty = () => { window.__sdlNotepadDirty = true; };
                 const userTagContainer = node => {
                     const element = node && node.nodeType === Node.ELEMENT_NODE
@@ -12191,8 +12372,51 @@ class SDLXLIFFReviewDialog(QDialog):
                         return 0;
                     }
                 };
+                const refreshUnderlineStart = container => {
+                    if (!container || !container.isConnected) return;
+                    const hosts = Array.from(container.querySelectorAll(
+                        '[' + EDIT_ATTR + ']'
+                    ));
+                    for (const host of hosts) {
+                        host.style.removeProperty('--sdl-notepad-leading-space-width');
+                    }
+                    const firstHost = hosts.find(host => host.textContent.length) || null;
+                    const leading = firstHost
+                        ? String(firstHost.textContent || '').match(/^\s+/u)
+                        : null;
+                    if (!firstHost || !leading || !leading[0].length) return;
+                    try {
+                        let remaining = leading[0].length;
+                        let endNode = null;
+                        let endOffset = 0;
+                        const walker = document.createTreeWalker(
+                            firstHost, NodeFilter.SHOW_TEXT
+                        );
+                        while (walker.nextNode()) {
+                            const node = walker.currentNode;
+                            const length = String(node.nodeValue || '').length;
+                            if (remaining <= length) {
+                                endNode = node;
+                                endOffset = remaining;
+                                break;
+                            }
+                            remaining -= length;
+                        }
+                        if (!endNode) return;
+                        const range = document.createRange();
+                        range.setStart(firstHost, 0);
+                        range.setEnd(endNode, endOffset);
+                        const width = Math.max(0, range.getBoundingClientRect().width);
+                        if (width > 0) {
+                            firstHost.style.setProperty(
+                                '--sdl-notepad-leading-space-width', width + 'px'
+                            );
+                        }
+                    } catch (_error) {}
+                };
                 const refreshNavigationContainerStyle = container => {
                     if (!container || !container.isConnected) return false;
+                    refreshUnderlineStart(container);
                     const hasUserLineBreak = !!container.querySelector(
                         'br[' + USER_TAG_ATTR + ']'
                     );
@@ -12457,7 +12681,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 };
                 const refreshUserTagIndicator = container => {
                     if (!container || !container.isConnected) return;
-                    if (container.querySelector('[' + USER_TAG_ATTR + ']')) {
+                    if (container.hasAttribute(USER_BLOCK_ATTR)
+                            || container.querySelector('[' + USER_TAG_ATTR + ']')) {
                         container.setAttribute(USER_TAG_CONTAINER_ATTR, '1');
                     } else {
                         container.removeAttribute(USER_TAG_CONTAINER_ATTR);
@@ -12539,6 +12764,20 @@ class SDLXLIFFReviewDialog(QDialog):
                     return true;
                 };
                 const focusBreakAction = (action, after=true) => {
+                    if (action.block) {
+                        const targetHost = after ? action.host : action.focusBefore;
+                        if (!targetHost || !targetHost.isConnected) return;
+                        try { targetHost.focus({preventScroll: true}); }
+                        catch (_error) { targetHost.focus(); }
+                        const selection = window.getSelection();
+                        const range = document.createRange();
+                        range.selectNodeContents(targetHost);
+                        range.collapse(false);
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                        setActiveNavigationContainer(targetHost);
+                        return;
+                    }
                     const host = action.host && action.host.isConnected
                         ? action.host : editableHost(action.node);
                     if (!host) return;
@@ -12607,6 +12846,46 @@ class SDLXLIFFReviewDialog(QDialog):
                     host.removeAttribute(PLACEHOLDER_ATTR);
                     markDirty();
                     return true;
+                };
+                const insertEmptyParagraphAfter = (host, paragraph) => {
+                    if (!host || !paragraph || paragraph.tagName.toUpperCase() !== 'P'
+                            || !paragraph.parentNode) return false;
+                    const block = paragraph.cloneNode(false);
+                    for (const attribute of Array.from(block.attributes)) {
+                        const name = String(attribute.name || '').toLowerCase();
+                        if (name === 'id' || name.startsWith('data-sdl-notepad-')) {
+                            block.removeAttribute(attribute.name);
+                        }
+                    }
+                    block.setAttribute(USER_BLOCK_ATTR, '1');
+                    const newHost = makeHost(null, true, '');
+                    block.appendChild(newHost);
+                    const parent = paragraph.parentNode;
+                    const nextSibling = paragraph.nextSibling;
+                    parent.insertBefore(block, nextSibling);
+                    refreshUserTagIndicator(block);
+                    const action = {
+                        kind: 'insert',
+                        block: true,
+                        node: block,
+                        parent,
+                        nextSibling,
+                        host: newHost,
+                        focusBefore: host,
+                        indicatorContainer: null
+                    };
+                    recordBreakEdit(action);
+                    focusBreakAction(action, true);
+                    markDirty();
+                    return true;
+                };
+                const insertEnter = host => {
+                    const container = navigationContainer(host);
+                    if (container && container.tagName.toUpperCase() === 'P'
+                            && selectionAtContainerEnd(host, container)) {
+                        return insertEmptyParagraphAfter(host, container);
+                    }
+                    return insertBreak(host);
                 };
                 const adjacentBreakAtCaret = (host, backwards) => {
                     const selection = window.getSelection();
@@ -12691,6 +12970,37 @@ class SDLXLIFFReviewDialog(QDialog):
                     refreshUserTagIndicator(action.indicatorContainer);
                     refreshUserEmptyIndicator(action.indicatorContainer);
                     refreshNavigationContainerStyle(action.indicatorContainer);
+                    focusBreakAction(action, false);
+                    markDirty();
+                    return true;
+                };
+                const deleteEmptyUserParagraph = host => {
+                    const block = navigationContainer(host);
+                    if (!block || block.tagName.toUpperCase() !== 'P'
+                            || block.textContent.trim()
+                            || block.querySelector('br,img,image,object,video,audio,svg,math,hr')
+                            || (!block.hasAttribute(USER_BLOCK_ATTR)
+                                && (block.hasAttribute(SOURCE_ATTR)
+                                    || block.hasAttribute(ROW_ATTR)))) return false;
+                    const hosts = Array.from(
+                        document.body.querySelectorAll('[' + EDIT_ATTR + ']')
+                    );
+                    const firstBlockHost = block.querySelector('[' + EDIT_ATTR + ']');
+                    const hostIndex = hosts.indexOf(firstBlockHost || host);
+                    const previousHost = hostIndex > 0 ? hosts[hostIndex - 1] : null;
+                    if (!previousHost) return false;
+                    const action = {
+                        kind: 'delete',
+                        block: true,
+                        node: block,
+                        parent: block.parentNode,
+                        nextSibling: block.nextSibling,
+                        host: firstBlockHost || host,
+                        focusBefore: previousHost,
+                        indicatorContainer: null
+                    };
+                    recordBreakEdit(action);
+                    block.remove();
                     focusBreakAction(action, false);
                     markDirty();
                     return true;
@@ -13015,7 +13325,13 @@ class SDLXLIFFReviewDialog(QDialog):
                     'caption:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
                     'figcaption:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
                     'blockquote:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '] {' +
-                    ' box-shadow: inset 0 -1px rgba(70,150,220,.72) !important; }' +
+                    ' box-shadow: none !important;' +
+                    ' background-image: linear-gradient(rgba(70,150,220,.72),' +
+                    ' rgba(70,150,220,.72)) !important;' +
+                    ' background-position: right bottom !important;' +
+                    ' background-repeat: no-repeat !important;' +
+                    ' background-size: calc(100% - var(--sdl-notepad-leading-space-width, 0px))' +
+                    ' 1px !important; }' +
                     '[' + ACTIVE_CONTAINER_ATTR + '][' + MULTILINE_CONTAINER_ATTR + '],' +
                     'p[' + MULTILINE_CONTAINER_ATTR + ']:focus-within,' +
                     'h1[' + MULTILINE_CONTAINER_ATTR + ']:focus-within,' +
@@ -13035,7 +13351,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     '[' + EDIT_ATTR + ']:has(br[' + USER_TAG_ATTR + ']:last-child)::after {' +
                     ' content: "\\00a0"; opacity: 0; }' +
                     '[' + EDIT_ATTR + '][' + PLACEHOLDER_ATTR + ']:focus,' +
-                    '[' + EDIT_ATTR + '][' + BREAK_ATTR + ']:focus { box-shadow: none; }' +
+                    '[' + EDIT_ATTR + '][' + BREAK_ATTR + ']:focus {' +
+                    ' box-shadow: none; background-image: none !important; }' +
                     '[' + USER_TAG_CONTAINER_ATTR + '] {' +
                     ' box-shadow: inset 3px 0 #d7a800 !important; }' +
                     '[' + USER_EMPTY_CONTAINER_ATTR + '] {' +
@@ -13104,7 +13421,7 @@ class SDLXLIFFReviewDialog(QDialog):
                             if (enterKeyInsertionHost === host) {
                                 enterKeyInsertionHost = null;
                             } else {
-                                insertBreak(host);
+                                insertEnter(host);
                             }
                         }
                         return;
@@ -13112,6 +13429,12 @@ class SDLXLIFFReviewDialog(QDialog):
                     const host = editableHost(event.target);
                     if (!host || !selectionInside(host)) {
                         event.preventDefault();
+                        return;
+                    }
+                    if (inputType.startsWith('delete')
+                            && deleteEmptyUserParagraph(host)) {
+                        event.preventDefault();
+                        event.stopImmediatePropagation();
                         return;
                     }
                     if (inputType.startsWith('delete')
@@ -13219,7 +13542,7 @@ class SDLXLIFFReviewDialog(QDialog):
                                     enterKeyInsertionHost = null;
                                 }
                             }, 0);
-                            insertBreak(current);
+                            insertEnter(current);
                         }
                         return;
                     }
@@ -13236,6 +13559,11 @@ class SDLXLIFFReviewDialog(QDialog):
                             event.preventDefault();
                             event.stopImmediatePropagation();
                         }
+                        return;
+                    }
+                    if (deleteEmptyUserParagraph(host)) {
+                        event.preventDefault();
+                        event.stopImmediatePropagation();
                         return;
                     }
                     if (deleteAdjacentEditableBreak(host, event.key === 'Backspace')) {
@@ -13284,6 +13612,11 @@ class SDLXLIFFReviewDialog(QDialog):
                     // blocks, spans, links, and other tags are unwrapped before
                     // the document enters the save pipeline.
                     sanitizeHost(host);
+                    if (host.textContent || host.querySelector('br')) {
+                        host.removeAttribute(PLACEHOLDER_ATTR);
+                    } else {
+                        host.setAttribute(PLACEHOLDER_ATTR, '1');
+                    }
                     const indicatorContainer = userTagContainer(host);
                     refreshUserTagIndicator(indicatorContainer);
                     refreshUserEmptyIndicator(indicatorContainer);
@@ -13305,6 +13638,36 @@ class SDLXLIFFReviewDialog(QDialog):
             browser.page().runJavaScript(script)
         except RuntimeError:
             pass
+
+    @classmethod
+    def _notepad_user_added_target_indexes(cls, document_html):
+        """Return text-unit indexes for live Notepad-created sibling blocks."""
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(str(document_html or ""), "html.parser")
+
+            def _is_review_text_node(tag):
+                name = str(getattr(tag, "name", "") or "").casefold()
+                if name in cls.TEXT_TAGS:
+                    return True
+                if name != "div":
+                    return False
+                classes = tag.get("class") or []
+                if isinstance(classes, str):
+                    classes = classes.split()
+                return (
+                    "u" in {str(value).casefold() for value in classes}
+                    and not tag.find(cls.TEXT_TAGS)
+                )
+
+            return [
+                index
+                for index, element in enumerate(soup.find_all(_is_review_text_node))
+                if element.has_attr("data-sdl-notepad-user-block")
+            ]
+        except Exception:
+            return []
 
     @staticmethod
     def _clean_notepad_browser_html(document_html):
@@ -13350,6 +13713,7 @@ class SDLXLIFFReviewDialog(QDialog):
             for marker in (
                 "data-sdl-notepad-user-tag",
                 "data-sdl-notepad-user-tag-container",
+                "data-sdl-notepad-user-block",
                 "data-sdl-notepad-original-had-text",
                 "data-sdl-notepad-user-empty-container",
             ):
@@ -13412,11 +13776,18 @@ class SDLXLIFFReviewDialog(QDialog):
                 if document_html is None:
                     return
                 prefix = str(getattr(browser, "_sdl_document_prefix", "") or "")
+                user_added_target_indexes = (
+                    self._notepad_user_added_target_indexes(document_html)
+                )
                 document = self._clean_notepad_browser_html(document_html)
                 if prefix:
                     html_start = re.search(r"<html(?:\s|>)", document, flags=re.IGNORECASE)
                     document = prefix + (document[html_start.start():] if html_start else document)
-                self._schedule_notepad_document_edit(piece_index, document)
+                self._schedule_notepad_document_edit(
+                    piece_index,
+                    document,
+                    user_added_target_indexes=user_added_target_indexes,
+                )
                 if flush:
                     if self._edit_save_timer.isActive():
                         self._edit_save_timer.stop()
