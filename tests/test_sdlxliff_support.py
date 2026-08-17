@@ -3067,7 +3067,7 @@ def test_manual_editing_generated_html_applies_image_rename_map(tmp_path, monkey
     assert saved_target == output_html
 
 
-def test_manual_edit_save_stays_pending_until_explicitly_completed(tmp_path, monkeypatch):
+def test_manual_edit_save_leaves_existing_progress_entry_untouched(tmp_path, monkeypatch):
     monkeypatch.setenv("OUTPUT_SDLXLIFF", "1")
     monkeypatch.setenv("RETAIN_SOURCE_EXTENSION", "0")
     output_name = "response_chapter0001.html"
@@ -3081,22 +3081,18 @@ def test_manual_edit_save_stays_pending_until_explicitly_completed(tmp_path, mon
         manual_untranslated=True,
     )
     progress_path = tmp_path / "translation_progress.json"
-    progress_path.write_text(
-        json.dumps(
-            {
-                "chapters": {
-                    "1": {
-                        "actual_num": 1,
-                        "status": "not_translated",
-                        "output_file": output_name,
-                        "original_basename": "chapter0001.xhtml",
-                    }
-                },
-                "completed_list": [],
+    original_progress = {
+        "chapters": {
+            "1": {
+                "actual_num": 1,
+                "status": "not_translated",
+                "output_file": output_name,
+                "original_basename": "chapter0001.xhtml",
             }
-        ),
-        encoding="utf-8",
-    )
+        },
+        "completed_list": [],
+    }
+    progress_path.write_text(json.dumps(original_progress), encoding="utf-8")
 
     dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     dialog.output_dir = str(tmp_path)
@@ -3117,20 +3113,7 @@ def test_manual_edit_save_stays_pending_until_explicitly_completed(tmp_path, mon
 
     dialog._write_piece_target_html(piece, edited_html)
 
-    pending_progress = json.loads(progress_path.read_text(encoding="utf-8"))
-    pending_entry = pending_progress["chapters"]["1"]
-    assert pending_entry["status"] == "pending"
-    assert pending_entry["manual_editing_pending"] is True
-    assert pending_entry["output_file"] == output_name
-    assert pending_progress["completed_list"] == []
-    progress_mixin = RetranslationMixin.__new__(RetranslationMixin)
-    assert progress_mixin._progress_display_status(
-        {
-            "status": "completed",
-            "output_file": output_name,
-            "info": pending_entry,
-        }
-    ) == "pending"
+    assert json.loads(progress_path.read_text(encoding="utf-8")) == original_progress
     assert dialog._piece_needs_manual_green_override(piece) is True
 
     result = dialog._mark_piece_progress_completed(piece)
@@ -3260,10 +3243,23 @@ def test_manual_edit_save_retains_source_name_and_extension_when_enabled(tmp_pat
         tmp_path / "SDLXLIFF" / f"{retained_output_name}.sdlxliff"
     )
     assert not os.path.exists(sidecar)
-    retained_progress = json.loads(progress_path.read_text(encoding="utf-8"))["chapters"]["1"]
-    assert retained_progress["output_file"] == retained_output_name
-    assert retained_progress["status"] == "pending"
-    assert retained_progress["manual_editing_pending"] is True
+    retained_chapters = json.loads(
+        progress_path.read_text(encoding="utf-8")
+    )["chapters"]
+    assert retained_chapters["1"] == {
+        "actual_num": 1,
+        "status": "not_translated",
+        "output_file": old_output_name,
+        "original_basename": retained_output_name,
+    }
+    new_entries = [
+        entry
+        for entry in retained_chapters.values()
+        if entry.get("output_file") == retained_output_name
+    ]
+    assert len(new_entries) == 1
+    assert new_entries[0]["status"] == "pending"
+    assert new_entries[0]["manual_editing_pending"] is True
 
     renamed_sidecar = piece["path"]
     progress_map = dialog._read_progress_metadata()

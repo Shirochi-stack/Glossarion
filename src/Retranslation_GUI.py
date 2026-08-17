@@ -3204,7 +3204,7 @@ class SDLXLIFFReviewDialog(QDialog):
         return matches
 
     def _mark_piece_progress_pending(self, piece, previous_output_name=None):
-        """Keep manually authored HTML pending until its explicit completion action."""
+        """Seed Pending only when this exact manually authored output has no entry."""
         progress_path = self._progress_path_for_review_piece(piece)
         if os.path.isfile(progress_path):
             try:
@@ -3223,62 +3223,57 @@ class SDLXLIFFReviewDialog(QDialog):
             return False
 
         output_name = self._manual_output_name_for_piece(piece, previous_output_name)
-        matches = self._matching_review_progress_entries(
-            progress_data,
-            piece,
-            previous_output_name,
-            output_name,
-        )
-        if not matches:
-            chapters = self._review_progress_chapters(progress_data)
-            if not isinstance(chapters, dict):
-                return False
-            original_name = (
-                (piece or {}).get("original_name")
-                or (piece or {}).get("original_basename")
-                or os.path.basename(output_name)
-            )
-            actual_num = (piece or {}).get("chapter_num")
-            if actual_num is None:
-                actual_num = self._chapter_number_from_name(
-                    original_name or output_name
-                )
-            try:
-                actual_num = int(actual_num)
-            except (TypeError, ValueError):
-                actual_num = self._chapter_number_from_name(output_name)
+        chapters = self._review_progress_chapters(progress_data)
+        if not isinstance(chapters, dict):
+            return False
 
-            preferred_key = str((piece or {}).get("progress_key") or "").strip()
-            if not preferred_key:
-                preferred_key = str(actual_num) if actual_num else (
-                    f"manual:{self._canonical_basename(output_name)}"
-                )
-            new_key = preferred_key
-            suffix = 2
-            while new_key in chapters:
-                new_key = f"{preferred_key}:manual:{suffix}"
-                suffix += 1
-            new_entry = {
-                "actual_num": actual_num,
-                "status": "pending",
-                "output_file": output_name,
-                "original_basename": os.path.basename(str(original_name)),
-                "manual_editing_pending": True,
-                "last_updated": time.time(),
-            }
-            chapters[new_key] = new_entry
-            piece["progress_key"] = str(new_key)
-            matches = [(new_key, new_entry)]
-
-        now = time.time()
-        for key, entry in matches:
-            entry["output_file"] = output_name
-            entry["status"] = "pending"
-            entry["manual_editing_pending"] = True
-            entry["last_updated"] = now
-            entry.pop("manually_marked_completed", None)
+        target_output = self._canonical_basename(output_name)
+        for key, entry in list(chapters.items()):
+            if not isinstance(entry, dict):
+                continue
+            if self._canonical_basename(entry.get("output_file")) != target_output:
+                continue
+            # The existing progress entry is authoritative. Auto-discovery can
+            # reuse it after the HTML appears; a manual save must not rewrite
+            # its status, timestamps, or completion metadata.
             if not (piece or {}).get("progress_key"):
                 piece["progress_key"] = str(key)
+            return True
+
+        original_name = (
+            (piece or {}).get("original_name")
+            or (piece or {}).get("original_basename")
+            or os.path.basename(output_name)
+        )
+        actual_num = (piece or {}).get("chapter_num")
+        if actual_num is None:
+            actual_num = self._chapter_number_from_name(
+                original_name or output_name
+            )
+        try:
+            actual_num = int(actual_num)
+        except (TypeError, ValueError):
+            actual_num = self._chapter_number_from_name(output_name)
+
+        preferred_key = str((piece or {}).get("progress_key") or "").strip()
+        if not preferred_key:
+            preferred_key = str(actual_num) if actual_num else (
+                f"manual:{target_output}"
+            )
+        new_key = preferred_key
+        suffix = 2
+        while new_key in chapters:
+            new_key = f"{preferred_key}:manual:{suffix}"
+            suffix += 1
+        chapters[new_key] = {
+            "actual_num": actual_num,
+            "status": "pending",
+            "output_file": output_name,
+            "original_basename": os.path.basename(str(original_name)),
+            "manual_editing_pending": True,
+            "last_updated": time.time(),
+        }
+        piece["progress_key"] = str(new_key)
         piece["output_name"] = output_name
         piece["manual_editing_pending"] = True
         self._refresh_review_progress_completed_list(progress_data)
