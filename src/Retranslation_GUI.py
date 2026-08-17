@@ -8601,6 +8601,22 @@ class SDLXLIFFReviewDialog(QDialog):
             and not cls._normalize_review_text(row_data.get("target", ""))
         )
 
+    @classmethod
+    def _compact_translator_note_display_label(cls, piece, row_index):
+        """Number only visible TN cards without changing persisted ordinals."""
+        visible_ordinal = 0
+        for index, row_data in enumerate((piece or {}).get("rows") or []):
+            if index > int(row_index):
+                break
+            if not row_data.get("translator_note"):
+                continue
+            if not cls._compact_review_row_visible(row_data):
+                continue
+            visible_ordinal += 1
+            if index == int(row_index):
+                return f"TN({visible_ordinal})"
+        return ""
+
     @staticmethod
     def _review_wrapped_lines(value, line_chars):
         text = str(value or "")
@@ -9660,11 +9676,19 @@ class SDLXLIFFReviewDialog(QDialog):
                 # creates the target node (row_data["target_tag"] is set in
                 # _target_html_with_edit), so the stale "Empty" caption must
                 # be replaced, not just recolored.
+                source_tag_label = row_data.get("source_tag_label")
+                target_tag_label = row_data.get("target_tag_label")
+                compact_tn_label = self._compact_translator_note_display_label(
+                    piece, row_index
+                )
+                if compact_tn_label:
+                    source_tag_label = compact_tn_label
+                    target_tag_label = compact_tn_label
                 tag_text = self._tag_label_text(
                     row_data.get("source_tag"),
                     row_data.get("target_tag"),
-                    row_data.get("source_tag_label"),
-                    row_data.get("target_tag_label"),
+                    source_tag_label,
+                    target_tag_label,
                 )
                 self._apply_tag_label_display(
                     tag_label, tag_text, row_data["status"]
@@ -15138,12 +15162,20 @@ class SDLXLIFFReviewDialog(QDialog):
         target_missing = bool(row_model.get("target_missing", not row_data.get("target_tag")))
         target_editable = bool(row_model.get("target_editable", not source_missing or not target_missing))
 
+        source_tag_label = row_data.get("source_tag_label")
+        target_tag_label = row_data.get("target_tag_label")
+        compact_tn_label = self._compact_translator_note_display_label(
+            piece, idx
+        )
+        if compact_tn_label:
+            source_tag_label = compact_tn_label
+            target_tag_label = compact_tn_label
         tag_label = self._tag_label(
             row_data.get("source_tag"),
             row_data.get("target_tag"),
             row_data.get("status"),
-            source_label=row_data.get("source_tag_label"),
-            target_label=row_data.get("target_tag_label"),
+            source_label=source_tag_label,
+            target_label=target_tag_label,
         )
         tag_label.setToolTip(row_data.get("reason", ""))
         target_widget = self._target_display_widget(

@@ -1010,13 +1010,17 @@ def test_compact_mode_hides_empty_translator_note_without_deleting_it(
         output_name,
         {"original_basename": "empty-tn.xhtml"},
         "<html><body><p>Source paragraph.</p></body></html>",
-        "<html><body><p>Translated paragraph.</p><p></p></body></html>",
+        (
+            "<html><body><p>Translated paragraph.</p>"
+            "<p>First visible note.</p><p></p>"
+            "<p>Second visible note.</p></body></html>"
+        ),
         raise_errors=True,
     )
     tree = etree.parse(sidecar)
     file_element = tree.xpath("//*[local-name()='file']")[0]
     file_element.set(
-        "{urn:glossarion:sdlxliff}user-added-target-indexes", "[1]"
+        "{urn:glossarion:sdlxliff}user-added-target-indexes", "[1,2,3]"
     )
     tree.write(sidecar, encoding="utf-8", xml_declaration=True)
 
@@ -1032,15 +1036,28 @@ def test_compact_mode_hides_empty_translator_note_without_deleting_it(
         timeout=5000,
     )
 
-    assert len(dialog.pieces[0]["rows"]) == 2
-    empty_note = dialog.pieces[0]["rows"][1]
+    assert len(dialog.pieces[0]["rows"]) == 4
+    assert [
+        row.get("target_tag_label")
+        for row in dialog.pieces[0]["rows"][1:]
+    ] == ["TN(1)", "TN(2)", "TN(3)"]
+    empty_note = dialog.pieces[0]["rows"][2]
     assert empty_note["translator_note"] is True
     assert empty_note["target"] == ""
     compact_rows = dialog.rows_widget.findChildren(QFrame, "SdlReviewRow")
-    assert len(compact_rows) == 1
-    assert compact_rows[0].property("sdl_row_index") == 0
+    assert len(compact_rows) == 3
+    assert [
+        frame.property("sdl_row_index") for frame in compact_rows
+    ] == [0, 1, 3]
+    visible_tn_labels = []
+    for frame in compact_rows[1:]:
+        label = frame.findChild(QLabel, "SdlReviewTagLabel")
+        visible_tn_labels.append(
+            BeautifulSoup(label.text(), "html.parser").get_text()
+        )
+    assert visible_tn_labels == ["TN(1)", "TN(2)"]
     saved_target = dialog._read_sdlxliff_html_pair(sidecar)[1]
-    assert len(BeautifulSoup(saved_target, "html.parser").find_all("p")) == 2
+    assert len(BeautifulSoup(saved_target, "html.parser").find_all("p")) == 4
 
 
 def test_sdlxliff_review_inserted_target_node_uses_text_anchor_without_offset(tmp_path):
