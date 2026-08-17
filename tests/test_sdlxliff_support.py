@@ -1960,6 +1960,45 @@ def test_sdlxliff_review_two_column_layout_toggle_saves_to_parent_config():
     assert parent.save_calls == 1
 
 
+def test_sdlxliff_review_layout_toggle_keeps_visible_page_until_replacement_is_ready():
+    class Stack:
+        def __init__(self, current):
+            self.current = current
+
+        def currentWidget(self):
+            return self.current
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    visible_page = object()
+    cached_page = object()
+    discarded = []
+    cancel_args = []
+    dialog._config = {}
+    dialog._context_parent = None
+    dialog.two_column_layout_btn = None
+    dialog.rows_stack = Stack(visible_page)
+    dialog.loading_page = object()
+    dialog._seamless_review_old_page = None
+    dialog._piece_pages = {0: visible_page, 1: cached_page}
+    dialog._piece_render_complete = {0, 1}
+    dialog._review_data_preload_token = 0
+    dialog.pieces = []
+    dialog.piece_list = None
+    dialog._update_review_layout_button = lambda: None
+    dialog._cancel_active_review_render = (
+        lambda defer_visible_discard=False: cancel_args.append(defer_visible_discard)
+    )
+    dialog._cancel_review_preload = lambda discard_page=True: None
+    dialog._discard_piece_page = lambda row, page: discarded.append((row, page))
+
+    dialog._set_review_two_column_layout(False)
+
+    assert cancel_args == [True]
+    assert dialog._seamless_review_old_page is visible_page
+    assert discarded == [(1, cached_page)]
+    assert dialog._piece_pages == {}
+
+
 def test_sdlxliff_review_two_column_layout_defaults_on_and_reads_legacy_config():
     dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     dialog._config = {}

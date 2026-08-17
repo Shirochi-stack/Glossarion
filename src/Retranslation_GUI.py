@@ -4576,9 +4576,17 @@ class SDLXLIFFReviewDialog(QDialog):
         self._update_review_layout_button()
         self._persist_review_config_value(self.TWO_COLUMN_LAYOUT_CONFIG_KEY, enabled)
         try:
-            self._cancel_active_review_render()
+            # Keep the currently painted mode in place while its replacement
+            # is built.  _render_piece() snapshots it before the swap and the
+            # existing page transition then fades that snapshot away over the
+            # completed Compact/Notepad page.  Removing it here used to expose
+            # the loading page for the full (and very noticeable) rebuild.
+            old_visible_page = self._retain_visible_review_page_for_seamless_swap()
+            self._cancel_active_review_render(defer_visible_discard=True)
             self._cancel_review_preload(discard_page=True)
             for row, page in list(self._piece_pages.items()):
+                if page is old_visible_page:
+                    continue
                 self._discard_piece_page(row, page)
             self._piece_pages.clear()
             self._piece_render_complete.clear()
@@ -8125,6 +8133,21 @@ class SDLXLIFFReviewDialog(QDialog):
         if old_page is None or old_page is new_page:
             return
         self._remove_review_page_widget(old_page)
+
+    def _retain_visible_review_page_for_seamless_swap(self):
+        """Keep the visible review page alive until its replacement is ready."""
+        try:
+            old_page = self.rows_stack.currentWidget()
+            if old_page is None or old_page is self.loading_page:
+                return None
+        except Exception:
+            return None
+
+        previous = getattr(self, "_seamless_review_old_page", None)
+        if previous is not None and previous is not old_page:
+            self._remove_review_page_widget(previous)
+        self._seamless_review_old_page = old_page
+        return old_page
 
     def _capture_review_transition_snapshot(self):
         """Grab what the user currently sees so the next page can fade in over it."""
