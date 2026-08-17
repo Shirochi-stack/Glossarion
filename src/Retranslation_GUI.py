@@ -12204,6 +12204,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 let injectionUndoReady = false;
                 let injectionRedoReady = false;
                 const recordInjectionEdit = action => {
+                    if (!injectionUndoReady) injectionUndoStack = [];
                     injectionUndoStack.push(action);
                     injectionRedoStack = [];
                     injectionUndoReady = true;

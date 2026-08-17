@@ -4724,6 +4724,46 @@ def test_notepad_context_menu_previews_injects_and_flags_machine_translation(tmp
     assert saved_soup.find(attrs={"data-sdl-notepad-row-index": True}) is None
     assert saved_soup.find(attrs={"data-sdl-notepad-status": True}) is None
 
+    def send_history_shortcut(key):
+        return js_value(
+            f"""
+            (() => {{
+                const host = document.querySelector('p [data-sdl-notepad-text]');
+                host.focus();
+                const selection = window.getSelection();
+                const range = document.createRange();
+                range.selectNodeContents(host);
+                range.collapse(false);
+                selection.removeAllRanges();
+                selection.addRange(range);
+                const event = new KeyboardEvent('keydown', {{
+                    key: {json.dumps(key)}, ctrlKey: true,
+                    bubbles: true, cancelable: true
+                }});
+                host.dispatchEvent(event);
+                return event.defaultPrevented;
+            }})();
+            """
+        )
+
+    assert send_history_shortcut("z") is True
+    qtbot.waitUntil(
+        lambda: "Existing human output with several ordinary words."
+        in output_path.read_text(encoding="utf-8")
+        and preview not in output_path.read_text(encoding="utf-8"),
+        timeout=5000,
+    )
+    assert js_value("document.querySelector('p')?.innerText") == (
+        "Existing human output with several ordinary words."
+    )
+
+    assert send_history_shortcut("y") is True
+    qtbot.waitUntil(
+        lambda: preview in output_path.read_text(encoding="utf-8"),
+        timeout=5000,
+    )
+    assert js_value("document.querySelector('p')?.innerText") == preview
+
 
 def test_manual_untranslated_notepad_renders_source_fallback_and_creates_output(tmp_path, qtbot):
     from PySide6.QtWebEngineWidgets import QWebEngineView
