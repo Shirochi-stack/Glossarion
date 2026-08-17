@@ -37,6 +37,7 @@ from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QImageRea
 from metadata_progress import is_metadata_progress_entry
 from translation_artifacts import is_translation_artifact_progress_entry
 from html_tag_entities import unescape_valid_html_tag_entities
+from epub_package import find_epub_opf_member
 
 try:
     import dpi_setup
@@ -1518,25 +1519,7 @@ def _extract_cover(epub_path: str) -> str | None:
             cover_data = None
 
             # --- Step 1: Find and parse the OPF file ---
-            opf_path = None
-            # Check container.xml for the OPF path
-            if "META-INF/container.xml" in names_set:
-                try:
-                    container_xml = zf.read("META-INF/container.xml").decode("utf-8", errors="replace")
-                    container_tree = ET.fromstring(container_xml)
-                    ns = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
-                    rootfile = container_tree.find(".//c:rootfile", ns)
-                    if rootfile is not None:
-                        opf_path = rootfile.get("full-path")
-                except Exception:
-                    pass
-
-            # Fallback: find any .opf file
-            if not opf_path:
-                for zname in names:
-                    if zname.lower().endswith(".opf"):
-                        opf_path = zname
-                        break
+            opf_path = find_epub_opf_member(zf)
 
             opf_dir = ""
             manifest_items = {}  # id -> (href, media_type)
@@ -2004,24 +1987,7 @@ def _extract_epub_search_metadata(
         with zipfile.ZipFile(epub_path, "r") as zf:
             names = zf.namelist()
             names_set = set(names)
-            opf_path = None
-            if "META-INF/container.xml" in names_set:
-                try:
-                    container_xml = zf.read(
-                        "META-INF/container.xml").decode(
-                            "utf-8", errors="replace")
-                    ctree = ET.fromstring(container_xml)
-                    ns = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
-                    rootfile = ctree.find(".//c:rootfile", ns)
-                    if rootfile is not None:
-                        opf_path = rootfile.get("full-path")
-                except Exception:
-                    pass
-            if not opf_path:
-                for zname in names:
-                    if zname.lower().endswith(".opf"):
-                        opf_path = zname
-                        break
+            opf_path = find_epub_opf_member(zf)
             if opf_path and opf_path in names_set:
                 opf_xml = zf.read(opf_path).decode(
                     "utf-8", errors="replace")
@@ -2342,23 +2308,7 @@ def _count_epub_spine_items(epub_path: str, exclude_special: bool = False,
         with zipfile.ZipFile(epub_path, "r") as zf:
             names = zf.namelist()
             names_set = set(names)
-            opf_path = None
-            if "META-INF/container.xml" in names_set:
-                try:
-                    container_xml = zf.read("META-INF/container.xml").decode(
-                        "utf-8", errors="replace")
-                    tree = ET.fromstring(container_xml)
-                    ns = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
-                    rootfile = tree.find(".//c:rootfile", ns)
-                    if rootfile is not None:
-                        opf_path = rootfile.get("full-path")
-                except Exception:
-                    pass
-            if not opf_path:
-                for zname in names:
-                    if zname.lower().endswith(".opf"):
-                        opf_path = zname
-                        break
+            opf_path = find_epub_opf_member(zf)
             if opf_path and opf_path in names_set:
                 try:
                     opf_xml = zf.read(opf_path).decode("utf-8", errors="replace")
@@ -14133,22 +14083,7 @@ def _parse_epub_details(epub_path: str, parse_chapter_titles: bool = True) -> di
             names = zf.namelist()
             names_set = set(names)
 
-            opf_path = None
-            if "META-INF/container.xml" in names_set:
-                try:
-                    container_xml = zf.read("META-INF/container.xml").decode("utf-8", errors="replace")
-                    container_tree = ET.fromstring(container_xml)
-                    ns = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
-                    rootfile = container_tree.find(".//c:rootfile", ns)
-                    if rootfile is not None:
-                        opf_path = rootfile.get("full-path")
-                except Exception:
-                    pass
-            if not opf_path:
-                for zname in names:
-                    if zname.lower().endswith(".opf"):
-                        opf_path = zname
-                        break
+            opf_path = find_epub_opf_member(zf)
             if not opf_path or opf_path not in names_set:
                 return details
 

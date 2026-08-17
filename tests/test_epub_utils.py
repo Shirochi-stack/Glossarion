@@ -16,6 +16,7 @@ import translate_headers_standalone
 from QA_Scanner_GUI import _normalize_qa_dialog_path, _wrapped_tooltip_html
 from enhanced_text_extractor import EnhancedTextExtractor
 from epub_converter import EPUBCompiler, FileUtils, HTMLEntityDecoder, XMLValidator
+from epub_package import find_epub_opf_member, find_opf_path
 from html_tag_entities import unescape_valid_html_tag_entities
 from metadata_batch_translator import BatchHeaderTranslator
 from qa_scan_runtime import (
@@ -1405,19 +1406,19 @@ def test_epub_html_discovery_never_uses_unrefined_backup(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("first_html_has_image", "expected_cover"),
+    ("first_html_has_image", "expected_html"),
     [
-        (True, None),
-        (False, "cover.jpg"),
+        (True, "response_front.html"),
+        (False, "response_chapter.html"),
     ],
 )
-def test_automatic_cover_skips_only_for_image_in_first_opf_spine_html(
+def test_disabled_cover_fallback_selects_first_image_bearing_opf_html(
     tmp_path,
     monkeypatch,
     first_html_has_image,
-    expected_cover,
+    expected_html,
 ):
-    monkeypatch.setenv("DISABLE_AUTOMATIC_COVER_CREATION", "0")
+    monkeypatch.setenv("DISABLE_AUTOMATIC_COVER_CREATION", "1")
     monkeypatch.setenv("EXTRACTION_WORKERS", "1")
     (tmp_path / "images").mkdir()
     (tmp_path / "images" / "cover.jpg").write_bytes(b"cover bytes")
@@ -1461,21 +1462,66 @@ def test_automatic_cover_skips_only_for_image_in_first_opf_spine_html(
     logs = []
     compiler = EPUBCompiler(str(tmp_path), log_callback=logs.append)
     html_files = ["response_front.html", "response_chapter.html"]
-    skip_automatic_cover = compiler._first_opf_spine_html_contains_image(
+    fallback_html = compiler._first_opf_spine_html_with_image(
         html_files
     )
     processed_images, cover_file = compiler._process_images(
-        skip_automatic_cover=skip_automatic_cover
+        skip_automatic_cover=bool(fallback_html)
     )
 
-    assert skip_automatic_cover is first_html_has_image
+    assert fallback_html == expected_html
     assert processed_images == {"cover.jpg": "cover.jpg"}
-    assert cover_file == expected_cover
-    if first_html_has_image:
-        assert any(
-            "first OPF spine document already contains an image" in log
-            for log in logs
-        )
+    assert cover_file is None
+    assert any(
+        "first image-bearing HTML accepted in OPF reading order" in log
+        for log in logs
+    )
+
+
+def test_cover_logs_unresolved_designation_before_automatic_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("DISABLE_AUTOMATIC_COVER_CREATION", "0")
+    monkeypatch.setenv("EXTRACTION_WORKERS", "1")
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "chapter001.jpg").write_bytes(b"image bytes")
+
+    logs = []
+    compiler = EPUBCompiler(str(tmp_path), log_callback=logs.append)
+    _processed, cover_file = compiler._process_images(
+        preferred_cover_names=["missing-cover.jpg"],
+    )
+
+    assert cover_file == "chapter001.jpg"
+    assert any(
+        "designated cover image reference(s) could not be resolved" in log
+        for log in logs
+    )
+    assert any("attempting automatic image selection" in log for log in logs)
+    assert any("Using first image" in log for log in logs)
+
+
+def test_disabled_cover_fallback_scans_workspace_html_without_opf(tmp_path):
+    (tmp_path / "response_001.html").write_text(
+        "<html><body><p>Text only.</p></body></html>",
+        encoding="utf-8",
+    )
+    (tmp_path / "response_002.html").write_text(
+        '<html><body><img src="images/illustration.jpg"/></body></html>',
+        encoding="utf-8",
+    )
+
+    logs = []
+    compiler = EPUBCompiler(str(tmp_path), log_callback=logs.append)
+
+    assert compiler._first_opf_spine_html_with_image(
+        ["response_001.html", "response_002.html"]
+    ) == "response_002.html"
+    assert any(
+        "first image-bearing HTML accepted: response_002.html" in log
+        for log in logs
+    )
 
 
 @pytest.mark.parametrize("disable_automatic_cover", ["0", "1"])
@@ -3644,3 +3690,79 @@ def test_preserve_asterisk_separator_lines_toggle_defaults_on(
 
     assert '<hr' in converted_html.lower()
     assert '<p>*****</p>' not in converted_html
+
+
+_STANDARD_OPF_CONTAINER = """<?xml version="1.0"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"
+           version="1.0">
+  <rootfiles>
+    <rootfile full-path="item/standard.opf"
+              media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+"""
+
+
+def _write_opf_discovery_epub(path, members):
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+
+
+def test_opf_discovery_container_rootfile_wins_over_content_opf(tmp_path):
+    epub_path = tmp_path / "book.epub"
+    _write_opf_discovery_epub(
+        epub_path,
+        {
+            "META-INF/container.xml": _STANDARD_OPF_CONTAINER,
+            "content.opf": "<package id='decoy'/>",
+            "item/standard.opf": "<package id='real'/>",
+        },
+    )
+
+    with zipfile.ZipFile(epub_path) as archive:
+        assert find_epub_opf_member(archive) == "item/standard.opf"
+
+
+def test_opf_discovery_prefers_content_only_as_archive_fallback(tmp_path):
+    epub_path = tmp_path / "book.epub"
+    _write_opf_discovery_epub(
+        epub_path,
+        {
+            "OPS/standard.opf": "<package/>",
+            "OEBPS/content.opf": "<package/>",
+        },
+    )
+
+    with zipfile.ZipFile(epub_path) as archive:
+        assert find_epub_opf_member(archive) == "OEBPS/content.opf"
+
+
+def test_opf_discovery_accepts_any_opf_as_last_archive_fallback(tmp_path):
+    epub_path = tmp_path / "book.epub"
+    _write_opf_discovery_epub(epub_path, {"item/standard.opf": "<package/>"})
+
+    with zipfile.ZipFile(epub_path) as archive:
+        assert find_epub_opf_member(archive) == "item/standard.opf"
+
+
+def test_opf_discovery_resolves_flat_container_declared_workspace(tmp_path):
+    (tmp_path / "container.xml").write_text(
+        _STANDARD_OPF_CONTAINER,
+        encoding="utf-8",
+    )
+    expected = tmp_path / "standard.opf"
+    expected.write_text("<package/>", encoding="utf-8")
+    (tmp_path / "content.opf").write_text(
+        "<package id='decoy'/>",
+        encoding="utf-8",
+    )
+
+    assert find_opf_path(str(tmp_path)) == str(expected)
+
+
+def test_opf_discovery_accepts_any_workspace_opf(tmp_path):
+    expected = tmp_path / "standard.opf"
+    expected.write_text("<package/>", encoding="utf-8")
+
+    assert find_opf_path(str(tmp_path)) == str(expected)

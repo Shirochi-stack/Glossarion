@@ -1,9 +1,9 @@
 """
 Standalone Chapter Header Translation Module
-Translates chapter headers using strict content.opf-based mapping
+Translates chapter headers using strict OPF package-based mapping
 
 This module can be used independently to translate chapter headers in HTML files
-by matching them to source EPUB chapters using content.opf spine order.
+by matching them to source EPUB chapters using OPF spine order.
 """
 
 import os
@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 import logging
 from typing import Dict, Tuple, Optional, List
 from bs4 import BeautifulSoup
+from epub_package import find_epub_opf_member
 
 
 DEFAULT_FAILED_TRANSLATION_RETRY_ATTEMPTS = 3
@@ -105,12 +106,10 @@ def extract_source_chapters_with_opf_mapping(
             opf_content = None
             opf_path = None
             
-            for name in zf.namelist():
-                if name.endswith('.opf'):
-                    opf_path = name
-                    opf_content = zf.read(name)
-                    log(f"📋 Found OPF file: {name}")
-                    break
+            opf_path = find_epub_opf_member(zf)
+            if opf_path:
+                opf_content = zf.read(opf_path)
+                log(f"📋 Found OPF package: {opf_path}")
             
             if not opf_content:
                 try:
@@ -1052,7 +1051,7 @@ def translate_headers_standalone(
     Standalone function to translate chapter headers with exact OPF-based matching
     
     Uses IDENTICAL translation and HTML update method as the pipeline's BatchHeaderTranslator.
-    The ONLY difference is the content.opf-based chapter matching instead of fuzzy matching.
+    The ONLY difference is OPF-based chapter matching instead of fuzzy matching.
     
     Args:
         epub_path: Path to source EPUB file
@@ -1081,7 +1080,7 @@ def translate_headers_standalone(
     config['output_dir'] = os.path.abspath(output_dir)
 
     log("=" * 80)
-    log("Starting Standalone Header Translation (Content.OPF Based)")
+    log("Starting Standalone Header Translation (OPF Based)")
     log("=" * 80)
     
     # Step 1: Extract source chapters with OPF mapping (UNIQUE TO STANDALONE)

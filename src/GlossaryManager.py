@@ -17,6 +17,7 @@ import PatternManager as PM
 import duplicate_detection_config as ddc
 from glossary_refinement import refine_glossary_entries, refinement_enabled as _glossary_refinement_enabled
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from epub_package import find_epub_opf_member
 
 # ---------------------------------------------------------------------------
 # Glossary CSV separator – Unit Separator (ASCII 31) replaces comma for
@@ -132,8 +133,7 @@ def _extract_raw_title_from_epub(epub_path):
     try:
         import zipfile
         with zipfile.ZipFile(epub_path, 'r') as zf:
-            # Find opf
-            opf_name = next((n for n in zf.namelist() if n.lower().endswith('.opf')), None)
+            opf_name = find_epub_opf_member(zf)
             if opf_name:
                 content = zf.read(opf_name).decode('utf-8', errors='ignore')
                 # Use BS4 with xml parser

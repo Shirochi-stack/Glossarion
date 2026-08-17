@@ -53,6 +53,7 @@ from emoticon_patterns import (
     DEFAULT_EMOTICON_PATTERNS,
     mask_whitelisted_emoticons,
 )
+from epub_package import find_epub_opf_member
 
 # Optional: psutil for process priority and CPU affinity control
 try:
@@ -1764,13 +1765,11 @@ def extract_epub_image_info(epub_path, log=print):
             manifest_map = {}  # Maps item id to href
             
             try:
-                for fname in zf.namelist():
-                    if 'content.opf' in fname.lower():
-                        content_opf_data = zf.read(fname).decode('utf-8', errors='ignore')
-                        content_opf_path = fname
-                        break
+                content_opf_path = find_epub_opf_member(zf)
+                if content_opf_path:
+                    content_opf_data = zf.read(content_opf_path).decode('utf-8', errors='ignore')
             except Exception as e:
-                log(f"⚠️ Could not read content.opf: {e}")
+                log(f"⚠️ Could not read OPF package: {e}")
             
             # Parse manifest and spine from content.opf
             if content_opf_data:
@@ -2048,13 +2047,11 @@ def extract_epub_punctuation_info(epub_path, log=print):
             manifest_map = {}  # Maps item id to href
             
             try:
-                for fname in zf.namelist():
-                    if 'content.opf' in fname.lower():
-                        content_opf_data = zf.read(fname).decode('utf-8', errors='ignore')
-                        content_opf_path = fname
-                        break
+                content_opf_path = find_epub_opf_member(zf)
+                if content_opf_path:
+                    content_opf_data = zf.read(content_opf_path).decode('utf-8', errors='ignore')
             except Exception as e:
-                log(f"⚠️ Could not read content.opf: {e}")
+                log(f"⚠️ Could not read OPF package: {e}")
             
             # Parse manifest and spine from content.opf
             if content_opf_data:
@@ -2501,13 +2498,11 @@ def extract_epub_quotation_info(
             manifest_map = {}
 
             try:
-                for filename in zf.namelist():
-                    if 'content.opf' in filename.lower():
-                        content_opf_data = zf.read(filename).decode('utf-8', errors='ignore')
-                        content_opf_path = filename
-                        break
+                content_opf_path = find_epub_opf_member(zf)
+                if content_opf_path:
+                    content_opf_data = zf.read(content_opf_path).decode('utf-8', errors='ignore')
             except Exception as exc:
-                log(f"⚠️ Could not read content.opf for quotation extraction: {exc}")
+                log(f"⚠️ Could not read OPF package for quotation extraction: {exc}")
 
             if content_opf_data:
                 try:
@@ -5621,13 +5616,11 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
             manifest_map = {}  # Maps item id to href
             
             try:
-                for fname in zf.namelist():
-                    if 'content.opf' in fname.lower():
-                        content_opf_data = zf.read(fname).decode('utf-8', errors='ignore')
-                        content_opf_path = fname
-                        break
+                content_opf_path = find_epub_opf_member(zf)
+                if content_opf_path:
+                    content_opf_data = zf.read(content_opf_path).decode('utf-8', errors='ignore')
             except Exception as e:
-                log(f"⚠️ Could not read content.opf: {e}")
+                log(f"⚠️ Could not read OPF package: {e}")
             
             # Parse manifest and spine from content.opf
             if content_opf_data:
@@ -5911,14 +5904,12 @@ def extract_epub_html_content(epub_path, log=print):
             content_opf_path = None
             manifest_map = {}
 
-            for fname in zf.namelist():
-                if 'content.opf' in fname.lower():
-                    content_opf_data = zf.read(fname).decode('utf-8', errors='ignore')
-                    content_opf_path = fname
-                    break
+            content_opf_path = find_epub_opf_member(zf)
+            if content_opf_path:
+                content_opf_data = zf.read(content_opf_path).decode('utf-8', errors='ignore')
 
             if not content_opf_data:
-                log("⚠️ Could not find content.opf while extracting source HTML")
+                log("⚠️ Could not find an OPF package while extracting source HTML")
                 return _fallback_extract_html_files(zf)
 
             soup_opf = BeautifulSoup(content_opf_data, 'xml')
@@ -7722,14 +7713,12 @@ def _sample_text_from_epub(epub_path: str, max_spine_items: int = 3, max_chars: 
             # Find content.opf
             content_opf_data = None
             content_opf_path = None
-            for fname in zf.namelist():
-                if 'content.opf' in fname.lower():
-                    try:
-                        content_opf_data = zf.read(fname).decode('utf-8', errors='ignore')
-                        content_opf_path = fname
-                        break
-                    except Exception:
-                        continue
+            content_opf_path = find_epub_opf_member(zf)
+            if content_opf_path:
+                try:
+                    content_opf_data = zf.read(content_opf_path).decode('utf-8', errors='ignore')
+                except Exception:
+                    content_opf_data = None
 
             if not content_opf_data:
                 return ''

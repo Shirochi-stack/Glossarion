@@ -19,6 +19,7 @@ from typing import Any, Callable, Mapping
 from xml.etree import ElementTree
 
 from epub_metadata_utils import DC_ELEMENTS, REPEATABLE_DC_ELEMENTS
+from epub_package import find_epub_opf_member
 from metadata_progress import (
     normalize_metadata_mode,
     resolve_metadata_field_settings,
@@ -65,13 +66,7 @@ def _local_name(value: str) -> str:
 def _extract_epub_metadata(source_path: str) -> dict:
     """Read OPF metadata without importing the chapter extraction stack."""
     with zipfile.ZipFile(source_path, "r") as archive:
-        opf_name = next(
-            (
-                name for name in archive.namelist()
-                if str(name).lower().endswith(".opf")
-            ),
-            None,
-        )
+        opf_name = find_epub_opf_member(archive)
         if not opf_name:
             raise ValueError("The EPUB does not contain an OPF package file")
         root = ElementTree.fromstring(archive.read(opf_name))

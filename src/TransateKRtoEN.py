@@ -24,6 +24,7 @@ except ImportError:
     # Older versions of BeautifulSoup might not have this warning
     pass
 from collections import Counter
+from epub_package import find_epub_opf_member, find_opf_path
 from unified_api_client import (
     UnifiedClient,
     UnifiedClientError,
@@ -11959,7 +11960,9 @@ def _single_pass_spine_ref_for_file(output_dir, chapter_basename):
 
     opf_candidates = []
     if output_dir:
-        opf_candidates.append(os.path.join(output_dir, "content.opf"))
+        workspace_opf = find_opf_path(output_dir)
+        if workspace_opf:
+            opf_candidates.append(workspace_opf)
     for opf_path in opf_candidates:
         try:
             if opf_path and os.path.exists(opf_path):
@@ -11975,12 +11978,11 @@ def _single_pass_spine_ref_for_file(output_dir, chapter_basename):
         if epub_path and os.path.exists(epub_path):
             import zipfile
             with zipfile.ZipFile(epub_path, "r") as zf:
-                for name in zf.namelist():
-                    if name.lower().endswith(".opf"):
-                        idx, pos = _match(_spine_from_opf_text(zf.read(name).decode("utf-8", errors="replace")))
-                        if idx is not None:
-                            return idx, pos
-                        break
+                opf_member = find_epub_opf_member(zf)
+                if opf_member:
+                    idx, pos = _match(_spine_from_opf_text(zf.read(opf_member).decode("utf-8", errors="replace")))
+                    if idx is not None:
+                        return idx, pos
     except Exception:
         pass
 
@@ -12741,8 +12743,8 @@ def retroactive_update_image_references(output_dir, source_dir=None):
     
     # Build set of known HTML core names from content.opf manifest (more reliable than extensions)
     opf_core_names = set()  # core names (no extension, no response_ prefix) from OPF
-    opf_path = os.path.join(output_dir, 'content.opf')
-    if os.path.exists(opf_path):
+    opf_path = find_opf_path(output_dir)
+    if opf_path:
         try:
             import xml.etree.ElementTree as ET
             tree = ET.parse(opf_path)
@@ -17227,7 +17229,7 @@ def _score_postprocess_output_dir(candidate_dir: str, chapters, input_path: str 
 
     if "translation_progress.json" in root_files:
         score += 25
-    if "content.opf" in root_files:
+    if any(name.lower().endswith(".opf") for name in root_files):
         score += 10
 
     source_epub_path = os.path.join(candidate_dir, "source_epub.txt")
@@ -22874,8 +22876,8 @@ def main(log_callback=None, stop_callback=None):
                 return
             
             # Sort chapters by OPF spine order if available
-            opf_path = os.path.join(out, 'content.opf')
-            if os.path.exists(opf_path) and chapters:
+            opf_path = find_opf_path(out)
+            if opf_path and chapters:
                 log_callback("📋 Sorting chapters according to OPF spine order...")
                 # Call module-level function directly
                 chapters = Chapter_Extractor._sort_by_opf_spine(chapters, opf_path)
@@ -24594,8 +24596,8 @@ def main(log_callback=None, stop_callback=None):
     # Special-file skipping is applied separately after range matching.
     _spine_pos_by_idx = {}  # chapter list index -> 1-based OPF spine position
     if use_spine_order and start is not None:
-        opf_path = os.path.join(out, 'content.opf')
-        if os.path.exists(opf_path):
+        opf_path = find_opf_path(out)
+        if opf_path:
             try:
                 import xml.etree.ElementTree as _ET
                 with open(opf_path, 'r', encoding='utf-8') as _f:
@@ -24648,7 +24650,7 @@ def main(log_callback=None, stop_callback=None):
             except Exception as _e:
                 print(f"⚠️ Spine order: failed to read content.opf: {_e}")
         else:
-            print("⚠️ Spine order: content.opf not found in output directory")
+            print("⚠️ Spine order: no OPF package found in output directory")
 
     # Helper: sequential numbering with zero-phase.
     # Start at 0; only start incrementing once a digit >0 is seen in the filename.

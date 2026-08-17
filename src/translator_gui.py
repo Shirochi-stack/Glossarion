@@ -110,6 +110,7 @@ from refinement_prompts import (
 )
 from language_options import TARGET_LANGUAGES
 from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS
+from epub_package import find_epub_opf_member, find_opf_path
 
 
 def _authnd_auto_token_limits():
@@ -28764,22 +28765,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             import zipfile
 
             with zipfile.ZipFile(epub_path, 'r') as zf:
-                # Find content.opf
-                opf_path = None
-                try:
-                    container_content = zf.read('META-INF/container.xml')
-                    container_root = ET.fromstring(container_content)
-                    rootfile = container_root.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile')
-                    if rootfile is not None:
-                        opf_path = rootfile.get('full-path')
-                except Exception:
-                    pass
-
-                if not opf_path:
-                    for name in zf.namelist():
-                        if name.endswith('content.opf') or name.endswith('.opf'):
-                            opf_path = name
-                            break
+                opf_path = find_epub_opf_member(zf)
 
                 if not opf_path:
                     return results
@@ -28857,14 +28843,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
             import zipfile
             import re
             
-            # First, check if we have content.opf in the current directory
+            # First, check for the workspace's authoritative OPF package.
             opf_file = None
             if file_list:
                 current_dir = os.path.dirname(file_list[0]) if file_list else os.getcwd()
-                possible_opf = os.path.join(current_dir, 'content.opf')
-                if os.path.exists(possible_opf):
-                    opf_file = possible_opf
-                    self.append_log(f"📋 Found content.opf in directory")
+                opf_file = find_opf_path(current_dir)
+                if opf_file:
+                    self.append_log(f"📋 Found OPF package: {os.path.basename(opf_file)}")
             
             # If no OPF, check if any of the files is an OPF
             if not opf_file:
@@ -28881,15 +28866,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     epub_path = epub_files[0]
                     try:
                         with zipfile.ZipFile(epub_path, 'r') as zf:
-                            for name in zf.namelist():
-                                if name.endswith('.opf'):
-                                    opf_content = zf.read(name)
-                                    temp_opf = os.path.join(os.path.dirname(epub_path), 'temp_content.opf')
-                                    with open(temp_opf, 'wb') as f:
-                                        f.write(opf_content)
-                                    opf_file = temp_opf
-                                    self.append_log(f"📋 Extracted OPF from EPUB: {os.path.basename(epub_path)}")
-                                    break
+                            opf_member = find_epub_opf_member(zf)
+                            if opf_member:
+                                opf_content = zf.read(opf_member)
+                                temp_opf = os.path.join(os.path.dirname(epub_path), 'temp_content.opf')
+                                with open(temp_opf, 'wb') as f:
+                                    f.write(opf_content)
+                                opf_file = temp_opf
+                                self.append_log(f"📋 Extracted OPF from EPUB: {os.path.basename(epub_path)}")
                     except Exception as e:
                         self.append_log(f"⚠️ Could not extract OPF from EPUB: {e}")
             

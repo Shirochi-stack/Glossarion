@@ -18,6 +18,7 @@ from pathlib import Path
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
+from epub_package import find_opf_path
 
 def run_chapter_extraction(epub_path, output_dir, extraction_mode="smart", progress_callback=None):
     """
@@ -82,8 +83,8 @@ def run_chapter_extraction(epub_path, output_dir, extraction_mode="smart", progr
             
             # The extract_chapters method already handles OPF sorting internally
             # Just log if OPF was used
-            opf_path = os.path.join(output_dir, 'content.opf')
-            if os.path.exists(opf_path):
+            opf_path = find_opf_path(output_dir)
+            if opf_path:
                 print(f"[INFO] OPF file available for chapter ordering", flush=True)
             
             # CRITICAL: Save the full chapters with body content!

@@ -27,6 +27,10 @@ from html_tag_entities import (
     looks_like_valid_html_tag as _looks_like_valid_html_tag,
     unescape_valid_html_tag_entities as _unescape_valid_html_tag_entities,
 )
+from epub_package import (
+    find_epub_opf_member,
+    find_opf_path as find_workspace_opf_path,
+)
 from pdf_bookmarks import (
     remove_pdf_source_page_break_markers,
     replace_with_chapter_bookmarks,
@@ -1712,42 +1716,7 @@ class EPUBCompiler:
         ``standard.opf``), so ``content.opf`` is only one possible name. Prefer
         the package selected by container.xml, then fall back to a sole/root OPF.
         """
-        container_path = os.path.join(self.output_dir, "container.xml")
-        if os.path.isfile(container_path):
-            try:
-                container_root = ET.parse(container_path).getroot()
-                rootfile_path = ""
-                for element in container_root.iter():
-                    if str(element.tag).rsplit("}", 1)[-1].lower() == "rootfile":
-                        rootfile_path = (element.get("full-path") or "").strip()
-                        if rootfile_path:
-                            break
-                if rootfile_path:
-                    normalized = rootfile_path.replace("/", os.sep).replace("\\", os.sep)
-                    candidates = (
-                        os.path.join(self.output_dir, normalized),
-                        os.path.join(self.output_dir, os.path.basename(normalized)),
-                    )
-                    for candidate in candidates:
-                        if os.path.isfile(candidate):
-                            return candidate
-            except (OSError, ET.ParseError, ValueError):
-                pass
-
-        conventional = os.path.join(self.output_dir, "content.opf")
-        if os.path.isfile(conventional):
-            return conventional
-
-        try:
-            opf_files = sorted(
-                os.path.join(self.output_dir, name)
-                for name in os.listdir(self.output_dir)
-                if name.lower().endswith(".opf")
-                and os.path.isfile(os.path.join(self.output_dir, name))
-            )
-        except OSError:
-            return None
-        return opf_files[0] if opf_files else None
+        return find_workspace_opf_path(self.output_dir)
 
     def _load_image_rename_map(self) -> Dict[str, str]:
         """Load the extraction-time original-image -> workspace-image map."""
@@ -1774,13 +1743,15 @@ class EPUBCompiler:
             "image_href": "",
             "page_href": "",
             "method": "",
+            "read_error": "",
         }
         if not opf_path:
             return result
 
         try:
             root = ET.parse(opf_path).getroot()
-        except (OSError, ET.ParseError, ValueError):
+        except (OSError, ET.ParseError, ValueError) as exc:
+            result["read_error"] = str(exc)
             return result
 
         def local_name(element) -> str:
@@ -2097,7 +2068,7 @@ class EPUBCompiler:
             if (hasattr(self, 'batch_translate_headers') and self.batch_translate_headers and 
                 run_standalone_header_translation is not None):
                 
-                self.log("\n🔄 Attempting standalone header translation (content.opf based)...")
+                self.log("\n🔄 Attempting standalone header translation (OPF based)...")
                 try:
                     # Check if translated_headers.txt already exists
                     translations_file = os.path.join(self.output_dir, "translated_headers.txt")
@@ -2871,7 +2842,49 @@ class EPUBCompiler:
                 os.environ.get('DISABLE_AUTOMATIC_COVER_CREATION', '0') != '1'
             )
             opf_cover = self._get_opf_cover_designation()
+            opf_path = opf_cover.get("opf_path", "")
+            self.log(
+                "📔 Cover discovery: automatic cover creation is "
+                f"{'ENABLED' if automatic_cover_enabled else 'DISABLED'}"
+            )
+            if opf_path:
+                self.log(
+                    "📔 Cover discovery: inspecting OPF package: "
+                    f"{os.path.basename(opf_path)}"
+                )
+                if opf_cover.get("read_error"):
+                    self.log(
+                        "⚠️ Cover discovery: OPF package could not be parsed: "
+                        f"{opf_cover['read_error']}"
+                    )
+                elif opf_cover.get("image_href"):
+                    self.log(
+                        "✅ Cover discovery: OPF explicitly designates cover image "
+                        f"'{opf_cover['image_href']}' via "
+                        f"{opf_cover.get('method') or 'package metadata'}"
+                    )
+                elif opf_cover.get("page_href"):
+                    self.log(
+                        "📔 Cover discovery: OPF designates cover page "
+                        f"'{opf_cover['page_href']}', but no separate cover image"
+                    )
+                else:
+                    self.log(
+                        "ℹ️ Cover discovery: OPF package has no recognized cover "
+                        "image or cover-page designation"
+                    )
+            else:
+                self.log(
+                    "ℹ️ Cover discovery: no OPF package was available for an "
+                    "authoritative cover designation"
+                )
+
             existing_cover_html = self._find_existing_cover_html(html_files, opf_cover)
+            if existing_cover_html:
+                self.log(
+                    "✅ Cover discovery: reusable image-bearing cover HTML found: "
+                    f"{existing_cover_html}"
+                )
 
             first_image_html = None
             if (
@@ -2881,17 +2894,22 @@ class EPUBCompiler:
             ):
                 # The broad "first spine HTML has an image" rule is deliberately
                 # only a fallback when automatic cover generation is disabled.
+                self.log(
+                    "📔 Cover fallback: automatic creation is disabled and no "
+                    "OPF cover image/reusable cover page was found; attempting "
+                    "the first image-bearing HTML fallback"
+                )
                 first_image_html = self._first_opf_spine_html_with_image(html_files)
+                if not first_image_html:
+                    self.log(
+                        "ℹ️ Cover fallback: no image-bearing HTML file was found"
+                    )
 
             reused_cover_html = existing_cover_html or first_image_html
             self._reused_cover_html = reused_cover_html
             preferred_cover_names: List[str] = []
             if opf_cover.get("image_href"):
                 preferred_cover_names.append(opf_cover["image_href"])
-                self.log(
-                    f"📔 OPF cover priority: {opf_cover['image_href']} "
-                    f"({opf_cover.get('method') or 'package metadata'})"
-                )
             if reused_cover_html:
                 preferred_cover_names.extend(
                     self._html_image_references(reused_cover_html)
@@ -2939,6 +2957,10 @@ class EPUBCompiler:
                     f"generating one: {reused_cover_html}"
                 )
             elif should_generate_cover_page:
+                self.log(
+                    "📔 Cover fallback: automatic creation selected image "
+                    f"'{cover_file_for_generated_page}'; generating cover.xhtml"
+                )
                 cover_page = self._create_cover_page(book, cover_file_for_generated_page, processed_images, css_items, metadata)
                 if cover_page:
                     spine.insert(0, cover_page)
@@ -2946,6 +2968,16 @@ class EPUBCompiler:
                 self.log(
                     "📔 Automatic cover page creation is disabled; retained "
                     "the selected image as OPF cover metadata only"
+                )
+            elif automatic_cover_enabled:
+                self.log(
+                    "ℹ️ Cover fallback: automatic creation found no usable image; "
+                    "no synthetic cover page was generated"
+                )
+            else:
+                self.log(
+                    "ℹ️ Cover fallback: automatic creation is disabled and the "
+                    "first-image HTML fallback found no usable cover"
                 )
             
             # Check stop flag
@@ -3988,24 +4020,7 @@ class EPUBCompiler:
             import zipfile
             
             with zipfile.ZipFile(epub_path, 'r') as zf:
-                # Find content.opf (might be in different locations)
-                opf_file = None
-                for name in zf.namelist():
-                    if name.endswith('content.opf'):
-                        opf_file = name
-                        break
-                
-                if not opf_file:
-                    # Try META-INF/container.xml to find content.opf
-                    try:
-                        container = zf.read('META-INF/container.xml')
-                        # Parse container.xml to find content.opf location
-                        container_tree = ET.fromstring(container)
-                        rootfile = container_tree.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile')
-                        if rootfile is not None:
-                            opf_file = rootfile.get('full-path')
-                    except:
-                        pass
+                opf_file = find_epub_opf_member(zf)
                 
                 if opf_file:
                     opf_content = zf.read(opf_file)
@@ -4030,31 +4045,13 @@ class EPUBCompiler:
         self,
         html_files: Optional[List[str]] = None,
     ) -> Optional[str]:
-        """Return the first OPF spine HTML when it contains an image element.
+        """Return the first image-bearing HTML, preferring OPF reading order.
 
         The translated files are normally flattened and prefixed with
-        ``response_``, so match them to the first content.opf spine entry by
-        normalized basename rather than assuming the OPF href still exists on
-        disk. Without a readable content.opf and matching translated document,
-        retain the existing automatic-cover behavior.
+        ``response_``, so match OPF entries by normalized basename rather than
+        assuming their original hrefs still exist on disk. If the OPF is absent
+        or incomplete, scan the remaining workspace HTML in its supplied order.
         """
-        opf_path = self._find_opf_path()
-        if not opf_path:
-            return None
-
-        opf_order = self._parse_opf_file(opf_path)
-        if not opf_order:
-            return None
-
-        try:
-            first_opf_name = min(opf_order.items(), key=lambda item: item[1])[0]
-        except (TypeError, ValueError):
-            return None
-
-        first_core = self._normalize_core_name(first_opf_name)
-        if not first_core:
-            return None
-
         candidates = list(html_files or [])
         if not candidates:
             try:
@@ -4066,23 +4063,43 @@ class EPUBCompiler:
             except OSError:
                 return None
 
+        ordered_candidates: List[str] = []
+        seen = set()
+        opf_path = self._find_opf_path()
+        opf_order = self._parse_opf_file(opf_path) if opf_path else None
+        if opf_order:
+            by_core: Dict[str, List[str]] = {}
+            for name in candidates:
+                by_core.setdefault(self._normalize_core_name(name), []).append(name)
+            for opf_name, _position in sorted(
+                opf_order.items(),
+                key=lambda item: item[1],
+            ):
+                core = self._normalize_core_name(opf_name)
+                for name in by_core.get(core, []):
+                    if name not in seen:
+                        ordered_candidates.append(name)
+                        seen.add(name)
+
+        # Include unmapped files and support workspaces with no readable OPF.
+        for name in candidates:
+            if name not in seen:
+                ordered_candidates.append(name)
+                seen.add(name)
+
         disk_filename = next(
             (
-                name
-                for name in candidates
-                if self._normalize_core_name(name) == first_core
+                name for name in ordered_candidates
+                if self._html_image_references(name)
             ),
             None,
         )
         if not disk_filename:
             return None
 
-        if not self._html_image_references(disk_filename):
-            return None
-
         self.log(
-            "📔 Automatic cover fallback accepted — first OPF "
-            f"spine document already contains an image: {disk_filename}"
+            "✅ Cover fallback: first image-bearing HTML accepted"
+            f"{' in OPF reading order' if opf_order else ''}: {disk_filename}"
         )
         return disk_filename
 
@@ -4090,7 +4107,7 @@ class EPUBCompiler:
         self,
         html_files: Optional[List[str]] = None,
     ) -> bool:
-        """Compatibility boolean wrapper for the first-spine image fallback."""
+        """Compatibility boolean wrapper for the image-bearing HTML fallback."""
         return bool(self._first_opf_spine_html_with_image(html_files))
 
     def _find_html_files(self) -> List[str]:
@@ -5558,18 +5575,31 @@ img {
                         return safe_name
                 return None
 
-            for preferred_name in preferred_cover_names or []:
+            preferred_cover_names = [
+                name for name in (preferred_cover_names or []) if name
+            ]
+            for preferred_name in preferred_cover_names:
                 cover_file = resolve_cover_name(preferred_name)
                 if cover_file:
                     self.log(
                         f"📔 Using designated cover image: {preferred_name} -> {cover_file}"
                     )
                     break
+            if preferred_cover_names and not cover_file:
+                self.log(
+                    "⚠️ Cover discovery: designated cover image reference(s) "
+                    "could not be resolved after image renaming: "
+                    + ", ".join(str(name) for name in preferred_cover_names)
+                )
 
             # Find a heuristic cover only when automatic creation is enabled.
             # Respect user preference to disable automatic cover creation
             disable_auto_cover = os.environ.get('DISABLE_AUTOMATIC_COVER_CREATION', '0') == '1'
             if processed_images and not cover_file and not disable_auto_cover and not skip_automatic_cover:
+                self.log(
+                    "📔 Cover fallback: attempting automatic image selection "
+                    "(rename-map cover name → cover/front filename → first image)"
+                )
                 # Prefer original source names from image_rename_map.json. This
                 # preserves cover identity after extraction renames cover.jpg to
                 # a chapter-based filename such as p-cover_img_1.jpg.
@@ -5601,6 +5631,17 @@ img {
                     first_original = sorted(processed_images.keys(), key=_numeric_key)[0]
                     cover_file = processed_images[first_original]
                     self.log(f"📔 Using first image (numerically sorted) as cover: {cover_file}")
+            elif not cover_file and not processed_images:
+                self.log(
+                    "ℹ️ Cover fallback: no processed images are available for "
+                    "cover selection"
+                )
+            elif not cover_file and (disable_auto_cover or skip_automatic_cover):
+                self.log(
+                    "ℹ️ Cover fallback: automatic image selection was not run "
+                    "because automatic cover creation is disabled or an HTML "
+                    "cover fallback is being used"
+                )
             
             self.log(f"✅ Processed {len(processed_images)} images successfully")
             
@@ -6463,25 +6504,7 @@ img {
                     return names_by_key.get(candidate.casefold())
 
                 # 1) container.xml -> OPF -> manifest NCX and EPUB 3 nav items.
-                opf_path = None
-                try:
-                    container = zf.read('META-INF/container.xml')
-                    tree = ET.fromstring(container)
-                    rootfile = tree.find(
-                        './/{urn:oasis:names:tc:opendocument:xmlns:container}rootfile'
-                    )
-                    if rootfile is not None:
-                        opf_path = names_by_key.get(
-                            (rootfile.get('full-path') or '').casefold()
-                        )
-                except Exception:
-                    opf_path = None
-
-                if not opf_path:
-                    opf_path = next(
-                        (name for name in names if name.lower().endswith('.opf')),
-                        None,
-                    )
+                opf_path = find_epub_opf_member(zf)
 
                 if opf_path:
                     try:

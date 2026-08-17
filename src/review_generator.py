@@ -28,6 +28,7 @@ except ImportError:
     ebooklib = None
 
 from bs4 import BeautifulSoup
+from epub_package import find_epub_opf_member
 
 
 # ─── tokenizer setup ────────────────────────────────────────────────────
@@ -166,11 +167,7 @@ def _get_spine_ordered_html_files(epub_path: str, log_fn: Callable = print) -> L
     try:
         with zipfile.ZipFile(epub_path, 'r') as zf:
             # Find OPF
-            opf_name = None
-            for name in zf.namelist():
-                if name.lower().endswith('.opf'):
-                    opf_name = name
-                    break
+            opf_name = find_epub_opf_member(zf)
 
             if not opf_name:
                 # No OPF — just grab all xhtml/html files in order

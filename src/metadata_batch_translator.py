@@ -34,6 +34,7 @@ from epub_metadata_utils import extract_dc_metadata
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from language_options import TARGET_LANGUAGES
 from translation_artifacts import update_translation_artifact_progress
+from epub_package import find_epub_opf_member
 import re
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
@@ -1752,9 +1753,8 @@ class MetadataBatchTranslatorUI:
         
         try:
             with zipfile.ZipFile(epub_path, 'r') as zf:
-                for name in zf.namelist():
-                    if name.lower().endswith('.opf'):
-                        opf_content = zf.read(name)
+                if (opf_name := find_epub_opf_member(zf)):
+                        opf_content = zf.read(opf_name)
                         soup = BeautifulSoup(opf_content, 'xml')
                         
                         # Keep repeatable Dublin Core fields (notably subject)
@@ -1774,8 +1774,6 @@ class MetadataBatchTranslatorUI:
                                     name = name[8:]
                                 
                                 metadata_fields[name] = content
-                        
-                        break
                         
         except Exception as e:
             self.gui.append_log(f"Error reading EPUB metadata: {e}")
@@ -4145,25 +4143,10 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
             opf_content = None
             opf_path = None
             
-            for name in zf.namelist():
-                if name.endswith('.opf'):
-                    opf_path = name
-                    opf_content = zf.read(name)
-                    log(f"📋 Found OPF file: {name}")
-                    break
-            
-            if not opf_content:
-                try:
-                    container = zf.read('META-INF/container.xml')
-                    tree = ET.fromstring(container)
-                    rootfile = tree.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile')
-                    if rootfile is not None:
-                        opf_path = rootfile.get('full-path')
-                        if opf_path:
-                            opf_content = zf.read(opf_path)
-                            log(f"📋 Found OPF via container.xml: {opf_path}")
-                except:
-                    pass
+            opf_path = find_epub_opf_member(zf)
+            if opf_path:
+                opf_content = zf.read(opf_path)
+                log(f"📋 Found OPF package: {opf_path}")
             
             # Parse OPF to get spine order
             spine_order = []

@@ -8455,7 +8455,7 @@ Do not stop after the glossary."""
                 # Skip excluded extensions
                 if any(lower_name.endswith(ext) for ext in excluded_extensions):
                     continue
-                if lower_name in excluded_names:
+                if lower_name in excluded_names or lower_name.endswith('.opf'):
                     continue
                 try:
                     # Read as bytes so we do not mutate line endings or strip
@@ -8620,7 +8620,7 @@ Do not stop after the glossary."""
                 lower_name = name.lower()
                 if any(lower_name.endswith(ext) for ext in excluded_extensions):
                     continue
-                if lower_name in excluded_names:
+                if lower_name in excluded_names or lower_name.endswith('.opf'):
                     continue
                 candidate_paths.append(path)
 

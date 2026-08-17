@@ -41,6 +41,7 @@ from translation_artifacts import (
     translation_artifacts_are_recycled_linked,
     update_translation_artifact_progress,
 )
+from epub_package import find_epub_opf_member, find_opf_path
 
 
 DEEPSEEK_V4_EFFORT_OPTIONS = ("none", "low", "high", "max")
@@ -217,7 +218,7 @@ def _rename_output_files_for_retain(gui, retain: bool, output_dir: str = None):
 
     When *retain* is True (toggle ON):
         - Remove the ``response_`` prefix from each file.
-        - Restore the extension from content.opf (strip stacked extensions
+        - Restore the extension from the OPF package (strip stacked extensions
           like ``.html.html`` or ``.htm.xhtml`` first).
 
     When *retain* is False (toggle OFF):
@@ -225,7 +226,7 @@ def _rename_output_files_for_retain(gui, retain: bool, output_dir: str = None):
         - Replace the file extension with ``.html`` (strip stacked
           extensions first).
 
-    Does **nothing** if content.opf is not found in the output directory.
+    Does **nothing** if no OPF package is found in the output directory.
     """
     import xml.etree.ElementTree as _ET
 
@@ -276,9 +277,9 @@ def _rename_output_files_for_retain(gui, retain: bool, output_dir: str = None):
     if not output_dir or not os.path.isdir(output_dir):
         return ('no_opf',)
 
-    opf_path = os.path.join(output_dir, 'content.opf')
-    if not os.path.exists(opf_path):
-        # Fallback: extract content.opf from the source EPUB directly.
+    opf_path = find_opf_path(output_dir)
+    if not opf_path:
+        # Fallback: extract the package document from the source EPUB directly.
         # This handles the case where the output dir doesn't have it yet
         # (first run, cleaned output, etc.).
         #
@@ -344,22 +345,22 @@ def _rename_output_files_for_retain(gui, retain: bool, output_dir: str = None):
             import zipfile as _zf
             try:
                 with _zf.ZipFile(_epub, 'r') as zf:
-                    # Find content.opf inside the EPUB (may be at root or inside OEBPS/)
-                    opf_candidates = [n for n in zf.namelist() if n.lower().endswith('content.opf')]
-                    if opf_candidates:
+                    opf_member = find_epub_opf_member(zf)
+                    if opf_member:
                         # Extract to output dir so subsequent calls find it immediately
-                        _opf_member = opf_candidates[0]
                         os.makedirs(output_dir, exist_ok=True)
-                        _opf_data = zf.read(_opf_member)
+                        _opf_data = zf.read(opf_member)
+                        _opf_basename = os.path.basename(opf_member.replace('\\', '/'))
+                        opf_path = os.path.join(output_dir, _opf_basename)
                         with open(opf_path, 'wb') as _wf:
                             _wf.write(_opf_data)
             except Exception:
                 pass
 
-        if not os.path.exists(opf_path):
+        if not opf_path or not os.path.exists(opf_path):
             return ('no_opf',)
 
-    # Parse content.opf to build a set of original basenames + extensions
+    # Parse the OPF package to build original basenames + extensions.
     try:
         tree = _ET.parse(opf_path)
         root = tree.getroot()
@@ -871,7 +872,7 @@ class HeaderTranslationHelpDialog(QDialog):
             {
                 "title": "📂 Standalone Mode",
                 "content": [
-                    "• Uses content.opf-based exact mapping for precise chapter matching",
+                    "• Uses OPF-based exact mapping for precise chapter matching",
                     "• Translates chapters with matching names (ignores 'response_' prefix and extensions)",
                     "• The regular translation logic uses this logic as well"
                 ]
@@ -8131,7 +8132,7 @@ def _create_prompt_management_section(self, parent):
             msg_box.setWindowTitle("Translate Headers")
             msg_box.setText("Start standalone header translation?")
             msg_box.setInformativeText(
-                "EPUB headers use content.opf-based exact matching. PDF headers "
+                "EPUB headers use OPF-based exact matching. PDF headers "
                 "use the extracted bookmark-section HTML files."
             )
             msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
@@ -8187,7 +8188,7 @@ def _create_prompt_management_section(self, parent):
     
     # Description for the buttons
     button_desc = QLabel(
-        "Standalone mode: EPUB uses content.opf mapping; PDF uses extracted h1-h6 headers."
+        "Standalone mode: EPUB uses OPF mapping; PDF uses extracted h1-h6 headers."
     )
     button_desc.setStyleSheet("color: gray; font-size: 10pt;")
     button_desc.setContentsMargins(20, 2, 0, 10)
@@ -8681,7 +8682,7 @@ def _create_prompt_management_section(self, parent):
     retain_cb.toggled.connect(_on_retain_toggle)
     retain_cb.setToolTip(
         "Keep the original chapter filename/extension instead of adding 'response_' and replacing the extension with '.html'.\n"
-        "Requires content.opf in the output folder; does nothing otherwise."
+        "Requires an OPF package in the output folder; does nothing otherwise."
     )
 
     rename_btn = QPushButton("Rename Files")
@@ -8719,7 +8720,7 @@ def _create_prompt_management_section(self, parent):
                 rename_btn.setText(f"✅ {result[1]} files renamed")
                 winsound.MessageBeep(winsound.MB_OK)
             elif result and result[0] == 'no_opf':
-                rename_btn.setText("📁 No content.opf found")
+                rename_btn.setText("📁 No OPF package found")
                 winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
             else:
                 rename_btn.setText("📄 No files to rename")

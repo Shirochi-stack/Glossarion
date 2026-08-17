@@ -137,6 +137,7 @@ datas.append(('WhereIsMyOutput.png', '.'))
 app_files = [
     ('manga_ocr_io.py', '.'),
     ('gemini_policy.py', '.'),
+    ('epub_package.py', '.'),
     # Core GUI
     ('translator_gui.py', '.'),
     ('parallel_epub_glossary.py', '.'),
@@ -442,6 +443,7 @@ if platform.system() == 'Windows':
 app_modules = [
     'manga_ocr_io',
     'gemini_policy',
+    'epub_package',
     'TransateKRtoEN',
     'metadata_translation_worker',
     'subtitle_processor',

@@ -43,6 +43,7 @@ import requests
 import uuid
 from pathlib import Path
 from html_output_utils import ensure_utf8_html_document
+from epub_package import find_epub_opf_member
 
 try:
     from antigravity_proxy import clamp_output_tokens_for_model as _clamp_antigravity_output_tokens
@@ -1464,11 +1465,7 @@ class AsyncProcessingDialog:
 
             spine_map = {}
             with zipfile.ZipFile(epub_path, "r") as zf:
-                opf_name = None
-                for name in zf.namelist():
-                    if name.lower().endswith(".opf"):
-                        opf_name = name
-                        break
+                opf_name = find_epub_opf_member(zf)
                 if not opf_name:
                     return spine_map
 

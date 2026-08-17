@@ -13,6 +13,7 @@ import zipfile
 from io import StringIO
 from urllib.parse import unquote
 from xml.etree import ElementTree as ET
+from epub_package import find_epub_opf_member
 
 try:
     from glossary_compressor import _text_contains_term
@@ -306,15 +307,7 @@ def html_to_text(markup):
 
 
 def _read_epub_opf(zf):
-    try:
-        container = ET.fromstring(zf.read("META-INF/container.xml"))
-        ns = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
-        rootfile = container.find(".//c:rootfile", ns)
-        if rootfile is not None and rootfile.get("full-path"):
-            return rootfile.get("full-path")
-    except Exception:
-        pass
-    return next((name for name in zf.namelist() if name.lower().endswith(".opf")), None)
+    return find_epub_opf_member(zf)
 
 
 def _epub_member_path(opf_path, href):

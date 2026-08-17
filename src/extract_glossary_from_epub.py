@@ -32,6 +32,7 @@ from glossary_refinement import (
     refinement_enabled as _glossary_refinement_enabled,
 )
 from glossary_usage import compact_extracted_entries
+from epub_package import find_epub_opf_member
 
 # Thread submission throttling (glossary batch) — mirrors translation behavior
 _glossary_thread_submit_lock = threading.Lock()
@@ -1477,8 +1478,7 @@ def _extract_raw_title_from_epub(epub_path: str) -> str:
         import zipfile
         from bs4 import BeautifulSoup
         with zipfile.ZipFile(epub_path, 'r') as zf:
-            # Find opf
-            opf_name = next((n for n in zf.namelist() if n.lower().endswith('.opf')), None)
+            opf_name = find_epub_opf_member(zf)
             if opf_name:
                 content = zf.read(opf_name).decode('utf-8', errors='ignore')
                 # Use BS4 with xml parser
@@ -7007,12 +7007,11 @@ def main(log_callback=None, stop_callback=None):
                 translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
 
                 with _zf.ZipFile(epub_path, 'r') as zf:
-                    # Find content.opf inside the EPUB
-                    opf_content = None
-                    for name in zf.namelist():
-                        if name.lower().endswith('.opf'):
-                            opf_content = zf.read(name).decode('utf-8')
-                            break
+                    opf_member = find_epub_opf_member(zf)
+                    opf_content = (
+                        zf.read(opf_member).decode('utf-8')
+                        if opf_member else None
+                    )
 
                 if opf_content:
                     _opf_root = _ET.fromstring(opf_content)
@@ -7526,11 +7525,11 @@ def main(log_callback=None, stop_callback=None):
                 import zipfile as _zf2
                 translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
                 with _zf2.ZipFile(epub_path, 'r') as zf:
-                    opf_content = None
-                    for name in zf.namelist():
-                        if name.lower().endswith('.opf'):
-                            opf_content = zf.read(name).decode('utf-8')
-                            break
+                    opf_member = find_epub_opf_member(zf)
+                    opf_content = (
+                        zf.read(opf_member).decode('utf-8')
+                        if opf_member else None
+                    )
                 if opf_content:
                     _opf_root2 = _ET2.fromstring(opf_content)
                     _ns2 = {'opf': 'http://www.idpf.org/2007/opf'}

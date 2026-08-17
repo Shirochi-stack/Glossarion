@@ -49,6 +49,7 @@ from epub_metadata_utils import (
     extract_dc_metadata,
     restore_truncated_repeatable_metadata,
 )
+from epub_package import find_epub_opf_member, find_opf_path
 
 _DEFAULT_SPECIAL_KEYWORDS = [
     'cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message',
@@ -1881,12 +1882,9 @@ def ensure_all_opf_chapters_extracted(zf, chapters, out):
     opf_chapters = []
     
     try:
-        # Find content.opf
-        opf_content = None
-        for name in zf.namelist():
-            if name.endswith('content.opf'):
-                opf_content = zf.read(name)
-                break
+        # The OPF filename is arbitrary; container.xml identifies the package.
+        opf_member = find_epub_opf_member(zf)
+        opf_content = zf.read(opf_member) if opf_member else None
         
         if not opf_content:
             return chapters  # No OPF, return original
@@ -2052,18 +2050,18 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     if progress_callback:
         progress_callback("Starting EPUB extraction...")
     
-    # First, extract and save content.opf for reference
-    for name in zf.namelist():
-        if name.endswith('.opf'):
-            try:
-                opf_content = zf.read(name).decode('utf-8', errors='ignore')
-                opf_output_path = os.path.join(output_dir, 'content.opf')
-                with open(opf_output_path, 'w', encoding='utf-8') as f:
-                    f.write(opf_content)
-                print(f"📋 Saved OPF file: {name} → content.opf")
-                break
-            except Exception as e:
-                print(f"⚠️ Could not save OPF file: {e}")
+    # First, save the authoritative OPF for reference under its source name.
+    opf_member = find_epub_opf_member(zf)
+    if opf_member:
+        try:
+            opf_content = zf.read(opf_member).decode('utf-8', errors='ignore')
+            opf_basename = os.path.basename(opf_member.replace('\\', '/'))
+            opf_output_path = os.path.join(output_dir, opf_basename)
+            with open(opf_output_path, 'w', encoding='utf-8') as f:
+                f.write(opf_content)
+            print(f"📋 Saved OPF package: {opf_member} → {opf_basename}")
+        except Exception as e:
+            print(f"⚠️ Could not save OPF package: {e}")
     
     # Get extraction mode from environment
     extraction_mode = os.getenv("EXTRACTION_MODE", "smart").lower()
@@ -2155,8 +2153,8 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     chapters, detected_language = _extract_chapters_universal(zf, extraction_mode, parser, progress_callback, pattern_manager)
     
     # Sort chapters according to OPF spine order if available
-    opf_path = os.path.join(output_dir, 'content.opf')
-    if os.path.exists(opf_path) and chapters:
+    opf_path = find_opf_path(output_dir)
+    if opf_path and chapters:
         print("📋 Sorting chapters according to OPF spine order...")
         chapters = _sort_by_opf_spine(chapters, opf_path)
         print(f"✅ Chapters sorted according to OPF reading order")
@@ -3611,9 +3609,8 @@ def _extract_epub_metadata(zf):
     except ImportError:
         xml_parser = 'xml'
     try:
-        for name in zf.namelist():
-            if name.lower().endswith('.opf'):
-                opf_content = zf.read(name)
+        if (opf_member := find_epub_opf_member(zf)):
+                opf_content = zf.read(opf_member)
                 soup = BeautifulSoup(opf_content, xml_parser)
                 
                 # Preserve every value for repeatable Dublin Core fields such
@@ -3696,8 +3693,6 @@ def _extract_epub_metadata(zf):
                     
                     if len(custom_keys) > 5:
                         print(f"   • ... and {len(custom_keys) - 5} more custom fields")
-                
-                break
                 
     except Exception as e:
         print(f"[WARNING] Failed to extract metadata: {e}")

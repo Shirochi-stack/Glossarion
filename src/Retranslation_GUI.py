@@ -78,6 +78,10 @@ _RAW_FOREIGN_TEXT_QA_RE = re.compile(
     r"_text_found_\d+_chars_",
     re.IGNORECASE,
 )
+from epub_package import (
+    find_epub_opf_member,
+    find_opf_path as find_workspace_opf_path,
+)
 _LLM_TOKEN_QA_RE = re.compile(
     r"(?:^|[^a-z0-9])llm[_\s-]*token[_\s-]*issue",
     re.IGNORECASE,
@@ -6498,26 +6502,10 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _find_opf_path(self, allow_deep_search=True):
         output_dir = self.output_dir or ""
-        if not output_dir or not os.path.isdir(output_dir):
-            return None
-        direct_candidates = [
-            os.path.join(output_dir, "content.opf"),
-            os.path.join(output_dir, "OEBPS", "content.opf"),
-            os.path.join(output_dir, "EPUB", "content.opf"),
-        ]
-        for path in direct_candidates:
-            if os.path.isfile(path):
-                return path
-        if not allow_deep_search:
-            return None
-        try:
-            for root_dir, _dirs, files in os.walk(output_dir):
-                for fname in files:
-                    if fname.lower().endswith(".opf"):
-                        return os.path.join(root_dir, fname)
-        except Exception:
-            return None
-        return None
+        return find_workspace_opf_path(
+            output_dir,
+            recursive=allow_deep_search,
+        )
 
     def _read_spine_positions(self, allow_deep_search=True):
         opf_path = self._find_opf_path(allow_deep_search=allow_deep_search)
@@ -13975,24 +13963,7 @@ class RetranslationMixin:
 
             if not os.path.isdir(source_path):
                 continue
-            opf_path = None
-            for direct in (
-                os.path.join(source_path, "content.opf"),
-                os.path.join(source_path, "OEBPS", "content.opf"),
-                os.path.join(source_path, "EPUB", "content.opf"),
-            ):
-                if os.path.isfile(direct):
-                    opf_path = direct
-                    break
-            if not opf_path:
-                try:
-                    for root_dir, _dirs, files in os.walk(source_path):
-                        match = next((name for name in files if name.lower().endswith(".opf")), None)
-                        if match:
-                            opf_path = os.path.join(root_dir, match)
-                            break
-                except Exception:
-                    opf_path = None
+            opf_path = find_workspace_opf_path(source_path)
             if not opf_path:
                 continue
             try:
@@ -17351,26 +17322,10 @@ class RetranslationMixin:
                 import zipfile
                 
                 with zipfile.ZipFile(file_path, 'r') as zf:
-                    # Find content.opf file
+                    # Find the package document declared by container.xml.
                     opf_path = None
                     opf_content = None
-                    
-                    # First try to find via container.xml
-                    try:
-                        container_content = zf.read('META-INF/container.xml')
-                        container_root = ET.fromstring(container_content)
-                        rootfile = container_root.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile')
-                        if rootfile is not None:
-                            opf_path = rootfile.get('full-path')
-                    except:
-                        pass
-                    
-                    # Fallback: search for content.opf
-                    if not opf_path:
-                        for name in zf.namelist():
-                            if name.endswith('content.opf'):
-                                opf_path = name
-                                break
+                    opf_path = find_epub_opf_member(zf)
                     
                     if opf_path:
                         opf_content = zf.read(opf_path)
@@ -18152,7 +18107,7 @@ class RetranslationMixin:
         title_layout.setContentsMargins(0, 0, 0, 0)
         
         if spine_chapters:
-            title_text = "Chapters from content.opf (in reading order):"
+            title_text = "Chapters from the OPF package (in reading order):"
         elif (
             str(file_path).lower().endswith('.pdf')
             and any(
@@ -19440,15 +19395,7 @@ class RetranslationMixin:
                     import zipfile
                     from xml.etree import ElementTree as ET
                     with zipfile.ZipFile(epub_path, 'r') as zf:
-                        opf_path = None
-                        try:
-                            container = ET.fromstring(zf.read('META-INF/container.xml'))
-                            ns = {'c': 'urn:oasis:names:tc:opendocument:xmlns:container'}
-                            rootfile = container.find('.//c:rootfile', ns)
-                            if rootfile is not None:
-                                opf_path = rootfile.get('full-path')
-                        except Exception:
-                            opf_path = next((n for n in zf.namelist() if n.endswith('.opf')), None)
+                        opf_path = find_epub_opf_member(zf)
                         
                         if not opf_path:
                             return cmap, 0, spine_index_map
