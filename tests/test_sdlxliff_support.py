@@ -3796,6 +3796,32 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         """
     ) is True
     assert js_value(
+        """
+        (() => {
+            const paragraph = document.querySelector('p');
+            const hosts = Array.from(
+                paragraph.querySelectorAll('[data-sdl-notepad-text]')
+            );
+            paragraph.style.width = '90px';
+            window.dispatchEvent(new Event('resize'));
+            const event = new MouseEvent('dblclick', {
+                bubbles: true, cancelable: true
+            });
+            hosts[hosts.length - 1].dispatchEvent(event);
+            const selection = window.getSelection();
+            const range = selection.getRangeAt(0);
+            const selectedWholeParagraph = range.startContainer === paragraph
+                && range.startOffset === 0
+                && range.endContainer === paragraph
+                && range.endOffset === paragraph.childNodes.length
+                && selection.toString() === paragraph.textContent;
+            paragraph.style.width = '';
+            window.dispatchEvent(new Event('resize'));
+            return event.defaultPrevented && selectedWholeParagraph;
+        })();
+        """
+    ) is True
+    assert js_value(
         "document.querySelector('[data-sdl-notepad-text]').getAttribute('contenteditable')"
     ) == "true"
     assert js_value(
@@ -3809,22 +3835,81 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
             const hosts = Array.from(
                 paragraph.querySelectorAll('[data-sdl-notepad-text]')
             );
+            hosts[0].dispatchEvent(new MouseEvent('mousedown', {
+                bubbles: true, cancelable: true
+            }));
             hosts[0].focus();
-            const firstSelectedWholeParagraph = paragraph.matches(':focus-within')
-                && getComputedStyle(hosts[0]).boxShadow === 'none';
+            const firstSelectedWholeParagraph = paragraph.matches(':focus-within');
             hosts[hosts.length - 1].focus();
             const secondHostKeepsSameParagraph = paragraph.matches(':focus-within');
             const style = getComputedStyle(paragraph);
             return JSON.stringify([
                 firstSelectedWholeParagraph,
                 secondHostKeepsSameParagraph,
-                style.outlineStyle === 'solid',
-                style.outlineColor.includes('70, 150, 220'),
-                style.boxShadow.includes('70, 150, 220')
+                !paragraph.hasAttribute('data-sdl-notepad-multiline-container'),
+                style.outlineStyle !== 'solid',
+                hosts.every(host => getComputedStyle(host).boxShadow.includes(
+                    '70, 150, 220'
+                )),
+                !style.borderBottomColor.includes('70, 150, 220')
             ]);
         })();
         """
-    ) == "[true,true,true,true,true]"
+    ) == "[true,true,true,true,true,true]"
+    assert js_value(
+        """
+        (() => {
+            const paragraph = document.querySelector('p');
+            const host = paragraph.querySelector('[data-sdl-notepad-text]');
+            paragraph.style.width = '90px';
+            window.dispatchEvent(new Event('resize'));
+            const wrappedStyle = getComputedStyle(paragraph);
+            const wrapped = paragraph.hasAttribute(
+                'data-sdl-notepad-multiline-container'
+            ) && wrappedStyle.outlineStyle === 'solid'
+                && wrappedStyle.outlineColor.includes('70, 150, 220');
+            paragraph.style.width = '';
+            window.dispatchEvent(new Event('resize'));
+            return wrapped;
+        })();
+        """
+    ) is True
+    assert js_value(
+        """
+        (() => {
+            const paragraph = document.createElement('p');
+            paragraph.style.margin = '0';
+            paragraph.style.width = '500px';
+            const host = document.createElement('span');
+            host.setAttribute('data-sdl-notepad-text', '1');
+            host.setAttribute('contenteditable', 'true');
+            host.textContent = 'One visible line';
+            paragraph.appendChild(host);
+            document.body.appendChild(paragraph);
+            host.focus();
+            const beforeHeight = paragraph.getBoundingClientRect().height;
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(host);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const enter = new KeyboardEvent('keydown', {
+                key: 'Enter', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(enter);
+            const afterHeight = paragraph.getBoundingClientRect().height;
+            const result = enter.defaultPrevented
+                && host.querySelectorAll(
+                    'br[data-sdl-notepad-user-tag="br"]'
+                ).length === 1
+                && afterHeight > beforeHeight + 2
+                && paragraph.hasAttribute('data-sdl-notepad-multiline-container');
+            paragraph.remove();
+            return result;
+        })();
+        """
+    ) is True
     assert js_value(
         """
         (() => {
@@ -4243,13 +4328,15 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
                 redo.defaultPrevented,
                 first.querySelector('br').getAttribute('data-sdl-notepad-user-tag') === 'br',
                 indicator.hasAttribute('data-sdl-notepad-user-tag-container'),
+                indicator.hasAttribute('data-sdl-notepad-multiline-container')
+                    && getComputedStyle(indicator).outlineStyle === 'solid',
                 document.activeElement === first
             ]);
         } catch (error) { return String(error && error.stack || error); }
         })();
         """
     )
-    assert enter_result == "[true,true,true,true,true,true,true,true,true,true,true]"
+    assert enter_result == "[true,true,true,true,true,true,true,true,true,true,true,true]"
     user_break_delete_result = js_value(
         """
         (() => { try {
@@ -4308,6 +4395,28 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
         """
     )
     assert user_break_delete_result == "[true,true,true,true,true,true,true,true,true,true,true]"
+    assert js_value(
+        """
+        (() => {
+            const paragraph = document.querySelector('p');
+            const host = paragraph.querySelector('[data-sdl-notepad-text]');
+            const userBreak = paragraph.querySelector(
+                'br[data-sdl-notepad-user-tag]'
+            );
+            if (!userBreak) return false;
+            const markerWasPresent = paragraph.hasAttribute(
+                'data-sdl-notepad-user-tag-container'
+            );
+            userBreak.remove();
+            host.dispatchEvent(new InputEvent('input', {
+                inputType: 'deleteContentBackward', bubbles: true
+            }));
+            return markerWasPresent
+                && !paragraph.hasAttribute('data-sdl-notepad-user-tag-container')
+                && !paragraph.querySelector('[data-sdl-notepad-user-tag]');
+        })();
+        """
+    ) is True
     one_above_break_fallback_result = js_value(
         """
         (() => { try {
@@ -4550,6 +4659,8 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert saved_soup.find(attrs={"data-sdl-notepad-original-had-text": True}) is None
     assert saved_soup.find(attrs={"data-sdl-notepad-user-empty-container": True}) is None
     assert saved_soup.find(attrs={"data-sdl-notepad-active-container": True}) is None
+    assert saved_soup.find(attrs={"data-sdl-notepad-multiline-container": True}) is None
+    assert saved_soup.find(attrs={"data-sdl-notepad-whole-selection": True}) is None
     assert saved_soup.find("img").get("src") == "../Images/chapter0001_img_1.png"
     assert saved_soup.find(id="sdl-notepad-source-tooltip") is None
     assert output_path.read_text(encoding="utf-8").count("Edited in the rendered page.") == 1

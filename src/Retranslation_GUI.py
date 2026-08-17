@@ -12023,6 +12023,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 const ROW_ATTR = 'data-sdl-notepad-row-index';
                 const STATUS_ATTR = 'data-sdl-notepad-status';
                 const ACTIVE_CONTAINER_ATTR = 'data-sdl-notepad-active-container';
+                const MULTILINE_CONTAINER_ATTR = 'data-sdl-notepad-multiline-container';
+                const WHOLE_SELECTION_ATTR = 'data-sdl-notepad-whole-selection';
                 const ORIGINAL_EDITABLE_ATTR = 'data-sdl-notepad-original-editable';
                 const ALLOWED_INLINE_TAGS = new Set(['STRONG', 'EM', 'U', 'B', 'I', 'BR']);
                 const blockedParents = 'script,style,noscript,template,textarea,select,option,svg,math';
@@ -12153,25 +12155,100 @@ class SDLXLIFFReviewDialog(QDialog):
                 const navigationBreaksIn = container => Array.from(
                     container.querySelectorAll('br')
                 );
+                const visualLineCount = container => {
+                    if (!container || !container.isConnected) return 0;
+                    try {
+                        const range = document.createRange();
+                        range.selectNodeContents(container);
+                        const lineTops = [];
+                        for (const rect of Array.from(range.getClientRects())) {
+                            // Ignore zero-width BR/caret fragments. A user BR
+                            // is handled explicitly below, including a trailing
+                            // break whose new line is still empty.
+                            if (rect.width < 0.5 || rect.height < 0.5) continue;
+                            if (!lineTops.some(top => Math.abs(top - rect.top) < 2)) {
+                                lineTops.push(rect.top);
+                            }
+                        }
+                        return lineTops.length;
+                    } catch (_error) {
+                        return 0;
+                    }
+                };
+                const refreshNavigationContainerStyle = container => {
+                    if (!container || !container.isConnected) return false;
+                    const hasUserLineBreak = !!container.querySelector(
+                        'br[' + USER_TAG_ATTR + ']'
+                    );
+                    const multiline = hasUserLineBreak || visualLineCount(container) > 1;
+                    if (multiline) {
+                        container.setAttribute(MULTILINE_CONTAINER_ATTR, '1');
+                    } else {
+                        container.removeAttribute(MULTILINE_CONTAINER_ATTR);
+                    }
+                    return multiline;
+                };
                 let activeNavigationContainer = null;
+                let wholeSelectionContainer = null;
+                let settingWholeSelection = false;
+                const clearWholeContainerSelection = () => {
+                    const container = wholeSelectionContainer;
+                    wholeSelectionContainer = null;
+                    if (!container || !container.isConnected
+                            || !container.hasAttribute(WHOLE_SELECTION_ATTR)) return;
+                    const original = container.getAttribute(WHOLE_SELECTION_ATTR);
+                    container.removeAttribute(WHOLE_SELECTION_ATTR);
+                    if (original === '__sdl_missing__') {
+                        container.removeAttribute('contenteditable');
+                    } else {
+                        container.setAttribute('contenteditable', original);
+                    }
+                };
+                const selectionCoversContainer = (selection, container) => {
+                    if (!selection || !selection.rangeCount || !container) return false;
+                    const range = selection.getRangeAt(0);
+                    return range.startContainer === container && range.startOffset === 0
+                        && range.endContainer === container
+                        && range.endOffset === container.childNodes.length;
+                };
                 const setActiveNavigationContainer = node => {
                     const host = editableHost(node);
                     const container = navigationContainer(host);
-                    if (container === activeNavigationContainer) return container;
+                    if (container === activeNavigationContainer) {
+                        refreshNavigationContainerStyle(container);
+                        return container;
+                    }
                     if (activeNavigationContainer && activeNavigationContainer.isConnected) {
                         activeNavigationContainer.removeAttribute(ACTIVE_CONTAINER_ATTR);
                     }
                     activeNavigationContainer = container || null;
                     if (activeNavigationContainer) {
                         activeNavigationContainer.setAttribute(ACTIVE_CONTAINER_ATTR, '1');
+                        refreshNavigationContainerStyle(activeNavigationContainer);
                     }
                     return activeNavigationContainer;
                 };
                 document.addEventListener('focusin', event => {
+                    const focusedContainer = navigationContainer(editableHost(event.target));
+                    if (wholeSelectionContainer
+                            && focusedContainer !== wholeSelectionContainer) {
+                        clearWholeContainerSelection();
+                    }
                     setActiveNavigationContainer(event.target);
+                }, true);
+                document.addEventListener('mousedown', () => {
+                    if (wholeSelectionContainer && !settingWholeSelection) {
+                        clearWholeContainerSelection();
+                    }
                 }, true);
                 document.addEventListener('selectionchange', () => {
                     const selection = window.getSelection();
+                    if (!settingWholeSelection && wholeSelectionContainer
+                            && !selectionCoversContainer(
+                                selection, wholeSelectionContainer
+                            )) {
+                        clearWholeContainerSelection();
+                    }
                     if (selection && selection.rangeCount) {
                         const selectionHost = editableHost(selection.anchorNode);
                         // Programmatic focus can briefly leave Chromium's old
@@ -12182,6 +12259,28 @@ class SDLXLIFFReviewDialog(QDialog):
                         }
                     }
                 });
+                document.addEventListener('dblclick', event => {
+                    const host = editableHost(event.target);
+                    const container = navigationContainer(host);
+                    if (!host || !container) return;
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    setActiveNavigationContainer(host);
+                    clearWholeContainerSelection();
+                    const originalEditable = container.hasAttribute('contenteditable')
+                        ? container.getAttribute('contenteditable') : '__sdl_missing__';
+                    container.setAttribute(WHOLE_SELECTION_ATTR, originalEditable);
+                    container.setAttribute('contenteditable', 'true');
+                    wholeSelectionContainer = container;
+                    const range = document.createRange();
+                    range.selectNodeContents(container);
+                    const selection = window.getSelection();
+                    settingWholeSelection = true;
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    settingWholeSelection = false;
+                    window.__sdlNotepadFormatSelection = null;
+                }, true);
                 const navigationPosition = (host, container) => {
                     const selection = window.getSelection();
                     if (!selection || !selection.rangeCount || !container) {
@@ -12357,6 +12456,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     injectionRedoReady = injectionRedoStack.length > 0;
                     refreshUserTagIndicator(action.container);
                     refreshUserEmptyIndicator(action.container);
+                    refreshNavigationContainerStyle(action.container);
                     const hosts = action.container.querySelectorAll(
                         '[' + EDIT_ATTR + ']'
                     );
@@ -12426,6 +12526,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     breakRedoReady = breakRedoStack.length > 0;
                     refreshUserTagIndicator(action.indicatorContainer);
                     refreshUserEmptyIndicator(action.indicatorContainer);
+                    refreshNavigationContainerStyle(action.indicatorContainer);
                     focusBreakAction(action, shouldInsert);
                     markDirty();
                     return true;
@@ -12451,6 +12552,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     recordBreakEdit(action);
                     refreshUserTagIndicator(indicatorContainer);
                     refreshUserEmptyIndicator(indicatorContainer);
+                    refreshNavigationContainerStyle(indicatorContainer);
                     range.setStartAfter(lineBreak);
                     range.collapse(true);
                     selection.removeAllRanges();
@@ -12541,6 +12643,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     lineBreak.remove();
                     refreshUserTagIndicator(action.indicatorContainer);
                     refreshUserEmptyIndicator(action.indicatorContainer);
+                    refreshNavigationContainerStyle(action.indicatorContainer);
                     focusBreakAction(action, false);
                     markDirty();
                     return true;
@@ -12785,6 +12888,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 initialIndicatorContainers.forEach(container => {
                     refreshUserTagIndicator(container);
                     refreshUserEmptyIndicator(container);
+                    refreshNavigationContainerStyle(container);
                 });
 
                 window.__sdlInjectMachineTranslation = (rowIndex, translated) => {
@@ -12850,14 +12954,39 @@ class SDLXLIFFReviewDialog(QDialog):
                     '[' + EDIT_ATTR + '][' + PLACEHOLDER_ATTR + '] {' +
                     ' display: inline-block; min-width: .65em; min-height: 1em; vertical-align: baseline; }' +
                     '[' + EDIT_ATTR + ']:focus { box-shadow: none; }' +
-                    '[' + ACTIVE_CONTAINER_ATTR + '],' +
-                    'p:focus-within,h1:focus-within,h2:focus-within,h3:focus-within,' +
-                    'h4:focus-within,h5:focus-within,h6:focus-within,li:focus-within,' +
-                    'td:focus-within,th:focus-within,caption:focus-within,' +
-                    'figcaption:focus-within,blockquote:focus-within {' +
+                    '[' + ACTIVE_CONTAINER_ATTR + ']:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
+                    'p:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
+                    'h1:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
+                    'h2:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
+                    'h3:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
+                    'h4:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
+                    'h5:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
+                    'h6:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
+                    'li:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
+                    'td:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
+                    'th:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
+                    'caption:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
+                    'figcaption:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '],' +
+                    'blockquote:focus-within:not([' + MULTILINE_CONTAINER_ATTR + ']) [' + EDIT_ATTR + '] {' +
+                    ' box-shadow: inset 0 -1px rgba(70,150,220,.72) !important; }' +
+                    '[' + ACTIVE_CONTAINER_ATTR + '][' + MULTILINE_CONTAINER_ATTR + '],' +
+                    'p[' + MULTILINE_CONTAINER_ATTR + ']:focus-within,' +
+                    'h1[' + MULTILINE_CONTAINER_ATTR + ']:focus-within,' +
+                    'h2[' + MULTILINE_CONTAINER_ATTR + ']:focus-within,' +
+                    'h3[' + MULTILINE_CONTAINER_ATTR + ']:focus-within,' +
+                    'h4[' + MULTILINE_CONTAINER_ATTR + ']:focus-within,' +
+                    'h5[' + MULTILINE_CONTAINER_ATTR + ']:focus-within,' +
+                    'h6[' + MULTILINE_CONTAINER_ATTR + ']:focus-within,' +
+                    'li[' + MULTILINE_CONTAINER_ATTR + ']:focus-within,' +
+                    'td[' + MULTILINE_CONTAINER_ATTR + ']:focus-within,' +
+                    'th[' + MULTILINE_CONTAINER_ATTR + ']:focus-within,' +
+                    'caption[' + MULTILINE_CONTAINER_ATTR + ']:focus-within,' +
+                    'figcaption[' + MULTILINE_CONTAINER_ATTR + ']:focus-within,' +
+                    'blockquote[' + MULTILINE_CONTAINER_ATTR + ']:focus-within {' +
                     ' outline: 1px solid rgba(70,150,220,.72) !important;' +
-                    ' outline-offset: 2px; border-radius: 2px;' +
-                    ' box-shadow: inset 0 -1px rgba(70,150,220,.72); }' +
+                    ' outline-offset: 2px; border-radius: 2px; }' +
+                    '[' + EDIT_ATTR + ']:has(br[' + USER_TAG_ATTR + ']:last-child)::after {' +
+                    ' content: "\\00a0"; opacity: 0; pointer-events: none; }' +
                     '[' + EDIT_ATTR + '][' + PLACEHOLDER_ATTR + ']:focus,' +
                     '[' + EDIT_ATTR + '][' + BREAK_ATTR + ']:focus { box-shadow: none; }' +
                     '[' + USER_TAG_CONTAINER_ATTR + '] {' +
@@ -13108,9 +13237,16 @@ class SDLXLIFFReviewDialog(QDialog):
                     // blocks, spans, links, and other tags are unwrapped before
                     // the document enters the save pipeline.
                     sanitizeHost(host);
-                    refreshUserEmptyIndicator(userTagContainer(host));
+                    const indicatorContainer = userTagContainer(host);
+                    refreshUserTagIndicator(indicatorContainer);
+                    refreshUserEmptyIndicator(indicatorContainer);
+                    refreshNavigationContainerStyle(navigationContainer(host));
                     markDirty();
                 }, true);
+
+                window.addEventListener('resize', () => {
+                    refreshNavigationContainerStyle(activeNavigationContainer);
+                });
 
                 const firstHost = document.body.querySelector('[' + EDIT_ATTR + ']');
                 if (firstHost) firstHost.focus();
@@ -13139,6 +13275,14 @@ class SDLXLIFFReviewDialog(QDialog):
                 source_tooltip.decompose()
             for wrapper in list(soup.find_all(attrs={"data-sdl-notepad-text": True})):
                 wrapper.unwrap()
+            for element in soup.find_all(attrs={"data-sdl-notepad-whole-selection": True}):
+                original = element.attrs.pop(
+                    "data-sdl-notepad-whole-selection", "__sdl_missing__"
+                )
+                if original == "__sdl_missing__":
+                    element.attrs.pop("contenteditable", None)
+                else:
+                    element["contenteditable"] = original
             for element in soup.find_all(attrs={"data-sdl-notepad-original-editable": True}):
                 original = element.attrs.pop("data-sdl-notepad-original-editable", "__sdl_missing__")
                 if original == "__sdl_missing__":
@@ -13152,6 +13296,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 "data-sdl-notepad-status",
                 "data-sdl-notepad-status-reason",
                 "data-sdl-notepad-active-container",
+                "data-sdl-notepad-multiline-container",
             ):
                 for element in soup.find_all(attrs={marker: True}):
                     element.attrs.pop(marker, None)
