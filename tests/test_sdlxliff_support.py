@@ -14,6 +14,8 @@ sys.path.insert(0, str(SRC))
 
 from lxml import etree
 from bs4 import BeautifulSoup
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import QFrame, QLabel, QListWidgetItem, QPlainTextEdit
 
 from sdlxliff_converter import convert_sdlxliff
@@ -872,6 +874,50 @@ def test_sdlxliff_review_ignores_empty_source_paragraphs_for_alignment(tmp_path)
         "Next time, I will return with the adult version cover.",
     ]
     assert all(row["source"] for row in piece["rows"])
+
+
+def test_sdlxliff_review_keeps_erased_translated_target_as_red_row(tmp_path):
+    output_name = "response_chapter_erased0001.html"
+    source_html = (
+        "<html><body>"
+        "<p>最初の原文です。</p>"
+        "<p>消去される翻訳の原文です。</p>"
+        "<p>最後の原文です。</p>"
+        "</body></html>"
+    )
+    target_html = (
+        "<html><body>"
+        "<p>First translated paragraph.</p>"
+        "<p></p>"
+        "<p>Last translated paragraph.</p>"
+        "</body></html>"
+    )
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter_erased0001.xhtml"},
+        source_html,
+        target_html,
+        raise_errors=True,
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(sidecar, 0, {"output_name": output_name})
+
+    assert piece["manual_editing"] is False
+    assert len(piece["rows"]) == 3
+    erased = piece["rows"][1]
+    assert erased["source"] == "消去される翻訳の原文です。"
+    assert erased["target"] == ""
+    assert erased["target_tag"] == "p"
+    assert erased["target_index"] == 1
+    assert erased["target_missing"] is False
+    assert erased["status"] == "red"
+    assert erased["reason"] == "empty"
+    assert [row["target_tag_label"] for row in piece["rows"]] == [
+        "p", "p(2)", "p(3)",
+    ]
+    assert piece["rows"][2]["target"] == "Last translated paragraph."
 
 
 def test_sdlxliff_review_user_text_in_empty_dom_slot_is_added_without_offset(tmp_path):
@@ -2039,6 +2085,49 @@ def test_sdlxliff_review_heading_to_paragraph_does_not_offset_following_paragrap
     assert piece["rows"][1]["target"] == "Translated paragraph one"
     assert piece["rows"][2]["source"] == "Source paragraph two"
     assert piece["rows"][2]["target"] == "Translated paragraph two"
+
+
+def test_sdlxliff_review_window_has_maximize_and_f11_without_minimize(tmp_path, qtbot):
+    class WindowStateReviewDialog(SDLXLIFFReviewDialog):
+        def isFullScreen(self):
+            return bool(getattr(self, "_fake_full_screen", False))
+
+        def isMaximized(self):
+            return bool(getattr(self, "_fake_maximized", False))
+
+        def showFullScreen(self):
+            self._fake_full_screen = True
+
+        def showNormal(self):
+            self._fake_full_screen = False
+            self._fake_maximized = False
+
+        def showMaximized(self):
+            self._fake_full_screen = False
+            self._fake_maximized = True
+
+    dialog = WindowStateReviewDialog(str(tmp_path), config={})
+    qtbot.addWidget(dialog)
+    flags = dialog.windowFlags()
+
+    assert bool(flags & Qt.WindowMaximizeButtonHint)
+    assert not bool(flags & Qt.WindowMinimizeButtonHint)
+    assert bool(flags & Qt.WindowCloseButtonHint)
+    assert dialog._full_screen_shortcut.key() == QKeySequence("F11")
+    assert dialog._full_screen_shortcut.context() == Qt.WindowShortcut
+
+    dialog._full_screen_shortcut.activated.emit()
+    assert dialog.isFullScreen() is True
+    dialog._full_screen_shortcut.activated.emit()
+    assert dialog.isFullScreen() is False
+    assert dialog.isMaximized() is False
+
+    dialog._fake_maximized = True
+    dialog._full_screen_shortcut.activated.emit()
+    assert dialog.isFullScreen() is True
+    dialog._full_screen_shortcut.activated.emit()
+    assert dialog.isFullScreen() is False
+    assert dialog.isMaximized() is True
 
 
 def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
@@ -4405,6 +4494,237 @@ def test_notepad_applies_persisted_edge_markers_before_user_interaction(tmp_path
     assert js_value("window.__sdlNotepadDirty") is False
 
 
+def test_notepad_erasing_translated_row_keeps_visible_red_empty_row(tmp_path, qtbot):
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+
+    output_name = "response_chapter0001.html"
+    source_html = (
+        "<html><body><p>消去しても残る必要がある原文です。</p>"
+        "<p>次の原文です。</p></body></html>"
+    )
+    target_html = (
+        "<html><body><p>Erase this translated row completely.</p>"
+        "<p>Keep this following translated row.</p></body></html>"
+    )
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0001.xhtml"},
+        source_html,
+        target_html,
+        raise_errors=True,
+    )
+    dialog = SDLXLIFFReviewDialog(
+        str(tmp_path),
+        sidecar,
+        config={SDLXLIFFReviewDialog.TWO_COLUMN_LAYOUT_CONFIG_KEY: False},
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(
+        lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
+        timeout=5000,
+    )
+    browser = dialog.rows_widget.findChild(QWebEngineView, "SdlReviewNotepadBrowser")
+    assert browser is not None
+
+    def js_value(script):
+        values = []
+        browser.page().runJavaScript(script, values.append)
+        qtbot.waitUntil(lambda: bool(values), timeout=5000)
+        return values[0]
+
+    qtbot.waitUntil(
+        lambda: js_value("document.querySelectorAll('[data-sdl-notepad-text]').length") >= 2,
+        timeout=5000,
+    )
+    browser.page().runJavaScript(
+        """
+        (() => {
+            const paragraph = document.querySelectorAll('p')[0];
+            const hosts = paragraph.querySelectorAll('[data-sdl-notepad-text]');
+            hosts.forEach(host => { host.textContent = ''; });
+            hosts[0].dispatchEvent(new InputEvent('input', {bubbles: true}));
+        })();
+        """
+    )
+    output_path = tmp_path / output_name
+    qtbot.waitUntil(
+        lambda: output_path.is_file()
+        and BeautifulSoup(
+            output_path.read_text(encoding="utf-8"), "html.parser"
+        ).find_all("p")[0].get_text(strip=True) == "",
+        timeout=5000,
+    )
+    qtbot.waitUntil(
+        lambda: len(dialog.pieces[0].get("rows") or []) == 2
+        and dialog.pieces[0]["rows"][0].get("status") == "red",
+        timeout=5000,
+    )
+    erased = dialog.pieces[0]["rows"][0]
+    assert erased["target"] == ""
+    assert erased["target_tag"] == "p"
+    assert erased["target_index"] == 0
+    assert erased["target_missing"] is False
+    assert erased["reason"] == "empty"
+    assert dialog.pieces[0]["rows"][1]["target"] == (
+        "Keep this following translated row."
+    )
+    assert js_value(
+        """
+        (() => {
+            const paragraph = document.querySelectorAll('p')[0];
+            const host = paragraph.querySelector('[data-sdl-notepad-text]');
+            return paragraph.isConnected
+                && paragraph.getAttribute('data-sdl-notepad-row-index') === '0'
+                && paragraph.getAttribute('data-sdl-notepad-status') === 'red'
+                && paragraph.hasAttribute('data-sdl-notepad-user-empty-container')
+                && paragraph.getBoundingClientRect().height > 0
+                && host.getBoundingClientRect().width > 0
+                && getComputedStyle(paragraph).boxShadow.includes('rgb(220, 53, 69)');
+        })();
+        """
+    ) is True
+
+
+def test_notepad_context_menu_previews_injects_and_flags_machine_translation(tmp_path, qtbot):
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+
+    output_name = "response_chapter0001.html"
+    source_html = (
+        "<html><body><p>これは機械翻訳の比較に十分な長さの原文です。</p></body></html>"
+    )
+    target_html = (
+        "<html><body><p>Existing human output with several ordinary words.</p></body></html>"
+    )
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0001.xhtml"},
+        source_html,
+        target_html,
+        raise_errors=True,
+    )
+    dialog = SDLXLIFFReviewDialog(
+        str(tmp_path),
+        sidecar,
+        config={
+            SDLXLIFFReviewDialog.TWO_COLUMN_LAYOUT_CONFIG_KEY: False,
+            SDLXLIFFReviewDialog.MACHINE_TRANSLATION_THRESHOLD_CONFIG_KEY: 1,
+        },
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(
+        lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
+        timeout=5000,
+    )
+    browser = dialog.rows_widget.findChild(QWebEngineView, "SdlReviewNotepadBrowser")
+    assert browser is not None
+
+    def js_value(script):
+        values = []
+        browser.page().runJavaScript(script, values.append)
+        qtbot.waitUntil(lambda: bool(values), timeout=5000)
+        return values[0]
+
+    qtbot.waitUntil(
+        lambda: js_value(
+            "document.querySelector('p')?.getAttribute('data-sdl-notepad-row-index')"
+        ) == "0",
+        timeout=5000,
+    )
+    piece = dialog.pieces[0]
+    row_data = piece["rows"][0]
+    preview = "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu."
+    dialog._set_row_tooltip_translation(piece, row_data, preview)
+
+    assert js_value(
+        """
+        (() => {
+            const host = document.querySelector('p [data-sdl-notepad-text]');
+            host.dispatchEvent(new MouseEvent('contextmenu', {
+                bubbles: true, cancelable: true
+            }));
+            return window.__sdlNotepadContextSnapshot?.rowIndex;
+        })();
+        """
+    ) == 0
+    dialog._request_notepad_browser_context_menu(browser, browser.rect().center())
+    qtbot.waitUntil(
+        lambda: getattr(dialog, "_review_text_context_menu", None) is not None,
+        timeout=5000,
+    )
+    context_menu = dialog._review_text_context_menu
+    preview_label = context_menu.findChild(
+        QLabel, "SdlNotepadContextMachineTranslationText"
+    )
+    assert preview_label is not None
+    assert preview_label.wordWrap() is True
+    assert preview_label.text() == preview
+    inject_action = context_menu.findChild(
+        QAction, "SdlNotepadInjectMachineTranslationAction"
+    )
+    assert inject_action is not None
+    assert inject_action.isEnabled() is True
+    visible_action_order = [
+        action.text().removeprefix("✓ ")
+        for action in context_menu.actions() if action.text()
+    ]
+    assert visible_action_order.index("Underline") < visible_action_order.index(
+        "📥  Inject Machine Translation"
+    ) < visible_action_order.index("Undo")
+    context_menu.close()
+    qtbot.waitUntil(
+        lambda: getattr(dialog, "_review_text_context_menu", None) is None,
+        timeout=2000,
+    )
+
+    dialog.flag_accuracy_btn.click()
+    qtbot.waitUntil(lambda: row_data.get("status") == "purple", timeout=2000)
+    qtbot.waitUntil(
+        lambda: js_value(
+            "document.querySelector('p')?.getAttribute('data-sdl-notepad-status')"
+        ) == "purple",
+        timeout=5000,
+    )
+    assert "rgb(185, 103, 255)" in js_value(
+        "getComputedStyle(document.querySelector('p')).boxShadow"
+    )
+
+    inject_menu = dialog._show_notepad_browser_context_menu(
+        browser,
+        browser.rect().center(),
+        row_data["source"],
+        {},
+        0,
+        0,
+    )
+    inject_menu.findChild(
+        QAction, "SdlNotepadInjectMachineTranslationAction"
+    ).trigger()
+    output_path = tmp_path / output_name
+    qtbot.waitUntil(
+        lambda: output_path.is_file()
+        and preview in output_path.read_text(encoding="utf-8"),
+        timeout=5000,
+    )
+    qtbot.waitUntil(
+        lambda: js_value("document.querySelector('p')?.innerText") == preview,
+        timeout=5000,
+    )
+    qtbot.waitUntil(
+        lambda: js_value(
+            "document.querySelector('p')?.getAttribute('data-sdl-notepad-status')"
+        ) == "green",
+        timeout=5000,
+    )
+    saved_soup = BeautifulSoup(output_path.read_text(encoding="utf-8"), "html.parser")
+    assert saved_soup.find("p").get_text(strip=True) == preview
+    assert saved_soup.find(attrs={"data-sdl-notepad-row-index": True}) is None
+    assert saved_soup.find(attrs={"data-sdl-notepad-status": True}) is None
+
+
 def test_manual_untranslated_notepad_renders_source_fallback_and_creates_output(tmp_path, qtbot):
     from PySide6.QtWebEngineWidgets import QWebEngineView
 
@@ -4522,7 +4842,9 @@ def test_notepad_browser_cleanup_removes_only_editor_scaffolding():
         '<body contenteditable="false" data-sdl-notepad-original-editable="true">'
         '<img src="file:///tmp/rendered.png" '
         'data-sdl-notepad-original-src="../Images/original.png">'
-        '<p data-sdl-notepad-source="Full source"><span contenteditable="plaintext-only" '
+        '<p data-sdl-notepad-source="Full source" data-sdl-notepad-row-index="0" '
+        'data-sdl-notepad-status="purple" data-sdl-notepad-status-reason="inaccurate">'
+        '<span contenteditable="plaintext-only" '
         'data-sdl-notepad-text="1" data-sdl-notepad-source="Full source">Edited </span>'
         '<strong><span contenteditable="true" data-sdl-notepad-text="1">bold</span></strong>'
         '<br></p><div id="sdl-notepad-source-tooltip">Full source</div></body></html>'
@@ -4535,6 +4857,9 @@ def test_notepad_browser_cleanup_removes_only_editor_scaffolding():
     assert soup.find(id="sdl-notepad-source-tooltip") is None
     assert soup.find(attrs={"data-sdl-notepad-text": True}) is None
     assert soup.find(attrs={"data-sdl-notepad-source": True}) is None
+    assert soup.find(attrs={"data-sdl-notepad-row-index": True}) is None
+    assert soup.find(attrs={"data-sdl-notepad-status": True}) is None
+    assert soup.find(attrs={"data-sdl-notepad-status-reason": True}) is None
     assert soup.find(attrs={"data-sdl-notepad-original-editable": True}) is None
     assert soup.find("body").get("contenteditable") == "true"
     assert soup.find("img").get("src") == "../Images/original.png"

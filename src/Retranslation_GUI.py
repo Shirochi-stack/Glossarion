@@ -1724,6 +1724,8 @@ class SDLXLIFFReviewDialog(QDialog):
         self._generation_stream_flush_timer.setSingleShot(True)
         self._generation_stream_flush_timer.timeout.connect(self._flush_generated_sidecar_stream_pieces)
         self._manual_refresh_shortcut = None
+        self._full_screen_shortcut = None
+        self._review_was_maximized_before_full_screen = False
         self._refresh_button_timer = None
         self._refresh_button_stop_timer = None
         self._refresh_button_frame = 0
@@ -1742,8 +1744,14 @@ class SDLXLIFFReviewDialog(QDialog):
         self._review_generation_progress.connect(self._apply_review_generation_progress)
         self.setWindowTitle("SDLXLIFF Source -> Output Review - Credits: OMORIO")
         self.setObjectName("SDLXLIFFReviewDialog")
+        self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
+        self.setWindowFlag(Qt.WindowMinimizeButtonHint, False)
+        self.setWindowFlag(Qt.WindowCloseButtonHint, True)
         self.setWindowModality(Qt.NonModal)
         self.resize(1500, 900)
+        self._full_screen_shortcut = QShortcut(QKeySequence("F11"), self)
+        self._full_screen_shortcut.setContext(Qt.WindowShortcut)
+        self._full_screen_shortcut.activated.connect(self._toggle_review_full_screen)
         self.setAutoFillBackground(True)
         self.setAttribute(Qt.WA_StyledBackground, True)
         palette = self.palette()
@@ -1911,6 +1919,17 @@ class SDLXLIFFReviewDialog(QDialog):
         self._manual_refresh_shortcut = QShortcut(QKeySequence("F5"), self)
         self._manual_refresh_shortcut.setContext(Qt.WindowShortcut)
         self._manual_refresh_shortcut.activated.connect(self._manual_review_refresh)
+
+    def _toggle_review_full_screen(self):
+        """Toggle F11 full screen while restoring the preceding window state."""
+        if self.isFullScreen():
+            if self._review_was_maximized_before_full_screen:
+                self.showMaximized()
+            else:
+                self.showNormal()
+            return
+        self._review_was_maximized_before_full_screen = self.isMaximized()
+        self.showFullScreen()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -7195,18 +7214,38 @@ class SDLXLIFFReviewDialog(QDialog):
                 ]
             else:
                 target_review_units = self._non_empty_text_units(target_units)
+
+            # Positional alignment must retain an empty target element even
+            # for an ordinary translated sidecar. Notepad edits leave the
+            # element itself in the DOM when its text is erased; dropping that
+            # empty unit here made the reviewer lose its target tag/index and
+            # made the row appear deleted instead of red. Keep the older
+            # non-empty list for fallback alignment when the two DOMs differ.
+            positional_target_review_units = target_review_units
+            if not manual_editing:
+                source_review_indexes = {
+                    unit.get("index") for unit in source_review_units
+                }
+                positional_target_review_units = [
+                    unit for unit in target_all_units
+                    if str(unit.get("text") or "").strip()
+                    or unit.get("index") in source_review_indexes
+                ]
+
+            target_annotation_units = positional_target_review_units
+
             def _annotate_target_units():
-                for unit in target_review_units:
+                for unit in target_annotation_units:
                     unit.pop("tag_label", None)
                     unit.pop("tag_ordinal", None)
                     unit.pop("translator_note", None)
                     unit.pop("translator_note_ordinal", None)
                 self._annotate_review_tag_labels([
-                    unit for unit in target_review_units
+                    unit for unit in target_annotation_units
                     if unit.get("index") not in translator_note_target_indexes
                 ])
                 translator_note_ordinal = 0
-                for unit in target_review_units:
+                for unit in target_annotation_units:
                     if unit.get("index") not in translator_note_target_indexes:
                         continue
                     translator_note_ordinal += 1
@@ -7227,10 +7266,12 @@ class SDLXLIFFReviewDialog(QDialog):
                 source_all_units,
                 target_all_units,
                 source_review_units,
-                target_review_units,
-                include_empty_target=manual_editing,
+                positional_target_review_units,
+                include_empty_target=True,
             )
             if aligned_units is None:
+                target_annotation_units = target_review_units
+                _annotate_target_units()
                 if manual_editing:
                     # Preserve the original manual-sidecar behavior when the
                     # two DOMs genuinely differ, while retaining non-empty
@@ -9077,6 +9118,48 @@ class SDLXLIFFReviewDialog(QDialog):
             "red": ("#3a2428", self.THEME["accent"], self.THEME["danger"], self.THEME["danger"], self.THEME["danger"]),
         }
 
+    @staticmethod
+    def _refresh_notepad_browser_row_statuses(browser, status_by_row):
+        """Patch Notepad DOM markers without reloading the edited document."""
+        normalized = {
+            str(int(row_index)): {
+                "status": str((row_state or {}).get("status") or "green"),
+                "reason": str((row_state or {}).get("reason") or ""),
+            }
+            for row_index, row_state in (status_by_row or {}).items()
+        }
+        status_by_row_json = json.dumps(normalized)
+        script = f"""
+            (() => {{
+                const statusByRow = {status_by_row_json};
+                let changed = 0;
+                document.querySelectorAll('[data-sdl-notepad-row-index]').forEach(element => {{
+                    const rowState = statusByRow[
+                        element.getAttribute('data-sdl-notepad-row-index')
+                    ];
+                    if (!rowState) return;
+                    element.setAttribute('data-sdl-notepad-status', rowState.status);
+                    if (rowState.reason) element.setAttribute(
+                        'data-sdl-notepad-status-reason', rowState.reason
+                    );
+                    else element.removeAttribute('data-sdl-notepad-status-reason');
+                    changed += 1;
+                }});
+                return changed;
+            }})();
+        """
+        try:
+            browser.page().runJavaScript(script)
+        except RuntimeError:
+            pass
+
+    @classmethod
+    def _refresh_notepad_browser_row_status(cls, browser, row_index, status, reason=""):
+        cls._refresh_notepad_browser_row_statuses(
+            browser,
+            {row_index: {"status": status, "reason": reason}},
+        )
+
     def _refresh_visible_review_row_status(self, piece_index, row_index):
         try:
             if piece_index < 0 or piece_index >= len(self.pieces):
@@ -9090,6 +9173,16 @@ class SDLXLIFFReviewDialog(QDialog):
             row_data = rows[row_index]
             page = self._piece_pages.get(piece_index) or self.rows_widget
             if page is None:
+                return
+            browser = page.findChild(QWidget, "SdlReviewNotepadBrowser")
+            if browser is not None:
+                self._refresh_notepad_browser_row_status(
+                    browser,
+                    row_index,
+                    row_data.get("status", "green"),
+                    row_data.get("reason", ""),
+                )
+                self._status_jump_indices.clear()
                 return
             frame = None
             for candidate in page.findChildren(QFrame, "SdlReviewRow"):
@@ -10882,6 +10975,17 @@ class SDLXLIFFReviewDialog(QDialog):
                     rebuilt, fill_untranslated=False
                 ),
             )
+        elif browser is not None:
+            self._refresh_notepad_browser_row_statuses(
+                browser,
+                {
+                    row_index: {
+                        "status": row_data.get("status", "green"),
+                        "reason": row_data.get("reason", ""),
+                    }
+                    for row_index, row_data in enumerate(rebuilt.get("rows") or [])
+                },
+            )
         try:
             self._last_review_signature = self._current_review_signature()
         except Exception:
@@ -11642,6 +11746,11 @@ class SDLXLIFFReviewDialog(QDialog):
 
             source_nodes = list(source_soup.find_all(_is_review_text_node))
             target_nodes = list(target_soup.find_all(_is_review_text_node))
+            rows_by_target_index = {
+                row_data.get("target_index"): (row_index, row_data)
+                for row_index, row_data in enumerate(piece.get("rows") or [])
+                if isinstance(row_data.get("target_index"), int)
+            }
             for node_index, target_node in enumerate(target_nodes):
                 if node_index >= len(source_nodes):
                     break
@@ -11664,12 +11773,29 @@ class SDLXLIFFReviewDialog(QDialog):
                 for line_break in target_breaks[:extra_break_count]:
                     line_break["data-sdl-notepad-user-tag"] = "br"
                 target_node["data-sdl-notepad-source"] = source_text
+                row_match = rows_by_target_index.get(node_index)
+                if row_match is not None:
+                    row_index, row_data = row_match
+                    target_node["data-sdl-notepad-row-index"] = str(row_index)
+                    target_node["data-sdl-notepad-status"] = str(
+                        row_data.get("status") or "green"
+                    )
+                    reason = str(row_data.get("reason") or "")
+                    if reason:
+                        target_node["data-sdl-notepad-status-reason"] = reason
                 if target_text or not fill_untranslated:
                     continue
                 # Replace the blank target node with the complete source node,
                 # not only get_text(), so inline/void markup remains visible.
                 replacement = copy.copy(source_node)
                 replacement["data-sdl-notepad-source"] = source_text
+                if row_match is not None:
+                    replacement["data-sdl-notepad-row-index"] = str(row_index)
+                    replacement["data-sdl-notepad-status"] = str(
+                        row_data.get("status") or "green"
+                    )
+                    if reason:
+                        replacement["data-sdl-notepad-status-reason"] = reason
                 target_node.replace_with(replacement)
 
             # Browser mode does its own rendering. Avoid prettify(), which can
@@ -11805,6 +11931,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 const ORIGINAL_TEXT_CONTAINER_ATTR = 'data-sdl-notepad-original-had-text';
                 const USER_EMPTY_CONTAINER_ATTR = 'data-sdl-notepad-user-empty-container';
                 const SOURCE_ATTR = 'data-sdl-notepad-source';
+                const ROW_ATTR = 'data-sdl-notepad-row-index';
+                const STATUS_ATTR = 'data-sdl-notepad-status';
                 const ORIGINAL_EDITABLE_ATTR = 'data-sdl-notepad-original-editable';
                 const ALLOWED_INLINE_TAGS = new Set(['STRONG', 'EM', 'U', 'B', 'I', 'BR']);
                 const blockedParents = 'script,style,noscript,template,textarea,select,option,svg,math';
@@ -12071,12 +12199,56 @@ class SDLXLIFFReviewDialog(QDialog):
                 let breakRedoStack = [];
                 let breakUndoReady = false;
                 let breakRedoReady = false;
+                let injectionUndoStack = [];
+                let injectionRedoStack = [];
+                let injectionUndoReady = false;
+                let injectionRedoReady = false;
+                const recordInjectionEdit = action => {
+                    injectionUndoStack.push(action);
+                    injectionRedoStack = [];
+                    injectionUndoReady = true;
+                    injectionRedoReady = false;
+                    breakUndoReady = false;
+                    breakRedoReady = false;
+                };
+                const replayInjectionHistory = redo => {
+                    const source = redo ? injectionRedoStack : injectionUndoStack;
+                    if (!source.length) return false;
+                    const action = source[source.length - 1];
+                    if (!action.container || !action.container.isConnected) return false;
+                    source.pop();
+                    action.container.innerHTML = redo
+                        ? action.afterHtml : action.beforeHtml;
+                    (redo ? injectionUndoStack : injectionRedoStack).push(action);
+                    injectionUndoReady = injectionUndoStack.length > 0;
+                    injectionRedoReady = injectionRedoStack.length > 0;
+                    refreshUserTagIndicator(action.container);
+                    refreshUserEmptyIndicator(action.container);
+                    const hosts = action.container.querySelectorAll(
+                        '[' + EDIT_ATTR + ']'
+                    );
+                    const host = hosts.length ? hosts[hosts.length - 1] : null;
+                    if (host) {
+                        try { host.focus({preventScroll: true}); }
+                        catch (_error) { host.focus(); }
+                        const selection = window.getSelection();
+                        const range = document.createRange();
+                        range.selectNodeContents(host);
+                        range.collapse(false);
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                    }
+                    markDirty();
+                    return true;
+                };
                 const recordBreakEdit = action => {
                     if (!breakUndoReady) breakUndoStack = [];
                     breakUndoStack.push(action);
                     breakRedoStack = [];
                     breakUndoReady = true;
                     breakRedoReady = false;
+                    injectionUndoReady = false;
+                    injectionRedoReady = false;
                 };
                 const insertRecordedBreak = action => {
                     if (!action.parent || !action.parent.isConnected) return false;
@@ -12329,6 +12501,8 @@ class SDLXLIFFReviewDialog(QDialog):
                         ? event.target : event.target && event.target.parentElement;
                     const sourceElement = element
                         ? element.closest('[' + SOURCE_ATTR + ']') : null;
+                    const rowElement = element
+                        ? element.closest('[' + ROW_ATTR + ']') : null;
                     const commandState = command => {
                         try { return !!document.queryCommandState(command); }
                         catch (_error) { return false; }
@@ -12357,6 +12531,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     window.__sdlNotepadContextSnapshot = {
                         source: sourceElement
                             ? sourceElement.getAttribute(SOURCE_ATTR) || '' : '',
+                        rowIndex: rowElement
+                            ? Number.parseInt(rowElement.getAttribute(ROW_ATTR), 10) : -1,
                         formats: {
                             bold: tagged('strong,b') || commandState('bold') || visuallyBold,
                             italic: tagged('em,i') || commandState('italic') || visuallyItalic,
@@ -12475,6 +12651,37 @@ class SDLXLIFFReviewDialog(QDialog):
                     refreshUserEmptyIndicator(container);
                 });
 
+                window.__sdlInjectMachineTranslation = (rowIndex, translated) => {
+                    const wanted = String(rowIndex);
+                    const container = Array.from(
+                        document.body.querySelectorAll('[' + ROW_ATTR + ']')
+                    ).find(element => element.getAttribute(ROW_ATTR) === wanted);
+                    if (!container) return false;
+                    const beforeHtml = container.innerHTML;
+                    const sourceText = container.getAttribute(SOURCE_ATTR) || '';
+                    while (container.firstChild) container.removeChild(container.firstChild);
+                    const textNode = document.createTextNode(String(translated || ''));
+                    container.appendChild(textNode);
+                    const host = makeHost(textNode, false, sourceText);
+                    recordInjectionEdit({
+                        container,
+                        beforeHtml,
+                        afterHtml: container.innerHTML
+                    });
+                    refreshUserTagIndicator(container);
+                    refreshUserEmptyIndicator(container);
+                    try { host.focus({preventScroll: true}); }
+                    catch (_error) { host.focus(); }
+                    const selection = window.getSelection();
+                    const range = document.createRange();
+                    range.selectNodeContents(host);
+                    range.collapse(false);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    markDirty();
+                    return true;
+                };
+
                 const style = document.createElement('style');
                 style.id = 'sdl-notepad-guard-style';
                 style.textContent =
@@ -12512,7 +12719,12 @@ class SDLXLIFFReviewDialog(QDialog):
                     '[' + USER_TAG_CONTAINER_ATTR + '] {' +
                     ' box-shadow: inset 3px 0 #d7a800 !important; }' +
                     '[' + USER_EMPTY_CONTAINER_ATTR + '] {' +
+                    ' min-height: 1em !important;' +
                     ' box-shadow: inset 3px 0 #dc3545 !important; }' +
+                    '[' + USER_EMPTY_CONTAINER_ATTR + '] [' + EDIT_ATTR + '] {' +
+                    ' display: inline-block; min-width: .65em; min-height: 1em; }' +
+                    '[' + STATUS_ATTR + '="purple"] {' +
+                    ' box-shadow: inset 4px 0 #b967ff !important; }' +
                     '#sdl-notepad-source-tooltip { position: fixed; display: none; z-index: 2147483647;' +
                     ' max-width: min(560px, calc(100vw - 32px)); padding: 9px 12px;' +
                     ' border: 1px solid #526173; border-radius: 6px; background: #15191f;' +
@@ -12633,6 +12845,10 @@ class SDLXLIFFReviewDialog(QDialog):
                     if (historyCommand && shortcutHost && selectionInside(shortcutHost)) {
                         event.preventDefault();
                         event.stopImmediatePropagation();
+                        if (historyCommand === 'undo' && injectionUndoReady
+                                && replayInjectionHistory(false)) return;
+                        if (historyCommand === 'redo' && injectionRedoReady
+                                && replayInjectionHistory(true)) return;
                         if (historyCommand === 'undo' && breakUndoReady
                                 && replayBreakHistory(false)) return;
                         if (historyCommand === 'redo' && breakRedoReady
@@ -12640,6 +12856,8 @@ class SDLXLIFFReviewDialog(QDialog):
                         document.execCommand(historyCommand, false, null);
                         breakUndoReady = false;
                         breakRedoReady = false;
+                        injectionUndoReady = false;
+                        injectionRedoReady = false;
                         markDirty();
                         return;
                     }
@@ -12723,6 +12941,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     if (!host) return;
                     breakUndoReady = false;
                     breakRedoReady = false;
+                    injectionUndoReady = false;
+                    injectionRedoReady = false;
                     // Keep only intentional strong/em/u markup. Browser-created
                     // blocks, spans, links, and other tags are unwrapped before
                     // the document enters the save pipeline.
@@ -12766,6 +12986,13 @@ class SDLXLIFFReviewDialog(QDialog):
                     element["contenteditable"] = original
             for element in soup.find_all(attrs={"data-sdl-notepad-source": True}):
                 element.attrs.pop("data-sdl-notepad-source", None)
+            for marker in (
+                "data-sdl-notepad-row-index",
+                "data-sdl-notepad-status",
+                "data-sdl-notepad-status-reason",
+            ):
+                for element in soup.find_all(attrs={marker: True}):
+                    element.attrs.pop(marker, None)
             for marker in (
                 "data-sdl-notepad-user-tag",
                 "data-sdl-notepad-user-tag-container",
@@ -12887,11 +13114,41 @@ class SDLXLIFFReviewDialog(QDialog):
         pos,
         source_text="",
         format_states=None,
+        piece_index=None,
+        row_index=None,
     ):
-        """Show browser edit actions plus the complete source text."""
+        """Show browser edit actions plus source and machine-preview context."""
         from PySide6.QtWebEngineCore import QWebEnginePage
 
         format_states = format_states if isinstance(format_states, dict) else {}
+        try:
+            piece_index = int(piece_index)
+            row_index = int(row_index)
+            if piece_index < 0 or row_index < 0:
+                raise IndexError
+            piece = self.pieces[piece_index]
+            row_data = (piece.get("rows") or [])[row_index]
+        except (TypeError, ValueError, IndexError):
+            piece = None
+            row_data = None
+
+        machine_translation = ""
+        machine_preview = "No machine translation preview is available for this row."
+        machine_state = ""
+        machine_detail = ""
+        if row_data is not None:
+            machine_translation = self._row_tooltip_translation(piece, row_data)
+            row_snapshot = self._review_row_snapshot(row_data)
+            machine_state = self._row_machine_translation_preview_state(row_snapshot)
+            machine_preview = (
+                self._row_machine_translation_preview_from_snapshot(row_snapshot)
+                or machine_preview
+            )
+            machine_detail = str(
+                row_data.get("tooltip_translation_error_detail")
+                or row_data.get("tooltip_translation_status")
+                or ""
+            )
 
         menu = QMenu(self)
         menu.setStyleSheet("""
@@ -12928,6 +13185,34 @@ class SDLXLIFFReviewDialog(QDialog):
         )
         source_layout.addWidget(source_header)
         source_layout.addWidget(source_label)
+
+        machine_header = QLabel("Machine translation preview", source_panel)
+        machine_header.setObjectName("SdlNotepadContextMachineTranslationHeader")
+        machine_header.setStyleSheet(
+            "color: #d8c99b; font-weight: bold; font-size: 9pt;"
+            if machine_state in {"pending", "error"}
+            else "color: #93c5fd; font-weight: bold; font-size: 9pt;"
+        )
+        machine_label = QLabel(str(machine_preview), source_panel)
+        machine_label.setObjectName("SdlNotepadContextMachineTranslationText")
+        machine_label.setTextFormat(Qt.PlainText)
+        machine_label.setWordWrap(True)
+        machine_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        machine_label.setMinimumWidth(320)
+        machine_label.setMaximumWidth(560)
+        machine_label.setToolTip(
+            self._wrapped_tooltip(machine_detail or machine_translation)
+        )
+        machine_label.setStyleSheet(
+            "color: #d8c99b; background: #2a2518; border: 1px dashed #8a6f2a; "
+            "border-left: 3px solid #d39e00; border-radius: 4px; padding: 8px 14px 8px 9px;"
+            if machine_state in {"pending", "error"}
+            else "color: #dbeafe; background: #172536; border: 1px solid #37536d; "
+            "border-left: 3px solid #5aa7d8; border-radius: 4px; padding: 8px 14px 8px 9px;"
+        )
+        source_layout.addSpacing(5)
+        source_layout.addWidget(machine_header)
+        source_layout.addWidget(machine_label)
         source_action = QWidgetAction(menu)
         source_action.setDefaultWidget(source_panel)
         menu.addAction(source_action)
@@ -12937,6 +13222,8 @@ class SDLXLIFFReviewDialog(QDialog):
             ("Bold", "format:bold"),
             ("Italic", "format:italic"),
             ("Underline", "format:underline"),
+            (None, None),
+            ("\U0001f4e5  Inject Machine Translation", "inject:machine-translation"),
             (None, None),
             ("Undo", QWebEnginePage.WebAction.Undo),
             ("Redo", QWebEnginePage.WebAction.Redo),
@@ -12953,6 +13240,20 @@ class SDLXLIFFReviewDialog(QDialog):
                 menu.addSeparator()
                 continue
             action = menu.addAction(label)
+            if web_action == "inject:machine-translation":
+                action.setObjectName("SdlNotepadInjectMachineTranslationAction")
+                action.setEnabled(
+                    bool(machine_translation) and machine_state == "translation"
+                    and piece is not None and row_data is not None
+                )
+                action.setToolTip(
+                    "Replace this row's output with the machine translation preview."
+                )
+                action.triggered.connect(
+                    lambda _checked=False, view=browser, pi=piece_index, ri=row_index:
+                        self._inject_notepad_machine_translation(view, pi, ri)
+                )
+                continue
             if isinstance(web_action, str) and web_action.startswith("format:"):
                 command = web_action.split(":", 1)[1]
                 action.setObjectName(
@@ -12994,6 +13295,48 @@ class SDLXLIFFReviewDialog(QDialog):
         menu.popup(browser.mapToGlobal(pos))
         return menu
 
+    def _inject_notepad_machine_translation(self, browser, piece_index, row_index):
+        """Inject a row preview into the live Notepad DOM, then save normally."""
+        try:
+            piece_index = int(piece_index)
+            row_index = int(row_index)
+            if piece_index < 0 or row_index < 0:
+                raise IndexError
+            piece = self.pieces[piece_index]
+            row_data = (piece.get("rows") or [])[row_index]
+            translated = self._row_tooltip_translation(piece, row_data).strip()
+        except (TypeError, ValueError, IndexError):
+            translated = ""
+        if not translated:
+            try:
+                self.save_status_label.setText("No machine translation preview")
+            except Exception:
+                pass
+            return
+
+        script = (
+            "window.__sdlInjectMachineTranslation ? "
+            f"window.__sdlInjectMachineTranslation({json.dumps(str(row_index))}, "
+            f"{json.dumps(translated)}) : false;"
+        )
+
+        def _injected(changed):
+            try:
+                if not bool(changed):
+                    self.save_status_label.setText("Machine translation injection failed")
+                    return
+                self.save_status_label.setText("Saving machine translation…")
+                self._capture_notepad_browser_html(
+                    browser, piece_index, only_dirty=True, flush=True
+                )
+            except RuntimeError:
+                pass
+
+        try:
+            browser.page().runJavaScript(script, _injected)
+        except RuntimeError:
+            pass
+
     @staticmethod
     def _apply_notepad_inline_format(browser, command):
         """Apply one whitelisted inline HTML format to the browser selection."""
@@ -13019,6 +13362,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 const element = document.elementFromPoint({x}, {y});
                 const sourceElement = element
                     ? element.closest('[data-sdl-notepad-source]') : null;
+                const rowElement = element
+                    ? element.closest('[data-sdl-notepad-row-index]') : null;
                 const commandState = command => {{
                     try {{ return !!document.queryCommandState(command); }}
                     catch (_error) {{ return false; }}
@@ -13059,6 +13404,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 return JSON.stringify({{
                     source: sourceElement
                         ? sourceElement.getAttribute('data-sdl-notepad-source') || '' : '',
+                    rowIndex: rowElement
+                        ? Number.parseInt(rowElement.getAttribute('data-sdl-notepad-row-index'), 10) : -1,
                     formats: {{
                         bold: commandState('bold')
                             || pointTagState('strong,b')
@@ -13087,6 +13434,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     pos,
                     context.get("source", ""),
                     context.get("formats", {}),
+                    browser.property("sdl_piece_index"),
+                    context.get("rowIndex", -1),
                 )
             except RuntimeError:
                 pass
@@ -13103,6 +13452,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
         browser = QWebEngineView()
         browser.setObjectName("SdlReviewNotepadBrowser")
+        browser.setProperty("sdl_piece_index", piece["index"])
         try:
             browser.settings().setAttribute(QWebEngineSettings.AutoLoadImages, True)
             browser.settings().setAttribute(
