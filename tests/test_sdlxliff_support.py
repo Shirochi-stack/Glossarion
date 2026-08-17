@@ -2126,6 +2126,37 @@ def test_sdlxliff_review_two_column_layout_defaults_on_and_reads_legacy_config()
     assert dialog._review_two_column_layout_enabled() is True
 
 
+def test_sdlxliff_review_notepad_status_jump_cycles_browser_markers():
+    class Page:
+        def __init__(self):
+            self.scripts = []
+
+        def runJavaScript(self, script, callback):
+            self.scripts.append(script)
+            callback({"index": len(self.scripts) - 1, "count": 2})
+
+    class Browser:
+        def __init__(self):
+            self._page = Page()
+
+        def page(self):
+            return self._page
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.piece_list = SimpleNamespace(currentRow=lambda: 4)
+    dialog._status_jump_indices = {}
+    browser = Browser()
+
+    dialog._jump_to_notepad_status(browser, "yellow")
+    dialog._jump_to_notepad_status(browser, "yellow")
+
+    assert "target.scrollIntoView" in browser._page.scripts[0]
+    assert "data-sdl-notepad-jump-highlight" in browser._page.scripts[0]
+    assert "const index = 0 % targets.length" in browser._page.scripts[0]
+    assert "const index = 1 % targets.length" in browser._page.scripts[1]
+    assert dialog._status_jump_indices[(4, "yellow")] == 1
+
+
 def test_sdlxliff_review_build_uses_machine_translation_for_top_skew(tmp_path):
     sidecar_dir = tmp_path / "SDLXLIFF"
     sidecar_dir.mkdir()
@@ -4382,7 +4413,7 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
             hosts[0].dispatchEvent(new InputEvent('input', {bubbles: true}));
             const markedRed = paragraph.hasAttribute(
                 'data-sdl-notepad-user-empty-container'
-            ) && getComputedStyle(paragraph).boxShadow.includes('rgb(220, 53, 69)');
+            ) && getComputedStyle(paragraph).borderLeftColor === 'rgb(220, 53, 69)';
             const originalEmptyStayedNeutral = !document.querySelector('#empty').hasAttribute(
                 'data-sdl-notepad-user-empty-container'
             );
@@ -5025,9 +5056,27 @@ def test_notepad_applies_persisted_edge_markers_before_user_interaction(tmp_path
         timeout=5000,
     )
     assert js_value(
-        "getComputedStyle(document.querySelector('#manual')).boxShadow"
-        ".includes('rgb(215, 168, 0)')"
+        "getComputedStyle(document.querySelector('#manual')).borderLeftColor"
+        " === 'rgb(215, 168, 0)'"
     ) is True
+    assert js_value(
+        "getComputedStyle(document.querySelector('#manual')).paddingLeft === '4px'"
+    ) is True
+    assert js_value(
+        "document.querySelector('#manual [data-sdl-notepad-text]').getBoundingClientRect().left "
+        ">= document.querySelector('#manual').getBoundingClientRect().left + 7"
+    ) is True
+    manual_status = js_value(
+        "document.querySelector('#manual').getAttribute('data-sdl-notepad-status')"
+    )
+    dialog._jump_to_status(manual_status)
+    qtbot.waitUntil(
+        lambda: js_value(
+            "document.querySelector('#manual').hasAttribute("
+            "'data-sdl-notepad-jump-highlight')"
+        ) is True,
+        timeout=5000,
+    )
 
     # Reopen the saved blank target without source fallback. This is the same
     # initialization path used when a normalization reload preserves a row the
@@ -5046,8 +5095,8 @@ def test_notepad_applies_persisted_edge_markers_before_user_interaction(tmp_path
         timeout=5000,
     )
     assert js_value(
-        "getComputedStyle(document.querySelector('#deleted')).boxShadow"
-        ".includes('rgb(220, 53, 69)')"
+        "getComputedStyle(document.querySelector('#deleted')).borderLeftColor"
+        " === 'rgb(220, 53, 69)'"
     ) is True
     assert js_value(
         "document.querySelector('#manual')?.hasAttribute("
@@ -5169,7 +5218,7 @@ def test_notepad_erasing_translated_row_keeps_visible_red_empty_row(tmp_path, qt
                 && paragraph.hasAttribute('data-sdl-notepad-user-empty-container')
                 && paragraph.getBoundingClientRect().height > 0
                 && host.getBoundingClientRect().width > 0
-                && getComputedStyle(paragraph).boxShadow.includes('rgb(220, 53, 69)');
+                && getComputedStyle(paragraph).borderLeftColor === 'rgb(220, 53, 69)';
         })();
         """
     ) is True
@@ -5445,11 +5494,13 @@ def test_notepad_filled_text_empty_source_paragraph_becomes_translator_note(
                 'p[data-sdl-notepad-source-empty]'
             );
             const host = paragraph.querySelector('[data-sdl-notepad-text]');
-            host.textContent = {json.dumps(note_text)};
+            // Native typing adds text alongside the source placeholder BR;
+            // it does not replace the host's entire innerHTML.
+            host.insertBefore(document.createTextNode({json.dumps(note_text)}), host.firstChild);
             host.dispatchEvent(new InputEvent('input', {{bubbles: true}}));
             return paragraph.hasAttribute(
                 'data-sdl-notepad-user-tag-container'
-            );
+            ) && paragraph.querySelector('br:not([data-sdl-notepad-user-tag])') === null;
         }})();
         """
     ) is True
@@ -5807,9 +5858,9 @@ def test_notepad_context_menu_previews_injects_and_flags_machine_translation(tmp
         ) == "purple",
         timeout=5000,
     )
-    assert "rgb(185, 103, 255)" in js_value(
-        "getComputedStyle(document.querySelector('p')).boxShadow"
-    )
+    assert js_value(
+        "getComputedStyle(document.querySelector('p')).borderLeftColor"
+    ) == "rgb(185, 103, 255)"
 
     inject_menu = dialog._show_notepad_browser_context_menu(
         browser,
@@ -5991,8 +6042,73 @@ def test_notepad_initial_html_keeps_translation_and_expands_source_markup_for_em
     assert [line_break.get("data-sdl-notepad-user-tag") for line_break in reopened_breaks] == [
         "br",
         "br",
-        None,
     ]
+
+
+def test_notepad_filled_empty_source_slot_drops_only_structural_placeholder_break():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    document = dialog._notepad_initial_document_html(
+        {
+            "source_html": "<html><body><p><br/></p><p><br/></p></body></html>",
+            "target_html": (
+                "<html><body><p>TEST<br/></p>"
+                "<p>First line<br/>Second line<br/></p></body></html>"
+            ),
+            "rows": [],
+            "user_added_target_indexes": [0, 1],
+        },
+        fill_untranslated=False,
+    )
+    paragraphs = BeautifulSoup(document, "html.parser").find_all("p")
+
+    assert paragraphs[0].get_text(strip=True) == "TEST"
+    assert paragraphs[0].find("br") is None
+    assert paragraphs[0].get("data-sdl-notepad-normalized-placeholder") == "1"
+    assert len(paragraphs[1].find_all("br")) == 1
+    assert paragraphs[1].find("br").get("data-sdl-notepad-user-tag") == "br"
+
+
+def test_notepad_reopen_auto_saves_stale_translator_note_placeholder_break(
+    tmp_path, qtbot
+):
+    output_name = "response_stale_note.html"
+    sidecar = _shared_write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "stale_note.xhtml"},
+        "<html><body><p>Source.</p><p><br/></p></body></html>",
+        "<html><body><p>Translation.</p><p>TEST<br/></p></body></html>",
+        raise_errors=True,
+    )
+    tree = etree.parse(sidecar)
+    file_element = tree.xpath("//*[local-name()='file']")[0]
+    file_element.set("{urn:glossarion:sdlxliff}manual-editing", "true")
+    file_element.set("{urn:glossarion:sdlxliff}user-added-target-indexes", "[1]")
+    tree.write(sidecar, encoding="utf-8", xml_declaration=True)
+
+    dialog = SDLXLIFFReviewDialog(
+        str(tmp_path),
+        sidecar,
+        config={SDLXLIFFReviewDialog.TWO_COLUMN_LAYOUT_CONFIG_KEY: False},
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(
+        lambda: bool(dialog.pieces) and 0 in dialog._piece_render_complete,
+        timeout=5000,
+    )
+
+    def stored_note_is_normalized():
+        target = etree.parse(sidecar).xpath("//*[local-name()='target']")[0]
+        paragraphs = BeautifulSoup(target.text or "", "html.parser").find_all("p")
+        paragraph = paragraphs[1] if len(paragraphs) > 1 else None
+        return (
+            paragraph is not None
+            and paragraph.get_text(strip=True) == "TEST"
+            and paragraph.find("br") is None
+        )
+
+    qtbot.waitUntil(stored_note_is_normalized, timeout=5000)
 
 
 def test_notepad_browser_cleanup_removes_only_editor_scaffolding():
@@ -6002,6 +6118,8 @@ def test_notepad_browser_cleanup_removes_only_editor_scaffolding():
         '<img src="file:///tmp/rendered.png" '
         'data-sdl-notepad-original-src="../Images/original.png">'
         '<p data-sdl-notepad-source="Full source" data-sdl-notepad-row-index="0" '
+        'data-sdl-notepad-jump-highlight="1" '
+        'data-sdl-notepad-normalized-placeholder="1" '
         'data-sdl-notepad-status="purple" data-sdl-notepad-status-reason="inaccurate">'
         '<span contenteditable="plaintext-only" '
         'data-sdl-notepad-text="1" data-sdl-notepad-source="Full source">Edited </span>'
@@ -6019,6 +6137,8 @@ def test_notepad_browser_cleanup_removes_only_editor_scaffolding():
     assert soup.find(attrs={"data-sdl-notepad-row-index": True}) is None
     assert soup.find(attrs={"data-sdl-notepad-status": True}) is None
     assert soup.find(attrs={"data-sdl-notepad-status-reason": True}) is None
+    assert soup.find(attrs={"data-sdl-notepad-jump-highlight": True}) is None
+    assert soup.find(attrs={"data-sdl-notepad-normalized-placeholder": True}) is None
     assert soup.find(attrs={"data-sdl-notepad-original-editable": True}) is None
     assert soup.find("body").get("contenteditable") == "true"
     assert soup.find("img").get("src") == "../Images/original.png"

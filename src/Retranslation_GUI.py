@@ -5989,6 +5989,10 @@ class SDLXLIFFReviewDialog(QDialog):
         if page is None or page is self.loading_page:
             return
         try:
+            browser = page.findChild(QWidget, "SdlReviewNotepadBrowser")
+            if browser is not None:
+                self._jump_to_notepad_status(browser, status)
+                return
             frames = [
                 frame for frame in page.findChildren(QFrame, "SdlReviewRow")
                 if frame.property("sdl_status") == status
@@ -6013,6 +6017,52 @@ class SDLXLIFFReviewDialog(QDialog):
                 pass
             QTimer.singleShot(0, lambda target=target: self.scroll.ensureWidgetVisible(target, 0, 18))
         except Exception:
+            pass
+
+    def _jump_to_notepad_status(self, browser, status):
+        """Cycle status legend navigation inside the browser-backed Notepad page."""
+        try:
+            piece_row = self.piece_list.currentRow()
+        except Exception:
+            piece_row = -1
+        jump_key = (piece_row, str(status))
+        requested_index = int(self._status_jump_indices.get(jump_key, -1)) + 1
+        wanted_json = json.dumps(str(status))
+        script = f"""
+            (() => {{
+                const wanted = {wanted_json};
+                const marker = 'data-sdl-notepad-jump-highlight';
+                const targets = Array.from(document.querySelectorAll(
+                    '[data-sdl-notepad-status]'
+                )).filter(element =>
+                    element.getAttribute('data-sdl-notepad-status') === wanted
+                );
+                document.querySelectorAll('[' + marker + ']').forEach(
+                    element => element.removeAttribute(marker)
+                );
+                if (!targets.length) return null;
+                const index = {requested_index} % targets.length;
+                const target = targets[index];
+                target.setAttribute(marker, '1');
+                target.scrollIntoView({{block: 'center', inline: 'nearest'}});
+                window.clearTimeout(window.__sdlNotepadJumpHighlightTimer);
+                window.__sdlNotepadJumpHighlightTimer = window.setTimeout(() => {{
+                    if (target.isConnected) target.removeAttribute(marker);
+                }}, 1400);
+                return {{index, count: targets.length}};
+            }})();
+        """
+
+        def _jumped(result):
+            try:
+                if isinstance(result, dict) and int(result.get("count", 0)) > 0:
+                    self._status_jump_indices[jump_key] = int(result.get("index", 0))
+            except Exception:
+                pass
+
+        try:
+            browser.page().runJavaScript(script, _jumped)
+        except RuntimeError:
             pass
 
     def _clear_review_row_highlight(self):
@@ -12173,9 +12223,31 @@ class SDLXLIFFReviewDialog(QDialog):
                 if isinstance(row_data.get("target_index"), int)
             }
             user_added_indexes = set(piece.get("user_added_target_indexes") or [])
+
+            def _remove_user_block_trailing_breaks(target_node):
+                """Drop BR-only tails; Enter-at-end is represented by a sibling P."""
+                removed = 0
+                while True:
+                    meaningful_children = [
+                        child for child in target_node.contents
+                        if not (isinstance(child, str) and not child.strip())
+                    ]
+                    if not meaningful_children:
+                        break
+                    tail = meaningful_children[-1]
+                    if str(getattr(tail, "name", "") or "").casefold() != "br":
+                        break
+                    tail.decompose()
+                    removed += 1
+                return removed
+
             for node_index, target_node in enumerate(target_nodes):
                 row_match = rows_by_target_index.get(node_index)
                 row_data = row_match[1] if row_match is not None else None
+                user_block = bool(
+                    node_index in user_added_indexes
+                    or (row_data and row_data.get("translator_note"))
+                )
                 source_index = (
                     row_data.get("source_index")
                     if row_data is not None
@@ -12197,15 +12269,48 @@ class SDLXLIFFReviewDialog(QDialog):
                 target_text = self._normalize_review_text(
                     target_node.get_text(" ", strip=True)
                 )
+                if user_block and target_text:
+                    # Notepad represents Enter at the end as a separate user
+                    # paragraph. Therefore a filled TN ending in <br> can only
+                    # be a stale empty-slot placeholder from the source DOM.
+                    if _remove_user_block_trailing_breaks(target_node):
+                        target_node[
+                            "data-sdl-notepad-normalized-placeholder"
+                        ] = "1"
                 source_break_count = (
                     len(source_node.find_all("br"))
                     if source_node is not None
                     else 0
                 )
+                if user_block and target_text:
+                    # Every remaining break belongs to the translator note and
+                    # must remain deletable, even when it reused a source slot.
+                    source_break_count = 0
                 target_breaks = list(target_node.find_all("br"))
                 extra_break_count = max(
                     0, len(target_breaks) - source_break_count
                 )
+                if (
+                    source_node is not None
+                    and not source_text
+                    and target_text
+                    and source_break_count
+                ):
+                    # A <br> inside a text-empty source paragraph is only its
+                    # empty-block placeholder. Once that slot contains a
+                    # translator note, retaining the placeholder creates a
+                    # phantom trailing line every time Notepad is reopened.
+                    placeholder_end = min(
+                        len(target_breaks), extra_break_count + source_break_count
+                    )
+                    for placeholder_break in target_breaks[
+                        extra_break_count:placeholder_end
+                    ]:
+                        placeholder_break.decompose()
+                    target_breaks = (
+                        target_breaks[:extra_break_count]
+                        + target_breaks[placeholder_end:]
+                    )
                 # Source EPUBs commonly end every paragraph with one
                 # structural <br>. Notepad Enter inserts before that trailing
                 # break. Re-identify the excess prefix even for older sidecars
@@ -12219,10 +12324,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     # does not make it a translated paragraph. If the user
                     # types here, Notepad promotes the slot to a TN(N).
                     target_node["data-sdl-notepad-source-empty"] = "1"
-                if (
-                    node_index in user_added_indexes
-                    or bool(row_data and row_data.get("translator_note"))
-                ):
+                if user_block:
                     target_node["data-sdl-notepad-user-block"] = "1"
                 if row_match is not None:
                     row_index, row_data = row_match
@@ -12394,6 +12496,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 const MULTILINE_CONTAINER_ATTR = 'data-sdl-notepad-multiline-container';
                 const WHOLE_SELECTION_ATTR = 'data-sdl-notepad-whole-selection';
                 const ORIGINAL_EDITABLE_ATTR = 'data-sdl-notepad-original-editable';
+                const JUMP_HIGHLIGHT_ATTR = 'data-sdl-notepad-jump-highlight';
+                const NORMALIZED_PLACEHOLDER_ATTR = 'data-sdl-notepad-normalized-placeholder';
                 const TEXT_UNIT_SELECTOR = 'h1,h2,h3,h4,h5,h6,p,li,hr,div.u';
                 const NESTED_TEXT_UNIT_SELECTOR = 'h1,h2,h3,h4,h5,h6,p,li,hr';
                 const ALLOWED_INLINE_TAGS = new Set(['STRONG', 'EM', 'U', 'B', 'I', 'BR']);
@@ -12909,6 +13013,16 @@ class SDLXLIFFReviewDialog(QDialog):
                     } else {
                         container.removeAttribute(USER_TAG_CONTAINER_ATTR);
                     }
+                };
+                const removeFilledEmptySourcePlaceholders = container => {
+                    if (!container || !container.isConnected
+                            || !container.hasAttribute(SOURCE_EMPTY_ATTR)
+                            || !container.textContent.trim()) return false;
+                    const placeholders = Array.from(container.querySelectorAll(
+                        'br:not([' + USER_TAG_ATTR + '])'
+                    ));
+                    placeholders.forEach(lineBreak => lineBreak.remove());
+                    return placeholders.length > 0;
                 };
                 const refreshUserEmptyIndicator = container => {
                     if (!container || !container.isConnected) return;
@@ -13468,6 +13582,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     initialIndicatorContainers.add(container);
                 });
                 initialIndicatorContainers.forEach(container => {
+                    removeFilledEmptySourcePlaceholders(container);
                     refreshUserTagIndicator(container);
                     refreshUserEmptyIndicator(container);
                     refreshNavigationContainerStyle(container);
@@ -13579,14 +13694,20 @@ class SDLXLIFFReviewDialog(QDialog):
                     '[' + EDIT_ATTR + '][' + BREAK_ATTR + ']:focus {' +
                     ' box-shadow: none; background-image: none !important; }' +
                     '[' + USER_TAG_CONTAINER_ATTR + '] {' +
-                    ' box-shadow: inset 3px 0 #d7a800 !important; }' +
+                    ' box-sizing: border-box !important; border-left: 4px solid #d7a800 !important;' +
+                    ' padding-left: 4px !important; box-shadow: none !important; }' +
                     '[' + USER_EMPTY_CONTAINER_ATTR + '] {' +
                     ' min-height: 1em !important;' +
-                    ' box-shadow: inset 3px 0 #dc3545 !important; }' +
+                    ' box-sizing: border-box !important; border-left: 4px solid #dc3545 !important;' +
+                    ' padding-left: 4px !important; box-shadow: none !important; }' +
                     '[' + USER_EMPTY_CONTAINER_ATTR + '] [' + EDIT_ATTR + '] {' +
                     ' display: inline-block; min-width: .65em; min-height: 1em; }' +
                     '[' + STATUS_ATTR + '="purple"] {' +
-                    ' box-shadow: inset 4px 0 #b967ff !important; }' +
+                    ' box-sizing: border-box !important; border-left: 4px solid #b967ff !important;' +
+                    ' padding-left: 4px !important; box-shadow: none !important; }' +
+                    '[' + JUMP_HIGHLIGHT_ATTR + '] {' +
+                    ' outline: 2px solid #69b7ff !important; outline-offset: 2px;' +
+                    ' border-radius: 2px; }' +
                     '#sdl-notepad-source-tooltip { position: fixed; display: none; z-index: 2147483647;' +
                     ' max-width: min(560px, calc(100vw - 32px)); padding: 9px 12px;' +
                     ' border: 1px solid #526173; border-radius: 6px; background: #15191f;' +
@@ -13837,12 +13958,13 @@ class SDLXLIFFReviewDialog(QDialog):
                     // blocks, spans, links, and other tags are unwrapped before
                     // the document enters the save pipeline.
                     sanitizeHost(host);
+                    const indicatorContainer = userTagContainer(host);
+                    removeFilledEmptySourcePlaceholders(indicatorContainer);
                     if (host.textContent || host.querySelector('br')) {
                         host.removeAttribute(PLACEHOLDER_ATTR);
                     } else {
                         host.setAttribute(PLACEHOLDER_ATTR, '1');
                     }
-                    const indicatorContainer = userTagContainer(host);
                     refreshUserTagIndicator(indicatorContainer);
                     refreshUserEmptyIndicator(indicatorContainer);
                     refreshNavigationContainerStyle(navigationContainer(host));
@@ -13854,6 +13976,11 @@ class SDLXLIFFReviewDialog(QDialog):
                 });
 
                 const firstHost = document.body.querySelector('[' + EDIT_ATTR + ']');
+                // Persist one-time repairs of stale trailing placeholder BRs
+                // even when the user only opens and closes Notepad.
+                if (document.body.querySelector('[' + NORMALIZED_PLACEHOLDER_ATTR + ']')) {
+                    markDirty();
+                }
                 if (firstHost) firstHost.focus();
                 else document.body.focus();
                 return true;
@@ -13939,6 +14066,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 "data-sdl-notepad-status-reason",
                 "data-sdl-notepad-active-container",
                 "data-sdl-notepad-multiline-container",
+                "data-sdl-notepad-jump-highlight",
+                "data-sdl-notepad-normalized-placeholder",
             ):
                 for element in soup.find_all(attrs={marker: True}):
                     element.attrs.pop(marker, None)
