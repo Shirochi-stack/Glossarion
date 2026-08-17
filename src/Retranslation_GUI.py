@@ -10537,7 +10537,17 @@ class SDLXLIFFReviewDialog(QDialog):
         page = self._piece_pages.get(piece_index)
         browser = page.findChild(QWidget, "SdlReviewNotepadBrowser") if page is not None else None
         if browser is not None and saved_html != html_text and hasattr(browser, "setHtml"):
-            self._set_notepad_browser_html(browser, piece, saved_html)
+            # Saved HTML intentionally has all editor-only source metadata
+            # stripped. Rebuild the rendered document from the refreshed
+            # piece so hover/context-menu source text survives a normalization
+            # reload. Do not refill a row the user deliberately emptied.
+            self._set_notepad_browser_html(
+                browser,
+                rebuilt,
+                self._notepad_initial_document_html(
+                    rebuilt, fill_untranslated=False
+                ),
+            )
         try:
             self._last_review_signature = self._current_review_signature()
         except Exception:
@@ -11275,8 +11285,8 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception as exc:
             self.save_status_label.setText(f"Save failed: {exc}")
 
-    def _notepad_initial_document_html(self, piece):
-        """Return readable target HTML with source markup in untranslated nodes."""
+    def _notepad_initial_document_html(self, piece, *, fill_untranslated=True):
+        """Attach source metadata and optionally show source markup for blank targets."""
         source_html = self._unescape_html_document(piece.get("source_html") or "")
         target_html = self._unescape_html_document(piece.get("target_html") or "")
         try:
@@ -11308,8 +11318,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 target_text = self._normalize_review_text(
                     target_node.get_text(" ", strip=True)
                 )
-                if target_text:
-                    target_node["data-sdl-notepad-source"] = source_text
+                target_node["data-sdl-notepad-source"] = source_text
+                if target_text or not fill_untranslated:
                     continue
                 # Replace the blank target node with the complete source node,
                 # not only get_text(), so inline/void markup remains visible.
@@ -11445,6 +11455,10 @@ class SDLXLIFFReviewDialog(QDialog):
                 const EDIT_ATTR = 'data-sdl-notepad-text';
                 const PLACEHOLDER_ATTR = 'data-sdl-notepad-placeholder';
                 const BREAK_ATTR = 'data-sdl-notepad-break';
+                const USER_TAG_ATTR = 'data-sdl-notepad-user-tag';
+                const USER_TAG_CONTAINER_ATTR = 'data-sdl-notepad-user-tag-container';
+                const ORIGINAL_TEXT_CONTAINER_ATTR = 'data-sdl-notepad-original-had-text';
+                const USER_EMPTY_CONTAINER_ATTR = 'data-sdl-notepad-user-empty-container';
                 const SOURCE_ATTR = 'data-sdl-notepad-source';
                 const ORIGINAL_EDITABLE_ATTR = 'data-sdl-notepad-original-editable';
                 const ALLOWED_INLINE_TAGS = new Set(['STRONG', 'EM', 'U', 'B', 'I', 'BR']);
@@ -11484,18 +11498,23 @@ class SDLXLIFFReviewDialog(QDialog):
                     const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
                     while (walker.nextNode()) nodes.push(walker.currentNode);
                     if (!nodes.length) {
-                        host.appendChild(document.createTextNode(''));
-                        nodes.push(host.firstChild);
+                        // A break-only host already has a firstChild (`<br>`),
+                        // whose nodeValue is null. Keep the actual caret text
+                        // node instead of accidentally treating that element
+                        // like text during Up/Down row navigation.
+                        const caretNode = document.createTextNode('');
+                        host.appendChild(caretNode);
+                        nodes.push(caretNode);
                     }
                     const boundaryAt = rawOffset => {
                         let offset = Math.max(0, Number(rawOffset) || 0);
                         for (const node of nodes) {
-                            const length = node.nodeValue.length;
+                            const length = String(node.nodeValue || '').length;
                             if (offset <= length) return [node, offset];
                             offset -= length;
                         }
                         const last = nodes[nodes.length - 1];
-                        return [last, last.nodeValue.length];
+                        return [last, String(last.nodeValue || '').length];
                     };
                     const start = boundaryAt(snapshot.start);
                     const end = boundaryAt(snapshot.end);
@@ -11529,6 +11548,90 @@ class SDLXLIFFReviewDialog(QDialog):
                     };
                 };
                 const markDirty = () => { window.__sdlNotepadDirty = true; };
+                const userTagContainer = node => {
+                    const element = node && node.nodeType === Node.ELEMENT_NODE
+                        ? node : node && node.parentElement;
+                    if (!element) return null;
+                    return element.closest(
+                        'p,h1,h2,h3,h4,h5,h6,li,td,th,caption,figcaption,blockquote,' +
+                        'section,article,div,body'
+                    ) || editableHost(element);
+                };
+                const refreshUserTagIndicator = container => {
+                    if (!container || !container.isConnected) return;
+                    if (container.querySelector('[' + USER_TAG_ATTR + ']')) {
+                        container.setAttribute(USER_TAG_CONTAINER_ATTR, '1');
+                    } else {
+                        container.removeAttribute(USER_TAG_CONTAINER_ATTR);
+                    }
+                };
+                const refreshUserEmptyIndicator = container => {
+                    if (!container || !container.isConnected) return;
+                    if (container.hasAttribute(ORIGINAL_TEXT_CONTAINER_ATTR)
+                            && !container.textContent.trim()) {
+                        container.setAttribute(USER_EMPTY_CONTAINER_ATTR, '1');
+                    } else {
+                        container.removeAttribute(USER_EMPTY_CONTAINER_ATTR);
+                    }
+                };
+                let breakUndoStack = [];
+                let breakRedoStack = [];
+                let breakUndoReady = false;
+                let breakRedoReady = false;
+                const recordBreakEdit = action => {
+                    if (!breakUndoReady) breakUndoStack = [];
+                    breakUndoStack.push(action);
+                    breakRedoStack = [];
+                    breakUndoReady = true;
+                    breakRedoReady = false;
+                };
+                const insertRecordedBreak = action => {
+                    if (!action.parent || !action.parent.isConnected) return false;
+                    const reference = action.nextSibling
+                        && action.nextSibling.parentNode === action.parent
+                        ? action.nextSibling : null;
+                    action.parent.insertBefore(action.node, reference);
+                    return true;
+                };
+                const focusBreakAction = (action, after=true) => {
+                    const host = action.host && action.host.isConnected
+                        ? action.host : editableHost(action.node);
+                    if (!host) return;
+                    try { host.focus({preventScroll: true}); }
+                    catch (_error) { host.focus(); }
+                    const selection = window.getSelection();
+                    const range = document.createRange();
+                    if (action.node.isConnected) {
+                        if (after) range.setStartAfter(action.node);
+                        else range.setStartBefore(action.node);
+                    } else if (action.nextSibling
+                            && action.nextSibling.parentNode === action.parent) {
+                        range.setStartBefore(action.nextSibling);
+                    } else {
+                        range.selectNodeContents(action.parent);
+                        range.collapse(false);
+                    }
+                    range.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                };
+                const replayBreakHistory = redo => {
+                    const source = redo ? breakRedoStack : breakUndoStack;
+                    if (!source.length) return false;
+                    const action = source.pop();
+                    const shouldInsert = redo
+                        ? action.kind === 'insert' : action.kind === 'delete';
+                    if (shouldInsert) insertRecordedBreak(action);
+                    else if (action.node.isConnected) action.node.remove();
+                    (redo ? breakUndoStack : breakRedoStack).push(action);
+                    breakUndoReady = breakUndoStack.length > 0;
+                    breakRedoReady = breakRedoStack.length > 0;
+                    refreshUserTagIndicator(action.indicatorContainer);
+                    refreshUserEmptyIndicator(action.indicatorContainer);
+                    focusBreakAction(action, shouldInsert);
+                    markDirty();
+                    return true;
+                };
                 const insertBreak = host => {
                     const selection = window.getSelection();
                     if (!host || !selection || !selection.rangeCount
@@ -11536,16 +11639,29 @@ class SDLXLIFFReviewDialog(QDialog):
                     const range = selection.getRangeAt(0);
                     range.deleteContents();
                     const lineBreak = document.createElement('br');
+                    lineBreak.setAttribute(USER_TAG_ATTR, 'br');
                     range.insertNode(lineBreak);
+                    const indicatorContainer = userTagContainer(lineBreak);
+                    const action = {
+                        kind: 'insert',
+                        node: lineBreak,
+                        parent: lineBreak.parentNode,
+                        nextSibling: lineBreak.nextSibling,
+                        host,
+                        indicatorContainer
+                    };
+                    recordBreakEdit(action);
+                    refreshUserTagIndicator(indicatorContainer);
+                    refreshUserEmptyIndicator(indicatorContainer);
                     range.setStartAfter(lineBreak);
                     range.collapse(true);
-                    host.removeAttribute(PLACEHOLDER_ATTR);
                     selection.removeAllRanges();
                     selection.addRange(range);
+                    host.removeAttribute(PLACEHOLDER_ATTR);
                     markDirty();
                     return true;
                 };
-                const adjacentEditableBreak = (host, backwards) => {
+                const adjacentBreakAtCaret = (host, backwards) => {
                     const selection = window.getSelection();
                     if (!host || !selection || !selection.rangeCount
                             || !selection.isCollapsed || !selectionInside(host)) return null;
@@ -11576,10 +11692,58 @@ class SDLXLIFFReviewDialog(QDialog):
                             && host.contains(candidate)
                         ? candidate : null;
                 };
+                const adjacentEditableBreak = (host, backwards) => {
+                    const lineBreak = adjacentBreakAtCaret(host, backwards);
+                    return lineBreak && lineBreak.hasAttribute(USER_TAG_ATTR)
+                        ? lineBreak : null;
+                };
+                const adjacentProtectedBreak = (host, backwards) => {
+                    const lineBreak = adjacentBreakAtCaret(host, backwards);
+                    return lineBreak && !lineBreak.hasAttribute(USER_TAG_ATTR)
+                        ? lineBreak : null;
+                };
+                const selectionContainsProtectedBreak = host => {
+                    const selection = window.getSelection();
+                    if (!selection || !selection.rangeCount || selection.isCollapsed
+                            || !selectionInside(host)) return false;
+                    const range = selection.getRangeAt(0);
+                    return Array.from(host.querySelectorAll('br:not([' + USER_TAG_ATTR + '])'))
+                        .some(lineBreak => {
+                            try { return range.intersectsNode(lineBreak); }
+                            catch (_error) { return false; }
+                        });
+                };
+                const fallbackEditableBreak = (host, backwards) => {
+                    const boundary = selectionBoundary(host);
+                    if (!backwards || !boundary.collapsed || !boundary.atStart) return null;
+                    const hosts = Array.from(
+                        document.body.querySelectorAll('[' + EDIT_ATTR + ']')
+                    );
+                    const previousHost = hosts[hosts.indexOf(host) - 1];
+                    if (!previousHost || previousHost.textContent.trim()) return null;
+                    const breaks = previousHost.querySelectorAll(
+                        'br[' + USER_TAG_ATTR + ']'
+                    );
+                    return breaks.length ? breaks[breaks.length - 1] : null;
+                };
                 const deleteAdjacentEditableBreak = (host, backwards) => {
-                    const lineBreak = adjacentEditableBreak(host, backwards);
+                    const lineBreak = adjacentEditableBreak(host, backwards)
+                        || fallbackEditableBreak(host, backwards);
                     if (!lineBreak) return false;
+                    const owner = editableHost(lineBreak);
+                    const action = {
+                        kind: 'delete',
+                        node: lineBreak,
+                        parent: lineBreak.parentNode,
+                        nextSibling: lineBreak.nextSibling,
+                        host: owner || host,
+                        indicatorContainer: userTagContainer(lineBreak)
+                    };
+                    recordBreakEdit(action);
                     lineBreak.remove();
+                    refreshUserTagIndicator(action.indicatorContainer);
+                    refreshUserEmptyIndicator(action.indicatorContainer);
+                    focusBreakAction(action, false);
                     markDirty();
                     return true;
                 };
@@ -11632,6 +11796,8 @@ class SDLXLIFFReviewDialog(QDialog):
                             element.replaceWith(replacement);
                         } else {
                             for (const attribute of Array.from(element.attributes)) {
+                                if (tagName === 'BR'
+                                        && attribute.name === USER_TAG_ATTR) continue;
                                 element.removeAttribute(attribute.name);
                             }
                         }
@@ -11730,6 +11896,10 @@ class SDLXLIFFReviewDialog(QDialog):
                     if (sourceText) host.setAttribute(SOURCE_ATTR, sourceText);
                     if (textNode) textNode.parentNode.replaceChild(host, textNode);
                     if (textNode) host.appendChild(textNode);
+                    if (textNode && textNode.nodeValue.trim()) {
+                        const container = userTagContainer(host);
+                        if (container) container.setAttribute(ORIGINAL_TEXT_CONTAINER_ATTR, '1');
+                    }
                     return host;
                 };
 
@@ -11748,22 +11918,32 @@ class SDLXLIFFReviewDialog(QDialog):
                     );
                 }
 
-                // A void <br> cannot itself be contenteditable. Give every
-                // existing break a small editable caret target immediately
-                // before it, preserving the break as a sibling so its browser
-                // layout and saved HTML semantics stay unchanged.
+                // Put existing breaks inside an editable island. When a text
+                // island is immediately before the break, absorb it there so
+                // no separate zero-width hit target sits on the sentence edge.
                 for (const lineBreak of Array.from(document.body.querySelectorAll('br'))) {
                     if (lineBreak.closest('[' + EDIT_ATTR + ']')
                             || lineBreak.closest(blockedParents)) continue;
+                    let preceding = lineBreak.previousSibling;
+                    while (preceding && preceding.nodeType === Node.TEXT_NODE
+                            && !preceding.nodeValue.trim()) {
+                        preceding = preceding.previousSibling;
+                    }
+                    if (preceding && preceding.nodeType === Node.ELEMENT_NODE
+                            && preceding.hasAttribute(EDIT_ATTR)) {
+                        preceding.appendChild(lineBreak);
+                        continue;
+                    }
                     const sourceContainer = lineBreak.parentElement
                         ? lineBreak.parentElement.closest('[' + SOURCE_ATTR + ']') : null;
                     const host = makeHost(
                         null,
-                        true,
+                        false,
                         sourceContainer ? sourceContainer.getAttribute(SOURCE_ATTR) || '' : ''
                     );
                     host.setAttribute(BREAK_ATTR, '1');
-                    lineBreak.parentNode.insertBefore(host, lineBreak);
+                    lineBreak.parentNode.replaceChild(host, lineBreak);
+                    host.appendChild(lineBreak);
                 }
 
                 // Empty rendered text containers still need a caret target.
@@ -11771,6 +11951,9 @@ class SDLXLIFFReviewDialog(QDialog):
                     'p,h1,h2,h3,h4,h5,h6,li,td,th,caption,figcaption,blockquote'
                 ).forEach(element => {
                     if (!element.querySelector('[' + EDIT_ATTR + ']')) {
+                        const display = String(window.getComputedStyle(element).display)
+                            .toLowerCase();
+                        if (display.startsWith('inline')) return;
                         element.insertBefore(
                             makeHost(null, true, element.getAttribute(SOURCE_ATTR) || ''),
                             element.firstChild
@@ -11810,6 +11993,12 @@ class SDLXLIFFReviewDialog(QDialog):
                     '[' + EDIT_ATTR + '][' + PLACEHOLDER_ATTR + '] {' +
                     ' display: inline-block; min-width: .65em; min-height: 1em; vertical-align: baseline; }' +
                     '[' + EDIT_ATTR + ']:focus { box-shadow: inset 0 -1px rgba(70,150,220,.55); }' +
+                    '[' + EDIT_ATTR + '][' + PLACEHOLDER_ATTR + ']:focus,' +
+                    '[' + EDIT_ATTR + '][' + BREAK_ATTR + ']:focus { box-shadow: none; }' +
+                    '[' + USER_TAG_CONTAINER_ATTR + '] {' +
+                    ' box-shadow: inset 3px 0 #d7a800 !important; }' +
+                    '[' + USER_EMPTY_CONTAINER_ATTR + '] {' +
+                    ' box-shadow: inset 3px 0 #dc3545 !important; }' +
                     '#sdl-notepad-source-tooltip { position: fixed; display: none; z-index: 2147483647;' +
                     ' max-width: min(560px, calc(100vw - 32px)); padding: 9px 12px;' +
                     ' border: 1px solid #526173; border-radius: 6px; background: #15191f;' +
@@ -11870,6 +12059,12 @@ class SDLXLIFFReviewDialog(QDialog):
                         event.preventDefault();
                         return;
                     }
+                    if (inputType.startsWith('delete')
+                            && selectionContainsProtectedBreak(host)) {
+                        event.preventDefault();
+                        event.stopImmediatePropagation();
+                        return;
+                    }
                     const boundary = selectionBoundary(host);
                     const deletesBackward = inputType.endsWith('Backward');
                     const deletesForward = inputType.endsWith('Forward');
@@ -11878,6 +12073,13 @@ class SDLXLIFFReviewDialog(QDialog):
                                     && deleteAdjacentEditableBreak(host, true))
                                 || (deletesForward
                                     && deleteAdjacentEditableBreak(host, false)))) {
+                        event.preventDefault();
+                        event.stopImmediatePropagation();
+                        return;
+                    }
+                    if (boundary.collapsed
+                            && ((deletesBackward && adjacentProtectedBreak(host, true))
+                                || (deletesForward && adjacentProtectedBreak(host, false)))) {
                         event.preventDefault();
                         event.stopImmediatePropagation();
                         return;
@@ -11917,7 +12119,13 @@ class SDLXLIFFReviewDialog(QDialog):
                     if (historyCommand && shortcutHost && selectionInside(shortcutHost)) {
                         event.preventDefault();
                         event.stopImmediatePropagation();
+                        if (historyCommand === 'undo' && breakUndoReady
+                                && replayBreakHistory(false)) return;
+                        if (historyCommand === 'redo' && breakRedoReady
+                                && replayBreakHistory(true)) return;
                         document.execCommand(historyCommand, false, null);
+                        breakUndoReady = false;
+                        breakRedoReady = false;
                         markDirty();
                         return;
                     }
@@ -11929,6 +12137,23 @@ class SDLXLIFFReviewDialog(QDialog):
                         event.stopImmediatePropagation();
                         applyInlineFormat(formatCommand);
                         return;
+                    }
+                    if ((event.key === 'ArrowUp' || event.key === 'ArrowDown')
+                            && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+                            && shortcutHost && selectionInside(shortcutHost)) {
+                        const hosts = Array.from(
+                            document.body.querySelectorAll('[' + EDIT_ATTR + ']')
+                        );
+                        const index = hosts.indexOf(shortcutHost);
+                        const target = hosts[index + (event.key === 'ArrowUp' ? -1 : 1)];
+                        if (target) {
+                            const snapshot = selectionOffsets(shortcutHost);
+                            const column = snapshot ? snapshot.start : 0;
+                            event.preventDefault();
+                            event.stopImmediatePropagation();
+                            restoreSelection({host: target, start: column, end: column});
+                            return;
+                        }
                     }
                     if (event.key === 'Enter') {
                         event.preventDefault();
@@ -11944,8 +12169,20 @@ class SDLXLIFFReviewDialog(QDialog):
                         return;
                     }
                     const selection = window.getSelection();
-                    if (!selection || !selection.isCollapsed) return;
+                    if (!selection) return;
+                    if (!selection.isCollapsed) {
+                        if (selectionContainsProtectedBreak(host)) {
+                            event.preventDefault();
+                            event.stopImmediatePropagation();
+                        }
+                        return;
+                    }
                     if (deleteAdjacentEditableBreak(host, event.key === 'Backspace')) {
+                        event.preventDefault();
+                        event.stopImmediatePropagation();
+                        return;
+                    }
+                    if (adjacentProtectedBreak(host, event.key === 'Backspace')) {
                         event.preventDefault();
                         event.stopImmediatePropagation();
                         return;
@@ -11953,19 +12190,6 @@ class SDLXLIFFReviewDialog(QDialog):
                     const boundary = selectionBoundary(host);
                     const crossesBoundary = event.key === 'Backspace'
                         ? boundary.atStart : boundary.atEnd;
-                    let sibling = event.key === 'Backspace' && boundary.atStart
-                        ? host.previousSibling
-                        : event.key === 'Delete' && boundary.atEnd ? host.nextSibling : null;
-                    while (sibling && sibling.nodeType === Node.TEXT_NODE && !sibling.nodeValue.trim()) {
-                        sibling = event.key === 'Backspace' ? sibling.previousSibling : sibling.nextSibling;
-                    }
-                    if (sibling && sibling.nodeType === Node.ELEMENT_NODE
-                            && sibling.tagName.toLowerCase() === 'br') {
-                        event.preventDefault();
-                        sibling.remove();
-                        markDirty();
-                        return;
-                    }
                     if (crossesBoundary) {
                         event.preventDefault();
                         event.stopImmediatePropagation();
@@ -11991,10 +12215,13 @@ class SDLXLIFFReviewDialog(QDialog):
                 document.addEventListener('input', event => {
                     const host = editableHost(event.target);
                     if (!host) return;
+                    breakUndoReady = false;
+                    breakRedoReady = false;
                     // Keep only intentional strong/em/u markup. Browser-created
                     // blocks, spans, links, and other tags are unwrapped before
                     // the document enters the save pipeline.
                     sanitizeHost(host);
+                    refreshUserEmptyIndicator(userTagContainer(host));
                     markDirty();
                 }, true);
 
@@ -12033,6 +12260,14 @@ class SDLXLIFFReviewDialog(QDialog):
                     element["contenteditable"] = original
             for element in soup.find_all(attrs={"data-sdl-notepad-source": True}):
                 element.attrs.pop("data-sdl-notepad-source", None)
+            for marker in (
+                "data-sdl-notepad-user-tag",
+                "data-sdl-notepad-user-tag-container",
+                "data-sdl-notepad-original-had-text",
+                "data-sdl-notepad-user-empty-container",
+            ):
+                for element in soup.find_all(attrs={marker: True}):
+                    element.attrs.pop(marker, None)
             media_attributes = (
                 ("data-sdl-notepad-original-src", "src"),
                 ("data-sdl-notepad-original-href", "href"),

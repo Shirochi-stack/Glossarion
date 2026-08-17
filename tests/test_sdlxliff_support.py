@@ -3482,12 +3482,130 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert js_value("document.querySelectorAll('[data-sdl-notepad-break]').length") == 1
     assert js_value("document.querySelector('[data-sdl-notepad-break]').isContentEditable") is True
     assert js_value(
+        "document.querySelector('[data-sdl-notepad-break]').firstElementChild.tagName"
+    ) == "BR"
+    assert not js_value("document.querySelector('[data-sdl-notepad-user-tag]')")
+    assert js_value(
+        """
+        (() => {
+            const host = document.querySelector('[data-sdl-notepad-break]');
+            host.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(host);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const event = new KeyboardEvent('keydown', {
+                key: 'Backspace', bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(event);
+            return event.defaultPrevented && host.querySelector('br') !== null;
+        })();
+        """
+    ) is True
+    assert js_value(
         "document.querySelector('[data-sdl-notepad-text]').getAttribute('contenteditable')"
     ) == "true"
     assert js_value(
         "document.querySelector('[data-sdl-notepad-text]').getAttribute('data-sdl-notepad-source')"
     ) == "Source line"
     assert js_value("getComputedStyle(document.querySelector('#sdl-notepad-source-tooltip')).whiteSpace") == "pre-wrap"
+    assert js_value(
+        """
+        (() => {
+            const hosts = Array.from(document.querySelectorAll('[data-sdl-notepad-text]'));
+            const first = hosts[0];
+            const second = hosts[1];
+            first.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.setStart(first.firstChild, Math.min(2, first.firstChild.length));
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const down = new KeyboardEvent('keydown', {
+                key: 'ArrowDown', bubbles: true, cancelable: true
+            });
+            first.dispatchEvent(down);
+            const movedDown = document.activeElement === second;
+            const up = new KeyboardEvent('keydown', {
+                key: 'ArrowUp', bubbles: true, cancelable: true
+            });
+            second.dispatchEvent(up);
+            return JSON.stringify([
+                down.defaultPrevented,
+                movedDown,
+                up.defaultPrevented,
+                document.activeElement === first
+            ]);
+        })();
+        """
+    ) == "[true,true,true,true]"
+    assert js_value(
+        """
+        (() => {
+            const hosts = Array.from(
+                document.querySelectorAll('[data-sdl-notepad-text]')
+            );
+            const breakHost = document.querySelector('[data-sdl-notepad-break]');
+            const breakIndex = hosts.indexOf(breakHost);
+            const previous = hosts[breakIndex - 1];
+            previous.focus();
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(previous);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            const down = new KeyboardEvent('keydown', {
+                key: 'ArrowDown', bubbles: true, cancelable: true
+            });
+            previous.dispatchEvent(down);
+            const movedIntoBreak = document.activeElement === breakHost;
+            const caretIsText = selection.anchorNode
+                && selection.anchorNode.nodeType === Node.TEXT_NODE;
+            const up = new KeyboardEvent('keydown', {
+                key: 'ArrowUp', bubbles: true, cancelable: true
+            });
+            breakHost.dispatchEvent(up);
+            return JSON.stringify([
+                down.defaultPrevented,
+                movedIntoBreak,
+                caretIsText,
+                up.defaultPrevented,
+                document.activeElement === previous,
+                breakHost.querySelector('br') !== null
+            ]);
+        })();
+        """
+    ) == "[true,true,true,true,true,true]"
+    assert js_value(
+        """
+        (() => {
+            const paragraph = document.querySelector('p');
+            const hosts = Array.from(
+                paragraph.querySelectorAll('[data-sdl-notepad-text]')
+            );
+            hosts.forEach(host => { host.textContent = ''; });
+            hosts[0].dispatchEvent(new InputEvent('input', {bubbles: true}));
+            const markedRed = paragraph.hasAttribute(
+                'data-sdl-notepad-user-empty-container'
+            ) && getComputedStyle(paragraph).boxShadow.includes('rgb(220, 53, 69)');
+            const originalEmptyStayedNeutral = !document.querySelector('#empty').hasAttribute(
+                'data-sdl-notepad-user-empty-container'
+            );
+            hosts[0].textContent = 'Translated line ';
+            hosts[1].textContent = 'protected';
+            hosts[0].dispatchEvent(new InputEvent('input', {bubbles: true}));
+            return JSON.stringify([
+                markedRed,
+                originalEmptyStayedNeutral,
+                !paragraph.hasAttribute('data-sdl-notepad-user-empty-container')
+            ]);
+        })();
+        """
+    ) == "[true,true,true]"
     assert js_value(
         """
         (() => {
@@ -3629,16 +3747,40 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
                 key: 'Enter', bubbles: true, cancelable: true
             });
             first.dispatchEvent(event);
+            const created = first.querySelectorAll('br').length === 1;
+            const indicator = first.closest('p');
+            const marked = first.querySelector('br').getAttribute(
+                'data-sdl-notepad-user-tag'
+            ) === 'br' && indicator.hasAttribute('data-sdl-notepad-user-tag-container');
+            const undo = new KeyboardEvent('keydown', {
+                key: 'z', ctrlKey: true, bubbles: true, cancelable: true
+            });
+            first.dispatchEvent(undo);
+            const undone = first.querySelectorAll('br').length === 0;
+            const indicatorUndone = !indicator.hasAttribute(
+                'data-sdl-notepad-user-tag-container'
+            );
+            const redo = new KeyboardEvent('keydown', {
+                key: 'y', ctrlKey: true, bubbles: true, cancelable: true
+            });
+            first.dispatchEvent(redo);
             return JSON.stringify([
                 event.defaultPrevented,
-                first.querySelectorAll('br').length === 1,
+                created,
+                marked,
+                undo.defaultPrevented,
+                undone,
+                indicatorUndone,
+                redo.defaultPrevented,
+                first.querySelector('br').getAttribute('data-sdl-notepad-user-tag') === 'br',
+                indicator.hasAttribute('data-sdl-notepad-user-tag-container'),
                 document.activeElement === first
             ]);
         } catch (error) { return String(error && error.stack || error); }
         })();
         """
     )
-    assert enter_result == "[true,true,true]"
+    assert enter_result == "[true,true,true,true,true,true,true,true,true,true]"
     user_break_delete_result = js_value(
         """
         (() => { try {
@@ -3649,6 +3791,16 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
             });
             host.dispatchEvent(backspace);
             const deleted = host.querySelectorAll('br').length === before - 1;
+            const undoBackspace = new KeyboardEvent('keydown', {
+                key: 'z', ctrlKey: true, bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(undoBackspace);
+            const backspaceUndone = host.querySelectorAll('br').length === before;
+            const redoBackspace = new KeyboardEvent('keydown', {
+                key: 'y', ctrlKey: true, bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(redoBackspace);
+            const backspaceRedone = host.querySelectorAll('br').length === before - 1;
             const recreate = new KeyboardEvent('keydown', {
                 key: 'Enter', bubbles: true, cancelable: true
             });
@@ -3665,22 +3817,72 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
             });
             host.dispatchEvent(forwardDelete);
             const forwardDeleted = host.querySelectorAll('br').length === before - 1;
-            host.dispatchEvent(new KeyboardEvent('keydown', {
-                key: 'Enter', bubbles: true, cancelable: true
-            }));
+            const undoDelete = new KeyboardEvent('keydown', {
+                key: 'z', ctrlKey: true, bubbles: true, cancelable: true
+            });
+            host.dispatchEvent(undoDelete);
             return JSON.stringify([
                 backspace.defaultPrevented,
                 deleted,
+                undoBackspace.defaultPrevented,
+                backspaceUndone,
+                redoBackspace.defaultPrevented,
+                backspaceRedone,
                 recreate.defaultPrevented,
                 forwardDelete.defaultPrevented,
                 forwardDeleted,
+                undoDelete.defaultPrevented,
                 host.querySelectorAll('br').length === before
             ]);
         } catch (error) { return String(error && error.stack || error); }
         })();
         """
     )
-    assert user_break_delete_result == "[true,true,true,true,true,true]"
+    assert user_break_delete_result == "[true,true,true,true,true,true,true,true,true,true,true]"
+    one_above_break_fallback_result = js_value(
+        """
+        (() => { try {
+            const container = document.createElement('div');
+            container.innerHTML =
+                '<span data-sdl-notepad-text="1" contenteditable="true">' +
+                    '<br data-sdl-notepad-user-tag="br"></span>' +
+                '<span data-sdl-notepad-text="1" contenteditable="true"></span>' +
+                '<span data-sdl-notepad-text="1" contenteditable="true"></span>';
+            document.body.appendChild(container);
+            const hosts = Array.from(container.querySelectorAll('[data-sdl-notepad-text]'));
+            const selection = window.getSelection();
+            const placeAtStart = host => {
+                host.focus();
+                const range = document.createRange();
+                range.selectNodeContents(host);
+                range.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(range);
+            };
+            placeAtStart(hosts[2]);
+            const tooFar = new KeyboardEvent('keydown', {
+                key: 'Backspace', bubbles: true, cancelable: true
+            });
+            hosts[2].dispatchEvent(tooFar);
+            const distantBreakPreserved = hosts[0].querySelector('br') !== null;
+            placeAtStart(hosts[1]);
+            const adjacent = new KeyboardEvent('keydown', {
+                key: 'Backspace', bubbles: true, cancelable: true
+            });
+            hosts[1].dispatchEvent(adjacent);
+            const adjacentBreakDeleted = hosts[0].querySelector('br') === null;
+            container.remove();
+            return JSON.stringify([
+                tooFar.defaultPrevented,
+                distantBreakPreserved,
+                adjacent.defaultPrevented,
+                adjacentBreakDeleted
+            ]);
+        } catch (error) { return String(error && error.stack || error); }
+        })();
+        """
+    )
+    assert one_above_break_fallback_result == "[true,true,true,true]"
     boundary_delete_result = js_value(
         """
         (() => { try {
@@ -3874,6 +4076,10 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert saved_soup.find(attrs={"data-sdl-notepad-source": True}) is None
     assert saved_soup.find(attrs={"data-sdl-notepad-original-editable": True}) is None
     assert saved_soup.find(attrs={"data-sdl-notepad-original-src": True}) is None
+    assert saved_soup.find(attrs={"data-sdl-notepad-user-tag": True}) is None
+    assert saved_soup.find(attrs={"data-sdl-notepad-user-tag-container": True}) is None
+    assert saved_soup.find(attrs={"data-sdl-notepad-original-had-text": True}) is None
+    assert saved_soup.find(attrs={"data-sdl-notepad-user-empty-container": True}) is None
     assert saved_soup.find("img").get("src") == "../Images/chapter0001_img_1.png"
     assert saved_soup.find(id="sdl-notepad-source-tooltip") is None
     assert output_path.read_text(encoding="utf-8").count("Edited in the rendered page.") == 1
@@ -3888,6 +4094,46 @@ def test_sdlxliff_notepad_mode_is_one_rendered_editable_browser(tmp_path, qtbot)
     assert "u" in notepad_tag_order
     assert notepad_tag_order.count("br") == 2
     assert notepad_tag_order[-1] == "br"
+
+    # Image-path normalization reloads the rendered browser from clean saved
+    # HTML. Source metadata must be reattached for both populated and
+    # user-emptied rows without refilling the latter with source text.
+    qtbot.waitUntil(
+        lambda: js_value(
+            "document.querySelector('p').getAttribute('data-sdl-notepad-source')"
+        ) == "Source line",
+        timeout=5000,
+    )
+    assert js_value(
+        """
+        (() => {
+            const paragraph = document.querySelector('p');
+            const hosts = Array.from(
+                paragraph.querySelectorAll('[data-sdl-notepad-text]')
+            );
+            const snapshots = hosts.map(host => host.innerHTML);
+            const tooltip = document.querySelector('#sdl-notepad-source-tooltip');
+            tooltip.style.display = 'none';
+            hosts[0].dispatchEvent(new MouseEvent('mouseover', {
+                bubbles: true, clientX: 20, clientY: 20
+            }));
+            const populatedHover = tooltip.style.display === 'block'
+                && tooltip.textContent === 'Source line';
+            hosts.forEach(host => { host.textContent = ''; });
+            hosts[0].dispatchEvent(new InputEvent('input', {bubbles: true}));
+            tooltip.style.display = 'none';
+            paragraph.dispatchEvent(new MouseEvent('mouseover', {
+                bubbles: true, clientX: 20, clientY: 20
+            }));
+            const deletedHover = tooltip.style.display === 'block'
+                && tooltip.textContent === 'Source line'
+                && paragraph.hasAttribute('data-sdl-notepad-user-empty-container');
+            hosts.forEach((host, index) => { host.innerHTML = snapshots[index]; });
+            hosts[0].dispatchEvent(new InputEvent('input', {bubbles: true}));
+            return JSON.stringify([populatedHover, deletedHover]);
+        })();
+        """
+    ) == "[true,true]"
 
     dialog.two_column_layout_btn.click()
     assert dialog.two_column_layout_btn.text() == "Compact"
@@ -3973,6 +4219,17 @@ def test_notepad_initial_html_keeps_translation_and_expands_source_markup_for_em
     assert paragraphs[1].find("br") is not None
     assert paragraphs[1].find("rb") is not None
     assert "<strong>two</strong><br/><rb>ruby base</rb>" in document
+
+    unfilled_document = dialog._notepad_initial_document_html(
+        {
+            "source_html": "<html><body><p>Source only</p></body></html>",
+            "target_html": "<html><body><p></p></body></html>",
+        },
+        fill_untranslated=False,
+    )
+    unfilled_paragraph = BeautifulSoup(unfilled_document, "html.parser").find("p")
+    assert unfilled_paragraph.get_text(strip=True) == ""
+    assert unfilled_paragraph["data-sdl-notepad-source"] == "Source only"
 
 
 def test_notepad_browser_cleanup_removes_only_editor_scaffolding():
