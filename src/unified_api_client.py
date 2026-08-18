@@ -26112,7 +26112,15 @@ class UnifiedClient:
             current_candidate = (slot_id, candidate_store)
             access_token = candidate_store.get_valid_access_token(auto_login=not pool_mode)
             if pool_mode:
-                print(f"🔄 AuthGrok pool: Using account slot #{slot_id}")
+                try:
+                    account_info = candidate_store.account_info
+                    account_email = str(account_info.get("email") or "").strip()
+                except Exception:
+                    account_email = ""
+                email_suffix = f" ({account_email})" if account_email else ""
+                print(
+                    f"🔄 AuthGrok pool: Using account slot #{slot_id}{email_suffix}"
+                )
             elif slot_id:
                 print(f"🔐 AuthGrok (Account #{slot_id}): Using pinned account")
 

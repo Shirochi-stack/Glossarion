@@ -28,6 +28,7 @@ import time
 import uuid
 import webbrowser
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -84,6 +85,9 @@ TOKEN_REFRESH_MARGIN_SECONDS = 120
 DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 DEVICE_CODE_DEFAULT_POLL_SECONDS = 5
 DEVICE_CODE_SLOW_DOWN_SECONDS = 5
+OIDC_CACHE_DEFAULT_SECONDS = 300
+JWKS_CACHE_DEFAULT_SECONDS = 300
+OAUTH_CACHE_MAX_SECONDS = 3600
 
 XAI_CLI_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
 XAI_CLI_RESPONSES_URL = f"{XAI_CLI_BASE_URL}/responses"
@@ -104,6 +108,10 @@ _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authgrok_tokens.json")
 _OFFICIAL_GROK_AUTH_FILE = os.path.join(os.path.expanduser("~"), ".grok", "auth.json")
 _OFFICIAL_GROK_SCOPE_KEY = f"{XAI_OAUTH_ISSUER}::{XAI_OAUTH_CLIENT_ID}"
 _OFFICIAL_GROK_LEGACY_SCOPE_KEY = "https://accounts.x.ai/sign-in"
+
+_oidc_cache_lock = threading.RLock()
+_oidc_discovery_cache: Optional[Tuple[Dict[str, Any], float]] = None
+_jwks_cache: Optional[Tuple[Dict[str, Any], float]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +154,55 @@ def _oauth_headers() -> Dict[str, str]:
     }
 
 
-def _load_oidc_discovery(timeout: int = 15) -> Dict[str, Any]:
+def _response_cache_seconds(response: Any, default_seconds: int) -> float:
+    """Honor HTTP cache lifetime hints, with a conservative bounded fallback."""
+    headers = getattr(response, "headers", {}) or {}
+    cache_control = str(
+        headers.get("Cache-Control") or headers.get("cache-control") or ""
+    )
+    directives = {part.strip().casefold() for part in cache_control.split(",") if part.strip()}
+    if "no-store" in directives or "no-cache" in directives:
+        return 0.0
+
+    max_age = None
+    for directive in directives:
+        if directive.startswith("max-age="):
+            try:
+                max_age = max(0.0, float(directive.split("=", 1)[1].strip('"')))
+            except (TypeError, ValueError):
+                pass
+            break
+
+    if max_age is not None:
+        try:
+            age = max(0.0, float(headers.get("Age") or headers.get("age") or 0))
+        except (TypeError, ValueError):
+            age = 0.0
+        return min(max(0.0, max_age - age), float(OAUTH_CACHE_MAX_SECONDS))
+
+    expires = headers.get("Expires") or headers.get("expires")
+    if expires:
+        try:
+            expires_at = parsedate_to_datetime(str(expires)).timestamp()
+            return min(
+                max(0.0, expires_at - time.time()),
+                float(OAUTH_CACHE_MAX_SECONDS),
+            )
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return float(default_seconds)
+
+
+def _load_oidc_discovery(
+    timeout: int = 15,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    global _oidc_discovery_cache
+    if not force_refresh:
+        with _oidc_cache_lock:
+            if _oidc_discovery_cache and _oidc_discovery_cache[1] > time.monotonic():
+                return dict(_oidc_discovery_cache[0])
+
     response = requests.get(
         XAI_OAUTH_DISCOVERY_URL,
         headers={"Accept": "application/json", "User-Agent": XAI_USER_AGENT},
@@ -171,7 +227,51 @@ def _load_oidc_discovery(timeout: int = 15) -> Dict[str, Any]:
             raise RuntimeError(f"xAI OIDC discovery advertised an untrusted {key}")
     if "ES256" not in (data.get("id_token_signing_alg_values_supported") or []):
         raise RuntimeError("xAI OIDC discovery did not advertise ES256 ID tokens")
-    return data
+    cache_seconds = _response_cache_seconds(response, OIDC_CACHE_DEFAULT_SECONDS)
+    with _oidc_cache_lock:
+        _oidc_discovery_cache = (dict(data), time.monotonic() + cache_seconds)
+    return dict(data)
+
+
+def _load_jwks(
+    discovery: Dict[str, Any],
+    timeout: int = 15,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    """Load pinned xAI signing keys, refreshing safely when keys rotate."""
+    global _jwks_cache
+    if discovery.get("jwks_uri") != XAI_OAUTH_JWKS_URL:
+        raise RuntimeError("Refusing to use an untrusted xAI JWKS endpoint")
+    if not force_refresh:
+        with _oidc_cache_lock:
+            if _jwks_cache and _jwks_cache[1] > time.monotonic():
+                return dict(_jwks_cache[0])
+
+    response = requests.get(
+        XAI_OAUTH_JWKS_URL,
+        headers={"Accept": "application/json", "User-Agent": XAI_USER_AGENT},
+        timeout=timeout,
+        allow_redirects=False,
+    )
+    if response.is_redirect or response.is_permanent_redirect:
+        raise RuntimeError("xAI JWKS request unexpectedly redirected")
+    response.raise_for_status()
+    jwks = response.json()
+    if not isinstance(jwks, dict) or not isinstance(jwks.get("keys"), list):
+        raise RuntimeError("xAI JWKS response was invalid")
+    cache_seconds = _response_cache_seconds(response, JWKS_CACHE_DEFAULT_SECONDS)
+    with _oidc_cache_lock:
+        _jwks_cache = (dict(jwks), time.monotonic() + cache_seconds)
+    return dict(jwks)
+
+
+def _warm_jwks_cache(discovery: Dict[str, Any]) -> None:
+    """Overlap signing-key retrieval with the user's browser interaction."""
+    try:
+        _load_jwks(discovery)
+    except Exception as exc:
+        # Token validation retries this normally and reports any persistent error.
+        logger.debug("AuthGrok JWKS cache warm-up failed: %s", exc)
 
 
 def build_auth_url(
@@ -224,21 +324,20 @@ def _validate_id_token(
     if header.get("alg") != "ES256" or not isinstance(header.get("kid"), str):
         raise RuntimeError("xAI ID token used an unsupported signing policy")
 
-    response = requests.get(
-        discovery["jwks_uri"],
-        headers={"Accept": "application/json", "User-Agent": XAI_USER_AGENT},
-        timeout=timeout,
-        allow_redirects=False,
-    )
-    if response.is_redirect or response.is_permanent_redirect:
-        raise RuntimeError("xAI JWKS request unexpectedly redirected")
-    response.raise_for_status()
-    jwks = response.json()
+    jwks = _load_jwks(discovery, timeout=timeout)
     keys = jwks.get("keys", []) if isinstance(jwks, dict) else []
     matches = [
         key for key in keys
         if isinstance(key, dict) and key.get("kid") == header["kid"]
     ]
+    if len(matches) != 1:
+        # A previously cached key set may be stale after xAI rotates keys.
+        jwks = _load_jwks(discovery, timeout=timeout, force_refresh=True)
+        keys = jwks.get("keys", []) if isinstance(jwks, dict) else []
+        matches = [
+            key for key in keys
+            if isinstance(key, dict) and key.get("kid") == header["kid"]
+        ]
     if len(matches) != 1:
         raise RuntimeError("xAI ID token signing key was missing or ambiguous")
     key = matches[0]
@@ -517,6 +616,11 @@ def run_device_oauth_flow(timeout: int = 300) -> Dict[str, Any]:
         "automatically after you approve the new account."
     )
     _open_oauth_browser(signed_out_url)
+    threading.Thread(
+        target=_warm_jwks_cache,
+        args=(discovery,),
+        daemon=True,
+    ).start()
     tokens = poll_device_code_tokens(device_code, timeout=timeout)
     claims = _validate_id_token(tokens["id_token"], None, discovery)
     tokens["account"] = {

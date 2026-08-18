@@ -46,6 +46,42 @@ def test_build_auth_url_can_force_a_fresh_numbered_account_login():
     assert query["max_age"] == ["0"]
 
 
+def test_oidc_discovery_cache_honors_server_max_age(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        is_redirect = False
+        is_permanent_redirect = False
+        headers = {"Cache-Control": "public, max-age=60"}
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {
+                "issuer": authgrok.XAI_OAUTH_ISSUER,
+                "authorization_endpoint": authgrok.XAI_OAUTH_AUTHORIZATION_URL,
+                "token_endpoint": authgrok.XAI_OAUTH_TOKEN_URL,
+                "jwks_uri": authgrok.XAI_OAUTH_JWKS_URL,
+                "id_token_signing_alg_values_supported": ["ES256"],
+            }
+
+    monkeypatch.setattr(authgrok, "_oidc_discovery_cache", None)
+    monkeypatch.setattr(
+        authgrok.requests,
+        "get",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or FakeResponse(),
+    )
+
+    first = authgrok._load_oidc_discovery()
+    second = authgrok._load_oidc_discovery()
+
+    assert first == second
+    assert len(calls) == 1
+
+
 def test_numbered_login_signs_out_xai_then_returns_to_device_authorization():
     url = authgrok.build_signed_out_device_url(
         "https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH"
@@ -86,6 +122,7 @@ def test_numbered_oauth_flow_uses_auto_polled_device_authorization(monkeypatch):
         lambda: {"jwks_uri": authgrok.XAI_OAUTH_JWKS_URL},
     )
     monkeypatch.setattr(authgrok, "request_device_code", lambda timeout=30: device_code)
+    monkeypatch.setattr(authgrok, "_warm_jwks_cache", lambda _discovery: None)
     monkeypatch.setattr(
         authgrok,
         "_open_oauth_browser",
@@ -577,12 +614,23 @@ def test_validate_id_token_verifies_es256_signature_and_nonce(monkeypatch):
                 }]
             }
 
-    monkeypatch.setattr(authgrok.requests, "get", lambda *args, **kwargs: FakeResponse())
+    get_calls = []
+    monkeypatch.setattr(
+        authgrok,
+        "_jwks_cache",
+        ({"keys": [{"kid": "previous-key"}]}, time.monotonic() + 60),
+    )
+    monkeypatch.setattr(
+        authgrok.requests,
+        "get",
+        lambda *args, **kwargs: get_calls.append((args, kwargs)) or FakeResponse(),
+    )
     discovery = {"jwks_uri": authgrok.XAI_OAUTH_JWKS_URL}
 
     assert authgrok._validate_id_token(token, "expected-nonce", discovery)["email"] == "reader@example.com"
     with pytest.raises(RuntimeError, match="nonce mismatch"):
         authgrok._validate_id_token(token, "wrong-nonce", discovery)
+    assert len(get_calls) == 1
 
 
 def test_unified_client_routes_authgrok_without_api_key():
@@ -598,17 +646,19 @@ def test_authgrok_zero_pool_fails_over_to_next_saved_account(monkeypatch):
 
     token_calls = []
     sent_tokens = []
+    logged = []
 
     class FakeStore:
-        def __init__(self, token):
+        def __init__(self, token, email):
             self.token = token
+            self.account_info = {"email": email}
 
         def get_valid_access_token(self, auto_login=True, force_refresh=False):
             token_calls.append((self.token, auto_login, force_refresh))
             return self.token
 
-    first = FakeStore("first-token")
-    second = FakeStore("second-token")
+    first = FakeStore("first-token", "first@example.test")
+    second = FakeStore("second-token", "second@example.test")
     monkeypatch.setattr(
         unified,
         "_authgrok_get_rotating_account_pool",
@@ -622,6 +672,11 @@ def test_authgrok_zero_pool_fails_over_to_next_saved_account(monkeypatch):
         return {"content": "rotated", "finish_reason": "stop", "usage": None}
 
     monkeypatch.setattr(unified, "_authgrok_send", fake_send)
+    monkeypatch.setattr(
+        unified,
+        "print",
+        lambda message, *args, **kwargs: logged.append(str(message)),
+    )
     client = unified.UnifiedClient.__new__(unified.UnifiedClient)
     client.request_timeout = 30
     client._get_active_request_model = lambda: "authgrok0/grok-4.5"
@@ -644,6 +699,8 @@ def test_authgrok_zero_pool_fails_over_to_next_saved_account(monkeypatch):
         ("first-token", False, False),
         ("second-token", False, False),
     ]
+    assert "🔄 AuthGrok pool: Using account slot #1 (first@example.test)" in logged
+    assert "🔄 AuthGrok pool: Using account slot #2 (second@example.test)" in logged
 
 
 def test_unified_client_maps_disabled_or_none_authgrok_reasoning_to_low(monkeypatch):
