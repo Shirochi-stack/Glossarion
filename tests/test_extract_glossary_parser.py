@@ -48,6 +48,7 @@ from GlossaryManager_GUI import (
     GlossaryManagerMixin,
     _GlossaryFilterItemDelegate,
     _collect_glossary_filter_values,
+    _recent_glossary_filter_dismissal,
 )
 
 
@@ -110,6 +111,14 @@ def test_glossary_filter_apply_limits_search_to_visible_checked_values():
         states,
         restrict_to_visible=True,
     ) == {"BIG SISTER IS WATCHING YOU"}
+
+
+def test_glossary_filter_same_header_click_suppresses_immediate_reopen():
+    dismissed = (3, 100.0)
+
+    assert _recent_glossary_filter_dismissal(dismissed, 3, now=100.1)
+    assert not _recent_glossary_filter_dismissal(dismissed, 2, now=100.1)
+    assert not _recent_glossary_filter_dismissal(dismissed, 3, now=100.3)
 
 
 def test_glossary_filter_search_interactions_are_wired():

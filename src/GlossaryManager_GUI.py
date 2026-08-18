@@ -45,6 +45,24 @@ def _collect_glossary_filter_values(value_states, *, restrict_to_visible=False):
     }
 
 
+def _recent_glossary_filter_dismissal(
+    dismissed_state,
+    column,
+    *,
+    now=None,
+    max_age=0.25,
+):
+    """Return whether a header click is the click that just closed its popup."""
+    if not isinstance(dismissed_state, tuple) or len(dismissed_state) != 2:
+        return False
+    dismissed_column, dismissed_at = dismissed_state
+    try:
+        age = (time.monotonic() if now is None else float(now)) - float(dismissed_at)
+    except (TypeError, ValueError):
+        return False
+    return dismissed_column == column and 0.0 <= age <= max_age
+
+
 class _GlossaryFilterItemDelegate(QStyledItemDelegate):
     """Paint fast, widget-free filter checkboxes in the glossary style."""
 
@@ -6512,6 +6530,34 @@ Do not stop after the glossary."""
             if field == '_section' or self.glossary_tree.isColumnHidden(column):
                 return
 
+            active_popup = getattr(self, '_glossary_column_filter_popup', None)
+            active_column = getattr(
+                self,
+                '_glossary_column_filter_popup_column',
+                None,
+            )
+            try:
+                active_popup_visible = bool(
+                    active_popup is not None and active_popup.isVisible()
+                )
+            except RuntimeError:
+                active_popup_visible = False
+            if active_popup_visible:
+                active_popup.reject()
+                if active_column == column:
+                    self._glossary_column_filter_dismissed = None
+                    return
+
+            dismissed_state = getattr(
+                self,
+                '_glossary_column_filter_dismissed',
+                None,
+            )
+            if _recent_glossary_filter_dismissal(dismissed_state, column):
+                self._glossary_column_filter_dismissed = None
+                return
+            self._glossary_column_filter_dismissed = None
+
             values = sorted(
                 {
                     self.glossary_tree.topLevelItem(row).text(column)
@@ -6529,6 +6575,19 @@ Do not stop after the glossary."""
             popup.setWindowFlags(Qt.Popup)
             popup.setMinimumWidth(360)
             popup.setMaximumWidth(560)
+            self._glossary_column_filter_popup = popup
+            self._glossary_column_filter_popup_column = column
+
+            def _remember_glossary_filter_popup_closed(_result):
+                if getattr(self, '_glossary_column_filter_popup', None) is popup:
+                    self._glossary_column_filter_popup = None
+                    self._glossary_column_filter_popup_column = None
+                self._glossary_column_filter_dismissed = (
+                    column,
+                    time.monotonic(),
+                )
+
+            popup.finished.connect(_remember_glossary_filter_popup_closed)
 
             popup_layout = QVBoxLayout(popup)
             popup_layout.setContentsMargins(12, 12, 12, 12)
