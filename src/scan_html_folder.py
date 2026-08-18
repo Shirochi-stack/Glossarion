@@ -6685,6 +6685,8 @@ _HTML_LIKE_EXTENSIONS = ('.html', '.xhtml', '.htm')
 _BEAUTIFULSOUP_REVIEW_TAGS = (
     'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li'
 )
+_BEAUTIFULSOUP_REVIEW_TEXT_TAGS = _BEAUTIFULSOUP_REVIEW_TAGS + ('hr',)
+_SDLXLIFF_INVISIBLE_TEXT_RE = re.compile(r'[\u200b\u200c\u200d\ufeff\u2060]')
 
 
 def _strip_html_like_extensions(name):
@@ -7195,19 +7197,42 @@ def _preservation_count_issues(source_profile, output_profile):
 
 
 def _count_beautifulsoup_review_tags(html_content):
-    """Count non-empty source/output review text units visible to BeautifulSoup."""
+    """Count the same non-empty text units shown by the SDLXLIFF viewer."""
     if not isinstance(html_content, str) or not html_content:
         return {}
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
         counts = {}
-        for tag_name in _BEAUTIFULSOUP_REVIEW_TAGS:
-            count = sum(
-                1 for tag in soup.find_all(tag_name)
-                if tag.get_text(" ", strip=True)
+
+        def _is_review_text_unit(tag):
+            tag_name = str(getattr(tag, 'name', '') or '').lower()
+            if tag_name in _BEAUTIFULSOUP_REVIEW_TEXT_TAGS:
+                return True
+            if tag_name != 'div':
+                return False
+            classes = tag.get('class') or []
+            if isinstance(classes, str):
+                classes = classes.split()
+            return (
+                'u' in {str(value).casefold() for value in classes}
+                and not tag.find(_BEAUTIFULSOUP_REVIEW_TEXT_TAGS)
             )
-            if count:
-                counts[tag_name] = count
+
+        for tag in soup.find_all(_is_review_text_unit):
+            tag_name = str(tag.name or '').lower()
+            text = (
+                '*****'
+                if tag_name == 'hr'
+                else _SDLXLIFF_INVISIBLE_TEXT_RE.sub(
+                    '',
+                    html_lib.unescape(tag.get_text(' ', strip=True)),
+                ).replace('\xa0', ' ').strip()
+            )
+            if not text:
+                continue
+            if tag_name in ('div', 'hr'):
+                tag_name = 'p'
+            counts[tag_name] = counts.get(tag_name, 0) + 1
         return counts
     except Exception:
         return {}

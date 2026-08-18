@@ -1418,6 +1418,22 @@ def test_qa_counts_and_text_checks_include_list_items():
     )) == 1
 
 
+def test_qa_review_tag_count_matches_viewer_paragraph_like_units():
+    html = (
+        "<p>Body</p><p>\u200b<br/></p><hr/>"
+        '<div class="u">Standalone block</div>'
+        '<div class="u"><p>Nested paragraph</p></div>'
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    viewer_counts = {}
+    for unit in dialog._extract_text_units_bs4(html):
+        tag_name = unit["tag"]
+        viewer_counts[tag_name] = viewer_counts.get(tag_name, 0) + 1
+
+    assert viewer_counts == {"p": 4}
+    assert _count_beautifulsoup_review_tags(html) == viewer_counts
+
+
 def test_qa_structure_checks_list_tag_balance(tmp_path):
     valid_path = tmp_path / "valid_list.html"
     valid_path.write_text(
@@ -8391,7 +8407,9 @@ def test_quick_scan_sdlxliff_tag_check_checks_minimum_source_paragraph_boundary(
 
 
 def test_qa_sdlxliff_tag_check_ignores_empty_text_units(tmp_path):
-    assert _count_beautifulsoup_review_tags("<p></p><p>Source</p><h1>Title</h1><h2> </h2>") == {
+    assert _count_beautifulsoup_review_tags(
+        "<p></p><p>\u200b<br/></p><p>Source</p><h1>Title</h1><h2> </h2>"
+    ) == {
         "h1": 1,
         "p": 1,
     }
@@ -8404,7 +8422,7 @@ def test_qa_sdlxliff_tag_check_ignores_empty_text_units(tmp_path):
   <file original="chapter0001.xhtml" source-language="ko-KR" target-language="en-US">
     <body>
       <trans-unit id="html">
-        <source><![CDATA[<html><body><h1>Title</h1><p></p><p>Body</p></body></html>]]></source>
+        <source><![CDATA[<html><body><h1>Title</h1><p></p><p>\u200b<br/></p><p>Body</p></body></html>]]></source>
         <target><![CDATA[<html><body><h1>Title</h1><p>Body</p><p>Extra</p></body></html>]]></target>
       </trans-unit>
     </body>
