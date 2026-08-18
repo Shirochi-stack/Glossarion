@@ -315,6 +315,34 @@ def test_selected_authgrok_uses_existing_session_without_login(tmp_path, monkeyp
     ]
 
 
+def test_selected_authgrok_zero_catalog_uses_pool_without_login(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    token_calls = []
+
+    class FakeStore:
+        def get_valid_access_token(self, auto_login=True):
+            token_calls.append(auto_login)
+            return "pooled-oauth-token"
+
+    fake_authgrok = types.SimpleNamespace(
+        get_account_pool=lambda: [(3, FakeStore())],
+        get_store=lambda account_id: pytest.fail("authgrok0 must use the account pool"),
+        fetch_available_models=lambda token, timeout: ["grok-live", "grok-build"],
+    )
+    monkeypatch.setitem(sys.modules, "authgrok_auth", fake_authgrok)
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authgrok0/grok-old",
+        timeout=0.1,
+    )
+
+    assert token_calls == [False]
+    assert result.provider_models["authgrok"] == [
+        "authgrok0/grok-live",
+        "authgrok0/grok-build",
+    ]
+
+
 def test_logged_in_ocagy_catalog_replaces_its_static_section(tmp_path, monkeypatch):
     _isolated_cache(tmp_path, monkeypatch)
     calls = []

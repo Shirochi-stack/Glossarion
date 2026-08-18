@@ -32,6 +32,67 @@ def test_build_auth_url_uses_xai_pkce_state_and_nonce():
     assert "conversations:write" in query["scope"][0]
 
 
+def test_build_auth_url_can_force_a_fresh_numbered_account_login():
+    url = authgrok.build_auth_url(
+        "challenge-value",
+        "state-value",
+        "http://127.0.0.1:56121/callback",
+        "nonce-value",
+        force_account_selection=True,
+    )
+
+    query = parse_qs(urlparse(url).query)
+    assert query["prompt"] == ["login"]
+    assert query["max_age"] == ["0"]
+
+
+def test_numbered_store_auto_login_forces_account_selection(tmp_path, monkeypatch):
+    captured = []
+
+    def fake_login(*, force_account_selection=False, timeout=300):
+        captured.append(force_account_selection)
+        return {
+            "access_token": "numbered-token",
+            "refresh_token": "numbered-refresh",
+            "expires_at": time.time() + 3600,
+        }
+
+    monkeypatch.setattr(authgrok, "run_oauth_flow", fake_login)
+    store = authgrok.AuthGrokTokenStore(
+        str(tmp_path / "authgrok_tokens_2.json"),
+        account_id=2,
+    )
+
+    assert store.get_valid_access_token(auto_login=True) == "numbered-token"
+    assert captured == [True]
+
+
+def test_authgrok_pool_deduplicates_emails_and_rotates_start(monkeypatch):
+    class FakeStore:
+        def __init__(self, account_id, email):
+            self.account_id = account_id
+            self._tokens = {
+                "access_token": f"token-{account_id}",
+                "account": {"email": email, "subject": f"subject-{account_id}"},
+            }
+
+        def load_tokens(self):
+            return self._tokens
+
+    stores = {
+        0: FakeStore(0, "first@example.test"),
+        1: FakeStore(1, "second@example.test"),
+        2: FakeStore(2, "FIRST@example.test"),
+    }
+    monkeypatch.setattr(authgrok, "_numbered_account_ids", lambda: [1, 2])
+    monkeypatch.setattr(authgrok, "get_store", lambda account_id=0: stores[int(account_id or 0)])
+    monkeypatch.setattr(authgrok, "_pool_rotation_cursor", 0)
+
+    assert [slot for slot, _store in authgrok.get_account_pool()] == [0, 1]
+    assert [slot for slot, _store in authgrok.get_rotating_account_pool()] == [0, 1]
+    assert [slot for slot, _store in authgrok.get_rotating_account_pool()] == [1, 0]
+
+
 def test_build_responses_body_converts_messages_images_and_reasoning():
     body = authgrok._build_responses_body(
         [
@@ -316,6 +377,59 @@ def test_unified_client_routes_authgrok_without_api_key():
     assert UnifiedClient._provider_from_model_name("authgrok/grok-4.5") == "authgrok"
     assert UnifiedClient._provider_from_model_name("authgrok12/grok-build") == "authgrok"
     assert any("authgrok" in prefix for prefix in UnifiedClient._NO_API_KEY_PREFIXES)
+
+
+def test_authgrok_zero_pool_fails_over_to_next_saved_account(monkeypatch):
+    import unified_api_client as unified
+
+    token_calls = []
+    sent_tokens = []
+
+    class FakeStore:
+        def __init__(self, token):
+            self.token = token
+
+        def get_valid_access_token(self, auto_login=True, force_refresh=False):
+            token_calls.append((self.token, auto_login, force_refresh))
+            return self.token
+
+    first = FakeStore("first-token")
+    second = FakeStore("second-token")
+    monkeypatch.setattr(
+        unified,
+        "_authgrok_get_rotating_account_pool",
+        lambda: [(1, first), (2, second)],
+    )
+
+    def fake_send(**kwargs):
+        sent_tokens.append(kwargs["access_token"])
+        if kwargs["access_token"] == "first-token":
+            raise RuntimeError("AuthGrok HTTP 429: quota exhausted")
+        return {"content": "rotated", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setattr(unified, "_authgrok_send", fake_send)
+    client = unified.UnifiedClient.__new__(unified.UnifiedClient)
+    client.request_timeout = 30
+    client._get_active_request_model = lambda: "authgrok0/grok-4.5"
+    client._get_max_retries = lambda: 1
+    client._is_stop_requested = lambda: False
+    client._should_abort_retry = lambda: False
+    client._get_authgrok_reasoning_param = lambda: {"effort": "low"}
+    client._log_once = lambda _message: None
+
+    result = client._send_authgrok(
+        [{"role": "user", "content": "hello"}],
+        temperature=None,
+        max_tokens=100,
+        response_name="test",
+    )
+
+    assert result.content == "rotated"
+    assert sent_tokens == ["first-token", "second-token"]
+    assert token_calls == [
+        ("first-token", False, False),
+        ("second-token", False, False),
+    ]
 
 
 def test_unified_client_maps_disabled_or_none_authgrok_reasoning_to_low(monkeypatch):

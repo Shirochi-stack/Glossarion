@@ -2,7 +2,8 @@
 """OAuth support for Grok models through an xAI account session.
 
 Prefix models with ``authgrok/`` (or ``authgrokN/`` for numbered account
-slots) to use xAI's OAuth-backed Grok CLI proxy without an API key.
+slots) to use xAI's OAuth-backed Grok CLI proxy without an API key. The
+explicit ``authgrok0/`` route rotates the distinct saved account slots.
 
 The browser is opened on xAI's authorization page.  Users may choose any
 sign-in method offered there, including Google account sign-in.  The flow is
@@ -19,6 +20,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -171,6 +173,7 @@ def build_auth_url(
     redirect_uri: str,
     nonce: str,
     authorization_endpoint: str = XAI_OAUTH_AUTHORIZATION_URL,
+    force_account_selection: bool = False,
 ) -> str:
     """Build the xAI authorization URL for the browser PKCE flow."""
     if authorization_endpoint != XAI_OAUTH_AUTHORIZATION_URL:
@@ -185,6 +188,13 @@ def build_auth_url(
         "state": state,
         "nonce": nonce,
     }
+    if force_account_selection:
+        # A numbered AuthGrok slot must not silently inherit the xAI account
+        # that happens to be active in the user's browser.  ``prompt=login``
+        # is the OIDC-defined way to require fresh authentication; ``max_age``
+        # reinforces that requirement for providers that key off session age.
+        params["prompt"] = "login"
+        params["max_age"] = "0"
     return f"{authorization_endpoint}?{urlencode(params)}"
 
 
@@ -411,7 +421,10 @@ def _create_callback_server(state: str) -> HTTPServer:
     return server
 
 
-def run_oauth_flow(timeout: int = 300) -> Dict[str, Any]:
+def run_oauth_flow(
+    timeout: int = 300,
+    force_account_selection: bool = False,
+) -> Dict[str, Any]:
     """Open xAI login in the browser and return validated OAuth tokens."""
     discovery = _load_oidc_discovery()
     verifier, challenge = generate_pkce()
@@ -428,6 +441,7 @@ def run_oauth_flow(timeout: int = 300) -> Dict[str, Any]:
         redirect_uri,
         nonce,
         discovery["authorization_endpoint"],
+        force_account_selection=force_account_selection,
     )
 
     print("Opening browser for Grok login (Google sign-in is supported by xAI)...")
@@ -694,7 +708,7 @@ class AuthGrokTokenStore:
                     "Set AUTHGROK_ACCESS_TOKEN and optionally AUTHGROK_REFRESH_TOKEN."
                 )
 
-            tokens = run_oauth_flow()
+            tokens = run_oauth_flow(force_account_selection=self._account_id > 0)
             self.save_tokens(tokens)
             return str(tokens["access_token"])
 
@@ -714,11 +728,17 @@ class AuthGrokTokenStore:
             "source": str(tokens.get("_source") or "glossarion"),
         }
 
+    @property
+    def account_id(self) -> int:
+        return self._account_id
+
 
 _default_store: Optional[AuthGrokTokenStore] = None
 _default_store_lock = threading.Lock()
 _account_stores: Dict[int, AuthGrokTokenStore] = {}
 _account_stores_lock = threading.Lock()
+_pool_rotation_lock = threading.Lock()
+_pool_rotation_cursor = 0
 
 
 def get_default_store() -> AuthGrokTokenStore:
@@ -739,6 +759,88 @@ def get_store(account_id: Optional[int] = None) -> AuthGrokTokenStore:
             token_file = os.path.join(_DEFAULT_TOKEN_DIR, f"authgrok_tokens_{account_id}.json")
             _account_stores[account_id] = AuthGrokTokenStore(token_file, account_id)
         return _account_stores[account_id]
+
+
+def _numbered_account_ids() -> List[int]:
+    """Return locally known numbered AuthGrok slots without opening login."""
+    with _account_stores_lock:
+        account_ids = set(_account_stores)
+    try:
+        for filename in os.listdir(_DEFAULT_TOKEN_DIR):
+            match = re.fullmatch(r"authgrok_tokens_(\d{1,4})\.json", filename)
+            if match:
+                account_ids.add(int(match.group(1)))
+    except OSError:
+        pass
+    account_ids.discard(0)
+    return sorted(account_ids)
+
+
+def _store_has_reusable_credentials(store: AuthGrokTokenStore) -> bool:
+    tokens = store.load_tokens() or {}
+    if tokens.get("access_token") or tokens.get("refresh_token"):
+        return True
+    if store.account_id != 0:
+        return False
+    if os.environ.get("AUTHGROK_ACCESS_TOKEN", "").strip():
+        return True
+    if os.environ.get("AUTHGROK_REFRESH_TOKEN", "").strip():
+        return True
+    try:
+        return load_grok_cli_credentials() is not None
+    except Exception:
+        return False
+
+
+def _store_account_identity(store: AuthGrokTokenStore) -> Optional[str]:
+    """Return a non-secret identity used to avoid pooling duplicate emails."""
+    tokens = store.load_tokens() or {}
+    account = tokens.get("account") if isinstance(tokens.get("account"), dict) else {}
+    claims = _decode_jwt_part(str(tokens.get("id_token") or ""), 1)
+    email = str(account.get("email") or claims.get("email") or "").strip().casefold()
+    if email:
+        return f"email:{email}"
+    subject = str(account.get("subject") or claims.get("sub") or "").strip()
+    if subject:
+        return f"subject:{subject}"
+    return None
+
+
+def get_account_pool() -> List[Tuple[int, AuthGrokTokenStore]]:
+    """Return saved AuthGrok accounts in stable slot order.
+
+    The default account is slot 0. Duplicate saved slots for the same known
+    email/subject are collapsed so ``authgrok0/`` rotates actual accounts, not
+    multiple copies of the same browser login.
+    """
+    candidates: List[Tuple[int, AuthGrokTokenStore]] = []
+    for account_id in [0, *_numbered_account_ids()]:
+        store = get_store(account_id)
+        if _store_has_reusable_credentials(store):
+            candidates.append((account_id, store))
+
+    unique: List[Tuple[int, AuthGrokTokenStore]] = []
+    seen_identities = set()
+    for account_id, store in candidates:
+        identity = _store_account_identity(store)
+        if identity and identity in seen_identities:
+            continue
+        if identity:
+            seen_identities.add(identity)
+        unique.append((account_id, store))
+    return unique
+
+
+def get_rotating_account_pool() -> List[Tuple[int, AuthGrokTokenStore]]:
+    """Return the saved account pool with a thread-safe round-robin start."""
+    global _pool_rotation_cursor
+    candidates = get_account_pool()
+    if not candidates:
+        return []
+    with _pool_rotation_lock:
+        start = _pool_rotation_cursor % len(candidates)
+        _pool_rotation_cursor = (start + 1) % len(candidates)
+    return candidates[start:] + candidates[:start]
 
 
 # ---------------------------------------------------------------------------

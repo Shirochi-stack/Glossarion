@@ -1180,6 +1180,7 @@ except ImportError:
 try:
     from authgrok_auth import get_default_store as _authgrok_get_store
     from authgrok_auth import get_store as _authgrok_get_store_by_id
+    from authgrok_auth import get_rotating_account_pool as _authgrok_get_rotating_account_pool
     from authgrok_auth import send_chat_completion as _authgrok_send
     from authgrok_auth import cancel_stream as _authgrok_cancel_stream
     from authgrok_auth import reset_cancel as _authgrok_reset_cancel
@@ -1187,6 +1188,7 @@ try:
 except ImportError:
     _authgrok_get_store = None
     _authgrok_get_store_by_id = None
+    _authgrok_get_rotating_account_pool = None
     _authgrok_send = None
     _authgrok_cancel_stream = None
     _authgrok_reset_cancel = None
@@ -26063,34 +26065,103 @@ class UnifiedClient:
         if not actual_model:
             actual_model = 'grok-4.5'
 
+        pool_mode = bool(_re.match(r'^authgrok0(?:/|$)', request_model, _re.IGNORECASE))
         account_id = self._extract_authgrok_account_id(request_model)
         if account_id is None:
             account_id = getattr(self, '_authgrok_account_id', None)
-        try:
+        if pool_mode:
+            try:
+                account_candidates = (
+                    _authgrok_get_rotating_account_pool()
+                    if _authgrok_get_rotating_account_pool is not None
+                    else []
+                )
+            except Exception as exc:
+                raise UnifiedClientError(
+                    f"AuthGrok account pool could not be loaded: {exc}",
+                    error_type="auth_error",
+                )
+            if not account_candidates:
+                raise UnifiedClientError(
+                    "AuthGrok account pool is empty. Sign in with authgrok/ and one or more "
+                    "numbered routes such as authgrok1/ before using authgrok0/.",
+                    error_type="auth_error",
+                )
+        else:
             if _authgrok_get_store_by_id is not None and account_id:
                 store = _authgrok_get_store_by_id(account_id)
-                account_label = f" (Account #{account_id})"
+                account_candidates = [(account_id, store)]
             else:
                 store = _authgrok_get_store()
-                account_label = ""
-            access_token = store.get_valid_access_token(auto_login=True)
+                account_candidates = [(0, store)]
+
+        max_retries = max(1, self._get_max_retries())
+        max_attempts = max(max_retries, len(account_candidates)) if pool_mode else max_retries
+        attempt = 0
+        candidate_position = 0
+        current_candidate = None
+        access_token = None
+        refreshed_candidates = set()
+        last_error = None
+        last_error_type = "api_error"
+
+        def _select_candidate():
+            nonlocal candidate_position, current_candidate, access_token
+            slot_id, candidate_store = account_candidates[candidate_position % len(account_candidates)]
+            candidate_position += 1
+            current_candidate = (slot_id, candidate_store)
+            access_token = candidate_store.get_valid_access_token(auto_login=not pool_mode)
+            if pool_mode:
+                print(f"🔄 AuthGrok pool: Using account slot #{slot_id}")
+            elif slot_id:
+                print(f"🔐 AuthGrok (Account #{slot_id}): Using pinned account")
+
+        try:
+            _select_candidate()
         except Exception as exc:
+            if not pool_mode:
+                account_label = f" (Account #{account_id})" if account_id else ""
+                raise UnifiedClientError(
+                    f"AuthGrok{account_label} authentication failed: {exc}\n"
+                    "Sign in to xAI in the browser (Google sign-in is supported) "
+                    "and make sure the account can use Grok.",
+                    error_type="auth_error",
+                )
+            last_error = exc
+            last_error_type = "auth_error"
+            attempt += 1
+            current_candidate = None
+
+        if current_candidate is None and attempt >= max_attempts:
             raise UnifiedClientError(
-                f"AuthGrok{account_label if 'account_label' in dir() else ''} authentication failed: {exc}\n"
-                "Sign in to xAI in the browser (Google sign-in is supported) and make sure the account can use Grok.",
+                f"AuthGrok account pool has no usable signed-in account: {last_error}",
                 error_type="auth_error",
             )
 
-        max_retries = max(1, self._get_max_retries())
-        attempt = 0
-        auth_retry_used = False
-        last_error = None
-        label = f"AuthGrok{account_label}" if account_label else "AuthGrok"
-        print(f"🔐 {label}: Sending OAuth request (model={actual_model})")
-
-        while attempt < max_retries:
+        while attempt < max_attempts:
             if self._is_stop_requested():
                 raise UnifiedClientError("AuthGrok: Translation stopped by user", error_type="cancelled")
+            if current_candidate is None:
+                try:
+                    _select_candidate()
+                except Exception as exc:
+                    last_error = exc
+                    last_error_type = "auth_error"
+                    attempt += 1
+                    current_candidate = None
+                    if attempt < max_attempts:
+                        print("⚠️ AuthGrok pool: Account authentication failed; trying the next saved account")
+                        continue
+                    break
+
+            slot_id, store = current_candidate
+            account_label = (
+                f" (Pool slot #{slot_id})"
+                if pool_mode
+                else (f" (Account #{slot_id})" if slot_id else "")
+            )
+            label = f"AuthGrok{account_label}"
+            print(f"🔐 {label}: Sending OAuth request (model={actual_model})")
             try:
                 if _authgrok_reset_cancel is not None:
                     _authgrok_reset_cancel()
@@ -26131,15 +26202,27 @@ class UnifiedClient:
 
                 # A bearer may be revoked before its recorded expiry. Force one
                 # refresh without consuming a normal request retry.
-                if "401" in error_text and not auth_retry_used:
-                    auth_retry_used = True
+                candidate_key = slot_id
+                if "401" in error_text and candidate_key not in refreshed_candidates:
+                    refreshed_candidates.add(candidate_key)
                     try:
-                        access_token = store.get_valid_access_token(auto_login=True, force_refresh=True)
-                        print("🔄 AuthGrok: OAuth token refreshed; retrying request…")
+                        access_token = store.get_valid_access_token(
+                            auto_login=not pool_mode,
+                            force_refresh=True,
+                        )
+                        print(f"🔄 {label}: OAuth token refreshed; retrying request…")
                         continue
                     except Exception as refresh_exc:
+                        if pool_mode:
+                            last_error = refresh_exc
+                            last_error_type = "auth_error"
+                            attempt += 1
+                            current_candidate = None
+                            if attempt < max_attempts:
+                                print("⚠️ AuthGrok pool: Token refresh failed; trying the next saved account")
+                                continue
                         raise UnifiedClientError(
-                            f"AuthGrok token refresh failed: {refresh_exc}",
+                            f"{label} token refresh failed: {refresh_exc}",
                             error_type="auth_error",
                         )
 
@@ -26148,12 +26231,21 @@ class UnifiedClient:
                 if "400" in error_text or "bad request" in lowered:
                     raise UnifiedClientError(f"AuthGrok: {error_text}", error_type="validation")
                 if "401" in error_text or "403" in error_text:
+                    if pool_mode and attempt < max_attempts:
+                        current_candidate = None
+                        last_error_type = "auth_error"
+                        print("⚠️ AuthGrok pool: Account was rejected; trying the next saved account")
+                        continue
                     raise UnifiedClientError(f"AuthGrok: {error_text}", error_type="auth_error")
-                if "429" in error_text and attempt >= max_retries:
+                if "429" in error_text and attempt >= max_attempts:
                     raise UnifiedClientError(f"AuthGrok: {error_text}", error_type="rate_limit")
-                if attempt < max_retries:
+                if attempt < max_attempts:
+                    if pool_mode:
+                        current_candidate = None
+                        print("⚠️ AuthGrok pool: Request failed; trying the next saved account")
+                        continue
                     delay = self._get_send_interval()
-                    print(f"⚠️ AuthGrok request failed; retrying in {delay:.1f}s ({attempt}/{max_retries})")
+                    print(f"⚠️ AuthGrok request failed; retrying in {delay:.1f}s ({attempt}/{max_attempts})")
                     if not self._sleep_with_cancel(delay, 0.5):
                         raise UnifiedClientError("AuthGrok: Translation stopped by user", error_type="cancelled")
             except UnifiedClientError:
@@ -26163,14 +26255,19 @@ class UnifiedClient:
                 attempt += 1
                 if self._should_abort_retry():
                     raise UnifiedClientError("AuthGrok: Translation stopped by user", error_type="cancelled")
-                if attempt < max_retries:
+                if attempt < max_attempts:
+                    if pool_mode:
+                        current_candidate = None
+                        print("⚠️ AuthGrok pool: Request failed; trying the next saved account")
+                        continue
                     delay = self._get_send_interval()
                     if not self._sleep_with_cancel(delay, 0.5):
                         raise UnifiedClientError("AuthGrok: Translation stopped by user", error_type="cancelled")
 
+        final_label = "AuthGrok account pool" if pool_mode else "AuthGrok"
         raise UnifiedClientError(
-            f"AuthGrok request failed after {max_retries} attempts: {last_error}",
-            error_type="api_error",
+            f"{final_label} request failed after {max_attempts} attempts: {last_error}",
+            error_type=last_error_type,
         )
 
     # ------------------------------------------------------------------

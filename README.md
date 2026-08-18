@@ -103,7 +103,7 @@
 * **Multi-Key Management** — key pool with rotation, rate limit caching, and per-key health tracking
 * **Config Backup System** — automatic JSON config backups with atomic writes
 * **AuthGPT OAuth** — use your ChatGPT subscription directly via OAuth token flow
-* **AuthGrok Browser Login** — use the `authgrok/` model prefix to sign in to an xAI/Grok account through your browser, including Google sign-in
+* **AuthGrok Browser Login & Pooling** — sign in to multiple xAI/Grok accounts with deterministic numbered slots, or use `authgrok0/` for automatic rotation
 * **OpenCode Antigravity OAuth** — use `ocagy0/` for the plugin-managed account pool or numbered OcAgy routes for deterministic batch-account selection, including Gemini 3.1 Pro High
 
 ---
@@ -127,7 +127,7 @@
 | **VertexAI** | `vertex/*` | vertex/gemini-3.1-pro-preview, vertex/claude-4-opus |
 | **Groq** | `groq/*` | groq/llama-3.3-70b-versatile, groq/meta-llama/llama-4-maverick-17b |
 | **AuthGPT** | `authgpt/*` | authgpt/gpt-5.4, authgpt/gpt-5.3-codex, authgpt/gpt-5.2 |
-| **AuthGrok** | `authgrok/*` | authgrok/grok-4.5, authgrok/grok-4.3, authgrok/grok-build |
+| **AuthGrok** | `authgrok0/*`, `authgrok/*`, `authgrokN/*` | authgrok0/grok-4.5, authgrok/grok-4.5, authgrok1/grok-build |
 | **AuthCD** | `authcd/*` | authcd/claude-sonnet-4-6, authcd/claude-haiku-4-5-20251001 |
 | **AuthGem** | `authgem/*`, `authgem-vertex/*` | authgem/gemini-3.1-pro-preview, authgem-vertex/gemini-3.1-pro-preview |
 | **Antigravity** | `antigravity/*` | antigravity/claude-opus-4-6-thinking-high, antigravity/gemini-3.1-pro-low |
@@ -148,7 +148,7 @@
 | **Google Translate** | `google-translate*` | google-translate, google-translate-free |
 | **Custom Prefix Routes** | user-defined `prefix/*` | Route custom prefixes to OpenAI-compatible endpoints in Model Manager |
 
-> **AuthGrok browser login:** The `authgrok/` prefix selects browser-based xAI account authentication instead of an xAI API key. Enter a model such as `authgrok/grok-4.5`, click **Grok Login**, and finish signing in through the browser.
+> **AuthGrok browser login and account pool:** `authgrok/` pins the default saved account, while `authgrok1/`, `authgrok2/`, and later numbered routes pin their matching account slots. Select each pinned route and click **Grok Login** to add a different email; numbered logins force a fresh xAI sign-in instead of inheriting the browser's current account. After saving the accounts, `authgrok0/` rotates distinct accounts round-robin and advances to another account on authentication, quota, or request failure.
 
 > **OcAgy login and account slots:** OcAgy is separate from the local `antigravity/` proxy. Click **OCAGY Login**; Glossarion installs OpenCode and `opencode-antigravity-auth` automatically when needed, then opens the login so you can choose **Google → OAuth with Google (Antigravity)**. No API key is required. `ocagy0/...` preserves the plugin-managed shared pool/current behavior; `ocagy/...` pins saved account #1, `ocagy1/...` pins account #2, `ocagy2/...` pins account #3, and so on. A pinned route fails clearly if that slot is missing, disabled, or out of quota instead of silently switching accounts.
 

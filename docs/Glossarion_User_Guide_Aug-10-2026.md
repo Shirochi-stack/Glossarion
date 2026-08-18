@@ -206,7 +206,7 @@ The built-in model list is a safety net, not a promise that every entry is still
 - For a private catalog, the key in the **API Key** box is used **only for the provider selected in the Model box**. Glossarion never tries that key against every provider.
 - Example: select `grok-3-mini`, paste an xAI key, then poll to check xAI. Select an unprefixed `gemini-...` model with a Gemini key to check Google Gemini.
 - Provider-specific environment variables such as `OPENAI_API_KEY`, `GEMINI_API_KEY`, or `GROQ_API_KEY` may also authorize their matching catalogs.
-- Subscription/OAuth and project-specific routes may stay static when their backend has no safe general catalog endpoint. AuthGrok is queried only when an `authgrok.../` model for an existing signed-in account is selected.
+- Subscription/OAuth and project-specific routes may stay static when their backend has no safe general catalog endpoint. AuthGrok is queried only when an `authgrok.../` model for an existing signed-in account is selected. For `authgrok0/...`, Glossarion uses an existing account from the saved pool without opening login.
 
 **How to read the result:**
 
@@ -219,7 +219,9 @@ The built-in model list is a safety net, not a promise that every entry is still
 
 ### Option 2 — Log in with a subscription (no key)
 
-If you already pay for **ChatGPT Plus/Pro**, **Claude Pro/Max**, or have a **Google** account, use the **🔐 login buttons** on the main window instead of an API key. Pick the matching `authgpt/...`, `authcd/...`, `authgem/...`, OcAgy, or `antigravity/...` model. OcAgy login opens an interactive OpenCode terminal instead of a browser directly. For both Antigravity routes, also read [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds).
+If you already pay for **ChatGPT Plus/Pro**, **Claude Pro/Max**, **Grok**, or have a **Google** account, use the **🔐 login buttons** on the main window instead of an API key. Pick the matching `authgpt/...`, `authcd/...`, `authgrok/...`, `authgem/...`, OcAgy, or `antigravity/...` model. OcAgy login opens an interactive OpenCode terminal instead of a browser directly. For both Antigravity routes, also read [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds).
+
+**AuthGrok account slots and rotation:** Use `authgrok/...` for the default saved xAI account. To add more emails, type `authgrok1/...`, click **Grok Login**, and complete the fresh xAI sign-in; repeat with `authgrok2/...`, and so on. Those numbered prefixes stay pinned to their slots. Once multiple accounts are saved, use `authgrok0/...` to rotate distinct emails round-robin. The pool advances to another saved account when an account cannot authenticate, is rate-limited/out of quota, or its request fails. Duplicate slots containing the same known email are used only once in the pool.
 
 ### Option 3 — Translate for free
 

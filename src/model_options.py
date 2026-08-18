@@ -1055,7 +1055,10 @@ def _authgrok_catalog_target(active_model: str) -> Optional[Tuple[str, str, int]
     match = re.match(r"^authgrok(\d{0,4})/", value)
     if not match:
         return None
-    account_id = int(match.group(1) or 0)
+    raw_account_id = match.group(1)
+    account_id = int(raw_account_id or 0)
+    if raw_account_id == "0":
+        return "authgrok", "authgrok0/", 0
     if account_id:
         return f"authgrok:{account_id}", f"authgrok{account_id}/", account_id
     return "authgrok", "authgrok/", 0
@@ -1069,7 +1072,13 @@ def _fetch_authgrok_catalog(active_model: str, timeout: float) -> Optional[Tuple
     provider_name, prefix, account_id = target
     import authgrok_auth
 
-    store = authgrok_auth.get_store(account_id)
+    if prefix == "authgrok0/":
+        account_pool = authgrok_auth.get_account_pool()
+        if not account_pool:
+            raise RuntimeError("AuthGrok account pool is empty")
+        _slot_id, store = account_pool[0]
+    else:
+        store = authgrok_auth.get_store(account_id)
     access_token = store.get_valid_access_token(auto_login=False)
     raw_models = authgrok_auth.fetch_available_models(
         access_token,

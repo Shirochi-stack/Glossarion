@@ -18001,6 +18001,8 @@ Recent translations to summarize:
 
         # Also include the primary model's account ID
         model = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
+        previous_authgrok_model = getattr(self, '_authgrok_account_model_snapshot', None)
+        authgrok_primary_id = None
         _prov_patterns = {
             'authgpt': _re.compile(r'^authgpt(\d{0,4})/'),
             'authgrok': _re.compile(r'^authgrok(\d{0,4})/'),
@@ -18012,6 +18014,8 @@ Recent translations to summarize:
             if m:
                 acct_id = int(m.group(1)) if m.group(1) else 0
                 pool_ids[provider].add(acct_id)
+                if provider == 'authgrok':
+                    authgrok_primary_id = acct_id
 
         combo_map = {
             'authgpt': 'authgpt_acct_combo',
@@ -18031,6 +18035,15 @@ Recent translations to summarize:
 
             # Clamp current index if accounts were removed
             cur_idx = self._auth_account_idx.get(provider, 0)
+            if (
+                provider == 'authgrok'
+                and model != previous_authgrok_model
+                and authgrok_primary_id in sorted_ids
+            ):
+                # When the user types a different numbered AuthGrok prefix,
+                # make the login control follow that slot. Subsequent refreshes
+                # keep deliberate account-dropdown selections intact.
+                cur_idx = sorted_ids.index(authgrok_primary_id)
             if cur_idx >= len(sorted_ids):
                 cur_idx = 0
             self._auth_account_idx[provider] = cur_idx
@@ -18069,6 +18082,8 @@ Recent translations to summarize:
                         update_fn()  # authgem auto-detects needs_vertex
                     else:
                         update_fn()
+
+        self._authgrok_account_model_snapshot = model
 
     def _on_auth_acct_combo_changed(self, provider, index):
         """Handle account-slot dropdown selection change for *provider*.
@@ -18569,7 +18584,9 @@ Recent translations to summarize:
         def _do_login():
             try:
                 from authgrok_auth import run_oauth_flow
-                store.save_tokens(run_oauth_flow())
+                store.save_tokens(run_oauth_flow(
+                    force_account_selection=account_id > 0,
+                ))
                 QMetaObject.invokeMethod(self, "_authgrok_login_finished", Qt.QueuedConnection)
             except Exception as exc:
                 self._authgrok_login_error = str(exc)
@@ -19801,13 +19818,15 @@ Recent translations to summarize:
         <h4>Grok Account (authgrok/)</h4>
         <p>Use Grok through an xAI account OAuth session — no API key needed</p>
         <ul>
+            <li><b>authgrok0/grok-4.5</b> - Rotate the pool of saved Grok accounts</li>
             <li><b>authgrok/grok-4.5</b> - Current flagship and offline fallback</li>
+            <li><b>authgrok1/grok-4.5</b> - Pin numbered account slot #1</li>
             <li><b>authgrok/grok-4.3</b> - OAuth-compatible route when entitled</li>
             <li><b>authgrok/grok-build</b> - Coding model when available to the account</li>
         </ul>
         <p style="color: #9ca3af; padding: 4px; font-size: 11px;">
             <b>ℹ️ Tip:</b> Click <b>🔐 Grok Login</b>; xAI's login page lets you choose Google sign-in.
-            The exact model catalog depends on the signed-in account.
+            Numbered routes request a fresh login so you can select a different email. The exact model catalog depends on the signed-in account.
         </p>
 
         <h4>Claude Subscription (authcd/)</h4>
