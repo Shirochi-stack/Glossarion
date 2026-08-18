@@ -641,6 +641,191 @@ def test_unified_client_routes_authgrok_without_api_key():
     assert any("authgrok" in prefix for prefix in UnifiedClient._NO_API_KEY_PREFIXES)
 
 
+def test_authgrok_http_error_reads_only_provider_error_metadata():
+    error = authgrok.AuthGrokHTTPError(
+        403,
+        json.dumps({
+            "code": "permission-denied",
+            "error": (
+                "Content violates usage guidelines. "
+                "Failed check: SAFETY_CHECK_TYPE_CSAM"
+            ),
+        }),
+    )
+
+    assert error.is_safety_error is True
+    assert error.safety_check == "SAFETY_CHECK_TYPE_CSAM"
+    assert error.provider_code == "permission-denied"
+
+
+def test_authgrok_http_error_ignores_safety_words_in_echoed_request_content():
+    error = authgrok.AuthGrokHTTPError(
+        403,
+        json.dumps({
+            "code": "permission-denied",
+            "error": "This account is not authorized",
+            "request": {
+                "input": (
+                    "A story literally says Content violates usage guidelines and "
+                    "SAFETY_CHECK_TYPE_CSAM in dialogue."
+                ),
+            },
+        }),
+    )
+
+    assert error.is_safety_error is False
+    assert error.safety_check is None
+
+
+def test_authgrok_safety_http_error_maps_to_prohibited_without_retry(monkeypatch):
+    import unified_api_client as unified
+
+    send_calls = []
+
+    class FakeStore:
+        def get_valid_access_token(self, auto_login=True, force_refresh=False):
+            return "access-token"
+
+    monkeypatch.setattr(unified, "_authgrok_get_store", lambda: FakeStore())
+
+    def fake_send(**kwargs):
+        send_calls.append(kwargs)
+        raise authgrok.AuthGrokHTTPError(
+            403,
+            json.dumps({
+                "code": "permission-denied",
+                "error": {
+                    "message": (
+                        "Content violates usage guidelines. "
+                        "Failed check: SAFETY_CHECK_TYPE_CSAM"
+                    ),
+                },
+            }),
+        )
+
+    monkeypatch.setattr(unified, "_authgrok_send", fake_send)
+    client = unified.UnifiedClient.__new__(unified.UnifiedClient)
+    client.request_timeout = 30
+    client._get_active_request_model = lambda: "authgrok/grok-4.6"
+    client._get_max_retries = lambda: 7
+    client._is_stop_requested = lambda: False
+    client._should_abort_retry = lambda: False
+    client._get_authgrok_reasoning_param = lambda: {"effort": "low"}
+    client._log_once = lambda _message: None
+
+    with pytest.raises(unified.UnifiedClientError) as raised:
+        client._send_authgrok(
+            [{"role": "user", "content": "Translate this chapter."}],
+            temperature=None,
+            max_tokens=100,
+            response_name="test",
+        )
+
+    assert raised.value.error_type == "prohibited_content"
+    assert raised.value.http_status == 403
+    assert raised.value.details == {
+        "provider": "authgrok",
+        "source": "authgrok_http_error",
+        "safety_check": "SAFETY_CHECK_TYPE_CSAM",
+        "provider_code": "permission-denied",
+    }
+    assert len(send_calls) == 1
+
+
+def test_authgrok_safety_http_error_skips_global_api_retries(monkeypatch):
+    import unified_api_client as unified
+
+    send_calls = []
+
+    class FakeStore:
+        def get_valid_access_token(self, auto_login=True, force_refresh=False):
+            return "access-token"
+
+    monkeypatch.setattr(unified, "_authgrok_get_store", lambda: FakeStore())
+
+    def fake_send(**kwargs):
+        send_calls.append(kwargs)
+        raise authgrok.AuthGrokHTTPError(
+            403,
+            json.dumps({
+                "code": "permission-denied",
+                "error": (
+                    "Content violates usage guidelines. "
+                    "Failed check: SAFETY_CHECK_TYPE_CSAM"
+                ),
+            }),
+        )
+
+    monkeypatch.setattr(unified, "_authgrok_send", fake_send)
+    monkeypatch.setattr(unified, "_authgrok_reset_cancel", lambda: None)
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("USE_GLOSSARY_KEYS", "0")
+    monkeypatch.setenv("USE_GLOSSARY_REFINEMENT_KEYS", "0")
+
+    client = unified.UnifiedClient(
+        "",
+        "authgrok/grok-4.6",
+        _skip_cancel_reset=True,
+    )
+    monkeypatch.setattr(client, "_save_payload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_save_failed_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_track_stats", lambda *args, **kwargs: None)
+
+    _content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "Translate this chapter."}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id="authgrok-filter-test",
+    )
+
+    assert finish_reason == "prohibited_content"
+    assert len(send_calls) == 1
+
+
+def test_authgrok_ordinary_403_remains_an_auth_error(monkeypatch):
+    import unified_api_client as unified
+
+    class FakeStore:
+        def get_valid_access_token(self, auto_login=True, force_refresh=False):
+            return "access-token"
+
+    monkeypatch.setattr(unified, "_authgrok_get_store", lambda: FakeStore())
+    monkeypatch.setattr(
+        unified,
+        "_authgrok_send",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            authgrok.AuthGrokHTTPError(
+                403,
+                json.dumps({
+                    "code": "permission-denied",
+                    "error": "This account is not authorized for the requested model",
+                }),
+            )
+        ),
+    )
+    client = unified.UnifiedClient.__new__(unified.UnifiedClient)
+    client.request_timeout = 30
+    client._get_active_request_model = lambda: "authgrok/grok-4.6"
+    client._get_max_retries = lambda: 7
+    client._is_stop_requested = lambda: False
+    client._should_abort_retry = lambda: False
+    client._get_authgrok_reasoning_param = lambda: {"effort": "low"}
+    client._log_once = lambda _message: None
+
+    with pytest.raises(unified.UnifiedClientError) as raised:
+        client._send_authgrok(
+            [{"role": "user", "content": "Translate this chapter."}],
+            temperature=None,
+            max_tokens=100,
+            response_name="test",
+        )
+
+    assert raised.value.error_type == "auth_error"
+
+
 def test_authgrok_zero_pool_fails_over_to_next_saved_account(monkeypatch):
     import unified_api_client as unified
 

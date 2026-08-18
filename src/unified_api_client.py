@@ -1178,6 +1178,7 @@ except ImportError:
 
 # AuthGrok - Grok account via xAI OAuth (optional)
 try:
+    from authgrok_auth import AuthGrokHTTPError as _AuthGrokHTTPError
     from authgrok_auth import get_default_store as _authgrok_get_store
     from authgrok_auth import get_store as _authgrok_get_store_by_id
     from authgrok_auth import get_rotating_account_pool as _authgrok_get_rotating_account_pool
@@ -1186,6 +1187,7 @@ try:
     from authgrok_auth import reset_cancel as _authgrok_reset_cancel
     AUTHGROK_AVAILABLE = True
 except ImportError:
+    _AuthGrokHTTPError = None
     _authgrok_get_store = None
     _authgrok_get_store_by_id = None
     _authgrok_get_rotating_account_pool = None
@@ -26207,6 +26209,35 @@ class UnifiedClient:
                 if "stream cancelled" in lowered or self._should_abort_retry():
                     self._log_once("⏹️ AuthGrok: Stream cancelled by user")
                     raise UnifiedClientError("AuthGrok: Translation stopped by user", error_type="cancelled")
+
+                # xAI safety failures are authoritative provider errors, not an
+                # authentication rejection. Classify only the typed HTTP error's
+                # parsed error metadata; do not inspect the prompt or response text.
+                is_provider_safety_error = (
+                    _AuthGrokHTTPError is not None
+                    and isinstance(exc, _AuthGrokHTTPError)
+                    and bool(getattr(exc, "is_safety_error", False))
+                )
+                if is_provider_safety_error:
+                    safety_details = {
+                        "provider": "authgrok",
+                        "source": "authgrok_http_error",
+                    }
+                    safety_check = getattr(exc, "safety_check", None)
+                    provider_code = getattr(exc, "provider_code", None)
+                    provider_error_type = getattr(exc, "provider_error_type", None)
+                    if safety_check:
+                        safety_details["safety_check"] = safety_check
+                    if provider_code:
+                        safety_details["provider_code"] = provider_code
+                    if provider_error_type:
+                        safety_details["provider_error_type"] = provider_error_type
+                    raise UnifiedClientError(
+                        f"AuthGrok: {error_text}",
+                        error_type="prohibited_content",
+                        http_status=getattr(exc, "status_code", None),
+                        details=safety_details,
+                    )
 
                 # A bearer may be revoked before its recorded expiry. Force one
                 # refresh without consuming a normal request retry.

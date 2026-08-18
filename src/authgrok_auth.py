@@ -1464,6 +1464,128 @@ def _safe_error_detail(response_body: str) -> str:
     return value.strip()[:1000] or "request failed"
 
 
+_SAFETY_CHECK_TYPE_PATTERN = re.compile(r"\bSAFETY_CHECK_TYPE_[A-Z0-9_]+\b", re.IGNORECASE)
+_SAFETY_ERROR_CODE_MARKERS = {
+    "censorship_blocked",
+    "content_filter",
+    "content_filtered",
+    "content_policy_violation",
+    "prohibited_content",
+    "safety_check_failed",
+    "safety_violation",
+}
+_ERROR_METADATA_FIELDS = (
+    "message",
+    "code",
+    "type",
+    "reason",
+    "failed_check",
+    "failedCheck",
+    "safety_check",
+    "safetyCheck",
+)
+
+
+def _http_error_metadata(response_body: str) -> Dict[str, Any]:
+    """Extract only provider-owned error metadata from a failed HTTP response.
+
+    Deliberately ignore request, prompt, input, and output fields. Providers may
+    echo those fields in diagnostics, and treating their text as an error signal
+    would make story content capable of producing a false safety classification.
+    """
+    value = str(response_body or "")[:16_384]
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return {
+            "structured": False,
+            "message": value.strip()[:1000] or "request failed",
+            "metadata_text": value.strip()[:4000],
+        }
+
+    if not isinstance(parsed, dict):
+        return {
+            "structured": False,
+            "message": _safe_error_detail(value),
+            "metadata_text": "",
+        }
+
+    containers: List[Dict[str, Any]] = []
+    error_value = parsed.get("error")
+    detail_value = parsed.get("detail")
+    if isinstance(error_value, dict):
+        containers.append(error_value)
+    if isinstance(detail_value, dict):
+        containers.append(detail_value)
+    containers.append(parsed)
+
+    metadata_values: List[str] = []
+    for container in containers:
+        for field in _ERROR_METADATA_FIELDS:
+            field_value = container.get(field)
+            if isinstance(field_value, (str, int, float)):
+                metadata_values.append(str(field_value))
+
+    # A common xAI shape is {"code": "permission-denied", "error": "..."}.
+    if isinstance(error_value, (str, int, float)):
+        metadata_values.append(str(error_value))
+    if isinstance(detail_value, (str, int, float)):
+        metadata_values.append(str(detail_value))
+
+    def _first_scalar(field: str) -> Optional[str]:
+        for container in containers:
+            candidate = container.get(field)
+            if isinstance(candidate, (str, int, float)):
+                return str(candidate)
+        return None
+
+    message = _first_scalar("message")
+    if not message and isinstance(error_value, (str, int, float)):
+        message = str(error_value)
+    if not message and isinstance(detail_value, (str, int, float)):
+        message = str(detail_value)
+
+    return {
+        "structured": True,
+        "message": (message or _safe_error_detail(value))[:1000],
+        "code": _first_scalar("code"),
+        "type": _first_scalar("type"),
+        "metadata_text": " ".join(metadata_values)[:4000],
+    }
+
+
+class AuthGrokHTTPError(RuntimeError):
+    """A failed AuthGrok HTTP response with parsed xAI error metadata."""
+
+    def __init__(self, status_code: int, response_body: str):
+        self.status_code = int(status_code)
+        metadata = _http_error_metadata(response_body)
+        self.error_detail = str(metadata.get("message") or "request failed")[:1000]
+        self.provider_code = metadata.get("code")
+        self.provider_error_type = metadata.get("type")
+
+        metadata_text = str(metadata.get("metadata_text") or "")
+        safety_match = _SAFETY_CHECK_TYPE_PATTERN.search(metadata_text)
+        self.safety_check = safety_match.group(0).upper() if safety_match else None
+
+        code_markers = {
+            str(value).strip().lower().replace("-", "_")
+            for value in (self.provider_code, self.provider_error_type)
+            if value is not None
+        }
+        structured_guideline_block = (
+            bool(metadata.get("structured"))
+            and self.status_code == 403
+            and "content violates usage guidelines" in metadata_text.lower()
+        )
+        self.is_safety_error = bool(
+            self.safety_check
+            or code_markers.intersection(_SAFETY_ERROR_CODE_MARKERS)
+            or structured_guideline_block
+        )
+        super().__init__(f"AuthGrok HTTP {self.status_code}: {self.error_detail}")
+
+
 def _is_terminal_sse_line(line: str) -> bool:
     payload = line[5:].strip() if line.startswith("data:") else ""
     if payload == "[DONE]":
@@ -1681,8 +1803,8 @@ def _stream_with_httpx(
         follow_redirects=False,
     ) as response:
         if response.status_code >= 400:
-            detail = _safe_error_detail(response.read().decode("utf-8", errors="replace"))
-            raise RuntimeError(f"AuthGrok HTTP {response.status_code}: {detail}")
+            response_body = response.read().decode("utf-8", errors="replace")
+            raise AuthGrokHTTPError(response.status_code, response_body)
         for line in response.iter_lines():
             if is_cancelled():
                 response.close()
@@ -1719,7 +1841,7 @@ def _stream_with_requests(
     if response.is_redirect or response.is_permanent_redirect:
         raise RuntimeError("AuthGrok Responses endpoint unexpectedly redirected")
     if response.status_code >= 400:
-        raise RuntimeError(f"AuthGrok HTTP {response.status_code}: {_safe_error_detail(response.text)}")
+        raise AuthGrokHTTPError(response.status_code, response.text)
     lines: List[str] = []
     state = _new_stream_display_state()
     for raw_line in response.iter_lines(chunk_size=1):
