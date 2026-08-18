@@ -149,6 +149,7 @@ except Exception as e:
 import re
 import base64
 import contextlib
+import codecs
 import asyncio
 # PIL Image import removed — unused in this module. The top-level import
 # added 200-500ms cold-start latency (plugin discovery + codec loading).
@@ -1364,6 +1365,81 @@ class UnifiedClientError(Exception):
         self.error_type = error_type
         self.http_status = http_status
         self.details = details
+
+
+class _HttpxJsonSSEStream:
+    """Expose an httpx byte stream as OpenAI-compatible JSON SSE events."""
+
+    def __init__(self, response, client, on_close=None):
+        self.response = response
+        self.client = client
+        self._on_close = on_close
+        self._closed = False
+        self._close_lock = threading.Lock()
+
+    @property
+    def status_code(self):
+        return self.response.status_code
+
+    @property
+    def headers(self):
+        return self.response.headers
+
+    @staticmethod
+    def _decode_line(line: str):
+        line = str(line or '').strip()
+        if not line or line.startswith(':') or not line.startswith('data:'):
+            return None, False
+        data = line[5:].strip()
+        if data == '[DONE]':
+            return None, True
+        if not data:
+            return None, False
+        try:
+            return json.loads(data), False
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None, False
+
+    def __iter__(self):
+        decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+        buffer = ''
+        try:
+            for raw_chunk in self.response.iter_raw():
+                if not raw_chunk:
+                    continue
+                if isinstance(raw_chunk, str):
+                    buffer += raw_chunk
+                else:
+                    buffer += decoder.decode(raw_chunk)
+                while '\n' in buffer:
+                    line, buffer = buffer.split('\n', 1)
+                    event, done = self._decode_line(line.rstrip('\r'))
+                    if done:
+                        return
+                    if event is not None:
+                        yield event
+
+            buffer += decoder.decode(b'', final=True)
+            if buffer:
+                event, done = self._decode_line(buffer.rstrip('\r'))
+                if not done and event is not None:
+                    yield event
+        finally:
+            self.close()
+
+    def close(self):
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        try:
+            self.response.close()
+        finally:
+            try:
+                self.client.close()
+            finally:
+                if self._on_close is not None:
+                    self._on_close()
 
 # ---------------------------------------------------------------------------
 # Deferred batch log buffer
@@ -15912,6 +15988,17 @@ class UnifiedClient:
                 return f" (reasoning_effort: {self._normalize_deepseek_v4_effort(effort)})"
             return f" (thinking enabled, effort: {effort})"
 
+        # NVIDIA API-key route. Keep this label tied to the exact payload
+        # builder so the log cannot disagree with what nd/ sends.
+        if model_lower.startswith('nd/'):
+            nvidia_model = model_lower[3:]
+            nvidia_payload = {}
+            if self._apply_nvidia_deepseek_v4_thinking(nvidia_payload, nvidia_model):
+                nvidia_cfg = nvidia_payload.get('chat_template_kwargs', {})
+                if not nvidia_cfg.get('thinking'):
+                    return " (reasoning_effort: none)"
+                return f" (reasoning_effort: {nvidia_cfg.get('reasoning_effort', 'high')})"
+
         if model_lower.startswith('authgrok'):
             reasoning = self._get_authgrok_reasoning_param()
             effort = str(reasoning.get('effort', 'high') or 'high')
@@ -17404,6 +17491,71 @@ class UnifiedClient:
             h['User-Agent'] = self._opencode_user_agent()
         return h
 
+    def _open_nvidia_httpx_sse_stream(
+            self, base_url: str, api_key: str, headers: Optional[dict],
+            call_kwargs: dict, timeout_obj=None):
+        """Open NVIDIA's OpenAI-compatible SSE endpoint without SDK buffering."""
+        if httpx is None:
+            raise UnifiedClientError(
+                "NVIDIA reasoning streaming requires httpx",
+                error_type="missing_dependency",
+            )
+
+        payload = dict(call_kwargs or {})
+        extra_headers = payload.pop('extra_headers', None) or {}
+        extra_body = payload.pop('extra_body', None)
+        if isinstance(extra_body, dict):
+            payload.update(extra_body)
+        payload['stream'] = True
+
+        request_headers = self._build_openai_headers('nvidia', api_key, headers)
+        request_headers.update(extra_headers)
+        request_headers['Accept'] = 'text/event-stream'
+        request_headers['Accept-Encoding'] = 'identity'
+        request_headers['Cache-Control'] = 'no-cache'
+        request_headers = _sanitize_headers_ascii(request_headers)
+
+        stream_client = httpx.Client(
+            timeout=timeout_obj,
+            limits=httpx.Limits(
+                max_connections=1,
+                max_keepalive_connections=0,
+                keepalive_expiry=0,
+            ),
+        )
+        url = f"{str(base_url or '').rstrip('/')}/chat/completions"
+        try:
+            request = stream_client.build_request(
+                'POST', url, headers=request_headers, json=payload,
+            )
+            response = stream_client.send(request, stream=True)
+        except Exception:
+            stream_client.close()
+            raise
+
+        if response.status_code != 200:
+            try:
+                response.read()
+                body = response.text
+            except Exception:
+                body = f"HTTP {response.status_code}"
+            finally:
+                response.close()
+                stream_client.close()
+            raise UnifiedClientError(
+                f"NVIDIA streaming error (HTTP {response.status_code}): {body[:1000]}",
+                http_status=response.status_code,
+            )
+
+        with self._all_httpx_clients_lock:
+            self._all_httpx_clients.add(stream_client)
+
+        def _untrack_client():
+            with self._all_httpx_clients_lock:
+                self._all_httpx_clients.discard(stream_client)
+
+        return _HttpxJsonSSEStream(response, stream_client, _untrack_client)
+
     @staticmethod
     def _opencode_user_agent() -> str:
         """Return the app User-Agent required by OpenCode Zen/Go WAF routing."""
@@ -17454,6 +17606,33 @@ class UnifiedClient:
         if normalized in ('xhigh', 'max', 'heavy'):
             return 'max'
         return 'high'
+
+    @staticmethod
+    def _apply_nvidia_deepseek_v4_thinking(payload: dict, effective_model: str = "") -> bool:
+        """Apply NVIDIA NIM's model-specific DeepSeek V4 thinking controls."""
+        model_lower = str(effective_model or '').strip().lower()
+        if 'deepseek-v4' not in model_lower:
+            return False
+
+        enabled = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
+        selected = (os.getenv('GPT_EFFORT', 'high') or 'high').strip().lower()
+        if not enabled or selected == 'none':
+            effort = 'none'
+        elif selected in ('xhigh', 'max', 'heavy'):
+            effort = 'max'
+        else:
+            # NVIDIA's hosted DeepSeek V4 endpoint accepts none/high/max.
+            effort = 'high'
+
+        chat_template_kwargs = payload.get('chat_template_kwargs')
+        if not isinstance(chat_template_kwargs, dict):
+            chat_template_kwargs = {}
+        chat_template_kwargs.update({
+            'thinking': effort != 'none',
+            'reasoning_effort': effort,
+        })
+        payload['chat_template_kwargs'] = chat_template_kwargs
+        return True
 
     @staticmethod
     def _is_opencode_deepseek_v4_model(effective_model: str = "") -> bool:
@@ -23213,7 +23392,26 @@ class UnifiedClient:
                         except Exception:
                             pass
 
-                    generic_reasoning_effort = self._get_openai_compatible_reasoning_effort(provider, effective_model)
+                    nvidia_reasoning_applied = False
+                    if provider == 'nvidia':
+                        nvidia_reasoning_applied = self._apply_nvidia_deepseek_v4_thinking(
+                            extra_body, effective_model,
+                        )
+                        if nvidia_reasoning_applied:
+                            nvidia_cfg = extra_body.get('chat_template_kwargs', {})
+                            nvidia_effort = nvidia_cfg.get('reasoning_effort', 'none')
+                            self._debug_log(
+                                f"🧠 [nvidia] thinking="
+                                f"{'ENABLED' if nvidia_cfg.get('thinking') else 'DISABLED'} "
+                                f"+ chat_template_kwargs.reasoning_effort={nvidia_effort} "
+                                f"(model={effective_model})"
+                            )
+
+                    generic_reasoning_effort = None
+                    if not nvidia_reasoning_applied:
+                        generic_reasoning_effort = self._get_openai_compatible_reasoning_effort(
+                            provider, effective_model,
+                        )
                     if generic_reasoning_effort:
                         if not use_responses_api:
                             params.setdefault("reasoning_effort", generic_reasoning_effort)
@@ -23371,6 +23569,25 @@ class UnifiedClient:
                     if use_streaming:
                         call_kwargs["stream"] = True
 
+                    nvidia_httpx_stream = (
+                        provider == 'nvidia'
+                        and use_streaming
+                        and not use_responses_api
+                    )
+
+                    def _create_openai_compatible_response():
+                        if nvidia_httpx_stream:
+                            return self._open_nvidia_httpx_sse_stream(
+                                base_url=base_url,
+                                api_key=actual_api_key,
+                                headers=headers,
+                                call_kwargs=call_kwargs,
+                                timeout_obj=timeout_obj,
+                            )
+                        if use_responses_api:
+                            return client.responses.create(**call_kwargs)
+                        return client.chat.completions.create(**call_kwargs)
+
                     # Avoid infinite retry loops when we need to auto-adjust max_tokens
                     context_retry_done = False
 
@@ -23390,11 +23607,9 @@ class UnifiedClient:
                         import time as _t
                         start_ts = _t.time()
                         if use_streaming and self._should_show_api_lifecycle_logs():
-                            print(f"🛰️ [{provider}] SDK stream start (model={effective_model}, base_url={base_url})", flush=True)
-                        if use_responses_api:
-                            resp = client.responses.create(**call_kwargs)
-                        else:
-                            resp = client.chat.completions.create(**call_kwargs)
+                            transport = 'httpx SSE' if nvidia_httpx_stream else 'SDK'
+                            print(f"🛰️ [{provider}] {transport} stream start (model={effective_model}, base_url={base_url})", flush=True)
+                        resp = _create_openai_compatible_response()
                         # Register streaming response for proper cleanup
                         if use_streaming:
                             with self._active_streams_lock:
@@ -23405,7 +23620,8 @@ class UnifiedClient:
                         graceful_stop_mode = os.getenv('GRACEFUL_STOP', '0') == '1'
                         if graceful_stop_mode or not self._is_stop_requested():
                             if use_streaming:
-                                print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s")
+                                transport = 'httpx SSE' if nvidia_httpx_stream else 'SDK'
+                                print(f"🛰️ [{provider}] {transport} stream opened in {dur:.1f}s")
                             else:
                                 if use_responses_api:
                                     print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s (responses)")
@@ -23630,10 +23846,7 @@ class UnifiedClient:
                                                         raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                                                 import time as _t
                                                 start_ts = _t.time()
-                                                if use_responses_api:
-                                                    resp = client.responses.create(**call_kwargs)
-                                                else:
-                                                    resp = client.chat.completions.create(**call_kwargs)
+                                                resp = _create_openai_compatible_response()
                                                 context_auto_adjust_succeeded = True
                                                 if use_streaming:
                                                     with self._active_streams_lock:
@@ -23686,10 +23899,7 @@ class UnifiedClient:
                                     start_ts = _t.time()
                                     if not self._is_stop_requested():
                                         print(f"🛰️ [{provider}] Retrying with streaming enabled...")
-                                    if use_responses_api:
-                                        resp = client.responses.create(**call_kwargs)
-                                    else:
-                                        resp = client.chat.completions.create(**call_kwargs)
+                                    resp = _create_openai_compatible_response()
                                     dur = _t.time() - start_ts
                                     if use_streaming:
                                         with self._active_streams_lock:

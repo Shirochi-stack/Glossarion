@@ -104,6 +104,7 @@ tests/**
 !tests/test_translation_artifacts.py
 !tests/test_gemini_free_budget.py
 !tests/test_gemini_openai_thinking.py
+!tests/test_nvidia_streaming.py
 !tests/test_review_volume_mode.py
 !tests/test_glossary_dedup_logging.py
 !tests/test_extract_glossary_parser.py
