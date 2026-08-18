@@ -108,12 +108,15 @@ def test_glossary_filter_apply_limits_search_to_visible_checked_values():
     ) == {"BIG SISTER IS WATCHING YOU"}
 
 
-def test_glossary_filter_search_enter_is_wired_to_apply():
+def test_glossary_filter_search_interactions_are_wired():
     source = (
         Path(__file__).resolve().parents[1] / "src" / "GlossaryManager_GUI.py"
     ).read_text(encoding="utf-8")
 
     assert "search_entry.returnPressed.connect(_apply_selected_values)" in source
+    assert "_set_checkbox_silently(checkbox, matches)" in source
+    assert "selection_before_search" in source
+    assert "filter_timer.setInterval(60)" in source
 
 
 def _run_test_refinement(entries, progress_file, parsed_entries, send_fn):

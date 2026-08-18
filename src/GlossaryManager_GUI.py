@@ -6471,6 +6471,7 @@ Do not stop after the glossary."""
             value_list.setMaximumHeight(390)
             popup_layout.addWidget(value_list, 1)
 
+            value_rows = []
             for raw_value in values:
                 display_value = raw_value if raw_value else "(Blanks)"
                 list_item = QListWidgetItem()
@@ -6492,12 +6493,21 @@ Do not stop after the glossary."""
                 list_item.setSizeHint(QSize(value_checkbox.sizeHint().width(), value_checkbox.height() + 8))
                 value_list.addItem(list_item)
                 value_list.setItemWidget(list_item, row_widget)
+                value_rows.append(
+                    (list_item, value_checkbox, raw_value, display_value.casefold())
+                )
 
-            def _value_checkbox(index):
-                list_item = value_list.item(index)
-                row_widget = value_list.itemWidget(list_item) if list_item is not None else None
-                checkbox = getattr(row_widget, '_filter_checkbox', None)
-                return checkbox if isinstance(checkbox, QCheckBox) else None
+            def _set_checkbox_silently(checkbox, checked):
+                checked = bool(checked)
+                if checkbox.isChecked() == checked:
+                    return
+                signals_were_blocked = checkbox.blockSignals(True)
+                try:
+                    checkbox.setChecked(checked)
+                finally:
+                    checkbox.blockSignals(signals_were_blocked)
+                if hasattr(checkbox, '_update_checkmark'):
+                    checkbox._update_checkmark()
 
             count_label = QLabel()
             count_label.setStyleSheet("color: #9ca3af;")
@@ -6505,12 +6515,13 @@ Do not stop after the glossary."""
 
             def _sync_select_all_state():
                 visible_items = [
-                    _value_checkbox(index)
-                    for index in range(value_list.count())
-                    if not value_list.item(index).isHidden()
+                    checkbox
+                    for list_item, checkbox, _raw_value, _display_value in value_rows
+                    if not list_item.isHidden()
                 ]
-                visible_items = [checkbox for checkbox in visible_items if checkbox is not None]
-                checked_count = sum(checkbox.isChecked() for checkbox in visible_items)
+                checked_count = sum(
+                    checkbox.isChecked() for checkbox in visible_items
+                )
                 select_all.blockSignals(True)
                 if not visible_items or checked_count == 0:
                     select_all.setCheckState(Qt.Unchecked)
@@ -6521,18 +6532,59 @@ Do not stop after the glossary."""
                 select_all.blockSignals(False)
                 if hasattr(select_all, '_update_checkmark'):
                     select_all._update_checkmark()
-                count_label.setText(
-                    f"{sum(bool(_value_checkbox(i) and _value_checkbox(i).isChecked()) for i in range(value_list.count()))} "
-                    f"of {value_list.count()} values selected"
+                total_checked = sum(
+                    checkbox.isChecked()
+                    for _item, checkbox, _raw_value, _display_value in value_rows
+                )
+                if search_entry.text().strip():
+                    count_label.setText(
+                        f"{checked_count} matching values selected"
+                    )
+                else:
+                    count_label.setText(
+                        f"{total_checked} of {len(value_rows)} values selected"
+                    )
+
+            selection_before_search = None
+
+            def _filter_value_list():
+                nonlocal selection_before_search
+                needle = search_entry.text().strip().casefold()
+                if needle and selection_before_search is None:
+                    selection_before_search = [
+                        checkbox.isChecked()
+                        for _item, checkbox, _raw_value, _display_value in value_rows
+                    ]
+                restore_selection = (
+                    selection_before_search
+                    if not needle and selection_before_search is not None
+                    else None
                 )
 
-            def _filter_value_list(text):
-                needle = text.strip().casefold()
-                for index in range(value_list.count()):
-                    list_item = value_list.item(index)
-                    display_value = str(list_item.data(Qt.UserRole + 1) or '')
-                    list_item.setHidden(bool(needle and needle not in display_value.casefold()))
+                value_list.setUpdatesEnabled(False)
+                try:
+                    for index, (
+                        list_item,
+                        checkbox,
+                        _raw_value,
+                        folded_display_value,
+                    ) in enumerate(value_rows):
+                        matches = not needle or needle in folded_display_value
+                        list_item.setHidden(not matches)
+                        if needle:
+                            _set_checkbox_silently(checkbox, matches)
+                        elif restore_selection is not None:
+                            _set_checkbox_silently(
+                                checkbox,
+                                restore_selection[index],
+                            )
+                finally:
+                    value_list.setUpdatesEnabled(True)
+
+                if restore_selection is not None:
+                    selection_before_search = None
                 _sync_select_all_state()
+                value_list.viewport().update()
 
             def _set_visible_check_state(state):
                 try:
@@ -6542,45 +6594,41 @@ Do not stop after the glossary."""
                 if state == Qt.PartiallyChecked:
                     return
                 value_list.blockSignals(True)
+                value_list.setUpdatesEnabled(False)
                 try:
-                    for index in range(value_list.count()):
-                        list_item = value_list.item(index)
+                    for list_item, checkbox, _raw_value, _display_value in value_rows:
                         if not list_item.isHidden():
-                            checkbox = _value_checkbox(index)
-                            if checkbox is not None:
-                                checkbox.blockSignals(True)
-                                checkbox.setChecked(state == Qt.Checked)
-                                checkbox.blockSignals(False)
-                                if hasattr(checkbox, '_update_checkmark'):
-                                    checkbox._update_checkmark()
+                            _set_checkbox_silently(
+                                checkbox,
+                                state == Qt.Checked,
+                            )
                 finally:
+                    value_list.setUpdatesEnabled(True)
                     value_list.blockSignals(False)
                 _sync_select_all_state()
+                value_list.viewport().update()
 
             def _toggle_all_visible_values(_checked=False):
                 visible_checkboxes = [
-                    _value_checkbox(index)
-                    for index in range(value_list.count())
-                    if not value_list.item(index).isHidden()
-                ]
-                visible_checkboxes = [
-                    checkbox for checkbox in visible_checkboxes if checkbox is not None
+                    checkbox
+                    for list_item, checkbox, _raw_value, _display_value in value_rows
+                    if not list_item.isHidden()
                 ]
                 should_check = any(not checkbox.isChecked() for checkbox in visible_checkboxes)
                 _set_visible_check_state(Qt.Checked if should_check else Qt.Unchecked)
 
             def _apply_selected_values():
+                if filter_timer.isActive():
+                    filter_timer.stop()
+                    _filter_value_list()
                 selected = _collect_glossary_filter_values(
                     (
                         (
-                            value_list.item(index).data(Qt.UserRole),
-                            not value_list.item(index).isHidden(),
-                            bool(
-                                _value_checkbox(index) is not None
-                                and _value_checkbox(index).isChecked()
-                            ),
+                            raw_value,
+                            not list_item.isHidden(),
+                            checkbox.isChecked(),
                         )
-                        for index in range(value_list.count())
+                        for list_item, checkbox, raw_value, _display_value in value_rows
                     ),
                     restrict_to_visible=bool(search_entry.text().strip()),
                 )
@@ -6603,14 +6651,16 @@ Do not stop after the glossary."""
                 _apply_glossary_column_filters()
                 popup.accept()
 
-            search_entry.textChanged.connect(_filter_value_list)
+            filter_timer = QTimer(popup)
+            filter_timer.setSingleShot(True)
+            filter_timer.setInterval(60)
+            filter_timer.timeout.connect(_filter_value_list)
+            search_entry.textChanged.connect(lambda _text: filter_timer.start())
             # Keep the partial state as status only. Using stateChanged here makes
             # a tri-state checkbox require two clicks (unchecked -> partial -> checked).
             select_all.clicked.connect(_toggle_all_visible_values)
-            for index in range(value_list.count()):
-                checkbox = _value_checkbox(index)
-                if checkbox is not None:
-                    checkbox.stateChanged.connect(lambda _state: _sync_select_all_state())
+            for _item, checkbox, _raw_value, _display_value in value_rows:
+                checkbox.stateChanged.connect(lambda _state: _sync_select_all_state())
             _sync_select_all_state()
 
             button_row = QHBoxLayout()
