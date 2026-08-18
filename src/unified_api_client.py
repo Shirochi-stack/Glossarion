@@ -19272,10 +19272,50 @@ class UnifiedClient:
     
     def _is_gemini_3_model(self) -> bool:
         """Check if the current model is a Gemini 3.0 series model"""
-        if not self.model:
-            return False
-        model_lower = self.model.lower()
-        return "gemini-3" in model_lower
+        return self._is_gemini_3_model_name(self.model)
+
+    @staticmethod
+    def _is_gemini_3_model_name(model: str = "") -> bool:
+        """Check a request model name without relying on shared client state."""
+        return "gemini-3" in str(model or "").lower()
+
+    @classmethod
+    def _build_gemini_openai_thinking_config(cls, effective_model: str) -> Optional[dict]:
+        """Build the model-specific thinking config for Gemini's OpenAI endpoint."""
+        if os.getenv('ENABLE_GEMINI_THINKING', '1') != '1':
+            return None
+
+        model_lower = str(effective_model or '').strip().lower()
+        if cls._is_gemini_3_model_name(model_lower):
+            level = (os.getenv('GEMINI_THINKING_LEVEL', 'high') or 'high').strip().lower()
+            if level == 'none':
+                return None
+            if level not in ('minimal', 'low', 'medium', 'high'):
+                level = 'high'
+
+            # Gemini 3 Pro variants do not accept the minimal level.
+            if 'pro' in model_lower and 'flash' not in model_lower and level == 'minimal':
+                level = 'low'
+            return {
+                "thinking_level": level.upper(),
+                "include_thoughts": True,
+            }
+
+        try:
+            budget = int(os.getenv('THINKING_BUDGET', '-1'))
+        except (TypeError, ValueError):
+            budget = -1
+        if budget < -1:
+            budget = -1
+
+        # Gemini 2.5 Pro cannot disable thinking and requires at least 128 tokens.
+        if 'gemini-2.5-pro' in model_lower and budget == 0:
+            budget = 128
+
+        thinking_config = {"thinking_budget": budget}
+        if budget != 0:
+            thinking_config["include_thoughts"] = True
+        return thinking_config
 
     def _supports_thinking(self) -> bool:
         """Check if the current Gemini model supports thinking parameter"""
@@ -23157,33 +23197,19 @@ class UnifiedClient:
                             pass
 
                     
-                    # Gemini OpenAI-compatible endpoint: inject thinking_config via extra_body
+                    # Gemini OpenAI-compatible endpoint: inject thinking_config via extra_body.
+                    # Gemini 3 uses thinking_level; earlier models use thinking_budget.
                     # NOTE: reasoning_effort and thinking_config CANNOT be used together;
                     # we use thinking_config exclusively so we can also set include_thoughts.
                     if provider == 'gemini-openai':
                         try:
-                            enable_gemini_think = os.getenv('ENABLE_GEMINI_THINKING', '1') == '1'
-                            if enable_gemini_think:
-                                level = os.getenv('GEMINI_THINKING_LEVEL', 'high').strip().lower()
-                                if level == 'minimal':
-                                    level = 'none'
-                                if level not in ('low', 'medium', 'high', 'none'):
-                                    level = 'high'
-                                
-                                stream_thoughts = self._stream_thinking_logging_enabled()
-                                
-                                if level != 'none':
-                                    thinking_cfg = {"thinking_level": level.upper()}
-                                    # Always include thoughts so the API reports thinking
-                                    # token counts in usage metadata.
-                                    thinking_cfg["include_thoughts"] = True
-                                    extra_body["extra_body"] = {
-                                        "google": {
-                                            "thinking_config": thinking_cfg
-                                        }
+                            thinking_cfg = self._build_gemini_openai_thinking_config(effective_model)
+                            if thinking_cfg:
+                                extra_body["extra_body"] = {
+                                    "google": {
+                                        "thinking_config": thinking_cfg
                                     }
-                                
-                                
+                                }
                         except Exception:
                             pass
 
