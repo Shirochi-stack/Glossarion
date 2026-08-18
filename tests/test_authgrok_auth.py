@@ -46,6 +46,78 @@ def test_build_auth_url_can_force_a_fresh_numbered_account_login():
     assert query["max_age"] == ["0"]
 
 
+def test_chromium_numbered_login_uses_private_dedicated_profile():
+    args = authgrok._isolated_browser_command(
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "https://auth.x.ai/oauth2/authorize?state=test",
+        r"C:\Temp\authgrok-profile",
+    )
+
+    assert "--incognito" in args
+    assert "--user-data-dir=C:\\Temp\\authgrok-profile" in args
+    assert args[-1].startswith("https://auth.x.ai/oauth2/authorize")
+
+
+def test_edge_numbered_login_uses_inprivate_dedicated_profile():
+    args = authgrok._isolated_browser_command(
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        "https://auth.x.ai/oauth2/authorize?state=test",
+        r"C:\Temp\authgrok-profile",
+    )
+
+    assert "--inprivate" in args
+    assert "--user-data-dir=C:\\Temp\\authgrok-profile" in args
+
+
+def test_numbered_oauth_flow_opens_cookie_isolated_browser(monkeypatch):
+    class FakeServer:
+        server_port = 56121
+        _error = None
+        _auth_code = "authorization-code"
+        _returned_state = "state-value"
+
+        def serve_forever(self):
+            return None
+
+        def shutdown(self):
+            return None
+
+        def server_close(self):
+            return None
+
+    opened = []
+    token_values = iter(["state-value", "nonce-value"])
+    monkeypatch.setattr(
+        authgrok,
+        "_load_oidc_discovery",
+        lambda: {"authorization_endpoint": authgrok.XAI_OAUTH_AUTHORIZATION_URL},
+    )
+    monkeypatch.setattr(authgrok, "generate_pkce", lambda: ("verifier", "challenge"))
+    monkeypatch.setattr(authgrok.secrets, "token_urlsafe", lambda _size: next(token_values))
+    monkeypatch.setattr(authgrok, "_create_callback_server", lambda _state: FakeServer())
+    monkeypatch.setattr(
+        authgrok,
+        "_open_oauth_browser",
+        lambda url, isolated_session=False: opened.append((url, isolated_session)),
+    )
+    monkeypatch.setattr(
+        authgrok,
+        "exchange_code_for_tokens",
+        lambda *_args: {"id_token": "signed-token", "access_token": "access-token"},
+    )
+    monkeypatch.setattr(
+        authgrok,
+        "_validate_id_token",
+        lambda *_args: {"email": "second@example.test", "sub": "second"},
+    )
+
+    tokens = authgrok.run_oauth_flow(force_account_selection=True)
+
+    assert len(opened) == 1
+    assert opened[0][1] is True
+    assert tokens["account"]["email"] == "second@example.test"
+
+
 def test_numbered_store_auto_login_forces_account_selection(tmp_path, monkeypatch):
     captured = []
 
@@ -91,6 +163,67 @@ def test_authgrok_pool_deduplicates_emails_and_rotates_start(monkeypatch):
     assert [slot for slot, _store in authgrok.get_account_pool()] == [0, 1]
     assert [slot for slot, _store in authgrok.get_rotating_account_pool()] == [0, 1]
     assert [slot for slot, _store in authgrok.get_rotating_account_pool()] == [1, 0]
+
+
+def test_get_saved_account_ids_returns_each_credential_bearing_slot(monkeypatch):
+    class FakeStore:
+        def __init__(self, account_id, tokens):
+            self.account_id = account_id
+            self._tokens = tokens
+
+        def load_tokens(self):
+            return self._tokens
+
+    stores = {
+        0: FakeStore(0, {"access_token": "default-token"}),
+        1: FakeStore(1, {"refresh_token": "numbered-refresh"}),
+        2: FakeStore(2, {}),
+    }
+    monkeypatch.setattr(authgrok, "_numbered_account_ids", lambda: [1, 2])
+    monkeypatch.setattr(authgrok, "get_store", lambda account_id=0: stores[int(account_id or 0)])
+
+    assert authgrok.get_saved_account_ids() == [0, 1]
+
+
+def test_get_next_account_id_uses_first_unreserved_positive_gap(monkeypatch):
+    monkeypatch.setattr(authgrok, "get_saved_account_ids", lambda: [0, 1, 3])
+
+    assert authgrok.get_next_account_id() == 2
+    assert authgrok.get_next_account_id([2]) == 4
+
+
+def test_numbered_slot_rejects_an_account_already_saved_elsewhere(monkeypatch):
+    class FakeStore:
+        def load_tokens(self):
+            return {
+                "account": {
+                    "email": "first@example.test",
+                    "subject": "first-subject",
+                }
+            }
+
+    monkeypatch.setattr(authgrok, "get_saved_account_ids", lambda: [0])
+    monkeypatch.setattr(authgrok, "get_store", lambda _account_id=0: FakeStore())
+
+    with pytest.raises(RuntimeError, match=r"already saved in Grok account slot #0"):
+        authgrok.validate_account_slot_tokens(
+            2,
+            {"account": {"email": "FIRST@example.test", "subject": "other"}},
+        )
+
+
+def test_numbered_slot_accepts_a_distinct_account(monkeypatch):
+    class FakeStore:
+        def load_tokens(self):
+            return {"account": {"email": "first@example.test"}}
+
+    monkeypatch.setattr(authgrok, "get_saved_account_ids", lambda: [0])
+    monkeypatch.setattr(authgrok, "get_store", lambda _account_id=0: FakeStore())
+
+    authgrok.validate_account_slot_tokens(
+        2,
+        {"account": {"email": "second@example.test"}},
+    )
 
 
 def test_build_responses_body_converts_messages_images_and_reasoning():

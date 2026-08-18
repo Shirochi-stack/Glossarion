@@ -106,6 +106,24 @@ def test_multi_key_trees_share_persistent_keyboard_and_wheel_zoom():
     assert "GWLP_HWNDPARENT" in source
 
 
+def test_multi_key_manager_detects_live_authgrok_pool_route():
+    import multi_api_key_manager
+
+    class FakeCombo:
+        def __init__(self, text):
+            self._text = text
+
+        def currentText(self):
+            return self._text
+
+    dialog = SimpleNamespace(model_combo=FakeCombo("  AUTHGROK0/grok-4.5  "))
+    check = multi_api_key_manager.MultiAPIKeyDialog._has_pending_authgrok_pool_model
+
+    assert check(dialog) is True
+    dialog.model_combo = FakeCombo("authgrok2/grok-4.5")
+    assert check(dialog) is False
+
+
 def test_openrouter_online_catalog_replaces_static_provider_section(tmp_path, monkeypatch):
     cache_path = _isolated_cache(tmp_path, monkeypatch)
 

@@ -2385,6 +2385,34 @@ class MultiAPIKeyDialog(QDialog):
                 continue
         return False
 
+    def _has_pending_authgrok_pool_model(self):
+        """Check live model fields for the AuthGrok rotating-pool route."""
+        import re
+
+        widget_names = [
+            'model_combo',
+            'fallback_model_combo',
+            'glossary_model_combo',
+            'glossary_refinement_model_combo',
+            'metadata_model_combo',
+            'qa_scan_model_combo',
+            'ai_truncation_detection_model_combo',
+            'rolling_summary_model_combo',
+            'truncation_retry_model_combo',
+            'inpainter_model_combo',
+        ]
+        for name in widget_names:
+            combo = getattr(self, name, None)
+            try:
+                model = str(combo.currentText() if combo else '').strip().lower()
+                if re.match(r'^authgrok0(?:/|$)', model):
+                    return True
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+        return False
+
     def _refresh_parent_model_requirements(self, save_config=False):
         """Ask the parent GUI to refresh provider buttons from saved and live manager state."""
         if save_config:
@@ -2398,6 +2426,11 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui,
                 '_multi_key_manager_needs_google_creds_hint',
                 self._has_pending_google_creds_model(),
+            )
+            setattr(
+                self.translator_gui,
+                '_multi_key_manager_authgrok_pool_hint',
+                self._has_pending_authgrok_pool_model(),
             )
         except Exception:
             pass

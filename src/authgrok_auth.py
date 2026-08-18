@@ -22,6 +22,10 @@ import logging
 import os
 import re
 import secrets
+import shutil
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -189,13 +193,135 @@ def build_auth_url(
         "nonce": nonce,
     }
     if force_account_selection:
-        # A numbered AuthGrok slot must not silently inherit the xAI account
-        # that happens to be active in the user's browser.  ``prompt=login``
-        # is the OIDC-defined way to require fresh authentication; ``max_age``
-        # reinforces that requirement for providers that key off session age.
+        # These are useful OIDC hints, but xAI currently still reuses its
+        # browser session and can jump straight to consent.  Numbered slots
+        # are enforced separately by opening this URL in an isolated profile.
         params["prompt"] = "login"
         params["max_age"] = "0"
     return f"{authorization_endpoint}?{urlencode(params)}"
+
+
+def _isolation_capable_browser_paths() -> List[str]:
+    """Return installed browsers that can use a dedicated temporary profile."""
+    candidates: List[str] = []
+    executable_names: List[str]
+
+    if os.name == "nt":
+        roots = [
+            os.environ.get("PROGRAMFILES", ""),
+            os.environ.get("PROGRAMFILES(X86)", ""),
+            os.environ.get("LOCALAPPDATA", ""),
+        ]
+        relative_paths = [
+            os.path.join("Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join("Microsoft", "Edge", "Application", "msedge.exe"),
+            os.path.join("BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+            os.path.join("Mozilla Firefox", "firefox.exe"),
+        ]
+        for relative_path in relative_paths:
+            for root in roots:
+                if root:
+                    candidates.append(os.path.join(root, relative_path))
+        executable_names = ["chrome.exe", "msedge.exe", "brave.exe", "firefox.exe"]
+    elif sys.platform == "darwin":
+        candidates.extend([
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "/Applications/Firefox.app/Contents/MacOS/firefox",
+        ])
+        executable_names = [
+            "google-chrome", "microsoft-edge", "brave-browser", "firefox"
+        ]
+    else:
+        executable_names = [
+            "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+            "microsoft-edge", "microsoft-edge-stable", "brave-browser", "firefox",
+        ]
+
+    candidates.extend(
+        resolved
+        for name in executable_names
+        if (resolved := shutil.which(name))
+    )
+
+    existing: List[str] = []
+    seen = set()
+    for path in candidates:
+        normalized = os.path.normcase(os.path.abspath(path))
+        if normalized not in seen and os.path.isfile(path):
+            seen.add(normalized)
+            existing.append(path)
+    return existing
+
+
+def _isolated_browser_command(
+    executable: str,
+    auth_url: str,
+    profile_dir: str,
+) -> List[str]:
+    """Build a browser command whose cookies cannot leak from another slot."""
+    browser_name = os.path.basename(executable).casefold()
+    if "firefox" in browser_name:
+        return [
+            executable,
+            "-no-remote",
+            "-profile", profile_dir,
+            "-private-window", auth_url,
+        ]
+
+    private_flag = "--inprivate" if "msedge" in browser_name else "--incognito"
+    return [
+        executable,
+        f"--user-data-dir={profile_dir}",
+        private_flag,
+        "--new-window",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-mode",
+        auth_url,
+    ]
+
+
+def _open_oauth_browser(auth_url: str, isolated_session: bool = False) -> None:
+    """Open OAuth normally or in a cookie-isolated browser for a new slot."""
+    if not isolated_session:
+        if not webbrowser.open(auth_url):
+            raise RuntimeError("Could not open the default browser for xAI login")
+        return
+
+    browsers = _isolation_capable_browser_paths()
+    if not browsers:
+        raise RuntimeError(
+            "A numbered Grok account needs an isolated browser session, but Glossarion "
+            "could not find Chrome, Edge, Brave, or Firefox. Install one of those browsers "
+            "and try the numbered account login again."
+        )
+
+    profile_dir = tempfile.mkdtemp(prefix="glossarion-authgrok-login-")
+    command = _isolated_browser_command(browsers[0], auth_url, profile_dir)
+    try:
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+    except Exception as exc:
+        try:
+            os.rmdir(profile_dir)
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"Could not open an isolated browser for the numbered Grok account: {exc}"
+        ) from exc
+
+    logger.info(
+        "Opened numbered AuthGrok login in isolated browser %s with profile %s",
+        browsers[0],
+        profile_dir,
+    )
 
 
 def _validate_id_token(
@@ -444,9 +570,15 @@ def run_oauth_flow(
         force_account_selection=force_account_selection,
     )
 
-    print("Opening browser for Grok login (Google sign-in is supported by xAI)...")
-    print(f"If the browser does not open, visit:\n{auth_url}")
-    webbrowser.open(auth_url)
+    if force_account_selection:
+        print(
+            "Opening an isolated browser for this numbered Grok account. "
+            "Its xAI and Google cookies are separate from your existing browser session."
+        )
+    else:
+        print("Opening browser for Grok login (Google sign-in is supported by xAI)...")
+        print(f"If the browser does not open, visit:\n{auth_url}")
+    _open_oauth_browser(auth_url, isolated_session=force_account_selection)
 
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
@@ -709,6 +841,7 @@ class AuthGrokTokenStore:
                 )
 
             tokens = run_oauth_flow(force_account_selection=self._account_id > 0)
+            validate_account_slot_tokens(self._account_id, tokens)
             self.save_tokens(tokens)
             return str(tokens["access_token"])
 
@@ -792,9 +925,8 @@ def _store_has_reusable_credentials(store: AuthGrokTokenStore) -> bool:
         return False
 
 
-def _store_account_identity(store: AuthGrokTokenStore) -> Optional[str]:
-    """Return a non-secret identity used to avoid pooling duplicate emails."""
-    tokens = store.load_tokens() or {}
+def _tokens_account_identity(tokens: Dict[str, Any]) -> Optional[str]:
+    """Return a stable non-secret identity from an xAI token response."""
     account = tokens.get("account") if isinstance(tokens.get("account"), dict) else {}
     claims = _decode_jwt_part(str(tokens.get("id_token") or ""), 1)
     email = str(account.get("email") or claims.get("email") or "").strip().casefold()
@@ -806,6 +938,51 @@ def _store_account_identity(store: AuthGrokTokenStore) -> Optional[str]:
     return None
 
 
+def _store_account_identity(store: AuthGrokTokenStore) -> Optional[str]:
+    """Return a non-secret identity used to avoid pooling duplicate emails."""
+    return _tokens_account_identity(store.load_tokens() or {})
+
+
+def get_saved_account_ids() -> List[int]:
+    """Return every slot that currently has reusable local credentials."""
+    saved: List[int] = []
+    for account_id in [0, *_numbered_account_ids()]:
+        if _store_has_reusable_credentials(get_store(account_id)):
+            saved.append(account_id)
+    return saved
+
+
+def validate_account_slot_tokens(account_id: int, tokens: Dict[str, Any]) -> None:
+    """Reject a numbered login that returned an account saved in another slot."""
+    account_id = int(account_id or 0)
+    if account_id <= 0:
+        return
+    identity = _tokens_account_identity(tokens)
+    if not identity:
+        return
+    for saved_id in get_saved_account_ids():
+        if saved_id == account_id:
+            continue
+        if _store_account_identity(get_store(saved_id)) != identity:
+            continue
+        account = tokens.get("account") if isinstance(tokens.get("account"), dict) else {}
+        label = str(account.get("email") or account.get("name") or "This xAI account")
+        raise RuntimeError(
+            f"{label} is already saved in Grok account slot #{saved_id}. "
+            "Retry this numbered slot and choose a different xAI/Google account."
+        )
+
+
+def get_next_account_id(reserved_ids=()) -> int:
+    """Return the first free positive numbered slot for a new login."""
+    used = {int(value) for value in reserved_ids if str(value).isdigit()}
+    used.update(get_saved_account_ids())
+    for account_id in range(1, 10000):
+        if account_id not in used:
+            return account_id
+    raise RuntimeError("AuthGrok account slots 1-9999 are already in use")
+
+
 def get_account_pool() -> List[Tuple[int, AuthGrokTokenStore]]:
     """Return saved AuthGrok accounts in stable slot order.
 
@@ -813,11 +990,10 @@ def get_account_pool() -> List[Tuple[int, AuthGrokTokenStore]]:
     email/subject are collapsed so ``authgrok0/`` rotates actual accounts, not
     multiple copies of the same browser login.
     """
-    candidates: List[Tuple[int, AuthGrokTokenStore]] = []
-    for account_id in [0, *_numbered_account_ids()]:
-        store = get_store(account_id)
-        if _store_has_reusable_credentials(store):
-            candidates.append((account_id, store))
+    candidates = [
+        (account_id, get_store(account_id))
+        for account_id in get_saved_account_ids()
+    ]
 
     unique: List[Tuple[int, AuthGrokTokenStore]] = []
     seen_identities = set()

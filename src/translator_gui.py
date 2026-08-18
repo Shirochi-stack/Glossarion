@@ -113,6 +113,9 @@ from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS
 from epub_package import find_epub_opf_member, find_opf_path
 
 
+_AUTHGROK_ADD_ACCOUNT_SENTINEL = "__authgrok_add_account__"
+
+
 def _authnd_auto_token_limits():
     cores = max(1, int(os.cpu_count() or 1))
     token_limit = min(4, max(1, cores // 2))
@@ -17639,6 +17642,10 @@ Recent translations to summarize:
             needs_authgrok = _re.match(r'^authgrok\d{0,4}/', model) is not None
             if not needs_authgrok:
                 needs_authgrok = self._has_authgrok_in_key_pools()
+            if not needs_authgrok:
+                needs_authgrok = bool(
+                    getattr(self, '_multi_key_manager_authgrok_pool_hint', False)
+                )
             if needs_authgrok:
                 self.authgrok_login_btn.show()
                 self._update_authgrok_login_status()
@@ -17842,6 +17849,29 @@ Recent translations to summarize:
             pass
         return False
 
+    def _authgrok_pool_route_requested(self, model=None):
+        """Return whether authgrok0/ is active in the GUI or a key manager pool."""
+        import re as _re
+
+        active_model = str(
+            model if model is not None
+            else (getattr(self, 'model_var', '') or self.config.get('model', ''))
+        ).strip().lower()
+        if _re.match(r'^authgrok0(?:/|$)', active_model):
+            return True
+        if bool(getattr(self, '_multi_key_manager_authgrok_pool_hint', False)):
+            return True
+        try:
+            for _pool_key, _toggle_key, pool_model in self._iter_enabled_key_pool_models():
+                if _re.match(
+                    r'^authgrok0(?:/|$)',
+                    str(pool_model or '').strip().lower(),
+                ):
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _has_authgem_in_key_pools(self):
         """Check if any enabled key pool contains an enabled authgem model."""
         try:
@@ -17997,10 +18027,23 @@ Recent translations to summarize:
         """
         import re as _re
 
+        model = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
         pool_ids = self._collect_auth_account_ids_from_pools()
+        authgrok_pool_requested = self._authgrok_pool_route_requested(model)
+        if authgrok_pool_requested:
+            # Pool mode is useful before the first login too, so always expose
+            # the default slot plus any numbered credentials already on disk.
+            pool_ids['authgrok'].add(0)
+            try:
+                from authgrok_auth import get_saved_account_ids
+                pool_ids['authgrok'].update(get_saved_account_ids())
+            except Exception:
+                pass
+            pool_ids['authgrok'].update(
+                getattr(self, '_authgrok_pending_account_ids', set())
+            )
 
         # Also include the primary model's account ID
-        model = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
         previous_authgrok_model = getattr(self, '_authgrok_account_model_snapshot', None)
         authgrok_primary_id = None
         _prov_patterns = {
@@ -18059,13 +18102,21 @@ Recent translations to summarize:
                 # successful login even though authgemN/ pool entries still exist.
                 main_btn_name = f"{provider}_login_btn"
                 provider_configured = bool(acct_set) and hasattr(self, main_btn_name)
-                show_combo = len(sorted_ids) > 1 and provider_configured
+                show_combo = (
+                    len(sorted_ids) > 1 and provider_configured
+                ) or (
+                    provider == 'authgrok'
+                    and authgrok_pool_requested
+                    and hasattr(self, main_btn_name)
+                )
                 if show_combo:
                     # Repopulate items (block signals to avoid triggering change handler)
                     combo.blockSignals(True)
                     combo.clear()
                     for aid in sorted_ids:
                         combo.addItem(f"#{aid}", aid)
+                    if provider == 'authgrok' and authgrok_pool_requested:
+                        combo.addItem("+ N", _AUTHGROK_ADD_ACCOUNT_SENTINEL)
                     combo.setCurrentIndex(cur_idx)
                     combo.blockSignals(False)
                     combo.show()
@@ -18092,8 +18143,18 @@ Recent translations to summarize:
         """
         if index < 0:
             return
+        combo = getattr(self, f'{provider}_acct_combo', None)
+        selected_data = combo.itemData(index) if combo is not None else None
+        if (
+            provider == 'authgrok'
+            and selected_data == _AUTHGROK_ADD_ACCOUNT_SENTINEL
+        ):
+            self._add_authgrok_account_slot()
+            return
         ids_list = self._auth_account_ids.get(provider, [0])
-        if index >= len(ids_list):
+        if selected_data in ids_list:
+            index = ids_list.index(selected_data)
+        elif index >= len(ids_list):
             return
         self._auth_account_idx[provider] = index
 
@@ -18104,6 +18165,46 @@ Recent translations to summarize:
                 update_fn()  # auto-detects needs_vertex
             else:
                 update_fn()
+
+    def _add_authgrok_account_slot(self):
+        """Create/select the next free numbered slot and start its login."""
+        try:
+            from authgrok_auth import get_next_account_id
+
+            reserved = getattr(self, '_auth_account_ids', {}).get('authgrok', [])
+            account_id = get_next_account_id(reserved)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Grok Account Slots",
+                f"Could not allocate another Grok account slot:\n{exc}",
+            )
+            self._refresh_auth_account_arrows()
+            return
+
+        pending = getattr(self, '_authgrok_pending_account_ids', None)
+        if pending is None:
+            pending = set()
+            self._authgrok_pending_account_ids = pending
+        pending.add(account_id)
+
+        ids_list = sorted(set(
+            getattr(self, '_auth_account_ids', {}).get('authgrok', [])
+        ) | pending)
+        self._auth_account_ids['authgrok'] = ids_list
+        self._auth_account_idx['authgrok'] = ids_list.index(account_id)
+        self._refresh_auth_account_arrows()
+
+        combo = getattr(self, 'authgrok_acct_combo', None)
+        if combo is not None:
+            combo_index = combo.findData(account_id)
+            if combo_index >= 0:
+                combo.setCurrentIndex(combo_index)
+        self._update_authgrok_login_status()
+        self.append_log(
+            f"➕ AuthGrok: Created account slot #{account_id}; opening a fresh xAI login…"
+        )
+        QTimer.singleShot(0, self._authgrok_login_clicked)
 
     # ==================================================================
     # AuthCD (Claude Login) – mirrors the AuthGPT pattern
@@ -18579,14 +18680,19 @@ Recent translations to summarize:
 
         self.authgrok_login_btn.setText("⏳ Logging in…")
         self.authgrok_login_btn.setEnabled(False)
+        if hasattr(self, 'authgrok_acct_combo'):
+            self.authgrok_acct_combo.setEnabled(False)
+        self._authgrok_login_account_id = account_id
         self.append_log(f"🔐 Grok{suffix}: Opening xAI login (Google sign-in supported)…")
 
         def _do_login():
             try:
-                from authgrok_auth import run_oauth_flow
-                store.save_tokens(run_oauth_flow(
+                from authgrok_auth import run_oauth_flow, validate_account_slot_tokens
+                tokens = run_oauth_flow(
                     force_account_selection=account_id > 0,
-                ))
+                )
+                validate_account_slot_tokens(account_id, tokens)
+                store.save_tokens(tokens)
                 QMetaObject.invokeMethod(self, "_authgrok_login_finished", Qt.QueuedConnection)
             except Exception as exc:
                 self._authgrok_login_error = str(exc)
@@ -18601,12 +18707,19 @@ Recent translations to summarize:
     @Slot()
     def _authgrok_login_finished(self):
         self.authgrok_login_btn.setEnabled(True)
+        if hasattr(self, 'authgrok_acct_combo'):
+            self.authgrok_acct_combo.setEnabled(True)
+        account_id = getattr(
+            self, '_authgrok_login_account_id', self._get_authgrok_account_id()
+        )
+        pending = getattr(self, '_authgrok_pending_account_ids', set())
+        pending.discard(account_id)
         self._refresh_auth_account_arrows()
         self._update_authgrok_login_status()
-        account_id = self._get_authgrok_account_id()
         suffix = f" #{account_id}" if account_id else ""
         try:
-            info = self._get_authgrok_store_for_current_model().account_info
+            from authgrok_auth import get_store
+            info = get_store(account_id).account_info
             detail = info.get('email') or info.get('name') or 'success'
         except Exception:
             detail = 'success'
@@ -18615,6 +18728,8 @@ Recent translations to summarize:
     @Slot()
     def _authgrok_login_failed(self):
         self.authgrok_login_btn.setEnabled(True)
+        if hasattr(self, 'authgrok_acct_combo'):
+            self.authgrok_acct_combo.setEnabled(True)
         self._refresh_auth_account_arrows()
         self._update_authgrok_login_status()
         error = getattr(self, '_authgrok_login_error', 'Unknown error')
@@ -20904,8 +21019,10 @@ Recent translations to summarize:
 
         self.authgrok_acct_combo = QComboBox()
         self.authgrok_acct_combo.setStyleSheet(_acct_combo_style)
-        self.authgrok_acct_combo.setToolTip("Select Grok account slot")
-        self.authgrok_acct_combo.setFixedWidth(46)
+        self.authgrok_acct_combo.setToolTip(
+            "Select a saved Grok account slot; choose + N to add another account"
+        )
+        self.authgrok_acct_combo.setFixedWidth(54)
         self.authgrok_acct_combo.currentIndexChanged.connect(lambda idx: self._on_auth_acct_combo_changed('authgrok', idx))
         self.authgrok_acct_combo.hide()
         model_btn_layout.addWidget(self.authgrok_acct_combo)
@@ -21131,8 +21248,12 @@ Recent translations to summarize:
             pass
         
         # State for arrow-based account slot cycling
-        self._auth_account_ids = {'authgpt': [0], 'authcd': [0], 'authgem': [0]}
-        self._auth_account_idx = {'authgpt': 0, 'authcd': 0, 'authgem': 0}
+        self._auth_account_ids = {
+            'authgpt': [0], 'authgrok': [0], 'authcd': [0], 'authgem': [0]
+        }
+        self._auth_account_idx = {
+            'authgpt': 0, 'authgrok': 0, 'authcd': 0, 'authgem': 0
+        }
         
         model_btn_layout.addStretch()
         self.frame.addWidget(model_btn_container, 1, 2, 1, 2, Qt.AlignLeft)
