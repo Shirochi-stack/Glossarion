@@ -112,9 +112,18 @@ def test_glossary_filter_search_interactions_are_wired():
     source = (
         Path(__file__).resolve().parents[1] / "src" / "GlossaryManager_GUI.py"
     ).read_text(encoding="utf-8")
+    filter_start = source.index("def _open_glossary_column_filter")
+    filter_end = source.index(
+        "self.glossary_tree.header().sectionClicked",
+        filter_start,
+    )
+    filter_body = source[filter_start:filter_end]
 
     assert "search_entry.returnPressed.connect(_apply_selected_values)" in source
-    assert "_set_checkbox_silently(checkbox, matches)" in source
+    assert "value_list.setUniformItemSizes(True)" in filter_body
+    assert "Qt.ItemIsUserCheckable" in filter_body
+    assert "value_list.setItemWidget" not in filter_body
+    assert "_set_filter_item_checked(list_item, matches)" in filter_body
     assert "selection_before_search" in source
     assert "filter_timer.setInterval(60)" in source
 
