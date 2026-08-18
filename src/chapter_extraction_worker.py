@@ -91,9 +91,21 @@ def run_chapter_extraction(epub_path, output_dir, extraction_mode="smart", progr
             # This is what the main process needs to load
             chapters_full_path = os.path.join(output_dir, "chapters_full.json")
             try:
-                with open(chapters_full_path, 'w', encoding='utf-8') as f:
-                    json.dump(chapters, f, ensure_ascii=False)
-                print(f"[INFO] Saved full chapters data to: {chapters_full_path}", flush=True)
+                # Full extraction now writes this artifact atomically before
+                # committing its validated cache marker. A cache hit must not
+                # rewrite the same potentially large JSON file.
+                if os.path.isfile(chapters_full_path):
+                    print(
+                        f"[INFO] Full chapters data ready at: {chapters_full_path}",
+                        flush=True,
+                    )
+                else:
+                    with open(chapters_full_path, 'w', encoding='utf-8') as f:
+                        json.dump(chapters, f, ensure_ascii=False)
+                    print(
+                        f"[INFO] Saved full chapters data to: {chapters_full_path}",
+                        flush=True,
+                    )
             except Exception as e:
                 print(f"[WARNING] Could not save full chapters: {e}", flush=True)
                 # Fall back to saving individual files

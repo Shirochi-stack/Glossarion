@@ -3616,6 +3616,153 @@ def _write_resource_fingerprint_epub(epub_path, *, comment=b'A'):
         archive.comment = comment
 
 
+def _write_chapter_cache_epub(epub_path):
+    container_xml = '''<?xml version="1.0"?>
+    <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+      <rootfiles><rootfile full-path="OEBPS/content.opf"
+        media-type="application/oebps-package+xml"/></rootfiles>
+    </container>'''
+    content_opf = '''<?xml version="1.0" encoding="UTF-8"?>
+    <package xmlns="http://www.idpf.org/2007/opf" version="3.0"
+      unique-identifier="book-id">
+      <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <dc:identifier id="book-id">chapter-cache-test</dc:identifier>
+        <dc:title>Chapter Cache Test</dc:title>
+        <dc:language>en</dc:language>
+      </metadata>
+      <manifest>
+        <item id="chapter1" href="Text/chapter0001.xhtml"
+          media-type="application/xhtml+xml"/>
+      </manifest>
+      <spine><itemref idref="chapter1"/></spine>
+    </package>'''
+    chapter_markup = (
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        '<h1>Chapter One</h1><p>Stable chapter cache payload.</p>'
+        '</body></html>'
+    )
+    with zipfile.ZipFile(epub_path, 'w') as archive:
+        archive.writestr('mimetype', 'application/epub+zip')
+        archive.writestr('META-INF/container.xml', container_xml)
+        archive.writestr('OEBPS/content.opf', content_opf)
+        archive.writestr('OEBPS/Text/chapter0001.xhtml', chapter_markup)
+
+
+def _extract_chapter_cache_epub(epub_path, output_dir, monkeypatch):
+    monkeypatch.delenv('SINGLE_CHAPTER_FILTER', raising=False)
+    monkeypatch.setenv('EXTRACTION_WORKERS', '1')
+    monkeypatch.setenv('DOWNLOAD_REMOTE_IMAGE_URLS', '0')
+    monkeypatch.setenv('DISABLE_CHAPTER_MERGING', '1')
+    with zipfile.ZipFile(epub_path, 'r') as archive:
+        return chapter_extractor.extract_chapters(
+            archive,
+            str(output_dir),
+            parser='html.parser',
+            progress_callback=lambda _message: None,
+        )
+
+
+def test_chapter_cache_skips_scan_and_processing_for_same_engine(
+    monkeypatch,
+    tmp_path,
+):
+    epub_path = tmp_path / 'source.epub'
+    output_dir = tmp_path / 'output'
+    output_dir.mkdir()
+    _write_chapter_cache_epub(epub_path)
+    monkeypatch.setenv('EXTRACTION_MODE', 'comprehensive')
+
+    first = _extract_chapter_cache_epub(epub_path, output_dir, monkeypatch)
+    assert len(first) == 1
+    assert (output_dir / '.chapters_extracted').is_file()
+    assert (output_dir / 'chapters_full.json').is_file()
+
+    def fail_if_epub_is_scanned(*_args, **_kwargs):
+        raise AssertionError('valid chapter cache unexpectedly scanned EPUB')
+
+    monkeypatch.setattr(
+        chapter_extractor,
+        '_extract_chapters_universal',
+        fail_if_epub_is_scanned,
+    )
+    second = _extract_chapter_cache_epub(epub_path, output_dir, monkeypatch)
+
+    assert second == first
+
+
+def test_chapter_cache_never_uses_beautifulsoup_for_html2text_selection(
+    monkeypatch,
+    tmp_path,
+):
+    epub_path = tmp_path / 'source.epub'
+    output_dir = tmp_path / 'output'
+    output_dir.mkdir()
+    _write_chapter_cache_epub(epub_path)
+    monkeypatch.setenv('EXTRACTION_MODE', 'comprehensive')
+    beautifulsoup_chapters = _extract_chapter_cache_epub(
+        epub_path,
+        output_dir,
+        monkeypatch,
+    )
+    assert beautifulsoup_chapters[0]['body']
+
+    calls = []
+
+    def fake_html2text_extraction(*_args, **_kwargs):
+        calls.append(True)
+        return ([{
+            'num': 1,
+            'title': 'Chapter One',
+            'body': 'HTML2TEXT ONLY PAYLOAD',
+            'filename': 'OEBPS/Text/chapter0001.xhtml',
+            'original_basename': 'chapter0001',
+            'file_size': 22,
+            'has_images': False,
+            'image_count': 0,
+            'detection_method': 'enhanced_sequential_no_merge',
+            'content_hash': 'html2text-cache-test',
+            'extraction_mode': 'enhanced',
+            'enhanced_extraction': True,
+            'html2text_blocks': ['HTML2TEXT ONLY PAYLOAD'],
+            'html2text_blocks_source_hash': 'html2text-cache-test',
+        }], 'english')
+
+    monkeypatch.setenv('EXTRACTION_MODE', 'enhanced')
+    monkeypatch.setattr(
+        chapter_extractor,
+        '_extract_chapters_universal',
+        fake_html2text_extraction,
+    )
+    html2text_chapters = _extract_chapter_cache_epub(
+        epub_path,
+        output_dir,
+        monkeypatch,
+    )
+
+    assert calls == [True]
+    assert html2text_chapters[0]['body'] == 'HTML2TEXT ONLY PAYLOAD'
+    marker = json.loads(
+        (output_dir / '.chapters_extracted').read_text(encoding='utf-8')
+    )
+    assert marker['signature']['engine'] == 'html2text'
+
+    def fail_if_html2text_cache_is_not_used(*_args, **_kwargs):
+        raise AssertionError('valid html2text cache unexpectedly rebuilt')
+
+    monkeypatch.setattr(
+        chapter_extractor,
+        '_extract_chapters_universal',
+        fail_if_html2text_cache_is_not_used,
+    )
+    cached_html2text = _extract_chapter_cache_epub(
+        epub_path,
+        output_dir,
+        monkeypatch,
+    )
+
+    assert cached_html2text[0]['body'] == 'HTML2TEXT ONLY PAYLOAD'
+
+
 def _extract_resource_fingerprint_epub(epub_path, output_dir, monkeypatch):
     monkeypatch.setenv('EXTRACTION_WORKERS', '1')
     monkeypatch.setenv('DOWNLOAD_REMOTE_IMAGE_URLS', '0')

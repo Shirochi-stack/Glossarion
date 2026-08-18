@@ -62,6 +62,11 @@ _REMOTE_CACHE_IMAGE_EXTENSIONS = {
     '.jpg', '.jpeg', '.png', '.gif', '.svg', '.bmp', '.webp'
 }
 
+_CHAPTER_EXTRACTION_CACHE_VERSION = 1
+_CHAPTER_EXTRACTION_MARKER_NAME = '.chapters_extracted'
+_CHAPTERS_FULL_NAME = 'chapters_full.json'
+_CHAPTERS_INFO_NAME = 'chapters_info.json'
+
 
 def _source_epub_image_count_from_zip(zf):
     """Count image resources packaged in the currently open source EPUB."""
@@ -2154,6 +2159,30 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     if is_stop_requested():
         print("❌ Extraction stopped by user")
         return []
+
+    chapter_cache_signature = None
+    if not _single_mode and pattern_manager is None:
+        chapter_cache_signature = _chapter_extraction_cache_signature(
+            extraction_mode,
+            parser,
+        )
+        cached_chapters, cache_reason = _load_chapter_extraction_cache(
+            output_dir,
+            chapter_cache_signature,
+        )
+        if cached_chapters is not None:
+            message = (
+                f"Chapter cache matches {chapter_cache_signature['engine']} "
+                f"settings; loaded {len(cached_chapters)} chapters without "
+                "scanning or processing the EPUB"
+            )
+            print(f"📚 {message}")
+            if progress_callback:
+                progress_callback(f"📚 {message}")
+            return cached_chapters
+        if cache_reason != 'chapter cache marker is missing':
+            print(f"♻️ Chapter cache invalid ({cache_reason}); rebuilding")
+            _remove_chapter_extraction_marker(output_dir)
     
     metadata_path = os.path.join(output_dir, 'metadata.json')
     if os.path.exists(metadata_path):
@@ -2320,8 +2349,13 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
         except Exception as e:
             print(f"⚠️ Could not merge existing chapters_info.json: {e}")
 
-    with open(chapters_info_path, 'w', encoding='utf-8') as f:
-        json.dump(chapters_info, f, ensure_ascii=False, indent=2)
+    chapters_info_saved = _write_json_atomic(
+        chapters_info_path,
+        chapters_info,
+        indent=2,
+    )
+    if not chapters_info_saved:
+        print("⚠️ Could not save chapters_info.json atomically")
 
     print(f"💾 Saved detailed chapter info to: chapters_info.json")
 
@@ -2364,6 +2398,33 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     if not _single_mode:
         _create_extraction_report(output_dir, metadata, chapters, extracted_resources)
     _log_extraction_summary(chapters, extracted_resources, detected_language)
+
+    chapter_cache_saved = False
+    if (
+        not _single_mode
+        and chapter_cache_signature is not None
+        and chapters_info_saved
+    ):
+        chapter_cache_saved = _write_chapter_extraction_cache(
+            output_dir,
+            chapters,
+            chapter_cache_signature,
+            detected_language,
+        )
+        if chapter_cache_saved:
+            print(
+                f"💾 Saved validated {chapter_cache_signature['engine']} "
+                "chapter cache"
+            )
+        else:
+            print("⚠️ Could not save validated chapter cache")
+    if not _single_mode and not chapter_cache_saved:
+        # The worker/main process still requires this artifact even when cache
+        # metadata could not be committed.
+        _write_json_atomic(
+            os.path.join(output_dir, _CHAPTERS_FULL_NAME),
+            chapters,
+        )
     
     print(f"🔍 VERIFICATION: {extraction_mode.capitalize()} chapter extraction completed successfully")
     print(f"⚡ Used {max_workers} workers for parallel processing")
@@ -2430,6 +2491,284 @@ def _source_epub_content_fingerprint(zf):
         'sha256': hasher.hexdigest(),
         'size': total_size,
     }
+
+
+def _env_flag(name, default='0'):
+    return os.getenv(name, default).strip().lower() in {
+        '1', 'true', 'yes', 'on'
+    }
+
+
+def _chapter_extraction_cache_signature(extraction_mode, parser):
+    """Return settings that can change extracted chapter payloads.
+
+    The selected engine is explicit so an html2text run can never consume a
+    BeautifulSoup artifact merely because both came from the same EPUB.
+    Runtime-only settings such as worker count and progress throttling are
+    intentionally excluded.
+    """
+    mode = str(extraction_mode or 'smart').strip().lower()
+    signature = {
+        'engine': 'html2text' if mode == 'enhanced' else 'beautifulsoup',
+        'extraction_mode': mode,
+        'parser': str(parser or ''),
+        'disable_chapter_merging': _env_flag('DISABLE_CHAPTER_MERGING'),
+        'download_remote_image_urls': _env_flag('DOWNLOAD_REMOTE_IMAGE_URLS'),
+        'translate_special_files': _env_flag('TRANSLATE_SPECIAL_FILES'),
+        'special_file_keywords': os.getenv('SPECIAL_FILE_KEYWORDS', '').strip(),
+        'special_file_exact': os.getenv('SPECIAL_FILE_EXACT', '').strip(),
+        'batch_translate_headers': _env_flag('BATCH_TRANSLATE_HEADERS'),
+        'use_title': _env_flag('USE_TITLE'),
+        'ignore_header': _env_flag('IGNORE_HEADER'),
+        'remove_duplicate_h1_p': _env_flag('REMOVE_DUPLICATE_H1_P'),
+    }
+    if mode == 'enhanced':
+        enhanced_filtering = os.getenv('ENHANCED_FILTERING', 'smart').strip().lower()
+        if enhanced_filtering == 'full':
+            enhanced_filtering = 'comprehensive'
+        model_name = os.getenv('MODEL', '').strip().lower()
+        traditional_model = (
+            model_name in {'deepl', 'google-translate', 'google-translate-free'}
+            or model_name.startswith('deepl/')
+            or model_name.startswith('google-translate/')
+        )
+        signature.update({
+            'enhanced_filtering': enhanced_filtering,
+            'enhanced_preserve_structure': _env_flag(
+                'ENHANCED_PRESERVE_STRUCTURE', '1'
+            ),
+            'enhanced_single_line_break': _env_flag(
+                'ENHANCED_SINGLE_LINE_BREAK'
+            ),
+            'html2text_escape_snob': _env_flag('HTML2TEXT_ESCAPE_SNOB'),
+            'fix_empty_attr_tags_extract': _env_flag(
+                'FIX_EMPTY_ATTR_TAGS_EXTRACT'
+            ),
+            'force_bs_for_traditional': _env_flag(
+                'FORCE_BS_FOR_TRADITIONAL'
+            ),
+            'traditional_model': traditional_model,
+        })
+    else:
+        signature['fix_stray_p_gt_bs'] = _env_flag('FIX_STRAY_P_GT_BS')
+    return signature
+
+
+def _write_json_atomic(path, payload, indent=None):
+    """Write JSON completely before replacing the visible destination."""
+    temporary_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(temporary_path, 'w', encoding='utf-8') as handle:
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                indent=indent,
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        return True
+    except (OSError, TypeError, ValueError):
+        try:
+            os.remove(temporary_path)
+        except OSError:
+            pass
+        return False
+
+
+def _file_content_fingerprint(path):
+    """Return a SHA-256 fingerprint for a cache dependency file."""
+    hasher = hashlib.sha256()
+    size = 0
+    try:
+        with open(path, 'rb') as handle:
+            while True:
+                chunk = handle.read(_RESOURCE_FINGERPRINT_CHUNK_SIZE)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+                size += len(chunk)
+    except OSError:
+        return None
+    return {
+        'algorithm': 'sha256',
+        'sha256': hasher.hexdigest(),
+        'size': size,
+    }
+
+
+def _resource_marker_source_fingerprint(output_dir):
+    marker_path = os.path.join(output_dir, '.resources_extracted')
+    try:
+        with open(marker_path, 'r', encoding='utf-8') as handle:
+            marker = json.load(handle)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(marker, dict)
+        or marker.get('version') != _RESOURCE_EXTRACTION_MARKER_VERSION
+        or not isinstance(marker.get('source_epub'), dict)
+    ):
+        return None
+    source = marker['source_epub']
+    if (
+        source.get('algorithm') != 'sha256'
+        or not source.get('sha256')
+        or not isinstance(source.get('size'), int)
+    ):
+        return None
+    return dict(source)
+
+
+def _chapter_extraction_marker_path(output_dir):
+    return os.path.join(output_dir, _CHAPTER_EXTRACTION_MARKER_NAME)
+
+
+def _remove_chapter_extraction_marker(output_dir):
+    try:
+        os.remove(_chapter_extraction_marker_path(output_dir))
+    except OSError:
+        pass
+
+
+def _load_chapter_extraction_cache(output_dir, signature):
+    """Return ``(chapters, reason)`` for a validated chapter cache."""
+    marker_path = _chapter_extraction_marker_path(output_dir)
+    try:
+        with open(marker_path, 'r', encoding='utf-8') as handle:
+            marker = json.load(handle)
+    except FileNotFoundError:
+        return None, 'chapter cache marker is missing'
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None, 'chapter cache marker is unreadable'
+
+    if not isinstance(marker, dict):
+        return None, 'chapter cache marker is invalid'
+    if marker.get('version') != _CHAPTER_EXTRACTION_CACHE_VERSION:
+        return None, 'chapter cache version changed'
+
+    source_fingerprint = _resource_marker_source_fingerprint(output_dir)
+    if source_fingerprint is None:
+        return None, 'validated source EPUB fingerprint is unavailable'
+    if marker.get('source_epub') != source_fingerprint:
+        return None, 'source EPUB fingerprint changed'
+    if marker.get('signature') != signature:
+        cached_engine = (
+            marker.get('signature', {}).get('engine')
+            if isinstance(marker.get('signature'), dict) else None
+        )
+        if cached_engine and cached_engine != signature.get('engine'):
+            return None, (
+                f"selected engine is {signature.get('engine')}, "
+                f"cached engine is {cached_engine}"
+            )
+        return None, 'chapter extraction settings changed'
+
+    rename_map_path = os.path.join(output_dir, 'image_rename_map.json')
+    current_rename_map = (
+        _file_content_fingerprint(rename_map_path)
+        if os.path.isfile(rename_map_path) else None
+    )
+    if marker.get('image_rename_map') != current_rename_map:
+        return None, 'image rename map changed'
+
+    artifacts = marker.get('artifacts')
+    if not isinstance(artifacts, dict):
+        return None, 'chapter artifact inventory is missing'
+
+    chapters_path = os.path.join(output_dir, _CHAPTERS_FULL_NAME)
+    info_path = os.path.join(output_dir, _CHAPTERS_INFO_NAME)
+    for artifact_name, artifact_path in (
+        (_CHAPTERS_FULL_NAME, chapters_path),
+        (_CHAPTERS_INFO_NAME, info_path),
+    ):
+        expected = artifacts.get(artifact_name)
+        if not isinstance(expected, dict):
+            return None, f'{artifact_name} inventory is missing'
+        try:
+            current_size = os.path.getsize(artifact_path)
+        except OSError:
+            return None, f'{artifact_name} is missing'
+        if current_size != expected.get('size'):
+            return None, f'{artifact_name} size changed'
+
+    try:
+        with open(chapters_path, 'r', encoding='utf-8') as handle:
+            chapters = json.load(handle)
+        with open(info_path, 'r', encoding='utf-8') as handle:
+            chapters_info = json.load(handle)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None, 'chapter cache JSON is unreadable'
+
+    if not isinstance(chapters, list) or not all(
+        isinstance(chapter, dict)
+        and isinstance(chapter.get('body'), str)
+        for chapter in chapters
+    ):
+        return None, 'chapters_full.json payload is invalid'
+    if not isinstance(chapters_info, list):
+        return None, 'chapters_info.json payload is invalid'
+    expected_count = artifacts[_CHAPTERS_FULL_NAME].get('count')
+    if len(chapters) != expected_count:
+        return None, 'chapter count changed'
+    if len(chapters_info) != artifacts[_CHAPTERS_INFO_NAME].get('count'):
+        return None, 'chapter info count changed'
+    return chapters, ''
+
+
+def _write_chapter_extraction_cache(
+    output_dir,
+    chapters,
+    signature,
+    detected_language,
+):
+    """Atomically commit chapter artifacts, then their validation marker."""
+    chapters_path = os.path.join(output_dir, _CHAPTERS_FULL_NAME)
+    info_path = os.path.join(output_dir, _CHAPTERS_INFO_NAME)
+    if not _write_json_atomic(chapters_path, chapters):
+        return False
+    source_fingerprint = _resource_marker_source_fingerprint(output_dir)
+    if source_fingerprint is None:
+        return False
+    try:
+        with open(info_path, 'r', encoding='utf-8') as handle:
+            chapters_info = json.load(handle)
+        if not isinstance(chapters_info, list):
+            return False
+        chapters_size = os.path.getsize(chapters_path)
+        info_size = os.path.getsize(info_path)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+    rename_map_path = os.path.join(output_dir, 'image_rename_map.json')
+    rename_map_fingerprint = (
+        _file_content_fingerprint(rename_map_path)
+        if os.path.isfile(rename_map_path) else None
+    )
+    marker = {
+        'version': _CHAPTER_EXTRACTION_CACHE_VERSION,
+        'created_at': datetime.now(timezone.utc).isoformat(),
+        'source_epub': source_fingerprint,
+        'signature': dict(signature),
+        'image_rename_map': rename_map_fingerprint,
+        'detected_language': str(detected_language or 'unknown'),
+        'artifacts': {
+            _CHAPTERS_FULL_NAME: {
+                'size': chapters_size,
+                'count': len(chapters),
+            },
+            _CHAPTERS_INFO_NAME: {
+                'size': info_size,
+                'count': len(chapters_info),
+            },
+        },
+    }
+    return _write_json_atomic(
+        _chapter_extraction_marker_path(output_dir),
+        marker,
+        indent=2,
+    )
 
 
 def _load_image_rename_targets(output_dir):
