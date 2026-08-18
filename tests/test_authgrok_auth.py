@@ -641,6 +641,48 @@ def test_unified_client_routes_authgrok_without_api_key():
     assert any("authgrok" in prefix for prefix in UnifiedClient._NO_API_KEY_PREFIXES)
 
 
+@pytest.mark.parametrize(
+    "check_type",
+    [
+        "SAFETY_CHECK_TYPE_CSAM",
+        "SAFETY_CHECK_TYPE_FUTURE_POLICY_42",
+    ],
+)
+def test_shared_openai_detector_matches_any_safety_check_type(monkeypatch, check_type):
+    from unified_api_client import UnifiedClient
+
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+    monkeypatch.setenv("DISABLE_EMPTY_SAFETY_HEURISTIC", "1")
+    client = UnifiedClient.__new__(UnifiedClient)
+
+    assert client._detect_safety_filter(
+        [{"role": "user", "content": "ordinary story text"}],
+        "",
+        None,
+        RuntimeError(f"Error code: 403 - Failed check: {check_type}"),
+        "xai",
+    ) is True
+
+
+def test_shared_openai_detector_does_not_read_safety_check_from_prompt(monkeypatch):
+    from unified_api_client import UnifiedClient
+
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+    monkeypatch.setenv("DISABLE_EMPTY_SAFETY_HEURISTIC", "1")
+    client = UnifiedClient.__new__(UnifiedClient)
+
+    assert client._detect_safety_filter(
+        [{
+            "role": "user",
+            "content": "The story mentions SAFETY_CHECK_TYPE_CSAM in dialogue.",
+        }],
+        "",
+        None,
+        RuntimeError("Error code: 403 - permission denied"),
+        "xai",
+    ) is False
+
+
 def test_authgrok_http_error_reads_only_provider_error_metadata():
     error = authgrok.AuthGrokHTTPError(
         403,

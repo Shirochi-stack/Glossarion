@@ -1739,6 +1739,17 @@ class UnifiedClient:
             'stop_sequence_limit',
         }:
             return False
+        # xAI-family endpoints expose the concrete failed check as
+        # SAFETY_CHECK_TYPE_<name>. Match the full identifier dynamically so new
+        # check types do not require a client update. Keep this provider-error
+        # signal separate from prompts and optional response refusal checks.
+        provider_error_str = ""
+        if response_is_exception:
+            provider_error_str = str(response)
+        elif response is not None and getattr(response, 'error_details', None) is not None:
+            provider_error_str = str(response.error_details)
+        if re.search(r'\bSAFETY_CHECK_TYPE_[A-Z0-9_]+\b', provider_error_str, re.IGNORECASE):
+            return True
         # 2) Safety indicators in raw response/error details
         response_str = ""
         if response is not None:
