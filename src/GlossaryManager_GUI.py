@@ -26,6 +26,22 @@ from glossary_usage import (
 )
 from language_options import TARGET_LANGUAGES
 
+
+def _collect_glossary_filter_values(value_states, *, restrict_to_visible=False):
+    """Return checked filter values, optionally limited to search matches.
+
+    ``value_states`` contains ``(raw_value, is_visible, is_checked)`` tuples.
+    Limiting an active search to visible values gives the popup the spreadsheet
+    behavior users expect: typing a value and applying it filters to those
+    search results instead of silently retaining every hidden checked value.
+    """
+    return {
+        raw_value
+        for raw_value, is_visible, is_checked in value_states
+        if is_checked and (is_visible or not restrict_to_visible)
+    }
+
+
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
 
@@ -6554,11 +6570,20 @@ Do not stop after the glossary."""
                 _set_visible_check_state(Qt.Checked if should_check else Qt.Unchecked)
 
             def _apply_selected_values():
-                selected = {
-                    value_list.item(index).data(Qt.UserRole)
-                    for index in range(value_list.count())
-                    if _value_checkbox(index) is not None and _value_checkbox(index).isChecked()
-                }
+                selected = _collect_glossary_filter_values(
+                    (
+                        (
+                            value_list.item(index).data(Qt.UserRole),
+                            not value_list.item(index).isHidden(),
+                            bool(
+                                _value_checkbox(index) is not None
+                                and _value_checkbox(index).isChecked()
+                            ),
+                        )
+                        for index in range(value_list.count())
+                    ),
+                    restrict_to_visible=bool(search_entry.text().strip()),
+                )
                 if len(selected) == len(values):
                     filters.pop(field, None)
                 else:
@@ -6604,6 +6629,7 @@ Do not stop after the glossary."""
             apply_button = QPushButton("Apply")
             apply_button.setDefault(True)
             apply_button.clicked.connect(_apply_selected_values)
+            search_entry.returnPressed.connect(_apply_selected_values)
             button_row.addWidget(apply_button)
             popup_layout.addLayout(button_row)
 

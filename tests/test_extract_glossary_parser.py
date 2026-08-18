@@ -41,7 +41,10 @@ from glossary_refinement import (
     refine_glossary_entries,
     refinement_chunking_mode,
 )
-from GlossaryManager_GUI import GlossaryManagerMixin
+from GlossaryManager_GUI import (
+    GlossaryManagerMixin,
+    _collect_glossary_filter_values,
+)
 
 
 class _RefinementTestSplitter:
@@ -80,6 +83,37 @@ def test_glossary_refinement_gui_only_applies_explicit_request_mode():
     assert resolve({"glossary_refinement_chunking_mode": "unknown"}) is None
     assert resolve({"glossary_refinement_chunking_mode": "separate"}) == "separate"
     assert resolve({"glossary_refinement_chunking_mode": "all"}) == "all"
+
+
+def test_glossary_filter_apply_uses_all_checked_values_without_a_search():
+    states = [
+        ("visible", True, True),
+        ("hidden", False, True),
+        ("unchecked", True, False),
+    ]
+
+    assert _collect_glossary_filter_values(states) == {"visible", "hidden"}
+
+
+def test_glossary_filter_apply_limits_search_to_visible_checked_values():
+    states = [
+        ("BIG SISTER IS WATCHING YOU", True, True),
+        ("hidden but checked", False, True),
+        ("visible but unchecked", True, False),
+    ]
+
+    assert _collect_glossary_filter_values(
+        states,
+        restrict_to_visible=True,
+    ) == {"BIG SISTER IS WATCHING YOU"}
+
+
+def test_glossary_filter_search_enter_is_wired_to_apply():
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "GlossaryManager_GUI.py"
+    ).read_text(encoding="utf-8")
+
+    assert "search_entry.returnPressed.connect(_apply_selected_values)" in source
 
 
 def _run_test_refinement(entries, progress_file, parsed_entries, send_fn):
