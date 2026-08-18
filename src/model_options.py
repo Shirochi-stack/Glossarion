@@ -672,6 +672,45 @@ _BARE_PROVIDER_PREFIXES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
 )
 
 
+_NUMBERED_MODEL_COMPLETION_RE = re.compile(
+    r"^(authgem-vertex|antigravity|authgpt|authgrok|authcd|authgem|authnd|authza|ocagy)"
+    r"(\d{1,4})(?=/|$)",
+    re.IGNORECASE,
+)
+
+
+def numbered_model_completion_values(
+    model_values: List[str],
+    typed_text: str,
+) -> List[str]:
+    """Render canonical catalog entries with the numbered prefix being typed.
+
+    Catalogs intentionally store one canonical route such as ``authgrok/``
+    rather than up to 10,000 account aliases.  Qt's contains completer compares
+    the literal editor text, though, so ``authgrok12/grok-4`` cannot match
+    ``authgrok/grok-4.5``.  This creates only the aliases needed for the active
+    edit and leaves the underlying catalog untouched.
+    """
+    values = list(model_values)
+    match = _NUMBERED_MODEL_COMPLETION_RE.match(str(typed_text or '').strip())
+    if not match:
+        return values
+
+    canonical_prefix = f"{match.group(1).lower()}/"
+    numbered_prefix = f"{match.group(1)}{match.group(2)}/"
+    rendered: List[str] = []
+    seen = set()
+    for value in values:
+        text = str(value)
+        if text.lower().startswith(canonical_prefix):
+            text = numbered_prefix + text[len(canonical_prefix):]
+        dedupe_key = text.casefold()
+        if dedupe_key not in seen:
+            seen.add(dedupe_key)
+            rendered.append(text)
+    return rendered
+
+
 def _catalog_provider_for_model(model: str) -> Optional[str]:
     """Resolve a dropdown model to the catalog that owns its namespace."""
     value = str(model or "").strip().lower()

@@ -124,6 +124,49 @@ def test_multi_key_manager_detects_live_authgrok_pool_route():
     assert check(dialog) is False
 
 
+@pytest.mark.parametrize(
+    ("typed", "canonical", "expected"),
+    [
+        ("authgrok0/grok-4", "authgrok/grok-4.5", "authgrok0/grok-4.5"),
+        ("authgpt12/gpt-5", "authgpt/gpt-5.6", "authgpt12/gpt-5.6"),
+        ("authcd3/claude", "authcd/claude-sonnet", "authcd3/claude-sonnet"),
+        ("authgem7/gemini", "authgem/gemini-3", "authgem7/gemini-3"),
+        (
+            "authgem-vertex27/gemini",
+            "authgem-vertex/gemini-3",
+            "authgem-vertex27/gemini-3",
+        ),
+        ("authnd4/nemotron", "authnd/nemotron-3", "authnd4/nemotron-3"),
+        ("authza2/glm", "authza/glm-5", "authza2/glm-5"),
+        ("ocagy0", "ocagy/gemini-3.1-pro-high", "ocagy0/gemini-3.1-pro-high"),
+        (
+            "antigravity42/gemini",
+            "antigravity/gemini-3.1-pro-high",
+            "antigravity42/gemini-3.1-pro-high",
+        ),
+    ],
+)
+def test_numbered_model_completion_preserves_typed_account_prefix(
+    typed,
+    canonical,
+    expected,
+):
+    values = [canonical, "openai/gpt-5"]
+
+    rendered = model_options.numbered_model_completion_values(values, typed)
+
+    assert rendered == [expected, "openai/gpt-5"]
+
+
+def test_ordinary_model_completion_values_are_unchanged():
+    values = ["authgrok/grok-4.5", "authgrok/grok-4.6"]
+
+    assert model_options.numbered_model_completion_values(
+        values,
+        "authgrok/grok-4",
+    ) == values
+
+
 def test_openrouter_online_catalog_replaces_static_provider_section(tmp_path, monkeypatch):
     cache_path = _isolated_cache(tmp_path, monkeypatch)
 

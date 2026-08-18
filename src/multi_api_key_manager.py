@@ -85,7 +85,7 @@ from typing import Dict, List, Optional, Tuple
 import requests
 from datetime import datetime, timedelta
 import logging
-from model_options import get_model_options
+from model_options import get_model_options, numbered_model_completion_values
 # Dialog for configuring per-key endpoint
 try:
     if _HEADLESS_IMPORT:
@@ -7641,13 +7641,22 @@ class MultiAPIKeyDialog(QDialog):
         from PySide6.QtCore import QSortFilterProxyModel, QStringListModel
 
         class _PrefixPriorityProxy(QSortFilterProxyModel):
-            def __init__(self, parent=None):
+            def __init__(self, base_model_values, parent=None):
                 super().__init__(parent)
                 self._search = ""
+                self._base_model_values = list(base_model_values)
                 self.setDynamicSortFilter(True)
 
             def set_search_text(self, text):
                 self._search = (text or "").lower()
+                source_model = self.sourceModel()
+                if source_model is not None:
+                    source_model.setStringList(
+                        numbered_model_completion_values(
+                            self._base_model_values,
+                            text,
+                        )
+                    )
                 self.invalidate()
                 self.sort(0)
 
@@ -7683,7 +7692,7 @@ class MultiAPIKeyDialog(QDialog):
         else:
             model_values = list(model_values)
         source = QStringListModel(model_values, combo)
-        proxy = _PrefixPriorityProxy(combo)
+        proxy = _PrefixPriorityProxy(model_values, combo)
         proxy.setSourceModel(source)
         proxy.sort(0)
 

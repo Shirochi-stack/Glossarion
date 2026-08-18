@@ -69,32 +69,60 @@ def test_edge_numbered_login_uses_inprivate_dedicated_profile():
     assert "--user-data-dir=C:\\Temp\\authgrok-profile" in args
 
 
-def test_numbered_oauth_flow_opens_cookie_isolated_browser(monkeypatch):
-    class FakeServer:
-        server_port = 56121
-        _error = None
-        _auth_code = "authorization-code"
-        _returned_state = "state-value"
+def test_macos_chrome_numbered_login_uses_isolated_profile():
+    args = authgrok._isolated_browser_command(
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "https://auth.x.ai/oauth2/authorize?state=test",
+        "/tmp/authgrok-profile",
+    )
 
-        def serve_forever(self):
-            return None
+    assert "--incognito" in args
+    assert "--user-data-dir=/tmp/authgrok-profile" in args
 
-        def shutdown(self):
-            return None
 
-        def server_close(self):
-            return None
+def test_linux_edge_numbered_login_uses_inprivate_profile():
+    args = authgrok._isolated_browser_command(
+        "/usr/bin/microsoft-edge-stable",
+        "https://auth.x.ai/oauth2/authorize?state=test",
+        "/tmp/authgrok-profile",
+    )
 
+    assert "--inprivate" in args
+    assert "--user-data-dir=/tmp/authgrok-profile" in args
+
+
+def test_linux_firefox_numbered_login_uses_private_dedicated_profile():
+    args = authgrok._isolated_browser_command(
+        "/usr/bin/firefox",
+        "https://auth.x.ai/oauth2/authorize?state=test",
+        "/tmp/authgrok-profile",
+    )
+
+    assert args == [
+        "/usr/bin/firefox",
+        "-no-remote",
+        "-profile", "/tmp/authgrok-profile",
+        "-private-window", "https://auth.x.ai/oauth2/authorize?state=test",
+    ]
+
+
+def test_numbered_oauth_flow_uses_auto_polled_device_authorization(monkeypatch):
     opened = []
-    token_values = iter(["state-value", "nonce-value"])
+    polled = []
+    device_code = {
+        "device_code": "device-secret",
+        "user_code": "ABCD-EFGH",
+        "verification_uri": "https://accounts.x.ai/device",
+        "verification_uri_complete": "https://accounts.x.ai/device?user_code=ABCD-EFGH",
+        "expires_in": 600,
+        "interval": 5,
+    }
     monkeypatch.setattr(
         authgrok,
         "_load_oidc_discovery",
-        lambda: {"authorization_endpoint": authgrok.XAI_OAUTH_AUTHORIZATION_URL},
+        lambda: {"jwks_uri": authgrok.XAI_OAUTH_JWKS_URL},
     )
-    monkeypatch.setattr(authgrok, "generate_pkce", lambda: ("verifier", "challenge"))
-    monkeypatch.setattr(authgrok.secrets, "token_urlsafe", lambda _size: next(token_values))
-    monkeypatch.setattr(authgrok, "_create_callback_server", lambda _state: FakeServer())
+    monkeypatch.setattr(authgrok, "request_device_code", lambda timeout=30: device_code)
     monkeypatch.setattr(
         authgrok,
         "_open_oauth_browser",
@@ -102,8 +130,15 @@ def test_numbered_oauth_flow_opens_cookie_isolated_browser(monkeypatch):
     )
     monkeypatch.setattr(
         authgrok,
-        "exchange_code_for_tokens",
-        lambda *_args: {"id_token": "signed-token", "access_token": "access-token"},
+        "poll_device_code_tokens",
+        lambda value, timeout=300: (
+            polled.append((value, timeout))
+            or {
+                "id_token": "signed-token",
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+            }
+        ),
     )
     monkeypatch.setattr(
         authgrok,
@@ -114,8 +149,90 @@ def test_numbered_oauth_flow_opens_cookie_isolated_browser(monkeypatch):
     tokens = authgrok.run_oauth_flow(force_account_selection=True)
 
     assert len(opened) == 1
+    assert opened[0][0] == device_code["verification_uri_complete"]
     assert opened[0][1] is True
+    assert polled == [(device_code, 300)]
     assert tokens["account"]["email"] == "second@example.test"
+
+
+def test_request_device_code_uses_xai_device_endpoint(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        is_redirect = False
+        is_permanent_redirect = False
+
+        def json(self):
+            return {
+                "device_code": "device-secret",
+                "user_code": "ABCD-EFGH",
+                "verification_uri": "https://accounts.x.ai/device",
+                "verification_uri_complete": (
+                    "https://accounts.x.ai/device?user_code=ABCD-EFGH"
+                ),
+                "expires_in": 900,
+                "interval": 4,
+            }
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return FakeResponse()
+
+    monkeypatch.setattr(authgrok.requests, "post", fake_post)
+
+    result = authgrok.request_device_code()
+
+    assert captured["url"] == authgrok.XAI_OAUTH_DEVICE_CODE_URL
+    assert captured["data"]["referrer"] == "grok-build"
+    assert result["user_code"] == "ABCD-EFGH"
+    assert result["interval"] == 4
+
+
+def test_device_token_polling_waits_until_authorized(monkeypatch):
+    responses = [
+        (400, {"error": "authorization_pending"}),
+        (
+            200,
+            {
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "id_token": "signed-token",
+                "expires_in": 3600,
+            },
+        ),
+    ]
+
+    class FakeResponse:
+        is_redirect = False
+        is_permanent_redirect = False
+
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    monkeypatch.setattr(authgrok.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        authgrok.requests,
+        "post",
+        lambda *_args, **_kwargs: FakeResponse(*responses.pop(0)),
+    )
+
+    result = authgrok.poll_device_code_tokens(
+        {
+            "device_code": "device-secret",
+            "expires_in": 600,
+            "interval": 1,
+        }
+    )
+
+    assert result["access_token"] == "access-token"
+    assert result["refresh_token"] == "refresh-token"
+    assert responses == []
 
 
 def test_numbered_store_auto_login_forces_account_selection(tmp_path, monkeypatch):

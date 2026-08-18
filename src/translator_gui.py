@@ -648,6 +648,7 @@ from model_options import (
     due_provider_catalog_for_model,
     get_last_successful_provider_models,
     get_model_options,
+    numbered_model_completion_values,
     provider_model_catalog_supports_anonymous_poll,
     provider_model_catalog_refresh_due,
     start_provider_model_catalog_refresh,
@@ -20755,13 +20756,22 @@ Recent translations to summarize:
         class _PrefixPriorityProxy(QSortFilterProxyModel):
             """Sorts completer results so prefix matches beat substring matches."""
 
-            def __init__(self, parent=None):
+            def __init__(self, base_model_values, parent=None):
                 super().__init__(parent)
                 self._search = ""
+                self._base_model_values = list(base_model_values)
                 self.setDynamicSortFilter(True)
 
             def set_search_text(self, text):
-                self._search = text.lower()
+                self._search = (text or "").lower()
+                source_model = self.sourceModel()
+                if source_model is not None:
+                    source_model.setStringList(
+                        numbered_model_completion_values(
+                            self._base_model_values,
+                            text,
+                        )
+                    )
                 self.invalidate()
                 self.sort(0)
 
@@ -20800,8 +20810,9 @@ Recent translations to summarize:
             except (RuntimeError, TypeError):
                 pass
 
-        source = QStringListModel(model_list)
-        proxy = _PrefixPriorityProxy()
+        base_model_values = list(model_list)
+        source = QStringListModel(base_model_values)
+        proxy = _PrefixPriorityProxy(base_model_values)
         proxy.setSourceModel(source)
         proxy.sort(0)
 

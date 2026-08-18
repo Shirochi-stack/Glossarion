@@ -71,6 +71,7 @@ XAI_OAUTH_ISSUER = "https://auth.x.ai"
 XAI_OAUTH_DISCOVERY_URL = f"{XAI_OAUTH_ISSUER}/.well-known/openid-configuration"
 XAI_OAUTH_AUTHORIZATION_URL = f"{XAI_OAUTH_ISSUER}/oauth2/authorize"
 XAI_OAUTH_TOKEN_URL = f"{XAI_OAUTH_ISSUER}/oauth2/token"
+XAI_OAUTH_DEVICE_CODE_URL = f"{XAI_OAUTH_ISSUER}/oauth2/device/code"
 XAI_OAUTH_JWKS_URL = f"{XAI_OAUTH_ISSUER}/.well-known/jwks.json"
 XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
 XAI_OAUTH_SCOPE = (
@@ -81,6 +82,9 @@ XAI_OAUTH_REDIRECT_HOST = "127.0.0.1"
 XAI_OAUTH_REDIRECT_PORT = 56121
 XAI_OAUTH_REDIRECT_PATH = "/callback"
 TOKEN_REFRESH_MARGIN_SECONDS = 120
+DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+DEVICE_CODE_DEFAULT_POLL_SECONDS = 5
+DEVICE_CODE_SLOW_DOWN_SECONDS = 5
 
 XAI_CLI_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
 XAI_CLI_RESPONSES_URL = f"{XAI_CLI_BASE_URL}/responses"
@@ -224,12 +228,20 @@ def _isolation_capable_browser_paths() -> List[str]:
                     candidates.append(os.path.join(root, relative_path))
         executable_names = ["chrome.exe", "msedge.exe", "brave.exe", "firefox.exe"]
     elif sys.platform == "darwin":
-        candidates.extend([
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-            "/Applications/Firefox.app/Contents/MacOS/firefox",
-        ])
+        mac_app_binaries = [
+            os.path.join("Google Chrome.app", "Contents", "MacOS", "Google Chrome"),
+            os.path.join("Microsoft Edge.app", "Contents", "MacOS", "Microsoft Edge"),
+            os.path.join("Brave Browser.app", "Contents", "MacOS", "Brave Browser"),
+            os.path.join("Firefox.app", "Contents", "MacOS", "firefox"),
+        ]
+        for applications_dir in (
+            "/Applications",
+            os.path.expanduser("~/Applications"),
+        ):
+            candidates.extend(
+                os.path.join(applications_dir, binary)
+                for binary in mac_app_binaries
+            )
         executable_names = [
             "google-chrome", "microsoft-edge", "brave-browser", "firefox"
         ]
@@ -270,7 +282,7 @@ def _isolated_browser_command(
             "-private-window", auth_url,
         ]
 
-    private_flag = "--inprivate" if "msedge" in browser_name else "--incognito"
+    private_flag = "--inprivate" if "edge" in browser_name else "--incognito"
     return [
         executable,
         f"--user-data-dir={profile_dir}",
@@ -326,7 +338,7 @@ def _open_oauth_browser(auth_url: str, isolated_session: bool = False) -> None:
 
 def _validate_id_token(
     id_token: str,
-    nonce: str,
+    nonce: Optional[str],
     discovery: Dict[str, Any],
     timeout: int = 15,
 ) -> Dict[str, Any]:
@@ -409,14 +421,30 @@ def _validate_id_token(
         raise RuntimeError("xAI ID token has expired")
     if not isinstance(claims.get("iat"), (int, float)) or claims["iat"] > now + 60:
         raise RuntimeError("xAI ID token issued-at time was invalid")
-    if not isinstance(claims.get("nonce"), str) or not secrets.compare_digest(claims["nonce"], nonce):
-        raise RuntimeError("xAI ID token nonce mismatch")
+    if nonce is not None:
+        if (
+            not isinstance(claims.get("nonce"), str)
+            or not secrets.compare_digest(claims["nonce"], nonce)
+        ):
+            raise RuntimeError("xAI ID token nonce mismatch")
     return claims
 
 
 # ---------------------------------------------------------------------------
 # Token exchange and refresh
 # ---------------------------------------------------------------------------
+
+
+def _normalize_oauth_token_data(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict) or not isinstance(data.get("access_token"), str):
+        raise RuntimeError("xAI token response did not include an access token")
+    expires_in = data.get("expires_in", 3600)
+    if not isinstance(expires_in, (int, float)) or expires_in <= 0:
+        expires_in = 3600
+    normalized = dict(data)
+    normalized["expires_at"] = time.time() + float(expires_in)
+    normalized["token_endpoint"] = XAI_OAUTH_TOKEN_URL
+    return normalized
 
 
 def _post_oauth_token(payload: Dict[str, str], timeout: int = 30) -> Dict[str, Any]:
@@ -435,14 +463,7 @@ def _post_oauth_token(payload: Dict[str, str], timeout: int = 30) -> Dict[str, A
         data = response.json()
     except Exception as exc:
         raise RuntimeError("xAI token endpoint returned invalid JSON") from exc
-    if not isinstance(data, dict) or not isinstance(data.get("access_token"), str):
-        raise RuntimeError("xAI token response did not include an access token")
-    expires_in = data.get("expires_in", 3600)
-    if not isinstance(expires_in, (int, float)) or expires_in <= 0:
-        expires_in = 3600
-    data["expires_at"] = time.time() + float(expires_in)
-    data["token_endpoint"] = XAI_OAUTH_TOKEN_URL
-    return data
+    return _normalize_oauth_token_data(data)
 
 
 def exchange_code_for_tokens(auth_code: str, code_verifier: str, redirect_uri: str) -> Dict[str, Any]:
@@ -469,6 +490,148 @@ def refresh_access_token(refresh_token: str) -> Dict[str, Any]:
         "refresh_token": refresh_token,
         "client_id": XAI_OAUTH_CLIENT_ID,
     })
+
+
+def request_device_code(timeout: int = 30) -> Dict[str, Any]:
+    """Start xAI's RFC 8628 device authorization flow."""
+    response = requests.post(
+        XAI_OAUTH_DEVICE_CODE_URL,
+        data={
+            "client_id": XAI_OAUTH_CLIENT_ID,
+            "scope": XAI_OAUTH_SCOPE,
+            "referrer": "grok-build",
+        },
+        headers=_oauth_headers(),
+        timeout=timeout,
+        allow_redirects=False,
+    )
+    if response.is_redirect or response.is_permanent_redirect:
+        raise RuntimeError("xAI device authorization endpoint unexpectedly redirected")
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"xAI device authorization failed with HTTP {response.status_code}"
+        )
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise RuntimeError("xAI device authorization returned invalid JSON") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("xAI device authorization returned an invalid response")
+
+    required_strings = ("device_code", "user_code", "verification_uri")
+    if any(not isinstance(data.get(key), str) or not data[key] for key in required_strings):
+        raise RuntimeError("xAI device authorization response was incomplete")
+    if not all(
+        char.isascii() and (char.isalnum() or char == "-")
+        for char in data["user_code"]
+    ):
+        raise RuntimeError("xAI device authorization returned an invalid user code")
+
+    verification_urls = [data["verification_uri"]]
+    complete_url = data.get("verification_uri_complete")
+    if complete_url is not None:
+        if not isinstance(complete_url, str) or not complete_url:
+            raise RuntimeError("xAI device authorization returned an invalid verification URL")
+        verification_urls.append(complete_url)
+    for verification_url in verification_urls:
+        if any(char.isascii() and ord(char) < 32 for char in verification_url):
+            raise RuntimeError("xAI device authorization returned an invalid verification URL")
+        parsed = urlparse(verification_url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise RuntimeError("xAI device authorization returned an unsafe verification URL")
+
+    expires_in = data.get("expires_in", 600)
+    interval = data.get("interval", DEVICE_CODE_DEFAULT_POLL_SECONDS)
+    if not isinstance(expires_in, (int, float)) or expires_in <= 0:
+        expires_in = 600
+    if not isinstance(interval, (int, float)) or interval <= 0:
+        interval = DEVICE_CODE_DEFAULT_POLL_SECONDS
+    result = dict(data)
+    result["expires_in"] = float(expires_in)
+    result["interval"] = float(interval)
+    return result
+
+
+def poll_device_code_tokens(
+    device_code: Dict[str, Any],
+    timeout: int = 300,
+) -> Dict[str, Any]:
+    """Poll xAI until the isolated-browser device authorization completes."""
+    interval = max(1.0, float(device_code.get("interval", DEVICE_CODE_DEFAULT_POLL_SECONDS)))
+    expires_in = max(1.0, float(device_code.get("expires_in", timeout)))
+    deadline = time.monotonic() + min(float(timeout), expires_in)
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("xAI device authorization timed out; try the Grok login again")
+        time.sleep(min(interval, remaining))
+
+        response = requests.post(
+            XAI_OAUTH_TOKEN_URL,
+            data={
+                "grant_type": DEVICE_CODE_GRANT_TYPE,
+                "device_code": str(device_code["device_code"]),
+                "client_id": XAI_OAUTH_CLIENT_ID,
+            },
+            headers=_oauth_headers(),
+            timeout=min(30, max(1, int(remaining))),
+            allow_redirects=False,
+        )
+        if response.is_redirect or response.is_permanent_redirect:
+            raise RuntimeError("xAI device token endpoint unexpectedly redirected")
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise RuntimeError("xAI device token endpoint returned invalid JSON") from exc
+
+        if response.status_code < 400:
+            tokens = _normalize_oauth_token_data(data)
+            if not tokens.get("refresh_token"):
+                raise RuntimeError("xAI device token response did not include a refresh token")
+            if not tokens.get("id_token"):
+                raise RuntimeError("xAI device token response did not include an ID token")
+            return tokens
+
+        error = str(data.get("error") or "") if isinstance(data, dict) else ""
+        detail = str(data.get("error_description") or error) if isinstance(data, dict) else ""
+        if error == "authorization_pending":
+            continue
+        if error == "slow_down":
+            interval += DEVICE_CODE_SLOW_DOWN_SECONDS
+            continue
+        if error == "access_denied":
+            raise RuntimeError("xAI device authorization was denied")
+        if error == "expired_token":
+            raise RuntimeError("xAI device authorization expired; try the Grok login again")
+        raise RuntimeError(f"xAI device authorization failed: {detail or 'unknown error'}")
+
+
+def run_device_oauth_flow(timeout: int = 300) -> Dict[str, Any]:
+    """Authorize a numbered account and receive its tokens without code pasting."""
+    discovery = _load_oidc_discovery()
+    device_code = request_device_code(timeout=min(30, timeout))
+    verification_url = (
+        device_code.get("verification_uri_complete")
+        or device_code["verification_uri"]
+    )
+
+    print(
+        "Opening an isolated browser for this numbered Grok account. "
+        "Glossarion will finish automatically after you approve the displayed code."
+    )
+    _open_oauth_browser(str(verification_url), isolated_session=True)
+    tokens = poll_device_code_tokens(device_code, timeout=timeout)
+    claims = _validate_id_token(tokens["id_token"], None, discovery)
+    tokens["account"] = {
+        "email": str(claims.get("email", "") or ""),
+        "name": str(claims.get("name", "") or ""),
+        "subject": str(claims.get("sub", "") or ""),
+    }
+    print("Grok device authorization successful.")
+    if tokens["account"]["email"]:
+        print(f"Account: {tokens['account']['email']}")
+    return tokens
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +715,12 @@ def run_oauth_flow(
     force_account_selection: bool = False,
 ) -> Dict[str, Any]:
     """Open xAI login in the browser and return validated OAuth tokens."""
+    if force_account_selection:
+        # xAI may render an out-of-band Grok Build code instead of redirecting
+        # an isolated browser to localhost.  Its device grant is designed for
+        # exactly this case: the app polls and receives tokens automatically.
+        return run_device_oauth_flow(timeout=timeout)
+
     discovery = _load_oidc_discovery()
     verifier, challenge = generate_pkce()
     state = secrets.token_urlsafe(32)
@@ -570,15 +739,9 @@ def run_oauth_flow(
         force_account_selection=force_account_selection,
     )
 
-    if force_account_selection:
-        print(
-            "Opening an isolated browser for this numbered Grok account. "
-            "Its xAI and Google cookies are separate from your existing browser session."
-        )
-    else:
-        print("Opening browser for Grok login (Google sign-in is supported by xAI)...")
-        print(f"If the browser does not open, visit:\n{auth_url}")
-    _open_oauth_browser(auth_url, isolated_session=force_account_selection)
+    print("Opening browser for Grok login (Google sign-in is supported by xAI)...")
+    print(f"If the browser does not open, visit:\n{auth_url}")
+    _open_oauth_browser(auth_url, isolated_session=False)
 
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
