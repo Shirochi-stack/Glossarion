@@ -219,13 +219,13 @@ The built-in model list is a safety net, not a promise that every entry is still
 
 ### Option 2 — Log in with a subscription (no key)
 
-If you already pay for **ChatGPT Plus/Pro**, **Claude Pro/Max**, **Grok**, or have a **Google** account, use the **🔐 login buttons** on the main window instead of an API key. Pick the matching `authgpt/...`, `authcd/...`, `authgrok/...`, `authgem/...`, OcAgy, or `antigravity/...` model. OcAgy login opens an interactive OpenCode terminal instead of a browser directly. For both Antigravity routes, also read [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds).
+If you have a **ChatGPT Plus/Pro**, **Claude Pro/Max**, or free/paid **Grok** account—or a **Google** account—use the **🔐 login buttons** on the main window instead of an API key. Pick the matching `authgpt/...`, `authcd/...`, `authgrok/...`, `authgem/...`, OcAgy, or `antigravity/...` model. AuthGrok works with xAI's confirmed free tier; a paid Grok subscription is not required. OcAgy login opens an interactive OpenCode terminal instead of a browser directly. For both Antigravity routes, also read [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds).
 
 **AuthGrok account slots and rotation:** Use `authgrok/...` for the default saved xAI account. When `authgrok0/...` is selected in the main model field or entered in the Multi API Key Manager, an account-slot dropdown appears beside **Grok Login**. Choose **+ N** to create the next free numbered slot and complete a fresh xAI sign-in for another email; repeat **+ N** for additional accounts without typing or using numbered model prefixes. Glossarion uses xAI's device-authorization flow in your regular default browser. Before each numbered login, it signs out the previous xAI website session without signing out Google or invalidating the OAuth tokens already saved by Glossarion. Sign in with the next account and approve access; Glossarion polls for completion and saves its tokens automatically, so nothing needs to be copied from the browser. If the returned email is already saved in another slot, Glossarion rejects it and asks for a different account. The `#N` entries select a specific account for login/logout management, while translation requests made through `authgrok0/...` rotate distinct emails round-robin. The pool advances to another saved account when an account cannot authenticate, is rate-limited/out of quota, or its request fails.
 
 ### Option 3 — Translate for free
 
-**💸 Don't want to pay anything at all?** You don't have to. See **[Section 17 — How to translate for free](#17-how-to-translate-for-free)** for every no-cost option (free NVIDIA routing, free Google AI Studio keys, free OpenRouter models, your own local AI, and more).
+**💸 Don't want to pay anything at all?** You don't have to. See **[Section 17 — How to translate for free](#17-how-to-translate-for-free)** for every no-cost option (the AuthGrok free tier, free NVIDIA routing, free Google AI Studio keys, free OpenRouter models, your own local AI, and more).
 
 > **⚠️ DON'T paste a key from one provider and a model from another.** An OpenAI key with a `claude-` model will fail. Key and model must match the same provider (the multi-provider hubs `eh/`, `or/` are the exception — one key, many models).
 
@@ -753,6 +753,7 @@ Yes — you can run Glossarion **without spending a cent.** There are several fr
 | **NVIDIA browser routing** | `authnd/...` (e.g. `authnd/z-ai/glm-5.1`) | **Nothing** — no key, no login | Routes through the built-in NVIDIA browser; needs the **standard `L_Glossarion` build** (has the EPUB Library). |
 | **NVIDIA API (free tier)** | `nd/...` (e.g. `nd/deepseek-ai/deepseek-v4-flash`) | A **[free NVIDIA API key](https://build.nvidia.com/explore/discover?api-key=true)** | Free, but **only available in certain regions**. |
 | **ChatGPT login** | `authgpt/...` | A **ChatGPT login** (🔐 button) | Only **a few free requests**. |
+| **Grok login (free tier)** | `authgrok/...` or `authgrok0/...` | A **free xAI/Grok account** (🔐 button) | No API key or paid Grok subscription required; xAI's free allowance and rate limits apply. |
 | **Google AI Studio key (Gemini)** | `gemini-...` (e.g. `gemini-3.1-flash-lite`) | A **[free Google AI Studio key](https://aistudio.google.com/apikey)** | A few free requests on most models — but **~500 free requests/day when used with Gemini 3.1 Flash Lite**. |
 | **Gemini coding endpoint** | `authgem/...` | A **Google login** (🔐 button) | Free, but throttled to **1 request per minute (RPM)**. |
 | **Antigravity login** | `antigravity/...` (e.g. `antigravity/gemini-3.5-flash-low`) | A **Google login**; Glossarion installs Bun automatically when needed | Free Cloud Code routing through a local proxy on `localhost:3000` using `Shirochi-stack/antigravity-proxy`; see [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
@@ -772,30 +773,33 @@ If you create a **free NVIDIA API key**, you can use `nd/...` models (e.g. `nd/d
 **3. `authgpt/` — free requests via ChatGPT login.**
 Click the **🔐 ChatGPT Login** button (Section 4), log in with your browser, and use an `authgpt/...` model. You get **a small number of free requests** this way — handy for testing a chapter or two without an API key.
 
-**4. Free Google AI Studio key (for use with Gemini).**
+**4. `authgrok/` — Grok's confirmed free tier.**
+Select an `authgrok/...` model and click **🔐 Grok Login**, then sign in with a free xAI/Grok account. No xAI API key or paid Grok subscription is required. Use `authgrok/...` to pin the default saved account, numbered routes such as `authgrok1/...` to pin other saved accounts, or `authgrok0/...` to rotate the saved account pool. Choose **+ N** in the Grok account-slot dropdown to add another account without typing a numbered prefix. xAI controls the free allowance and rate limits, so availability can be lower than on a paid account and may change over time.
+
+**5. Free Google AI Studio key (for use with Gemini).**
 Go to Google AI Studio, create a **free API key** (this is a *Google AI Studio key*, not a model-specific one), paste it into the API Key box, and use a `gemini-...` model. The free tier gives **a few requests on most models**, but the lightweight **Gemini 3.1 Flash Lite** model allows **around 500 free requests per day** — enough to translate a lot of chapters for free. Type `gemini-3.1-flash-lite` in the Model box.
 
-**5. `authgem/` — Gemini's coding endpoint (free, but slow).**
+**6. `authgem/` — Gemini's coding endpoint (free, but slow).**
 Log in with the **🔐 Gemini Login** and use an `authgem/...` model. This routes through **Gemini's coding endpoint**, which is free but **capped at 1 request per minute**. Fine for slow background translation; frustrating if you're in a hurry. (Tip: raise your **API call delay** in Section 6 so you don't trip the limit.)
 
-**6. `antigravity/` — Antigravity through the local proxy.**
+**7. `antigravity/` — Antigravity through the local proxy.**
 Click the **🔐 Antigravity Login** button, log in with Google, and type a model like `antigravity/gemini-3.5-flash-low`. This is a free no-API-key route that runs through the local **Antigravity proxy** on `http://localhost:3000`. Glossarion uses the `Shirochi-stack/antigravity-proxy` runtime for that helper server; compiled `.exe` builds need **Node.js LTS** or **Bun** available so Glossarion can start it. Full setup is in **[Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds)**.
 
-**7. OcAgy — OpenCode Antigravity OAuth, including Gemini 3.1 Pro High.**
+**8. OcAgy — OpenCode Antigravity OAuth, including Gemini 3.1 Pro High.**
 Click **🔐 OCAGY Login**. Glossarion installs the **OpenCode terminal CLI** and `opencode-antigravity-auth` automatically when needed. In the terminal, choose **Google → OAuth with Google (Antigravity)** and finish signing in. Use `ocagy0/gemini-3.1-pro-high` for the plugin-managed shared account pool, or use a pinned prefix such as `ocagy/gemini-3.1-pro-high` (account #1) or `ocagy1/gemini-3.1-pro-high` (account #2). This route does **not** use the local port-3000 proxy and needs no API key. Full setup is in **[Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds)**.
 
-**8. `or/` — free models on OpenRouter.**
+**9. `or/` — free models on OpenRouter.**
 Make a **free OpenRouter key** and type an OpenRouter model with the `:free` suffix, e.g. `or/deepseek/deepseek-v4-flash:free`. OpenRouter rotates which models are free, so check their site for the current `:free` list.
 
-**9. `google-translate-free` — free machine translation.**
+**10. `google-translate-free` — free machine translation.**
 Type exactly `google-translate-free` in the Model box. This is **classic machine translation** (like the Google Translate website), not an AI model — so it needs no key and costs nothing, but it won't follow your profile/glossary or keep long-range context. Good for a rough, instant draft.
 
-**10. Host your own local AI (totally free, fully private).**
+**11. Host your own local AI (totally free, fully private).**
 Install **LM Studio** or **Ollama**, download a model, and point Glossarion at it. Nothing leaves your computer and there's no usage cost — the only "price" is your own hardware doing the work. Full setup (all three ways to connect a local model) is in **[Section 9](#9-local-ai--custom-endpoints--the-3-methods)**.
 
-> **✅ Best free starting point:** try **`authnd/`** (zero setup) or a **free Google AI Studio key** used with **Gemini 3.1 Flash Lite** (~500/day). If you have a decent PC and care about privacy, set up a **local model** instead.
+> **✅ Best free starting point:** try **`authgrok/`** with a free xAI/Grok login, **`authnd/`** for zero setup, or a **free Google AI Studio key** used with **Gemini 3.1 Flash Lite** (~500/day). If you have a decent PC and care about privacy, set up a **local model** instead.
 
-> **⚠️ Free tiers are slow or capped on purpose.** Expect rate limits (especially `authgem/` at 1 RPM and `authgpt/`'s few requests). Increase your **API call delay** (Section 6) and translate a small **Chapter range** at a time so you don't burn through a daily quota in one shot.
+> **⚠️ Free tiers are slow or capped on purpose.** Expect rate limits and allowance limits (including xAI's `authgrok/` free tier, `authgem/` at 1 RPM, and `authgpt/`'s few requests). Increase your **API call delay** (Section 6) and translate a small **Chapter range** at a time so you don't burn through a daily quota in one shot.
 
 ---
 
