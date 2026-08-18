@@ -1627,7 +1627,6 @@ def test_progress_managers_use_event_driven_differential_refresh():
     assert "progress_watch_debounce.setInterval(100)" in source
     assert "gp_watch_debounce.setInterval(100)" in source
     assert "prefetch_bridge.finished.emit(payload)" in source
-    assert 'QPushButton("🔄 Full Refresh")' in source
     assert "_gp_timer.setInterval(2000)" in source
     assert "_auto_refresh_timer.setInterval(2000)" in source
     assert "_row_fingerprints" in source
@@ -1639,6 +1638,9 @@ def test_progress_managers_use_event_driven_differential_refresh():
         glossary_start,
     )
     glossary_source = source[glossary_start:glossary_end]
+    assert 'AnimatedRefreshButton("  Refresh")' in glossary_source
+    assert "Full Refresh" not in glossary_source
+    assert "on_complete=_finish_refresh_animation" in glossary_source
     assert "from PySide6.QtWidgets import QComboBox, QStackedWidget" not in glossary_source
     assert "dialog._show_glossary_progress = _show_glossary_progress" in source
 

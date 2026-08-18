@@ -21962,6 +21962,7 @@ class RetranslationMixin:
                 '_refinement_fingerprint': None,
                 '_full_rebuild_pending': False,
                 '_refresh_after_running': False,
+                '_refresh_callbacks': [],
             }
             if not panel_state['chapter_map']:
                 chapter_filenames = gp_data.get('chapter_filenames', {})
@@ -22007,6 +22008,16 @@ class RetranslationMixin:
                 panel_state['_refresh_generation'] = panel_state.get('_refresh_generation', 0) + 1
                 panel_state['_last_signature'] = None
                 _gp_pending_result.clear()
+
+            def _finish_gp_refresh_callbacks():
+                """Notify manual-refresh callers after the requested snapshot is applied."""
+                callbacks = panel_state.get('_refresh_callbacks') or []
+                panel_state['_refresh_callbacks'] = []
+                for callback in callbacks:
+                    try:
+                        callback()
+                    except (RuntimeError, TypeError):
+                        pass
             
             panel = QWidget(parent_widget)
             p_layout = QVBoxLayout(panel)
@@ -23845,11 +23856,18 @@ class RetranslationMixin:
                     _refresh_refinement_rows(_d)
                 except Exception as e:
                     print(f"⚠️ Could not apply glossary progress refresh: {e}")
+                finally:
+                    _finish_gp_refresh_callbacks()
                 return True
 
             def _deliver_gp_refresh_result(result):
                 """Apply a worker snapshot immediately on Qt's GUI thread."""
                 _ensure_gp_watch_paths(result.get('path'))
+                if result.get('retry'):
+                    panel_state['_last_signature'] = None
+                    panel_state['_refresh_after_running'] = False
+                    QTimer.singleShot(0, _refresh)
+                    return
                 _gp_pending_result.append(result)
                 _apply_pending_gp_result()
                 if panel_state.pop('_refresh_after_running', False):
@@ -23864,6 +23882,8 @@ class RetranslationMixin:
                 panel_state['_gp_bg_running'] = False
                 if panel_state.pop('_refresh_after_running', False):
                     QTimer.singleShot(0, _refresh)
+                else:
+                    _finish_gp_refresh_callbacks()
 
             gp_refresh_bridge = _GlossaryProgressAsyncBridge(
                 on_finished=_deliver_gp_refresh_result,
@@ -23886,8 +23906,10 @@ class RetranslationMixin:
 
             panel_state['_gp_bg_running'] = False
 
-            def _refresh(force=False):
+            def _refresh(force=False, on_complete=None):
                 try:
+                    if callable(on_complete):
+                        panel_state.setdefault('_refresh_callbacks', []).append(on_complete)
                     if force:
                         _invalidate_gp_refresh()
                         panel_state['_full_rebuild_pending'] = True
@@ -23900,13 +23922,14 @@ class RetranslationMixin:
                         # Clear stale cached statuses and invalidate any worker that
                         # may still be carrying a snapshot of the deleted file.
                         _apply_missing_progress_state()
+                        _finish_gp_refresh_callbacks()
                         return
 
                     # Skip if a background scan is still in flight. This check is
                     # deliberately after the missing-file check so deletion is
                     # detected even while an old disk read is finishing.
                     if panel_state.get('_gp_bg_running'):
-                        if force:
+                        if force or panel_state.get('_refresh_callbacks'):
                             panel_state['_refresh_after_running'] = True
                         return
                     
@@ -23918,6 +23941,7 @@ class RetranslationMixin:
                     _cur_ts = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
                     if (_cur_signature == panel_state.get('_last_signature')
                             and _cur_ts == panel_state.get('translate_special')):
+                        _finish_gp_refresh_callbacks()
                         return  # Nothing changed — skip
                     panel_state['_gp_bg_running'] = True
 
@@ -23935,6 +23959,12 @@ class RetranslationMixin:
                             _d = _gp_load_progress_dict(_rp)
                             _after_signature = _gp_file_signature(_rp)
                             if _before_signature != _after_signature:
+                                panel_state['_gp_bg_running'] = False
+                                _emit_gp_refresh_finished({
+                                    'retry': True,
+                                    'path': _rp,
+                                    'generation': _snap_generation,
+                                })
                                 return
                             _toggle_changed = (_cur_ts != _snap_ts)
                             _spine_result = None
@@ -23993,6 +24023,7 @@ class RetranslationMixin:
                 except Exception as e:
                     panel_state['_gp_bg_running'] = False
                     print(f"⚠️ Could not schedule glossary progress refresh: {e}")
+                    _finish_gp_refresh_callbacks()
 
             # Atomic progress saves replace the file, so watch both the file and
             # its directory. The short debounce coalesces temp-file/replace event
@@ -24207,9 +24238,11 @@ class RetranslationMixin:
                     # State container for upgrade tracking
                     _state = {'upgraded': False}
                     
-                    def _empty_refresh(force=False):
+                    def _empty_refresh(force=False, on_complete=None):
                         """Check if a progress file appeared and upgrade the panel in-place."""
                         if _state['upgraded']:
+                            if callable(on_complete):
+                                on_complete()
                             return
                         gp = _find_gp_for_file(fp)
                         if gp and os.path.isfile(gp):
@@ -24229,7 +24262,10 @@ class RetranslationMixin:
                             except ValueError:
                                 all_refresh_funcs.append(real_refresh)
                             if force:
-                                real_refresh(force=True)
+                                real_refresh(force=True, on_complete=on_complete)
+                                return
+                        if callable(on_complete):
+                            on_complete()
                     
                     return panel, _empty_refresh
                 
@@ -24362,14 +24398,20 @@ class RetranslationMixin:
                     except (AttributeError, RuntimeError):
                         return 0
 
-                def _invoke_gp_refresher(refresh_func, force=False):
-                    refresh_func(force=force)
+                def _invoke_gp_refresher(refresh_func, force=False, on_complete=None):
+                    refresh_func(force=force, on_complete=on_complete)
 
-                def _gp_refresh_visible(force=False):
+                def _gp_refresh_visible(force=False, on_complete=None):
                     if not all_refresh_funcs:
+                        if callable(on_complete):
+                            on_complete()
                         return
                     idx = min(_gp_active_refresh_index(), len(all_refresh_funcs) - 1)
-                    _invoke_gp_refresher(all_refresh_funcs[idx], force=force)
+                    _invoke_gp_refresher(
+                        all_refresh_funcs[idx],
+                        force=force,
+                        on_complete=on_complete,
+                    )
 
                 if isinstance(gp_navigation_widget, QTabWidget):
                     gp_navigation_widget.currentChanged.connect(
@@ -24380,25 +24422,62 @@ class RetranslationMixin:
                         lambda _idx: QTimer.singleShot(0, _gp_refresh_visible)
                     )
 
-                # Explicit full refresh bypasses signatures and rebuilds the
+                # Explicit refresh bypasses signatures and rebuilds the
                 # visible panel. Hidden books remain untouched so large
                 # multi-book dialogs stay responsive.
                 action_row = QHBoxLayout()
                 action_row.addStretch()
-                full_refresh_btn = QPushButton("🔄 Full Refresh")
-                full_refresh_btn.setCursor(Qt.PointingHandCursor)
-                full_refresh_btn.setToolTip("Reload and rebuild the visible glossary progress panel from disk")
-                full_refresh_btn.setStyleSheet(
-                    "QPushButton { background-color: #2563eb; color: white; padding: 6px 14px; "
-                    "border-radius: 4px; font-size: 10pt; font-weight: bold; } "
-                    "QPushButton:hover { background-color: #1d4ed8; }"
+                refresh_btn = AnimatedRefreshButton("  Refresh")
+                refresh_btn.setCursor(Qt.PointingHandCursor)
+                refresh_btn.setMinimumHeight(32)
+                refresh_btn.setToolTip("Reload and rebuild the visible glossary progress panel from disk")
+                refresh_btn.setStyleSheet(
+                    "QPushButton { "
+                    "background-color: #17a2b8; "
+                    "color: white; "
+                    "padding: 6px 16px; "
+                    "font-weight: bold; "
+                    "font-size: 10pt; "
+                    "}"
+                    "QPushButton[refreshActive=\"true\"] { "
+                    "background-color: #138496; "
+                    "}"
                 )
 
                 def _gp_full_refresh():
-                    _gp_refresh_visible(force=True)
+                    if not refresh_btn.isEnabled():
+                        return
+                    refresh_btn.start_animation()
+                    refresh_btn.setEnabled(False)
+                    start_time = time.time()
+                    min_animation_duration = 0.8
 
-                full_refresh_btn.clicked.connect(_gp_full_refresh)
-                action_row.addWidget(full_refresh_btn)
+                    def _finish_refresh_animation():
+                        elapsed = time.time() - start_time
+                        remaining = max(0, min_animation_duration - elapsed)
+
+                        def _stop_animation():
+                            try:
+                                refresh_btn.stop_animation()
+                                refresh_btn.setEnabled(True)
+                            except RuntimeError:
+                                pass
+
+                        if remaining > 0:
+                            QTimer.singleShot(int(remaining * 1000), _stop_animation)
+                        else:
+                            _stop_animation()
+
+                    QTimer.singleShot(
+                        50,
+                        lambda: _gp_refresh_visible(
+                            force=True,
+                            on_complete=_finish_refresh_animation,
+                        ),
+                    )
+
+                refresh_btn.clicked.connect(_gp_full_refresh)
+                action_row.addWidget(refresh_btn)
 
                 close_btn = QPushButton("Close")
                 close_btn.setStyleSheet(
