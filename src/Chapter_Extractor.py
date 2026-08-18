@@ -2176,9 +2176,10 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
                 f"settings; loaded {len(cached_chapters)} chapters without "
                 "scanning or processing the EPUB"
             )
-            print(f"📚 {message}")
             if progress_callback:
                 progress_callback(f"📚 {message}")
+            else:
+                print(f"📚 {message}")
             return cached_chapters
         if cache_reason != 'chapter cache marker is missing':
             print(f"♻️ Chapter cache invalid ({cache_reason}); rebuilding")
