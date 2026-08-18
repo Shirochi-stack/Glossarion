@@ -22128,6 +22128,7 @@ class RetranslationMixin:
             # Chapter list
             gp_listbox = QListWidget()
             self._apply_compact_inline_list_style(gp_listbox, QFont('Courier', 10))
+            gp_listbox.setUniformItemSizes(True)
             gp_listbox.setContextMenuPolicy(Qt.CustomContextMenu)
             gp_listbox.setSelectionMode(QListWidget.ExtendedSelection)
             
@@ -22196,43 +22197,80 @@ class RetranslationMixin:
                 panel_state['populate_generation'] = panel_state.get('populate_generation', 0) + 1
                 generation = panel_state['populate_generation']
                 cache = _gp_status_cache(_d)
-                gp_listbox.clear()
-                gp_listbox.setUpdatesEnabled(False)
-                panel_state['_chapter_items'] = {}
-                panel_state['_row_fingerprints'] = {}
-                panel_state['_refinement_fingerprint'] = None
                 total = panel_state['total']
                 chapter_map = panel_state['chapter_map']
+                saved_scroll = gp_listbox.verticalScrollBar().value()
+                selected_chapters = {
+                    item.data(Qt.UserRole + 1)
+                    for item in gp_listbox.selectedItems()
+                    if item and item.data(Qt.UserRole + 1) is not None
+                }
+                new_chapter_items = {}
+                new_fingerprints = {}
                 state = {'ci': 0}
 
                 def _add_chunk():
                     if generation != panel_state.get('populate_generation'):
                         return
+                    signals_were_blocked = gp_listbox.signalsBlocked()
+                    updates_were_enabled = gp_listbox.updatesEnabled()
                     start_ci = state['ci']
                     end_ci = min(start_ci + chunk_size, total)
-                    for ci in range(start_ci, end_ci):
-                        fname = chapter_map.get(ci, f'chapter {ci + 1}')
-                        display, status = _gp_display_for(ci, fname, _d, cache)
-                        item = QListWidgetItem(display)
-                        item.setForeground(QColor(_gp_color_for(status)))
-                        item.setData(Qt.UserRole, status)
-                        item.setData(Qt.UserRole + 1, ci)
-                        self._add_compact_inline_list_item(gp_listbox, item)
-                        panel_state['_chapter_items'][ci] = item
-                        panel_state['_row_fingerprints'][ci] = (
-                            status,
-                            _gp_color_for(status),
-                            display,
-                        )
-                        if panel_state.get('select_all_visible'):
-                            item.setSelected(not item.isHidden())
-                    state['ci'] = end_ci
+                    try:
+                        gp_listbox.blockSignals(True)
+                        gp_listbox.setUpdatesEnabled(False)
+                        for ci in range(start_ci, end_ci):
+                            fname = chapter_map.get(ci, f'chapter {ci + 1}')
+                            display, status = _gp_display_for(ci, fname, _d, cache)
+                            color = _gp_color_for(status)
+                            item = gp_listbox.item(ci) if ci < gp_listbox.count() else None
+                            if item is None or item.data(Qt.UserRole + 3):
+                                item = QListWidgetItem(display)
+                                self._set_compact_inline_item_size(gp_listbox, item)
+                                gp_listbox.insertItem(ci, item)
+                            elif item.text() != display:
+                                item.setText(display)
+                            self._set_compact_inline_item_size(gp_listbox, item)
+                            item.setForeground(QColor(color))
+                            item.setData(Qt.UserRole, status)
+                            item.setData(Qt.UserRole + 1, ci)
+                            item.setData(Qt.UserRole + 3, None)
+                            new_chapter_items[ci] = item
+                            new_fingerprints[ci] = (status, color, display)
+                            if panel_state.get('select_all_visible'):
+                                item.setSelected(not item.isHidden())
+                            else:
+                                item.setSelected(ci in selected_chapters)
+                        state['ci'] = end_ci
+                    finally:
+                        gp_listbox.blockSignals(signals_were_blocked)
+                        gp_listbox.setUpdatesEnabled(updates_were_enabled)
+                        gp_listbox.viewport().update()
+
                     if end_ci < total:
                         QTimer.singleShot(0, _add_chunk)
                     else:
-                        _refresh_refinement_rows(_d, keep_updates_disabled=True)
-                        gp_listbox.setUpdatesEnabled(True)
-                        gp_listbox.viewport().update()
+                        signals_were_blocked = gp_listbox.signalsBlocked()
+                        updates_were_enabled = gp_listbox.updatesEnabled()
+                        try:
+                            gp_listbox.blockSignals(True)
+                            gp_listbox.setUpdatesEnabled(False)
+                            # Remove obsolete chapter rows without clearing the
+                            # live list or collapsing its scrollbar range.
+                            for row in range(gp_listbox.count() - 1, total - 1, -1):
+                                item = gp_listbox.item(row)
+                                if item and not item.data(Qt.UserRole + 3):
+                                    gp_listbox.takeItem(row)
+                            panel_state['_chapter_items'] = new_chapter_items
+                            panel_state['_row_fingerprints'] = new_fingerprints
+                            panel_state['_refinement_fingerprint'] = None
+                            _refresh_refinement_rows(_d, keep_updates_disabled=True)
+                            sb = gp_listbox.verticalScrollBar()
+                            sb.setValue(min(saved_scroll, sb.maximum()))
+                        finally:
+                            gp_listbox.blockSignals(signals_were_blocked)
+                            gp_listbox.setUpdatesEnabled(updates_were_enabled)
+                            gp_listbox.viewport().update()
 
                 QTimer.singleShot(0, _add_chunk)
 
@@ -23732,31 +23770,6 @@ class RetranslationMixin:
             
             # Helper to fully rebuild the listbox when chapter_map changes
             def _rebuild_listbox(_d):
-                _cmap = panel_state['chapter_map']
-                _total = 0
-                _comp, _fail, _merg = _gp_sets(_d)
-                
-                gp_listbox.clear()
-                for ci in range(_total):
-                    fname = _cmap.get(ci, f'chapter {ci + 1}')
-                    ch_num = _gp_display_chapter_num(ci, fname)
-                    
-                    if ci in _merg:
-                        icon, status, color = '🔗', 'merged', '#17a2b8'
-                    elif ci in _comp:
-                        icon, status, color = '✅', 'completed', '#27ae60'
-                    elif ci in _fail:
-                        icon, status, color = '❌', 'failed', '#e74c3c'
-                    else:
-                        icon, status, color = '⬜', 'not_completed', '#5a9fd4'
-                    
-                    display, status = _gp_display_for(ci, fname, _d)
-                    color = _gp_color_for(status)
-                    item = QListWidgetItem(display)
-                    item.setForeground(QColor(color))
-                    item.setData(Qt.UserRole, status)
-                    item.setData(Qt.UserRole + 1, ci)
-                    self._add_compact_inline_list_item(gp_listbox, item)
                 _populate_gp_listbox(_d)
 
             def _apply_missing_progress_state():
@@ -24854,6 +24867,7 @@ class RetranslationMixin:
         # Create listbox (QListWidget has built-in scrollbars)
         listbox = QListWidget()
         listbox.setSelectionMode(QListWidget.ExtendedSelection)
+        listbox.setUniformItemSizes(True)
         listbox_font = QFont('Courier', 10)  # Fixed-width font for better alignment
         self._apply_compact_inline_list_style(listbox, listbox_font, extra_row_px=2)
         # Use 36% of screen width
@@ -27783,36 +27797,22 @@ class RetranslationMixin:
                         _time.sleep(min(0.5, 0.03 * (2 ** min(_attempt, 5))) + random.uniform(0, 0.03))
                 raise last_error
             
-            # Save current scroll position (and first visible row/offset) to restore after refresh
+            # Freeze painting while the current snapshot is reconciled. Preserve
+            # one scrollbar value; competing anchor/queued restores caused the
+            # viewport to visibly bounce on every live status transition.
             saved_scroll = None
             updates_were_enabled = True
             signals_were_blocked = False
             self._suspend_yield = True
-            first_visible_row = None
-            first_visible_offset = 0
             if 'listbox' in data and data['listbox']:
                 try:
-                    from PySide6.QtCore import QPoint
                     saved_scroll = data['listbox'].verticalScrollBar().value()
                     updates_were_enabled = data['listbox'].updatesEnabled()
                     signals_were_blocked = data['listbox'].signalsBlocked()
-                    idx = data['listbox'].indexAt(QPoint(0, 0))
-                    if idx and idx.isValid():
-                        first_visible_row = idx.row()
-                        rect = data['listbox'].visualItemRect(data['listbox'].item(first_visible_row))
-                        first_visible_offset = -rect.top()
                     data['listbox'].blockSignals(True)
                     data['listbox'].setUpdatesEnabled(False)
                 except Exception:
                     saved_scroll = None
-            
-            # Save current selections to restore after refresh
-            selected_indices = []
-            try:
-                selected_indices = [data['listbox'].row(item) for item in data['listbox'].selectedItems()]
-            except RuntimeError:
-                print("⚠️ Could not save selection state - widget was deleted")
-                return
             
             # Reload progress file. Prefer the snapshot prefetched off-thread by
             # the silent auto-refresh — zero disk I/O on the GUI thread.
@@ -28026,15 +28026,12 @@ class RetranslationMixin:
             # updating item metadata; avoid a second all-rows Qt pass here.
             self._progress_list_show_special(data)
             
-            # Restore scroll position and repaint immediately after rebuild
+            # Restore once, before painting is re-enabled. The streamed
+            # reconciler performs its own final restore if it is still running.
             if 'listbox' in data and data['listbox']:
                 try:
                     sb = data['listbox'].verticalScrollBar()
-                    if first_visible_row is not None and first_visible_row < data['listbox'].count():
-                        item = data['listbox'].item(first_visible_row)
-                        data['listbox'].scrollToItem(item, data['listbox'].PositionAtTop)
-                        sb.setValue(sb.value() - first_visible_offset)
-                    elif saved_scroll is not None:
+                    if saved_scroll is not None:
                         target = min(saved_scroll, sb.maximum())
                         if sb.value() != target:
                             sb.setValue(target)
@@ -28048,36 +28045,6 @@ class RetranslationMixin:
                     except Exception:
                         pass
             self._suspend_yield = False
-            
-            # Restore selections
-            try:
-                if selected_indices:
-                    for idx in selected_indices:
-                        if idx < data['listbox'].count():
-                            data['listbox'].item(idx).setSelected(True)
-                    # Update selection count
-                    if 'selection_count_label' in data and data['selection_count_label']:
-                        data['selection_count_label'].setText(f"Selected: {len(selected_indices)}")
-                else:
-                    # Clear selections if there were none
-                    data['listbox'].clearSelection()
-                    if 'selection_count_label' in data and data['selection_count_label']:
-                        data['selection_count_label'].setText("Selected: 0")
-
-                # Re-apply scroll AFTER selections (since selecting can auto-scroll)
-                if saved_scroll is not None and 'listbox' in data and data['listbox']:
-                    from PySide6.QtCore import QTimer
-                    def _restore_scroll_again():
-                        try:
-                            sb = data['listbox'].verticalScrollBar()
-                            target = min(saved_scroll, sb.maximum())
-                            if sb.value() != target:
-                                sb.setValue(target)
-                        except Exception:
-                            pass
-                    QTimer.singleShot(0, _restore_scroll_again)
-            except RuntimeError:
-                print("⚠️ Could not restore selection state - widget was deleted during refresh")
             
             # print("✅ Retranslation data refreshed successfully")
             
@@ -29283,6 +29250,16 @@ class RetranslationMixin:
     def _progress_list_item_key(self, info):
         if not isinstance(info, dict):
             return None
+        # A progress_key is transient for OPF rows: it appears when a chapter
+        # enters progress and may disappear when its progress entry is removed.
+        # Base identity on the source row so a status change never looks like a
+        # remove/insert operation to the streamed list reconciler.
+        opf_position = info.get('opf_position')
+        if opf_position is not None:
+            return f"opf:{opf_position}:{info.get('original_filename', '')}"
+        source_key = info.get('key')
+        if source_key not in (None, ''):
+            return f"source:{source_key}"
         progress_key = info.get('progress_key')
         if progress_key:
             return f"progress:{progress_key}"
@@ -29504,7 +29481,7 @@ class RetranslationMixin:
         item.setHidden(is_skipped_special and not show_special_files)
 
     def _populate_progress_listbox_streamed(self, data, chunk_size=150, preserve_selection=False, preserve_scroll=False):
-        """Populate large progress lists over multiple event-loop turns."""
+        """Reconcile large progress lists in chunks without clearing the viewport."""
         if not self._is_data_valid(data):
             return
 
@@ -29538,39 +29515,57 @@ class RetranslationMixin:
         data['_listbox_populate_generation'] = generation
         data['_listbox_populate_active'] = True
 
-        try:
-            listbox.blockSignals(True)
-            listbox.setUpdatesEnabled(False)
-            listbox.clear()
-        except RuntimeError:
-            data['_listbox_populate_active'] = False
-            return
-
         state = {'idx': 0}
 
         def _finish():
             if generation != data.get('_listbox_populate_generation'):
                 return
             data['_listbox_populate_active'] = False
+            signals_were_blocked = False
+            updates_were_enabled = True
             try:
+                signals_were_blocked = listbox.signalsBlocked()
+                updates_were_enabled = listbox.updatesEnabled()
+                listbox.blockSignals(True)
+                listbox.setUpdatesEnabled(False)
+                while listbox.count() > len(infos):
+                    listbox.takeItem(listbox.count() - 1)
+
+                if preserve_selection:
+                    for row in range(listbox.count()):
+                        item = listbox.item(row)
+                        payload = item.data(Qt.UserRole) or {}
+                        item_key = payload.get('item_key') if isinstance(payload, dict) else None
+                        item.setSelected(bool(item_key and item_key in selected_keys))
+
                 if saved_scroll is not None:
                     sb = listbox.verticalScrollBar()
                     sb.setValue(min(saved_scroll, sb.maximum()))
-                listbox.blockSignals(False)
-                listbox.setUpdatesEnabled(True)
                 label = data.get('selection_count_label')
                 if label:
                     label.setText(f"Selected: {len(listbox.selectedItems())}")
-                listbox.viewport().update()
             except RuntimeError:
                 pass
+            finally:
+                try:
+                    listbox.blockSignals(signals_were_blocked)
+                    listbox.setUpdatesEnabled(updates_were_enabled)
+                    listbox.viewport().update()
+                except RuntimeError:
+                    pass
 
         def _add_chunk():
             if generation != data.get('_listbox_populate_generation'):
                 return
             if not self._is_data_valid(data):
+                data['_listbox_populate_active'] = False
                 return
+            signals_were_blocked = False
+            updates_were_enabled = True
             try:
+                signals_were_blocked = listbox.signalsBlocked()
+                updates_were_enabled = listbox.updatesEnabled()
+                listbox.blockSignals(True)
                 listbox.setUpdatesEnabled(False)
                 show_special_files = self._progress_list_show_special(data)
                 end_idx = min(state['idx'] + chunk_size, len(infos))
@@ -29582,7 +29577,13 @@ class RetranslationMixin:
                         max_original_len,
                         max_output_len,
                     )
-                    item = QListWidgetItem(display)
+                    item = listbox.item(idx) if idx < listbox.count() else None
+                    if item is None:
+                        item = QListWidgetItem(display)
+                        self._add_compact_inline_list_item(listbox, item)
+                    elif item.text() != display:
+                        item.setText(display)
+                    self._set_compact_inline_item_size(listbox, item)
                     self._apply_progress_list_item_visuals(item, status)
                     self._set_progress_list_item_metadata(item, info, status, show_special_files)
                     item.setData(
@@ -29594,14 +29595,20 @@ class RetranslationMixin:
                             and not show_special_files,
                         ),
                     )
-                    self._add_compact_inline_list_item(listbox, item)
-                    if selected_keys and self._progress_list_item_key(info) in selected_keys:
-                        item.setSelected(True)
+                    if preserve_selection:
+                        item.setSelected(self._progress_list_item_key(info) in selected_keys)
                 state['idx'] = end_idx
-                listbox.setUpdatesEnabled(True)
-                listbox.viewport().update()
             except RuntimeError:
+                if generation == data.get('_listbox_populate_generation'):
+                    data['_listbox_populate_active'] = False
                 return
+            finally:
+                try:
+                    listbox.blockSignals(signals_were_blocked)
+                    listbox.setUpdatesEnabled(updates_were_enabled)
+                    listbox.viewport().update()
+                except RuntimeError:
+                    pass
 
             if state['idx'] < len(infos):
                 QTimer.singleShot(0, _add_chunk)
@@ -29628,28 +29635,27 @@ class RetranslationMixin:
             )
             return
 
-        # A same-length list can still have a changed order or identity. In that
-        # case, rebuild; otherwise update only rows whose presentation or backing
-        # progress payload actually changed.
+        # Row objects can be safely reused even when a genuine reorder changes
+        # their identity; metadata and selection are reconciled by stable keys.
+        # Avoiding clear/rebuild keeps the scrollbar range and viewport stable.
         infos = data.get('chapter_display_info') or []
-        for idx, info in enumerate(infos):
-            item = listbox.item(idx)
-            payload = item.data(Qt.UserRole) if item else None
-            if not isinstance(payload, dict) or payload.get('item_key') != self._progress_list_item_key(info):
-                self._populate_progress_listbox_streamed(
-                    data,
-                    preserve_selection=True,
-                    preserve_scroll=True,
-                )
-                return
-
         show_special_files = self._progress_list_show_special(data)
         max_original_len, max_output_len = self._progress_list_column_widths(
             infos,
             data,
         )
 
+        selected_keys = set()
+        try:
+            for selected_item in listbox.selectedItems():
+                payload = selected_item.data(Qt.UserRole) or {}
+                if isinstance(payload, dict) and payload.get('item_key'):
+                    selected_keys.add(payload['item_key'])
+        except RuntimeError:
+            selected_keys = set()
+
         row_updates = []
+        identity_changed = False
         for idx, info in enumerate(infos):
             item = listbox.item(idx)
             if not item:
@@ -29664,12 +29670,19 @@ class RetranslationMixin:
             fingerprint = (display, display_status, hidden)
             old_payload = item.data(Qt.UserRole) or {}
             payload_changed = not isinstance(old_payload, dict) or old_payload.get('info') != info
+            if (
+                not isinstance(old_payload, dict)
+                or old_payload.get('item_key') != self._progress_list_item_key(info)
+            ):
+                identity_changed = True
             if item.data(Qt.UserRole + 4) != fingerprint or payload_changed:
                 row_updates.append((item, info, display, display_status, fingerprint))
 
         if not row_updates:
             return
 
+        updates_were_enabled = listbox.updatesEnabled()
+        signals_were_blocked = listbox.signalsBlocked()
         listbox.setUpdatesEnabled(False)
         listbox.blockSignals(True)
         try:
@@ -29678,9 +29691,18 @@ class RetranslationMixin:
                 self._apply_progress_list_item_visuals(item, display_status)
                 self._set_progress_list_item_metadata(item, info, display_status, show_special_files)
                 item.setData(Qt.UserRole + 4, fingerprint)
+            if identity_changed:
+                for row in range(listbox.count()):
+                    item = listbox.item(row)
+                    payload = item.data(Qt.UserRole) or {}
+                    item_key = payload.get('item_key') if isinstance(payload, dict) else None
+                    item.setSelected(bool(item_key and item_key in selected_keys))
+                label = data.get('selection_count_label')
+                if label:
+                    label.setText(f"Selected: {len(listbox.selectedItems())}")
         finally:
-            listbox.blockSignals(False)
-            listbox.setUpdatesEnabled(True)
+            listbox.blockSignals(signals_were_blocked)
+            listbox.setUpdatesEnabled(updates_were_enabled)
 
     def _update_statistics_display(self, data):
         """Update statistics display for both OPF and non-OPF files"""

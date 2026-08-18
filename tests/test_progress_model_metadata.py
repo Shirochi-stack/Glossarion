@@ -1644,6 +1644,47 @@ def test_progress_managers_use_event_driven_differential_refresh():
     assert "from PySide6.QtWidgets import QComboBox, QStackedWidget" not in glossary_source
     assert "dialog._show_glossary_progress = _show_glossary_progress" in source
 
+    glossary_populate_start = source.index(
+        "            def _populate_gp_listbox(_d, chunk_size=150):"
+    )
+    glossary_populate_end = source.index(
+        "            _populate_gp_listbox(gp_data)",
+        glossary_populate_start,
+    )
+    glossary_populate_source = source[glossary_populate_start:glossary_populate_end]
+    assert "gp_listbox.clear()" not in glossary_populate_source
+    assert "gp_listbox.insertItem(ci, item)" in glossary_populate_source
+
+
+def test_progress_row_identity_is_stable_when_translation_starts():
+    gui = RetranslationMixin()
+    waiting = {
+        "key": "chapter0001.xhtml",
+        "num": 1,
+        "output_file": "chapter0001.xhtml",
+        "original_filename": "chapter0001.xhtml",
+        "opf_position": 15,
+    }
+    active = {
+        **waiting,
+        "progress_key": "temporary-progress-hash",
+        "status": "in_progress",
+    }
+
+    assert gui._progress_list_item_key(waiting) == gui._progress_list_item_key(active)
+
+
+def test_streamed_progress_reconcile_does_not_clear_or_queue_scroll_restores():
+    stream_source = inspect.getsource(
+        RetranslationMixin._populate_progress_listbox_streamed
+    )
+    refresh_source = inspect.getsource(RetranslationMixin._refresh_retranslation_data)
+
+    assert "listbox.clear()" not in stream_source
+    assert "listbox.takeItem" in stream_source
+    assert "scrollToItem" not in refresh_source
+    assert "_restore_scroll_again" not in refresh_source
+
 
 def test_open_progress_managers_rebuild_when_input_signature_changes():
     refresh_source = inspect.getsource(
