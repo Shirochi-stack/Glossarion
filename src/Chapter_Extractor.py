@@ -1079,6 +1079,7 @@ def _prepare_single_chapter_image_renames(
     chapters,
     output_dir,
     progress_callback=None,
+    status_context='Single-chapter mode',
 ):
     """Prepare safe canonical image names during a targeted translation.
 
@@ -1299,14 +1300,14 @@ def _prepare_single_chapter_image_renames(
 
     if restored_count or updated_chapters or new_mapping_keys:
         message = (
-            f"Single-chapter image state restored: {restored_count} file(s) "
+            f"{status_context} image state restored: {restored_count} file(s) "
             f"renamed, {updated_chapters} chapter(s) updated"
         )
         print(f"🖼️ {message}")
         if progress_callback:
             progress_callback(message)
     else:
-        print("🎯 Single-chapter mode: existing image names already preserved")
+        print(f"🎯 {status_context}: existing image names already preserved")
 
     return chapters
 
@@ -1524,6 +1525,29 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
     if not existing_images:
         print("📸 No image files found — skipping image rename")
         return chapters
+
+    # A valid resource fingerprint reuses the already-renamed image files.
+    # Freshly parsed chapter HTML still contains the source EPUB names, so a
+    # second full rename pass would otherwise classify every canonical file as
+    # unclaimed, rename it as a cover, and overwrite the authoritative map.
+    # Replay a complete map instead when its terminal targets exactly match the
+    # current image directory.
+    existing_rename_map, _ = _load_image_rename_targets(output_dir)
+    current_image_names = {name.casefold() for name in existing_images}
+    mapped_target_names = {
+        name.casefold() for name in existing_rename_map.values()
+    }
+    if existing_rename_map and mapped_target_names == current_image_names:
+        print(
+            f"♻️ Reusing complete image rename map for "
+            f"{len(existing_images)} existing image file(s)"
+        )
+        return _prepare_single_chapter_image_renames(
+            chapters,
+            output_dir,
+            progress_callback,
+            status_context='Full extraction',
+        )
     
     print(f"\n🖼️ Renaming {len(existing_images)} images to chapter-based format...")
     
@@ -2346,6 +2370,242 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     
     return chapters
 
+_RESOURCE_EXTRACTION_MARKER_VERSION = 3
+_RESOURCE_FINGERPRINT_CHUNK_SIZE = 8 * 1024 * 1024
+_RESOURCE_MARKER_DIRECTORIES = {
+    'css': 'css',
+    'fonts': 'fonts',
+    'epub_structure': '',
+    'other': '',
+}
+_RESOURCE_MARKER_TYPES = tuple(_RESOURCE_MARKER_DIRECTORIES)
+
+
+def _source_epub_content_fingerprint(zf):
+    """Return a SHA-256 fingerprint of every byte in the source EPUB.
+
+    Hashing the complete archive, rather than mtimes or ZIP member metadata,
+    makes even a one-byte edit outside a member payload invalidate the marker.
+    ``ZipFile`` instances backed by an in-memory stream are supported for
+    tests and non-path callers by hashing their underlying file object while
+    restoring its original position afterwards.
+    """
+    source_path = getattr(zf, 'filename', None)
+    try:
+        source_path = os.fspath(source_path) if source_path is not None else ''
+    except TypeError:
+        source_path = ''
+
+    hasher = hashlib.sha256()
+    total_size = 0
+
+    def _consume(stream):
+        nonlocal total_size
+        while True:
+            chunk = stream.read(_RESOURCE_FINGERPRINT_CHUNK_SIZE)
+            if not chunk:
+                break
+            hasher.update(chunk)
+            total_size += len(chunk)
+
+    try:
+        if source_path and os.path.isfile(source_path):
+            with open(source_path, 'rb') as source:
+                _consume(source)
+        else:
+            source = getattr(zf, 'fp', None)
+            if source is None or not hasattr(source, 'seek'):
+                return None
+            original_position = source.tell()
+            try:
+                source.seek(0)
+                _consume(source)
+            finally:
+                source.seek(original_position)
+    except (OSError, ValueError, AttributeError):
+        return None
+
+    return {
+        'algorithm': 'sha256',
+        'sha256': hasher.hexdigest(),
+        'size': total_size,
+    }
+
+
+def _load_image_rename_targets(output_dir):
+    """Return original-name -> terminal-name mappings from the rename sidecar."""
+    rename_map_path = os.path.join(output_dir, 'image_rename_map.json')
+    try:
+        with open(rename_map_path, 'r', encoding='utf-8') as handle:
+            loaded = json.load(handle)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}, {}
+    if not isinstance(loaded, dict):
+        return {}, {}
+
+    raw = {}
+    for original, renamed in loaded.items():
+        original_name = os.path.basename(str(original or '').replace('\\', '/'))
+        renamed_name = os.path.basename(str(renamed or '').replace('\\', '/'))
+        if not original_name or not renamed_name:
+            continue
+        raw[original_name] = renamed_name
+
+    # Later repair passes can extend a mapping into a chain, for example
+    # ``1.png -> chapter001_img_1.png -> chapter002_img_1.png``. Validation
+    # must check the terminal filename rather than the now-missing intermediate.
+    raw_folded_keys = {name.casefold(): name for name in raw}
+    exact = {}
+    folded = {}
+    for original_name, first_target in raw.items():
+        current_name = first_target
+        seen = {original_name.casefold()}
+        while current_name.casefold() not in seen:
+            seen.add(current_name.casefold())
+            next_key = raw_folded_keys.get(current_name.casefold())
+            if next_key is None:
+                break
+            next_name = raw.get(next_key)
+            if not next_name or next_name == current_name:
+                break
+            current_name = next_name
+        exact[original_name] = current_name
+        folded[original_name.casefold()] = current_name
+    return exact, folded
+
+
+def _validate_resource_extraction_marker(
+    marker_path,
+    output_dir,
+    source_fingerprint,
+):
+    """Return ``(valid, reason)`` for a versioned resource marker."""
+    try:
+        with open(marker_path, 'r', encoding='utf-8') as handle:
+            marker = json.load(handle)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False, 'legacy or unreadable marker'
+
+    if not isinstance(marker, dict):
+        return False, 'invalid marker payload'
+    if marker.get('version') != _RESOURCE_EXTRACTION_MARKER_VERSION:
+        return False, 'marker version changed'
+    if not isinstance(source_fingerprint, dict):
+        return False, 'source EPUB could not be fingerprinted'
+
+    recorded_source = marker.get('source_epub')
+    if not isinstance(recorded_source, dict):
+        return False, 'source EPUB fingerprint is missing'
+    if (
+        recorded_source.get('algorithm') != 'sha256'
+        or recorded_source.get('sha256') != source_fingerprint.get('sha256')
+        or recorded_source.get('size') != source_fingerprint.get('size')
+    ):
+        return False, 'source EPUB content changed'
+
+    recorded_images = marker.get('images')
+    if not isinstance(recorded_images, dict):
+        return False, 'image inventory is missing'
+    expected_images = recorded_images.get('source_filenames')
+    if not isinstance(expected_images, list):
+        return False, 'image inventory is invalid'
+
+    images_dir = os.path.join(output_dir, 'images')
+    if not os.path.isdir(images_dir):
+        return False, 'images directory is missing'
+
+    rename_exact, rename_folded = _load_image_rename_targets(output_dir)
+    missing = []
+    for original in expected_images:
+        original_name = os.path.basename(str(original or '').replace('\\', '/'))
+        if not original_name:
+            return False, 'image inventory contains an invalid filename'
+        current_name = rename_exact.get(original_name)
+        if not current_name:
+            current_name = rename_folded.get(original_name.casefold(), original_name)
+        if not os.path.isfile(os.path.join(images_dir, current_name)):
+            missing.append(current_name)
+            if len(missing) >= 3:
+                break
+    if missing:
+        return False, 'missing extracted image file(s): ' + ', '.join(missing)
+
+    recorded_resources = marker.get('resources')
+    if not isinstance(recorded_resources, dict):
+        return False, 'non-image resource inventory is missing'
+    missing_resources = []
+    for resource_type in _RESOURCE_MARKER_TYPES:
+        expected_names = recorded_resources.get(resource_type)
+        if not isinstance(expected_names, list):
+            return False, f'{resource_type} resource inventory is invalid'
+        relative_dir = _RESOURCE_MARKER_DIRECTORIES[resource_type]
+        for recorded_name in expected_names:
+            filename = os.path.basename(
+                str(recorded_name or '').replace('\\', '/')
+            )
+            if not filename:
+                return False, f'{resource_type} inventory contains an invalid filename'
+            candidate = (
+                os.path.join(output_dir, relative_dir, filename)
+                if relative_dir else os.path.join(output_dir, filename)
+            )
+            if not os.path.isfile(candidate):
+                missing_resources.append(
+                    f'{relative_dir}/{filename}' if relative_dir else filename
+                )
+                if len(missing_resources) >= 3:
+                    break
+        if len(missing_resources) >= 3:
+            break
+    if missing_resources:
+        return False, (
+            'missing extracted resource file(s): '
+            + ', '.join(missing_resources)
+        )
+    return True, ''
+
+
+def _write_resource_extraction_marker(
+    marker_path,
+    source_fingerprint,
+    expected_image_filenames,
+    expected_resource_filenames,
+):
+    """Atomically write the completed source/image resource fingerprint."""
+    if not isinstance(source_fingerprint, dict):
+        return False
+    marker = {
+        'version': _RESOURCE_EXTRACTION_MARKER_VERSION,
+        'created_at': datetime.now(timezone.utc).isoformat(),
+        'source_epub': dict(source_fingerprint),
+        'images': {
+            # These are the packaged basenames before the chapter rename pass.
+            # Validation resolves them through image_rename_map.json.
+            'source_filenames': sorted(set(expected_image_filenames)),
+        },
+        'resources': {
+            resource_type: sorted(set(
+                expected_resource_filenames.get(resource_type, [])
+            ))
+            for resource_type in _RESOURCE_MARKER_TYPES
+        },
+    }
+    temporary_path = (
+        f"{marker_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        with open(temporary_path, 'w', encoding='utf-8') as handle:
+            json.dump(marker, handle, ensure_ascii=False, indent=2)
+        os.replace(temporary_path, marker_path)
+        return True
+    except OSError:
+        try:
+            os.remove(temporary_path)
+        except OSError:
+            pass
+        return False
+
+
 def _extract_all_resources(
     zf,
     output_dir,
@@ -2363,21 +2623,51 @@ def _extract_all_resources(
         'other': []
     }
     
-    # Check if already extracted
+    # Check if already extracted. Legacy timestamp-only markers are never
+    # trusted: the source EPUB and every expected packaged image must validate.
     extraction_marker = os.path.join(output_dir, '.resources_extracted')
     remote_download_enabled = os.getenv(
         'DOWNLOAD_REMOTE_IMAGE_URLS', '0'
     ).strip().lower() in {'1', 'true', 'yes', 'on'}
-    if os.path.exists(extraction_marker) and (
-        not remote_download_enabled or preserve_images
-    ):
-        print("📦 Resources already extracted, skipping...")
-        return _count_existing_resources(output_dir, extracted_resources)
-    if os.path.exists(extraction_marker):
-        print(
-            "♻️ Remote image cache is missing or belongs to a different "
-            "source image count; refreshing EPUB image resources"
+    source_fingerprint = None
+    marker_exists = os.path.isfile(extraction_marker)
+    marker_valid = False
+    marker_reason = ''
+    if marker_exists:
+        print("🔐 Validating source EPUB and extracted image fingerprint...")
+        source_fingerprint = _source_epub_content_fingerprint(zf)
+        marker_valid, marker_reason = _validate_resource_extraction_marker(
+            extraction_marker,
+            output_dir,
+            source_fingerprint,
         )
+        if marker_valid and (
+            not remote_download_enabled or preserve_images
+        ):
+            print("📦 Resource fingerprint matches, skipping extraction...")
+            return _count_existing_resources(output_dir, extracted_resources)
+
+        if marker_valid:
+            print(
+                "♻️ Remote image cache is missing or belongs to a different "
+                "source image count; refreshing EPUB image resources"
+            )
+        else:
+            print(f"♻️ Resource fingerprint invalid ({marker_reason}); re-extracting")
+            # A changed source or missing packaged image must rebuild the image
+            # directory, even if the remote-image cache would normally preserve it.
+            preserve_images = False
+            # The old map describes the invalidated image set. Keeping it would
+            # make the newly extracted original filenames resolve to stale
+            # renamed targets until the later rename pass replaces the sidecar.
+            try:
+                os.remove(os.path.join(output_dir, 'image_rename_map.json'))
+            except OSError:
+                pass
+        try:
+            os.remove(extraction_marker)
+        except OSError:
+            pass
     
     _cleanup_old_resources(output_dir, preserve_images=preserve_images)
     
@@ -2391,6 +2681,21 @@ def _extract_all_resources(
     
     # Get list of files to process
     file_list = [f for f in zf.namelist() if not f.endswith('/') and os.path.basename(f)]
+    expected_image_filenames = []
+    expected_resource_filenames = {
+        resource_type: [] for resource_type in _RESOURCE_MARKER_TYPES
+    }
+    for file_path in file_list:
+        resource_info = _categorize_resource(
+            file_path,
+            os.path.basename(file_path),
+        )
+        if resource_info and resource_info[0] == 'images':
+            expected_image_filenames.append(resource_info[2])
+        elif resource_info and resource_info[0] in expected_resource_filenames:
+            expected_resource_filenames[resource_info[0]].append(
+                resource_info[2]
+            )
     
     # Thread-safe lock for extracted_resources
     resource_lock = threading.Lock()
@@ -2463,9 +2768,57 @@ def _extract_all_resources(
         ProgressBar.update(total_resources, total_resources, prefix="📦 Extracting resources")
         ProgressBar.finish()
     
-    # Mark as complete
-    with open(extraction_marker, 'w') as f:
-        f.write(f"Resources extracted at {time.time()}")
+    # Mark as complete only when every expected resource exists. The later
+    # chapter rename pass may change image filenames; validation follows
+    # image_rename_map.json for those files.
+    images_dir = os.path.join(output_dir, 'images')
+    missing_after_extract = [
+        name for name in set(expected_image_filenames)
+        if not os.path.isfile(os.path.join(images_dir, name))
+    ]
+    missing_resource_after_extract = []
+    for resource_type, expected_names in expected_resource_filenames.items():
+        relative_dir = _RESOURCE_MARKER_DIRECTORIES[resource_type]
+        for name in set(expected_names):
+            candidate = (
+                os.path.join(output_dir, relative_dir, name)
+                if relative_dir else os.path.join(output_dir, name)
+            )
+            if not os.path.isfile(candidate):
+                missing_resource_after_extract.append(
+                    f'{relative_dir}/{name}' if relative_dir else name
+                )
+
+    if (
+        is_stop_requested()
+        or missing_after_extract
+        or missing_resource_after_extract
+    ):
+        try:
+            os.remove(extraction_marker)
+        except OSError:
+            pass
+        if missing_after_extract:
+            print(
+                "[WARNING] Resource marker not written; missing extracted "
+                f"image file(s): {', '.join(sorted(missing_after_extract)[:3])}"
+            )
+        if missing_resource_after_extract:
+            print(
+                "[WARNING] Resource marker not written; missing extracted "
+                "resource file(s): "
+                + ', '.join(sorted(missing_resource_after_extract)[:3])
+            )
+    else:
+        if source_fingerprint is None:
+            source_fingerprint = _source_epub_content_fingerprint(zf)
+        if not _write_resource_extraction_marker(
+            extraction_marker,
+            source_fingerprint,
+            expected_image_filenames,
+            expected_resource_filenames,
+        ):
+            print("[WARNING] Could not write resource extraction fingerprint")
     
     _validate_critical_files(output_dir, extracted_resources)
     return extracted_resources

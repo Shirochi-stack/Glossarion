@@ -16687,12 +16687,19 @@ def cleanup_previous_extraction(
     output_dir,
     preserve_images=False,
     preserve_workspace=False,
+    fingerprint_managed=False,
 ):
     """Clean up a prior extraction, or retain it for a targeted chapter run."""
     if preserve_workspace:
         print(
             "🎯 Single-chapter mode: preserving the existing extraction "
             "workspace (images, rename map, CSS, fonts, and EPUB structure)"
+        )
+        return 0
+
+    if fingerprint_managed:
+        print(
+            "🔐 EPUB resource cleanup deferred to fingerprint validation"
         )
         return 0
 
@@ -22065,6 +22072,7 @@ def main(log_callback=None, stop_callback=None):
             preserve_workspace=bool(
                 (os.getenv("SINGLE_CHAPTER_FILTER", "") or "").strip()
             ),
+            fingerprint_managed=input_path.lower().endswith('.epub'),
         )
 
     os.environ["EPUB_OUTPUT_DIR"] = out

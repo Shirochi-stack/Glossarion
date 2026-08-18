@@ -3047,6 +3047,73 @@ def test_remote_images_are_localized_once_before_chapter_rename(monkeypatch, tmp
     )
 
 
+def test_full_image_rename_replays_complete_map_on_later_runs(tmp_path):
+    images_dir = tmp_path / 'images'
+    images_dir.mkdir()
+    source_names = ('1.png', '10.png', '100.png')
+    for source_name in source_names:
+        (images_dir / source_name).write_bytes(_remote_test_png_bytes())
+
+    source_markup = ''.join(
+        f'<img src="images/{source_name}">' for source_name in source_names
+    )
+
+    def fresh_chapters():
+        return [{
+            'num': 1,
+            'title': 'Chapter 1',
+            'filename': 'chapter0001.xhtml',
+            'original_basename': 'chapter0001',
+            'body': source_markup,
+            'original_html': source_markup,
+        }]
+
+    first = chapter_extractor._rename_images_to_chapter_format(
+        fresh_chapters(), str(tmp_path)
+    )
+    first_map = json.loads(
+        (tmp_path / 'image_rename_map.json').read_text(encoding='utf-8')
+    )
+    first_files = {
+        path.name for path in images_dir.iterdir() if path.is_file()
+    }
+
+    second = chapter_extractor._rename_images_to_chapter_format(
+        fresh_chapters(), str(tmp_path)
+    )
+    second_map = json.loads(
+        (tmp_path / 'image_rename_map.json').read_text(encoding='utf-8')
+    )
+    second_files = {
+        path.name for path in images_dir.iterdir() if path.is_file()
+    }
+
+    assert first_map == {
+        '1.png': 'chapter0001_img_1.png',
+        '10.png': 'chapter0001_img_2.png',
+        '100.png': 'chapter0001_img_3.png',
+    }
+    assert second_map == first_map
+    assert second_files == first_files == set(first_map.values())
+    assert all(target in second[0]['body'] for target in first_map.values())
+    assert all(target in first[0]['body'] for target in first_map.values())
+
+
+def test_image_rename_map_loader_resolves_terminal_chain_target(tmp_path):
+    (tmp_path / 'image_rename_map.json').write_text(
+        json.dumps({
+            '1.png': 'chapter001_img_1.png',
+            'chapter001_img_1.png': 'chapter002_img_1.png',
+        }),
+        encoding='utf-8',
+    )
+
+    exact, folded = chapter_extractor._load_image_rename_targets(str(tmp_path))
+
+    assert exact['1.png'] == 'chapter002_img_1.png'
+    assert folded['1.png'] == 'chapter002_img_1.png'
+
+
 def test_failed_remote_image_download_keeps_original_url(monkeypatch, tmp_path):
     remote_url = 'https://images.example.invalid/blocked.file'
     chapters = [{
@@ -3452,6 +3519,32 @@ def test_single_chapter_cleanup_preserves_the_full_epub_workspace(tmp_path):
     assert map_path.is_file()
 
 
+def test_epub_fingerprint_managed_cleanup_preserves_resources(tmp_path):
+    from TransateKRtoEN import cleanup_previous_extraction
+
+    images_dir = tmp_path / 'images'
+    images_dir.mkdir()
+    image_path = images_dir / 'chapter0001_img_1.png'
+    image_path.write_bytes(_remote_test_png_bytes())
+    marker_path = tmp_path / '.resources_extracted'
+    marker_path.write_text('fingerprint', encoding='utf-8')
+    opf_path = tmp_path / 'content.opf'
+    opf_path.write_text('<package/>', encoding='utf-8')
+    ncx_path = tmp_path / 'toc.ncx'
+    ncx_path.write_text('<ncx/>', encoding='utf-8')
+
+    cleaned = cleanup_previous_extraction(
+        str(tmp_path),
+        fingerprint_managed=True,
+    )
+
+    assert cleaned == 0
+    assert marker_path.is_file()
+    assert image_path.is_file()
+    assert opf_path.is_file()
+    assert ncx_path.is_file()
+
+
 def test_chapter_extractor_preserves_cache_only_for_matching_source_count(
     monkeypatch, tmp_path
 ):
@@ -3506,6 +3599,190 @@ def test_resource_marker_does_not_suppress_mismatched_remote_cache_refresh(
 
     assert not stale_image.exists()
     assert (images_dir / 'current.png').is_file()
+
+
+def _write_resource_fingerprint_epub(epub_path, *, comment=b'A'):
+    with zipfile.ZipFile(epub_path, 'w') as archive:
+        archive.writestr('OEBPS/Images/picture.png', b'packaged image bytes')
+        archive.writestr('OEBPS/Styles/book.css', b'body { color: black; }')
+        archive.writestr('OEBPS/Fonts/book.woff', b'packaged font bytes')
+        archive.writestr('OEBPS/content.opf', b'<package/>')
+        archive.writestr('META-INF/container.xml', b'<container/>')
+        archive.writestr('OEBPS/Scripts/book.js', b'window.book = true;')
+        archive.writestr(
+            'OEBPS/Text/chapter.xhtml',
+            '<html><body><p>Fingerprint source text.</p></body></html>',
+        )
+        archive.comment = comment
+
+
+def _extract_resource_fingerprint_epub(epub_path, output_dir, monkeypatch):
+    monkeypatch.setenv('EXTRACTION_WORKERS', '1')
+    monkeypatch.setenv('DOWNLOAD_REMOTE_IMAGE_URLS', '0')
+    with zipfile.ZipFile(epub_path, 'r') as archive:
+        return chapter_extractor._extract_all_resources(
+            archive,
+            str(output_dir),
+            progress_callback=lambda _message: None,
+        )
+
+
+def test_resource_fingerprint_accepts_image_rename_map_targets(
+    monkeypatch, tmp_path
+):
+    epub_path = tmp_path / 'source.epub'
+    output_dir = tmp_path / 'output'
+    output_dir.mkdir()
+    _write_resource_fingerprint_epub(epub_path)
+    _extract_resource_fingerprint_epub(epub_path, output_dir, monkeypatch)
+
+    images_dir = output_dir / 'images'
+    original = images_dir / 'picture.png'
+    renamed = images_dir / 'chapter001_img_1.png'
+    original.rename(renamed)
+    (output_dir / 'image_rename_map.json').write_text(
+        json.dumps({'picture.png': renamed.name}),
+        encoding='utf-8',
+    )
+
+    def fail_if_cleanup_runs(*_args, **_kwargs):
+        raise AssertionError('valid resource fingerprint unexpectedly re-extracted')
+
+    monkeypatch.setattr(
+        chapter_extractor,
+        '_cleanup_old_resources',
+        fail_if_cleanup_runs,
+    )
+    resources = _extract_resource_fingerprint_epub(
+        epub_path, output_dir, monkeypatch
+    )
+
+    marker = json.loads(
+        (output_dir / '.resources_extracted').read_text(encoding='utf-8')
+    )
+    assert marker['version'] == 3
+    assert marker['source_epub']['algorithm'] == 'sha256'
+    assert marker['images']['source_filenames'] == ['picture.png']
+    assert marker['resources'] == {
+        'css': ['book.css'],
+        'fonts': ['book.woff'],
+        'epub_structure': ['container.xml', 'content.opf'],
+        'other': ['book.js'],
+    }
+    assert resources['images'] == [renamed.name]
+    assert renamed.is_file()
+
+
+def test_resource_fingerprint_missing_renamed_image_forces_reextract(
+    monkeypatch, tmp_path
+):
+    epub_path = tmp_path / 'source.epub'
+    output_dir = tmp_path / 'output'
+    output_dir.mkdir()
+    _write_resource_fingerprint_epub(epub_path)
+    _extract_resource_fingerprint_epub(epub_path, output_dir, monkeypatch)
+
+    images_dir = output_dir / 'images'
+    original = images_dir / 'picture.png'
+    renamed = images_dir / 'chapter001_img_1.png'
+    original.rename(renamed)
+    (output_dir / 'image_rename_map.json').write_text(
+        json.dumps({'picture.png': renamed.name}),
+        encoding='utf-8',
+    )
+    renamed.unlink()
+
+    with zipfile.ZipFile(epub_path, 'r') as archive:
+        source_fingerprint = (
+            chapter_extractor._source_epub_content_fingerprint(archive)
+        )
+    marker_valid, marker_reason = (
+        chapter_extractor._validate_resource_extraction_marker(
+            str(output_dir / '.resources_extracted'),
+            str(output_dir),
+            source_fingerprint,
+        )
+    )
+    assert marker_valid is False
+    assert marker_reason == (
+        'missing extracted image file(s): chapter001_img_1.png'
+    )
+
+    _extract_resource_fingerprint_epub(epub_path, output_dir, monkeypatch)
+
+    assert (images_dir / 'picture.png').read_bytes() == b'packaged image bytes'
+    assert not (output_dir / 'image_rename_map.json').exists()
+
+
+@pytest.mark.parametrize(
+    ('relative_path', 'expected_bytes'),
+    [
+        ('css/book.css', b'body { color: black; }'),
+        ('fonts/book.woff', b'packaged font bytes'),
+        ('content.opf', b'<package/>'),
+        ('container.xml', b'<container/>'),
+        ('book.js', b'window.book = true;'),
+    ],
+)
+def test_resource_fingerprint_missing_non_image_resource_forces_reextract(
+    monkeypatch,
+    tmp_path,
+    relative_path,
+    expected_bytes,
+):
+    epub_path = tmp_path / 'source.epub'
+    output_dir = tmp_path / 'output'
+    output_dir.mkdir()
+    _write_resource_fingerprint_epub(epub_path)
+    _extract_resource_fingerprint_epub(epub_path, output_dir, monkeypatch)
+
+    missing_resource = output_dir / relative_path
+    assert missing_resource.is_file()
+    missing_resource.unlink()
+
+    _extract_resource_fingerprint_epub(epub_path, output_dir, monkeypatch)
+
+    assert missing_resource.read_bytes() == expected_bytes
+
+
+def test_resource_fingerprint_one_byte_epub_change_forces_reextract(
+    monkeypatch, tmp_path
+):
+    epub_path = tmp_path / 'source.epub'
+    output_dir = tmp_path / 'output'
+    output_dir.mkdir()
+    _write_resource_fingerprint_epub(epub_path, comment=b'A')
+    _extract_resource_fingerprint_epub(epub_path, output_dir, monkeypatch)
+    first_marker = json.loads(
+        (output_dir / '.resources_extracted').read_text(encoding='utf-8')
+    )
+
+    images_dir = output_dir / 'images'
+    original = images_dir / 'picture.png'
+    renamed = images_dir / 'chapter001_img_1.png'
+    original.rename(renamed)
+    (output_dir / 'image_rename_map.json').write_text(
+        json.dumps({'picture.png': renamed.name}),
+        encoding='utf-8',
+    )
+
+    # The ZIP comment is the final byte of this archive. Change that one byte
+    # without touching a member, timestamp, filename, or archive length.
+    with open(epub_path, 'r+b') as source:
+        source.seek(-1, os.SEEK_END)
+        assert source.read(1) == b'A'
+        source.seek(-1, os.SEEK_END)
+        source.write(b'B')
+
+    _extract_resource_fingerprint_epub(epub_path, output_dir, monkeypatch)
+    second_marker = json.loads(
+        (output_dir / '.resources_extracted').read_text(encoding='utf-8')
+    )
+
+    assert first_marker['source_epub']['sha256'] != second_marker['source_epub']['sha256']
+    assert (images_dir / 'picture.png').read_bytes() == b'packaged image bytes'
+    assert not renamed.exists()
+    assert not (output_dir / 'image_rename_map.json').exists()
 
 
 def test_remote_image_progress_cache_is_excluded_from_epub_sources(tmp_path):
