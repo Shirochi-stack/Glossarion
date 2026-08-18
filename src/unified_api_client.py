@@ -17427,8 +17427,8 @@ class UnifiedClient:
             provider = (provider or '').strip().lower()
             pass_all = os.getenv('PASS_THINKING_TO_OPENAI_COMPATIBLE', '0') == '1'
 
-            # OpenCode Go is controlled by the GPT/OpenRouter/NIM effort selector.
-            if provider == 'opencode':
+            # Official OpenCode and NVIDIA NIM routes use the main GPT thinking controls.
+            if provider in {'opencode', 'nvidia'}:
                 return effort
 
             if provider in {'deepseek', 'gemini-openai', 'openrouter', 'nanogpt', 'anthropic'}:
