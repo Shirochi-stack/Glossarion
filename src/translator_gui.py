@@ -13061,6 +13061,9 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.open_progress_manager_signal.connect(self._open_progress_manager_on_main_thread)
         # Input path refresh request
         self.input_files_updated_signal.connect(self._apply_selected_files_to_input_field)
+        self.input_files_updated_signal.connect(
+            self._schedule_progress_manager_input_path_refresh
+        )
         self.parallel_epub_restore_finished_signal.connect(
             self._finish_parallel_epub_pair_restore
         )
@@ -16453,6 +16456,9 @@ Recent translations to summarize:
         self.entry_epub.setAcceptDrops(True)
         try:
             self.entry_epub.textChanged.connect(lambda _text: self._refresh_qa_settings_source_status())
+            self.entry_epub.textChanged.connect(
+                self._schedule_progress_manager_input_path_refresh
+            )
         except Exception:
             pass
 
@@ -41178,6 +41184,7 @@ Important rules:
                     pass
                 # Refresh the multi-file tooltip so it lists the new paths.
                 self._update_entry_epub_tooltip()
+                self._schedule_progress_manager_input_path_refresh()
         except Exception:
             # Never let a path-rewrite failure block the library dialog.
             pass

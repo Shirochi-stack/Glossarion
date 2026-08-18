@@ -11,9 +11,12 @@ from PySide6.QtCore import QRect, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialogButtonBox,
     QMessageBox,
     QComboBox,
+    QListWidget,
+    QListWidgetItem,
 )
 
 from extract_glossary_from_epub import (
@@ -43,6 +46,7 @@ from glossary_refinement import (
 )
 from GlossaryManager_GUI import (
     GlossaryManagerMixin,
+    _GlossaryFilterItemDelegate,
     _collect_glossary_filter_values,
 )
 
@@ -121,11 +125,32 @@ def test_glossary_filter_search_interactions_are_wired():
 
     assert "search_entry.returnPressed.connect(_apply_selected_values)" in source
     assert "value_list.setUniformItemSizes(True)" in filter_body
+    assert "value_list.setItemDelegate(_GlossaryFilterItemDelegate(value_list))" in filter_body
     assert "Qt.ItemIsUserCheckable" in filter_body
     assert "value_list.setItemWidget" not in filter_body
     assert "_set_filter_item_checked(list_item, matches)" in filter_body
+    assert "value_list.itemClicked.connect(_toggle_filter_item)" in filter_body
     assert "selection_before_search" in source
     assert "filter_timer.setInterval(60)" in source
+
+
+def test_glossary_filter_delegate_renders_without_checkbox_widgets():
+    app = QApplication.instance() or QApplication([])
+    value_list = QListWidget()
+    value_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+    value_list.setItemDelegate(_GlossaryFilterItemDelegate(value_list))
+    item = QListWidgetItem("A Rank")
+    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+    item.setCheckState(Qt.Checked)
+    value_list.addItem(item)
+    value_list.resize(320, 80)
+    value_list.show()
+    app.processEvents()
+
+    assert not value_list.grab().isNull()
+    assert value_list.findChildren(QCheckBox) == []
+    value_list.deleteLater()
+    app.processEvents()
 
 
 def _run_test_refinement(entries, progress_file, parsed_entries, send_fn):

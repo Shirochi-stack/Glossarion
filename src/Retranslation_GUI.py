@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QPlainTextEdit, QTextBrowser, QStackedWidget, QComboBox, QInputDialog,
                                 QLineEdit, QProgressBar, QGraphicsOpacityEffect, QWidgetAction,
                                 QApplication)
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent, QObject
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent, QObject, QFileSystemWatcher
 from PySide6.QtGui import QFont, QFontMetricsF, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut
 import xml.etree.ElementTree as ET
 import zipfile
@@ -17634,6 +17634,216 @@ class RetranslationMixin:
 
             QTimer.singleShot(0, _refresh)
 
+    @staticmethod
+    def _normalize_progress_manager_input_path(path):
+        value = str(path or '').strip()
+        if not value or value == '__generative_mode__':
+            return ''
+        try:
+            return os.path.normcase(os.path.normpath(os.path.abspath(value)))
+        except (OSError, TypeError, ValueError):
+            return value
+
+    def _progress_manager_current_input_signature(self):
+        """Return the stable input selection represented by the main file field."""
+        selected = [
+            str(path).strip()
+            for path in (getattr(self, 'selected_files', None) or [])
+            if str(path or '').strip() and str(path).strip() != '__generative_mode__'
+        ]
+        try:
+            entry_text = self.entry_epub.text().strip()
+        except (AttributeError, RuntimeError):
+            entry_text = ''
+
+        # A real path typed into the single-file field is more current than a
+        # stale selected_files value. Multi-file summary text is never a path.
+        if (
+            entry_text
+            and 'files selected' not in entry_text
+            and not entry_text.startswith('No file selected')
+            and (os.path.isfile(entry_text) or os.path.isdir(entry_text))
+        ):
+            selected = [entry_text]
+
+        normalized = {
+            self._normalize_progress_manager_input_path(path)
+            for path in selected
+        }
+        normalized.discard('')
+        return tuple(sorted(normalized))
+
+    def _stamp_progress_manager_input_signature(self, dialog):
+        if dialog is not None:
+            dialog._progress_manager_input_signature = (
+                self._progress_manager_current_input_signature()
+            )
+
+    def _schedule_progress_manager_input_path_refresh(self, *_args):
+        """Debounce input edits before rebuilding any visible Progress Manager."""
+        timer = getattr(self, '_progress_input_refresh_timer', None)
+        if timer is None:
+            try:
+                timer = QTimer(self)
+            except TypeError:
+                timer = QTimer()
+            timer.setSingleShot(True)
+            timer.setInterval(125)
+            timer.timeout.connect(self._refresh_open_progress_managers_for_input_change)
+            self._progress_input_refresh_timer = timer
+        timer.start()
+
+    def _progress_manager_dialogs(self):
+        dialogs = []
+        seen = set()
+
+        def _add(dialog):
+            if dialog is None or id(dialog) in seen:
+                return
+            seen.add(id(dialog))
+            dialogs.append(dialog)
+
+        cache = getattr(self, '_retranslation_dialog_cache', None)
+        if isinstance(cache, dict):
+            for value in cache.values():
+                if isinstance(value, dict):
+                    _add(value.get('dialog'))
+        _add(getattr(self, '_multi_file_retranslation_dialog', None))
+
+        image_cache = getattr(self, '_image_retranslation_dialog_cache', None)
+        if isinstance(image_cache, dict):
+            for dialog in image_cache.values():
+                _add(dialog)
+        return dialogs
+
+    def _reopen_glossary_progress_after_input_change(self, attempt=0):
+        for dialog in self._progress_manager_dialogs():
+            try:
+                if not dialog.isVisible():
+                    continue
+            except RuntimeError:
+                continue
+            opener = getattr(dialog, '_show_glossary_progress', None)
+            if not callable(opener):
+                continue
+            opener()
+
+            def _force_glossary_refresh(target_dialog=dialog):
+                gp_dialog = getattr(target_dialog, '_glossary_progress_dialog', None)
+                full_refresh = getattr(gp_dialog, '_gp_full_refresh', None)
+                if callable(full_refresh):
+                    full_refresh()
+
+            QTimer.singleShot(0, _force_glossary_refresh)
+            return
+        if attempt < 30:
+            QTimer.singleShot(
+                100,
+                lambda: self._reopen_glossary_progress_after_input_change(attempt + 1),
+            )
+
+    def _refresh_open_progress_managers_for_input_change(self):
+        """Fully rebuild visible progress dialogs when the selected input changes."""
+        if getattr(self, '_progress_input_rebuild_running', False):
+            return
+        current_signature = self._progress_manager_current_input_signature()
+        if not current_signature:
+            return
+
+        changed_dialogs = []
+        reopen_glossary = False
+        for dialog in self._progress_manager_dialogs():
+            try:
+                if not dialog.isVisible():
+                    continue
+            except RuntimeError:
+                continue
+            previous_signature = getattr(
+                dialog, '_progress_manager_input_signature', None
+            )
+            if previous_signature is None:
+                dialog._progress_manager_input_signature = current_signature
+                continue
+            if tuple(previous_signature) == current_signature:
+                continue
+            changed_dialogs.append(dialog)
+            try:
+                gp_dialog = getattr(dialog, '_glossary_progress_dialog', None)
+                reopen_glossary = reopen_glossary or bool(
+                    gp_dialog is not None and gp_dialog.isVisible()
+                )
+            except RuntimeError:
+                pass
+
+        if not changed_dialogs:
+            return
+
+        # Keep the underlying selection synchronized when the user typed a
+        # valid single path directly into the input field. force_retranslation()
+        # consults selected_files before the line edit for folders and bundles.
+        try:
+            entry_text = self.entry_epub.text().strip()
+            normalized_entry = self._normalize_progress_manager_input_path(entry_text)
+            if (
+                len(current_signature) == 1
+                and normalized_entry == current_signature[0]
+                and (os.path.isfile(entry_text) or os.path.isdir(entry_text))
+            ):
+                self.selected_files = [entry_text]
+                self.file_path = entry_text
+        except (AttributeError, RuntimeError):
+            pass
+
+        changed_ids = {id(dialog) for dialog in changed_dialogs}
+        cache = getattr(self, '_retranslation_dialog_cache', None)
+        if isinstance(cache, dict):
+            for key, value in list(cache.items()):
+                if isinstance(value, dict) and id(value.get('dialog')) in changed_ids:
+                    cache.pop(key, None)
+
+        multi_dialog = getattr(self, '_multi_file_retranslation_dialog', None)
+        if id(multi_dialog) in changed_ids:
+            self._multi_file_retranslation_dialog = None
+            self._multi_file_selection_key = None
+
+        image_cache = getattr(self, '_image_retranslation_dialog_cache', None)
+        if isinstance(image_cache, dict):
+            for key, dialog in list(image_cache.items()):
+                if id(dialog) in changed_ids:
+                    image_cache.pop(key, None)
+
+        pending = getattr(self, '_subtitle_bundle_progress_shell', None)
+        if isinstance(pending, dict) and id(pending.get('dialog')) in changed_ids:
+            self._subtitle_bundle_progress_shell = None
+
+        self._progress_input_rebuild_running = True
+        for dialog in changed_dialogs:
+            dialog._progress_input_retired = True
+            try:
+                gp_dialog = getattr(dialog, '_glossary_progress_dialog', None)
+                if gp_dialog is not None:
+                    gp_dialog.hide()
+                    gp_dialog.deleteLater()
+            except RuntimeError:
+                pass
+            try:
+                dialog.hide()
+                dialog.deleteLater()
+            except RuntimeError:
+                pass
+
+        def _rebuild_for_new_input():
+            try:
+                self.force_retranslation()
+                if reopen_glossary:
+                    self._reopen_glossary_progress_after_input_change()
+            except Exception as exc:
+                print(f"⚠️ Could not rebuild Progress Manager for new input: {exc}")
+            finally:
+                self._progress_input_rebuild_running = False
+
+        QTimer.singleShot(0, _rebuild_for_new_input)
+
     def _sync_translation_artifact_progress_toggle(self, kind, enabled):
         """Refresh Progress Manager rows after TOC/header toggle changes."""
         spec = translation_artifact_spec_for_kind(kind)
@@ -18901,6 +19111,7 @@ class RetranslationMixin:
         glossary_progress_source_filenames=None,
     ):
         dialog, dialog_layout, loading_widget, loading_label = self._create_retranslation_shell_dialog("Progress Manager")
+        self._stamp_progress_manager_input_signature(dialog)
         file_key = cache_key or os.path.abspath(file_path)
 
         def closeEvent(event):
@@ -18917,6 +19128,8 @@ class RetranslationMixin:
 
         def _build_dialog_contents():
             try:
+                if getattr(dialog, '_progress_input_retired', False):
+                    return
                 content = QWidget(dialog)
                 content_layout = QVBoxLayout(content)
                 content_layout.setContentsMargins(0, 0, 0, 0)
@@ -21744,6 +21957,11 @@ class RetranslationMixin:
                 'mark_completed_lock': threading.Lock(),
                 '_gp_bg_running': False,
                 '_refresh_generation': 0,
+                '_chapter_items': {},
+                '_row_fingerprints': {},
+                '_refinement_fingerprint': None,
+                '_full_rebuild_pending': False,
+                '_refresh_after_running': False,
             }
             if not panel_state['chapter_map']:
                 chapter_filenames = gp_data.get('chapter_filenames', {})
@@ -21779,7 +21997,6 @@ class RetranslationMixin:
             # times inside one second. A float mtime alone can miss those
             # transitions on Windows, so track nanosecond timestamps and size.
             panel_state['_last_signature'] = _gp_file_signature(gp_path)
-            panel_state['_last_forced_refresh'] = time.monotonic()
 
             # Background results are generation-tagged so a manual deletion can
             # invalidate an already queued snapshot instead of letting it paint
@@ -21789,7 +22006,6 @@ class RetranslationMixin:
             def _invalidate_gp_refresh():
                 panel_state['_refresh_generation'] = panel_state.get('_refresh_generation', 0) + 1
                 panel_state['_last_signature'] = None
-                panel_state['_last_forced_refresh'] = 0.0
                 _gp_pending_result.clear()
             
             panel = QWidget(parent_widget)
@@ -21932,6 +22148,10 @@ class RetranslationMixin:
                 self._add_compact_inline_list_item(gp_listbox, item)
 
             def _refresh_refinement_rows(_d, keep_updates_disabled=False):
+                refinement_rows = _gp_refinement_rows(_d)
+                refinement_fingerprint = tuple(refinement_rows)
+                if refinement_fingerprint == panel_state.get('_refinement_fingerprint'):
+                    return False
                 selected_ref_keys = {
                     it.data(Qt.UserRole + 3)
                     for it in gp_listbox.selectedItems()
@@ -21945,7 +22165,7 @@ class RetranslationMixin:
                         if item and item.data(Qt.UserRole + 3):
                             gp_listbox.takeItem(row)
 
-                    for ref_key, ref_display, ref_status in _gp_refinement_rows(_d):
+                    for ref_key, ref_display, ref_status in refinement_rows:
                         item = QListWidgetItem(ref_display)
                         item.setForeground(QColor(_gp_color_for(ref_status)))
                         item.setData(Qt.UserRole, ref_status)
@@ -21954,10 +22174,12 @@ class RetranslationMixin:
                         self._add_compact_inline_list_item(gp_listbox, item)
                         if ref_key in selected_ref_keys:
                             item.setSelected(True)
+                    panel_state['_refinement_fingerprint'] = refinement_fingerprint
                 finally:
                     if not keep_updates_disabled:
                         gp_listbox.setUpdatesEnabled(True)
                         gp_listbox.viewport().update()
+                return True
             
             def _populate_gp_listbox(_d, chunk_size=150):
                 panel_state['populate_generation'] = panel_state.get('populate_generation', 0) + 1
@@ -21965,6 +22187,9 @@ class RetranslationMixin:
                 cache = _gp_status_cache(_d)
                 gp_listbox.clear()
                 gp_listbox.setUpdatesEnabled(False)
+                panel_state['_chapter_items'] = {}
+                panel_state['_row_fingerprints'] = {}
+                panel_state['_refinement_fingerprint'] = None
                 total = panel_state['total']
                 chapter_map = panel_state['chapter_map']
                 state = {'ci': 0}
@@ -21982,6 +22207,12 @@ class RetranslationMixin:
                         item.setData(Qt.UserRole, status)
                         item.setData(Qt.UserRole + 1, ci)
                         self._add_compact_inline_list_item(gp_listbox, item)
+                        panel_state['_chapter_items'][ci] = item
+                        panel_state['_row_fingerprints'][ci] = (
+                            status,
+                            _gp_color_for(status),
+                            display,
+                        )
                         if panel_state.get('select_all_visible'):
                             item.setSelected(not item.isHidden())
                     state['ci'] = end_ci
@@ -23563,7 +23794,6 @@ class RetranslationMixin:
                     _d = result['d']
                     gp_data = _d
                     panel_state['_last_signature'] = result_signature
-                    panel_state['_last_forced_refresh'] = time.monotonic()
                     _clear_missing_progress_state(result.get('path') or gp_path)
                     
                     if result.get('toggle_changed'):
@@ -23587,27 +23817,31 @@ class RetranslationMixin:
                     
                     if result.get('bt') and bt_label:
                         bt_label.setText(f"📖 {result['bt']}")
-                    
-                    chapter_items = {}
-                    for row in range(gp_listbox.count()):
-                        item = gp_listbox.item(row)
-                        if not item or item.data(Qt.UserRole + 3):
-                            continue
-                        try:
-                            chapter_items[int(item.data(Qt.UserRole + 1))] = item
-                        except (TypeError, ValueError):
-                            continue
 
-                    for ci, new_status, new_color, display_text, _issues in result.get('item_updates', []):
-                        item = chapter_items.get(ci)
-                        if item is None:
-                            continue
-                        # The model/key can change while the status stays the
-                        # same, so refresh the complete row every time.
-                        if display_text:
-                            item.setText(display_text)
-                        item.setForeground(QColor(new_color))
-                        item.setData(Qt.UserRole, new_status)
+                    if result.get('full_rebuild'):
+                        panel_state['_full_rebuild_pending'] = False
+                        _populate_gp_listbox(_d)
+                        return True
+                    
+                    chapter_items = panel_state.get('_chapter_items') or {}
+                    row_fingerprints = panel_state.setdefault('_row_fingerprints', {})
+
+                    item_updates = result.get('item_updates', [])
+                    if item_updates:
+                        gp_listbox.setUpdatesEnabled(False)
+                        try:
+                            for ci, new_status, new_color, display_text, _issues in item_updates:
+                                item = chapter_items.get(ci)
+                                if item is None:
+                                    continue
+                                if display_text:
+                                    item.setText(display_text)
+                                item.setForeground(QColor(new_color))
+                                item.setData(Qt.UserRole, new_status)
+                                row_fingerprints[ci] = (new_status, new_color, display_text)
+                        finally:
+                            gp_listbox.setUpdatesEnabled(True)
+                            gp_listbox.viewport().update()
                     _refresh_refinement_rows(_d)
                 except Exception as e:
                     print(f"⚠️ Could not apply glossary progress refresh: {e}")
@@ -23615,24 +23849,48 @@ class RetranslationMixin:
 
             def _deliver_gp_refresh_result(result):
                 """Apply a worker snapshot immediately on Qt's GUI thread."""
+                _ensure_gp_watch_paths(result.get('path'))
                 _gp_pending_result.append(result)
                 _apply_pending_gp_result()
+                if panel_state.pop('_refresh_after_running', False):
+                    QTimer.singleShot(0, _refresh)
 
             # A Python worker cannot safely update QListWidgetItems directly.
             # Deliver completed snapshots through a Qt signal so live progress
             # paints as soon as the disk read finishes, without depending on a
             # later polling-timer tick.
+            def _gp_refresh_failed(message):
+                print(f"Glossary progress refresh failed: {message}")
+                panel_state['_gp_bg_running'] = False
+                if panel_state.pop('_refresh_after_running', False):
+                    QTimer.singleShot(0, _refresh)
+
             gp_refresh_bridge = _GlossaryProgressAsyncBridge(
                 on_finished=_deliver_gp_refresh_result,
-                on_failed=lambda message: print(f"Glossary progress refresh failed: {message}"),
+                on_failed=_gp_refresh_failed,
                 parent=panel,
             )
             panel._gp_refresh_bridge = gp_refresh_bridge
 
+            def _emit_gp_refresh_finished(payload):
+                try:
+                    gp_refresh_bridge.finished.emit(payload)
+                except RuntimeError:
+                    pass
+
+            def _emit_gp_refresh_failed(message):
+                try:
+                    gp_refresh_bridge.failed.emit(message)
+                except RuntimeError:
+                    pass
+
             panel_state['_gp_bg_running'] = False
 
-            def _refresh():
+            def _refresh(force=False):
                 try:
+                    if force:
+                        _invalidate_gp_refresh()
+                        panel_state['_full_rebuild_pending'] = True
                     # First, apply any pending result from a previous background scan
                     _apply_pending_gp_result()
 
@@ -23648,6 +23906,8 @@ class RetranslationMixin:
                     # deliberately after the missing-file check so deletion is
                     # detected even while an old disk read is finishing.
                     if panel_state.get('_gp_bg_running'):
+                        if force:
+                            panel_state['_refresh_after_running'] = True
                         return
                     
                     # Dirty-check: skip if file hasn't changed
@@ -23656,10 +23916,8 @@ class RetranslationMixin:
                     except OSError:
                         _cur_signature = None
                     _cur_ts = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
-                    _force_due = time.monotonic() - panel_state.get('_last_forced_refresh', 0.0) >= 5.0
                     if (_cur_signature == panel_state.get('_last_signature')
-                            and _cur_ts == panel_state.get('translate_special')
-                            and not _force_due):
+                            and _cur_ts == panel_state.get('translate_special')):
                         return  # Nothing changed — skip
                     panel_state['_gp_bg_running'] = True
 
@@ -23668,6 +23926,8 @@ class RetranslationMixin:
                     _snap_cmap = dict(panel_state['chapter_map'])
                     _snap_ts = panel_state.get('translate_special')
                     _snap_generation = panel_state.get('_refresh_generation', 0)
+                    _snap_fingerprints = dict(panel_state.get('_row_fingerprints') or {})
+                    _snap_full_rebuild = bool(panel_state.get('_full_rebuild_pending', False))
 
                     def _bg_work():
                         try:
@@ -23692,7 +23952,9 @@ class RetranslationMixin:
                                 new_color = _gp_color_for(new_status)
                                 fname = _snap_cmap.get(ci, f'chapter {ci + 1}')
                                 display_text, _ = _gp_display_for(ci, fname, _d, _cache)
-                                _item_updates.append((ci, new_status, new_color, display_text, _issues))
+                                fingerprint = (new_status, new_color, display_text)
+                                if _snap_full_rebuild or _snap_fingerprints.get(ci) != fingerprint:
+                                    _item_updates.append((ci, new_status, new_color, display_text, _issues))
 
                             _nr = max(0, _snap_total - len(_comp | _fail | _merg | _prog))
                             _legend_stats = _combine_glossary_progress_legend_stats(
@@ -23706,7 +23968,7 @@ class RetranslationMixin:
                                 },
                                 _ref_counts,
                             )
-                            gp_refresh_bridge.finished.emit({
+                            _emit_gp_refresh_finished({
                                 'd': _d,
                                 'path': _rp,
                                 'signature': _after_signature,
@@ -23719,9 +23981,10 @@ class RetranslationMixin:
                                 'nr': _nr, 'total': _snap_total,
                                 'item_updates': _item_updates,
                                 'bt': _d.get('book_title', ''),
+                                'full_rebuild': _snap_full_rebuild,
                             })
                         except Exception as e:
-                            gp_refresh_bridge.failed.emit(str(e))
+                            _emit_gp_refresh_failed(str(e))
                         finally:
                             panel_state['_gp_bg_running'] = False
 
@@ -23730,7 +23993,46 @@ class RetranslationMixin:
                 except Exception as e:
                     panel_state['_gp_bg_running'] = False
                     print(f"⚠️ Could not schedule glossary progress refresh: {e}")
-            
+
+            # Atomic progress saves replace the file, so watch both the file and
+            # its directory. The short debounce coalesces temp-file/replace event
+            # bursts into one background snapshot. A slow timer remains as a
+            # fallback for platforms that occasionally drop filesystem events.
+            gp_watcher = QFileSystemWatcher(panel)
+            gp_watch_debounce = QTimer(panel)
+            gp_watch_debounce.setSingleShot(True)
+            gp_watch_debounce.setInterval(100)
+
+            def _ensure_gp_watch_paths(path=None):
+                target = os.path.abspath(path or _find_gp_for_file(fp) or gp_path)
+                watch_paths = []
+                parent_dir = os.path.dirname(target)
+                if parent_dir and os.path.isdir(parent_dir):
+                    watch_paths.append(parent_dir)
+                if os.path.isfile(target):
+                    watch_paths.append(target)
+                current = set(gp_watcher.files()) | set(gp_watcher.directories())
+                missing = [watch_path for watch_path in watch_paths if watch_path not in current]
+                if missing:
+                    gp_watcher.addPaths(missing)
+
+            def _refresh_watched_gp():
+                _ensure_gp_watch_paths()
+                if panel.isVisible():
+                    _refresh()
+
+            def _gp_watch_changed(_path):
+                _ensure_gp_watch_paths()
+                if panel.isVisible():
+                    gp_watch_debounce.start()
+
+            gp_watch_debounce.timeout.connect(_refresh_watched_gp)
+            gp_watcher.fileChanged.connect(_gp_watch_changed)
+            gp_watcher.directoryChanged.connect(_gp_watch_changed)
+            _ensure_gp_watch_paths(gp_path)
+            panel._gp_progress_watcher = gp_watcher
+            panel._gp_progress_watch_debounce = gp_watch_debounce
+
             return panel, _refresh
         
         def _show_glossary_progress():
@@ -23749,11 +24051,9 @@ class RetranslationMixin:
                             _gpt.start()
 
                         def _refresh_cached_gp_panels():
-                            for rfn in getattr(dialog, '_gp_refresh_funcs', []):
-                                try:
-                                    rfn()
-                                except Exception:
-                                    pass
+                            refresh_visible = getattr(_cached, '_gp_refresh_visible', None)
+                            if callable(refresh_visible):
+                                refresh_visible()
 
                         QTimer.singleShot(0, _refresh_cached_gp_panels)
                         return
@@ -23845,6 +24145,7 @@ class RetranslationMixin:
                 
                 # Build panels and collect refresh functions
                 all_refresh_funcs = []
+                gp_navigation_widget = None
                 
                 def _build_gp_empty_panel(fp, parent_widget):
                     """Build a placeholder panel for an EPUB without glossary progress yet.
@@ -23906,7 +24207,7 @@ class RetranslationMixin:
                     # State container for upgrade tracking
                     _state = {'upgraded': False}
                     
-                    def _empty_refresh():
+                    def _empty_refresh(force=False):
                         """Check if a progress file appeared and upgrade the panel in-place."""
                         if _state['upgraded']:
                             return
@@ -23927,6 +24228,8 @@ class RetranslationMixin:
                                 all_refresh_funcs[idx] = real_refresh
                             except ValueError:
                                 all_refresh_funcs.append(real_refresh)
+                            if force:
+                                real_refresh(force=True)
                     
                     return panel, _empty_refresh
                 
@@ -23980,11 +24283,11 @@ class RetranslationMixin:
                         all_refresh_funcs.append(refresh_fn)
                         _pump_gp_loading()
                     gp_content_layout.addWidget(notebook)
+                    gp_navigation_widget = notebook
                 
                 else:
                     # Dropdown navigation for >3 files
                     _pump_gp_loading(f"Building glossary panels ({n_files} files)...")
-                    from PySide6.QtWidgets import QComboBox, QStackedWidget
                     
                     nav_row = QHBoxLayout()
                     nav_row.setSpacing(6)
@@ -24049,8 +24352,54 @@ class RetranslationMixin:
                     _update_nav()
                     
                     gp_content_layout.addWidget(stack)
-                
-                # Close button
+                    gp_navigation_widget = stack
+
+                def _gp_active_refresh_index():
+                    if gp_navigation_widget is None:
+                        return 0
+                    try:
+                        return max(0, gp_navigation_widget.currentIndex())
+                    except (AttributeError, RuntimeError):
+                        return 0
+
+                def _invoke_gp_refresher(refresh_func, force=False):
+                    refresh_func(force=force)
+
+                def _gp_refresh_visible(force=False):
+                    if not all_refresh_funcs:
+                        return
+                    idx = min(_gp_active_refresh_index(), len(all_refresh_funcs) - 1)
+                    _invoke_gp_refresher(all_refresh_funcs[idx], force=force)
+
+                if isinstance(gp_navigation_widget, QTabWidget):
+                    gp_navigation_widget.currentChanged.connect(
+                        lambda _idx: QTimer.singleShot(0, _gp_refresh_visible)
+                    )
+                elif isinstance(gp_navigation_widget, QStackedWidget):
+                    gp_navigation_widget.currentChanged.connect(
+                        lambda _idx: QTimer.singleShot(0, _gp_refresh_visible)
+                    )
+
+                # Explicit full refresh bypasses signatures and rebuilds the
+                # visible panel. Hidden books remain untouched so large
+                # multi-book dialogs stay responsive.
+                action_row = QHBoxLayout()
+                action_row.addStretch()
+                full_refresh_btn = QPushButton("🔄 Full Refresh")
+                full_refresh_btn.setCursor(Qt.PointingHandCursor)
+                full_refresh_btn.setToolTip("Reload and rebuild the visible glossary progress panel from disk")
+                full_refresh_btn.setStyleSheet(
+                    "QPushButton { background-color: #2563eb; color: white; padding: 6px 14px; "
+                    "border-radius: 4px; font-size: 10pt; font-weight: bold; } "
+                    "QPushButton:hover { background-color: #1d4ed8; }"
+                )
+
+                def _gp_full_refresh():
+                    _gp_refresh_visible(force=True)
+
+                full_refresh_btn.clicked.connect(_gp_full_refresh)
+                action_row.addWidget(full_refresh_btn)
+
                 close_btn = QPushButton("Close")
                 close_btn.setStyleSheet(
                     "QPushButton { background-color: #555; color: white; padding: 6px 20px; "
@@ -24058,7 +24407,9 @@ class RetranslationMixin:
                     "QPushButton:hover { background-color: #666; }"
                 )
                 close_btn.clicked.connect(gp_dialog.hide)
-                gp_content_layout.addWidget(close_btn, alignment=Qt.AlignCenter)
+                action_row.addWidget(close_btn)
+                action_row.addStretch()
+                gp_content_layout.addLayout(action_row)
 
                 try:
                     loading_timer = getattr(gp_dialog, '_loading_icon_timer', None)
@@ -24080,24 +24431,23 @@ class RetranslationMixin:
                 except Exception:
                     pass
                 
-                # Auto-refresh timer (2s) — calls all panel refresh functions
+                # Slow reliability fallback. Filesystem watcher events provide
+                # the real-time path and normal ticks refresh only the active page.
                 def _gp_refresh_all():
                     try:
                         if not gp_dialog.isVisible():
                             return
-                        for rfn in all_refresh_funcs:
-                            try:
-                                rfn()
-                            except Exception:
-                                pass
+                        _gp_refresh_visible()
                     except Exception:
                         pass
-                
+
                 _gp_timer = QTimer(gp_dialog)
-                _gp_timer.setInterval(1000)
+                _gp_timer.setInterval(2000)
                 _gp_timer.timeout.connect(_gp_refresh_all)
                 _gp_timer.start()
                 gp_dialog._gp_auto_refresh_timer = _gp_timer
+                gp_dialog._gp_refresh_visible = _gp_refresh_visible
+                gp_dialog._gp_full_refresh = _gp_full_refresh
 
                 # Stop auto-refresh timer when dialog is hidden to avoid
                 # main-thread JSON parsing lag during translation
@@ -24111,7 +24461,7 @@ class RetranslationMixin:
                     _original_gp_hide_event(event)
                 gp_dialog.hideEvent = _gp_hide_event
 
-                # Restart the timer AND force-refresh all panels whenever the
+                # Restart the timer and refresh the visible panel whenever the
                 # cached dialog becomes visible again. Without this the auto-
                 # refresh stayed dead after the first hide (hideEvent stops it
                 # and nothing restarted it), and re-shown panels were stale.
@@ -24140,6 +24490,7 @@ class RetranslationMixin:
                 import traceback
                 traceback.print_exc()
         
+        dialog._show_glossary_progress = _show_glossary_progress
         glossary_progress_btn.clicked.connect(_show_glossary_progress)
         title_layout.addWidget(glossary_progress_btn)
         
@@ -25607,6 +25958,9 @@ class RetranslationMixin:
         def animated_refresh():
             import time
 
+            # Invalidate any older background snapshot so it cannot paint over
+            # the explicit refresh after finishing.
+            data['_prefetch_generation'] = int(data.get('_prefetch_generation', 0)) + 1
             btn_refresh.start_animation()
             btn_refresh.setEnabled(False)
 
@@ -25794,131 +26148,221 @@ class RetranslationMixin:
         if data.get('dialog'):
             setattr(data['dialog'], '_refresh_func', animated_refresh)
 
-        # Auto-refresh every 2 seconds (silent, no animation).
-        # Two-phase to keep ALL disk I/O off the GUI thread: a daemon thread
-        # snapshots the progress JSON + directory listings, and the NEXT tick
-        # applies the snapshot to the widgets. During EPUB compile / heavy
-        # translation I/O even a single os.scandir or json read on the GUI
-        # thread stalls for seconds in frozen builds (verified via the freeze
-        # watchdog), so the GUI-thread pass must be pure in-memory work.
+        # Filesystem events trigger a debounced background snapshot. The worker
+        # emits its immutable result back to Qt immediately, eliminating the old
+        # extra timer tick while keeping every disk operation off the GUI thread.
+        def _progress_page_is_visible():
+            dlg = data.get('dialog')
+            if not (dlg and dlg.isVisible()):
+                return False
+            page = data.get('container')
+            return page is None or page is dlg or page.isVisible()
+
+        def _clear_prefetched_progress_data():
+            for key in (
+                '_prefetched_prog',
+                '_prefetched_prog_path',
+                '_prefetched_output_listing',
+                '_prefetched_tts_listing',
+                '_prefetched_signatures',
+            ):
+                data.pop(key, None)
+
+        def _schedule_dirty_prefetch():
+            if data.pop('_prefetch_dirty', False) and _progress_page_is_visible():
+                QTimer.singleShot(0, _silent_refresh)
+
+        def _on_prefetch_finished(payload):
+            data['_prefetch_running'] = False
+            if not isinstance(payload, dict):
+                _schedule_dirty_prefetch()
+                return
+            if payload.get('generation') != data.get('_prefetch_generation'):
+                _schedule_dirty_prefetch()
+                return
+
+            _ensure_translation_watch_paths(payload.get('progress_file'))
+            if payload.get('retry'):
+                data['_prefetch_dirty'] = True
+                _schedule_dirty_prefetch()
+                return
+            if payload.get('unchanged') or not _progress_page_is_visible():
+                _schedule_dirty_prefetch()
+                return
+
+            data['_prefetched_prog'] = payload.get('prog')
+            data['_prefetched_prog_path'] = payload.get('progress_file')
+            data['_prefetched_output_listing'] = payload.get('listing', set())
+            if payload.get('tts_listing') is not None:
+                data['_prefetched_tts_listing'] = payload.get('tts_listing')
+            data['_prefetched_signatures'] = payload.get('signatures')
+            try:
+                data['_refresh_read_only'] = True
+                self._refresh_retranslation_data(data)
+                data['_last_applied_snapshot_signatures'] = payload.get('signatures')
+            finally:
+                data['_refresh_read_only'] = False
+                _clear_prefetched_progress_data()
+            _schedule_dirty_prefetch()
+
+        def _on_prefetch_failed(message):
+            data['_prefetch_running'] = False
+            print(f"Progress Manager background refresh failed: {message}")
+            _schedule_dirty_prefetch()
+
+        prefetch_bridge = _GlossaryProgressAsyncBridge(
+            on_finished=_on_prefetch_finished,
+            on_failed=_on_prefetch_failed,
+            parent=data.get('container') or data.get('dialog') or self,
+        )
+        data['_prefetch_bridge'] = prefetch_bridge
+
+        def _emit_prefetch_finished(payload):
+            try:
+                prefetch_bridge.finished.emit(payload)
+            except RuntimeError:
+                pass
+
+        def _emit_prefetch_failed(message):
+            try:
+                prefetch_bridge.failed.emit(message)
+            except RuntimeError:
+                pass
+
         def _silent_refresh():
             try:
-                # Skip if a manual refresh is already in progress
-                if not btn_refresh.isEnabled():
+                if not btn_refresh.isEnabled() or not _progress_page_is_visible():
                     return
-                dlg = data.get('dialog')
-                if not (dlg and dlg.isVisible()):
-                    return
-                # All embedded pages share the same visible parent dialog.
-                # Checking the page itself prevents 39 selected EPUBs from
-                # launching 39 scans and GUI refreshes every second.
-                page = data.get('container')
-                if page is not None and page is not dlg and not page.isVisible():
-                    return
-
-                # Phase 2: apply the snapshot prefetched by the previous tick
-                if data.pop('_prefetch_ready', False):
-                    snapshot_signatures = data.pop('_prefetched_signatures', None)
-                    try:
-                        data['_refresh_read_only'] = True
-                        self._refresh_retranslation_data(data)
-                        if snapshot_signatures is not None:
-                            data['_last_applied_snapshot_signatures'] = snapshot_signatures
-                    finally:
-                        data['_refresh_read_only'] = False
-                        # Drop any unconsumed snapshot keys
-                        for _k in ('_prefetched_prog', '_prefetched_prog_path',
-                                   '_prefetched_output_listing', '_prefetched_tts_listing',
-                                   '_prefetched_signatures'):
-                            data.pop(_k, None)
-
-                # Phase 1: kick off the next disk snapshot in the background
                 if data.get('_prefetch_running'):
                     return
+
                 data['_prefetch_running'] = True
-                _pf_path = data.get('progress_file')
-                _pf_outdir = data.get('output_dir')
-                _prefetch_tts = self._current_progress_output_mode(data) == 'audio' or any(
+                data['_prefetch_dirty'] = False
+                generation = int(data.get('_prefetch_generation', 0)) + 1
+                data['_prefetch_generation'] = generation
+                progress_file = data.get('progress_file')
+                output_dir = data.get('output_dir')
+                last_signatures = data.get('_last_applied_snapshot_signatures')
+                fallback_prog = copy.deepcopy(data.get('prog') or {})
+                prefetch_tts = self._current_progress_output_mode(data) == 'audio' or any(
                     isinstance(entry, dict) and (entry.get('tts_status') or entry.get('tts_file'))
-                    for entry in (data.get('prog') or {}).get('chapters', {}).values()
+                    for entry in fallback_prog.get('chapters', {}).values()
                 )
 
                 def _bg_prefetch():
-                    prog = None
-                    listing = None
-                    tts_listing = None
                     try:
-                        progress_signature = _progress_path_signature(_pf_path)
+                        progress_signature = _progress_path_signature(progress_file)
                         try:
-                            with os.scandir(_pf_outdir) as _scan:
-                                listing = {e.name for e in _scan if e.is_file()}
+                            with os.scandir(output_dir) as scan:
+                                listing = {entry.name for entry in scan if entry.is_file()}
                         except Exception:
                             listing = set()
-                        if _prefetch_tts:
+                        tts_listing = None
+                        if prefetch_tts:
                             try:
                                 tts_listing = {
                                     name.lower()
-                                    for name in os.listdir(os.path.join(_pf_outdir, "text_to_speech"))
+                                    for name in os.listdir(os.path.join(output_dir, "text_to_speech"))
                                 }
                             except OSError:
                                 tts_listing = set()
 
-                        listing_signature = (len(listing), hash(frozenset(listing)))
-                        tts_signature = (
-                            (len(tts_listing), hash(frozenset(tts_listing)))
-                            if tts_listing is not None else None
-                        )
-                        snapshot_signatures = (
+                        signatures = (
                             progress_signature,
-                            listing_signature,
-                            tts_signature,
+                            (len(listing), hash(frozenset(listing))),
+                            (
+                                (len(tts_listing), hash(frozenset(tts_listing)))
+                                if tts_listing is not None else None
+                            ),
                         )
-
-                        # Stable books should be a true no-op: do not parse JSON
-                        # and, more importantly, do not touch thousands of Qt rows.
-                        if snapshot_signatures == data.get('_last_applied_snapshot_signatures'):
+                        payload = {
+                            'generation': generation,
+                            'progress_file': progress_file,
+                            'signatures': signatures,
+                        }
+                        if signatures == last_signatures:
+                            payload['unchanged'] = True
+                            _emit_prefetch_finished(payload)
                             return
 
                         try:
-                            with open(_pf_path, 'r', encoding='utf-8') as f:
-                                loaded = json.load(f)
-                            if isinstance(loaded, dict):
-                                prog = loaded
+                            with open(progress_file, 'r', encoding='utf-8') as progress_stream:
+                                loaded = json.load(progress_stream)
+                            prog = loaded if isinstance(loaded, dict) else fallback_prog
                         except Exception:
-                            # A transient writer lock/replacement should not force
-                            # the GUI thread back into synchronous retry I/O.
-                            prog = copy.deepcopy(data.get('prog') or {})
-                    finally:
-                        if prog is not None:
-                            data['_prefetched_prog'] = prog
-                            data['_prefetched_prog_path'] = _pf_path
-                        if listing is not None:
-                            data['_prefetched_output_listing'] = listing
-                        if tts_listing is not None:
-                            data['_prefetched_tts_listing'] = tts_listing
-                        if prog is not None and 'snapshot_signatures' in locals():
-                            data['_prefetched_signatures'] = snapshot_signatures
-                            data['_prefetch_ready'] = True
-                        data['_prefetch_running'] = False
+                            prog = fallback_prog
+
+                        # If an atomic replacement landed during the read, discard
+                        # this snapshot and immediately queue one more pass.
+                        if _progress_path_signature(progress_file) != progress_signature:
+                            payload['retry'] = True
+                            _emit_prefetch_finished(payload)
+                            return
+
+                        payload.update({
+                            'prog': prog,
+                            'listing': listing,
+                            'tts_listing': tts_listing,
+                        })
+                        _emit_prefetch_finished(payload)
+                    except Exception as exc:
+                        _emit_prefetch_failed(str(exc))
 
                 threading.Thread(
                     target=_bg_prefetch,
                     name="retrans-refresh-prefetch",
                     daemon=True,
                 ).start()
-            except Exception:
+            except Exception as exc:
                 data['_prefetch_running'] = False
+                print(f"Could not schedule Progress Manager refresh: {exc}")
 
+        progress_watcher = QFileSystemWatcher(data.get('container') or data.get('dialog') or self)
+        progress_watch_debounce = QTimer(data.get('container') or data.get('dialog') or self)
+        progress_watch_debounce.setSingleShot(True)
+        progress_watch_debounce.setInterval(100)
+
+        def _ensure_translation_watch_paths(progress_file=None):
+            raw_target = progress_file or data.get('progress_file') or ''
+            target = os.path.abspath(raw_target) if raw_target else ''
+            raw_output_dir = data.get('output_dir') or (os.path.dirname(target) if target else '')
+            output_dir = os.path.abspath(raw_output_dir) if raw_output_dir else ''
+            watch_paths = []
+            for directory in {output_dir, os.path.dirname(target)}:
+                if directory and os.path.isdir(directory):
+                    watch_paths.append(directory)
+            if target and os.path.isfile(target):
+                watch_paths.append(target)
+            current = set(progress_watcher.files()) | set(progress_watcher.directories())
+            missing = [watch_path for watch_path in watch_paths if watch_path not in current]
+            if missing:
+                progress_watcher.addPaths(missing)
+
+        def _translation_progress_changed(_path):
+            _ensure_translation_watch_paths()
+            data['_prefetch_dirty'] = True
+            if _progress_page_is_visible():
+                progress_watch_debounce.start()
+
+        progress_watch_debounce.timeout.connect(_silent_refresh)
+        progress_watcher.fileChanged.connect(_translation_progress_changed)
+        progress_watcher.directoryChanged.connect(_translation_progress_changed)
+        _ensure_translation_watch_paths()
+        data['_progress_watcher'] = progress_watcher
+        data['_progress_watch_debounce'] = progress_watch_debounce
+
+        # Slow polling is retained only as a fallback for dropped filesystem
+        # notifications and watcher re-registration after atomic replacements.
         _auto_refresh_timer = QTimer(data.get('dialog') or self)
-        _auto_refresh_timer.setInterval(1000)
+        _auto_refresh_timer.setInterval(2000)
         _auto_refresh_timer.timeout.connect(_silent_refresh)
         _auto_refresh_timer.start()
         data['_auto_refresh_timer'] = _auto_refresh_timer
 
         # Force-refresh whenever the (cached, hidden-on-close) Progress Manager
         # becomes visible again: kick a background snapshot immediately and
-        # apply it as soon as it lands, instead of waiting up to two timer
-        # ticks. Uses the same prefetch path, so no disk I/O on the GUI thread.
+        # apply it as soon as it lands. Uses the same prefetch path, so no disk
+        # I/O runs on the GUI thread.
         _pm_dialog = data.get('dialog')
         if _pm_dialog is not None:
             if not hasattr(_pm_dialog, '_progress_show_refreshers'):
@@ -25944,8 +26388,6 @@ class RetranslationMixin:
                     except Exception:
                         pass
                     _run_visible_refreshers()
-                    QTimer.singleShot(250, _run_visible_refreshers)
-                    QTimer.singleShot(900, _run_visible_refreshers)
 
                 _pm_dialog.showEvent = _pm_show_event
 
@@ -27867,7 +28309,7 @@ class RetranslationMixin:
                     print(f"✅ Auto-discovered and tracked (refresh): {filename} -> {output_file}")
         
         # Save progress file if we added new entries
-        if progress_updated:
+        if progress_updated and not data.get('_refresh_read_only'):
             try:
                 with open(data['progress_file'], 'w', encoding='utf-8') as f:
                     json.dump(prog, f, ensure_ascii=False, indent=2)
@@ -28958,6 +29400,7 @@ class RetranslationMixin:
     def _set_progress_list_item_metadata(self, item, info, status, show_special_files):
         is_special = info.get('is_special', False)
         is_skipped_special = self._progress_entry_needs_special_visibility(info)
+        item.setToolTip("")
         item.setData(Qt.UserRole, {
             'is_special': is_special,
             'info': info,
@@ -29063,6 +29506,15 @@ class RetranslationMixin:
                     item = QListWidgetItem(display)
                     self._apply_progress_list_item_visuals(item, status)
                     self._set_progress_list_item_metadata(item, info, status, show_special_files)
+                    item.setData(
+                        Qt.UserRole + 4,
+                        (
+                            display,
+                            status,
+                            self._progress_entry_needs_special_visibility(info)
+                            and not show_special_files,
+                        ),
+                    )
                     self._add_compact_inline_list_item(listbox, item)
                     if selected_keys and self._progress_list_item_key(info) in selected_keys:
                         item.setSelected(True)
@@ -29097,31 +29549,56 @@ class RetranslationMixin:
             )
             return
 
+        # A same-length list can still have a changed order or identity. In that
+        # case, rebuild; otherwise update only rows whose presentation or backing
+        # progress payload actually changed.
+        infos = data.get('chapter_display_info') or []
+        for idx, info in enumerate(infos):
+            item = listbox.item(idx)
+            payload = item.data(Qt.UserRole) if item else None
+            if not isinstance(payload, dict) or payload.get('item_key') != self._progress_list_item_key(info):
+                self._populate_progress_listbox_streamed(
+                    data,
+                    preserve_selection=True,
+                    preserve_scroll=True,
+                )
+                return
+
         show_special_files = self._progress_list_show_special(data)
         max_original_len, max_output_len = self._progress_list_column_widths(
-            data.get('chapter_display_info') or [],
+            infos,
             data,
         )
+
+        row_updates = []
+        for idx, info in enumerate(infos):
+            item = listbox.item(idx)
+            if not item:
+                continue
+            display, display_status = self._progress_list_display_text(
+                info,
+                data,
+                max_original_len,
+                max_output_len,
+            )
+            hidden = self._progress_entry_needs_special_visibility(info) and not show_special_files
+            fingerprint = (display, display_status, hidden)
+            old_payload = item.data(Qt.UserRole) or {}
+            payload_changed = not isinstance(old_payload, dict) or old_payload.get('info') != info
+            if item.data(Qt.UserRole + 4) != fingerprint or payload_changed:
+                row_updates.append((item, info, display, display_status, fingerprint))
+
+        if not row_updates:
+            return
 
         listbox.setUpdatesEnabled(False)
         listbox.blockSignals(True)
         try:
-            for idx, info in enumerate(data.get('chapter_display_info') or []):
-                if idx % 120 == 0:
-                    self._ui_yield()
-                item = listbox.item(idx)
-                if not item:
-                    continue
-                display, display_status = self._progress_list_display_text(
-                    info,
-                    data,
-                    max_original_len,
-                    max_output_len,
-                )
+            for item, info, display, display_status, fingerprint in row_updates:
                 item.setText(display)
                 self._apply_progress_list_item_visuals(item, display_status)
-                self._set_compact_inline_item_size(listbox, item)
                 self._set_progress_list_item_metadata(item, info, display_status, show_special_files)
+                item.setData(Qt.UserRole + 4, fingerprint)
         finally:
             listbox.blockSignals(False)
             listbox.setUpdatesEnabled(True)
@@ -29159,7 +29636,10 @@ class RetranslationMixin:
                     labels.update(find_stats_labels(child))
             return labels
         
-        stats_labels = find_stats_labels(container)
+        stats_labels = data.get('_stats_labels')
+        if not isinstance(stats_labels, dict):
+            stats_labels = find_stats_labels(container)
+            data['_stats_labels'] = stats_labels
         
         if stats_labels:
             # Recalculate statistics from chapter_display_info (works for both OPF and non-OPF)
@@ -29201,6 +29681,22 @@ class RetranslationMixin:
                 missing = sum(1 for status in display_statuses if status in ['not_translated', 'not_refined', 'no_tts'])
                 failed = sum(1 for status in display_statuses if status in ['failed', 'qa_failed', 'refine_failed'])
             
+            mode = self._current_progress_output_mode(data)
+            stats_fingerprint = (
+                total_chapters,
+                completed,
+                merged,
+                in_progress,
+                pending,
+                missing,
+                failed,
+                skipped,
+                mode,
+            )
+            if stats_fingerprint == data.get('_stats_fingerprint'):
+                return
+            data['_stats_fingerprint'] = stats_fingerprint
+
             # Update labels
             if 'total' in stats_labels:
                 stats_labels['total'].setText(f"Total: {total_chapters} | ")
@@ -29225,11 +29721,9 @@ class RetranslationMixin:
                 else:
                     stats_labels['pending'].setVisible(False)
             if 'missing' in stats_labels:
-                mode = self._current_progress_output_mode(data)
                 missing_label = "✨ Not Refined" if mode == 'refinement' else ("🔊 No TTS" if mode == 'audio' else "⬜ Not Translated")
                 stats_labels['missing'].setText(f"{missing_label}: {missing} | ")
             if 'failed' in stats_labels:
-                mode = self._current_progress_output_mode(data)
                 failed_icon = "💀" if mode == 'refinement' else "❌"
                 failed_label = "Refine Failed" if mode == 'refinement' else "Failed"
                 stats_labels['failed'].setText(f"{failed_icon} {failed_label}: {failed} | ")
@@ -29559,6 +30053,7 @@ class RetranslationMixin:
             
             # Create main dialog
             dialog = QDialog(self)
+            self._stamp_progress_manager_input_signature(dialog)
             dialog.setWindowTitle("Progress Manager - Multiple Files")
             # Parent-child windowing keeps this above the translator GUI
             dialog.setWindowModality(Qt.NonModal)
@@ -29882,6 +30377,8 @@ class RetranslationMixin:
                     print(f"[WARN] No tab data to refresh on dialog open")
 
             def _build_next_tab():
+                if getattr(dialog, '_progress_input_retired', False):
+                    return
                 if build_state['idx'] >= len(build_tasks):
                     _finish_streamed_tabs()
                     return
@@ -30530,6 +31027,7 @@ class RetranslationMixin:
         
         # Create dialog
         dialog = QDialog(self)
+        self._stamp_progress_manager_input_signature(dialog)
         dialog.setWindowTitle("Progress Manager - Images")
         # Parent-child windowing keeps this above the translator GUI
         dialog.setWindowModality(Qt.NonModal)

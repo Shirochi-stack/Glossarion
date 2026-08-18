@@ -14,9 +14,12 @@ from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton,
                                 QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
                                 QGroupBox, QSpinBox, QSlider, QMessageBox, QFileDialog,
                                 QSizePolicy, QAbstractItemView, QButtonGroup, QApplication,
-                                QComboBox, QMenu, QInputDialog)
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, Property, QObject, QEventLoop, QSize, QPoint
-from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut, QBrush
+                                QComboBox, QMenu, QInputDialog, QStyledItemDelegate,
+                                QStyleOptionViewItem, QStyle)
+from PySide6.QtCore import (Qt, Signal, Slot, QTimer, Property, QObject,
+                            QEventLoop, QSize, QPoint, QRectF)
+from PySide6.QtGui import (QFont, QColor, QIcon, QKeySequence, QShortcut,
+                           QBrush, QPainter, QPainterPath, QPen)
 from glossary_usage import (
     build_prepared_output_index,
     entry_matches_output_index,
@@ -41,6 +44,85 @@ def _collect_glossary_filter_values(value_states, *, restrict_to_visible=False):
         if is_checked and (is_visible or not restrict_to_visible)
     }
 
+
+class _GlossaryFilterItemDelegate(QStyledItemDelegate):
+    """Paint fast, widget-free filter checkboxes in the glossary style."""
+
+    _CHECKED_COLOR = QColor("#5a9fd4")
+    _UNCHECKED_BORDER = QColor("#5a9fd4")
+    _CHECKMARK_COLOR = QColor("#ffffff")
+    _HOVER_COLOR = QColor("#3a3a3a")
+
+    @staticmethod
+    def _box_size(font_metrics):
+        return max(14, min(18, font_metrics.height()))
+
+    @classmethod
+    def _box_rect(cls, option):
+        size = cls._box_size(option.fontMetrics)
+        left = option.rect.left() + 8
+        top = option.rect.top() + max(0, (option.rect.height() - size) // 2)
+        return QRectF(left, top, size, size)
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        option.features &= ~QStyleOptionViewItem.HasCheckIndicator
+        indent = 8 + self._box_size(option.fontMetrics) + 10
+        option.rect.adjust(indent, 0, 0, 0)
+
+    def paint(self, painter, option, index):
+        original_option = QStyleOptionViewItem(option)
+        if option.state & QStyle.State_MouseOver:
+            painter.fillRect(option.rect, self._HOVER_COLOR)
+
+        text_option = QStyleOptionViewItem(option)
+        text_option.state &= ~QStyle.State_MouseOver
+        super().paint(painter, text_option, index)
+
+        try:
+            check_state = Qt.CheckState(index.data(Qt.CheckStateRole))
+        except (TypeError, ValueError):
+            check_state = Qt.Unchecked
+        box = self._box_rect(original_option)
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        if check_state == Qt.Unchecked:
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(self._UNCHECKED_BORDER, 1.2))
+        else:
+            painter.setBrush(self._CHECKED_COLOR)
+            painter.setPen(QPen(self._CHECKED_COLOR, 1.0))
+        painter.drawRoundedRect(box, 2.5, 2.5)
+
+        mark_pen = QPen(self._CHECKMARK_COLOR, max(1.6, box.width() * 0.11))
+        mark_pen.setCapStyle(Qt.RoundCap)
+        mark_pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(mark_pen)
+        if check_state == Qt.PartiallyChecked:
+            y = box.top() + box.height() * 0.52
+            painter.drawLine(
+                int(box.left() + box.width() * 0.25),
+                int(y),
+                int(box.right() - box.width() * 0.25),
+                int(y),
+            )
+        elif check_state == Qt.Checked:
+            path = QPainterPath()
+            path.moveTo(
+                box.left() + box.width() * 0.22,
+                box.top() + box.height() * 0.53,
+            )
+            path.lineTo(
+                box.left() + box.width() * 0.43,
+                box.top() + box.height() * 0.73,
+            )
+            path.lineTo(
+                box.left() + box.width() * 0.79,
+                box.top() + box.height() * 0.28,
+            )
+            painter.drawPath(path)
+        painter.restore()
 
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
@@ -6468,6 +6550,7 @@ Do not stop after the glossary."""
             value_list = QListWidget()
             value_list.setSelectionMode(QAbstractItemView.NoSelection)
             value_list.setUniformItemSizes(True)
+            value_list.setItemDelegate(_GlossaryFilterItemDelegate(value_list))
             value_list.setMinimumHeight(230)
             value_list.setMaximumHeight(390)
             popup_layout.addWidget(value_list, 1)
@@ -6504,6 +6587,13 @@ Do not stop after the glossary."""
                 state = Qt.Checked if checked else Qt.Unchecked
                 if list_item.checkState() != state:
                     list_item.setCheckState(state)
+
+            def _toggle_filter_item(list_item):
+                if list_item.flags() & Qt.ItemIsUserCheckable:
+                    _set_filter_item_checked(
+                        list_item,
+                        not _filter_item_checked(list_item),
+                    )
 
             count_label = QLabel()
             count_label.setStyleSheet("color: #9ca3af;")
@@ -6663,6 +6753,7 @@ Do not stop after the glossary."""
             value_list.itemChanged.connect(
                 lambda _item: _sync_select_all_state()
             )
+            value_list.itemClicked.connect(_toggle_filter_item)
             _sync_select_all_state()
 
             button_row = QHBoxLayout()

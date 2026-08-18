@@ -1616,3 +1616,39 @@ def test_progress_manager_routes_parallel_pair_through_raw_epub(tmp_path):
             },
         )
     ]
+
+
+def test_progress_managers_use_event_driven_differential_refresh():
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "Retranslation_GUI.py"
+    ).read_text(encoding="utf-8")
+
+    assert "QFileSystemWatcher" in source
+    assert "progress_watch_debounce.setInterval(100)" in source
+    assert "gp_watch_debounce.setInterval(100)" in source
+    assert "prefetch_bridge.finished.emit(payload)" in source
+    assert 'QPushButton("🔄 Full Refresh")' in source
+    assert "_gp_timer.setInterval(2000)" in source
+    assert "_auto_refresh_timer.setInterval(2000)" in source
+    assert "_row_fingerprints" in source
+    assert "_prefetch_ready" not in source
+
+    glossary_start = source.index("        def _show_glossary_progress():")
+    glossary_end = source.index(
+        "        glossary_progress_btn.clicked.connect(_show_glossary_progress)",
+        glossary_start,
+    )
+    glossary_source = source[glossary_start:glossary_end]
+    assert "from PySide6.QtWidgets import QComboBox, QStackedWidget" not in glossary_source
+    assert "dialog._show_glossary_progress = _show_glossary_progress" in source
+
+
+def test_open_progress_managers_rebuild_when_input_signature_changes():
+    refresh_source = inspect.getsource(
+        RetranslationMixin._refresh_open_progress_managers_for_input_change
+    )
+
+    assert "_progress_manager_input_signature" in refresh_source
+    assert "dialog.deleteLater()" in refresh_source
+    assert "self.force_retranslation()" in refresh_source
+    assert "self._reopen_glossary_progress_after_input_change()" in refresh_source
