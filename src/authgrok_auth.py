@@ -5,10 +5,10 @@ Prefix models with ``authgrok/`` (or ``authgrokN/`` for numbered account
 slots) to use xAI's OAuth-backed Grok CLI proxy without an API key. The
 explicit ``authgrok0/`` route rotates the distinct saved account slots.
 
-The browser is opened on xAI's authorization page.  Users may choose any
-sign-in method offered there, including Google account sign-in.  The default
-slot uses OAuth 2.0 Authorization Code + PKCE; numbered slots use xAI's device
-grant so Glossarion can receive tokens without scraping or copying browser data.
+The browser is opened on xAI's authorization page. Users may choose any
+sign-in method offered there, including Google account sign-in. Interactive
+logins use xAI's device grant and first sign out the existing website session,
+so both the default and numbered slots receive a fresh account selection.
 
 The wire contract follows the public, MIT-licensed pi-xai-oauth reference:
 https://github.com/BlockedPath/pi-xai-oauth
@@ -601,7 +601,7 @@ def build_signed_out_device_url(verification_url: str) -> str:
 
 
 def run_device_oauth_flow(timeout: int = 300) -> Dict[str, Any]:
-    """Authorize a numbered account and receive its tokens without code pasting."""
+    """Authorize an account and receive its tokens without code pasting."""
     discovery = _load_oidc_discovery()
     device_code = request_device_code(timeout=min(30, timeout))
     verification_url = (
@@ -611,7 +611,7 @@ def run_device_oauth_flow(timeout: int = 300) -> Dict[str, Any]:
 
     signed_out_url = build_signed_out_device_url(str(verification_url))
     print(
-        "Opening the regular browser for this numbered Grok account. "
+        "Opening the regular browser for this Grok account. "
         "Glossarion will sign out the previous xAI website session first, then finish "
         "automatically after you approve the new account."
     )
@@ -712,7 +712,7 @@ def _create_callback_server(state: str) -> HTTPServer:
 
 def run_oauth_flow(
     timeout: int = 300,
-    force_account_selection: bool = False,
+    force_account_selection: bool = True,
 ) -> Dict[str, Any]:
     """Open xAI login in the browser and return validated OAuth tokens."""
     if force_account_selection:
@@ -1003,7 +1003,10 @@ class AuthGrokTokenStore:
                     "Set AUTHGROK_ACCESS_TOKEN and optionally AUTHGROK_REFRESH_TOKEN."
                 )
 
-            tokens = run_oauth_flow(force_account_selection=self._account_id > 0)
+            # Always clear the regular xAI website session before an interactive
+            # login. The saved OAuth token for an existing slot is independent
+            # of that browser session, and this prevents silent account reuse.
+            tokens = run_oauth_flow(force_account_selection=True)
             validate_account_slot_tokens(self._account_id, tokens)
             self.save_tokens(tokens)
             return str(tokens["access_token"])

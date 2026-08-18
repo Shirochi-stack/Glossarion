@@ -103,7 +103,17 @@ def test_numbered_login_rejects_untrusted_device_verification_url():
         )
 
 
-def test_numbered_oauth_flow_uses_auto_polled_device_authorization(monkeypatch):
+@pytest.mark.parametrize(
+    "flow_kwargs",
+    [
+        {},
+        {"force_account_selection": True},
+    ],
+)
+def test_all_interactive_oauth_flows_use_signed_out_device_authorization(
+    monkeypatch,
+    flow_kwargs,
+):
     opened = []
     polled = []
     device_code = {
@@ -146,7 +156,7 @@ def test_numbered_oauth_flow_uses_auto_polled_device_authorization(monkeypatch):
         lambda *_args: {"email": "second@example.test", "sub": "second"},
     )
 
-    tokens = authgrok.run_oauth_flow(force_account_selection=True)
+    tokens = authgrok.run_oauth_flow(**flow_kwargs)
 
     assert len(opened) == 1
     opened_query = parse_qs(urlparse(opened[0]).query)
@@ -236,7 +246,8 @@ def test_device_token_polling_waits_until_authorized(monkeypatch):
     assert responses == []
 
 
-def test_numbered_store_auto_login_forces_account_selection(tmp_path, monkeypatch):
+@pytest.mark.parametrize("account_id", [0, 2])
+def test_every_store_auto_login_forces_account_selection(tmp_path, monkeypatch, account_id):
     captured = []
 
     def fake_login(*, force_account_selection=False, timeout=300):
@@ -248,9 +259,13 @@ def test_numbered_store_auto_login_forces_account_selection(tmp_path, monkeypatc
         }
 
     monkeypatch.setattr(authgrok, "run_oauth_flow", fake_login)
+    monkeypatch.setattr(authgrok, "load_grok_cli_credentials", lambda: None)
+    monkeypatch.setattr(authgrok, "validate_account_slot_tokens", lambda *_args: None)
+    monkeypatch.delenv("AUTHGROK_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("AUTHGROK_REFRESH_TOKEN", raising=False)
     store = authgrok.AuthGrokTokenStore(
-        str(tmp_path / "authgrok_tokens_2.json"),
-        account_id=2,
+        str(tmp_path / f"authgrok_tokens_{account_id}.json"),
+        account_id=account_id,
     )
 
     assert store.get_valid_access_token(auto_login=True) == "numbered-token"

@@ -18690,7 +18690,7 @@ Recent translations to summarize:
             try:
                 from authgrok_auth import run_oauth_flow, validate_account_slot_tokens
                 tokens = run_oauth_flow(
-                    force_account_selection=account_id > 0,
+                    force_account_selection=True,
                 )
                 validate_account_slot_tokens(account_id, tokens)
                 store.save_tokens(tokens)
