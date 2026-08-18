@@ -6,8 +6,9 @@ slots) to use xAI's OAuth-backed Grok CLI proxy without an API key. The
 explicit ``authgrok0/`` route rotates the distinct saved account slots.
 
 The browser is opened on xAI's authorization page.  Users may choose any
-sign-in method offered there, including Google account sign-in.  The flow is
-OAuth 2.0 Authorization Code + PKCE and validates the returned OIDC ID token.
+sign-in method offered there, including Google account sign-in.  The default
+slot uses OAuth 2.0 Authorization Code + PKCE; numbered slots use xAI's device
+grant so Glossarion can receive tokens without scraping or copying browser data.
 
 The wire contract follows the public, MIT-licensed pi-xai-oauth reference:
 https://github.com/BlockedPath/pi-xai-oauth
@@ -22,10 +23,6 @@ import logging
 import os
 import re
 import secrets
-import shutil
-import subprocess
-import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -73,6 +70,8 @@ XAI_OAUTH_AUTHORIZATION_URL = f"{XAI_OAUTH_ISSUER}/oauth2/authorize"
 XAI_OAUTH_TOKEN_URL = f"{XAI_OAUTH_ISSUER}/oauth2/token"
 XAI_OAUTH_DEVICE_CODE_URL = f"{XAI_OAUTH_ISSUER}/oauth2/device/code"
 XAI_OAUTH_JWKS_URL = f"{XAI_OAUTH_ISSUER}/.well-known/jwks.json"
+XAI_ACCOUNTS_ORIGIN = "https://accounts.x.ai"
+XAI_ACCOUNTS_SIGN_OUT_URL = f"{XAI_ACCOUNTS_ORIGIN}/sign-out"
 XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
 XAI_OAUTH_SCOPE = (
     "openid profile email offline_access grok-cli:access api:access "
@@ -197,143 +196,17 @@ def build_auth_url(
         "nonce": nonce,
     }
     if force_account_selection:
-        # These are useful OIDC hints, but xAI currently still reuses its
-        # browser session and can jump straight to consent.  Numbered slots
-        # are enforced separately by opening this URL in an isolated profile.
+        # These hints are retained for callers that explicitly construct a
+        # fresh PKCE URL. Numbered Glossarion slots use the device flow below.
         params["prompt"] = "login"
         params["max_age"] = "0"
     return f"{authorization_endpoint}?{urlencode(params)}"
 
 
-def _isolation_capable_browser_paths() -> List[str]:
-    """Return installed browsers that can use a dedicated temporary profile."""
-    candidates: List[str] = []
-    executable_names: List[str]
-
-    if os.name == "nt":
-        roots = [
-            os.environ.get("PROGRAMFILES", ""),
-            os.environ.get("PROGRAMFILES(X86)", ""),
-            os.environ.get("LOCALAPPDATA", ""),
-        ]
-        relative_paths = [
-            os.path.join("Google", "Chrome", "Application", "chrome.exe"),
-            os.path.join("Microsoft", "Edge", "Application", "msedge.exe"),
-            os.path.join("BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
-            os.path.join("Mozilla Firefox", "firefox.exe"),
-        ]
-        for relative_path in relative_paths:
-            for root in roots:
-                if root:
-                    candidates.append(os.path.join(root, relative_path))
-        executable_names = ["chrome.exe", "msedge.exe", "brave.exe", "firefox.exe"]
-    elif sys.platform == "darwin":
-        mac_app_binaries = [
-            os.path.join("Google Chrome.app", "Contents", "MacOS", "Google Chrome"),
-            os.path.join("Microsoft Edge.app", "Contents", "MacOS", "Microsoft Edge"),
-            os.path.join("Brave Browser.app", "Contents", "MacOS", "Brave Browser"),
-            os.path.join("Firefox.app", "Contents", "MacOS", "firefox"),
-        ]
-        for applications_dir in (
-            "/Applications",
-            os.path.expanduser("~/Applications"),
-        ):
-            candidates.extend(
-                os.path.join(applications_dir, binary)
-                for binary in mac_app_binaries
-            )
-        executable_names = [
-            "google-chrome", "microsoft-edge", "brave-browser", "firefox"
-        ]
-    else:
-        executable_names = [
-            "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
-            "microsoft-edge", "microsoft-edge-stable", "brave-browser", "firefox",
-        ]
-
-    candidates.extend(
-        resolved
-        for name in executable_names
-        if (resolved := shutil.which(name))
-    )
-
-    existing: List[str] = []
-    seen = set()
-    for path in candidates:
-        normalized = os.path.normcase(os.path.abspath(path))
-        if normalized not in seen and os.path.isfile(path):
-            seen.add(normalized)
-            existing.append(path)
-    return existing
-
-
-def _isolated_browser_command(
-    executable: str,
-    auth_url: str,
-    profile_dir: str,
-) -> List[str]:
-    """Build a browser command whose cookies cannot leak from another slot."""
-    browser_name = os.path.basename(executable).casefold()
-    if "firefox" in browser_name:
-        return [
-            executable,
-            "-no-remote",
-            "-profile", profile_dir,
-            "-private-window", auth_url,
-        ]
-
-    private_flag = "--inprivate" if "edge" in browser_name else "--incognito"
-    return [
-        executable,
-        f"--user-data-dir={profile_dir}",
-        private_flag,
-        "--new-window",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-background-mode",
-        auth_url,
-    ]
-
-
-def _open_oauth_browser(auth_url: str, isolated_session: bool = False) -> None:
-    """Open OAuth normally or in a cookie-isolated browser for a new slot."""
-    if not isolated_session:
-        if not webbrowser.open(auth_url):
-            raise RuntimeError("Could not open the default browser for xAI login")
-        return
-
-    browsers = _isolation_capable_browser_paths()
-    if not browsers:
-        raise RuntimeError(
-            "A numbered Grok account needs an isolated browser session, but Glossarion "
-            "could not find Chrome, Edge, Brave, or Firefox. Install one of those browsers "
-            "and try the numbered account login again."
-        )
-
-    profile_dir = tempfile.mkdtemp(prefix="glossarion-authgrok-login-")
-    command = _isolated_browser_command(browsers[0], auth_url, profile_dir)
-    try:
-        subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-        )
-    except Exception as exc:
-        try:
-            os.rmdir(profile_dir)
-        except OSError:
-            pass
-        raise RuntimeError(
-            f"Could not open an isolated browser for the numbered Grok account: {exc}"
-        ) from exc
-
-    logger.info(
-        "Opened numbered AuthGrok login in isolated browser %s with profile %s",
-        browsers[0],
-        profile_dir,
-    )
+def _open_oauth_browser(auth_url: str) -> None:
+    """Open xAI OAuth in the user's normal default browser."""
+    if not webbrowser.open(auth_url):
+        raise RuntimeError("Could not open the default browser for xAI login")
 
 
 def _validate_id_token(
@@ -556,7 +429,7 @@ def poll_device_code_tokens(
     device_code: Dict[str, Any],
     timeout: int = 300,
 ) -> Dict[str, Any]:
-    """Poll xAI until the isolated-browser device authorization completes."""
+    """Poll xAI until the browser device authorization completes."""
     interval = max(1.0, float(device_code.get("interval", DEVICE_CODE_DEFAULT_POLL_SECONDS)))
     expires_in = max(1.0, float(device_code.get("expires_in", timeout)))
     deadline = time.monotonic() + min(float(timeout), expires_in)
@@ -607,6 +480,27 @@ def poll_device_code_tokens(
         raise RuntimeError(f"xAI device authorization failed: {detail or 'unknown error'}")
 
 
+def build_signed_out_device_url(verification_url: str) -> str:
+    """Log out the xAI website session, then continue to device authorization."""
+    parsed = urlparse(verification_url)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "accounts.x.ai"
+        or parsed.path != "/oauth2/device"
+        or parsed.fragment
+    ):
+        raise RuntimeError("xAI device authorization returned an unsafe verification URL")
+
+    return_to = parsed.path
+    if parsed.query:
+        return_to += f"?{parsed.query}"
+    sign_out_query = urlencode({
+        "redirect": "oauth2-provider",
+        "return_to": return_to,
+    })
+    return f"{XAI_ACCOUNTS_SIGN_OUT_URL}?{sign_out_query}"
+
+
 def run_device_oauth_flow(timeout: int = 300) -> Dict[str, Any]:
     """Authorize a numbered account and receive its tokens without code pasting."""
     discovery = _load_oidc_discovery()
@@ -616,11 +510,13 @@ def run_device_oauth_flow(timeout: int = 300) -> Dict[str, Any]:
         or device_code["verification_uri"]
     )
 
+    signed_out_url = build_signed_out_device_url(str(verification_url))
     print(
-        "Opening an isolated browser for this numbered Grok account. "
-        "Glossarion will finish automatically after you approve the displayed code."
+        "Opening the regular browser for this numbered Grok account. "
+        "Glossarion will sign out the previous xAI website session first, then finish "
+        "automatically after you approve the new account."
     )
-    _open_oauth_browser(str(verification_url), isolated_session=True)
+    _open_oauth_browser(signed_out_url)
     tokens = poll_device_code_tokens(device_code, timeout=timeout)
     claims = _validate_id_token(tokens["id_token"], None, discovery)
     tokens["account"] = {
@@ -717,8 +613,8 @@ def run_oauth_flow(
     """Open xAI login in the browser and return validated OAuth tokens."""
     if force_account_selection:
         # xAI may render an out-of-band Grok Build code instead of redirecting
-        # an isolated browser to localhost.  Its device grant is designed for
-        # exactly this case: the app polls and receives tokens automatically.
+        # to localhost. Its device grant is designed for exactly this case:
+        # the app polls and receives tokens automatically.
         return run_device_oauth_flow(timeout=timeout)
 
     discovery = _load_oidc_discovery()
@@ -741,7 +637,7 @@ def run_oauth_flow(
 
     print("Opening browser for Grok login (Google sign-in is supported by xAI)...")
     print(f"If the browser does not open, visit:\n{auth_url}")
-    _open_oauth_browser(auth_url, isolated_session=False)
+    _open_oauth_browser(auth_url)
 
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()

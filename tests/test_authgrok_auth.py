@@ -46,64 +46,25 @@ def test_build_auth_url_can_force_a_fresh_numbered_account_login():
     assert query["max_age"] == ["0"]
 
 
-def test_chromium_numbered_login_uses_private_dedicated_profile():
-    args = authgrok._isolated_browser_command(
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        "https://auth.x.ai/oauth2/authorize?state=test",
-        r"C:\Temp\authgrok-profile",
+def test_numbered_login_signs_out_xai_then_returns_to_device_authorization():
+    url = authgrok.build_signed_out_device_url(
+        "https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH"
     )
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
 
-    assert "--incognito" in args
-    assert "--user-data-dir=C:\\Temp\\authgrok-profile" in args
-    assert args[-1].startswith("https://auth.x.ai/oauth2/authorize")
-
-
-def test_edge_numbered_login_uses_inprivate_dedicated_profile():
-    args = authgrok._isolated_browser_command(
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        "https://auth.x.ai/oauth2/authorize?state=test",
-        r"C:\Temp\authgrok-profile",
+    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == (
+        authgrok.XAI_ACCOUNTS_SIGN_OUT_URL
     )
-
-    assert "--inprivate" in args
-    assert "--user-data-dir=C:\\Temp\\authgrok-profile" in args
-
-
-def test_macos_chrome_numbered_login_uses_isolated_profile():
-    args = authgrok._isolated_browser_command(
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "https://auth.x.ai/oauth2/authorize?state=test",
-        "/tmp/authgrok-profile",
-    )
-
-    assert "--incognito" in args
-    assert "--user-data-dir=/tmp/authgrok-profile" in args
+    assert query["redirect"] == ["oauth2-provider"]
+    assert query["return_to"] == ["/oauth2/device?user_code=ABCD-EFGH"]
 
 
-def test_linux_edge_numbered_login_uses_inprivate_profile():
-    args = authgrok._isolated_browser_command(
-        "/usr/bin/microsoft-edge-stable",
-        "https://auth.x.ai/oauth2/authorize?state=test",
-        "/tmp/authgrok-profile",
-    )
-
-    assert "--inprivate" in args
-    assert "--user-data-dir=/tmp/authgrok-profile" in args
-
-
-def test_linux_firefox_numbered_login_uses_private_dedicated_profile():
-    args = authgrok._isolated_browser_command(
-        "/usr/bin/firefox",
-        "https://auth.x.ai/oauth2/authorize?state=test",
-        "/tmp/authgrok-profile",
-    )
-
-    assert args == [
-        "/usr/bin/firefox",
-        "-no-remote",
-        "-profile", "/tmp/authgrok-profile",
-        "-private-window", "https://auth.x.ai/oauth2/authorize?state=test",
-    ]
+def test_numbered_login_rejects_untrusted_device_verification_url():
+    with pytest.raises(RuntimeError, match="unsafe verification URL"):
+        authgrok.build_signed_out_device_url(
+            "https://example.test/oauth2/device?user_code=ABCD-EFGH"
+        )
 
 
 def test_numbered_oauth_flow_uses_auto_polled_device_authorization(monkeypatch):
@@ -112,8 +73,10 @@ def test_numbered_oauth_flow_uses_auto_polled_device_authorization(monkeypatch):
     device_code = {
         "device_code": "device-secret",
         "user_code": "ABCD-EFGH",
-        "verification_uri": "https://accounts.x.ai/device",
-        "verification_uri_complete": "https://accounts.x.ai/device?user_code=ABCD-EFGH",
+        "verification_uri": "https://accounts.x.ai/oauth2/device",
+        "verification_uri_complete": (
+            "https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH"
+        ),
         "expires_in": 600,
         "interval": 5,
     }
@@ -126,7 +89,7 @@ def test_numbered_oauth_flow_uses_auto_polled_device_authorization(monkeypatch):
     monkeypatch.setattr(
         authgrok,
         "_open_oauth_browser",
-        lambda url, isolated_session=False: opened.append((url, isolated_session)),
+        lambda url: opened.append(url),
     )
     monkeypatch.setattr(
         authgrok,
@@ -149,8 +112,9 @@ def test_numbered_oauth_flow_uses_auto_polled_device_authorization(monkeypatch):
     tokens = authgrok.run_oauth_flow(force_account_selection=True)
 
     assert len(opened) == 1
-    assert opened[0][0] == device_code["verification_uri_complete"]
-    assert opened[0][1] is True
+    opened_query = parse_qs(urlparse(opened[0]).query)
+    assert opened[0].startswith(authgrok.XAI_ACCOUNTS_SIGN_OUT_URL)
+    assert opened_query["return_to"] == ["/oauth2/device?user_code=ABCD-EFGH"]
     assert polled == [(device_code, 300)]
     assert tokens["account"]["email"] == "second@example.test"
 
@@ -167,9 +131,9 @@ def test_request_device_code_uses_xai_device_endpoint(monkeypatch):
             return {
                 "device_code": "device-secret",
                 "user_code": "ABCD-EFGH",
-                "verification_uri": "https://accounts.x.ai/device",
+                "verification_uri": "https://accounts.x.ai/oauth2/device",
                 "verification_uri_complete": (
-                    "https://accounts.x.ai/device?user_code=ABCD-EFGH"
+                    "https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH"
                 ),
                 "expires_in": 900,
                 "interval": 4,
