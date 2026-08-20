@@ -1230,6 +1230,183 @@ def test_reader_paints_shell_before_creating_browser_views(
         qapp.processEvents()
 
 
+def test_reader_keeps_qobject_parent_but_clears_transient_window_owner(
+    qapp, monkeypatch,
+):
+    """Minimizing Library/Details must not minimize their open reader."""
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    monkeypatch.setattr(
+        epub_library,
+        "_epub_reader_webengine_is_warmed",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        EpubReaderDialog,
+        "_initialize_reader_views",
+        lambda self: None,
+    )
+
+    owner = QWidget()
+    owner.show()
+    dialog = EpubReaderDialog(
+        "C:/layout-test/independent-reader.epub",
+        config={},
+        parent=owner,
+    )
+    try:
+        dialog.show()
+        qapp.processEvents()
+
+        # The QObject parent remains available for cleanup and config access,
+        # while the QWindow transient parent (the native minimize link) is gone.
+        assert dialog.parent() is owner
+        assert dialog.windowHandle() is not None
+        assert dialog.windowHandle().transientParent() is None
+
+        owner.showMinimized()
+        qapp.processEvents()
+        assert owner.isMinimized()
+        assert not dialog.isMinimized()
+        owner.showNormal()
+
+        # Re-showing must not recreate the native owner relationship.
+        dialog.hide()
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.windowHandle().transientParent() is None
+    finally:
+        dialog.close()
+        owner.close()
+        qapp.processEvents()
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_visible"),
+    [
+        ("completed", False),
+        ("", False),
+        ("qa_failed", True),
+        ("failed", True),
+        ("pending", True),
+    ],
+)
+def test_reader_translate_button_uses_overlay_progress_status(
+    tmp_path, status, expected_visible,
+):
+    translated = tmp_path / "response_chapter.xhtml"
+    translated.write_text("<p>translated</p>", encoding="utf-8")
+
+    class ButtonStub:
+        visible = None
+
+        def setVisible(self, visible):
+            self.visible = bool(visible)
+
+    class ReaderStub:
+        _translate_btn = ButtonStub()
+        _workspace_mode = False
+        _live_translate_active = False
+        _current_row = 0
+        _chapter_filenames = ["chapter.xhtml"]
+        _translated_overlay = {
+            "chapter.xhtml": {
+                "path": str(translated),
+                "status": status,
+            }
+        }
+        _raw_epub_alt_path = ""
+
+    reader = ReaderStub()
+    EpubReaderDialog._update_translate_btn_visibility(reader)
+
+    assert reader._translate_btn.visible is expected_visible
+
+
+def test_details_overlay_preserves_qa_failed_status(tmp_path):
+    translated = tmp_path / "response_chapter.xhtml"
+    translated.write_text("<p>translated but failed QA</p>", encoding="utf-8")
+
+    class DetailsStub:
+        _chapters_info = [
+            {
+                "filename": "chapter.xhtml",
+                "translated_path": str(translated),
+                "translated_title": "Chapter",
+                "status": "qa_failed",
+            }
+        ]
+        _book = {"output_folder": str(tmp_path)}
+
+    overlay, _extra_dirs = BookDetailsDialog._build_translated_overlay(
+        DetailsStub()
+    )
+
+    assert overlay["chapter.xhtml"]["status"] == "qa_failed"
+
+
+def test_reader_retries_qa_failed_chapter_without_completed_confirmation(
+    tmp_path, monkeypatch,
+):
+    raw_epub = tmp_path / "book.epub"
+    raw_epub.write_bytes(b"epub")
+    translated = tmp_path / "response_chapter.xhtml"
+    translated.write_text("<p>translated but failed QA</p>", encoding="utf-8")
+    reset_calls = []
+
+    class GuiStub:
+        translation_thread = None
+
+        def add_log_listener(self, _listener):
+            pass
+
+        def start_single_chapter_translation(self, *_args, **_kwargs):
+            return False
+
+    class ReaderStub:
+        _live_translate_active = False
+        _chapters = [("Chapter", "<p>raw</p>")]
+        _chapter_filenames = ["chapter.xhtml"]
+        _current_row = 0
+        _epub_path = str(raw_epub)
+        _raw_epub_alt_path = ""
+        _translated_overlay = {
+            "chapter.xhtml": {
+                "path": str(translated),
+                "status": "qa_failed",
+            }
+        }
+
+        def _ensure_live_panel(self):
+            pass
+
+        def _reset_live_state(self):
+            pass
+
+        def _on_live_log_line(self, _message):
+            pass
+
+        def _teardown_live_listener(self):
+            pass
+
+    monkeypatch.setattr(epub_library, "_find_translator_gui", lambda _reader: GuiStub())
+    monkeypatch.setattr(
+        epub_library,
+        "_mark_chapter_pending_for_retranslation",
+        lambda folder, filename: reset_calls.append((folder, filename)) or True,
+    )
+    monkeypatch.setattr(
+        epub_library.QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: pytest.fail(
+            "QA-failed chapters must not use the completed confirmation"
+        ),
+    )
+
+    EpubReaderDialog._on_translate_current_chapter(ReaderStub())
+
+    assert reset_calls == [(str(tmp_path), "chapter.xhtml")]
+
+
 def test_reader_cold_webengine_is_initialized_before_first_show(
     qapp, monkeypatch,
 ):

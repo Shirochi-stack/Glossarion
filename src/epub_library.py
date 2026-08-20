@@ -17776,6 +17776,10 @@ class BookDetailsDialog(QDialog):
             overlay[key] = {
                 "path": path,
                 "title": ci.get("translated_title") or "",
+                # A response file can exist even though the translation failed
+                # QA.  Preserve the progress status so the reader does not
+                # mistake every on-disk response for a completed chapter.
+                "status": str(ci.get("status") or "").strip().lower(),
             }
         extra_dirs: list[str] = []
         output_folder = self._book.get("output_folder")
@@ -21162,7 +21166,13 @@ class EpubReaderDialog(QDialog):
                          if p and os.path.isfile(p) else 0.0)
                 except OSError:
                     m = 0.0
-                sig.append((k, p, m, entry.get("title", "") or ""))
+                sig.append((
+                    k,
+                    p,
+                    m,
+                    entry.get("title", "") or "",
+                    str(entry.get("status") or "").strip().lower(),
+                ))
             return tuple(sig)
 
         new_sig = _sig(normalised)
@@ -23612,17 +23622,23 @@ class EpubReaderDialog(QDialog):
             return
 
         # Already-translated chapter → confirm + reset its progress entry
-        # so the pipeline doesn't skip it as completed.
+        # so the pipeline doesn't skip it as completed. QA-failed/failed
+        # outputs are already known to need another attempt, so do not show the
+        # misleading "already translated" confirmation for those chapters.
         overlay_entry = (self._translated_overlay or {}).get(chapter_file.lower())
         if overlay_entry and overlay_entry.get("path"):
-            title = self._chapters[row][0] if row < len(self._chapters) else chapter_file
-            if QMessageBox.question(
-                    self, "Retranslate chapter",
-                    f"“{title}” is already translated.\n\n"
-                    "Delete its current translation and retranslate it live?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No) != QMessageBox.Yes:
-                return
+            entry_status = str(
+                overlay_entry.get("status") or "").strip().lower()
+            if entry_status in ("", "completed"):
+                title = (self._chapters[row][0]
+                         if row < len(self._chapters) else chapter_file)
+                if QMessageBox.question(
+                        self, "Retranslate chapter",
+                        f"“{title}” is already translated.\n\n"
+                        "Delete its current translation and retranslate it live?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No) != QMessageBox.Yes:
+                    return
             out_dir = os.path.dirname(str(overlay_entry["path"]))
             if out_dir and os.path.isdir(out_dir):
                 _mark_chapter_pending_for_retranslation(out_dir, chapter_file)
@@ -23679,8 +23695,10 @@ class EpubReaderDialog(QDialog):
         Rules:
           * While a live run is active the button stays visible (it toggles
             the live view).
-          * Overlay mode (in-progress books): hidden when the current
-            chapter has a translated response file on disk.
+          * Overlay mode (in-progress books): hidden when the current chapter
+            has a completed translated response file on disk. Failed and
+            QA-failed responses remain translatable even though their output
+            file still exists.
           * Dual-path mode (compiled output + raw source): hidden while the
             compiled/translated EPUB is the active view — every chapter in
             it is already translated. Flipping to Raw shows it again.
@@ -23708,7 +23726,12 @@ class EpubReaderDialog(QDialog):
                     entry = overlay.get(base)
                     if entry and entry.get("path") and os.path.isfile(
                             str(entry["path"])):
-                        visible = False
+                        status = str(entry.get("status") or "").strip().lower()
+                        # Status-less overlay entries predate status propagation
+                        # and retain the original "file means completed"
+                        # behavior. Explicit non-completed statuses must keep
+                        # the action available for another attempt.
+                        visible = status not in ("", "completed")
             elif self._raw_epub_alt_path:
                 # Compiled↔raw dual mode: the primary path is the
                 # translated output; only the raw flavor is translatable.
@@ -24155,6 +24178,16 @@ class EpubReaderDialog(QDialog):
     def showEvent(self, event):
         """Paint the loading shell before starting Chromium-backed panes."""
         super().showEvent(event)
+        # Keep QObject ownership (lifetime, config persistence, and access to
+        # the translator) without making the reader an OS-owned window.  On
+        # Windows an owned top-level window is automatically hidden whenever
+        # its owner is minimized, which previously made minimizing Library or
+        # Book Details minimize the reader as well.
+        self._clear_transient_window_parent()
+        # Some platform plugins finish creating the native window immediately
+        # after showEvent.  Repeat once after that hand-off so the native owner
+        # cannot be restored as part of first-show window creation.
+        QTimer.singleShot(0, self._clear_transient_window_parent)
         if (self._closing or self._reader_views_ready
                 or self._reader_init_queued):
             return
@@ -24164,6 +24197,20 @@ class EpubReaderDialog(QDialog):
         # symptom: the context menu disappears but no reader window is visible
         # while Chromium performs its cold start.
         QTimer.singleShot(40, self._initialize_reader_views)
+
+    def _clear_transient_window_parent(self):
+        """Make the reader minimize independently of its QObject parent."""
+        if getattr(self, "_closing", False):
+            return
+        try:
+            handle = self.windowHandle()
+            if handle is not None and handle.transientParent() is not None:
+                handle.setTransientParent(None)
+        except Exception:
+            logger.debug(
+                "Could not detach EPUB reader from its transient window owner: %s",
+                traceback.format_exc(),
+            )
 
     def closeEvent(self, event):
         """Persist reader settings back into config and flush to disk.
