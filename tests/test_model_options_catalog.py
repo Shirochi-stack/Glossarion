@@ -1246,3 +1246,62 @@ def test_gui_auto_poll_log_counts_models_not_already_displayed(
     assert logs == [
         f"✅ Auto-poll complete: electronhub — 3 models · {expected_new_label}"
     ]
+
+
+def test_model_manager_unpolled_filter_is_off_by_default_and_reversible(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    qt_gui = pytest.importorskip("PySide6.QtGui")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    list_widget = qt_widgets.QListWidget()
+    list_widget.addItems(["provider/confirmed", "provider/unpolled"])
+    toggle = qt_widgets.QCheckBox("Hide unpolled models")
+    manager = SimpleNamespace(
+        _model_list_widget=list_widget,
+        _polled_model_icon=qt_gui.QIcon(),
+        _hide_unpolled_models_toggle=toggle,
+    )
+    confirmed = {"PROVIDER/CONFIRMED"}
+
+    assert not toggle.isChecked()
+    translator_gui.TranslatorGUI._apply_polled_model_icons(manager, confirmed)
+    assert not list_widget.item(0).isHidden()
+    assert not list_widget.item(1).isHidden()
+
+    toggle.setChecked(True)
+    translator_gui.TranslatorGUI._apply_polled_model_icons(manager, confirmed)
+    assert not list_widget.item(0).isHidden()
+    assert list_widget.item(1).isHidden()
+
+    toggle.setChecked(False)
+    translator_gui.TranslatorGUI._apply_polled_model_icons(manager, confirmed)
+    assert not list_widget.item(0).isHidden()
+    assert not list_widget.item(1).isHidden()
+    app.processEvents()
+
+
+def test_model_manager_save_persists_hide_unpolled_preference():
+    import translator_gui
+
+    saved_orders = []
+    gui = SimpleNamespace(
+        config={},
+        _collect_custom_prefix_routes_from_table=lambda _table, _dialog: [],
+        _sync_custom_prefix_routes_env=lambda: None,
+        _save_model_order=lambda list_widget, dialog: saved_orders.append(
+            (list_widget, dialog)
+        ),
+    )
+    toggle = SimpleNamespace(isChecked=lambda: True)
+    dialog = SimpleNamespace(_hide_unpolled_models_toggle=toggle)
+    list_widget = object()
+    prefix_table = object()
+
+    translator_gui.TranslatorGUI._save_model_manager_state(
+        gui, list_widget, prefix_table, dialog
+    )
+
+    assert gui.config['model_manager_hide_unpolled_models'] is True
+    assert saved_orders == [(list_widget, dialog)]

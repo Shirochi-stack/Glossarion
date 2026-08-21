@@ -20483,7 +20483,7 @@ Recent translations to summarize:
 
     @staticmethod
     def _apply_polled_model_icons(manager, polled_model_keys):
-        """Mark models confirmed by the latest online provider poll."""
+        """Mark confirmed models and apply the optional testing filter."""
         list_widget = getattr(manager, '_model_list_widget', None)
         if list_widget is None:
             return
@@ -20493,10 +20493,13 @@ Recent translations to summarize:
         polled_model_keys = {
             str(model).casefold() for model in (polled_model_keys or set())
         }
+        hide_toggle = getattr(manager, '_hide_unpolled_models_toggle', None)
+        hide_unpolled = bool(hide_toggle is not None and hide_toggle.isChecked())
         for index in range(list_widget.count()):
             item = list_widget.item(index)
             is_polled = item.text().casefold() in polled_model_keys
             item.setIcon(checked_icon if is_polled else empty_icon)
+            item.setHidden(hide_unpolled and not is_polled)
             item.setToolTip(
                 "✓ Confirmed by the latest successful online provider poll"
                 if is_polled else ""
@@ -22337,7 +22340,22 @@ Recent translations to summarize:
         reset_btn.clicked.connect(reset_defaults)
         button_column.addWidget(reset_btn)
 
-        button_column.addSpacing(10)
+        # Temporary testing view only. Hiding an item never removes it from the
+        # editable list or from the saved model order.
+        hide_unpolled_toggle = self._create_styled_checkbox(
+            "🧪 Hide unpolled models"
+        )
+        hide_unpolled_toggle.setObjectName("hideUnpolledModelsToggle")
+        hide_unpolled_toggle.setChecked(bool(
+            self.config.get('model_manager_hide_unpolled_models', False)
+        ))
+        hide_unpolled_toggle.setToolTip(
+            "Show only models marked ✓ by successful provider catalog polls. "
+            "This testing filter does not change or save the model list."
+        )
+        button_column.addWidget(hide_unpolled_toggle)
+
+        button_column.addSpacing(4)
 
         # Visible provider-catalog polling. This uses the same asynchronous
         # refresh as startup, so the manager and the rest of Qt stay responsive.
@@ -22365,6 +22383,7 @@ Recent translations to summarize:
         }
         dialog._model_list_widget = list_widget
         dialog._polled_model_icon = self._create_polled_model_icon()
+        dialog._hide_unpolled_models_toggle = hide_unpolled_toggle
         dialog._model_poll_button = poll_btn
         dialog._model_poll_status = poll_status
         dialog._save_model_list_state = save_state
@@ -22373,6 +22392,12 @@ Recent translations to summarize:
         self._apply_polled_model_icons(
             dialog, getattr(self, '_polled_online_model_ids', set())
         )
+        def update_hide_unpolled_filter(checked):
+            self.config['model_manager_hide_unpolled_models'] = bool(checked)
+            self._apply_polled_model_icons(
+                dialog, getattr(self, '_polled_online_model_ids', set())
+            )
+        hide_unpolled_toggle.toggled.connect(update_hide_unpolled_filter)
 
         def poll_provider_catalogs():
             dialog._catalog_poll_pending = True
@@ -23003,6 +23028,13 @@ Recent translations to summarize:
         if routes is None:
             return
 
+        hide_unpolled_toggle = getattr(
+            dialog, '_hide_unpolled_models_toggle', None
+        )
+        if hide_unpolled_toggle is not None:
+            self.config['model_manager_hide_unpolled_models'] = bool(
+                hide_unpolled_toggle.isChecked()
+            )
         self.custom_prefix_routes = routes
         self.config['custom_prefix_routes'] = routes
         self._sync_custom_prefix_routes_env()
