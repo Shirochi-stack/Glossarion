@@ -926,7 +926,7 @@ def test_dual_path_reader_snapshot_copies_prepared_image_state(tmp_path):
     assert state["image_cache_generation"] == 3
 
 
-def test_first_dual_path_switch_preloads_target_chapter_images(monkeypatch):
+def test_standalone_raw_epub_open_preloads_initial_chapter_images(monkeypatch):
     created = []
 
     class SignalStub:
@@ -948,13 +948,16 @@ def test_first_dual_path_switch_preloads_target_chapter_images(monkeypatch):
             self.started = True
 
     class ReaderStub:
-        _raw_toggle_in_flight = True
-        _raw_epub_alt_path = "raw.epub"
-        _reload_position_hint = {"row": 1}
-        _dual_path_image_preload_thread = None
+        _raw_toggle_in_flight = False
+        _reader_startup_pending = True
+        _chapters = []
+        _reload_position_hint = None
+        _initial_chapter_filename = "scan.xhtml"
+        _initial_chapter = None
+        _epub_load_image_preload_thread = None
         _extra_image_dirs = []
         _epub_path = "raw.epub"
-        _pending_dual_path_load = None
+        _pending_epub_load = None
 
         def _dual_path_reader_state_key(self):
             return "raw-state"
@@ -962,10 +965,10 @@ def test_first_dual_path_switch_preloads_target_chapter_images(monkeypatch):
         def _ensure_reader_image_temp_dir(self):
             return "image-cache"
 
-        def _on_dual_path_switch_images_preloaded(self, *_args):
+        def _on_epub_load_images_preloaded(self, *_args):
             pass
 
-        def _on_dual_path_image_preload_finished(self, *_args):
+        def _on_epub_load_image_preload_finished(self, *_args):
             pass
 
     monkeypatch.setattr(
@@ -977,14 +980,15 @@ def test_first_dual_path_switch_preloads_target_chapter_images(monkeypatch):
     ]
     reader = ReaderStub()
 
-    started = EpubReaderDialog._start_dual_path_switch_image_preload(
-        reader, chapters, {"scan.jpg": b"image"}, ["one.xhtml", "two.xhtml"],
+    started = EpubReaderDialog._start_epub_load_image_preload(
+        reader, chapters, {"scan.jpg": b"image"},
+        ["one.xhtml", "scan.xhtml"],
     )
 
     assert started is True
     assert created[0].started is True
     assert 'src="scan.jpg"' in created[0].html_content
-    assert reader._pending_dual_path_load[0] == "raw-state"
+    assert reader._pending_epub_load[0] == "raw-state"
 
 
 def test_finishing_raw_toggle_recovers_hidden_prime_and_unlocks_button(
@@ -1818,6 +1822,16 @@ def test_next_chapter_image_preloader_materializes_only_its_references(
     assert len(emitted[0][1]) == 1
 
 
+def test_large_raw_image_classification_does_not_decode_bitmap(monkeypatch):
+    class UnexpectedDecoder:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("large images should not be decoded for sizing")
+
+    monkeypatch.setattr(epub_library, "QImageReader", UnexpectedDecoder)
+
+    assert epub_library._reader_image_is_sizeable(b"large-scan" * 700) is True
+
+
 def test_reader_schedules_next_chapter_image_preload_off_thread(
     qapp, tmp_path, monkeypatch,
 ):
@@ -1847,6 +1861,46 @@ def test_reader_schedules_next_chapter_image_preload_off_thread(
         assert reader._image_preload_thread is None
         assert reader._preloaded_chapter_keys
         assert reader._preloaded_image_resources
+        warmed = next(iter(reader._preloaded_image_resources.values()))
+        assert open(warmed["path"], "rb").read() == image_bytes
+    finally:
+        reader.close()
+        qapp.processEvents()
+
+
+def test_raw_reader_defers_uncached_image_chapter_jump(
+    qapp, tmp_path, monkeypatch,
+):
+    epub_path = tmp_path / "jump-preload.epub"
+    image_bytes = b"jump-image" * 1200
+    with zipfile.ZipFile(epub_path, "w") as archive:
+        archive.writestr("Images/jump.png", image_bytes)
+
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    monkeypatch.setattr(
+        epub_library, "_epub_reader_webengine_is_warmed", lambda: False)
+    monkeypatch.setattr(EpubReaderDialog, "_start_loading", lambda self, **_kw: None)
+    reader = EpubReaderDialog(str(epub_path), config={})
+    reader._chapters = [
+        ("Current", "<p>Current chapter</p>"),
+        ("Scan", '<p><img src="Images/jump.png"></p>'),
+    ]
+    reader._images = {
+        "Images/jump.png": epub_library._lazy_epub_image("Images/jump.png")
+    }
+    reader._current_row = 0
+    reader._layout_mode = epub_library.LAYOUT_SINGLE
+    rendered = []
+    reader._render_current = lambda: rendered.append(reader._current_row)
+    try:
+        reader._activate_chapter_index(1)
+        assert reader._current_row == 0
+        assert rendered == []
+
+        _pump_events(qapp, timeout=0.8)
+
+        assert reader._current_row == 1
+        assert rendered == [1]
         warmed = next(iter(reader._preloaded_image_resources.values()))
         assert open(warmed["path"], "rb").read() == image_bytes
     finally:

@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QStyle, QStyleOptionViewItem, QLayout, QFormLayout, QDialogButtonBox,
     QPlainTextEdit
 )
-from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPoint, QPointF, QUrl, QEventLoop, QAbstractAnimation, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPoint, QPointF, QUrl, QEventLoop, QAbstractAnimation, QPropertyAnimation, QEasingCurve, QBuffer, QByteArray, QIODevice
 from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QImageReader, QMovie, QCursor, QShortcut, QKeySequence, QTransform, QTextLayout, QTextOption, QPainter, QColor, QPen
 
 from metadata_progress import is_metadata_progress_entry
@@ -1322,10 +1322,25 @@ def _read_epub_member_from_zip(zf, member: str,
 def _reader_image_is_sizeable(image_data: bytes) -> bool:
     """Return whether an image should receive full-page reader treatment."""
     sizeable = len(image_data or b"") > 5120
+    # The byte-size rule already classifies substantial images. Avoid
+    # QImage.fromData() in that common case: it fully decodes multi-megapixel
+    # scans just to ask for their dimensions, which can dominate raw-reader
+    # loading time and allocate a large temporary bitmap.
+    if sizeable:
+        return True
     try:
-        probe = QImage.fromData(image_data)
-        if not probe.isNull():
-            sizeable = sizeable or (probe.width() >= 220 and probe.height() >= 220)
+        payload = QByteArray(image_data or b"")
+        buffer = QBuffer()
+        buffer.setData(payload)
+        if buffer.open(QIODevice.ReadOnly):
+            probe = QImageReader(buffer)
+            dimensions = probe.size()
+            sizeable = (
+                dimensions.isValid()
+                and dimensions.width() >= 220
+                and dimensions.height() >= 220
+            )
+            buffer.close()
     except Exception:
         pass
     return sizeable
@@ -20100,8 +20115,9 @@ class EpubReaderDialog(QDialog):
         self._workspace_loader_thread: _WorkspaceReaderLoaderThread | None = None
         self._workspace_raw_thread: _PdfRawSectionLoaderThread | None = None
         self._image_preload_thread: _ReaderImagePreloadThread | None = None
-        self._dual_path_image_preload_thread: _ReaderImagePreloadThread | None = None
-        self._pending_dual_path_load = None
+        self._epub_load_image_preload_thread: _ReaderImagePreloadThread | None = None
+        self._pending_epub_load = None
+        self._pending_image_chapter_activation: tuple[str, int] | None = None
         self._image_preload_active_key = ""
         self._image_preload_pending = False
         self._preloaded_chapter_keys: set[str] = set()
@@ -20980,7 +20996,7 @@ class EpubReaderDialog(QDialog):
         # Fast path: nothing to merge. Extra image directories are resolved
         # lazily per chapter and no longer require a startup worker.
         if not self._translated_overlay:
-            if self._start_dual_path_switch_image_preload(
+            if self._start_epub_load_image_preload(
                     raw_chapters, images or {}, filenames):
                 return
             self._finalize_post_load(raw_chapters, raw_chapters, images or {},
@@ -23846,9 +23862,8 @@ class EpubReaderDialog(QDialog):
                     self._get_chapter_pages(self._current_row))
         else:
             new_row = min(len(self._chapters) - 1, self._current_row + 1)
-            self._current_row = new_row
             self._set_toc_selection_for_chapter(new_row)
-            self._render_current()
+            self._activate_chapter_index(new_row)
 
     def _advance_paginated_next(self, ch_pages):
         """Advance one page/spread using a freshly resolved chapter count."""
@@ -23861,10 +23876,9 @@ class EpubReaderDialog(QDialog):
             else:
                 self._scroll_to_page_double()
         elif self._current_row < len(self._chapters) - 1:
-            self._current_row += 1
-            self._current_page = 0
-            self._set_toc_selection_for_chapter(self._current_row)
-            self._render_current()
+            new_row = self._current_row + 1
+            self._set_toc_selection_for_chapter(new_row)
+            self._activate_chapter_index(new_row)
 
     # ── Live single-chapter translation ──────────────────────────────────
 
@@ -24632,12 +24646,13 @@ class EpubReaderDialog(QDialog):
         )
         self._image_preload_thread = None
         _stop_qthread_safely(
-            getattr(self, "_dual_path_image_preload_thread", None),
+            getattr(self, "_epub_load_image_preload_thread", None),
             timeout_ms=800,
             signal_names=("done", "finished"),
         )
-        self._dual_path_image_preload_thread = None
-        self._pending_dual_path_load = None
+        self._epub_load_image_preload_thread = None
+        self._pending_epub_load = None
+        self._pending_image_chapter_activation = None
         self._close_epub_image_zip()
         _persist_config_via_parent(self)
         super().closeEvent(event)
@@ -24896,12 +24911,13 @@ class EpubReaderDialog(QDialog):
         self._image_preload_active_key = ""
         self._image_preload_pending = False
         _stop_qthread_safely(
-            getattr(self, "_dual_path_image_preload_thread", None),
+            getattr(self, "_epub_load_image_preload_thread", None),
             timeout_ms=500,
             signal_names=("done", "finished"),
         )
-        self._dual_path_image_preload_thread = None
-        self._pending_dual_path_load = None
+        self._epub_load_image_preload_thread = None
+        self._pending_epub_load = None
+        self._pending_image_chapter_activation = None
         self._close_epub_image_zip()
 
         self._processed_html_cache = dict(
@@ -24939,35 +24955,59 @@ class EpubReaderDialog(QDialog):
         )
         return True
 
-    def _start_dual_path_switch_image_preload(
+    def _start_epub_load_image_preload(
             self, chapters, images, filenames) -> bool:
-        """Prepare the target chapter's images before its first raw swap.
+        """Prepare the first visible chapter's images before EPUB rendering.
 
         Cache/parsing work already runs outside the GUI thread. Image
         materialization used to re-enter the GUI thread during the first
-        chapter render, though, which was especially visible for raw EPUBs
-        containing large scans. Keep the old page visible while the existing
-        image worker extracts and classifies just the destination chapter.
+        chapter render, though, which was especially visible for standalone
+        raw EPUBs containing large scans. The loading shell stays responsive
+        on an initial open; raw/translated swaps keep the old page visible.
         """
-        if (not getattr(self, "_raw_toggle_in_flight", False)
-                or not getattr(self, "_raw_epub_alt_path", "")
-                or not chapters):
+        is_initial_open = bool(
+            getattr(self, "_reader_startup_pending", False)
+            and not getattr(self, "_chapters", None)
+        )
+        is_flavor_swap = bool(getattr(self, "_raw_toggle_in_flight", False))
+        if not chapters or not (is_initial_open or is_flavor_swap):
             return False
         hint = getattr(self, "_reload_position_hint", None) or {}
-        row = max(0, min(int(hint.get("row", 0) or 0), len(chapters) - 1))
-        html_content = str(chapters[row][1] or "")
+        if hint:
+            row = int(hint.get("row", 0) or 0)
+        else:
+            row = 0
+            initial_filename = getattr(
+                self, "_initial_chapter_filename", None)
+            if initial_filename:
+                normalized = [
+                    os.path.basename(str(name or "")).lower()
+                    for name in (filenames or [])
+                ]
+                try:
+                    row = normalized.index(initial_filename)
+                except ValueError:
+                    row = 0
+            elif getattr(self, "_initial_chapter", None) is not None:
+                row = int(self._initial_chapter)
+        row = max(0, min(row, len(chapters) - 1))
+        if getattr(self, "_layout_mode", LAYOUT_SINGLE) == LAYOUT_ALL:
+            html_content = "\n".join(
+                str(content or "") for _title, content in chapters)
+        else:
+            html_content = str(chapters[row][1] or "")
         if not re.search(r"(?:<|&lt;)\s*(?:img|image)\b", html_content, re.I):
             return False
 
-        previous = getattr(self, "_dual_path_image_preload_thread", None)
+        previous = getattr(self, "_epub_load_image_preload_thread", None)
         if previous is not None:
             _stop_qthread_safely(
                 previous, timeout_ms=500,
                 signal_names=("done", "finished"),
             )
         state_key = self._dual_path_reader_state_key()
-        preload_key = f"dual-path|{state_key}|{row}"
-        self._pending_dual_path_load = (
+        preload_key = f"epub-load|{state_key}|{row}"
+        self._pending_epub_load = (
             state_key,
             list(chapters),
             dict(images or {}),
@@ -24982,27 +25022,27 @@ class EpubReaderDialog(QDialog):
             self._ensure_reader_image_temp_dir(),
             parent=self,
         )
-        self._dual_path_image_preload_thread = thread
-        thread.done.connect(self._on_dual_path_switch_images_preloaded)
+        self._epub_load_image_preload_thread = thread
+        thread.done.connect(self._on_epub_load_images_preloaded)
         thread.finished.connect(
             lambda pending=thread:
-                self._on_dual_path_image_preload_finished(pending))
+                self._on_epub_load_image_preload_finished(pending))
         thread.start()
         return True
 
     @Slot(str, object)
-    def _on_dual_path_switch_images_preloaded(
+    def _on_epub_load_images_preloaded(
             self, preload_key: str, resources: dict) -> None:
-        """Install first-chapter image results and complete the EPUB swap."""
+        """Install first-chapter image results and complete the EPUB load."""
         if getattr(self, "_closing", False):
             return
-        pending = getattr(self, "_pending_dual_path_load", None)
+        pending = getattr(self, "_pending_epub_load", None)
         if not pending:
             return
         state_key, chapters, images, filenames = pending
         if state_key != self._dual_path_reader_state_key():
             return
-        self._pending_dual_path_load = None
+        self._pending_epub_load = None
         self._set_reader_images(images)
         self._preloaded_image_resources.update(dict(resources or {}))
         for identity, info in (resources or {}).items():
@@ -25012,9 +25052,9 @@ class EpubReaderDialog(QDialog):
         self._finalize_post_load(
             chapters, chapters, images, False, filenames)
 
-    def _on_dual_path_image_preload_finished(self, thread) -> None:
-        if thread is getattr(self, "_dual_path_image_preload_thread", None):
-            self._dual_path_image_preload_thread = None
+    def _on_epub_load_image_preload_finished(self, thread) -> None:
+        if thread is getattr(self, "_epub_load_image_preload_thread", None):
+            self._epub_load_image_preload_thread = None
         try:
             thread.deleteLater()
         except Exception:
@@ -25076,12 +25116,13 @@ class EpubReaderDialog(QDialog):
         self._image_preload_active_key = ""
         self._image_preload_pending = False
         _stop_qthread_safely(
-            getattr(self, "_dual_path_image_preload_thread", None),
+            getattr(self, "_epub_load_image_preload_thread", None),
             timeout_ms=500,
             signal_names=("done", "finished"),
         )
-        self._dual_path_image_preload_thread = None
-        self._pending_dual_path_load = None
+        self._epub_load_image_preload_thread = None
+        self._pending_epub_load = None
+        self._pending_image_chapter_activation = None
         self._close_epub_image_zip()
         self._images = {}
         self._image_resource_signature = ()
@@ -25133,6 +25174,8 @@ class EpubReaderDialog(QDialog):
     def _activate_chapter_index(self, chapter_index: int) -> None:
         """Open an underlying spine chapter independently of sidebar shape."""
         if chapter_index < 0 or chapter_index >= len(self._chapters):
+            return
+        if self._defer_chapter_activation_for_images(chapter_index):
             return
         self._current_row = chapter_index
         self._current_page = 0  # reset pagination when selecting a new chapter
@@ -25214,6 +25257,7 @@ class EpubReaderDialog(QDialog):
         getattr(self, "_processed_html_cache", {}).clear()
         getattr(self, "_image_sizeable_cache", {}).clear()
         getattr(self, "_preloaded_chapter_keys", set()).clear()
+        self._pending_image_chapter_activation = None
 
     def _set_reader_images(self, images: dict | None) -> None:
         """Install an image map and invalidate rendering only when it changed."""
@@ -25232,6 +25276,66 @@ class EpubReaderDialog(QDialog):
         generation = int(getattr(self, "_image_cache_generation", 0) or 0)
         return f"{generation}|{self._epub_path}|{dirs}|{digest}"
 
+    def _chapter_image_preload_key(self, row: int,
+                                   html_content: str = "") -> str:
+        """Return the generation-scoped preload key for one chapter."""
+        if not html_content and 0 <= row < len(self._chapters):
+            html_content = str(self._chapters[row][1] or "")
+        generation = int(getattr(self, "_image_cache_generation", 0) or 0)
+        digest = hashlib.md5(str(html_content).encode("utf-8")).hexdigest()
+        return f"{generation}:{row}:{digest}"
+
+    def _defer_chapter_activation_for_images(self, chapter_index: int) -> bool:
+        """Keep the current page usable while a jumped-to chapter is warmed."""
+        if (getattr(self, "_closing", False)
+                or self._layout_mode == LAYOUT_ALL
+                or not (0 <= chapter_index < len(self._chapters))):
+            return False
+        html_content = str(self._chapters[chapter_index][1] or "")
+        preload_key = self._chapter_image_preload_key(
+            chapter_index, html_content)
+        if preload_key in self._preloaded_chapter_keys:
+            return False
+        if not re.search(r"(?:<|&lt;)\s*(?:img|image)\b", html_content, re.I):
+            self._preloaded_chapter_keys.add(preload_key)
+            return False
+
+        self._pending_image_chapter_activation = (
+            preload_key, chapter_index)
+        active = getattr(self, "_image_preload_thread", None)
+        if active is not None:
+            try:
+                if active.isRunning():
+                    if self._image_preload_active_key == preload_key:
+                        return True
+                    _stop_qthread_safely(
+                        active, timeout_ms=500,
+                        signal_names=("done", "finished"),
+                    )
+            except RuntimeError:
+                pass
+        self._image_preload_thread = None
+        self._image_preload_active_key = ""
+        self._image_preload_pending = False
+
+        thread = _ReaderImagePreloadThread(
+            preload_key,
+            html_content,
+            dict(getattr(self, "_images", {}) or {}),
+            list(getattr(self, "_extra_image_dirs", []) or []),
+            self._epub_path,
+            self._ensure_reader_image_temp_dir(),
+            parent=self,
+        )
+        self._image_preload_thread = thread
+        self._image_preload_active_key = preload_key
+        thread.done.connect(self._on_next_chapter_images_preloaded)
+        thread.finished.connect(
+            lambda pending=thread:
+                self._on_image_preload_thread_finished(pending))
+        thread.start()
+        return True
+
     def _schedule_next_chapter_image_preload(self) -> None:
         """Warm the following chapter's local image files in the background."""
         if getattr(self, "_closing", False):
@@ -25243,9 +25347,7 @@ class EpubReaderDialog(QDialog):
         if not (0 <= next_row < len(chapters)):
             return
         html_content = str(chapters[next_row][1] or "")
-        generation = int(getattr(self, "_image_cache_generation", 0) or 0)
-        digest = hashlib.md5(html_content.encode("utf-8")).hexdigest()
-        preload_key = f"{generation}:{next_row}:{digest}"
+        preload_key = self._chapter_image_preload_key(next_row, html_content)
         if preload_key in getattr(self, "_preloaded_chapter_keys", set()):
             return
         if not re.search(r"(?:<|&lt;)\s*(?:img|image)\b", html_content, re.I):
@@ -25288,13 +25390,29 @@ class EpubReaderDialog(QDialog):
             generation = int(str(preload_key).split(":", 1)[0])
         except (TypeError, ValueError):
             generation = -1
+        pending_activation = getattr(
+            self, "_pending_image_chapter_activation", None)
         if generation != int(getattr(self, "_image_cache_generation", 0) or 0):
+            if pending_activation and pending_activation[0] == preload_key:
+                self._pending_image_chapter_activation = None
+                QTimer.singleShot(
+                    0,
+                    lambda row=pending_activation[1]:
+                        self._activate_chapter_index(row),
+                )
             return
         self._preloaded_chapter_keys.add(str(preload_key))
         self._preloaded_image_resources.update(dict(resources or {}))
         for identity, info in (resources or {}).items():
             if isinstance(info, dict) and "sizeable" in info:
                 self._image_sizeable_cache[str(identity)] = bool(info["sizeable"])
+        if pending_activation and pending_activation[0] == preload_key:
+            self._pending_image_chapter_activation = None
+            QTimer.singleShot(
+                0,
+                lambda row=pending_activation[1]:
+                    self._activate_chapter_index(row),
+            )
 
     def _on_image_preload_thread_finished(self, thread) -> None:
         if thread is getattr(self, "_image_preload_thread", None):
@@ -25426,6 +25544,11 @@ class EpubReaderDialog(QDialog):
                 src = img_tag.get("src", "")
                 if not src:
                     continue
+                # Let Chromium present text/layout without waiting for a large
+                # scan to finish decoding. This preserves the original image
+                # bytes and dimensions; it only changes decode scheduling.
+                if not img_tag.get("decoding"):
+                    img_tag["decoding"] = "async"
                 # Remote image URLs are loaded directly by QWebEngine. Do not
                 # reinterpret them as relative filesystem paths; the reader
                 # view explicitly permits its local file:// page to request
