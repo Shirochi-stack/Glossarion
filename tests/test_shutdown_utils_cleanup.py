@@ -155,6 +155,103 @@ def test_browser_state_cleanup_moves_then_retries_locked_target(monkeypatch, tmp
     assert not any((root / ".startup_cleanup_deleting").glob("*"))
 
 
+def test_epub_reader_cache_cleanup_removes_only_exact_temp_dirs(tmp_path):
+    temp_root = tmp_path / "temp"
+    epub_cache = temp_root / "Glossarion_EpubCache"
+    image_cache = temp_root / "Glossarion_EpubImages"
+    _touch(epub_cache / "book-cache.pkl")
+    _touch(image_cache / "book-hash" / "scan.jpg")
+    preserved = _touch(temp_root / "Glossarion_OtherCache" / "keep.txt")
+
+    stats = shutdown_utils.cleanup_epub_reader_caches_for_shutdown(
+        [str(temp_root)], retries=1,
+    )
+
+    assert stats == {
+        "roots": 1,
+        "removed": 2,
+        "failed": 0,
+        "skipped": 0,
+    }
+    assert not epub_cache.exists()
+    assert not image_cache.exists()
+    assert preserved.is_file()
+    assert temp_root.is_dir()
+
+
+def test_epub_reader_cache_cleanup_refuses_regular_file_target(tmp_path):
+    temp_root = tmp_path / "temp"
+    cache_like_file = _touch(temp_root / "Glossarion_EpubCache")
+
+    stats = shutdown_utils.cleanup_epub_reader_caches_for_shutdown(
+        [str(temp_root)], retries=1,
+    )
+
+    assert stats["removed"] == 0
+    assert stats["skipped"] == 1
+    assert cache_like_file.is_file()
+
+
+def test_force_shutdown_runs_epub_cache_cleanup_for_desktop(monkeypatch, tmp_path):
+    cleanup_calls = []
+    monkeypatch.setattr(
+        shutdown_utils,
+        "epub_reader_cache_roots_for_shutdown",
+        lambda: [str(tmp_path)],
+    )
+    monkeypatch.setattr(shutdown_utils, "_ensure_safe_tempdir", lambda: None)
+    monkeypatch.setattr(shutdown_utils, "_run_cleanup_fns", lambda _fns: None)
+    monkeypatch.setattr(
+        shutdown_utils, "drain_qt_events_for_shutdown", lambda **_kw: None,
+    )
+    monkeypatch.setattr(
+        shutdown_utils, "_terminate_all_children_for_shutdown", lambda **_kw: 0,
+    )
+    monkeypatch.setattr(
+        shutdown_utils,
+        "cleanup_browser_generated_state_for_shutdown",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        shutdown_utils,
+        "cleanup_epub_reader_caches_for_shutdown",
+        lambda roots: cleanup_calls.append(list(roots)) or {},
+    )
+    monkeypatch.setattr(
+        shutdown_utils, "_cleanup_pyinstaller_temp_dir", lambda: None,
+    )
+    monkeypatch.setattr(shutdown_utils, "_taskkill_self_tree", lambda: None)
+    monkeypatch.setattr(
+        shutdown_utils.os,
+        "_exit",
+        lambda code: (_ for _ in ()).throw(SystemExit(code)),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        shutdown_utils.force_shutdown(0)
+
+    assert exc.value.code == 0
+    assert cleanup_calls == [[str(tmp_path), str(tmp_path)]]
+
+
+def test_run_cli_main_does_not_delete_desktop_epub_cache(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        shutdown_utils,
+        "force_shutdown",
+        lambda exit_code, cleanup_fns=None, **kwargs:
+            calls.append((exit_code, cleanup_fns, kwargs)),
+    )
+
+    shutdown_utils.run_cli_main(lambda: 0)
+
+    assert calls == [(
+        0,
+        None,
+        {"cleanup_epub_reader_caches": False},
+    )]
+
+
 def test_cleanup_generated_browser_profile_dir_refuses_parent_and_wrong_parent(monkeypatch, tmp_path):
     home = _isolated_state_env(monkeypatch, tmp_path)
     root = home / ".glossarion"

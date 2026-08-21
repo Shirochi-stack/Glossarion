@@ -31,6 +31,10 @@ _BROWSER_STATE_HELPER_ENV_VARS = (
     "AUTHND_TOKEN_HELPER",
     "GEMINI_FREE_HELPER",
 )
+_EPUB_READER_TEMP_CACHE_DIRS = (
+    "Glossarion_EpubCache",
+    "Glossarion_EpubImages",
+)
 
 
 def subprocess_no_window_kwargs(**kwargs):
@@ -401,6 +405,137 @@ def cleanup_browser_generated_state_for_shutdown() -> dict:
                 "[CLOSE] Browser state cleanup: "
                 f"removed={stats['removed']}, moved={stats['moved']}, "
                 f"failed={stats['failed']}, roots={stats['roots']}"
+            )
+        except Exception:
+            pass
+    return stats
+
+
+def epub_reader_cache_roots_for_shutdown() -> list[str]:
+    """Return validated temp roots that may contain EPUB reader caches."""
+    candidates = []
+    try:
+        candidates.append(tempfile.gettempdir())
+    except Exception:
+        pass
+    if tempfile.tempdir:
+        candidates.append(tempfile.tempdir)
+    for env_name in ("TMPDIR", "TEMP", "TMP"):
+        value = os.environ.get(env_name)
+        if value:
+            candidates.append(value)
+
+    roots = []
+    seen = set()
+    for value in candidates:
+        try:
+            root = os.path.abspath(os.path.expandvars(
+                os.path.expanduser(str(value))))
+            if not os.path.isdir(root):
+                continue
+            key = os.path.normcase(os.path.realpath(root))
+        except Exception:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(root)
+    return roots
+
+
+def _validated_epub_reader_cache_target(root: str,
+                                        dirname: str) -> Optional[str]:
+    """Resolve one exact EPUB cache child without permitting broad deletes."""
+    if dirname not in _EPUB_READER_TEMP_CACHE_DIRS:
+        return None
+    try:
+        root_abs = os.path.abspath(str(root or ""))
+        target = os.path.abspath(os.path.join(root_abs, dirname))
+        if os.path.basename(target) != dirname:
+            return None
+        if os.path.dirname(target) != root_abs:
+            return None
+        if not _path_is_under_root(target, root_abs):
+            return None
+        return target
+    except Exception:
+        return None
+
+
+def cleanup_epub_reader_caches_for_shutdown(
+    temp_roots: Optional[Iterable[str]] = None,
+    retries: int = 3,
+    delay: float = 0.08,
+) -> dict:
+    """Delete parsed-EPUB and materialized-image caches at app shutdown.
+
+    Only the two names in :data:`_EPUB_READER_TEMP_CACHE_DIRS` are accepted,
+    and each target must be a direct child of a validated temp root. Symlinks
+    are unlinked rather than followed. A short retry handles Windows file
+    handles that finish closing immediately after QtWebEngine exits.
+    """
+    stats = {
+        "roots": 0,
+        "removed": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
+    roots = list(
+        temp_roots
+        if temp_roots is not None
+        else epub_reader_cache_roots_for_shutdown()
+    )
+    seen = set()
+    validated_roots = []
+    for value in roots:
+        try:
+            root = os.path.abspath(str(value or ""))
+            key = os.path.normcase(os.path.realpath(root))
+        except Exception:
+            stats["skipped"] += 1
+            continue
+        if not value or key in seen or not os.path.isdir(root):
+            if value and key in seen:
+                continue
+            stats["skipped"] += 1
+            continue
+        seen.add(key)
+        validated_roots.append(root)
+    stats["roots"] = len(validated_roots)
+
+    attempts = max(1, int(retries or 1))
+    pause = max(0.0, float(delay or 0.0))
+    for root in validated_roots:
+        for dirname in _EPUB_READER_TEMP_CACHE_DIRS:
+            target = _validated_epub_reader_cache_target(root, dirname)
+            if not target or not os.path.lexists(target):
+                continue
+            # Never remove an unexpected regular file with a cache-like name.
+            if not os.path.isdir(target) and not os.path.islink(target):
+                stats["skipped"] += 1
+                continue
+            removed = False
+            for attempt in range(attempts):
+                try:
+                    removed = bool(_remove_path_once(target))
+                    if removed or not os.path.lexists(target):
+                        removed = True
+                        break
+                except Exception:
+                    pass
+                if attempt < attempts - 1 and pause:
+                    time.sleep(pause)
+            if removed:
+                stats["removed"] += 1
+            elif os.path.lexists(target):
+                stats["failed"] += 1
+
+    if stats["removed"] or stats["failed"]:
+        try:
+            print(
+                "[CLOSE] EPUB reader cache cleanup: "
+                f"removed={stats['removed']}, failed={stats['failed']}, "
+                f"roots={stats['roots']}"
             )
         except Exception:
             pass
@@ -1624,7 +1759,12 @@ def _cleanup_pyinstaller_temp_dir(retries: int = 4, delay: float = 0.2) -> None:
     return
 
 
-def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[], None]]] = None) -> None:
+def force_shutdown(
+    exit_code: int = 0,
+    cleanup_fns: Optional[Iterable[Callable[[], None]]] = None,
+    *,
+    cleanup_epub_reader_caches: bool = True,
+) -> None:
     """
     Best-effort cleanup then forcefully exit the current process.
     Terminates child processes (multiprocessing + psutil if available) and
@@ -1636,8 +1776,16 @@ def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[
     the bootloader's final temp-dir cleanup pops a warning dialog.
     We deliberately do NOT touch `_MEIPASS` from Python; see
     `_cleanup_pyinstaller_temp_dir` for the rationale.
+
+    ``cleanup_epub_reader_caches`` defaults to true for the desktop app's
+    direct shutdown calls. CLI helper processes explicitly disable it so a
+    worker cannot remove cache files while the main reader is still open.
     """
     code = _normalize_exit_code(exit_code)
+    epub_cache_roots = (
+        epub_reader_cache_roots_for_shutdown()
+        if cleanup_epub_reader_caches else []
+    )
     _ensure_safe_tempdir()
     _run_cleanup_fns(cleanup_fns)
     if time.monotonic() - _last_qt_shutdown_drain_at > 0.75:
@@ -1649,6 +1797,15 @@ def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[
     # native Windows fallback for Lite builds where psutil is missing/broken.
     _terminate_all_children_for_shutdown(timeout=1.5)
     cleanup_browser_generated_state_for_shutdown()
+    if cleanup_epub_reader_caches:
+        # Include any root selected by _ensure_safe_tempdir without losing the
+        # root that was active while the reader created its cache folders.
+        cleanup_epub_reader_caches_for_shutdown(
+            [
+                *epub_cache_roots,
+                *epub_reader_cache_roots_for_shutdown(),
+            ]
+        )
     _cleanup_pyinstaller_temp_dir()  # no-op, kept for backwards compatibility
     # Disabled by default. Killing our own process tree with taskkill can
     # interrupt Qt/PySide/native DLL teardown at an arbitrary instruction and
@@ -1684,4 +1841,8 @@ def run_cli_main(main_fn: Callable[[], Optional[int]], cleanup_fns: Optional[Ite
             pass
         exit_code = 1
     finally:
-        force_shutdown(exit_code, cleanup_fns=cleanup_fns)
+        force_shutdown(
+            exit_code,
+            cleanup_fns=cleanup_fns,
+            cleanup_epub_reader_caches=False,
+        )
