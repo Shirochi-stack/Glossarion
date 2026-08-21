@@ -842,6 +842,151 @@ def test_raw_toggle_is_serialized_and_queued_click_is_rejected(qapp):
     assert button.isChecked() is False
 
 
+def test_dual_path_raw_toggle_reuses_visited_reader_state(tmp_path):
+    translated = tmp_path / "translated.epub"
+    raw = tmp_path / "raw.epub"
+    translated.write_bytes(b"translated")
+    raw.write_bytes(b"raw")
+
+    class ReaderStub:
+        _raw_toggle_in_flight = False
+        _show_raw = False
+        _raw_btn = None
+        _config = {}
+        _raw_epub_alt_path = str(raw)
+        _translated_epub_path = str(translated)
+        _epub_path = str(translated)
+        _translated_overlay = {}
+        _chapters_raw = [("Chapter", "<p>Translated</p>")]
+        _chapters_overlaid = list(_chapters_raw)
+
+        def _set_raw_toggle_busy(self, busy):
+            self.busy = busy
+
+        def _remember_dual_path_reader_state(self):
+            self.remembered_show_raw = self._show_raw
+
+        def _capture_position_hint(self):
+            return {"row": 0, "was_last_page": False, "proportion": 0.0}
+
+        def _restore_dual_path_reader_state(self):
+            self.restored = True
+            return True
+
+        def _reload_epub_from_active_path(self):
+            self.reloaded = True
+
+    reader = ReaderStub()
+    EpubReaderDialog._on_show_raw_toggled(reader, True)
+
+    assert reader.remembered_show_raw is False
+    assert reader._show_raw is True
+    assert reader._epub_path == str(raw)
+    assert reader.restored is True
+    assert not hasattr(reader, "reloaded")
+    assert reader._reload_position_hint["row"] == 0
+
+
+def test_dual_path_reader_snapshot_copies_prepared_image_state(tmp_path):
+    translated = tmp_path / "translated.epub"
+    raw = tmp_path / "raw.epub"
+    translated.write_bytes(b"translated")
+    raw.write_bytes(b"raw")
+
+    class ReaderStub:
+        _raw_epub_alt_path = str(raw)
+        _translated_overlay = {}
+        _epub_path = str(translated)
+        _show_special_files = True
+        _config = {}
+        _chapters_raw = [("Chapter", '<img src="scan.jpg">')]
+        _chapters_overlaid = list(_chapters_raw)
+        _images = {"scan.jpg": ("lazy", "scan.jpg")}
+        _chapter_filenames = ["chapter.xhtml"]
+        _processed_html_cache = {"chapter": "prepared"}
+        _image_sizeable_cache = {"scan": True}
+        _preloaded_chapter_keys = {"next"}
+        _preloaded_image_resources = {
+            "scan": {"path": "cached.jpg", "sizeable": True},
+        }
+        _image_cache_generation = 3
+        _image_resource_signature = (("scan.jpg", "lazy"),)
+        _dual_path_reader_states = {}
+        _dual_path_reader_state_key = (
+            EpubReaderDialog._dual_path_reader_state_key)
+
+    reader = ReaderStub()
+    EpubReaderDialog._remember_dual_path_reader_state(reader)
+    state = next(iter(reader._dual_path_reader_states.values()))
+
+    reader._processed_html_cache.clear()
+    reader._preloaded_image_resources.clear()
+    assert state["processed_html_cache"] == {"chapter": "prepared"}
+    assert state["preloaded_image_resources"]["scan"]["path"] == "cached.jpg"
+    assert state["image_cache_generation"] == 3
+
+
+def test_first_dual_path_switch_preloads_target_chapter_images(monkeypatch):
+    created = []
+
+    class SignalStub:
+        def connect(self, callback):
+            self.callback = callback
+
+    class ThreadStub:
+        def __init__(self, preload_key, html_content, images, extra_dirs,
+                     epub_path, temp_dir, parent=None):
+            self.preload_key = preload_key
+            self.html_content = html_content
+            self.images = images
+            self.done = SignalStub()
+            self.finished = SignalStub()
+            self.started = False
+            created.append(self)
+
+        def start(self):
+            self.started = True
+
+    class ReaderStub:
+        _raw_toggle_in_flight = True
+        _raw_epub_alt_path = "raw.epub"
+        _reload_position_hint = {"row": 1}
+        _dual_path_image_preload_thread = None
+        _extra_image_dirs = []
+        _epub_path = "raw.epub"
+        _pending_dual_path_load = None
+
+        def _dual_path_reader_state_key(self):
+            return "raw-state"
+
+        def _ensure_reader_image_temp_dir(self):
+            return "image-cache"
+
+        def _on_dual_path_switch_images_preloaded(self, *_args):
+            pass
+
+        def _on_dual_path_image_preload_finished(self, *_args):
+            pass
+
+    monkeypatch.setattr(
+        epub_library, "_ReaderImagePreloadThread", ThreadStub,
+    )
+    chapters = [
+        ("Text", "<p>No image</p>"),
+        ("Scan", '<p><img src="scan.jpg"></p>'),
+    ]
+    reader = ReaderStub()
+
+    started = EpubReaderDialog._start_dual_path_switch_image_preload(
+        reader, chapters, {"scan.jpg": b"image"}, ["one.xhtml", "two.xhtml"],
+    )
+
+    assert started is True
+    assert created[0].started is True
+    assert 'src="scan.jpg"' in created[0].html_content
+    assert reader._pending_dual_path_load[0] == "raw-state"
+
+
 def test_finishing_raw_toggle_recovers_hidden_prime_and_unlocks_button(
         qapp, monkeypatch):
     class StackStub:

@@ -20100,6 +20100,8 @@ class EpubReaderDialog(QDialog):
         self._workspace_loader_thread: _WorkspaceReaderLoaderThread | None = None
         self._workspace_raw_thread: _PdfRawSectionLoaderThread | None = None
         self._image_preload_thread: _ReaderImagePreloadThread | None = None
+        self._dual_path_image_preload_thread: _ReaderImagePreloadThread | None = None
+        self._pending_dual_path_load = None
         self._image_preload_active_key = ""
         self._image_preload_pending = False
         self._preloaded_chapter_keys: set[str] = set()
@@ -20111,6 +20113,12 @@ class EpubReaderDialog(QDialog):
         self._epub_image_zip = None
         self._epub_image_zip_path = ""
         self._epub_image_zip_names: dict[str, str] = {}
+        # Completed books can switch between two standalone EPUB files. Keep
+        # the already-loaded state for each path so returning to a flavor does
+        # not re-read its cache, rebuild image metadata, or re-process chapter
+        # HTML. The key includes the same source/settings fingerprint as the
+        # persistent EPUB cache, so replacing either file naturally misses.
+        self._dual_path_reader_states: dict[str, dict] = {}
         self._workspace_raw_ready: set[int] = set()
         self._workspace_raw_pending_row: int | None = None
         self._raw_toggle_in_flight = False
@@ -20972,6 +20980,9 @@ class EpubReaderDialog(QDialog):
         # Fast path: nothing to merge. Extra image directories are resolved
         # lazily per chapter and no longer require a startup worker.
         if not self._translated_overlay:
+            if self._start_dual_path_switch_image_preload(
+                    raw_chapters, images or {}, filenames):
+                return
             self._finalize_post_load(raw_chapters, raw_chapters, images or {},
                                      False, filenames)
             return
@@ -24620,6 +24631,13 @@ class EpubReaderDialog(QDialog):
             signal_names=("done", "finished"),
         )
         self._image_preload_thread = None
+        _stop_qthread_safely(
+            getattr(self, "_dual_path_image_preload_thread", None),
+            timeout_ms=800,
+            signal_names=("done", "finished"),
+        )
+        self._dual_path_image_preload_thread = None
+        self._pending_dual_path_load = None
         self._close_epub_image_zip()
         _persist_config_via_parent(self)
         super().closeEvent(event)
@@ -24747,6 +24765,11 @@ class EpubReaderDialog(QDialog):
             return
         previous_value = bool(self._show_raw)
         self._set_raw_toggle_busy(True)
+        # Save the currently-active standalone EPUB before changing the
+        # flavor flag. Besides chapters and image descriptors, this retains
+        # the processed HTML and materialized-image caches accumulated while
+        # reading it. Overlay mode is intentionally ignored by the helper.
+        self._remember_dual_path_reader_state()
         self._show_raw = new_value
         # Invalidate embedded CSS cache so it re-reads from the correct EPUB
         if hasattr(self, '_embedded_css_cache'):
@@ -24777,6 +24800,8 @@ class EpubReaderDialog(QDialog):
             # Reload pipeline consumes this hint to pick the same row
             # and hand the page portion to the finalizer.
             self._reload_position_hint = position_hint
+            if self._restore_dual_path_reader_state():
+                return
             self._reload_epub_from_active_path()
             return
         # Overlay mode — in-memory chapter swap.
@@ -24814,6 +24839,186 @@ class EpubReaderDialog(QDialog):
                 self._finish_raw_toggle()
         else:
             self._finish_raw_toggle()
+
+    def _dual_path_reader_state_key(self, epub_path: str | None = None) -> str:
+        """Return a file/settings fingerprint for an in-memory reader state."""
+        raw_path = str(epub_path or self._epub_path or "")
+        if not raw_path:
+            return ""
+        path = os.path.abspath(raw_path)
+        cache_key = _epub_cache_key(
+            path,
+            show_special_files=self._show_special_files,
+            config=self._config,
+        )
+        return f"{os.path.normcase(path)}|{cache_key}"
+
+    def _remember_dual_path_reader_state(self) -> None:
+        """Retain the active standalone EPUB for a later instant swap-back."""
+        if (not getattr(self, "_raw_epub_alt_path", "")
+                or getattr(self, "_translated_overlay", None)
+                or not getattr(self, "_chapters_raw", None)):
+            return
+        key = self._dual_path_reader_state_key()
+        if not key:
+            return
+        state = {
+            "raw_chapters": list(self._chapters_raw),
+            "overlaid_chapters": list(self._chapters_overlaid),
+            "images": dict(self._images),
+            "filenames": list(self._chapter_filenames),
+            "processed_html_cache": dict(self._processed_html_cache),
+            "image_sizeable_cache": dict(self._image_sizeable_cache),
+            "preloaded_chapter_keys": set(self._preloaded_chapter_keys),
+            "preloaded_image_resources": dict(
+                self._preloaded_image_resources),
+            "image_cache_generation": int(self._image_cache_generation),
+            "image_resource_signature": self._image_resource_signature,
+            "img_temp_dir": getattr(self, "_img_temp_dir", ""),
+        }
+        if hasattr(self, "_embedded_css_cache"):
+            state["embedded_css_cache"] = self._embedded_css_cache
+        self._dual_path_reader_states[key] = state
+
+    def _restore_dual_path_reader_state(self) -> bool:
+        """Restore a previously visited standalone EPUB without disk loading."""
+        key = self._dual_path_reader_state_key()
+        state = self._dual_path_reader_states.get(key)
+        if not state:
+            return False
+
+        _stop_qthread_safely(
+            getattr(self, "_image_preload_thread", None),
+            timeout_ms=500,
+            signal_names=("done", "finished"),
+        )
+        self._image_preload_thread = None
+        self._image_preload_active_key = ""
+        self._image_preload_pending = False
+        _stop_qthread_safely(
+            getattr(self, "_dual_path_image_preload_thread", None),
+            timeout_ms=500,
+            signal_names=("done", "finished"),
+        )
+        self._dual_path_image_preload_thread = None
+        self._pending_dual_path_load = None
+        self._close_epub_image_zip()
+
+        self._processed_html_cache = dict(
+            state.get("processed_html_cache") or {})
+        self._image_sizeable_cache = dict(
+            state.get("image_sizeable_cache") or {})
+        self._preloaded_chapter_keys = set(
+            state.get("preloaded_chapter_keys") or set())
+        self._preloaded_image_resources = dict(
+            state.get("preloaded_image_resources") or {})
+        self._image_cache_generation = int(
+            state.get("image_cache_generation") or 0)
+        self._image_resource_signature = tuple(
+            state.get("image_resource_signature") or ())
+        temp_dir = str(state.get("img_temp_dir") or "")
+        if temp_dir:
+            self._img_temp_dir = temp_dir
+        elif hasattr(self, "_img_temp_dir"):
+            del self._img_temp_dir
+        if "embedded_css_cache" in state:
+            self._embedded_css_cache = state["embedded_css_cache"]
+        elif hasattr(self, "_embedded_css_cache"):
+            del self._embedded_css_cache
+
+        self._native_toc_source_entries = _load_reader_native_toc(
+            self._toc_output_dir, self._epub_path)
+        raw_chapters = list(state.get("raw_chapters") or [])
+        overlaid = list(state.get("overlaid_chapters") or raw_chapters)
+        self._finalize_post_load(
+            raw_chapters,
+            overlaid,
+            dict(state.get("images") or {}),
+            False,
+            list(state.get("filenames") or []),
+        )
+        return True
+
+    def _start_dual_path_switch_image_preload(
+            self, chapters, images, filenames) -> bool:
+        """Prepare the target chapter's images before its first raw swap.
+
+        Cache/parsing work already runs outside the GUI thread. Image
+        materialization used to re-enter the GUI thread during the first
+        chapter render, though, which was especially visible for raw EPUBs
+        containing large scans. Keep the old page visible while the existing
+        image worker extracts and classifies just the destination chapter.
+        """
+        if (not getattr(self, "_raw_toggle_in_flight", False)
+                or not getattr(self, "_raw_epub_alt_path", "")
+                or not chapters):
+            return False
+        hint = getattr(self, "_reload_position_hint", None) or {}
+        row = max(0, min(int(hint.get("row", 0) or 0), len(chapters) - 1))
+        html_content = str(chapters[row][1] or "")
+        if not re.search(r"(?:<|&lt;)\s*(?:img|image)\b", html_content, re.I):
+            return False
+
+        previous = getattr(self, "_dual_path_image_preload_thread", None)
+        if previous is not None:
+            _stop_qthread_safely(
+                previous, timeout_ms=500,
+                signal_names=("done", "finished"),
+            )
+        state_key = self._dual_path_reader_state_key()
+        preload_key = f"dual-path|{state_key}|{row}"
+        self._pending_dual_path_load = (
+            state_key,
+            list(chapters),
+            dict(images or {}),
+            list(filenames or []),
+        )
+        thread = _ReaderImagePreloadThread(
+            preload_key,
+            html_content,
+            dict(images or {}),
+            list(getattr(self, "_extra_image_dirs", []) or []),
+            self._epub_path,
+            self._ensure_reader_image_temp_dir(),
+            parent=self,
+        )
+        self._dual_path_image_preload_thread = thread
+        thread.done.connect(self._on_dual_path_switch_images_preloaded)
+        thread.finished.connect(
+            lambda pending=thread:
+                self._on_dual_path_image_preload_finished(pending))
+        thread.start()
+        return True
+
+    @Slot(str, object)
+    def _on_dual_path_switch_images_preloaded(
+            self, preload_key: str, resources: dict) -> None:
+        """Install first-chapter image results and complete the EPUB swap."""
+        if getattr(self, "_closing", False):
+            return
+        pending = getattr(self, "_pending_dual_path_load", None)
+        if not pending:
+            return
+        state_key, chapters, images, filenames = pending
+        if state_key != self._dual_path_reader_state_key():
+            return
+        self._pending_dual_path_load = None
+        self._set_reader_images(images)
+        self._preloaded_image_resources.update(dict(resources or {}))
+        for identity, info in (resources or {}).items():
+            if isinstance(info, dict) and "sizeable" in info:
+                self._image_sizeable_cache[str(identity)] = bool(
+                    info["sizeable"])
+        self._finalize_post_load(
+            chapters, chapters, images, False, filenames)
+
+    def _on_dual_path_image_preload_finished(self, thread) -> None:
+        if thread is getattr(self, "_dual_path_image_preload_thread", None):
+            self._dual_path_image_preload_thread = None
+        try:
+            thread.deleteLater()
+        except Exception:
+            pass
 
     def _capture_position_hint(self) -> dict:
         """Snapshot the current reading position for later restoration.
@@ -24870,6 +25075,13 @@ class EpubReaderDialog(QDialog):
         self._image_preload_thread = None
         self._image_preload_active_key = ""
         self._image_preload_pending = False
+        _stop_qthread_safely(
+            getattr(self, "_dual_path_image_preload_thread", None),
+            timeout_ms=500,
+            signal_names=("done", "finished"),
+        )
+        self._dual_path_image_preload_thread = None
+        self._pending_dual_path_load = None
         self._close_epub_image_zip()
         self._images = {}
         self._image_resource_signature = ()
@@ -24881,6 +25093,8 @@ class EpubReaderDialog(QDialog):
         # Clear embedded CSS cache so it re-reads from the new EPUB path
         if hasattr(self, '_embedded_css_cache'):
             del self._embedded_css_cache
+        self._native_toc_source_entries = _load_reader_native_toc(
+            self._toc_output_dir, self._epub_path)
         if hasattr(self, "_img_temp_dir"):
             # Clear so _process_html picks a fresh per-EPUB temp dir.
             try:
