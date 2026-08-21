@@ -20113,12 +20113,6 @@ Recent translations to summarize:
             self.model_combo.activated.connect(
                 lambda *_args: self._schedule_current_provider_catalog_refresh(250)
             )
-            self.model_combo.activated.connect(
-                self._schedule_pending_model_combo_catalog_refresh
-            )
-            line_edit.editingFinished.connect(
-                self._schedule_pending_model_combo_catalog_refresh
-            )
             self._model_auto_poll_text_connected = True
 
     def _model_editor_or_popup_is_active(self):
@@ -20178,32 +20172,106 @@ Recent translations to summarize:
         finally:
             combo.blockSignals(blocked)
 
+    def _update_active_model_combo_catalog(self, model_values):
+        """Update a focused/open model picker without rebuilding the widget.
+
+        Clearing an editable ``QComboBox`` while its editor owns focus can
+        disturb the caret and close its popup.  Apply only the changed rows and
+        update the existing completer model instead, then restore the exact
+        editor and popup state.
+        """
+        from difflib import SequenceMatcher
+
+        combo = self.model_combo
+        line_edit = combo.lineEdit()
+        current_text = line_edit.text() if line_edit is not None else combo.currentText()
+        cursor_position = line_edit.cursorPosition() if line_edit is not None else 0
+        selection_start = line_edit.selectionStart() if line_edit is not None else -1
+        selection_length = (
+            len(line_edit.selectedText())
+            if line_edit is not None and selection_start >= 0
+            else 0
+        )
+
+        popup = combo.view()
+        popup_visible = popup is not None and popup.isVisible()
+        popup_text = None
+        popup_scroll = None
+        if popup_visible:
+            popup_index = popup.currentIndex()
+            popup_text = popup_index.data() if popup_index.isValid() else None
+            popup_scroll = popup.verticalScrollBar().value()
+
+        completer = combo.completer()
+        completion_popup = completer.popup() if completer is not None else None
+        completion_popup_visible = (
+            completion_popup is not None and completion_popup.isVisible()
+        )
+
+        old_values = [combo.itemText(index) for index in range(combo.count())]
+        blocked = combo.blockSignals(True)
+        line_edit_blocked = line_edit.blockSignals(True) if line_edit is not None else False
+        try:
+            # Work backwards so row indexes from SequenceMatcher remain valid.
+            opcodes = SequenceMatcher(
+                None,
+                old_values,
+                model_values,
+                autojunk=False,
+            ).get_opcodes()
+            for operation, old_start, old_end, new_start, new_end in reversed(opcodes):
+                if operation == 'equal':
+                    continue
+                for row in range(old_end - 1, old_start - 1, -1):
+                    combo.removeItem(row)
+                if operation in ('replace', 'insert'):
+                    combo.insertItems(old_start, model_values[new_start:new_end])
+
+            proxy = getattr(self, '_model_completer_proxy', None)
+            if proxy is not None and hasattr(proxy, 'set_model_values'):
+                proxy.set_model_values(model_values, current_text)
+            else:
+                # Compatibility fallback for a picker created before the live
+                # completer updater was installed.
+                self._install_model_completer(model_values)
+
+            matching_index = combo.findText(current_text)
+            combo.setCurrentIndex(matching_index)
+
+            line_edit = combo.lineEdit()
+            if line_edit is not None:
+                if line_edit.text() != current_text:
+                    line_edit.setText(current_text)
+                if selection_start >= 0:
+                    line_edit.setSelection(selection_start, selection_length)
+                else:
+                    line_edit.setCursorPosition(
+                        max(0, min(cursor_position, len(current_text)))
+                    )
+
+            if popup_visible:
+                popup_row = combo.findText(str(popup_text)) if popup_text is not None else -1
+                if popup_row >= 0:
+                    popup.setCurrentIndex(combo.model().index(popup_row, combo.modelColumn()))
+                if popup_scroll is not None:
+                    popup.verticalScrollBar().setValue(popup_scroll)
+            if completion_popup_visible and completer is not None:
+                completer.complete()
+        finally:
+            if line_edit is not None:
+                line_edit.blockSignals(line_edit_blocked)
+            combo.blockSignals(blocked)
+
     def _refresh_model_combo_catalog(self, model_values):
-        """Apply catalog choices now, or defer them until typing has finished."""
+        """Apply catalog choices without interrupting the current selection."""
         model_values = list(model_values)
         self._model_all_values = model_values
         if self._model_editor_or_popup_is_active():
-            # Keep only the newest completed poll. Rebuilding an editable
-            # QComboBox (and replacing its completer) while it owns focus can
-            # swallow a keystroke, reset the caret, and briefly drop focus.
-            self._pending_model_combo_catalog_values = model_values
-            return False
+            self._update_active_model_combo_catalog(model_values)
+            return True
 
-        self._pending_model_combo_catalog_values = None
         self._replace_model_combo_catalog(model_values)
         return True
-
-    def _schedule_pending_model_combo_catalog_refresh(self, *_args):
-        """Apply a deferred catalog after Qt finishes the focus-out event."""
-        if getattr(self, '_pending_model_combo_catalog_values', None) is not None:
-            QTimer.singleShot(0, self._apply_pending_model_combo_catalog_refresh)
-
-    def _apply_pending_model_combo_catalog_refresh(self):
-        """Apply the newest deferred catalog once the model editor is idle."""
-        model_values = getattr(self, '_pending_model_combo_catalog_values', None)
-        if model_values is None or self._model_editor_or_popup_is_active():
-            return False
-        return self._refresh_model_combo_catalog(model_values)
 
     def _schedule_current_provider_catalog_refresh(self, delay_ms=1200):
         """Debounce automatic polling until model/key typing has settled."""
@@ -20780,6 +20848,13 @@ Recent translations to summarize:
                     )
                 self.invalidate()
                 self.sort(0)
+
+            def set_model_values(self, model_values, search_text=None):
+                """Refresh completion choices without replacing the completer."""
+                self._base_model_values = list(model_values)
+                if search_text is None:
+                    search_text = self._search
+                self.set_search_text(search_text)
 
             def lessThan(self, left, right):
                 l_val = (self.sourceModel().data(left, Qt.DisplayRole) or "").lower()

@@ -1034,7 +1034,7 @@ def test_last_successful_catalog_markers_survive_failure_and_reload(tmp_path, mo
     ]
 
 
-def test_gui_catalog_refresh_waits_until_model_typing_finishes(monkeypatch):
+def test_gui_catalog_refresh_updates_stealthily_while_model_editor_is_active(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     qt_widgets = pytest.importorskip("PySide6.QtWidgets")
     import translator_gui
@@ -1050,14 +1050,11 @@ def test_gui_catalog_refresh_waits_until_model_typing_finishes(monkeypatch):
         _replace_model_combo_catalog = (
             translator_gui.TranslatorGUI._replace_model_combo_catalog
         )
+        _update_active_model_combo_catalog = (
+            translator_gui.TranslatorGUI._update_active_model_combo_catalog
+        )
         _refresh_model_combo_catalog = (
             translator_gui.TranslatorGUI._refresh_model_combo_catalog
-        )
-        _schedule_pending_model_combo_catalog_refresh = (
-            translator_gui.TranslatorGUI._schedule_pending_model_combo_catalog_refresh
-        )
-        _apply_pending_model_combo_catalog_refresh = (
-            translator_gui.TranslatorGUI._apply_pending_model_combo_catalog_refresh
         )
 
     app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
@@ -1113,23 +1110,38 @@ def test_gui_catalog_refresh_waits_until_model_typing_finishes(monkeypatch):
     assert editor.hasFocus()
 
     new_models = ["authnd/new-model", "authnd/newer-model"]
-    assert not harness._refresh_model_combo_catalog(new_models)
-    assert [combo.itemText(index) for index in range(combo.count())] == old_models
+    original_completer = combo.completer()
+    assert harness._refresh_model_combo_catalog(new_models)
+    assert [combo.itemText(index) for index in range(combo.count())] == new_models
     assert editor.text() == "authnd/partially-typed"
     assert editor.cursorPosition() == len("authnd/partially")
     assert editor.hasFocus()
+    assert combo.completer() is original_completer
+    assert harness._model_completer_proxy._base_model_values == new_models
 
-    # The connected editingFinished handler applies the newest pending list on
-    # the next event-loop turn without taking focus back from the next field.
+    # An actual selected model survives catalog additions and reordering too.
+    combo.setCurrentText("authnd/new-model")
+    editor.setSelection(0, len("authnd/new"))
+    app.processEvents()
+    reordered_models = [
+        "authnd/newer-model",
+        "authnd/new-model",
+        "authnd/latest-model",
+    ]
+    assert harness._refresh_model_combo_catalog(reordered_models)
+    assert combo.currentText() == "authnd/new-model"
+    assert combo.currentIndex() == 1
+    assert editor.selectedText() == "authnd/new"
+    assert editor.hasFocus()
+
+    # Moving on to the next field does not trigger another catalog rebuild.
     other_field.setFocus()
     app.processEvents()
     app.processEvents()
 
-    assert [combo.itemText(index) for index in range(combo.count())] == new_models
-    assert editor.text() == "authnd/partially-typed"
-    assert editor.cursorPosition() == len("authnd/partially")
+    assert [combo.itemText(index) for index in range(combo.count())] == reordered_models
+    assert editor.text() == "authnd/new-model"
     assert other_field.hasFocus()
-    assert harness._pending_model_combo_catalog_values is None
 
     window.close()
 
