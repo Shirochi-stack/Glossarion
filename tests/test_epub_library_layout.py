@@ -1505,6 +1505,210 @@ def test_remote_image_url_survives_local_image_processing(tmp_path):
     assert 'class="remote-image"' in processed
 
 
+def test_reader_lazily_extracts_only_referenced_epub_images_and_caches_html(
+    tmp_path, monkeypatch,
+):
+    epub_path = tmp_path / "lazy-images.epub"
+    used_bytes = b"used-image" * 800
+    unused_bytes = b"unused-image" * 800
+    with zipfile.ZipFile(epub_path, "w") as archive:
+        archive.writestr("OEBPS/Images/used.png", used_bytes)
+        archive.writestr("OEBPS/Images/unused.png", unused_bytes)
+
+    reader = EpubReaderDialog.__new__(EpubReaderDialog)
+    reader._epub_path = str(epub_path)
+    reader._images = {
+        "used.png": epub_library._lazy_epub_image("OEBPS/Images/used.png"),
+        "unused.png": epub_library._lazy_epub_image("OEBPS/Images/unused.png"),
+    }
+    reader._extra_image_dirs = []
+    reader._img_temp_dir = str(tmp_path / "reader-images")
+
+    reads = []
+    classifications = []
+    original_read = epub_library._read_epub_member_from_zip
+    monkeypatch.setattr(
+        epub_library,
+        "_read_epub_member_from_zip",
+        lambda archive, member, lookup=None: (
+            reads.append(member)
+            or original_read(archive, member, lookup)
+        ),
+    )
+    monkeypatch.setattr(
+        epub_library,
+        "_reader_image_is_sizeable",
+        lambda data: classifications.append(len(data)) or True,
+    )
+
+    html = '<p><img src="../Images/used.png"></p>'
+    try:
+        first = reader._process_html(html)
+        second = reader._process_html(html)
+    finally:
+        reader._close_epub_image_zip()
+
+    assert first == second
+    assert reads == ["OEBPS/Images/used.png"]
+    assert classifications == [len(used_bytes)]
+    assert "unused.png" not in " ".join(reads)
+    assert (tmp_path / "reader-images" / "used.png").read_bytes() == used_bytes
+
+
+def test_epub_loader_caches_image_members_without_eager_payloads(
+    tmp_path, monkeypatch,
+):
+    from ebooklib import epub
+
+    epub_path = tmp_path / "descriptor-cache.epub"
+    book = epub.EpubBook()
+    book.set_identifier("descriptor-cache")
+    book.set_title("Descriptor cache")
+    book.set_language("en")
+    chapter = epub.EpubHtml(
+        title="Chapter",
+        file_name="Text/chapter.xhtml",
+        lang="en",
+    )
+    chapter.content = '<html><body><img src="../Images/page.png"></body></html>'
+    image = epub.EpubItem(
+        uid="page-image",
+        file_name="Images/page.png",
+        media_type="image/png",
+        content=b"large-image-payload" * 2000,
+    )
+    book.add_item(chapter)
+    book.add_item(image)
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    book.toc = (chapter,)
+    book.spine = ["nav", chapter]
+    epub.write_epub(str(epub_path), book)
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(epub_library, "_epub_cache_dir", lambda: str(cache_dir))
+    archive_reads = []
+    original_read_file = epub.EpubReader.read_file
+    monkeypatch.setattr(
+        epub.EpubReader,
+        "read_file",
+        lambda self, name: (
+            archive_reads.append(str(name).replace("\\", "/"))
+            or original_read_file(self, name)
+        ),
+    )
+    worker = epub_library._EpubLoaderThread(str(epub_path), config={})
+    errors = []
+    worker.error.connect(errors.append)
+
+    worker.run()
+    cached = epub_library._load_epub_cache(str(epub_path), config={})
+
+    assert errors == []
+    assert cached is not None
+    _chapters, images, _filenames = cached
+    assert images
+    assert all(not isinstance(value, bytes) for value in images.values())
+    assert not any(name.lower().endswith("images/page.png")
+                   for name in archive_reads)
+    assert {
+        epub_library._lazy_epub_image_member(value)
+        for value in images.values()
+    } == {"Images/page.png"}
+    reader = EpubReaderDialog.__new__(EpubReaderDialog)
+    reader._epub_path = str(epub_path)
+    reader._images = images
+    reader._extra_image_dirs = []
+    reader._img_temp_dir = str(tmp_path / "materialized")
+    try:
+        processed = reader._process_html(
+            '<p><img src="../Images/page.png"></p>')
+    finally:
+        reader._close_epub_image_zip()
+    assert "file:" in processed
+    assert (tmp_path / "materialized" / "page.png").read_bytes() == image.content
+
+
+def test_next_chapter_image_preloader_materializes_only_its_references(
+    tmp_path, monkeypatch,
+):
+    epub_path = tmp_path / "preload-images.epub"
+    next_bytes = b"next-image" * 800
+    later_bytes = b"later-image" * 800
+    with zipfile.ZipFile(epub_path, "w") as archive:
+        archive.writestr("Images/next.png", next_bytes)
+        archive.writestr("Images/later.png", later_bytes)
+
+    reads = []
+    original_read = epub_library._read_epub_member_from_zip
+    monkeypatch.setattr(
+        epub_library,
+        "_read_epub_member_from_zip",
+        lambda archive, member, lookup=None: (
+            reads.append(member)
+            or original_read(archive, member, lookup)
+        ),
+    )
+    worker = epub_library._ReaderImagePreloadThread(
+        "0:1:test",
+        '<p><img src="Images/next.png"></p>',
+        {
+            "Images/next.png": epub_library._lazy_epub_image("Images/next.png"),
+            "Images/later.png": epub_library._lazy_epub_image("Images/later.png"),
+        },
+        [],
+        str(epub_path),
+        str(tmp_path / "preloaded"),
+    )
+    emitted = []
+    worker.done.connect(lambda key, resources: emitted.append((key, resources)))
+
+    worker.run()
+
+    assert reads == ["Images/next.png"]
+    assert (tmp_path / "preloaded" / "next.png").read_bytes() == next_bytes
+    assert not (tmp_path / "preloaded" / "later.png").exists()
+    assert emitted and emitted[0][0] == "0:1:test"
+    assert len(emitted[0][1]) == 1
+
+
+def test_reader_schedules_next_chapter_image_preload_off_thread(
+    qapp, tmp_path, monkeypatch,
+):
+    epub_path = tmp_path / "scheduled-preload.epub"
+    image_bytes = b"scheduled-image" * 800
+    with zipfile.ZipFile(epub_path, "w") as archive:
+        archive.writestr("Images/next.png", image_bytes)
+
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    monkeypatch.setattr(
+        epub_library, "_epub_reader_webengine_is_warmed", lambda: False)
+    monkeypatch.setattr(EpubReaderDialog, "_start_loading", lambda self, **_kw: None)
+    reader = EpubReaderDialog(str(epub_path), config={})
+    reader._chapters = [
+        ("Current", "<p>text only</p>"),
+        ("Next", '<p><img src="Images/next.png"></p>'),
+    ]
+    reader._images = {
+        "Images/next.png": epub_library._lazy_epub_image("Images/next.png")
+    }
+    reader._current_row = 0
+    reader._layout_mode = epub_library.LAYOUT_SINGLE
+    try:
+        reader._schedule_next_chapter_image_preload()
+        _pump_events(qapp, timeout=0.8)
+
+        assert reader._image_preload_thread is None
+        assert reader._preloaded_chapter_keys
+        assert reader._preloaded_image_resources
+        warmed = next(iter(reader._preloaded_image_resources.values()))
+        assert open(warmed["path"], "rb").read() == image_bytes
+    finally:
+        reader.close()
+        qapp.processEvents()
+
+
 @pytest.mark.parametrize("href_attr", ["href", "xlink:href"])
 def test_svg_image_link_is_rehydrated_and_resolved(tmp_path, href_attr):
     reader = EpubReaderDialog.__new__(EpubReaderDialog)

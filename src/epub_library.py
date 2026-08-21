@@ -1152,7 +1152,225 @@ def _epub_cache_dir() -> str:
 #          embeds its state so on/off entries don't collide).
 #   v6  - image cache includes manifest-declared image assets even when
 #          ebooklib classifies them as ITEM_UNKNOWN (notably image/webp).
-_EPUB_CACHE_SCHEMA = "v6"
+#   v7  - image entries are lightweight EPUB-member descriptors; bytes are
+#          extracted only when a displayed/preloaded chapter references them.
+_EPUB_CACHE_SCHEMA = "v7"
+_LAZY_EPUB_IMAGE_TAG = "__glossarion_epub_image_member__"
+_READER_IMAGE_EXTS = (
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp",
+    ".avif", ".jxl",
+)
+
+
+def _discover_epub_image_members(epub_path: str) -> set[str]:
+    """Return case-folded ZIP members declared as images in the OPF."""
+    import posixpath
+    import zipfile
+    from urllib.parse import unquote
+    from xml.etree import ElementTree as ET
+
+    members: set[str] = set()
+    try:
+        with zipfile.ZipFile(epub_path, "r") as archive:
+            container = ET.fromstring(archive.read("META-INF/container.xml"))
+            rootfile = next((
+                node.attrib.get("full-path", "")
+                for node in container.iter()
+                if node.tag.rsplit("}", 1)[-1] == "rootfile"
+                and node.attrib.get("full-path")
+            ), "")
+            if not rootfile:
+                return members
+            package = ET.fromstring(archive.read(rootfile))
+            opf_dir = posixpath.dirname(rootfile)
+            for node in package.iter():
+                if node.tag.rsplit("}", 1)[-1] != "item":
+                    continue
+                href = unquote(str(node.attrib.get("href") or ""))
+                media_type = str(node.attrib.get("media-type") or "").lower()
+                if not href:
+                    continue
+                if (not media_type.startswith("image/")
+                        and not href.lower().endswith(_READER_IMAGE_EXTS)):
+                    continue
+                member = posixpath.normpath(posixpath.join(opf_dir, href))
+                members.add(member.lstrip("/").casefold())
+    except Exception:
+        logger.debug("Could not pre-index EPUB image members: %s",
+                     traceback.format_exc())
+    return members
+
+
+def _lazy_epub_image(member_name: str) -> tuple[str, str]:
+    """Return a pickle-safe descriptor for an unextracted EPUB image."""
+    return (_LAZY_EPUB_IMAGE_TAG, str(member_name or ""))
+
+
+def _lazy_epub_image_member(value) -> str:
+    """Return the archive member stored in a lazy image descriptor."""
+    if (isinstance(value, (tuple, list)) and len(value) == 2
+            and value[0] == _LAZY_EPUB_IMAGE_TAG):
+        return str(value[1] or "")
+    return ""
+
+
+def _reader_image_candidates(src: str) -> list[str]:
+    """Return the legacy-compatible lookup variants for an image reference."""
+    src = str(src or "")
+    candidates = [
+        src,
+        os.path.basename(src),
+        src.lstrip("../"),
+        src.lstrip("./"),
+    ]
+    return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def _reader_image_resource(src: str, images: dict | None,
+                           extra_image_dirs, epub_path: str) -> dict | None:
+    """Resolve *src* without loading its bytes.
+
+    The returned descriptor is safe to hand to the background preloader. Its
+    ``identity`` changes when a filesystem resource changes and stays stable
+    for an EPUB member during the lifetime of an unchanged source archive.
+    """
+    images = images or {}
+    for candidate in _reader_image_candidates(src):
+        if candidate not in images:
+            continue
+        value = images[candidate]
+        member = _lazy_epub_image_member(value)
+        if member:
+            try:
+                stamp = os.path.getmtime(epub_path)
+            except OSError:
+                stamp = 0
+            return {
+                "kind": "epub",
+                "member": member,
+                "identity": f"epub:{os.path.abspath(epub_path or '')}:{stamp}:{member}",
+            }
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return {
+                "kind": "bytes",
+                "data": bytes(value),
+                "identity": f"memory:{candidate}:{id(value)}:{len(value)}",
+            }
+
+    img_basename = os.path.basename(str(src or ""))
+    for extra_dir in extra_image_dirs or []:
+        if not extra_dir or not os.path.isdir(extra_dir):
+            continue
+        disk_path = os.path.join(extra_dir, img_basename)
+        if os.path.isfile(disk_path):
+            return _reader_file_image_resource(disk_path)
+
+    if epub_path:
+        epub_dir = os.path.dirname(epub_path)
+        if epub_dir:
+            rel_candidate = os.path.normpath(os.path.join(epub_dir, str(src or "")))
+            if os.path.isfile(rel_candidate):
+                return _reader_file_image_resource(rel_candidate)
+            for sub in ("images", "Images", "translated_images"):
+                disk_path = os.path.join(epub_dir, sub, img_basename)
+                if os.path.isfile(disk_path):
+                    return _reader_file_image_resource(disk_path)
+    return None
+
+
+def _reader_file_image_resource(path: str) -> dict:
+    path = os.path.abspath(path)
+    try:
+        stat = os.stat(path)
+        stamp = f"{stat.st_mtime_ns}:{stat.st_size}"
+    except OSError:
+        stamp = "0:0"
+    return {
+        "kind": "file",
+        "path": path,
+        "identity": f"file:{path}:{stamp}",
+    }
+
+
+def _read_epub_member_from_zip(zf, member: str,
+                               name_lookup: dict[str, str] | None = None) -> bytes:
+    """Read an EPUB member with a case-insensitive fallback."""
+    try:
+        return zf.read(member)
+    except KeyError:
+        lookup = name_lookup
+        if lookup is None:
+            lookup = {name.casefold(): name for name in zf.namelist()}
+        member_folded = str(member or "").lstrip("/").casefold()
+        actual = lookup.get(member_folded)
+        if not actual:
+            suffix = "/" + member_folded
+            matches = [
+                candidate for folded, candidate in lookup.items()
+                if folded.endswith(suffix)
+            ]
+            if len(matches) == 1:
+                actual = matches[0]
+        if not actual:
+            return b""
+        try:
+            return zf.read(actual)
+        except (KeyError, OSError):
+            return b""
+
+
+def _reader_image_is_sizeable(image_data: bytes) -> bool:
+    """Return whether an image should receive full-page reader treatment."""
+    sizeable = len(image_data or b"") > 5120
+    try:
+        probe = QImage.fromData(image_data)
+        if not probe.isNull():
+            sizeable = sizeable or (probe.width() >= 220 and probe.height() >= 220)
+    except Exception:
+        pass
+    return sizeable
+
+
+def _reader_image_cache_path(temp_dir: str, src: str) -> str:
+    """Return the existing reader-compatible cached image path."""
+    safe_name = os.path.basename(str(src or "")).replace("/", "_").replace("\\", "_")
+    if not safe_name:
+        safe_name = hashlib.md5(str(src or "").encode()).hexdigest() + ".img"
+    return os.path.join(temp_dir, safe_name)
+
+
+def _write_reader_image_cache(temp_dir: str, src: str, image_data: bytes,
+                              source_path: str = "") -> str:
+    """Materialize image bytes once and return their local cache path."""
+    os.makedirs(temp_dir, exist_ok=True)
+    img_path = _reader_image_cache_path(temp_dir, src)
+    needs_write = not os.path.isfile(img_path)
+    if not needs_write:
+        try:
+            needs_write = os.path.getsize(img_path) != len(image_data)
+            if source_path and not needs_write:
+                needs_write = os.path.getmtime(img_path) < os.path.getmtime(source_path)
+        except OSError:
+            needs_write = True
+    if needs_write:
+        with open(img_path, "wb") as f:
+            f.write(image_data)
+    return img_path
+
+
+def _reader_image_map_signature(images: dict | None) -> tuple:
+    """Return a cheap identity signature without comparing image payloads."""
+    signature = []
+    for key, value in (images or {}).items():
+        member = _lazy_epub_image_member(value)
+        if member:
+            marker = ("epub", member)
+        elif isinstance(value, (bytes, bytearray, memoryview)):
+            marker = ("bytes", id(value), len(value))
+        else:
+            marker = (type(value).__name__, id(value))
+        signature.append((str(key), marker))
+    return tuple(sorted(signature))
 
 
 def _epub_cache_key(epub_path: str, show_special_files: bool = True,
@@ -18482,10 +18700,9 @@ class _EpubCacheLoaderThread(QThread):
 
 class _OverlayMergeThread(QThread):
     """Off-UI-thread merge of the reader's loaded chapters against the
-    translated-chapter overlay and any extra image directories.
+    translated-chapter overlay.
 
-    Both operations are file-I/O bound (reading per-chapter HTML from
-    disk, walking image subfolders) and used to run synchronously in
+    Reading per-chapter translated HTML from disk used to run synchronously in
     :meth:`EpubReaderDialog._on_epub_loaded_from_cache`, making an
     in-progress book with hundreds of translated chapters visibly lag
     the Qt event loop on open. Running them in a dedicated QThread —
@@ -18604,83 +18821,130 @@ class _OverlayMergeThread(QThread):
                     overlay_applied = True
             overlaid = merged
 
-        # --- Extra image-directory scan ---
-        # Augments the EPUB's own image table with files discovered in
-        # the translator's output folder (e.g. ``images/``,
-        # ``translated_images/``) so overlaid chapters can resolve any
-        # assets the compiled EPUB doesn't carry.
+        # Extra image directories stay as paths and are resolved lazily by the
+        # active/next chapter. The old implementation read every image in
+        # ``images/`` and ``translated_images/`` during this merge even when
+        # the user never opened a chapter that referenced most of them.
         images = self._images
-        if self._extra_dirs:
-            merged_imgs = dict(images)
-            _img_exts = (".jpg", ".jpeg", ".png", ".gif",
-                         ".webp", ".svg", ".bmp")
-            extra_files: list[tuple[str, str, str]] = []
-            for dir_path in self._extra_dirs:
-                if self._should_stop():
-                    return
-                if not dir_path or not os.path.isdir(dir_path):
-                    continue
-                try:
-                    for entry in os.scandir(dir_path):
-                        if not entry.is_file(follow_symlinks=False):
-                            continue
-                        if not entry.name.lower().endswith(_img_exts):
-                            continue
-                        extra_files.append((
-                            entry.path,
-                            entry.name,
-                            os.path.basename(dir_path),
-                        ))
-                except (PermissionError, OSError):
-                    continue
-
-            def _read_extra_image(file_info):
-                path, name, dir_name = file_info
-                if self._should_stop():
-                    return None
-                try:
-                    with open(path, "rb") as f:
-                        data = f.read()
-                except OSError:
-                    return None
-                if self._should_stop():
-                    return None
-                return name, dir_name, data
-
-            if extra_files:
-                try:
-                    workers = _reader_worker_count(
-                        len(extra_files), config=self._config)
-                    if workers <= 1:
-                        loaded_images = [
-                            _read_extra_image(file_info)
-                            for file_info in extra_files
-                        ]
-                    else:
-                        with ThreadPoolExecutor(max_workers=workers) as pool:
-                            loaded_images = list(pool.map(
-                                _read_extra_image, extra_files))
-                except Exception:
-                    logger.debug("Parallel extra image read failed, "
-                                 "falling back: %s", traceback.format_exc())
-                    loaded_images = [
-                        _read_extra_image(file_info)
-                        for file_info in extra_files
-                    ]
-                if self._should_stop():
-                    return
-                for loaded in loaded_images:
-                    if not loaded:
-                        continue
-                    name, dir_name, data = loaded
-                    merged_imgs.setdefault(name, data)
-                    rel = dir_name + "/" + name
-                    merged_imgs.setdefault(rel, data)
-                    merged_imgs.setdefault("images/" + name, data)
-            images = merged_imgs
 
         if not self._should_stop():
             self.done.emit(overlaid, images, overlay_applied)
+
+
+class _ReaderImagePreloadThread(QThread):
+    """Materialize the next chapter's image resources off the GUI thread."""
+
+    done = Signal(str, object)
+
+    def __init__(self, preload_key: str, html_content: str, images: dict,
+                 extra_image_dirs, epub_path: str, temp_dir: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("EpubReaderImagePreloadThread")
+        self._preload_key = str(preload_key or "")
+        self._html_content = str(html_content or "")
+        self._images = dict(images or {})
+        self._extra_dirs = list(extra_image_dirs or [])
+        self._epub_path = str(epub_path or "")
+        self._temp_dir = str(temp_dir or "")
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        self.requestInterruption()
+
+    def _should_stop(self) -> bool:
+        if self._cancelled:
+            return True
+        try:
+            return bool(self.isInterruptionRequested())
+        except RuntimeError:
+            return True
+
+    def run(self):
+        resources: dict[str, dict] = {}
+        zf = None
+        try:
+            from bs4 import BeautifulSoup
+            import zipfile
+
+            content = unescape_valid_html_tag_entities(self._html_content)
+            soup = BeautifulSoup(content, "html.parser")
+            sources: list[str] = []
+            for tag in soup.find_all("img"):
+                src = str(tag.get("src") or "")
+                if src:
+                    sources.append(src)
+            for tag in soup.find_all("image"):
+                src = next((
+                    str(tag.get(attr) or "")
+                    for attr in (
+                        "href", "xlink:href",
+                        "{http://www.w3.org/1999/xlink}href",
+                    )
+                    if tag.get(attr)
+                ), "")
+                if src:
+                    sources.append(src)
+
+            zip_names = None
+            for src in dict.fromkeys(sources):
+                if self._should_stop():
+                    return
+                if QUrl(src).scheme().lower() in ("http", "https"):
+                    continue
+                resource = _reader_image_resource(
+                    src, self._images, self._extra_dirs, self._epub_path)
+                if not resource:
+                    continue
+                identity = resource["identity"]
+                kind = resource.get("kind")
+                data = b""
+                if kind == "bytes":
+                    data = resource.get("data") or b""
+                elif kind == "file":
+                    try:
+                        with open(resource.get("path") or "", "rb") as f:
+                            data = f.read()
+                    except OSError:
+                        data = b""
+                elif kind == "epub" and self._epub_path:
+                    try:
+                        if zf is None:
+                            zf = zipfile.ZipFile(self._epub_path, "r")
+                            zip_names = {
+                                name.casefold(): name for name in zf.namelist()
+                            }
+                        data = _read_epub_member_from_zip(
+                            zf, resource.get("member") or "", zip_names)
+                    except (OSError, zipfile.BadZipFile):
+                        data = b""
+                if not data or self._should_stop():
+                    continue
+                try:
+                    cached_path = _write_reader_image_cache(
+                        self._temp_dir,
+                        src,
+                        data,
+                        resource.get("path") or "",
+                    )
+                except OSError:
+                    continue
+                resources[identity] = {
+                    "path": cached_path,
+                    "sizeable": _reader_image_is_sizeable(data),
+                    "classified": True,
+                }
+        except Exception:
+            logger.debug("Next-chapter image preload failed: %s",
+                         traceback.format_exc())
+        finally:
+            if zf is not None:
+                try:
+                    zf.close()
+                except Exception:
+                    pass
+        if not self._should_stop():
+            self.done.emit(self._preload_key, resources)
 
 
 def _workspace_reader_placeholder(title: str, message: str) -> str:
@@ -19148,15 +19412,26 @@ class _EpubLoaderThread(QThread):
             from ebooklib import epub as epub_mod
             from bs4 import BeautifulSoup
 
-            book = epub_mod.read_epub(self._epub_path, options={"ignore_ncx": True})
+            lazy_image_members = _discover_epub_image_members(self._epub_path)
+
+            class _LazyImageEpubReader(epub_mod.EpubReader):
+                """Let ebooklib build image items without inflating payloads."""
+
+                def read_file(reader_self, name):
+                    normalized = str(name or "").replace("\\", "/").lstrip("/")
+                    if (normalized.casefold() in lazy_image_members
+                            or normalized.lower().endswith(_READER_IMAGE_EXTS)):
+                        return b""
+                    return super().read_file(name)
+
+            epub_reader = _LazyImageEpubReader(
+                self._epub_path, options={"ignore_ncx": True})
+            book = epub_reader.load()
+            epub_reader.process()
             if self._should_stop():
                 return
 
-            images: dict[str, bytes] = {}
-            _IMAGE_EXTS = (
-                ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp",
-                ".avif", ".jxl",
-            )
+            images: dict[str, object] = {}
             for item in book.get_items():
                 if self._should_stop():
                     return
@@ -19170,20 +19445,23 @@ class _EpubLoaderThread(QThread):
                 is_image = (
                     item.get_type() == ebooklib.ITEM_IMAGE
                     or str(item_media).lower().startswith("image/")
-                    or lower_name.endswith(_IMAGE_EXTS)
+                    or lower_name.endswith(_READER_IMAGE_EXTS)
                 )
                 if not is_image or not item_name:
                     continue
-                content = item.get_content()
-                if not content:
-                    continue
-                images[item_name] = content
+                # Keep only the archive-member name here. Reading every image
+                # eagerly made image-heavy books pay their full compressed I/O
+                # and pickle cost before page one could render. The reader now
+                # materializes only references used by the current chapter (or
+                # the background-preloaded next chapter).
+                descriptor = _lazy_epub_image(item_name)
+                images[item_name] = descriptor
                 stripped = item_name.lstrip("./")
                 if stripped and stripped not in images:
-                    images[stripped] = content
+                    images[stripped] = descriptor
                 basename = os.path.basename(item_name)
                 if basename and basename not in images:
-                    images[basename] = content
+                    images[basename] = descriptor
 
             # --- Chapter item resolution ------------------------------------
             #
@@ -19821,6 +20099,18 @@ class EpubReaderDialog(QDialog):
         self._overlay_thread: _OverlayMergeThread | None = None
         self._workspace_loader_thread: _WorkspaceReaderLoaderThread | None = None
         self._workspace_raw_thread: _PdfRawSectionLoaderThread | None = None
+        self._image_preload_thread: _ReaderImagePreloadThread | None = None
+        self._image_preload_active_key = ""
+        self._image_preload_pending = False
+        self._preloaded_chapter_keys: set[str] = set()
+        self._preloaded_image_resources: dict[str, dict] = {}
+        self._processed_html_cache: dict[str, str] = {}
+        self._image_sizeable_cache: dict[str, bool] = {}
+        self._image_cache_generation = 0
+        self._image_resource_signature: tuple = ()
+        self._epub_image_zip = None
+        self._epub_image_zip_path = ""
+        self._epub_image_zip_names: dict[str, str] = {}
         self._workspace_raw_ready: set[int] = set()
         self._workspace_raw_pending_row: int | None = None
         self._raw_toggle_in_flight = False
@@ -20679,9 +20969,9 @@ class EpubReaderDialog(QDialog):
             return
         filenames = list(filenames or [])
         raw_chapters = list(chapters or [])
-        # Fast path: nothing to merge (plain EPUB open, no overlay, no
-        # extra image directories). The UI can finalize immediately.
-        if not self._translated_overlay and not self._extra_image_dirs:
+        # Fast path: nothing to merge. Extra image directories are resolved
+        # lazily per chapter and no longer require a startup worker.
+        if not self._translated_overlay:
             self._finalize_post_load(raw_chapters, raw_chapters, images or {},
                                      False, filenames)
             return
@@ -20953,7 +21243,7 @@ class EpubReaderDialog(QDialog):
             self._raw_btn.setChecked(currently_raw)
             self._raw_btn.blockSignals(False)
         self._chapters = chapters
-        self._images = images
+        self._set_reader_images(images)
         self._refresh_search_for_active_chapters()
         # Keep filenames around so callers can resolve chapter indices by
         # source filename (used by initial_chapter_filename lookup + TOC jumps).
@@ -21245,7 +21535,7 @@ class EpubReaderDialog(QDialog):
             prev_current = self._chapters[self._current_row]
         self._chapters_raw = pending_raw or self._chapters_raw
         self._chapters_overlaid = overlaid_chapters or []
-        self._images = merged_images or self._images
+        self._set_reader_images(merged_images or self._images)
         if self._show_raw and overlay_applied:
             new_chapters = self._chapters_raw
         else:
@@ -23004,6 +23294,10 @@ class EpubReaderDialog(QDialog):
                 _set_html(self._reader, self._wrap_html(html, paginated=False))
                 self._loaded_chapter = row
 
+        # Let Chromium begin the current page load before starting background
+        # work for the following chapter.
+        QTimer.singleShot(0, self._schedule_next_chapter_image_preload)
+
     # ── Pagination helpers (CSS column-based) ───────────────────────────────
 
     # ── Right-click context menu on the reader pane ────────────────────
@@ -24320,6 +24614,13 @@ class EpubReaderDialog(QDialog):
             signal_names=("done", "error"),
         )
         self._workspace_raw_thread = None
+        _stop_qthread_safely(
+            getattr(self, "_image_preload_thread", None),
+            timeout_ms=800,
+            signal_names=("done", "finished"),
+        )
+        self._image_preload_thread = None
+        self._close_epub_image_zip()
         _persist_config_via_parent(self)
         super().closeEvent(event)
 
@@ -24561,7 +24862,19 @@ class EpubReaderDialog(QDialog):
         self._chapters_raw = []
         self._chapters_overlaid = []
         self._chapter_filenames = []
+        _stop_qthread_safely(
+            getattr(self, "_image_preload_thread", None),
+            timeout_ms=500,
+            signal_names=("done", "finished"),
+        )
+        self._image_preload_thread = None
+        self._image_preload_active_key = ""
+        self._image_preload_pending = False
+        self._close_epub_image_zip()
         self._images = {}
+        self._image_resource_signature = ()
+        self._invalidate_processed_reader_cache()
+        self._preloaded_image_resources.clear()
         self._chapter_page_cache = {}
         self._loaded_chapter = -1
         self._current_page = 0
@@ -24613,17 +24926,197 @@ class EpubReaderDialog(QDialog):
             self._search_match_index = 0
         self._render_current()
 
+    def _ensure_reader_image_temp_dir(self) -> str:
+        """Return a per-source image cache directory, invalidated by mtime."""
+        current = getattr(self, "_img_temp_dir", "")
+        if current:
+            os.makedirs(current, exist_ok=True)
+            return current
+        try:
+            stamp = os.path.getmtime(self._epub_path)
+        except OSError:
+            stamp = 0
+        source_key = f"{self._epub_path}|{stamp}"
+        epub_hash = hashlib.md5(source_key.encode()).hexdigest()[:10]
+        current = os.path.join(
+            tempfile.gettempdir(), "Glossarion_EpubImages", epub_hash)
+        os.makedirs(current, exist_ok=True)
+        self._img_temp_dir = current
+        return current
+
+    def _close_epub_image_zip(self) -> None:
+        zf = getattr(self, "_epub_image_zip", None)
+        self._epub_image_zip = None
+        self._epub_image_zip_path = ""
+        self._epub_image_zip_names = {}
+        if zf is not None:
+            try:
+                zf.close()
+            except Exception:
+                pass
+
+    def _load_reader_image_resource(self, resource: dict) -> bytes:
+        """Load one resolved image resource, reusing the active EPUB archive."""
+        kind = resource.get("kind")
+        if kind == "bytes":
+            return resource.get("data") or b""
+        if kind == "file":
+            try:
+                with open(resource.get("path") or "", "rb") as f:
+                    return f.read()
+            except OSError:
+                return b""
+        if kind != "epub" or not self._epub_path:
+            return b""
+        try:
+            import zipfile
+
+            active_path = os.path.abspath(self._epub_path)
+            zf = getattr(self, "_epub_image_zip", None)
+            if (zf is None
+                    or getattr(self, "_epub_image_zip_path", "") != active_path):
+                self._close_epub_image_zip()
+                zf = zipfile.ZipFile(active_path, "r")
+                self._epub_image_zip = zf
+                self._epub_image_zip_path = active_path
+                self._epub_image_zip_names = {
+                    name.casefold(): name for name in zf.namelist()
+                }
+            return _read_epub_member_from_zip(
+                zf,
+                resource.get("member") or "",
+                self._epub_image_zip_names,
+            )
+        except Exception:
+            logger.debug("Lazy EPUB image extraction failed: %s",
+                         traceback.format_exc())
+            self._close_epub_image_zip()
+            return b""
+
+    def _invalidate_processed_reader_cache(self) -> None:
+        """Invalidate chapter/image metadata after the resource set changes."""
+        self._image_cache_generation = int(getattr(
+            self, "_image_cache_generation", 0) or 0) + 1
+        getattr(self, "_processed_html_cache", {}).clear()
+        getattr(self, "_image_sizeable_cache", {}).clear()
+        getattr(self, "_preloaded_chapter_keys", set()).clear()
+
+    def _set_reader_images(self, images: dict | None) -> None:
+        """Install an image map and invalidate rendering only when it changed."""
+        new_images = images or {}
+        signature = _reader_image_map_signature(new_images)
+        changed = signature != getattr(self, "_image_resource_signature", ())
+        self._images = new_images
+        self._image_resource_signature = signature
+        if changed:
+            self._invalidate_processed_reader_cache()
+
+    def _processed_reader_html_key(self, html_content: str) -> str:
+        digest = hashlib.md5(str(html_content or "").encode("utf-8")).hexdigest()
+        dirs = "|".join(os.path.abspath(str(path)) for path in
+                        (getattr(self, "_extra_image_dirs", []) or []))
+        generation = int(getattr(self, "_image_cache_generation", 0) or 0)
+        return f"{generation}|{self._epub_path}|{dirs}|{digest}"
+
+    def _schedule_next_chapter_image_preload(self) -> None:
+        """Warm the following chapter's local image files in the background."""
+        if getattr(self, "_closing", False):
+            return
+        if self._layout_mode == LAYOUT_ALL:
+            return
+        next_row = int(getattr(self, "_current_row", 0) or 0) + 1
+        chapters = getattr(self, "_chapters", []) or []
+        if not (0 <= next_row < len(chapters)):
+            return
+        html_content = str(chapters[next_row][1] or "")
+        generation = int(getattr(self, "_image_cache_generation", 0) or 0)
+        digest = hashlib.md5(html_content.encode("utf-8")).hexdigest()
+        preload_key = f"{generation}:{next_row}:{digest}"
+        if preload_key in getattr(self, "_preloaded_chapter_keys", set()):
+            return
+        if not re.search(r"(?:<|&lt;)\s*(?:img|image)\b", html_content, re.I):
+            self._preloaded_chapter_keys.add(preload_key)
+            return
+        active = getattr(self, "_image_preload_thread", None)
+        if active is not None:
+            try:
+                if active.isRunning():
+                    if getattr(self, "_image_preload_active_key", "") == preload_key:
+                        return
+                    self._image_preload_pending = True
+                    return
+            except RuntimeError:
+                pass
+        temp_dir = self._ensure_reader_image_temp_dir()
+        thread = _ReaderImagePreloadThread(
+            preload_key,
+            html_content,
+            dict(getattr(self, "_images", {}) or {}),
+            list(getattr(self, "_extra_image_dirs", []) or []),
+            self._epub_path,
+            temp_dir,
+            parent=self,
+        )
+        self._image_preload_thread = thread
+        self._image_preload_active_key = preload_key
+        self._image_preload_pending = False
+        thread.done.connect(self._on_next_chapter_images_preloaded)
+        thread.finished.connect(
+            lambda pending=thread: self._on_image_preload_thread_finished(pending))
+        thread.start()
+
+    @Slot(str, object)
+    def _on_next_chapter_images_preloaded(self, preload_key: str,
+                                          resources: dict) -> None:
+        if getattr(self, "_closing", False):
+            return
+        try:
+            generation = int(str(preload_key).split(":", 1)[0])
+        except (TypeError, ValueError):
+            generation = -1
+        if generation != int(getattr(self, "_image_cache_generation", 0) or 0):
+            return
+        self._preloaded_chapter_keys.add(str(preload_key))
+        self._preloaded_image_resources.update(dict(resources or {}))
+        for identity, info in (resources or {}).items():
+            if isinstance(info, dict) and "sizeable" in info:
+                self._image_sizeable_cache[str(identity)] = bool(info["sizeable"])
+
+    def _on_image_preload_thread_finished(self, thread) -> None:
+        if thread is getattr(self, "_image_preload_thread", None):
+            self._image_preload_thread = None
+            self._image_preload_active_key = ""
+        try:
+            thread.deleteLater()
+        except Exception:
+            pass
+        if (not getattr(self, "_closing", False)
+                and getattr(self, "_image_preload_pending", False)):
+            self._image_preload_pending = False
+            QTimer.singleShot(0, self._schedule_next_chapter_image_preload)
+
     def _process_html(self, html_content: str) -> str:
         """Process chapter HTML: resolve image paths to temp files."""
+        cache = getattr(self, "_processed_html_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._processed_html_cache = cache
+        cache_key = self._processed_reader_html_key(html_content)
+        cached_html = cache.get(cache_key)
+        if cached_html is not None:
+            return cached_html
         try:
             from bs4 import BeautifulSoup
 
-            # Ensure temp image directory exists for this EPUB
-            if not hasattr(self, '_img_temp_dir') or not os.path.isdir(self._img_temp_dir):
-                epub_hash = hashlib.md5(self._epub_path.encode()).hexdigest()[:10]
-                self._img_temp_dir = os.path.join(
-                    tempfile.gettempdir(), "Glossarion_EpubImages", epub_hash)
-                os.makedirs(self._img_temp_dir, exist_ok=True)
+            temp_dir = self._ensure_reader_image_temp_dir()
+            preloaded = getattr(self, "_preloaded_image_resources", None)
+            if not isinstance(preloaded, dict):
+                preloaded = {}
+                self._preloaded_image_resources = preloaded
+            sizeable_cache = getattr(self, "_image_sizeable_cache", None)
+            if not isinstance(sizeable_cache, dict):
+                sizeable_cache = {}
+                self._image_sizeable_cache = sizeable_cache
 
             # Translation output can contain safely escaped markup when it was
             # produced before a tag was added to the shared HTML allowlist.
@@ -24632,68 +25125,51 @@ class EpubReaderDialog(QDialog):
             html_content = unescape_valid_html_tag_entities(html_content)
             soup = BeautifulSoup(html_content, "html.parser")
 
-            def _resolve_image_data(src: str):
-                """Return bytes for an EPUB/workspace-relative image reference."""
-                image_data = None
-                candidates = [
+            def _materialize_image(src: str, classify_size: bool = True):
+                """Return (local URL, sizeable) using preload/cache state."""
+                resource = _reader_image_resource(
                     src,
-                    os.path.basename(src),
-                    src.lstrip("../"),
-                    src.lstrip("./"),
-                ]
-                for candidate in candidates:
-                    if candidate in self._images:
-                        image_data = self._images[candidate]
-                        break
+                    getattr(self, "_images", {}) or {},
+                    getattr(self, "_extra_image_dirs", []) or [],
+                    getattr(self, "_epub_path", "") or "",
+                )
+                if not resource:
+                    return "", False
+                identity = str(resource["identity"])
+                warmed = preloaded.get(identity) or {}
+                warmed_path = str(warmed.get("path") or "")
+                classification_ready = (
+                    not classify_size
+                    or identity in sizeable_cache
+                    or bool(warmed.get("classified"))
+                )
+                if (warmed_path and os.path.isfile(warmed_path)
+                        and classification_ready):
+                    sizeable = bool(sizeable_cache.get(
+                        identity, warmed.get("sizeable", False)))
+                    return QUrl.fromLocalFile(warmed_path).toString(), sizeable
 
-                # Filesystem fallback: if the image wasn't found in the
-                # pre-merged dict (common when the translator renamed images
-                # during extraction), try the workspace and source folders.
+                image_data = self._load_reader_image_resource(resource)
                 if not image_data:
-                    img_basename = os.path.basename(src)
-                    for extra_dir in getattr(self, '_extra_image_dirs', []) or []:
-                        if extra_dir and os.path.isdir(extra_dir):
-                            disk_path = os.path.join(extra_dir, img_basename)
-                            if os.path.isfile(disk_path):
-                                try:
-                                    with open(disk_path, "rb") as df:
-                                        image_data = df.read()
-                                except OSError:
-                                    pass
-                                if image_data:
-                                    break
-
-                    if not image_data and hasattr(self, '_epub_path') and self._epub_path:
-                        epub_dir = os.path.dirname(self._epub_path)
-                        if epub_dir:
-                            rel_candidate = os.path.normpath(os.path.join(epub_dir, src))
-                            if os.path.isfile(rel_candidate):
-                                try:
-                                    with open(rel_candidate, "rb") as df:
-                                        image_data = df.read()
-                                except OSError:
-                                    pass
-                            if not image_data:
-                                for sub in ("images", "Images", "translated_images"):
-                                    disk_path = os.path.join(epub_dir, sub, img_basename)
-                                    if os.path.isfile(disk_path):
-                                        try:
-                                            with open(disk_path, "rb") as df:
-                                                image_data = df.read()
-                                        except OSError:
-                                            pass
-                                        if image_data:
-                                            break
-                return image_data
-
-            def _cache_image(src: str, image_data: bytes) -> str:
-                """Cache image bytes and return a browser-readable file URL."""
-                safe_name = os.path.basename(src).replace("/", "_").replace("\\", "_")
-                img_path = os.path.join(self._img_temp_dir, safe_name)
-                if not os.path.isfile(img_path):
-                    with open(img_path, "wb") as f:
-                        f.write(image_data)
-                return QUrl.fromLocalFile(img_path).toString()
+                    return "", False
+                img_path = _write_reader_image_cache(
+                    temp_dir,
+                    src,
+                    image_data,
+                    resource.get("path") or "",
+                )
+                sizeable = False
+                if classify_size:
+                    if identity not in sizeable_cache:
+                        sizeable_cache[identity] = _reader_image_is_sizeable(
+                            image_data)
+                    sizeable = bool(sizeable_cache[identity])
+                preloaded[identity] = {
+                    "path": img_path,
+                    "sizeable": sizeable,
+                    "classified": bool(classify_size),
+                }
+                return QUrl.fromLocalFile(img_path).toString(), sizeable
 
             # Pre-pass: split <p> tags that contain multiple <img> tags
             # into separate <p> tags, one per image. Without this, the
@@ -24742,20 +25218,9 @@ class EpubReaderDialog(QDialog):
                 # HTTP(S) image resources.
                 if QUrl(src).scheme().lower() in ("http", "https"):
                     continue
-                image_data = _resolve_image_data(src)
-                if image_data:
-                    img_tag["src"] = _cache_image(src, image_data)
-                    # Wrap sizeable images in full-page containers. Byte size
-                    # alone misses flat/white page images that compress tiny.
-                    image_is_sizeable = len(image_data) > 5120
-                    try:
-                        probe = QImage.fromData(image_data)
-                        if not probe.isNull():
-                            image_is_sizeable = image_is_sizeable or (
-                                probe.width() >= 220 and probe.height() >= 220
-                            )
-                    except Exception:
-                        pass
+                image_url, image_is_sizeable = _materialize_image(src)
+                if image_url:
+                    img_tag["src"] = image_url
                     if image_is_sizeable:
                         wrapper = soup.new_tag("div")
                         wrapper["class"] = ["full-page-img"]
@@ -24833,11 +25298,14 @@ class EpubReaderDialog(QDialog):
                 src = image_tag.get(href_attr, "")
                 if not src or QUrl(src).scheme().lower() in ("http", "https"):
                     continue
-                image_data = _resolve_image_data(src)
-                if image_data:
-                    image_tag[href_attr] = _cache_image(src, image_data)
+                image_url, _sizeable = _materialize_image(
+                    src, classify_size=False)
+                if image_url:
+                    image_tag[href_attr] = image_url
 
-            return str(soup)
+            processed = str(soup)
+            cache[cache_key] = processed
+            return processed
         except Exception:
             logger.debug("HTML processing failed: %s", traceback.format_exc())
             return html_content
