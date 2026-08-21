@@ -19963,19 +19963,6 @@ Recent translations to summarize:
             Requires Claude Code CLI (<code>npm install -g @anthropic-ai/claude-code</code>).
         </p>
 
-        <h4>Gemini Subscription (authgem/)</h4>
-        <p>Use Gemini via Code Assist proxy — free daily quota with Google account</p>
-        <ul>
-            <li><b>authgem/gemini-2.5-flash</b> - Gemini 2.5 Flash (free quota)</li>
-            <li><b>authgem/gemini-2.5-pro</b> - Gemini 2.5 Pro (free quota)</li>
-            <li><b>authgem/gemini-3-flash-preview</b> - Gemini 3 Flash Preview</li>
-        </ul>
-        <p style="color: #4385f4; padding: 2px; font-size: 11px;">
-            <b>ℹ️</b> Uses Code Assist proxy (same as Gemini CLI). Free daily requests included.
-            Preview models may require retries due to server capacity.
-        </p>
-
-
         <h4>Gemini Vertex AI (authgem-vertex/)</h4>
         <p>Use Gemini via Vertex AI — requires GCP project with billing</p>
         <ul>
@@ -20011,17 +19998,6 @@ Recent translations to summarize:
         <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
             <b>&#x2139;&#xfe0f; Tip:</b> Without the za/ prefix, GLM models route to the Chinese endpoint.
             Use za/ to access the international API. Requires a Zhipu API key.
-        </p>
-
-        <h4>POE (poe/)</h4>
-        <p>Access models through Poe platform <span style="color: #d9534f;">(likely not functional)</span></p>
-        <ul>
-            <li><b>poe/gpt-4o</b> - GPT-4o via Poe</li>
-            <li><b>poe/claude-4-opus</b> - Claude 4 Opus via Poe</li>
-            <li><b>poe/gemini-2.5-pro</b> - Gemini 2.5 Pro via Poe</li>
-        </ul>
-        <p style="color: #856404; padding: 8px; font-size: 11px;">
-            <b>⚠️ Note:</b> POE integration may not work properly due to API limitations or changes.
         </p>
 
         <h4>NVIDIA (nd/ and authnd/)</h4>
@@ -41994,7 +41970,6 @@ Important rules:
                 ("🔑", "authgpt/", "AuthGPT", "ChatGPT via OAuth login", "#281418", "#e88080"),
                 ("✕", "authgrok/", "AuthGrok", "Grok via xAI OAuth login", "#111111", "#d8d8d8"),
                 ("🔒", "authcd/", "AuthCD", "Claude via CLI login", "#1e1438", "#d97706"),
-                ("🔐", "authgem/", "AuthGem", "Free quota via Code Assist", "#143840", "#4385f4"),
                 ("☁️", "authgem-vertex/", "AuthGem Vertex", "Vertex AI (GCP billing)", "#143840", "#34a853"),
                 ("🤖", "antigravity/", "Cloud Code", "Local proxy (localhost)", "#181830", "#a0a0f0"),
                 ("🟢", "nd/", "NVIDIA", "NVIDIA Integrate models", "#143014", "#60d060"),
