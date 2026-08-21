@@ -185,12 +185,6 @@ def _get_static_model_options() -> List[str]:
         "alpaca-7b",
         "wizardlm-70b", "wizardlm-13b",
         "openchat-3.5",
-        
-        # For POE, prefix with 'poe/' (NO LONGER WORKS)
-       # "poe/gpt-4", "poe/gpt-4o", "poe/gpt-4.5", "poe/gpt-4.1",
-       # "poe/claude-3-opus", "poe/claude-4-opus", "poe/claude-3-sonnet", "poe/claude-4-sonnet",
-       # "poe/claude", "poe/Assistant",
-       # "poe/gemini-2.5-flash", "poe/gemini-2.5-pro",
 
         # LiteRouter (lr/ prefix)
         "lr/deepseek-v3.2:free", "lr/deepseek-chat", "lr/deepseek-r1",
@@ -291,18 +285,6 @@ def _get_static_model_options() -> List[str]:
         # AuthCD – Claude subscription via OAuth (Anthropic Messages API)
         "authcd/claude-sonnet-5", "authcd/claude-fable-5", "authcd/claude-sonnet-4-6", "authcd/claude-sonnet-4-5", "authcd/claude-opus-4-8",
         "authcd/claude-opus-4-7", "authcd/claude-opus-4-6", "authcd/claude-haiku-4-5",
-
-        # AuthGem – Gemini-cli via Google OAuth (no API key needed)
-        "authgem/gemini-2.5-flash", "authgem/gemini-2.5-flash-lite",
-        "authgem/gemini-2.5-pro",
-        "authgem/gemini-2.0-flash", "authgem/gemini-2.0-flash-lite",
-        "authgem/gemini-3.1-pro-preview", "authgem/gemini-3.1-flash-lite", "authgem/gemini-3-flash-preview",
-
-        # AuthGem-Key - Gemini AI Studio using the API-key route
-        "authgem-key/gemini-2.5-flash", "authgem-key/gemini-2.5-flash-lite",
-        "authgem-key/gemini-2.5-pro", "authgem-key/gemini-2.0-flash",
-        "authgem-key/gemini-2.0-flash-lite", "authgem-key/gemini-3.1-pro-preview",
-        "authgem-key/gemini-3.1-flash-lite", "authgem-key/gemini-3-flash-preview",
 
         # nano-gpt provider models
         "nan/deepseek/deepseek-v4-flash", "nan/deepseek/deepseek-v4-flash:thinking", "nan/deepseek/deepseek-v4-pro",

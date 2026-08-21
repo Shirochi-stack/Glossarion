@@ -20573,6 +20573,11 @@ Recent translations to summarize:
         if not online_models or not hasattr(self, 'model_combo'):
             return
 
+        previous_model_keys = {
+            str(self.model_combo.itemText(index)).casefold()
+            for index in range(self.model_combo.count())
+        }
+
         custom_models = self.config.get('custom_model_list')
         if isinstance(custom_models, list):
             display_models = list(custom_models)
@@ -20691,9 +20696,23 @@ Recent translations to summarize:
         if requested_provider:
             status = str(statuses.get(requested_provider, "static fallback (no result)"))
             if status.startswith('online'):
+                refreshed_provider_models = list(
+                    provider_models.get(requested_provider, []) or []
+                )
+                new_model_keys = set()
+                for model in refreshed_provider_models:
+                    key = str(model).casefold()
+                    if key not in previous_model_keys:
+                        new_model_keys.add(key)
+                new_model_count = len(new_model_keys)
+                new_model_label = (
+                    "1 new model found"
+                    if new_model_count == 1
+                    else f"{new_model_count} new models found"
+                )
                 self.append_log(
                     f"✅ Auto-poll complete: {requested_provider} — "
-                    f"{len(provider_models.get(requested_provider, []) or [])} models"
+                    f"{len(refreshed_provider_models)} models · {new_model_label}"
                 )
             else:
                 self.append_log(

@@ -1198,3 +1198,51 @@ def test_gui_auto_poll_respects_unified_client_optional_key_models(
     else:
         assert due_calls == []
         assert poll_calls == []
+
+
+@pytest.mark.parametrize(
+    ("displayed_models", "expected_new_label"),
+    [
+        (["electronhub/model-a"], "1 new model found"),
+        (
+            ["electronhub/model-a", "ELECTRONHUB/MODEL-B"],
+            "0 new models found",
+        ),
+    ],
+)
+def test_gui_auto_poll_log_counts_models_not_already_displayed(
+    displayed_models,
+    expected_new_label,
+):
+    import translator_gui
+
+    logs = []
+    combo = SimpleNamespace(
+        count=lambda: len(displayed_models),
+        itemText=lambda index: displayed_models[index],
+    )
+    gui = SimpleNamespace(
+        config={},
+        model_combo=combo,
+        _refresh_model_combo_catalog=lambda _models: True,
+        _ensure_polled_model_marker_state=lambda: {},
+        append_log=logs.append,
+    )
+    result = SimpleNamespace(
+        models=["electronhub/model-a", "electronhub/model-b"],
+        statuses={"electronhub": "online (2 models)"},
+        provider_models={
+            "electronhub": [
+                "electronhub/model-a",
+                "electronhub/model-b",
+                "ELECTRONHUB/MODEL-B",
+            ],
+        },
+        requested_provider="electronhub",
+    )
+
+    translator_gui.TranslatorGUI._apply_provider_model_catalog_refresh(gui, result)
+
+    assert logs == [
+        f"✅ Auto-poll complete: electronhub — 3 models · {expected_new_label}"
+    ]
