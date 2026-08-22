@@ -4628,6 +4628,40 @@ def _create_response_handling_section(self, parent):
     compression_desc.setStyleSheet("color: gray; font-size: 10pt;")
     compression_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(compression_desc)
+
+    chunk_progress_cb = self._create_styled_checkbox(
+        "Resume incomplete EPUB chapters from saved chunks"
+    )
+    chunk_progress_cb.setChecked(
+        bool(
+            getattr(
+                self,
+                'enable_chunk_progress_var',
+                self.config.get('enable_chunk_progress', False),
+            )
+        )
+    )
+    chunk_progress_cb.setToolTip(
+        "Stores successful EPUB chunks in translation_progress.json. Cached "
+        "chunks are discarded when the configured or discovered chunk budget changes."
+    )
+    self.enable_chunk_progress_checkbox = chunk_progress_cb
+
+    def _on_chunk_progress_toggle(checked):
+        self.enable_chunk_progress_var = bool(checked)
+        self.config['enable_chunk_progress'] = bool(checked)
+
+    chunk_progress_cb.toggled.connect(_on_chunk_progress_toggle)
+    section_v.addWidget(chunk_progress_cb)
+
+    chunk_progress_desc = QLabel(
+        "Opt-in EPUB resume cache. Completed chunks are reused only while both "
+        "the original and API-cached token budgets still match."
+    )
+    chunk_progress_desc.setWordWrap(True)
+    chunk_progress_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    chunk_progress_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(chunk_progress_desc)
     
     # Separator
     sep6 = QFrame()

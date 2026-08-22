@@ -444,6 +444,161 @@ def _run_batch_chapter_failure(
     return source, output_files[0].read_text(encoding="utf-8")
 
 
+def test_batch_epub_chunk_progress_submits_only_missing_chunks(
+    tmp_path,
+    monkeypatch,
+):
+    chunk_budget = {
+        "initial_output_token_limit": 12000,
+        "cached_output_token_limit": 9000,
+        "compression_factor": 2.0,
+        "safety_margin": 500,
+        "minimum_chunk_size": 1000,
+        "initial_chunk_size": 5750,
+        "cached_chunk_size": 4250,
+    }
+
+    class Config:
+        MODEL = "model-a"
+        input_path = str(tmp_path / "book.epub")
+        ENABLE_CHUNK_PROGRESS = True
+        BATCH_SIZE = 3
+        CONTEXTUAL = False
+        HIST_LIMIT = 0
+        ENABLE_IMAGE_TRANSLATION = False
+        USE_ROLLING_SUMMARY = False
+        ASSISTANT_PROMPT = ""
+        TEMP = 0
+        MAX_OUTPUT_TOKENS = 12000
+        MAX_RETRY_TOKENS = 12000
+        EMERGENCY_IMAGE_RESTORE = False
+        REMOVE_AI_ARTIFACTS = "off"
+
+        @staticmethod
+        def get_system_prompt(actual_merge_count=1):
+            return "Translate."
+
+        @staticmethod
+        def get_chunk_budget_snapshot(safety_margin=500, minimum=1000):
+            return chunk_budget
+
+    chunks = [
+        ("chunk-1", 1, 3),
+        ("chunk-2", 2, 3),
+        ("chunk-3", 3, 3),
+    ]
+    sent = []
+
+    def fake_send(messages, *_args, **kwargs):
+        callback = kwargs.get("before_send_callback")
+        if callback:
+            callback()
+        source = messages[-1]["content"]
+        sent.append(source)
+        return f"translated:{source}", "stop", None
+
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.setenv("CHAR_RATIO_TRUNCATION_ENABLED", "0")
+    monkeypatch.setenv("DIRECT_TEXT_ACTIVE", "0")
+    monkeypatch.setattr(
+        translation_module.ContentProcessor,
+        "image_processing_html",
+        staticmethod(lambda chapter: chapter["body"]),
+    )
+    monkeypatch.setattr(
+        translation_module.ContentProcessor,
+        "is_mostly_image_html",
+        staticmethod(lambda _body: False),
+    )
+    monkeypatch.setattr(
+        translation_module,
+        "_split_chapter_for_translation",
+        lambda *_args, **_kwargs: chunks,
+    )
+    monkeypatch.setattr(
+        translation_module,
+        "find_glossary_file",
+        lambda _out: None,
+    )
+    monkeypatch.setattr(
+        translation_module,
+        "build_system_prompt",
+        lambda base, *_args, **_kwargs: base,
+    )
+    monkeypatch.setattr(
+        translation_module,
+        "apply_emergency_glossary_compliance",
+        lambda text, _out: text,
+    )
+    monkeypatch.setattr(
+        translation_module,
+        "_build_translation_chunk_prompt_parts",
+        lambda system_prompt, chunk, *_args, **_kwargs: (
+            system_prompt,
+            [],
+            chunk,
+        ),
+    )
+    monkeypatch.setattr(translation_module, "send_with_interrupt", fake_send)
+    monkeypatch.setattr(
+        translation_module,
+        "is_qa_failed_response",
+        lambda _text: False,
+    )
+
+    progress = ProgressManager(str(tmp_path))
+    progress.prepare_chapter_chunk_progress(
+        "hash-1", 3, chunk_budget, enabled=True
+    )
+    progress.record_chapter_chunk(
+        "hash-1", 1, 3, "cached-one", chunk_budget
+    )
+    progress.save()
+
+    class Client:
+        pass
+
+    processor = BatchTranslationProcessor(
+        Config(),
+        Client(),
+        [],
+        str(tmp_path),
+        threading.RLock(),
+        progress.save,
+        lambda idx, actual_num, content_hash, output_file=None,
+        status="completed", **kwargs: progress.update(
+            idx,
+            actual_num,
+            content_hash,
+            output_file,
+            status,
+            **kwargs,
+        ),
+        lambda: False,
+        progress_manager=progress,
+    )
+    result = processor.process_single_chapter(
+        (
+            0,
+            {
+                "num": 1,
+                "actual_chapter_num": 1,
+                "content_hash": "hash-1",
+                "body": "original",
+                "filename": "chapter001.xhtml",
+                "original_basename": "chapter001.xhtml",
+            },
+        )
+    )
+
+    assert result[0] is True
+    assert sorted(sent) == ["chunk-2", "chunk-3"]
+    assert result[3] == "cached-one\ntranslated:chunk-2\ntranslated:chunk-3"
+    entry = progress.prog["chapter_chunks"]["hash-1"]
+    assert entry["completed"] == [1, 2, 3]
+    assert entry["chapter_status"] == "completed"
+
+
 @pytest.mark.parametrize(
     ("finish_reason", "save_partial", "save_prohibited"),
     [

@@ -2301,18 +2301,31 @@ class UnifiedClient:
         return requested
 
     def _normalize_token_params(self, max_tokens: Optional[int], max_completion_tokens: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
-        """Normalize token parameters and apply the active key's output token override."""
+        """Normalize token parameters, per-key overrides, and discovered caps."""
         per_key_limit = self._active_per_key_output_token_limit()
+
+        def _cached_cap(value):
+            if value is None:
+                return None
+            try:
+                request_model = self._get_active_request_model()
+            except Exception:
+                request_model = getattr(self, "model", None)
+            cached_limit = self.get_cached_output_token_limit(request_model)
+            if cached_limit:
+                return min(int(value), int(cached_limit))
+            return value
 
         if self._is_o_series_model():
             mct = max_completion_tokens if max_completion_tokens is not None else (max_tokens or int(os.getenv('MAX_OUTPUT_TOKENS', '8192')))
             if per_key_limit is not None:
                 mct = per_key_limit
-            return None, mct
+            return None, _cached_cap(mct)
         else:
             mt = max_tokens if max_tokens is not None else (max_completion_tokens or int(os.getenv('MAX_OUTPUT_TOKENS', '8192')))
             if per_key_limit is not None:
                 mt = per_key_limit
+            mt = _cached_cap(mt)
             if self._is_antigravity_model():
                 mt = self._clamp_antigravity_max_tokens(mt)
             return mt, None
@@ -2412,6 +2425,67 @@ class UnifiedClient:
     # Cache discovered model token limits to avoid repeated adjustments
     _model_token_limits = {}  # model_name -> max_tokens
     _model_limits_lock = threading.Lock()
+
+    @classmethod
+    def get_cached_output_token_limit(cls, model: Optional[str]) -> Optional[int]:
+        """Return the safest discovered output cap for *model*.
+
+        Most providers cache limits under the routed model name.  Browser/OAuth
+        routes may cache the same model under both its route-prefixed and
+        provider-native names, while AuthCD keeps a small compatibility cache of
+        its own.  Chunk planning needs the same effective cap that request
+        sending will apply, so expose one normalized, read-only lookup here.
+        """
+        model_name = str(model or "").strip()
+        if not model_name:
+            return None
+
+        candidates = []
+
+        def _add(candidate):
+            candidate = str(candidate or "").strip()
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+
+        _add(model_name)
+        route_match = re.match(
+            r"^(authnd|authcd)\d{0,4}/(.+)$",
+            model_name,
+            re.IGNORECASE,
+        )
+        route_name = None
+        native_model = None
+        if route_match:
+            route_name = route_match.group(1).lower()
+            native_model = route_match.group(2).strip()
+            _add(native_model)
+            _add(f"{route_name}/{native_model}")
+
+        limits = []
+        try:
+            with cls._model_limits_lock:
+                for candidate in candidates:
+                    value = cls._model_token_limits.get(candidate)
+                    try:
+                        value = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if value > 0:
+                        limits.append(value)
+
+                if route_name == "authcd" and native_model:
+                    authcd_limits = getattr(cls, "_authcd_model_max_tokens", {})
+                    value = authcd_limits.get(native_model)
+                    try:
+                        value = int(value)
+                    except (TypeError, ValueError):
+                        value = None
+                    if value and value > 0:
+                        limits.append(value)
+        except Exception:
+            return None
+
+        return min(limits) if limits else None
     
     # Cache models that don't support adaptive thinking (fall back to standard extended thinking)
     _adaptive_unsupported_models = set()

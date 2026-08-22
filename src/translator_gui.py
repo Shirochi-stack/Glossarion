@@ -15908,6 +15908,7 @@ Recent translations to summarize:
             ('hide_image_translation_label_var', 'hide_image_translation_label', True),
             ('retry_timeout_var', 'retry_timeout', False),
             ('batch_translation_var', 'batch_translation', True),
+            ('enable_chunk_progress_var', 'enable_chunk_progress', False),
             ('disable_epub_gallery_var', 'disable_epub_gallery', True),
             # NEW: Disable automatic cover creation (affects extraction and EPUB cover page)
             ('disable_automatic_cover_creation_var', 'disable_automatic_cover_creation', True),
@@ -33269,6 +33270,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SYSTEM_PROMPT': self.prompt_text.toPlainText().strip(),
             'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',  # Optional assistant prefill
             'ENABLE_TRANSLATION_CHUNK_PROMPT': '1' if getattr(self, 'enable_translation_chunk_prompt_var', self.config.get('enable_translation_chunk_prompt', False)) else '0',
+            'ENABLE_CHUNK_PROGRESS': '1' if getattr(self, 'enable_chunk_progress_var', self.config.get('enable_chunk_progress', False)) else '0',
             'INCLUDE_PREVIOUS_CHUNK': '1' if getattr(self, 'include_previous_chunk_var', self.config.get('include_previous_chunk', False)) else '0',
             'PREVIOUS_CHUNK_CONTEXT_LIMIT': str(getattr(self, 'previous_chunk_context_limit_var', self.config.get('previous_chunk_context_limit', 3))),
             'TRANSLATION_CHUNK_PROMPT_ROLE': str(getattr(self, 'translation_chunk_prompt_role_var', self.config.get('translation_chunk_prompt_role', 'assistant')) or 'assistant').strip().lower(),
@@ -44283,6 +44285,7 @@ Important rules:
                 ('enable_decimal_chapters', ['enable_decimal_chapters_var'], False, bool),
                 ('force_ncx_only', ['force_ncx_only_var'], False, bool),
                 ('batch_translate_headers', ['batch_translate_headers_var'], True, bool),
+                ('enable_chunk_progress', ['enable_chunk_progress_checkbox', 'enable_chunk_progress_var'], False, bool),
                 ('update_html_headers', ['update_html_headers_var'], False, bool),
                 ('save_header_translations', ['save_header_translations_var'], False, bool),
                 ('use_sorted_fallback', ['use_sorted_fallback_var'], False, bool),
@@ -45744,6 +45747,7 @@ Important rules:
                 ('MAX_IMAGES_PER_CHAPTER', str(getattr(self, 'max_images_per_chapter_var', '-1'))),
                 ('IMAGE_CHUNK_HEIGHT', str(getattr(self, 'image_chunk_height_var', '1500'))),
                 ('MAX_OUTPUT_TOKENS', str(getattr(self, 'max_output_tokens', 128000))),
+                ('ENABLE_CHUNK_PROGRESS', '1' if _bool_value(getattr(self, 'enable_chunk_progress_var', self.config.get('enable_chunk_progress', False))) else '0'),
                 ('HIDE_IMAGE_TRANSLATION_LABEL', '1' if getattr(self, 'hide_image_translation_label_var', True) else '0'),
                 ('DISABLE_EPUB_GALLERY', '1' if getattr(self, 'disable_epub_gallery_var', True) else '0'),
                 ('DISABLE_AUTOMATIC_COVER_CREATION', '1' if getattr(self, 'disable_automatic_cover_creation_var', True) else '0'),

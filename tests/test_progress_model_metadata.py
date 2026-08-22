@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import textwrap
 import threading
+import types
 import zipfile
 
 import pytest
@@ -37,6 +38,7 @@ from Retranslation_GUI import (
 from TransateKRtoEN import (
     ContentProcessor,
     ProgressManager,
+    TranslationConfig,
     _vision_ocr_header_markdown,
 )
 from image_translator import ImageTranslator
@@ -470,6 +472,187 @@ def test_cleanup_missing_files_uses_one_directory_snapshot(tmp_path, monkeypatch
     assert "3" not in progress.prog["chapter_chunks"]
     assert "5" in progress.prog["chapters"]
     assert "6" in progress.prog["chapters"]
+
+
+def _epub_chunk_budget(initial=5750, cached=4250):
+    return {
+        "initial_output_token_limit": 12000,
+        "cached_output_token_limit": 9000,
+        "compression_factor": 2.0,
+        "safety_margin": 500,
+        "minimum_chunk_size": 1000,
+        "initial_chunk_size": initial,
+        "cached_chunk_size": cached,
+    }
+
+
+def test_chunk_progress_reuses_matching_budget_and_normalizes_indices(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    entry, reason, changed = progress.prepare_chapter_chunk_progress(
+        "hash-1", 3, _epub_chunk_budget(), enabled=True
+    )
+    assert reason is None
+    assert changed is True
+    assert progress.record_chapter_chunk(
+        "hash-1", 2, 3, "translated two", _epub_chunk_budget()
+    )
+
+    entry, reason, _changed = progress.prepare_chapter_chunk_progress(
+        "hash-1", 3, _epub_chunk_budget(), enabled=True
+    )
+
+    assert reason is None
+    assert entry["completed"] == [2]
+    assert entry["chunks"] == {"2": "translated two"}
+
+
+@pytest.mark.parametrize(
+    ("changed_budget", "expected_reason"),
+    [
+        (
+            _epub_chunk_budget(initial=5000, cached=4250),
+            "initial chunk size changed",
+        ),
+        (
+            _epub_chunk_budget(initial=5750, cached=3500),
+            "cached chunk size changed",
+        ),
+    ],
+)
+def test_incomplete_chunk_progress_is_invalidated_when_budget_changes(
+    tmp_path,
+    changed_budget,
+    expected_reason,
+):
+    progress = ProgressManager(str(tmp_path))
+    progress.prepare_chapter_chunk_progress(
+        "hash-1", 3, _epub_chunk_budget(), enabled=True
+    )
+    progress.record_chapter_chunk(
+        "hash-1", 1, 3, "stale", _epub_chunk_budget()
+    )
+
+    entry, reason, changed = progress.prepare_chapter_chunk_progress(
+        "hash-1", 3, changed_budget, enabled=True
+    )
+
+    assert changed is True
+    assert expected_reason in reason
+    assert entry["completed"] == []
+    assert entry["chunks"] == {}
+
+
+def test_disabled_chunk_progress_removes_incomplete_cache(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    progress.prepare_chapter_chunk_progress(
+        "hash-1", 2, _epub_chunk_budget(), enabled=True
+    )
+    progress.record_chapter_chunk(
+        "hash-1", 1, 2, "cached", _epub_chunk_budget()
+    )
+
+    entry, reason, changed = progress.prepare_chapter_chunk_progress(
+        "hash-1", 2, _epub_chunk_budget(), enabled=False
+    )
+
+    assert entry is None
+    assert reason == "disabled"
+    assert changed is True
+    assert "hash-1" not in progress.prog["chapter_chunks"]
+
+
+def test_chunk_budget_uses_global_individual_and_cached_model_limits(
+    monkeypatch,
+):
+    keys = [
+        {
+            "api_key": "one",
+            "model": "model-a",
+            "enabled": True,
+            "individual_output_token_limit": 12000,
+        },
+        {
+            "api_key": "two",
+            "model": "model-b",
+            "enabled": True,
+            "individual_output_token_limit": None,
+        },
+        {
+            "api_key": "disabled",
+            "model": "model-c",
+            "enabled": False,
+            "individual_output_token_limit": 1000,
+        },
+    ]
+    monkeypatch.setenv("MODEL", "model-main")
+    monkeypatch.setenv("MAX_OUTPUT_TOKENS", "20000")
+    monkeypatch.setenv("COMPRESSION_FACTOR", "2")
+    monkeypatch.setenv("USE_MULTI_API_KEYS", "1")
+    monkeypatch.setenv("MULTI_API_KEYS", json.dumps(keys))
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setattr(
+        UnifiedClient,
+        "_model_token_limits",
+        {"model-a": 9000, "model-b": 15000, "model-c": 500},
+    )
+
+    config = TranslationConfig()
+    snapshot = config.get_chunk_budget_snapshot()
+
+    assert config.get_initial_output_limit() == 12000
+    assert config.get_effective_output_limit() == 9000
+    assert snapshot["initial_chunk_size"] == 5750
+    assert snapshot["cached_chunk_size"] == 4250
+
+
+def test_unified_cached_limit_resolves_auth_route_aliases(monkeypatch):
+    monkeypatch.setattr(
+        UnifiedClient,
+        "_model_token_limits",
+        {
+            "z-ai/glm-test": 7000,
+            "authnd/z-ai/glm-test": 6500,
+        },
+    )
+    monkeypatch.setattr(
+        UnifiedClient,
+        "_authcd_model_max_tokens",
+        {"claude-test": 6000},
+        raising=False,
+    )
+
+    assert UnifiedClient.get_cached_output_token_limit(
+        "authnd3/z-ai/glm-test"
+    ) == 6500
+    assert UnifiedClient.get_cached_output_token_limit(
+        "authcd2/claude-test"
+    ) == 6000
+
+
+def test_unified_cached_cap_wins_after_individual_key_override(monkeypatch):
+    client = UnifiedClient.__new__(UnifiedClient)
+    client.model = "model-a"
+    client.client_type = "openai"
+    client.current_key_output_token_limit = 12000
+    client._get_active_request_model = lambda: "model-a"
+    client._get_thread_local_client = lambda: types.SimpleNamespace(
+        output_token_limit=None,
+        per_key_max_output_tokens=None,
+    )
+    client._is_o_series_model = lambda: False
+    monkeypatch.setattr(
+        UnifiedClient,
+        "_model_token_limits",
+        {"model-a": 9000},
+    )
+
+    max_tokens, max_completion_tokens = client._normalize_token_params(
+        20000,
+        None,
+    )
+
+    assert max_tokens == 9000
+    assert max_completion_tokens is None
 
 
 @pytest.mark.parametrize("extension", [".srt", ".ass", ".lrc"])

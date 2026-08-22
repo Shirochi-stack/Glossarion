@@ -317,6 +317,49 @@ def _split_chapter_for_translation(chapter_splitter, chapter, available_tokens, 
     return chapter_splitter.split_chapter(body, available_tokens, filename=filename)
 
 
+def _translation_chunk_budget_snapshot(config, safety_margin=500, minimum=1000):
+    """Return a normalized chunk-budget snapshot for real and test configs."""
+    resolver = getattr(config, "get_chunk_budget_snapshot", None)
+    if callable(resolver):
+        return resolver(safety_margin=safety_margin, minimum=minimum)
+
+    effective_resolver = getattr(config, "get_effective_output_limit", None)
+    if callable(effective_resolver):
+        cached_output_limit = int(effective_resolver())
+    else:
+        cached_output_limit = int(getattr(config, "MAX_OUTPUT_TOKENS", 8192))
+    initial_resolver = getattr(config, "get_initial_output_limit", None)
+    initial_output_limit = (
+        int(initial_resolver())
+        if callable(initial_resolver)
+        else int(getattr(config, "MAX_OUTPUT_TOKENS", cached_output_limit))
+    )
+    compression_resolver = getattr(config, "get_effective_compression_factor", None)
+    compression_factor = (
+        float(compression_resolver())
+        if callable(compression_resolver)
+        else float(getattr(config, "COMPRESSION_FACTOR", 1.0) or 1.0)
+    )
+    if compression_factor <= 0:
+        compression_factor = 0.000000000001
+
+    def _chunk_size(output_limit):
+        return max(
+            int(minimum),
+            int((int(output_limit) - int(safety_margin)) / compression_factor),
+        )
+
+    return {
+        "initial_output_token_limit": initial_output_limit,
+        "cached_output_token_limit": cached_output_limit,
+        "compression_factor": compression_factor,
+        "safety_margin": int(safety_margin),
+        "minimum_chunk_size": int(minimum),
+        "initial_chunk_size": _chunk_size(initial_output_limit),
+        "cached_chunk_size": _chunk_size(cached_output_limit),
+    }
+
+
 def _sdlxliff_json_records(text):
     try:
         data = json.loads(str(text or ""))
@@ -1847,6 +1890,10 @@ class TranslationConfig:
         self.WATERMARK_PATTERN_THRESHOLD = int(os.getenv("WATERMARK_PATTERN_THRESHOLD", "10"))
         self.WATERMARK_CLAHE_LIMIT = float(os.getenv("WATERMARK_CLAHE_LIMIT", "3.0"))
         self.COMPRESSION_FACTOR = float(os.getenv("COMPRESSION_FACTOR", "2.0"))
+        self.ENABLE_CHUNK_PROGRESS = (
+            os.getenv("ENABLE_CHUNK_PROGRESS", "0").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
         
         # Multi API key support
         self.use_multi_api_keys = os.environ.get('USE_MULTI_API_KEYS', '0') == '1'
@@ -1883,73 +1930,88 @@ class TranslationConfig:
                 print(f"Failed to load fallback keys: {e}")
                 self.use_fallback_keys = False
 
-    def get_effective_output_limit(self) -> int:
-        """Return the effective output token limit, considering per-key overrides.
-
-        - Start from the global MAX_OUTPUT_TOKENS.
-        - Check if the model has a discovered limit (from auto-adjustment).
-        - If the active translation key pool has per-key limits, use the safe pool limit:
-          configured per-key limits override global, while unset keys keep global.
-        """
-        effective = _clamp_output_tokens_for_selected_model(
-            self.MODEL,
-            self.MAX_OUTPUT_TOKENS,
-            default=8192,
-        )
-        
-        # Check if we've discovered a model limit via auto-adjustment
+    @staticmethod
+    def _positive_output_limit(value):
         try:
-            from unified_api_client import UnifiedClient
-            with UnifiedClient._model_limits_lock:
-                cached_limit = UnifiedClient._model_token_limits.get(self.MODEL)
-                if cached_limit and cached_limit < effective:
-                    effective = cached_limit
+            if value in (None, ""):
+                return None
+            value = int(value)
+            return value if value > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _load_output_limit_key_list(env_name, existing):
+        raw = os.getenv(env_name, "[]")
+        try:
+            if raw and raw.strip() not in ("", "[]", "null", "None"):
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return parsed
         except Exception:
             pass
+        return existing or []
 
-        def _positive_int(value):
-            try:
-                if value in (None, ""):
-                    return None
-                value = int(value)
-                return value if value > 0 else None
-            except Exception:
-                return None
-
-        def _load_key_list(env_name, existing):
-            raw = os.getenv(env_name, "[]")
-            try:
-                if raw and raw.strip() not in ("", "[]", "null", "None"):
-                    parsed = json.loads(raw)
-                    if isinstance(parsed, list):
-                        return parsed
-            except Exception:
-                pass
-            return existing or []
-
-        def _pool_effective_limit(keys):
-            enabled = [k for k in (keys or []) if isinstance(k, dict) and k.get('enabled', True)]
-            if not enabled:
-                return None
-            limits = []
-            for key_data in enabled:
-                # Unset per-key values still use the current global limit for that key.
-                limits.append(_positive_int(key_data.get('individual_output_token_limit')) or effective)
-            return min(limits) if limits else None
-
-        pool_limit = None
+    def _translation_output_routes(self):
+        """Return enabled ``(model, configured_limit)`` translation routes."""
+        keys = []
         if self.use_multi_api_keys:
-            pool_limit = _pool_effective_limit(_load_key_list('MULTI_API_KEYS', self.multi_api_keys))
-        if pool_limit is None and self.use_fallback_keys:
-            pool_limit = _pool_effective_limit(_load_key_list('FALLBACK_KEYS', self.fallback_keys))
-        if pool_limit is not None:
-            effective = pool_limit
+            keys = self._load_output_limit_key_list(
+                "MULTI_API_KEYS",
+                self.multi_api_keys,
+            )
+        if not keys and self.use_fallback_keys:
+            keys = self._load_output_limit_key_list(
+                "FALLBACK_KEYS",
+                self.fallback_keys,
+            )
 
-        return _clamp_output_tokens_for_selected_model(
-            self.MODEL,
-            effective,
-            default=8192,
-        )
+        routes = []
+        for key_data in keys or []:
+            if not isinstance(key_data, dict) or not key_data.get("enabled", True):
+                continue
+            model = str(key_data.get("model") or self.MODEL).strip() or self.MODEL
+            configured = (
+                self._positive_output_limit(
+                    key_data.get("individual_output_token_limit")
+                )
+                or self.MAX_OUTPUT_TOKENS
+            )
+            routes.append((model, configured))
+
+        if not routes:
+            routes.append((self.MODEL, self.MAX_OUTPUT_TOKENS))
+        return routes
+
+    def get_initial_output_limit(self) -> int:
+        """Return the safest configured limit before discovered cache caps."""
+        limits = [
+            _clamp_output_tokens_for_selected_model(
+                model,
+                configured,
+                default=8192,
+            )
+            for model, configured in self._translation_output_routes()
+        ]
+        return min(limits) if limits else 8192
+
+    def get_effective_output_limit(self) -> int:
+        """Return the safest configured/per-key limit after discovered caps."""
+        limits = []
+        for model, configured in self._translation_output_routes():
+            effective = _clamp_output_tokens_for_selected_model(
+                model,
+                configured,
+                default=8192,
+            )
+            try:
+                cached_limit = UnifiedClient.get_cached_output_token_limit(model)
+            except Exception:
+                cached_limit = None
+            if cached_limit:
+                effective = min(effective, int(cached_limit))
+            limits.append(effective)
+        return min(limits) if limits else 8192
 
     def get_effective_compression_factor(self) -> float:
         """Return a non-zero compression factor for token-budget math.
@@ -1965,6 +2027,28 @@ class TranslationConfig:
         if compression_factor <= 0:
             return 0.000000000001
         return compression_factor
+
+    def get_chunk_budget_snapshot(self, safety_margin=500, minimum=1000):
+        """Describe configured and cache-adjusted EPUB input chunk budgets."""
+        compression_factor = self.get_effective_compression_factor()
+        initial_output_limit = self.get_initial_output_limit()
+        cached_output_limit = self.get_effective_output_limit()
+
+        def _chunk_size(output_limit):
+            return max(
+                int(minimum),
+                int((int(output_limit) - int(safety_margin)) / compression_factor),
+            )
+
+        return {
+            "initial_output_token_limit": int(initial_output_limit),
+            "cached_output_token_limit": int(cached_output_limit),
+            "compression_factor": float(compression_factor),
+            "safety_margin": int(safety_margin),
+            "minimum_chunk_size": int(minimum),
+            "initial_chunk_size": _chunk_size(initial_output_limit),
+            "cached_chunk_size": _chunk_size(cached_output_limit),
+        }
 
     def get_system_prompt(self, actual_merge_count: int = 1) -> str:
         """Return the system prompt, optionally with split marker instruction.
@@ -3644,6 +3728,217 @@ class ProgressManager:
         return prog
 
     @staticmethod
+    def _chunk_budget_fields(budget_snapshot):
+        snapshot = budget_snapshot if isinstance(budget_snapshot, dict) else {}
+        normalized = {}
+        for key in (
+            "initial_output_token_limit",
+            "cached_output_token_limit",
+            "safety_margin",
+            "minimum_chunk_size",
+            "initial_chunk_size",
+            "cached_chunk_size",
+        ):
+            try:
+                normalized[key] = int(snapshot[key])
+            except (KeyError, TypeError, ValueError):
+                normalized[key] = None
+        try:
+            normalized["compression_factor"] = float(
+                snapshot["compression_factor"]
+            )
+        except (KeyError, TypeError, ValueError):
+            normalized["compression_factor"] = None
+        return normalized
+
+    def prepare_chapter_chunk_progress(
+        self,
+        chapter_key,
+        total_chunks,
+        budget_snapshot,
+        *,
+        enabled=True,
+        legacy_keys=None,
+    ):
+        """Prepare and validate an incomplete chapter's resumable chunk entry.
+
+        Returns ``(entry, invalidation_reason, changed)``.  Cached translations
+        are retained only when both the configured and discovered-cache chunk
+        sizes still match the split plan that produced them.
+        """
+        chapter_key = str(chapter_key)
+        legacy_keys = [str(key) for key in (legacy_keys or [])]
+        try:
+            total_chunks = max(0, int(total_chunks))
+        except (TypeError, ValueError):
+            total_chunks = 0
+
+        with self._save_lock:
+            chapter_chunks = self.prog.setdefault("chapter_chunks", {})
+            changed = False
+            if not enabled:
+                for key in [chapter_key, *legacy_keys]:
+                    if key in chapter_chunks:
+                        chapter_chunks.pop(key, None)
+                        changed = True
+                return None, "disabled", changed
+
+            if chapter_key not in chapter_chunks:
+                for legacy_key in legacy_keys:
+                    if legacy_key in chapter_chunks:
+                        chapter_chunks[chapter_key] = chapter_chunks.pop(
+                            legacy_key
+                        )
+                        changed = True
+                        break
+
+            existing = chapter_chunks.get(chapter_key)
+            budget_fields = self._chunk_budget_fields(budget_snapshot)
+            invalidation_reason = None
+            if not isinstance(existing, dict):
+                existing = None
+            elif existing.get("schema_version") != 1:
+                invalidation_reason = "legacy chunk progress has no budget fingerprint"
+            else:
+                try:
+                    stored_total = int(existing.get("total"))
+                except (TypeError, ValueError):
+                    stored_total = None
+                if stored_total != total_chunks:
+                    invalidation_reason = (
+                        f"chunk count changed ({stored_total} -> {total_chunks})"
+                    )
+                else:
+                    for field, label in (
+                        ("initial_chunk_size", "initial chunk size"),
+                        ("cached_chunk_size", "cached chunk size"),
+                    ):
+                        try:
+                            stored_value = int(existing.get(field))
+                        except (TypeError, ValueError):
+                            stored_value = None
+                        current_value = budget_fields.get(field)
+                        if stored_value != current_value:
+                            invalidation_reason = (
+                                f"{label} changed ({stored_value} -> {current_value})"
+                            )
+                            break
+
+            if existing is None or invalidation_reason:
+                existing = {
+                    "schema_version": 1,
+                    "total": total_chunks,
+                    "completed": [],
+                    "chunks": {},
+                    "chunk_metadata": {},
+                    "chapter_status": "incomplete",
+                    "last_updated": time.time(),
+                }
+                existing.update(budget_fields)
+                chapter_chunks[chapter_key] = existing
+                changed = True
+            else:
+                raw_chunks = existing.get("chunks")
+                raw_chunks = raw_chunks if isinstance(raw_chunks, dict) else {}
+                valid_chunks = {}
+                for raw_idx, result in raw_chunks.items():
+                    try:
+                        chunk_idx = int(raw_idx)
+                    except (TypeError, ValueError):
+                        continue
+                    if 1 <= chunk_idx <= total_chunks and isinstance(result, str):
+                        valid_chunks[str(chunk_idx)] = result
+
+                raw_completed = existing.get("completed")
+                raw_completed = raw_completed if isinstance(raw_completed, list) else []
+                completed = set()
+                for raw_idx in raw_completed:
+                    try:
+                        chunk_idx = int(raw_idx)
+                    except (TypeError, ValueError):
+                        continue
+                    if str(chunk_idx) in valid_chunks:
+                        completed.add(chunk_idx)
+                completed.update(int(idx) for idx in valid_chunks)
+                normalized_completed = sorted(completed)
+                if (
+                    existing.get("chunks") != valid_chunks
+                    or existing.get("completed") != normalized_completed
+                ):
+                    changed = True
+                existing["chunks"] = valid_chunks
+                existing["completed"] = normalized_completed
+                if not isinstance(existing.get("chunk_metadata"), dict):
+                    existing["chunk_metadata"] = {}
+                    changed = True
+                existing["chapter_status"] = "incomplete"
+                existing.update(budget_fields)
+
+            return existing, invalidation_reason, changed
+
+    def record_chapter_chunk(
+        self,
+        chapter_key,
+        chunk_idx,
+        total_chunks,
+        result,
+        budget_snapshot,
+        *,
+        model_name=None,
+        key_identifier=None,
+    ):
+        """Record one successfully translated chunk in an existing plan."""
+        if not isinstance(result, str):
+            return False
+        entry, _reason, _changed = self.prepare_chapter_chunk_progress(
+            chapter_key,
+            total_chunks,
+            budget_snapshot,
+            enabled=True,
+        )
+        try:
+            chunk_idx = int(chunk_idx)
+        except (TypeError, ValueError):
+            return False
+        if not entry or chunk_idx < 1 or chunk_idx > int(total_chunks):
+            return False
+
+        with self._save_lock:
+            entry["chunks"][str(chunk_idx)] = result
+            completed = set()
+            for value in entry.get("completed", []):
+                try:
+                    completed.add(int(value))
+                except (TypeError, ValueError):
+                    pass
+            completed.add(chunk_idx)
+            entry["completed"] = sorted(completed)
+            if model_name or key_identifier:
+                metadata = entry.setdefault("chunk_metadata", {})
+                metadata[str(chunk_idx)] = {
+                    "model_name": str(model_name or "").strip() or None,
+                    "key_identifier": str(key_identifier or "").strip() or None,
+                }
+            entry["chapter_status"] = "incomplete"
+            entry["last_updated"] = time.time()
+        return True
+
+    def mark_chapter_chunk_progress_status(self, chapter_key, status):
+        """Mirror the parent chapter state onto a stored chunk-cache entry."""
+        chapter_key = str(chapter_key)
+        with self._save_lock:
+            entry = self.prog.get("chapter_chunks", {}).get(chapter_key)
+            if not isinstance(entry, dict):
+                return False
+            entry["chapter_status"] = (
+                "completed"
+                if str(status or "").lower().startswith("completed")
+                else "incomplete"
+            )
+            entry["last_updated"] = time.time()
+            return True
+
+    @staticmethod
     def _clean_model_name(value):
         model_name = str(value or "").strip()
         return model_name or None
@@ -4863,6 +5158,8 @@ class ProgressManager:
             pass
         
         self.prog["chapters"][chapter_key] = chapter_info
+        if content_hash:
+            self.mark_chapter_chunk_progress_status(content_hash, status)
 
     def update_ocr_progress(self, actual_num, done, total, output_file=None, chapter_obj=None, content_hash=None):
         """Update per-chapter Vision OCR request progress without changing translation status."""
@@ -8421,7 +8718,7 @@ class BatchTranslationProcessor:
     def __init__(self, config, client, base_msg, out_dir, progress_lock, 
                  save_progress_fn, update_progress_fn, check_stop_fn, 
                  image_translator=None, is_text_file=False, history_manager=None,
-                 restore_progress_fn=None):
+                 restore_progress_fn=None, progress_manager=None):
         self.config = config
         self.client = client
         self.base_msg = base_msg
@@ -8430,11 +8727,17 @@ class BatchTranslationProcessor:
         self.save_progress_fn = save_progress_fn
         self.update_progress_fn = update_progress_fn
         self.restore_progress_fn = restore_progress_fn
+        self.progress_manager = progress_manager
         self.check_stop_fn = check_stop_fn
         self.image_translator = image_translator
         self.chapters_completed = 0
         self.chunks_completed = 0
         self.is_text_file = is_text_file
+        self.chunk_progress_enabled = bool(
+            getattr(config, "ENABLE_CHUNK_PROGRESS", False)
+            and str(getattr(config, "input_path", "")).lower().endswith(".epub")
+            and progress_manager is not None
+        )
         # Optional shared HistoryManager for contextual translation across chapters
         self.history_manager = history_manager
 
@@ -8846,13 +9149,11 @@ class BatchTranslationProcessor:
                 max_input_tokens = 1000000
                 budget_str = "unlimited"
             
-            # Calculate available tokens for content based on effective OUTPUT limit (same as calculation phase)
-            # Use output token limit with compression factor, not input limit
-            max_output_tokens = self.config.get_effective_output_limit()
-            safety_margin_output = 500
-            compression_factor = self.config.get_effective_compression_factor()
-            available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
-            available_tokens = max(available_tokens, 1000)  # Ensure minimum
+            # Use one fingerprintable budget for splitting and chunk-cache validation.
+            chunk_budget = _translation_chunk_budget_snapshot(self.config)
+            max_output_tokens = chunk_budget["cached_output_token_limit"]
+            compression_factor = chunk_budget["compression_factor"]
+            available_tokens = chunk_budget["cached_chunk_size"]
             
             # Split into chunks if needed
             # Get filename for content type detection
@@ -8877,14 +9178,63 @@ class BatchTranslationProcessor:
             
             file_ref = chapter.get('original_basename', f'{terminology}_{chap_num}')
             
+            cached_chunk_entry = None
+            if self.progress_manager is not None:
+                with self.progress_lock:
+                    (
+                        cached_chunk_entry,
+                        invalidation_reason,
+                        chunk_progress_changed,
+                    ) = self.progress_manager.prepare_chapter_chunk_progress(
+                        content_hash,
+                        total_chunks,
+                        chunk_budget,
+                        enabled=self.chunk_progress_enabled,
+                        legacy_keys=[str(chapter_progress_idx)],
+                    )
+                    if chunk_progress_changed:
+                        self.save_progress_fn()
+                if self.chunk_progress_enabled and invalidation_reason:
+                    print(
+                        f"🧹 Chapter {actual_num}: invalidated cached chunks — "
+                        f"{invalidation_reason}"
+                    )
+
             # Initialize shared structures for chunk processing (works for 1 or many chunks)
             translated_chunks = [None] * total_chunks  # Pre-allocate to maintain order
             chunk_request_metadata = [None] * total_chunks
+            if isinstance(cached_chunk_entry, dict):
+                cached_results = cached_chunk_entry.get("chunks", {})
+                cached_metadata = cached_chunk_entry.get("chunk_metadata", {})
+                for raw_idx, cached_result in cached_results.items():
+                    try:
+                        cached_idx = int(raw_idx)
+                    except (TypeError, ValueError):
+                        continue
+                    if not (1 <= cached_idx <= total_chunks):
+                        continue
+                    translated_chunks[cached_idx - 1] = cached_result
+                    metadata = (
+                        cached_metadata.get(str(cached_idx), {})
+                        if isinstance(cached_metadata, dict)
+                        else {}
+                    )
+                    if isinstance(metadata, dict) and metadata.get("model_name"):
+                        chunk_request_metadata[cached_idx - 1] = (
+                            metadata.get("model_name"),
+                            metadata.get("key_identifier"),
+                        )
             chunks_lock = threading.Lock()
             chapter_truncated_event = threading.Event()
 
             if total_chunks > 1:
                 print(f"✂️ Chapter {actual_num} requires {total_chunks} chunks - processing in parallel")
+            resumed_chunk_count = sum(chunk is not None for chunk in translated_chunks)
+            if resumed_chunk_count:
+                print(
+                    f"♻️ Chapter {actual_num}: resuming {resumed_chunk_count}/"
+                    f"{total_chunks} chunk(s) from translation_progress.json"
+                )
             
             def process_chunk(chunk_data):
                 """Process a single chunk in parallel"""
@@ -9742,7 +10092,11 @@ class BatchTranslationProcessor:
             # - WAIT_FOR_CHUNKS=1: always wait for remaining chunks of this chapter
             # - WAIT_FOR_CHUNKS=0: ONLY wait if all chunks have already been *sent to the API* (post-stagger)
             #   Otherwise, cancel this chapter (do not write partial output).
-            sent_or_done_chunks = set()  # chunk indices (1-based) that were in-flight or completed
+            sent_or_done_chunks = {
+                index + 1
+                for index, cached_result in enumerate(translated_chunks)
+                if cached_result is not None
+            }  # chunk indices (1-based) that were cached, in-flight, or completed
 
             def _update_sent_or_done_from_watchdog() -> None:
                 try:
@@ -9811,13 +10165,19 @@ class BatchTranslationProcessor:
             last_chunk_raw_obj = None
             chapter_truncated = False  # Track if any chunk was truncated
             graceful_stop_qa_issue = None  # Preserve QA status if graceful stop exits before the post-loop gate
+            pending_chunks = [
+                chunk_data
+                for chunk_data in chunks
+                if translated_chunks[int(chunk_data[1]) - 1] is None
+            ]
+            self.chunks_completed += resumed_chunk_count
 
             with ThreadPoolExecutor(max_workers=max_chunk_workers, thread_name_prefix=f"Ch{actual_num}Chunk") as chunk_executor:
                 # Submit chunks with staggered delay to prevent simultaneous starts
                 thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
                 future_to_chunk = {}
                 
-                for chunk_submit_idx, chunk_data in enumerate(chunks):
+                for chunk_submit_idx, chunk_data in enumerate(pending_chunks):
                     # Sleep BEFORE submitting (apply to all chunks when multiple chunks exist)
                     if thread_delay > 0 and total_chunks > 1:
                         chunk_num = chunk_data[1]  # Extract chunk number for logging
@@ -9861,7 +10221,7 @@ class BatchTranslationProcessor:
                     future_to_chunk[future] = chunk_data[1]  # Store chunk index
                 
                 # Collect results as they complete
-                completed_chunks = 0
+                completed_chunks = resumed_chunk_count
                 
                 for future in as_completed(future_to_chunk):
                     # Read env vars INSIDE loop to catch stop pressed mid-chunk
@@ -10058,6 +10418,19 @@ class BatchTranslationProcessor:
                                 # Track if any chunk was truncated
                                 if is_truncated:
                                     chapter_truncated = True
+
+                            if self.chunk_progress_enabled:
+                                with self.progress_lock:
+                                    self.progress_manager.record_chapter_chunk(
+                                        content_hash,
+                                        chunk_idx,
+                                        total_chunks,
+                                        result,
+                                        chunk_budget,
+                                        model_name=chunk_actual_model,
+                                        key_identifier=chunk_actual_key,
+                                    )
+                                    self.save_progress_fn()
                             
                             # Log redundant with "Received Chapter X, Chunk Y" above
                             # print(f"✅ Chunk {chunk_idx}/{total_chunks} completed ({completed_chunks}/{total_chunks})")
@@ -24783,16 +25156,11 @@ def main(log_callback=None, stop_callback=None):
         if chapter_key in progress_manager.prog["chapters"] and progress_manager.prog["chapters"][chapter_key].get("status") == "in_progress":
             pass
         
-        # Calculate based on effective OUTPUT limit only
-        max_output_tokens = config.get_effective_output_limit() 
-        safety_margin_output = 500
-        
-        # Expected output/input token ratio used to keep translated chunks under the output limit.
-        compression_factor = config.get_effective_compression_factor()
-        available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
-        
-        # Ensure minimum
-        available_tokens = max(available_tokens, 1000)
+        chunk_budget = _translation_chunk_budget_snapshot(config)
+        max_output_tokens = chunk_budget["cached_output_token_limit"]
+        safety_margin_output = chunk_budget["safety_margin"]
+        compression_factor = chunk_budget["compression_factor"]
+        available_tokens = chunk_budget["cached_chunk_size"]
         
         # Debug output for first chapter
         if os.getenv('DEBUG_CHUNK_SPLITTING', '0') == '1' and idx == 0:
@@ -25894,7 +26262,8 @@ def main(log_callback=None, stop_callback=None):
             image_translator,
             is_text_file=is_text_file,
             history_manager=history_manager,
-            restore_progress_fn=progress_manager.restore_in_progress
+            restore_progress_fn=progress_manager.restore_in_progress,
+            progress_manager=progress_manager,
         )
 
         # Batch-mode rolling summary: updated once per batch and injected into the NEXT batch.
@@ -27328,16 +27697,10 @@ def main(log_callback=None, stop_callback=None):
                 # Check if this chapter is already a chunk from text file splitting
                 if c.get('is_chunk', False):
                     # This is already a pre-split chunk, but still check if it needs further splitting
-                    # Calculate based on effective OUTPUT limit only
-                    max_output_tokens = config.get_effective_output_limit()
-                    safety_margin_output = 500
-                    
-                    # Expected output/input token ratio used to keep translated chunks under the output limit.
-                    compression_factor = config.get_effective_compression_factor()
-                    available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
-                    
-                    # Ensure minimum
-                    available_tokens = max(available_tokens, 1000)
+                    chunk_budget = _translation_chunk_budget_snapshot(config)
+                    max_output_tokens = chunk_budget["cached_output_token_limit"]
+                    compression_factor = chunk_budget["compression_factor"]
+                    available_tokens = chunk_budget["cached_chunk_size"]
                     
                     print(f"📊 Max Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
                     
@@ -27361,16 +27724,10 @@ def main(log_callback=None, stop_callback=None):
                         print(f"📄 Section {c['num']} (pre-split from text file)")
                 else:
                     # Normal splitting logic for non-text files
-                    # Calculate based on effective OUTPUT limit only
-                    max_output_tokens = config.get_effective_output_limit()
-                    safety_margin_output = 500
-                    
-                    # Expected output/input token ratio used to keep translated chunks under the output limit.
-                    compression_factor = config.get_effective_compression_factor()
-                    available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
-                    
-                    # Ensure minimum
-                    available_tokens = max(available_tokens, 1000)
+                    chunk_budget = _translation_chunk_budget_snapshot(config)
+                    max_output_tokens = chunk_budget["cached_output_token_limit"]
+                    compression_factor = chunk_budget["compression_factor"]
+                    available_tokens = chunk_budget["cached_chunk_size"]
                     
                     print(f"📊 Max Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
                     
@@ -27401,15 +27758,40 @@ def main(log_callback=None, stop_callback=None):
                 terminology = "Section" if is_text_source else "Chapter"
                 print(f"   ℹ️ {terminology} size: {actual_chapter_tokens:,} tokens (within limit of {available_tokens:,} tokens)")
             
-            chapter_key_str = str(idx)
-            if chapter_key_str not in progress_manager.prog["chapter_chunks"]:
-                progress_manager.prog["chapter_chunks"][chapter_key_str] = {
-                    "total": len(chunks),
-                    "completed": [],
-                    "chunks": {}
-                }
-            
-            progress_manager.prog["chapter_chunks"][chapter_key_str]["total"] = len(chunks)
+            chapter_key_str = content_hash
+            chunk_progress_enabled = bool(
+                getattr(config, "ENABLE_CHUNK_PROGRESS", False)
+                and str(input_path or "").lower().endswith(".epub")
+            )
+            (
+                cached_chunk_entry,
+                invalidation_reason,
+                chunk_progress_changed,
+            ) = progress_manager.prepare_chapter_chunk_progress(
+                chapter_key_str,
+                len(chunks),
+                chunk_budget,
+                enabled=chunk_progress_enabled,
+                legacy_keys=[str(idx)],
+            )
+            if chunk_progress_changed:
+                progress_manager.save()
+            if chunk_progress_enabled and invalidation_reason:
+                print(
+                    f"🧹 Chapter {actual_num}: invalidated cached chunks — "
+                    f"{invalidation_reason}"
+                )
+            cached_chunk_results = (
+                cached_chunk_entry.get("chunks", {})
+                if isinstance(cached_chunk_entry, dict)
+                else {}
+            )
+            if cached_chunk_results:
+                print(
+                    f"♻️ Chapter {actual_num}: resuming "
+                    f"{len(cached_chunk_results)}/{len(chunks)} chunk(s) from "
+                    "translation_progress.json"
+                )
             
             translated_chunks = []
             chunk_abort = False  # Flag to abort chapter processing on QA failures
@@ -27417,6 +27799,22 @@ def main(log_callback=None, stop_callback=None):
             
             for chunk_idx_enumerate, (chunk_html, chunk_idx, total_chunks) in enumerate(chunks):
                 previous_chunk_html = chunks[chunk_idx_enumerate - 1][0] if chunk_idx_enumerate > 0 else ""
+                cached_result = cached_chunk_results.get(str(chunk_idx))
+                if isinstance(cached_result, str):
+                    translated_chunks.append((cached_result, chunk_idx, total_chunks))
+                    chunk_context_manager.add_chunk(
+                        chunk_html,
+                        cached_result,
+                        chunk_idx,
+                        total_chunks,
+                    )
+                    chunks_completed += 1
+                    current_chunk_number += 1
+                    print(
+                        f"  ♻️ Reused cached chunk {chunk_idx}/{total_chunks} "
+                        f"for Chapter {actual_num}"
+                    )
+                    continue
                 # Apply thread delay before processing chunk (including first, when multiple chunks)
                 if total_chunks > 1:
                     thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
@@ -27451,23 +27849,6 @@ def main(log_callback=None, stop_callback=None):
                         
                         if chunk_delay_interrupted:
                             break  # Exit the chunk loop to save partial results
-                
-                chapter_key_str = content_hash
-                old_key_str = str(idx)
-                
-                if chapter_key_str not in progress_manager.prog.get("chapter_chunks", {}) and old_key_str in progress_manager.prog.get("chapter_chunks", {}):
-                    progress_manager.prog["chapter_chunks"][chapter_key_str] = progress_manager.prog["chapter_chunks"][old_key_str]
-                    del progress_manager.prog["chapter_chunks"][old_key_str]
-                    #print(f"[PROGRESS] Migrated chunks for chapter {chap_num} to new tracking system")
-                
-                if chapter_key_str not in progress_manager.prog["chapter_chunks"]:
-                    progress_manager.prog["chapter_chunks"][chapter_key_str] = {
-                        "total": len(chunks),
-                        "completed": [],
-                        "chunks": {}
-                    }
-                
-                progress_manager.prog["chapter_chunks"][chapter_key_str]["total"] = len(chunks)
                 
                 # Get chapter status to check for qa_failed
                 chapter_info = progress_manager.prog["chapters"].get(chapter_key_str, {})
@@ -28207,9 +28588,18 @@ def main(log_callback=None, stop_callback=None):
                 
                 chunk_context_manager.add_chunk(user_prompt, result, chunk_idx, total_chunks)
 
-                progress_manager.prog["chapter_chunks"][chapter_key_str]["completed"].append(chunk_idx)
-                progress_manager.prog["chapter_chunks"][chapter_key_str]["chunks"][str(chunk_idx)] = result
-                progress_manager.save()
+                if chunk_progress_enabled:
+                    actual_model, actual_key = _capture_thread_actual_request_metadata()
+                    progress_manager.record_chapter_chunk(
+                        chapter_key_str,
+                        chunk_idx,
+                        total_chunks,
+                        result,
+                        chunk_budget,
+                        model_name=actual_model,
+                        key_identifier=actual_key,
+                    )
+                    progress_manager.save()
 
                 chunks_completed += 1
                     
