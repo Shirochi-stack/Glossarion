@@ -88,6 +88,13 @@ from epub_package import (
     find_epub_opf_member,
     find_opf_path as find_workspace_opf_path,
 )
+from chapter_chunk_progress import (
+    chunk_failure_summary,
+    ensure_chunk_entry_schema,
+    remove_chunk_segments,
+    reset_chunks_for_retranslation,
+    set_chunk_qa,
+)
 _LLM_TOKEN_QA_RE = re.compile(
     r"(?:^|[^a-z0-9])llm[_\s-]*token[_\s-]*issue",
     re.IGNORECASE,
@@ -96,6 +103,38 @@ _MISSING_IMAGE_QA_RE = re.compile(
     r"(?:^|[^a-z0-9])missing[_\s-]*images?(?=$|[^a-z0-9])",
     re.IGNORECASE,
 )
+
+
+def _sync_parent_chunk_qa_summary(prog, parent_key, chunk_key):
+    """Mirror aggregate child QA state without failing the parent chapter."""
+    if not isinstance(prog, dict):
+        return None
+    chunk_entry = prog.get("chapter_chunks", {}).get(str(chunk_key or ""))
+    parent = prog.get("chapters", {}).get(parent_key)
+    if not isinstance(chunk_entry, dict) or not isinstance(parent, dict):
+        return None
+    ensure_chunk_entry_schema(chunk_entry)
+    summary = chunk_failure_summary(chunk_entry)
+    failed_indices = sorted(
+        int(index)
+        for index, record in chunk_entry.get("entries", {}).items()
+        if isinstance(record, dict)
+        and str(record.get("status") or "").lower() in {"qa_failed", "failed"}
+    )
+    parent["chunk_qa_summary"] = {
+        **summary,
+        "failed_indices": failed_indices,
+        "last_updated": time.time(),
+    }
+    parent["has_chunk_qa_failures"] = bool(failed_indices)
+    parent["chunk_qa_issues_found"] = {
+        index: list(record.get("qa_issues_found") or [])
+        for index, record in chunk_entry.get("entries", {}).items()
+        if isinstance(record, dict) and record.get("qa_issues_found")
+    }
+    if not failed_indices:
+        parent.pop("chunk_qa_issues_found", None)
+    return summary
 
 
 class _KeepOpenActionMenu(QMenu):
@@ -20496,6 +20535,9 @@ class RetranslationMixin:
             'output_dir': output_dir,
             'progress_source_is_subtitle': progress_source_is_subtitle,
         }
+        self._append_chunk_progress_display_info(
+            _display_data, chapter_display_info
+        )
         self._append_metadata_display_info(_display_data, chapter_display_info)
         self._append_translation_artifact_display_info(
             _display_data, chapter_display_info
@@ -25211,6 +25253,24 @@ class RetranslationMixin:
             cleared_count = 0
             progress_updated = False
             for info in failed_chapters:
+                if info.get("is_chunk_progress"):
+                    chunk_key = str(info.get("chunk_progress_key") or "")
+                    chunk_entry = data['prog'].get("chapter_chunks", {}).get(
+                        chunk_key
+                    )
+                    if isinstance(chunk_entry, dict) and set_chunk_qa(
+                        chunk_entry,
+                        info.get("chunk_index"),
+                        [],
+                    ):
+                        _sync_parent_chunk_qa_summary(
+                            data['prog'],
+                            info.get("parent_progress_key"),
+                            chunk_key,
+                        )
+                        cleared_count += 1
+                        progress_updated = True
+                    continue
                 match = None
                 progress_key = info.get('progress_key')
                 if progress_key and progress_key in data['prog'].get("chapters", {}):
@@ -25352,6 +25412,26 @@ class RetranslationMixin:
             
             selected_indices = [data['listbox'].row(item) for item in selected_items]
             selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
+            selected_parent_keys = {
+                chapter.get("progress_key")
+                for chapter in selected_chapters
+                if not chapter.get("is_chunk_progress")
+                and chapter.get("progress_key")
+            }
+            # A selected parent requests a full chapter reset. Do not also
+            # process its child chunk rows, which would otherwise edit the
+            # same output file twice and inflate the confirmation counts.
+            selected_chapters = [
+                chapter
+                for chapter in selected_chapters
+                if not chapter.get("is_chunk_progress")
+                or chapter.get("parent_progress_key") not in selected_parent_keys
+            ]
+            chunk_selected = [
+                chapter
+                for chapter in selected_chapters
+                if chapter.get("is_chunk_progress")
+            ]
 
             metadata_selected = [ch for ch in selected_chapters if self._is_metadata_progress_info(ch)]
             artifact_selected = [
@@ -25565,6 +25645,20 @@ class RetranslationMixin:
                         + ", ".join(selected_labels)
                         + "\n\nContinue?"
                     )
+            elif chunk_selected and len(chunk_selected) == count:
+                chunk_labels = [
+                    f"Ch.{chapter.get('num')} chunk "
+                    f"{chapter.get('chunk_index')}/{chapter.get('total_chunks')}"
+                    for chapter in chunk_selected
+                ]
+                confirm_msg = (
+                    "This will remove only the selected translated chunk "
+                    "segment(s) from their HTML files, preserve every other "
+                    "cached chunk, and mark the selected chunks pending:\n\n"
+                    + ", ".join(chunk_labels[:20])
+                    + (f" (+{len(chunk_labels) - 20} more)" if len(chunk_labels) > 20 else "")
+                    + "\n\nContinue?"
+                )
             elif count > 10:
                 if missing_count > 0 and existing_count > 0:
                     existing_action = (
@@ -25685,6 +25779,9 @@ class RetranslationMixin:
             sidecar_failed_count = 0
             machine_translation_deleted_count = 0
             machine_translation_failed_count = 0
+            chunk_reset_count = 0
+            full_chapter_chunk_reset_count = 0
+            chunk_segment_deleted_count = 0
             progress_updated = False
             metadata_file_deleted = False
 
@@ -25718,6 +25815,87 @@ class RetranslationMixin:
                 output_file = ch_info['output_file']
                 actual_num = ch_info['num']
                 progress_key = ch_info.get('progress_key')
+
+                if ch_info.get("is_chunk_progress"):
+                    chunk_key = str(ch_info.get("chunk_progress_key") or "")
+                    parent_key = ch_info.get("parent_progress_key")
+                    chunk_index = ch_info.get("chunk_index")
+                    chunk_entry = data['prog'].get("chapter_chunks", {}).get(
+                        chunk_key
+                    )
+                    parent_entry = data['prog'].get("chapters", {}).get(
+                        parent_key
+                    )
+                    if not isinstance(chunk_entry, dict) or not isinstance(
+                        parent_entry, dict
+                    ):
+                        print(
+                            f"WARNING: Missing chunk/parent progress entry for "
+                            f"chapter {actual_num}, chunk {chunk_index}"
+                        )
+                        continue
+
+                    output_path = (
+                        output_file
+                        if os.path.isabs(str(output_file or ""))
+                        else os.path.join(data['output_dir'], str(output_file or ""))
+                    )
+                    if output_file and os.path.isfile(output_path):
+                        try:
+                            with open(
+                                output_path,
+                                'r',
+                                encoding='utf-8',
+                                errors='replace',
+                            ) as source_file:
+                                original_output = source_file.read()
+                            updated_output, removed = remove_chunk_segments(
+                                original_output,
+                                chunk_key,
+                                [chunk_index],
+                                chunk_entry,
+                            )
+                            if removed:
+                                temporary = (
+                                    f"{output_path}.{os.getpid()}."
+                                    f"{threading.get_ident()}.chunk-reset.tmp"
+                                )
+                                try:
+                                    with open(
+                                        temporary,
+                                        'w',
+                                        encoding='utf-8',
+                                        newline='',
+                                    ) as target_file:
+                                        target_file.write(updated_output)
+                                    os.replace(temporary, output_path)
+                                finally:
+                                    if os.path.isfile(temporary):
+                                        os.remove(temporary)
+                                chunk_segment_deleted_count += len(removed)
+                        except Exception as exc:
+                            print(
+                                f"Failed to remove chapter {actual_num} chunk "
+                                f"{chunk_index} from {output_path}: {exc}"
+                            )
+
+                    reset = reset_chunks_for_retranslation(
+                        chunk_entry,
+                        [chunk_index],
+                    )
+                    if reset:
+                        parent_entry["status"] = "pending"
+                        parent_entry["failure_reason"] = ""
+                        parent_entry["error_message"] = ""
+                        parent_entry["last_updated"] = time.time()
+                        _clear_refinement_progress_fields(parent_entry)
+                        _sync_parent_chunk_qa_summary(
+                            data['prog'], parent_key, chunk_key
+                        )
+                        chunk_reset_count += len(reset)
+                        status_reset_count += 1
+                        progress_updated = True
+                    continue
 
                 if (
                     delete_both_linked_artifacts
@@ -25911,6 +26089,26 @@ class RetranslationMixin:
                             ch_entry.pop("model", None)
                         if _clear_refinement_progress_fields(ch_entry):
                             refinement_cleared_count += 1
+                        # A parent-row retranslation is a full chapter reset.
+                        # Clear every cached child result so it cannot be
+                        # silently rebuilt from the chunk resume cache.
+                        parent_chunk_key = str(
+                            ch_entry.get("content_hash") or chapter_key
+                        )
+                        parent_chunk_entry = data['prog'].get(
+                            "chapter_chunks", {}
+                        ).get(parent_chunk_key)
+                        if isinstance(parent_chunk_entry, dict):
+                            ensure_chunk_entry_schema(parent_chunk_entry)
+                            reset = reset_chunks_for_retranslation(
+                                parent_chunk_entry,
+                                list(parent_chunk_entry.get("chunks", {})),
+                            )
+                            if reset:
+                                full_chapter_chunk_reset_count += 1
+                            _sync_parent_chunk_qa_summary(
+                                data['prog'], chapter_key, parent_chunk_key
+                            )
                         progress_updated = True
                         status_reset_count += 1
                     else:
@@ -25962,6 +26160,19 @@ class RetranslationMixin:
                 )
             if machine_translation_deleted_count > 0:
                 success_parts.append(f"deleted {machine_translation_deleted_count} Machine Translation preview file(s)")
+            if chunk_segment_deleted_count > 0:
+                success_parts.append(
+                    f"removed {chunk_segment_deleted_count} selected chunk segment(s) from HTML"
+                )
+            if chunk_reset_count > 0:
+                success_parts.append(
+                    f"reset {chunk_reset_count} chunk(s) while preserving their siblings"
+                )
+            if full_chapter_chunk_reset_count > 0:
+                success_parts.append(
+                    "cleared cached chunks for "
+                    f"{full_chapter_chunk_reset_count} full chapter reset(s)"
+                )
             if marked_count > 0:
                 success_parts.append(f"marked {marked_count} missing chapters for translation")
             if status_reset_count > 0:
@@ -25979,7 +26190,7 @@ class RetranslationMixin:
             if success_parts:
                 success_msg = "Successfully " + ", ".join(success_parts) + "."
                 if deleted_count > 0 or marked_count > 0 or merged_cleared_count > 0:
-                    total_to_translate = len(selected_indices) + merged_cleared_count
+                    total_to_translate = len(selected_chapters) + merged_cleared_count
                     success_msg += f"\n\nTotal {total_to_translate} chapters ready for translation."
                 self._styled_msgbox(QMessageBox.Information, data.get('dialog', self), "Success", success_msg)
             else:
@@ -28381,6 +28592,7 @@ class RetranslationMixin:
             }
             chapter_display_info.append(display_info)
         
+        self._append_chunk_progress_display_info(data, chapter_display_info)
         self._append_metadata_display_info(data, chapter_display_info)
         self._append_translation_artifact_display_info(
             data, chapter_display_info
@@ -28533,6 +28745,7 @@ class RetranslationMixin:
         # Sort by chapter number
         chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
         
+        self._append_chunk_progress_display_info(data, chapter_display_info)
         self._append_metadata_display_info(data, chapter_display_info)
         self._append_translation_artifact_display_info(
             data, chapter_display_info
@@ -28542,6 +28755,79 @@ class RetranslationMixin:
 
         # Update data with rebuilt list
         data['chapter_display_info'] = chapter_display_info
+
+    def _append_chunk_progress_display_info(self, data, chapter_display_info):
+        """Insert selectable per-chunk rows directly after their EPUB chapter."""
+        prog = data.get("prog") if isinstance(data, dict) else None
+        if not isinstance(prog, dict):
+            return
+        chapter_chunks = prog.get("chapter_chunks", {})
+        chapters = prog.get("chapters", {})
+        if not isinstance(chapter_chunks, dict) or not chapter_chunks:
+            return
+
+        expanded = []
+        for parent in list(chapter_display_info or []):
+            expanded.append(parent)
+            if (
+                parent.get("is_subtitle")
+                or parent.get("pdf_ocr")
+                or self._is_metadata_progress_info(parent)
+                or self._is_translation_artifact_progress_info(parent)
+            ):
+                continue
+            parent_key = parent.get("progress_key")
+            if not parent_key:
+                fallback_key = parent.get("key")
+                if fallback_key in chapters and isinstance(
+                    chapters.get(fallback_key), dict
+                ):
+                    parent_key = fallback_key
+            if parent_key and not parent.get("progress_key"):
+                parent["progress_key"] = parent_key
+            parent_entry = (
+                chapters.get(parent_key)
+                if parent_key and isinstance(chapters.get(parent_key), dict)
+                else parent.get("info") or parent.get("progress_entry") or {}
+            )
+            chunk_key = str(
+                (parent_entry or {}).get("content_hash")
+                or parent_key
+                or ""
+            )
+            chunk_entry = chapter_chunks.get(chunk_key)
+            if not isinstance(chunk_entry, dict):
+                continue
+            ensure_chunk_entry_schema(chunk_entry)
+            total = int(chunk_entry.get("total") or 0)
+            for raw_index, record in sorted(
+                chunk_entry.get("entries", {}).items(),
+                key=lambda item: int(item[0]) if str(item[0]).isdigit() else 10**9,
+            ):
+                if not isinstance(record, dict):
+                    continue
+                try:
+                    chunk_index = int(raw_index)
+                except (TypeError, ValueError):
+                    continue
+                expanded.append({
+                    "key": f"chunk:{chunk_key}:{chunk_index}",
+                    "num": parent.get("num"),
+                    "info": record,
+                    "output_file": parent.get("output_file", ""),
+                    "status": record.get("status", "pending"),
+                    "duplicate_count": 1,
+                    "entries": [],
+                    "original_filename": parent.get("original_filename", ""),
+                    "is_special": parent.get("is_special", False),
+                    "is_chunk_progress": True,
+                    "chunk_index": chunk_index,
+                    "total_chunks": total,
+                    "chunk_progress_key": chunk_key,
+                    "parent_progress_key": parent_key,
+                    "parent_info": parent_entry,
+                })
+        chapter_display_info[:] = expanded
 
     def _append_pdf_ocr_display_info(self, data, chapter_display_info):
         """Add a lightweight summary row for PDF Vision OCR progress."""
@@ -29075,6 +29361,19 @@ class RetranslationMixin:
         """Update chapter status information after refresh"""
         # Re-check file existence and update status for each chapter
         for info in data['chapter_display_info']:
+            if info.get("is_chunk_progress"):
+                chunk_entry = data.get("prog", {}).get(
+                    "chapter_chunks", {}
+                ).get(str(info.get("chunk_progress_key") or ""))
+                if isinstance(chunk_entry, dict):
+                    ensure_chunk_entry_schema(chunk_entry)
+                    record = chunk_entry.get("entries", {}).get(
+                        str(info.get("chunk_index"))
+                    )
+                    if isinstance(record, dict):
+                        info["info"] = record
+                        info["status"] = record.get("status", "pending")
+                continue
             output_file = info['output_file']
             resolved_output_file, resolved_output_path = self._resolve_existing_output_path(
                 data['output_dir'],
@@ -29250,6 +29549,11 @@ class RetranslationMixin:
     def _progress_list_item_key(self, info):
         if not isinstance(info, dict):
             return None
+        if info.get("is_chunk_progress"):
+            return (
+                f"chunk:{info.get('chunk_progress_key')}:"
+                f"{info.get('chunk_index')}"
+            )
         # A progress_key is transient for OPF rows: it appears when a chapter
         # enters progress and may disappear when its progress entry is removed.
         # Base identity on the source row so a status change never looks like a
@@ -29320,7 +29624,22 @@ class RetranslationMixin:
             if ocr_total > 0:
                 status_label = f"{status_label} ({min(ocr_done, ocr_total)}/{ocr_total})"
 
-        if self._is_metadata_progress_info(info):
+        if info.get("is_chunk_progress"):
+            try:
+                chapter_label = (
+                    f"Ch.{int(chapter_num):03d}"
+                    if not isinstance(chapter_num, float)
+                    or chapter_num.is_integer()
+                    else f"Ch.{chapter_num:06.1f}"
+                )
+            except (TypeError, ValueError):
+                chapter_label = f"Ch.{chapter_num}"
+            display = (
+                f"   ↳ {chapter_label} Chunk {info.get('chunk_index')}/"
+                f"{info.get('total_chunks')} | {icon} {status_label:11s} | "
+                f"{output_display}"
+            )
+        elif self._is_metadata_progress_info(info):
             metadata_label = (
                 info.get('metadata_label')
                 or (info.get('info') or {}).get('metadata_label')
@@ -29744,7 +30063,11 @@ class RetranslationMixin:
         
         if stats_labels:
             # Recalculate statistics from chapter_display_info (works for both OPF and non-OPF)
-            chapter_display_info = data.get('chapter_display_info', [])
+            chapter_display_info = [
+                info
+                for info in data.get('chapter_display_info', [])
+                if not info.get("is_chunk_progress")
+            ]
             pdf_rows = [info for info in chapter_display_info if info.get('pdf_ocr')]
             if pdf_rows and len(pdf_rows) == len(chapter_display_info):
                 pdf_info = pdf_rows[0].get('info') or {}

@@ -38,6 +38,12 @@ from metadata_progress import is_metadata_progress_entry
 from translation_artifacts import is_translation_artifact_progress_entry
 from html_tag_entities import unescape_valid_html_tag_entities
 from epub_package import find_epub_opf_member
+from chapter_chunk_progress import (
+    chunk_failure_summary,
+    chunk_status_summary_text,
+    ensure_chunk_entry_schema,
+    reset_chunks_for_retranslation,
+)
 
 try:
     import dpi_setup
@@ -1609,6 +1615,16 @@ def _mark_chapter_pending_for_retranslation(output_folder: str,
                 ch["failure_reason"] = ""
                 ch["error_message"] = ""
                 changed = True
+            chunk_key = str(ch.get("content_hash") or key)
+            chunk_entry = prog.get("chapter_chunks", {}).get(chunk_key)
+            if isinstance(chunk_entry, dict):
+                ensure_chunk_entry_schema(chunk_entry)
+                reset = reset_chunks_for_retranslation(
+                    chunk_entry,
+                    list(chunk_entry.get("chunks", {})),
+                )
+                if reset:
+                    changed = True
         if changed:
             with open(progress_file, "w", encoding="utf-8") as f:
                 _json.dump(prog, f, ensure_ascii=False, indent=2)
@@ -14816,6 +14832,40 @@ class _BookDetailsLoader(QThread):
                 if match:
                     resolved["progress_key"] = prog_key_by_id.get(id(match), "")
                     resolved["output_file"] = output_file
+                    chunk_key = str(
+                        match.get("content_hash")
+                        or resolved["progress_key"]
+                        or ""
+                    )
+                    chunk_entry = (prog or {}).get("chapter_chunks", {}).get(
+                        chunk_key
+                    )
+                    if isinstance(chunk_entry, dict):
+                        ensure_chunk_entry_schema(chunk_entry)
+                        summary = chunk_failure_summary(chunk_entry)
+                        resolved["chunk_progress_key"] = chunk_key
+                        resolved["chunk_summary"] = summary
+                        resolved["chunk_status_text"] = (
+                            chunk_status_summary_text(chunk_entry, limit=50)
+                        )
+                        resolved["chunks"] = [
+                            {
+                                "index": int(chunk_index),
+                                "status": record.get("status", "pending"),
+                                "qa_issues_found": list(
+                                    record.get("qa_issues_found") or []
+                                ),
+                                "model_name": record.get("model_name"),
+                                "key_identifier": record.get("key_identifier"),
+                            }
+                            for chunk_index, record in sorted(
+                                chunk_entry.get("entries", {}).items(),
+                                key=lambda item: int(item[0])
+                                if str(item[0]).isdigit()
+                                else 10**9,
+                            )
+                            if isinstance(record, dict)
+                        ]
                     for pdf_key in (
                         "pdf_toc_section",
                         "pdf_toc_title",
@@ -14914,6 +14964,10 @@ def _prepare_chapter_row_spec(info: dict, show_raw_title: bool = False) -> dict:
     translated = info.get("translated_title") or ""
     raw = info.get("raw_title") or ""
     filename = info.get("filename", "") or ""
+    chunk_status_text = str(info.get("chunk_status_text") or "").strip()
+    filename_display = (
+        f"{filename} · {chunk_status_text}" if chunk_status_text else filename
+    )
 
     if show_raw_title:
         primary_text = raw or filename
@@ -14945,6 +14999,12 @@ def _prepare_chapter_row_spec(info: dict, show_raw_title: bool = False) -> dict:
             badge_key = "failed"
         badge_text = _CHAPTER_BADGE_TEXT.get(status, "")
         badge_style = _CHAPTER_BADGE_STYLES.get(badge_key, "")
+        chunk_summary = info.get("chunk_summary")
+        if isinstance(chunk_summary, dict) and chunk_summary.get("failed"):
+            failed = int(chunk_summary.get("failed") or 0)
+            total = int(chunk_summary.get("total") or 0)
+            badge_text = f"⚠ {failed}/{total} chunks"
+            badge_style = _CHAPTER_BADGE_STYLES.get("failed", "")
 
     return {
         "info": info,
@@ -14952,7 +15012,7 @@ def _prepare_chapter_row_spec(info: dict, show_raw_title: bool = False) -> dict:
         "primary_class": primary_class,
         "primary_style": _CHAPTER_PRIMARY_STYLES.get(primary_class, ""),
         "primary_tooltip": primary_tooltip,
-        "filename": filename,
+        "filename": filename_display,
         "badge_text": badge_text,
         "badge_style": badge_style,
     }
@@ -16492,13 +16552,15 @@ class BookDetailsDialog(QDialog):
         old_sig = [
             (c.get("index"), c.get("status"),
              c.get("translated_path") or "",
-             c.get("translated_title") or "")
+             c.get("translated_title") or "",
+             c.get("chunk_status_text") or "")
             for c in self._chapters_info
         ]
         new_sig = [
             (c.get("index"), c.get("status"),
              c.get("translated_path") or "",
-             c.get("translated_title") or "")
+             c.get("translated_title") or "",
+             c.get("chunk_status_text") or "")
             for c in new_chapters_info
         ]
         chapters_changed = old_sig != new_sig
@@ -16611,7 +16673,12 @@ class BookDetailsDialog(QDialog):
             progress_items = [c for c in self._chapters_info
                               if not c.get("is_special")
                               and not c.get("is_gallery")]
-        done = sum(1 for c in progress_items if c.get("status") == "completed")
+        done = sum(
+            1
+            for c in progress_items
+            if c.get("status") == "completed"
+            and not (c.get("chunk_summary") or {}).get("failed")
+        )
         total = len(progress_items) or int(self._book.get("total_chapters", 0) or 0)
         # When the book has reached 100% translation, the card already
         # renders on the Completed tab without an "in progress" ribbon
@@ -17729,7 +17796,12 @@ class BookDetailsDialog(QDialog):
         """
         items = self._chapter_base_infos()
         total = len(items)
-        done = sum(1 for c in items if c.get("status") == "completed")
+        done = sum(
+            1
+            for c in items
+            if c.get("status") == "completed"
+            and not (c.get("chunk_summary") or {}).get("failed")
+        )
         return done, total
 
     def _has_progress_context(self) -> bool:
@@ -17740,7 +17812,11 @@ class BookDetailsDialog(QDialog):
         if self._show_qa_failures_only:
             failure_count = sum(
                 1 for chapter in self._chapter_base_infos()
-                if str(chapter.get("status") or "").strip().lower() == "qa_failed"
+                if (
+                    str(chapter.get("status") or "").strip().lower()
+                    == "qa_failed"
+                    or bool((chapter.get("chunk_summary") or {}).get("failed"))
+                )
             )
             self._toc_toggle.setText(f"Failures  ({failure_count})")
             self._toc_toggle.setToolTip("Show all chapters")
@@ -17777,7 +17853,11 @@ class BookDetailsDialog(QDialog):
         if self._show_qa_failures_only:
             items = [
                 info for info in items
-                if str(info.get("status") or "").strip().lower() == "qa_failed"
+                if (
+                    str(info.get("status") or "").strip().lower()
+                    == "qa_failed"
+                    or bool((info.get("chunk_summary") or {}).get("failed"))
+                )
             ]
         search = getattr(self, "_toc_search", None)
         needle = (search.text() if search is not None else "")
@@ -17790,6 +17870,12 @@ class BookDetailsDialog(QDialog):
                 info.get("raw_title", ""),
                 info.get("translated_title", ""),
                 info.get("filename", ""),
+                info.get("chunk_status_text", ""),
+                " ".join(
+                    str(issue)
+                    for chunk in info.get("chunks", [])
+                    for issue in chunk.get("qa_issues_found", [])
+                ),
             )).lower()
             if needle in hay:
                 filtered.append(info)

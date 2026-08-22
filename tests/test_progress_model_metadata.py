@@ -11,6 +11,11 @@ import zipfile
 import pytest
 from bs4 import BeautifulSoup
 
+from chapter_chunk_progress import (
+    extract_marked_chunks,
+    remove_chunk_segments,
+    wrap_chunk_html,
+)
 from Retranslation_GUI import (
     RetranslationMixin,
     _clear_llm_token_qa_markers,
@@ -494,7 +499,12 @@ def test_chunk_progress_reuses_matching_budget_and_normalizes_indices(tmp_path):
     assert reason is None
     assert changed is True
     assert progress.record_chapter_chunk(
-        "hash-1", 2, 3, "translated two", _epub_chunk_budget()
+        "hash-1",
+        2,
+        3,
+        "translated two",
+        _epub_chunk_budget(),
+        source_text="source two",
     )
 
     entry, reason, _changed = progress.prepare_chapter_chunk_progress(
@@ -502,8 +512,152 @@ def test_chunk_progress_reuses_matching_budget_and_normalizes_indices(tmp_path):
     )
 
     assert reason is None
+    assert entry["schema_version"] == 2
     assert entry["completed"] == [2]
     assert entry["chunks"] == {"2": "translated two"}
+    assert entry["entries"]["2"]["status"] == "completed"
+    assert entry["entries"]["2"]["source"] == "source two"
+
+
+def test_chunk_progress_migrates_v1_cache_to_selectable_v2_entries(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    progress.prog["chapter_chunks"]["hash-1"] = {
+        "schema_version": 1,
+        "total": 2,
+        "completed": [1],
+        "chunks": {"1": "cached one"},
+        "chunk_metadata": {
+            "1": {"model_name": "model-a", "key_identifier": "key-a"}
+        },
+        "chapter_status": "incomplete",
+        **_epub_chunk_budget(),
+    }
+
+    entry, reason, changed = progress.prepare_chapter_chunk_progress(
+        "hash-1", 2, _epub_chunk_budget(), enabled=True
+    )
+
+    assert reason is None
+    assert changed is True
+    assert entry["schema_version"] == 2
+    assert entry["chunks"] == {"1": "cached one"}
+    assert entry["completed"] == [1]
+    assert entry["entries"]["1"]["status"] == "completed"
+    assert entry["entries"]["1"]["model_name"] == "model-a"
+    assert entry["entries"]["2"]["status"] == "pending"
+
+
+def test_selective_chunk_reset_removes_only_its_html_segment_and_cache(
+    tmp_path,
+):
+    progress = ProgressManager(str(tmp_path))
+    progress.prepare_chapter_chunk_progress(
+        "hash-1", 3, _epub_chunk_budget(), enabled=True
+    )
+    for index in (1, 2, 3):
+        progress.record_chapter_chunk(
+            "hash-1",
+            index,
+            3,
+            f"<p>translated {index}</p>",
+            _epub_chunk_budget(),
+            source_text=f"<p>source {index}</p>",
+        )
+    html = "\n".join(
+        wrap_chunk_html(
+            "hash-1", index, 3, f"<p>translated {index}</p>"
+        )
+        for index in (1, 2, 3)
+    )
+    entry = progress.prog["chapter_chunks"]["hash-1"]
+
+    updated_html, removed = remove_chunk_segments(
+        html, "hash-1", [2], entry
+    )
+    reset = progress.reset_chapter_chunks("hash-1", [2])
+
+    assert removed == [2]
+    assert reset == [2]
+    assert sorted(extract_marked_chunks(updated_html, "hash-1")) == [1, 3]
+    assert entry["completed"] == [1, 3]
+    assert entry["entries"]["2"]["status"] == "pending"
+    assert progress.get_reusable_chapter_chunks("hash-1") == {
+        "1": "<p>translated 1</p>",
+        "3": "<p>translated 3</p>",
+    }
+
+
+def test_chunk_qa_state_excludes_only_failed_chunk_from_resume_cache(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    progress.prepare_chapter_chunk_progress(
+        "hash-1", 2, _epub_chunk_budget(), enabled=True
+    )
+    for index in (1, 2):
+        progress.record_chapter_chunk(
+            "hash-1",
+            index,
+            2,
+            f"translated {index}",
+            _epub_chunk_budget(),
+        )
+
+    assert progress.set_chapter_chunk_qa(
+        "hash-1", 2, ["llm_token_issue: 'BADTOKEN'"]
+    )
+    entry = progress.prog["chapter_chunks"]["hash-1"]
+    assert entry["chapter_status"] == "qa_failed"
+    assert entry["entries"]["2"]["status"] == "qa_failed"
+    assert progress.get_reusable_chapter_chunks("hash-1") == {
+        "1": "translated 1"
+    }
+
+    assert progress.set_chapter_chunk_qa("hash-1", 2, [])
+    assert entry["chapter_status"] == "completed"
+    assert progress.get_reusable_chapter_chunks("hash-1") == {
+        "1": "translated 1",
+        "2": "translated 2",
+    }
+
+
+def test_progress_manager_expands_chapter_into_selectable_chunk_rows(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    progress.prog["chapters"]["1"] = {
+        "actual_num": 1,
+        "content_hash": "hash-1",
+        "output_file": "chapter.html",
+        "status": "completed",
+    }
+    progress.prepare_chapter_chunk_progress(
+        "hash-1", 2, _epub_chunk_budget(), enabled=True
+    )
+    progress.record_chapter_chunk(
+        "hash-1", 1, 2, "translated 1", _epub_chunk_budget()
+    )
+    progress.set_chapter_chunk_qa("hash-1", 1, ["bad output"])
+
+    rows = [
+        {
+            "key": "1",
+            "num": 1,
+            "info": progress.prog["chapters"]["1"],
+            "output_file": "chapter.html",
+            "status": "completed",
+        }
+    ]
+    mixin = RetranslationMixin()
+    mixin._append_chunk_progress_display_info(
+        {"prog": progress.prog}, rows
+    )
+
+    assert len(rows) == 3
+    assert rows[0]["key"] == "1"
+    assert rows[0]["progress_key"] == "1"
+    assert rows[1]["is_chunk_progress"] is True
+    assert rows[1]["chunk_index"] == 1
+    assert rows[1]["status"] == "qa_failed"
+    assert rows[2]["chunk_index"] == 2
+    assert rows[2]["status"] == "pending"
+    assert rows[1]["parent_progress_key"] == "1"
 
 
 @pytest.mark.parametrize(

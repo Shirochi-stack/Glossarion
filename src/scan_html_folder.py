@@ -54,6 +54,12 @@ from emoticon_patterns import (
     mask_whitelisted_emoticons,
 )
 from epub_package import find_epub_opf_member
+from chapter_chunk_progress import (
+    chunk_failure_summary,
+    ensure_chunk_entry_schema,
+    extract_marked_chunks,
+    set_chunk_qa,
+)
 
 # Optional: psutil for process priority and CPU affinity control
 try:
@@ -4949,6 +4955,331 @@ def _clear_refinement_progress_fields(entry):
     return changed
 
 
+def _chunk_issue_matches(issue, chunk_html, chunk_text, source_text, qa_settings):
+    """Best-effort deterministic localization of one file QA issue."""
+    issue_text = str(issue or "")
+    issue_lower = issue_text.lower()
+    haystacks = (str(chunk_html or "").casefold(), str(chunk_text or "").casefold())
+
+    # Most artifact/foreign-text issues carry the actual offending sample.
+    samples = []
+    for pattern in (
+        r"'([^']+)'",
+        r'"([^"]+)"',
+        r"\[([^\]]+)\]",
+    ):
+        samples.extend(re.findall(pattern, issue_text))
+    for sample in samples:
+        normalized = str(sample or "").strip().casefold()
+        if len(normalized) >= 2 and any(normalized in haystack for haystack in haystacks):
+            return True
+
+    if "_text_found_" in issue_lower:
+        try:
+            return bool(detect_non_english_content(chunk_text, qa_settings)[0])
+        except Exception:
+            return False
+    if issue_lower == "no_spacing_or_linebreaks":
+        try:
+            return has_no_spacing_or_linebreaks(
+                chunk_text,
+                min_text_length=qa_settings.get("min_text_length_for_spacing", 100),
+            )
+        except Exception:
+            return False
+    if issue_lower == "excessive_repetition":
+        try:
+            source_visible = BeautifulSoup(
+                str(source_text or ""), "html.parser"
+            ).get_text(" ", strip=True)
+            return has_repeating_sentences(
+                chunk_text,
+                source_text=source_visible or None,
+            )
+        except Exception:
+            return False
+    if "potential_truncation" in issue_lower:
+        try:
+            return bool(check_potential_truncation(chunk_text).get("flagged"))
+        except Exception:
+            return False
+    if "word_count_mismatch" in issue_lower and source_text:
+        try:
+            source_visible = BeautifulSoup(
+                str(source_text), "html.parser"
+            ).get_text(" ", strip=True)
+            source_count = max(1, _count_words_cached(source_visible))
+            translated_count = _count_words_cached(chunk_text)
+            ratio = translated_count / source_count
+            return ratio < 0.6 or ratio > 2.5
+        except Exception:
+            return False
+    if any(token in issue_lower for token in ("missing_images", "extra_images", "changed_image_references")):
+        if not source_text:
+            return False
+        try:
+            source_soup = BeautifulSoup(str(source_text), "html.parser")
+            output_soup = BeautifulSoup(str(chunk_html), "html.parser")
+            source_refs = {
+                tag.get("src") for tag in source_soup.find_all(["img", "image"])
+                if tag.get("src")
+            }
+            output_refs = {
+                tag.get("src") for tag in output_soup.find_all(["img", "image"])
+                if tag.get("src")
+            }
+            if "extra_images" in issue_lower:
+                return bool(output_refs - source_refs)
+            return bool(source_refs - output_refs)
+        except Exception:
+            return False
+
+    try:
+        artifact_types = {
+            str(item.get("type") or "").lower()
+            for item in (
+                detect_translation_artifacts(chunk_text)
+                + detect_ai_artifacts(
+                    chunk_text,
+                    ai_artifact_patterns=qa_settings.get("ai_artifact_patterns"),
+                    ai_artifact_patterns_are_regex=qa_settings.get(
+                        "ai_artifact_patterns_are_regex", False
+                    ),
+                    check_ai_thinking_preamble=qa_settings.get(
+                        "check_ai_thinking_preamble", False
+                    ),
+                    ai_thinking_preamble_patterns=qa_settings.get(
+                        "ai_thinking_preamble_patterns"
+                    ),
+                    ai_thinking_preamble_patterns_are_regex=qa_settings.get(
+                        "ai_thinking_preamble_patterns_are_regex", False
+                    ),
+                    ai_thinking_preamble_sample_size=qa_settings.get(
+                        "ai_thinking_preamble_sample_size", 500
+                    ),
+                )
+            )
+        }
+        if any(kind and kind in issue_lower for kind in artifact_types):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _attach_chunk_results_to_scan(
+    folder_path,
+    results,
+    qa_settings,
+    log,
+    progress_path=None,
+):
+    """Attach marker-localized chunk QA results to scanned chapter rows."""
+    qa_settings = qa_settings if isinstance(qa_settings, dict) else {}
+    path = progress_path or os.path.join(folder_path, "translation_progress.json")
+    try:
+        with open(path, "r", encoding="utf-8") as progress_file:
+            progress = json.load(progress_file)
+    except (OSError, ValueError, TypeError):
+        return 0
+    chapter_chunks = progress.get("chapter_chunks", {})
+    if not isinstance(chapter_chunks, dict) or not chapter_chunks:
+        return 0
+
+    by_output = {}
+    for chapter_key, chapter_info in progress.get("chapters", {}).items():
+        if not isinstance(chapter_info, dict):
+            continue
+        output_file = os.path.basename(str(chapter_info.get("output_file") or ""))
+        chunk_key = str(chapter_info.get("content_hash") or chapter_key)
+        chunk_entry = chapter_chunks.get(chunk_key)
+        if output_file and isinstance(chunk_entry, dict):
+            ensure_chunk_entry_schema(chunk_entry)
+            by_output[output_file.casefold()] = (chunk_key, chunk_entry)
+
+    attached = 0
+    for result in results or []:
+        filename = os.path.basename(str(result.get("filename") or ""))
+        matched = by_output.get(filename.casefold())
+        if not matched:
+            continue
+        chunk_key, chunk_entry = matched
+        try:
+            with open(result.get("filepath") or os.path.join(folder_path, filename), "r", encoding="utf-8", errors="replace") as output_file:
+                marked = extract_marked_chunks(output_file.read(), chunk_key)
+        except OSError:
+            marked = {}
+        if not marked:
+            continue
+
+        all_issues = list(result.get("issues") or [])
+        previews = result.get("qa_issue_previews")
+        previews = previews if isinstance(previews, dict) else {}
+        chunk_results = []
+        unmatched = set(range(len(all_issues)))
+        for index, block in sorted(marked.items()):
+            chunk_html = block.get("content", "")
+            chunk_text = BeautifulSoup(chunk_html, "html.parser").get_text(
+                " ", strip=True
+            )
+            record = chunk_entry.get("entries", {}).get(str(index), {})
+            source_text = record.get("source") if isinstance(record, dict) else None
+            localized = []
+            for issue_index, issue in enumerate(all_issues):
+                if _chunk_issue_matches(
+                    issue,
+                    chunk_html,
+                    chunk_text,
+                    source_text,
+                    qa_settings,
+                ):
+                    localized.append(issue)
+                    unmatched.discard(issue_index)
+            chunk_results.append({
+                "chunk_index": index,
+                "total_chunks": block.get("total") or chunk_entry.get("total"),
+                "issues": localized,
+                "qa_issue_previews": {
+                    str(issue): previews.get(str(issue))
+                    for issue in localized
+                    if previews.get(str(issue)) is not None
+                },
+            })
+
+        # If only some marker blocks remain, distinguish an intentional
+        # pending reset from an output file that silently lost a supposedly
+        # completed chunk.
+        marked_indices = set(marked)
+        for raw_index, record in sorted(
+            chunk_entry.get("entries", {}).items(),
+            key=lambda item: int(item[0])
+            if str(item[0]).isdigit()
+            else 10**9,
+        ):
+            if not isinstance(record, dict):
+                continue
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                continue
+            if index in marked_indices:
+                continue
+            status = str(record.get("status") or "pending").lower()
+            if (
+                status not in {"completed", "qa_failed", "failed"}
+                or str(index) not in chunk_entry.get("chunks", {})
+            ):
+                continue
+            missing_issue = "missing_chunk_segment"
+            chunk_results.append({
+                "chunk_index": index,
+                "total_chunks": chunk_entry.get("total"),
+                "issues": [missing_issue],
+                "qa_issue_previews": {},
+            })
+            if missing_issue not in result.setdefault("issues", []):
+                result["issues"].append(missing_issue)
+
+        # Whole-document findings (duplicates, wrapper-level structure, etc.)
+        # cannot be localized further. Persist them on each concrete chunk
+        # rather than reverting to a chapter-level qa_failed state.
+        if unmatched:
+            shared = [all_issues[index] for index in sorted(unmatched)]
+            for chunk_result in chunk_results:
+                chunk_result["issues"].extend(shared)
+                for issue in shared:
+                    if previews.get(str(issue)) is not None:
+                        chunk_result["qa_issue_previews"][str(issue)] = previews[
+                            str(issue)
+                        ]
+
+        result["chunk_progress_key"] = chunk_key
+        result["chunk_results"] = chunk_results
+        attached += 1
+    if attached:
+        log(f"🧩 Localized QA state for {attached} marker-aware chapter file(s)")
+    return attached
+
+
+def _apply_chunk_scan_to_progress(
+    prog,
+    chapter_key,
+    chapter_info,
+    scan_row,
+    log,
+):
+    """Apply one scan row to chunk records; return True when chunk-aware."""
+    chunk_results = scan_row.get("chunk_results")
+    if not isinstance(chunk_results, list) or not chunk_results:
+        return False
+    chunk_key = str(
+        scan_row.get("chunk_progress_key")
+        or chapter_info.get("content_hash")
+        or chapter_key
+    )
+    chunk_entry = prog.get("chapter_chunks", {}).get(chunk_key)
+    if not isinstance(chunk_entry, dict):
+        return False
+    ensure_chunk_entry_schema(chunk_entry)
+    for chunk_result in chunk_results:
+        set_chunk_qa(
+            chunk_entry,
+            chunk_result.get("chunk_index"),
+            chunk_result.get("issues", []),
+            previews=chunk_result.get("qa_issue_previews", {}),
+            confidence=scan_row.get("duplicate_confidence", 0),
+        )
+
+    summary = chunk_failure_summary(chunk_entry)
+    failed_indices = [
+        int(key)
+        for key, record in chunk_entry.get("entries", {}).items()
+        if isinstance(record, dict)
+        and str(record.get("status") or "").lower() in {"qa_failed", "failed"}
+    ]
+    chapter_info["chunk_qa_summary"] = {
+        **summary,
+        "failed_indices": sorted(failed_indices),
+        "last_scanned": time.time(),
+    }
+    chapter_info["has_chunk_qa_failures"] = bool(failed_indices)
+    chapter_info["chunk_qa_issues_found"] = {
+        key: list(record.get("qa_issues_found") or [])
+        for key, record in chunk_entry.get("entries", {}).items()
+        if isinstance(record, dict) and record.get("qa_issues_found")
+    }
+    existing_issues = chapter_info.get("qa_issues_found", []) or []
+    protected = {
+        "SPLIT_FAILED", "TRUNCATED", "PROHIBITED_CONTENT", "EMPTY_OUTPUT",
+        "API_ERROR", "TIMEOUT",
+    }
+    has_protected = any(
+        (issue.get("type") if isinstance(issue, dict) else str(issue)) in protected
+        for issue in existing_issues
+    )
+    if not has_protected:
+        previous_status = str(chapter_info.get("status") or "").lower()
+        if summary["pending"]:
+            chapter_info["status"] = (
+                previous_status
+                if previous_status in {"pending", "in_progress"}
+                else "pending"
+            )
+        else:
+            chapter_info["status"] = "completed"
+        chapter_info["qa_issues"] = False
+        chapter_info["qa_issues_found"] = []
+        chapter_info["qa_issue_previews"] = {}
+        chapter_info["qa_timestamp"] = time.time()
+    if failed_indices:
+        _clear_refinement_progress_fields(chapter_info)
+    log(
+        f"   └─ Updated chunks for chapter {chapter_info.get('actual_num')}: "
+        f"{summary['failed']} QA failed, {summary['completed']} completed"
+    )
+    return True
+
+
 def update_progress_file(folder_path, results, log, progress_path=None):
     """Update translation progress file"""
     prog_path = progress_path or os.path.join(folder_path, "translation_progress.json")
@@ -5249,6 +5580,23 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
             old_status = chapter_info.get("status", "unknown")
             actual_num_being_updated = chapter_info.get("actual_num")
             log(f"      DEBUG: Updating chapter_key='{chapter_key}', actual_num={actual_num_being_updated}, old_status={old_status}")
+
+            if _apply_chunk_scan_to_progress(
+                prog,
+                chapter_key,
+                chapter_info,
+                faulty_row,
+                log,
+            ):
+                updated_count += 1
+                chapter_num = _choose_log_num(
+                    chapter_info,
+                    faulty_row.get("chapter_num")
+                    or faulty_row.get("file_index", 0) + 1,
+                    faulty_filename,
+                )
+                updated_nums_for_log.append(chapter_num)
+                continue
             
             # MERGED CHILDREN FIX: Clear any merged children of this chapter before marking as qa_failed
             merged_child_nums = chapter_info.get("merged_chapters", [])
@@ -5435,6 +5783,34 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
         chapter_info = prog["chapters"][chapter_key]
         old_status = chapter_info.get("status", "")
         was_qa_failed = old_status == "qa_failed" or chapter_info.get("qa_issues")
+
+        chunk_key = str(
+            resolved_row.get("chunk_progress_key")
+            or chapter_info.get("content_hash")
+            or chapter_key
+        )
+        existing_chunk_entry = prog.get("chapter_chunks", {}).get(chunk_key)
+        previous_chunk_failures = (
+            chunk_failure_summary(existing_chunk_entry)["failed"]
+            if isinstance(existing_chunk_entry, dict)
+            else 0
+        )
+        if _apply_chunk_scan_to_progress(
+            prog,
+            chapter_key,
+            chapter_info,
+            resolved_row,
+            log,
+        ):
+            if previous_chunk_failures:
+                resolved_count += 1
+                chapter_num = _choose_log_num(
+                    chapter_info,
+                    resolved_row.get("chapter_num") or file_chapter_num,
+                    filename,
+                )
+                resolved_nums_for_log.append(chapter_num)
+            continue
 
         if was_qa_failed:
             # Check if this chapter has any protected issues that should NOT be auto-cleared
@@ -11561,6 +11937,14 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 log(f"   ⛔ AI truncation detection stopped: {_ai_checked} checked, {_ai_flagged} flagged")
             else:
                 log(f"   ✅ AI truncation detection complete: {_ai_checked} checked, {_ai_flagged} flagged")
+
+    _attach_chunk_results_to_scan(
+        folder_path,
+        results,
+        qa_settings,
+        log,
+        progress_path=progress_path,
+    )
 
     # Clean up to save memory
     for result in results:

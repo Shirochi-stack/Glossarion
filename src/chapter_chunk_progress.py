@@ -1,0 +1,377 @@
+"""Shared EPUB translation-chunk progress and HTML marker helpers.
+
+This module is intentionally dependency-light so the translator, Progress
+Manager GUI, QA scanner, and EPUB Library can share one chunk contract without
+importing the full translation pipeline.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import time
+from typing import Iterable
+
+
+CHUNK_PROGRESS_SCHEMA_VERSION = 2
+
+_CHUNK_BLOCK_RE = re.compile(
+    r"<!--\s*GLOSSARION_CHUNK_START\s+key=(?P<key>[0-9a-f]+)\s+"
+    r"idx=(?P<idx>\d+)\s+total=(?P<total>\d+)\s*-->"
+    r"(?P<content>.*?)"
+    r"<!--\s*GLOSSARION_CHUNK_END\s+key=(?P=key)\s+idx=(?P=idx)\s*-->",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _positive_int(value, default=0):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return int(default)
+    return value if value > 0 else int(default)
+
+
+def chunk_marker_key(chapter_key) -> str:
+    return hashlib.sha256(str(chapter_key or "").encode("utf-8")).hexdigest()[:16]
+
+
+def chunk_html_markers(chapter_key, chunk_index, total_chunks):
+    marker_key = chunk_marker_key(chapter_key)
+    chunk_index = _positive_int(chunk_index)
+    total_chunks = _positive_int(total_chunks)
+    return (
+        f"<!-- GLOSSARION_CHUNK_START key={marker_key} "
+        f"idx={chunk_index} total={total_chunks} -->",
+        f"<!-- GLOSSARION_CHUNK_END key={marker_key} idx={chunk_index} -->",
+    )
+
+
+def wrap_chunk_html(chapter_key, chunk_index, total_chunks, content) -> str:
+    start, end = chunk_html_markers(chapter_key, chunk_index, total_chunks)
+    return f"{start}\n{str(content or '')}\n{end}"
+
+
+def extract_marked_chunks(html_text, chapter_key=None):
+    """Return marker-delimited chunks keyed by one-based chunk index."""
+    text = str(html_text or "")
+    expected_key = chunk_marker_key(chapter_key) if chapter_key is not None else None
+    chunks = {}
+    for match in _CHUNK_BLOCK_RE.finditer(text):
+        if expected_key and match.group("key").lower() != expected_key.lower():
+            continue
+        index = _positive_int(match.group("idx"))
+        if not index:
+            continue
+        chunks[index] = {
+            "index": index,
+            "total": _positive_int(match.group("total")),
+            "marker_key": match.group("key"),
+            "content": match.group("content").strip("\r\n"),
+            "start": match.start(),
+            "end": match.end(),
+            "full": match.group(0),
+        }
+    return chunks
+
+
+def _chunk_record(entry, chunk_index, create=False):
+    if not isinstance(entry, dict):
+        return None
+    records = entry.setdefault("entries", {}) if create else entry.get("entries", {})
+    if not isinstance(records, dict):
+        if not create:
+            return None
+        records = {}
+        entry["entries"] = records
+    key = str(_positive_int(chunk_index))
+    if key == "0":
+        return None
+    record = records.get(key)
+    if not isinstance(record, dict) and create:
+        record = {"index": int(key), "status": "pending"}
+        records[key] = record
+    return record if isinstance(record, dict) else None
+
+
+def ensure_chunk_entry_schema(entry, total_chunks=None):
+    """Upgrade one chapter chunk entry in place and synchronize mirrors."""
+    if not isinstance(entry, dict):
+        return False
+    changed = False
+    total = _positive_int(total_chunks, _positive_int(entry.get("total")))
+    chunks = entry.get("chunks")
+    if not isinstance(chunks, dict):
+        chunks = {}
+        entry["chunks"] = chunks
+        changed = True
+    metadata = entry.get("chunk_metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        entry["chunk_metadata"] = metadata
+        changed = True
+    records = entry.get("entries")
+    if not isinstance(records, dict):
+        records = {}
+        entry["entries"] = records
+        changed = True
+
+    completed = set()
+    for value in entry.get("completed", []) if isinstance(entry.get("completed"), list) else []:
+        index = _positive_int(value)
+        if index:
+            completed.add(index)
+
+    indexes = set(range(1, total + 1))
+    for mapping in (chunks, records):
+        for raw_index in mapping:
+            index = _positive_int(raw_index)
+            if index:
+                indexes.add(index)
+
+    normalized_records = {}
+    normalized_chunks = {}
+    for index in sorted(indexes):
+        key = str(index)
+        old_record = records.get(key)
+        record = dict(old_record) if isinstance(old_record, dict) else {}
+        result = chunks.get(key)
+        if isinstance(result, str):
+            normalized_chunks[key] = result
+            record["result_sha256"] = hashlib.sha256(
+                result.encode("utf-8", errors="ignore")
+            ).hexdigest()
+        record["index"] = index
+        status = str(record.get("status") or "").strip().lower()
+        if status not in {"completed", "pending", "in_progress", "qa_failed", "failed"}:
+            status = "completed" if index in completed and isinstance(result, str) else "pending"
+        if status == "completed" and not isinstance(result, str):
+            status = "pending"
+        record["status"] = status
+        meta = metadata.get(key)
+        if isinstance(meta, dict):
+            for field in ("model_name", "key_identifier"):
+                if meta.get(field) and not record.get(field):
+                    record[field] = meta[field]
+        record.setdefault("qa_issues_found", [])
+        record.setdefault("qa_issue_previews", {})
+        normalized_records[key] = record
+
+    normalized_completed = sorted(
+        index
+        for index, record in (
+            (int(key), value) for key, value in normalized_records.items()
+        )
+        if record.get("status") == "completed" and str(index) in normalized_chunks
+    )
+    if entry.get("schema_version") != CHUNK_PROGRESS_SCHEMA_VERSION:
+        entry["schema_version"] = CHUNK_PROGRESS_SCHEMA_VERSION
+        changed = True
+    if entry.get("total") != total:
+        entry["total"] = total
+        changed = True
+    if entry.get("entries") != normalized_records:
+        entry["entries"] = normalized_records
+        changed = True
+    if entry.get("chunks") != normalized_chunks:
+        entry["chunks"] = normalized_chunks
+        changed = True
+    if entry.get("completed") != normalized_completed:
+        entry["completed"] = normalized_completed
+        changed = True
+    return changed
+
+
+def reusable_chunk_results(entry):
+    if not isinstance(entry, dict):
+        return {}
+    ensure_chunk_entry_schema(entry)
+    chunks = entry.get("chunks", {})
+    records = entry.get("entries", {})
+    return {
+        key: result
+        for key, result in chunks.items()
+        if isinstance(result, str)
+        and isinstance(records.get(str(key)), dict)
+        and records[str(key)].get("status") == "completed"
+    }
+
+
+def record_chunk_result(
+    entry,
+    chunk_index,
+    result,
+    *,
+    source_text=None,
+    model_name=None,
+    key_identifier=None,
+):
+    if not isinstance(entry, dict) or not isinstance(result, str):
+        return False
+    ensure_chunk_entry_schema(entry)
+    index = _positive_int(chunk_index)
+    if not index or (entry.get("total") and index > int(entry["total"])):
+        return False
+    key = str(index)
+    entry.setdefault("chunks", {})[key] = result
+    record = _chunk_record(entry, index, create=True)
+    record.update({
+        "index": index,
+        "status": "completed",
+        "result_sha256": hashlib.sha256(
+            result.encode("utf-8", errors="ignore")
+        ).hexdigest(),
+        "qa_issues_found": [],
+        "qa_issue_previews": {},
+        "qa_timestamp": None,
+        "last_updated": time.time(),
+    })
+    if isinstance(source_text, str):
+        record["source"] = source_text
+        record["source_sha256"] = hashlib.sha256(
+            source_text.encode("utf-8", errors="ignore")
+        ).hexdigest()
+    if model_name:
+        record["model_name"] = str(model_name)
+    if key_identifier:
+        record["key_identifier"] = str(key_identifier)
+    metadata = entry.setdefault("chunk_metadata", {})
+    if model_name or key_identifier:
+        metadata[key] = {
+            "model_name": str(model_name or "").strip() or None,
+            "key_identifier": str(key_identifier or "").strip() or None,
+        }
+    ensure_chunk_entry_schema(entry)
+    entry["last_updated"] = time.time()
+    return True
+
+
+def set_chunk_qa(entry, chunk_index, issues, previews=None, confidence=0):
+    """Set or clear QA state for one persisted chunk result."""
+    if not isinstance(entry, dict):
+        return False
+    ensure_chunk_entry_schema(entry)
+    record = _chunk_record(entry, chunk_index, create=True)
+    if record is None:
+        return False
+    issues = list(issues or [])
+    record["qa_issues_found"] = issues
+    record["qa_issue_previews"] = dict(previews or {})
+    record["qa_timestamp"] = time.time()
+    record["duplicate_confidence"] = confidence or 0
+    if issues:
+        record["status"] = "qa_failed"
+    elif str(chunk_index) in entry.get("chunks", {}):
+        record["status"] = "completed"
+    else:
+        record["status"] = "pending"
+    record["last_updated"] = time.time()
+    ensure_chunk_entry_schema(entry)
+    summary = chunk_failure_summary(entry)
+    entry["chapter_status"] = (
+        "qa_failed"
+        if summary["failed"]
+        else "incomplete"
+        if summary["pending"]
+        else "completed"
+    )
+    entry["last_updated"] = time.time()
+    return True
+
+
+def reset_chunks_for_retranslation(entry, chunk_indices: Iterable[int]):
+    """Drop selected cached results and mark only those chunks pending."""
+    if not isinstance(entry, dict):
+        return []
+    ensure_chunk_entry_schema(entry)
+    reset = []
+    for raw_index in chunk_indices or []:
+        index = _positive_int(raw_index)
+        record = _chunk_record(entry, index, create=False)
+        if not index or record is None:
+            continue
+        key = str(index)
+        entry.get("chunks", {}).pop(key, None)
+        entry.get("chunk_metadata", {}).pop(key, None)
+        for field in (
+            "result_sha256", "model_name", "key_identifier", "qa_timestamp",
+            "duplicate_confidence",
+        ):
+            record.pop(field, None)
+        record["status"] = "pending"
+        record["qa_issues_found"] = []
+        record["qa_issue_previews"] = {}
+        record["last_updated"] = time.time()
+        reset.append(index)
+    ensure_chunk_entry_schema(entry)
+    if reset:
+        entry["chapter_status"] = "incomplete"
+        entry["last_updated"] = time.time()
+    return reset
+
+
+def remove_chunk_segments(html_text, chapter_key, chunk_indices, entry=None):
+    """Remove selected marker blocks, with an exact-result legacy fallback."""
+    text = str(html_text or "")
+    wanted = {_positive_int(index) for index in chunk_indices or []}
+    wanted.discard(0)
+    removed = []
+    marked = extract_marked_chunks(text, chapter_key)
+    spans = []
+    for index in sorted(wanted):
+        block = marked.get(index)
+        if block:
+            spans.append((block["start"], block["end"], index))
+    for start, end, index in sorted(spans, reverse=True):
+        text = text[:start] + text[end:]
+        removed.append(index)
+
+    remaining = wanted.difference(removed)
+    if remaining and isinstance(entry, dict):
+        chunks = entry.get("chunks", {}) if isinstance(entry.get("chunks"), dict) else {}
+        for index in sorted(remaining):
+            result = chunks.get(str(index))
+            if isinstance(result, str) and result and result in text:
+                text = text.replace(result, "", 1)
+                removed.append(index)
+    return text, sorted(removed)
+
+
+def chunk_failure_summary(entry):
+    if not isinstance(entry, dict):
+        return {"total": 0, "completed": 0, "failed": 0, "pending": 0}
+    ensure_chunk_entry_schema(entry)
+    records = entry.get("entries", {})
+    statuses = [
+        str(record.get("status") or "pending").lower()
+        for record in records.values()
+        if isinstance(record, dict)
+    ]
+    return {
+        "total": _positive_int(entry.get("total"), len(statuses)),
+        "completed": statuses.count("completed"),
+        "failed": sum(status in {"qa_failed", "failed"} for status in statuses),
+        "pending": sum(status in {"pending", "in_progress"} for status in statuses),
+    }
+
+
+def chunk_status_summary_text(entry, limit=8):
+    if not isinstance(entry, dict):
+        return ""
+    ensure_chunk_entry_schema(entry)
+    icons = {
+        "completed": "✓",
+        "qa_failed": "⚠",
+        "failed": "✗",
+        "in_progress": "…",
+        "pending": "○",
+    }
+    records = entry.get("entries", {})
+    labels = []
+    for key in sorted(records, key=lambda value: _positive_int(value)):
+        record = records[key]
+        status = str(record.get("status") or "pending").lower()
+        labels.append(f"{key}{icons.get(status, '?')}")
+    if len(labels) > limit:
+        labels = labels[:limit] + [f"+{len(labels) - limit}"]
+    return "Chunks " + " ".join(labels) if labels else ""

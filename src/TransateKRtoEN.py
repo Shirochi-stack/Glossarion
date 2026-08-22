@@ -156,6 +156,16 @@ import re
 import time
 from history_manager import HistoryManager
 from chapter_splitter import ChapterSplitter
+from chapter_chunk_progress import (
+    CHUNK_PROGRESS_SCHEMA_VERSION,
+    chunk_failure_summary,
+    ensure_chunk_entry_schema,
+    record_chunk_result,
+    reset_chunks_for_retranslation,
+    reusable_chunk_results,
+    set_chunk_qa,
+    wrap_chunk_html,
+)
 from image_translator import ImageTranslator
 from typing import Dict, List, Tuple 
 from txt_processor import TextFileProcessor, build_source_structure_metadata
@@ -3797,7 +3807,10 @@ class ProgressManager:
             invalidation_reason = None
             if not isinstance(existing, dict):
                 existing = None
-            elif existing.get("schema_version") != 1:
+            elif existing.get("schema_version") not in (
+                1,
+                CHUNK_PROGRESS_SCHEMA_VERSION,
+            ):
                 invalidation_reason = "legacy chunk progress has no budget fingerprint"
             else:
                 try:
@@ -3826,11 +3839,12 @@ class ProgressManager:
 
             if existing is None or invalidation_reason:
                 existing = {
-                    "schema_version": 1,
+                    "schema_version": CHUNK_PROGRESS_SCHEMA_VERSION,
                     "total": total_chunks,
                     "completed": [],
                     "chunks": {},
                     "chunk_metadata": {},
+                    "entries": {},
                     "chapter_status": "incomplete",
                     "last_updated": time.time(),
                 }
@@ -3873,7 +3887,11 @@ class ProgressManager:
                     changed = True
                 existing["chapter_status"] = "incomplete"
                 existing.update(budget_fields)
+                if ensure_chunk_entry_schema(existing, total_chunks):
+                    changed = True
 
+            if ensure_chunk_entry_schema(existing, total_chunks):
+                changed = True
             return existing, invalidation_reason, changed
 
     def record_chapter_chunk(
@@ -3884,6 +3902,7 @@ class ProgressManager:
         result,
         budget_snapshot,
         *,
+        source_text=None,
         model_name=None,
         key_identifier=None,
     ):
@@ -3904,24 +3923,51 @@ class ProgressManager:
             return False
 
         with self._save_lock:
-            entry["chunks"][str(chunk_idx)] = result
-            completed = set()
-            for value in entry.get("completed", []):
-                try:
-                    completed.add(int(value))
-                except (TypeError, ValueError):
-                    pass
-            completed.add(chunk_idx)
-            entry["completed"] = sorted(completed)
-            if model_name or key_identifier:
-                metadata = entry.setdefault("chunk_metadata", {})
-                metadata[str(chunk_idx)] = {
-                    "model_name": str(model_name or "").strip() or None,
-                    "key_identifier": str(key_identifier or "").strip() or None,
-                }
+            record_chunk_result(
+                entry,
+                chunk_idx,
+                result,
+                source_text=source_text,
+                model_name=model_name,
+                key_identifier=key_identifier,
+            )
             entry["chapter_status"] = "incomplete"
             entry["last_updated"] = time.time()
         return True
+
+    def get_reusable_chapter_chunks(self, chapter_key):
+        """Return only completed, QA-clean cached results for one chapter."""
+        with self._save_lock:
+            entry = self.prog.get("chapter_chunks", {}).get(str(chapter_key))
+            return dict(reusable_chunk_results(entry))
+
+    def set_chapter_chunk_qa(
+        self,
+        chapter_key,
+        chunk_idx,
+        issues,
+        *,
+        previews=None,
+        duplicate_confidence=0,
+    ):
+        """Set or clear QA state for one persisted EPUB chunk."""
+        with self._save_lock:
+            entry = self.prog.get("chapter_chunks", {}).get(str(chapter_key))
+            if not isinstance(entry, dict):
+                return False
+            return set_chunk_qa(
+                entry,
+                chunk_idx,
+                issues,
+                previews=previews,
+                confidence=duplicate_confidence,
+            )
+
+    def reset_chapter_chunks(self, chapter_key, chunk_indices):
+        """Invalidate selected results while preserving all other chunks."""
+        with self._save_lock:
+            entry = self.prog.get("chapter_chunks", {}).get(str(chapter_key))
+            return reset_chunks_for_retranslation(entry, chunk_indices)
 
     def mark_chapter_chunk_progress_status(self, chapter_key, status):
         """Mirror the parent chapter state onto a stored chunk-cache entry."""
@@ -3935,6 +3981,9 @@ class ProgressManager:
                 if str(status or "").lower().startswith("completed")
                 else "incomplete"
             )
+            summary = chunk_failure_summary(entry)
+            if summary["failed"]:
+                entry["chapter_status"] = "qa_failed"
             entry["last_updated"] = time.time()
             return True
 
@@ -9203,8 +9252,14 @@ class BatchTranslationProcessor:
             # Initialize shared structures for chunk processing (works for 1 or many chunks)
             translated_chunks = [None] * total_chunks  # Pre-allocate to maintain order
             chunk_request_metadata = [None] * total_chunks
+            chunk_source_by_index = {
+                int(chunk_data[1]): chunk_data[0]
+                for chunk_data in chunks
+            }
             if isinstance(cached_chunk_entry, dict):
-                cached_results = cached_chunk_entry.get("chunks", {})
+                cached_results = self.progress_manager.get_reusable_chapter_chunks(
+                    content_hash
+                )
                 cached_metadata = cached_chunk_entry.get("chunk_metadata", {})
                 for raw_idx, cached_result in cached_results.items():
                     try:
@@ -10427,6 +10482,9 @@ class BatchTranslationProcessor:
                                         total_chunks,
                                         result,
                                         chunk_budget,
+                                        source_text=chunk_source_by_index.get(
+                                            int(chunk_idx)
+                                        ),
                                         model_name=chunk_actual_model,
                                         key_identifier=chunk_actual_key,
                                     )
@@ -10481,12 +10539,37 @@ class BatchTranslationProcessor:
                 else:
                     raise Exception(f"Failed to translate chunks: {missing}")
             
-            # Combine all chunks
+            # Combine all chunks. EPUB chunk-progress output carries stable
+            # comment boundaries so QA/retranslation tools can address one
+            # chunk without deleting the rest of the chapter.
+            output_chunks = translated_chunks
+            if self.chunk_progress_enabled and not is_partial_result:
+                output_chunks = [
+                    wrap_chunk_html(
+                        content_hash,
+                        index,
+                        total_chunks,
+                        re.sub(
+                            r"\n?```\s*$",
+                            "",
+                            re.sub(
+                                r"^```(?:html)?\s*\n?",
+                                "",
+                                str(chunk_result or ""),
+                                count=1,
+                                flags=re.MULTILINE,
+                            ),
+                            count=1,
+                            flags=re.MULTILINE,
+                        ),
+                    )
+                    for index, chunk_result in enumerate(output_chunks, 1)
+                ]
             if total_chunks > 1:
-                result = '\n'.join(translated_chunks)
+                result = '\n'.join(output_chunks)
                 print(f"🔗 Combined {total_chunks} chunks for Chapter {actual_num}")
             else:
-                result = translated_chunks[0] if translated_chunks else None
+                result = output_chunks[0] if output_chunks else None
             
             final_actual_model, final_actual_key = _aggregate_actual_request_metadata(chunk_request_metadata)
             if final_actual_model:
@@ -27782,7 +27865,7 @@ def main(log_callback=None, stop_callback=None):
                     f"{invalidation_reason}"
                 )
             cached_chunk_results = (
-                cached_chunk_entry.get("chunks", {})
+                progress_manager.get_reusable_chapter_chunks(chapter_key_str)
                 if isinstance(cached_chunk_entry, dict)
                 else {}
             )
@@ -28596,6 +28679,7 @@ def main(log_callback=None, stop_callback=None):
                         total_chunks,
                         result,
                         chunk_budget,
+                        source_text=chunk_html,
                         model_name=actual_model,
                         key_identifier=actual_key,
                     )
@@ -28698,9 +28782,59 @@ def main(log_callback=None, stop_callback=None):
             if len(translated_chunks) > 1:
                 print(f"  📎 Merging {len(translated_chunks)} chunks...")
                 translated_chunks.sort(key=lambda x: x[1])
-                merged_result = chapter_splitter.merge_translated_chunks(translated_chunks)
+                output_chunks = translated_chunks
+                if chunk_progress_enabled and not is_partial_result:
+                    output_chunks = [
+                        (
+                            wrap_chunk_html(
+                                chapter_key_str,
+                                chunk_idx,
+                                total_chunks,
+                                re.sub(
+                                    r"\n?```\s*$",
+                                    "",
+                                    re.sub(
+                                        r"^```(?:html)?\s*\n?",
+                                        "",
+                                        str(chunk_result or ""),
+                                        count=1,
+                                        flags=re.MULTILINE,
+                                    ),
+                                    count=1,
+                                    flags=re.MULTILINE,
+                                ),
+                            ),
+                            chunk_idx,
+                            total_chunks,
+                        )
+                        for chunk_result, chunk_idx, total_chunks in output_chunks
+                    ]
+                merged_result = chapter_splitter.merge_translated_chunks(output_chunks)
             else:
-                merged_result = translated_chunks[0][0] if translated_chunks else ""
+                if translated_chunks:
+                    chunk_result, chunk_idx, total_chunks = translated_chunks[0]
+                    if chunk_progress_enabled and not is_partial_result:
+                        chunk_result = wrap_chunk_html(
+                            chapter_key_str,
+                            chunk_idx,
+                            total_chunks,
+                            re.sub(
+                                r"\n?```\s*$",
+                                "",
+                                re.sub(
+                                    r"^```(?:html)?\s*\n?",
+                                    "",
+                                    str(chunk_result or ""),
+                                    count=1,
+                                    flags=re.MULTILINE,
+                                ),
+                                count=1,
+                                flags=re.MULTILINE,
+                            ),
+                        )
+                    merged_result = chunk_result
+                else:
+                    merged_result = ""
 
             if config.CONTEXTUAL and len(translated_chunks) > 1:
                 user_summary, assistant_summary = chunk_context_manager.get_summary_for_history()

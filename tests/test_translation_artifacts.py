@@ -8,6 +8,7 @@ import pytest
 import other_settings
 import Retranslation_GUI as retranslation_gui_module
 import TransateKRtoEN as translation_module
+from chapter_chunk_progress import extract_marked_chunks, wrap_chunk_html
 from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS, mask_whitelisted_emoticons
 
 from Retranslation_GUI import (
@@ -32,6 +33,7 @@ from qa_scan_runtime import (
     restore_env,
 )
 from scan_html_folder import (
+    _attach_chunk_results_to_scan,
     detect_ai_artifacts,
     detect_non_english_content,
     scan_html_folder,
@@ -593,10 +595,187 @@ def test_batch_epub_chunk_progress_submits_only_missing_chunks(
 
     assert result[0] is True
     assert sorted(sent) == ["chunk-2", "chunk-3"]
-    assert result[3] == "cached-one\ntranslated:chunk-2\ntranslated:chunk-3"
+    marked = extract_marked_chunks(result[3], "hash-1")
+    assert [marked[index]["content"] for index in (1, 2, 3)] == [
+        "cached-one",
+        "translated:chunk-2",
+        "translated:chunk-3",
+    ]
     entry = progress.prog["chapter_chunks"]["hash-1"]
+    assert entry["schema_version"] == 2
     assert entry["completed"] == [1, 2, 3]
     assert entry["chapter_status"] == "completed"
+    assert entry["entries"]["2"]["source"] == "chunk-2"
+    assert entry["entries"]["3"]["source"] == "chunk-3"
+
+
+def test_html_scanner_marks_and_clears_only_the_failing_chunk(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    budget = {
+        "initial_output_token_limit": 12000,
+        "cached_output_token_limit": 9000,
+        "compression_factor": 2.0,
+        "safety_margin": 500,
+        "minimum_chunk_size": 1000,
+        "initial_chunk_size": 5750,
+        "cached_chunk_size": 4250,
+    }
+    progress.prog["chapters"]["1"] = {
+        "actual_num": 1,
+        "content_hash": "chapter-hash",
+        "output_file": "chapter.html",
+        "status": "completed",
+    }
+    progress.prepare_chapter_chunk_progress(
+        "chapter-hash", 2, budget, enabled=True
+    )
+    progress.record_chapter_chunk(
+        "chapter-hash",
+        1,
+        2,
+        "<p>Good output</p>",
+        budget,
+        source_text="<p>Source one</p>",
+    )
+    progress.record_chapter_chunk(
+        "chapter-hash",
+        2,
+        2,
+        "<p>BADTOKEN output</p>",
+        budget,
+        source_text="<p>Source two</p>",
+    )
+    progress.mark_chapter_chunk_progress_status("chapter-hash", "completed")
+    output_path = tmp_path / "chapter.html"
+    output_path.write_text(
+        "\n".join(
+            [
+                wrap_chunk_html(
+                    "chapter-hash", 1, 2, "<p>Good output</p>"
+                ),
+                wrap_chunk_html(
+                    "chapter-hash", 2, 2, "<p>BADTOKEN output</p>"
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    progress.save()
+
+    logs = []
+    faulty = {
+        "filename": "chapter.html",
+        "filepath": str(output_path),
+        "file_index": 0,
+        "chapter_num": 1,
+        "issues": ["llm_token_issue: 'BADTOKEN'"],
+        "qa_issue_previews": {},
+        "duplicate_confidence": 0,
+    }
+    assert _attach_chunk_results_to_scan(
+        str(tmp_path),
+        [faulty],
+        {},
+        logs.append,
+        progress_path=progress.PROGRESS_FILE,
+    ) == 1
+    update_new_format_progress(
+        progress.prog, [faulty], [], logs.append, str(tmp_path)
+    )
+
+    chapter = progress.prog["chapters"]["1"]
+    entry = progress.prog["chapter_chunks"]["chapter-hash"]
+    assert chapter["status"] == "completed"
+    assert chapter["has_chunk_qa_failures"] is True
+    assert entry["entries"]["1"]["status"] == "completed"
+    assert entry["entries"]["2"]["status"] == "qa_failed"
+    assert progress.get_reusable_chapter_chunks("chapter-hash") == {
+        "1": "<p>Good output</p>"
+    }
+
+    resolved = {
+        "filename": "chapter.html",
+        "filepath": str(output_path),
+        "file_index": 0,
+        "chapter_num": 1,
+        "issues": [],
+        "qa_issue_previews": {},
+        "duplicate_confidence": 0,
+    }
+    assert _attach_chunk_results_to_scan(
+        str(tmp_path),
+        [resolved],
+        {},
+        logs.append,
+        progress_path=progress.PROGRESS_FILE,
+    ) == 1
+    update_new_format_progress(
+        progress.prog, [], [resolved], logs.append, str(tmp_path)
+    )
+
+    assert chapter["status"] == "completed"
+    assert chapter["has_chunk_qa_failures"] is False
+    assert entry["entries"]["1"]["status"] == "completed"
+    assert entry["entries"]["2"]["status"] == "completed"
+
+    output_path.write_text(
+        wrap_chunk_html(
+            "chapter-hash", 1, 2, "<p>Good output</p>"
+        ),
+        encoding="utf-8",
+    )
+    progress.save()
+    missing = {
+        "filename": "chapter.html",
+        "filepath": str(output_path),
+        "file_index": 0,
+        "chapter_num": 1,
+        "issues": [],
+        "qa_issue_previews": {},
+        "duplicate_confidence": 0,
+    }
+    assert _attach_chunk_results_to_scan(
+        str(tmp_path),
+        [missing],
+        {},
+        logs.append,
+        progress_path=progress.PROGRESS_FILE,
+    ) == 1
+    assert missing["issues"] == ["missing_chunk_segment"]
+    update_new_format_progress(
+        progress.prog, [missing], [], logs.append, str(tmp_path)
+    )
+    assert chapter["status"] == "completed"
+    assert entry["entries"]["1"]["status"] == "completed"
+    assert entry["entries"]["2"]["status"] == "qa_failed"
+
+    progress.reset_chapter_chunks("chapter-hash", [2])
+    chapter["status"] = "pending"
+    progress.save()
+    incomplete = {
+        "filename": "chapter.html",
+        "filepath": str(output_path),
+        "file_index": 0,
+        "chapter_num": 1,
+        "issues": [],
+        "qa_issue_previews": {},
+        "duplicate_confidence": 0,
+    }
+    assert _attach_chunk_results_to_scan(
+        str(tmp_path),
+        [incomplete],
+        {},
+        logs.append,
+        progress_path=progress.PROGRESS_FILE,
+    ) == 1
+    update_new_format_progress(
+        progress.prog, [], [incomplete], logs.append, str(tmp_path)
+    )
+
+    assert chapter["status"] == "pending"
+    assert entry["chapter_status"] == "incomplete"
+    assert entry["entries"]["1"]["status"] == "completed"
+    assert entry["entries"]["2"]["status"] == "pending"
 
 
 @pytest.mark.parametrize(

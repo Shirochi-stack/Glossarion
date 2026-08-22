@@ -23,6 +23,7 @@ from epub_library import (
     _OverlayMergeThread,
     _configure_epub_reader_web_settings,
     _merge_manual_metadata_edits,
+    _prepare_chapter_row_spec,
 )
 
 
@@ -1427,6 +1428,158 @@ def test_reader_keeps_qobject_parent_but_clears_transient_window_owner(
         dialog.close()
         owner.close()
         qapp.processEvents()
+
+
+def test_epub_details_chapter_row_exposes_individual_chunk_statuses():
+    spec = _prepare_chapter_row_spec(
+        {
+            "filename": "chapter.xhtml",
+            "raw_title": "Raw chapter",
+            "translated_title": "Translated chapter",
+            "status": "completed",
+            "chunk_status_text": "Chunks 1✓ 2⚠ 3○",
+            "chunk_summary": {
+                "total": 3,
+                "completed": 1,
+                "failed": 1,
+                "pending": 1,
+            },
+        }
+    )
+
+    assert spec["primary_text"] == "Translated chapter"
+    assert spec["filename"] == "chapter.xhtml · Chunks 1✓ 2⚠ 3○"
+    assert spec["badge_text"] == "⚠ 1/3 chunks"
+
+
+def test_epub_details_loader_attaches_chunk_records_from_progress(tmp_path):
+    workspace = tmp_path / "chunked-epub-workspace"
+    workspace.mkdir()
+    output = workspace / "response_chapter_001.html"
+    output.write_text("<h1>Translated chapter</h1>", encoding="utf-8")
+    progress_path = workspace / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "content_hash": "chapter-hash",
+                        "original_basename": "chapter_001.xhtml",
+                        "output_file": output.name,
+                        "status": "completed",
+                    }
+                },
+                "chapter_chunks": {
+                    "chapter-hash": {
+                        "schema_version": 2,
+                        "total": 2,
+                        "completed": [1],
+                        "chunks": {
+                            "1": "<p>Good output</p>",
+                            "2": "<p>Bad output</p>",
+                        },
+                        "entries": {
+                            "1": {
+                                "index": 1,
+                                "status": "completed",
+                                "qa_issues_found": [],
+                            },
+                            "2": {
+                                "index": 2,
+                                "status": "qa_failed",
+                                "qa_issues_found": ["bad output"],
+                            },
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    payloads = []
+    loader = _BookDetailsLoader(
+        {
+            "path": str(workspace),
+            "type": "in_progress",
+            "output_folder": str(workspace),
+            "progress_file": str(progress_path),
+        },
+        {},
+    )
+    loader.done.connect(payloads.append)
+
+    loader.run()
+
+    assert len(payloads) == 1
+    chapter = payloads[0]["chapters_info"][0]
+    assert chapter["chunk_progress_key"] == "chapter-hash"
+    assert chapter["chunk_status_text"] == "Chunks 1✓ 2⚠"
+    assert chapter["chunk_summary"]["failed"] == 1
+    assert chapter["chunks"] == [
+        {
+            "index": 1,
+            "status": "completed",
+            "qa_issues_found": [],
+            "model_name": None,
+            "key_identifier": None,
+        },
+        {
+            "index": 2,
+            "status": "qa_failed",
+            "qa_issues_found": ["bad output"],
+            "model_name": None,
+            "key_identifier": None,
+        },
+    ]
+
+
+def test_epub_details_full_chapter_retranslation_clears_chunk_cache(tmp_path):
+    output = tmp_path / "response_chapter.xhtml"
+    output.write_text("<p>translated</p>", encoding="utf-8")
+    progress_path = tmp_path / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "content_hash": "chapter-hash",
+                        "original_basename": "chapter.xhtml",
+                        "output_file": output.name,
+                        "status": "completed",
+                    }
+                },
+                "chapter_chunks": {
+                    "chapter-hash": {
+                        "schema_version": 2,
+                        "total": 2,
+                        "completed": [1, 2],
+                        "chunks": {"1": "one", "2": "two"},
+                        "entries": {
+                            "1": {"index": 1, "status": "completed"},
+                            "2": {"index": 2, "status": "completed"},
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert epub_library._mark_chapter_pending_for_retranslation(
+        str(tmp_path), "chapter.xhtml"
+    ) is True
+
+    saved = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert not output.exists()
+    assert saved["chapters"]["1"]["status"] == "pending"
+    assert saved["chapter_chunks"]["chapter-hash"]["chunks"] == {}
+    assert saved["chapter_chunks"]["chapter-hash"]["completed"] == []
+    assert {
+        record["status"]
+        for record in saved["chapter_chunks"]["chapter-hash"]["entries"].values()
+    } == {"pending"}
 
 
 @pytest.mark.parametrize(
