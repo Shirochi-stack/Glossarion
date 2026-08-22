@@ -1473,7 +1473,7 @@ def test_epub_details_loader_attaches_chunk_records_from_progress(tmp_path):
                 "chapter_chunks": {
                     "chapter-hash": {
                         "schema_version": 2,
-                        "total": 2,
+                        "total": 3,
                         "completed": [1],
                         "chunks": {
                             "1": "<p>Good output</p>",
@@ -1489,6 +1489,11 @@ def test_epub_details_loader_attaches_chunk_records_from_progress(tmp_path):
                                 "index": 2,
                                 "status": "qa_failed",
                                 "qa_issues_found": ["bad output"],
+                            },
+                            "3": {
+                                "index": 3,
+                                "status": "pending",
+                                "qa_issues_found": [],
                             },
                         },
                     }
@@ -1514,8 +1519,10 @@ def test_epub_details_loader_attaches_chunk_records_from_progress(tmp_path):
     assert len(payloads) == 1
     chapter = payloads[0]["chapters_info"][0]
     assert chapter["chunk_progress_key"] == "chapter-hash"
-    assert chapter["chunk_status_text"] == "Chunks 1✓ 2⚠"
+    assert chapter["status"] == "pending"
+    assert chapter["chunk_status_text"] == "Chunks 1✓ 2⚠ 3○"
     assert chapter["chunk_summary"]["failed"] == 1
+    assert chapter["chunk_summary"]["pending"] == 1
     assert chapter["chunks"] == [
         {
             "index": 1,
@@ -1531,7 +1538,59 @@ def test_epub_details_loader_attaches_chunk_records_from_progress(tmp_path):
             "model_name": None,
             "key_identifier": None,
         },
+        {
+            "index": 3,
+            "status": "pending",
+            "qa_issues_found": [],
+            "model_name": None,
+            "key_identifier": None,
+        },
     ]
+
+
+def test_library_summary_does_not_count_saved_partial_chunk_file_as_done(
+    tmp_path,
+):
+    output = tmp_path / "response_chapter_001.html"
+    output.write_text("<p>saved truncated evidence</p>", encoding="utf-8")
+    progress_path = tmp_path / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "content_hash": "chapter-hash",
+                        "original_basename": "chapter_001.xhtml",
+                        "output_file": output.name,
+                        "status": "completed",
+                    }
+                },
+                "chapter_chunks": {
+                    "chapter-hash": {
+                        "schema_version": 2,
+                        "total": 5,
+                        "completed": [1],
+                        "chunks": {"1": "translated one"},
+                        "entries": {
+                            "1": {"index": 1, "status": "completed"},
+                            "2": {"index": 2, "status": "pending"},
+                            "3": {"index": 3, "status": "pending"},
+                            "4": {"index": 4, "status": "pending"},
+                            "5": {"index": 5, "status": "pending"},
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = epub_library._read_progress_summary(str(progress_path))
+
+    assert summary["total"] == 1
+    assert summary["completed"] == 0
+    assert summary["in_progress"] == 1
 
 
 def test_epub_details_full_chapter_retranslation_clears_chunk_cache(tmp_path):

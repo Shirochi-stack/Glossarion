@@ -90,6 +90,7 @@ from epub_package import (
 )
 from chapter_chunk_progress import (
     chunk_failure_summary,
+    effective_parent_status,
     ensure_chunk_entry_schema,
     remove_chunk_segments,
     reset_chunks_for_retranslation,
@@ -28799,6 +28800,10 @@ class RetranslationMixin:
             if not isinstance(chunk_entry, dict):
                 continue
             ensure_chunk_entry_schema(chunk_entry)
+            parent["status"] = effective_parent_status(
+                parent.get("status"),
+                chunk_entry,
+            )
             total = int(chunk_entry.get("total") or 0)
             for raw_index, record in sorted(
                 chunk_entry.get("entries", {}).items(),
@@ -29437,6 +29442,19 @@ class RetranslationMixin:
                 # Handle legacy completed variants as completed for display
                 if new_status in ('completed_empty', 'completed_image_only'):
                     new_status = 'completed'
+                chunk_key = str(
+                    matched_info.get("content_hash")
+                    or matched_key
+                    or ""
+                )
+                chunk_entry = data.get("prog", {}).get(
+                    "chapter_chunks", {}
+                ).get(chunk_key)
+                if isinstance(chunk_entry, dict):
+                    new_status = effective_parent_status(
+                        new_status,
+                        chunk_entry,
+                    )
                 # Verify file actually exists for completed status (but NOT for merged - merged chapters
                 # don't have their own output files, they point to parent's file)
                 if new_status == 'completed' and not os.path.exists(output_path):

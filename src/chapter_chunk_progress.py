@@ -355,6 +355,29 @@ def chunk_failure_summary(entry):
     }
 
 
+def chunk_entry_needs_translation(entry):
+    """Return whether a persisted chunk plan still has work to translate."""
+    summary = chunk_failure_summary(entry)
+    return bool(summary["total"] and (summary["failed"] or summary["pending"]))
+
+
+def effective_parent_status(status, entry):
+    """Prevent pending chunks from being hidden by a completed parent row.
+
+    Individual chunk QA failures intentionally do not fail an otherwise
+    completed parent chapter: the scanner and UIs expose those failures on the
+    child rows. Pending/in-progress chunks are different; they mean the chapter
+    output is structurally incomplete and therefore cannot be called complete.
+    """
+    base_status = str(status or "").strip().lower()
+    summary = chunk_failure_summary(entry)
+    if not summary["total"] or not summary["pending"]:
+        return status
+    if base_status in {"qa_failed", "failed", "error", "file_missing"}:
+        return status
+    return "pending"
+
+
 def chunk_status_summary_text(entry, limit=8):
     if not isinstance(entry, dict):
         return ""

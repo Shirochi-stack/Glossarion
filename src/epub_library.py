@@ -41,6 +41,7 @@ from epub_package import find_epub_opf_member
 from chapter_chunk_progress import (
     chunk_failure_summary,
     chunk_status_summary_text,
+    effective_parent_status,
     ensure_chunk_entry_schema,
     reset_chunks_for_retranslation,
 )
@@ -2487,6 +2488,16 @@ def _read_progress_summary(progress_file: str, exclude_special: bool = False,
                 continue
         total += 1
         status = ch.get("status", "")
+        chunk_key = str(ch.get("content_hash") or key)
+        chunk_entry = prog.get("chapter_chunks", {}).get(chunk_key)
+        if isinstance(chunk_entry, dict):
+            chunk_summary = chunk_failure_summary(chunk_entry)
+            status = effective_parent_status(status, chunk_entry)
+            # Keep the parent chapter row individually complete for scanner
+            # compatibility, but count a child-only QA failure as failed in
+            # the book-level aggregate rather than claiming the book is done.
+            if chunk_summary["failed"] and status == "completed":
+                status = "qa_failed"
         # Phantom-completion check: the progress JSON may say
         # "completed" but the actual output file could have been
         # deleted by the user. Verify it's still on disk before
@@ -14843,6 +14854,10 @@ class _BookDetailsLoader(QThread):
                     if isinstance(chunk_entry, dict):
                         ensure_chunk_entry_schema(chunk_entry)
                         summary = chunk_failure_summary(chunk_entry)
+                        resolved["status"] = effective_parent_status(
+                            resolved.get("status"),
+                            chunk_entry,
+                        )
                         resolved["chunk_progress_key"] = chunk_key
                         resolved["chunk_summary"] = summary
                         resolved["chunk_status_text"] = (
@@ -16678,6 +16693,7 @@ class BookDetailsDialog(QDialog):
             for c in progress_items
             if c.get("status") == "completed"
             and not (c.get("chunk_summary") or {}).get("failed")
+            and not (c.get("chunk_summary") or {}).get("pending")
         )
         total = len(progress_items) or int(self._book.get("total_chapters", 0) or 0)
         # When the book has reached 100% translation, the card already
@@ -17801,6 +17817,7 @@ class BookDetailsDialog(QDialog):
             for c in items
             if c.get("status") == "completed"
             and not (c.get("chunk_summary") or {}).get("failed")
+            and not (c.get("chunk_summary") or {}).get("pending")
         )
         return done, total
 

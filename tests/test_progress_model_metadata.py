@@ -12,6 +12,8 @@ import pytest
 from bs4 import BeautifulSoup
 
 from chapter_chunk_progress import (
+    chunk_entry_needs_translation,
+    effective_parent_status,
     extract_marked_chunks,
     remove_chunk_segments,
     wrap_chunk_html,
@@ -619,6 +621,108 @@ def test_chunk_qa_state_excludes_only_failed_chunk_from_resume_cache(tmp_path):
     }
 
 
+def test_returned_truncated_chunk_is_retained_but_never_reused(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    progress.prepare_chapter_chunk_progress(
+        "hash-1", 2, _epub_chunk_budget(), enabled=True
+    )
+
+    assert progress.record_chapter_chunk(
+        "hash-1",
+        1,
+        2,
+        "truncated translation",
+        _epub_chunk_budget(),
+        qa_issues=["TRUNCATED"],
+    )
+
+    entry = progress.prog["chapter_chunks"]["hash-1"]
+    assert entry["chunks"]["1"] == "truncated translation"
+    assert entry["entries"]["1"]["status"] == "qa_failed"
+    assert entry["entries"]["1"]["qa_issues_found"] == ["TRUNCATED"]
+    assert entry["entries"]["2"]["status"] == "pending"
+    assert progress.get_reusable_chapter_chunks("hash-1") == {}
+
+
+def test_saved_partial_output_cannot_restore_pending_chunks_as_completed(
+    tmp_path,
+):
+    output_name = "p-003.xhtml"
+    (tmp_path / output_name).write_text(
+        "<p>saved truncated evidence</p>", encoding="utf-8"
+    )
+    progress = ProgressManager(str(tmp_path))
+    progress.prepare_chapter_chunk_progress(
+        "hash-3", 5, _epub_chunk_budget(), enabled=True
+    )
+    progress.record_chapter_chunk(
+        "hash-3", 1, 5, "translated one", _epub_chunk_budget()
+    )
+    chapter = {
+        "filename": output_name,
+        "original_basename": output_name,
+    }
+    progress.update(
+        2,
+        3,
+        "hash-3",
+        output_name,
+        status="in_progress",
+        chapter_obj=chapter,
+    )
+    chapter_key = next(iter(progress.prog["chapters"]))
+
+    should_translate, _message, existing_output = progress.check_chapter_status(
+        2,
+        3,
+        "hash-3",
+        str(tmp_path),
+        chapter_obj=chapter,
+    )
+
+    assert should_translate is True
+    assert existing_output == output_name
+    assert progress.prog["chapters"][chapter_key]["status"] == "in_progress"
+    assert not progress.prog["chapters"][chapter_key].get(
+        "auto_restored_from_output"
+    )
+
+    # Repair a progress file that was already corrupted by the old
+    # file-existence recovery logic (the exact state shown in the UI bug).
+    progress.prog["chapters"][chapter_key]["status"] = "completed"
+    should_translate, _message, existing_output = progress.check_chapter_status(
+        2,
+        3,
+        "hash-3",
+        str(tmp_path),
+        chapter_obj=chapter,
+    )
+    assert should_translate is True
+    assert existing_output == output_name
+    assert progress.prog["chapters"][chapter_key]["status"] == "pending"
+
+
+def test_parent_completion_is_rejected_while_chunk_work_remains(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    progress.prepare_chapter_chunk_progress(
+        "hash-3", 5, _epub_chunk_budget(), enabled=True
+    )
+    progress.record_chapter_chunk(
+        "hash-3", 1, 5, "translated one", _epub_chunk_budget()
+    )
+
+    progress.update(
+        2, 3, "hash-3", "p-003.xhtml", status="completed"
+    )
+
+    chapter_info = next(iter(progress.prog["chapters"].values()))
+    entry = progress.prog["chapter_chunks"]["hash-3"]
+    assert chapter_info["status"] == "pending"
+    assert entry["chapter_status"] == "incomplete"
+    assert chunk_entry_needs_translation(entry) is True
+    assert effective_parent_status("completed", entry) == "pending"
+
+
 def test_progress_manager_expands_chapter_into_selectable_chunk_rows(tmp_path):
     progress = ProgressManager(str(tmp_path))
     progress.prog["chapters"]["1"] = {
@@ -652,6 +756,7 @@ def test_progress_manager_expands_chapter_into_selectable_chunk_rows(tmp_path):
     assert len(rows) == 3
     assert rows[0]["key"] == "1"
     assert rows[0]["progress_key"] == "1"
+    assert rows[0]["status"] == "pending"
     assert rows[1]["is_chunk_progress"] is True
     assert rows[1]["chunk_index"] == 1
     assert rows[1]["status"] == "qa_failed"

@@ -158,6 +158,7 @@ from history_manager import HistoryManager
 from chapter_splitter import ChapterSplitter
 from chapter_chunk_progress import (
     CHUNK_PROGRESS_SCHEMA_VERSION,
+    chunk_entry_needs_translation,
     chunk_failure_summary,
     ensure_chunk_entry_schema,
     record_chunk_result,
@@ -3905,8 +3906,10 @@ class ProgressManager:
         source_text=None,
         model_name=None,
         key_identifier=None,
+        qa_issues=None,
+        qa_issue_previews=None,
     ):
-        """Record one successfully translated chunk in an existing plan."""
+        """Record one returned chunk and its terminal QA state."""
         if not isinstance(result, str):
             return False
         entry, _reason, _changed = self.prepare_chapter_chunk_progress(
@@ -3931,7 +3934,15 @@ class ProgressManager:
                 model_name=model_name,
                 key_identifier=key_identifier,
             )
-            entry["chapter_status"] = "incomplete"
+            if qa_issues:
+                set_chunk_qa(
+                    entry,
+                    chunk_idx,
+                    qa_issues,
+                    previews=qa_issue_previews,
+                )
+            else:
+                entry["chapter_status"] = "incomplete"
             entry["last_updated"] = time.time()
         return True
 
@@ -3976,14 +3987,16 @@ class ProgressManager:
             entry = self.prog.get("chapter_chunks", {}).get(chapter_key)
             if not isinstance(entry, dict):
                 return False
-            entry["chapter_status"] = (
-                "completed"
-                if str(status or "").lower().startswith("completed")
-                else "incomplete"
-            )
+            status_l = str(status or "").lower()
             summary = chunk_failure_summary(entry)
-            if summary["failed"]:
+            if status_l in {"qa_failed", "failed", "error"} or summary["failed"]:
                 entry["chapter_status"] = "qa_failed"
+            elif summary["pending"]:
+                entry["chapter_status"] = "incomplete"
+            elif status_l.startswith("completed"):
+                entry["chapter_status"] = "completed"
+            else:
+                entry["chapter_status"] = "incomplete"
             entry["last_updated"] = time.time()
             return True
 
@@ -5010,6 +5023,20 @@ class ProgressManager:
                     chapter_key = existing_key
                     existing_info = candidate
                     break
+
+        # A completed parent is impossible while its persisted chunk plan still
+        # contains pending or failed work. This guard is deliberately applied
+        # before the chapter row is rebuilt so no caller can reintroduce the
+        # invalid state merely because a partial output file was saved.
+        if str(status or "").lower().startswith("completed"):
+            chunk_key = str(
+                content_hash
+                or (existing_info.get("content_hash") if isinstance(existing_info, dict) else "")
+                or chapter_key
+            )
+            chunk_entry = self.prog.get("chapter_chunks", {}).get(chunk_key)
+            if chunk_entry_needs_translation(chunk_entry):
+                status = "pending"
         
         # Log if we're using a composite key
         if "_" in chapter_key and chapter_key != str(actual_num):
@@ -5734,6 +5761,21 @@ class ProgressManager:
                 pass
         # Use helper method to get consistent key
         chapter_key = self._get_chapter_key(actual_num, output_file=None, chapter_obj=chapter_obj, content_hash=content_hash)
+
+        def _chunk_entry_for(entry=None, fallback_key=None):
+            entry = entry if isinstance(entry, dict) else {}
+            chunk_key = str(
+                entry.get("content_hash")
+                or content_hash
+                or fallback_key
+                or chapter_key
+            )
+            return self.prog.get("chapter_chunks", {}).get(chunk_key)
+
+        def _chunk_work_remains(entry=None, fallback_key=None):
+            return chunk_entry_needs_translation(
+                _chunk_entry_for(entry, fallback_key)
+            )
         
         # Check if we have tracking for this chapter
         if chapter_key in self.prog["chapters"]:
@@ -5748,6 +5790,20 @@ class ProgressManager:
                 )
             status = chapter_info.get("status")
             status_l = status.lower() if isinstance(status, str) else status or ""
+            # A saved truncated/partial HTML file is evidence to retain, not
+            # evidence that the chapter is complete. The chunk ledger is the
+            # authority whenever it still contains pending or QA-failed work.
+            if _chunk_work_remains(chapter_info, chapter_key):
+                chunk_summary = chunk_failure_summary(
+                    _chunk_entry_for(chapter_info, chapter_key)
+                )
+                if chunk_summary["pending"] and status_l.startswith("completed"):
+                    chapter_info["status"] = "pending"
+                    chapter_info.pop("auto_restored_from_output", None)
+                    chapter_info["last_updated"] = time.time()
+                    self.prog["chapters"][chapter_key] = chapter_info
+                    self.save()
+                return True, None, chapter_info.get("output_file")
             if chapter_obj and chapter_obj.get("subtitle_batch"):
                 final_subtitle = str(
                     chapter_info.get("subtitle_output_file") or ""
@@ -5851,6 +5907,8 @@ class ProgressManager:
         
         # No entry in progress tracking - check if file exists on disk
         # This handles the case where progress file was deleted but translated files remain
+        if _chunk_work_remains(fallback_key=chapter_key):
+            return True, None, None
         if chapter_obj:
             from TransateKRtoEN import FileUtilities
             output_filename = FileUtilities.create_chapter_filename(chapter_obj, actual_num)
@@ -5860,6 +5918,8 @@ class ProgressManager:
             expected_norm = _norm(output_filename)
             for k, info in self.prog.get("chapters", {}).items():
                 if _norm(info.get("output_file")) == expected_norm:
+                    if _chunk_work_remains(info, k):
+                        return True, None, info.get("output_file")
                     status = info.get("status")
                     if status in ["completed", "completed_empty", "completed_image_only"]:
                         if info.get("output_file"):
@@ -6476,6 +6536,11 @@ class ProgressManager:
                 continue
             status = chapter_info.get("status")
             output_file = chapter_info.get("output_file")
+            chunk_key = str(chapter_info.get("content_hash") or "")
+            chunk_entry = self.prog.get("chapter_chunks", {}).get(chunk_key)
+            if chunk_entry_needs_translation(chunk_entry):
+                stats["in_progress"] += 1
+                continue
             
             if status == "completed" and output_file:
                 output_path = os.path.join(output_dir, output_file)
@@ -10386,6 +10451,20 @@ class BatchTranslationProcessor:
                                 except Exception:
                                     pass
                             with self.progress_lock:
+                                if self.chunk_progress_enabled and result:
+                                    self.progress_manager.record_chapter_chunk(
+                                        content_hash,
+                                        chunk_idx,
+                                        total_chunks,
+                                        result,
+                                        chunk_budget,
+                                        source_text=chunk_source_by_index.get(
+                                            int(chunk_idx)
+                                        ),
+                                        model_name=chunk_actual_model,
+                                        key_identifier=chunk_actual_key,
+                                        qa_issues=["TRUNCATED"],
+                                    )
                                 self.update_progress_fn(
                                     chapter_progress_idx, actual_num, content_hash, fname,
                                     status="qa_failed",
@@ -10487,6 +10566,9 @@ class BatchTranslationProcessor:
                                         ),
                                         model_name=chunk_actual_model,
                                         key_identifier=chunk_actual_key,
+                                        qa_issues=(
+                                            ["TRUNCATED"] if is_truncated else None
+                                        ),
                                     )
                                     self.save_progress_fn()
                             
@@ -28682,6 +28764,14 @@ def main(log_callback=None, stop_callback=None):
                         source_text=chunk_html,
                         model_name=actual_model,
                         key_identifier=actual_key,
+                        qa_issues=(
+                            ["TRUNCATED"]
+                            if finish_reason in {
+                                "length", "max_tokens", "max_length",
+                                "stop_sequence_limit", "truncated", "incomplete",
+                            }
+                            else None
+                        ),
                     )
                     progress_manager.save()
 
