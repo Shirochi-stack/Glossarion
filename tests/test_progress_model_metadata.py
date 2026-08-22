@@ -644,6 +644,35 @@ def test_returned_truncated_chunk_is_retained_but_never_reused(tmp_path):
     assert progress.get_reusable_chapter_chunks("hash-1") == {}
 
 
+def test_chunk_runtime_status_tracks_dispatch_and_cancel_without_regressing_cache(
+    tmp_path,
+):
+    progress = ProgressManager(str(tmp_path))
+    progress.prepare_chapter_chunk_progress(
+        "hash-1", 3, _epub_chunk_budget(), enabled=True
+    )
+    progress.record_chapter_chunk(
+        "hash-1", 1, 3, "translated one", _epub_chunk_budget()
+    )
+
+    assert progress.set_chapter_chunk_runtime_status(
+        "hash-1", 2, "in_progress"
+    )
+    entry = progress.prog["chapter_chunks"]["hash-1"]
+    assert entry["entries"]["1"]["status"] == "completed"
+    assert entry["entries"]["2"]["status"] == "in_progress"
+    assert entry["entries"]["3"]["status"] == "pending"
+    assert entry["chapter_status"] == "in_progress"
+    assert progress.get_reusable_chapter_chunks("hash-1") == {
+        "1": "translated one"
+    }
+
+    assert progress.reset_in_progress_chapter_chunks("hash-1") == [2]
+    assert entry["entries"]["1"]["status"] == "completed"
+    assert entry["entries"]["2"]["status"] == "pending"
+    assert entry["chapter_status"] == "incomplete"
+
+
 def test_saved_partial_output_cannot_restore_pending_chunks_as_completed(
     tmp_path,
 ):
@@ -721,6 +750,7 @@ def test_parent_completion_is_rejected_while_chunk_work_remains(tmp_path):
     assert entry["chapter_status"] == "incomplete"
     assert chunk_entry_needs_translation(entry) is True
     assert effective_parent_status("completed", entry) == "pending"
+    assert effective_parent_status("in_progress", entry) == "in_progress"
 
 
 def test_progress_manager_expands_chapter_into_selectable_chunk_rows(tmp_path):

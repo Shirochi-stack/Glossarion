@@ -246,6 +246,70 @@ def record_chunk_result(
     return True
 
 
+def set_chunk_runtime_status(entry, chunk_index, status):
+    """Set a non-terminal runtime status for one planned chunk."""
+    if not isinstance(entry, dict):
+        return False
+    status = str(status or "").strip().lower()
+    if status not in {"pending", "in_progress"}:
+        return False
+    ensure_chunk_entry_schema(entry)
+    record = _chunk_record(entry, chunk_index, create=True)
+    if record is None:
+        return False
+    record["status"] = status
+    record["last_updated"] = time.time()
+    ensure_chunk_entry_schema(entry)
+    statuses = {
+        str(value.get("status") or "pending").lower()
+        for value in entry.get("entries", {}).values()
+        if isinstance(value, dict)
+    }
+    if statuses.intersection({"qa_failed", "failed"}):
+        entry["chapter_status"] = "qa_failed"
+    elif "in_progress" in statuses:
+        entry["chapter_status"] = "in_progress"
+    elif "pending" in statuses:
+        entry["chapter_status"] = "incomplete"
+    else:
+        entry["chapter_status"] = "completed"
+    entry["last_updated"] = time.time()
+    return True
+
+
+def reset_in_progress_chunks(entry):
+    """Return all interrupted in-flight chunks to resumable pending state."""
+    if not isinstance(entry, dict):
+        return []
+    ensure_chunk_entry_schema(entry)
+    reset = []
+    for raw_index, record in entry.get("entries", {}).items():
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("status") or "").lower() != "in_progress":
+            continue
+        record["status"] = "pending"
+        record["last_updated"] = time.time()
+        try:
+            reset.append(int(raw_index))
+        except (TypeError, ValueError):
+            pass
+    if reset:
+        statuses = {
+            str(value.get("status") or "pending").lower()
+            for value in entry.get("entries", {}).values()
+            if isinstance(value, dict)
+        }
+        entry["chapter_status"] = (
+            "qa_failed"
+            if statuses.intersection({"qa_failed", "failed"})
+            else "incomplete"
+        )
+        entry["last_updated"] = time.time()
+        ensure_chunk_entry_schema(entry)
+    return sorted(reset)
+
+
 def set_chunk_qa(entry, chunk_index, issues, previews=None, confidence=0):
     """Set or clear QA state for one persisted chunk result."""
     if not isinstance(entry, dict):
@@ -373,7 +437,9 @@ def effective_parent_status(status, entry):
     summary = chunk_failure_summary(entry)
     if not summary["total"] or not summary["pending"]:
         return status
-    if base_status in {"qa_failed", "failed", "error", "file_missing"}:
+    if base_status in {
+        "in_progress", "qa_failed", "failed", "error", "file_missing"
+    }:
         return status
     return "pending"
 

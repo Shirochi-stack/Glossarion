@@ -490,12 +490,17 @@ def test_batch_epub_chunk_progress_submits_only_missing_chunks(
         ("chunk-3", 3, 3),
     ]
     sent = []
+    in_flight_seen = {}
 
     def fake_send(messages, *_args, **kwargs):
+        source = messages[-1]["content"]
         callback = kwargs.get("before_send_callback")
         if callback:
             callback()
-        source = messages[-1]["content"]
+        chunk_index = int(source.rsplit("-", 1)[-1])
+        in_flight_seen[source] = progress.prog["chapter_chunks"][
+            "hash-1"
+        ]["entries"][str(chunk_index)]["status"]
         sent.append(source)
         return f"translated:{source}", "stop", None
 
@@ -595,6 +600,10 @@ def test_batch_epub_chunk_progress_submits_only_missing_chunks(
 
     assert result[0] is True
     assert sorted(sent) == ["chunk-2", "chunk-3"]
+    assert in_flight_seen == {
+        "chunk-2": "in_progress",
+        "chunk-3": "in_progress",
+    }
     marked = extract_marked_chunks(result[3], "hash-1")
     assert [marked[index]["content"] for index in (1, 2, 3)] == [
         "cached-one",

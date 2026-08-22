@@ -162,8 +162,10 @@ from chapter_chunk_progress import (
     chunk_failure_summary,
     ensure_chunk_entry_schema,
     record_chunk_result,
+    reset_in_progress_chunks,
     reset_chunks_for_retranslation,
     reusable_chunk_results,
+    set_chunk_runtime_status,
     set_chunk_qa,
     wrap_chunk_html,
 )
@@ -3951,6 +3953,18 @@ class ProgressManager:
         with self._save_lock:
             entry = self.prog.get("chapter_chunks", {}).get(str(chapter_key))
             return dict(reusable_chunk_results(entry))
+
+    def set_chapter_chunk_runtime_status(self, chapter_key, chunk_idx, status):
+        """Persist pending/in-progress at the real request lifecycle boundary."""
+        with self._save_lock:
+            entry = self.prog.get("chapter_chunks", {}).get(str(chapter_key))
+            return set_chunk_runtime_status(entry, chunk_idx, status)
+
+    def reset_in_progress_chapter_chunks(self, chapter_key):
+        """Make interrupted API requests resumable without touching results."""
+        with self._save_lock:
+            entry = self.prog.get("chapter_chunks", {}).get(str(chapter_key))
+            return reset_in_progress_chunks(entry)
 
     def set_chapter_chunk_qa(
         self,
@@ -9111,7 +9125,7 @@ class BatchTranslationProcessor:
             # Determine output filename early so we can track it in progress
             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
 
-            def _mark_batch_chapter_progress_on_send():
+            def _mark_batch_chapter_progress_on_send(chunk_idx=None):
                 with self.progress_lock:
                     try:
                         if chapter_truncated_event.is_set():
@@ -9119,6 +9133,16 @@ class BatchTranslationProcessor:
                     except NameError:
                         pass
                     self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=chapter)
+                    if (
+                        self.chunk_progress_enabled
+                        and chunk_idx is not None
+                        and self.progress_manager is not None
+                    ):
+                        self.progress_manager.set_chapter_chunk_runtime_status(
+                            content_hash,
+                            chunk_idx,
+                            "in_progress",
+                        )
                     self.save_progress_fn()
             
             from bs4 import BeautifulSoup
@@ -9361,6 +9385,17 @@ class BatchTranslationProcessor:
                 chunk_html, chunk_idx, chunk_total = chunk_data
                 chunk_actual_model = None
                 chunk_actual_key = None
+
+                def _set_batch_chunk_runtime_status(status):
+                    if not self.chunk_progress_enabled:
+                        return
+                    with self.progress_lock:
+                        self.progress_manager.set_chapter_chunk_runtime_status(
+                            content_hash,
+                            chunk_idx,
+                            status,
+                        )
+                        self.save_progress_fn()
 
                 def _chunk_result(result_value, raw_obj_value, is_truncated_value, finish_reason_value,
                                   actual_model=None, actual_key=None):
@@ -9620,7 +9655,7 @@ class BatchTranslationProcessor:
                 while True:
                     try:
                         def _mark_batch_chunk_progress_on_send():
-                            _mark_batch_chapter_progress_on_send()
+                            _mark_batch_chapter_progress_on_send(chunk_idx)
                             if _single_pass_glossary_mode():
                                 _mark_single_pass_glossary_in_progress(
                                     self.out_dir,
@@ -9667,6 +9702,7 @@ class BatchTranslationProcessor:
 
                         if chunk_abort_event.is_set():
                             print(f"Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: stopped after chapter QA failure ({_chunk_abort_label()})")
+                            _set_batch_chunk_runtime_status("pending")
                             return _chunk_result(None, None, False, "chapter_abort", chunk_actual_model, chunk_actual_key)
                         
                         # Treat cancelled errors (from client being closed) as timeout
@@ -9759,6 +9795,7 @@ class BatchTranslationProcessor:
                     except Exception:
                         if chunk_abort_event.is_set():
                             print(f"Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: stopped after chapter QA failure ({_chunk_abort_label()})")
+                            _set_batch_chunk_runtime_status("pending")
                             return _chunk_result(None, None, False, "chapter_abort", chunk_actual_model, chunk_actual_key)
                         raise
                 
@@ -10408,6 +10445,24 @@ class BatchTranslationProcessor:
                                         self.save_progress_fn()
                                     print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
                             chunk_abort_event.set()
+                            if self.chunk_progress_enabled:
+                                with self.progress_lock:
+                                    if graceful_stop_qa_issue:
+                                        self.progress_manager.set_chapter_chunk_qa(
+                                            content_hash,
+                                            chunk_idx,
+                                            graceful_stop_qa_issue,
+                                        )
+                                    else:
+                                        self.progress_manager.set_chapter_chunk_runtime_status(
+                                            content_hash,
+                                            chunk_idx,
+                                            "pending",
+                                        )
+                                    self.progress_manager.reset_in_progress_chapter_chunks(
+                                        content_hash
+                                    )
+                                    self.save_progress_fn()
                             chunk_executor.shutdown(wait=False, cancel_futures=True)
                             # Let the outer handler preserve any QA state or mark the chapter as pending/skipped.
                             raise UnifiedClientError(
@@ -10416,10 +10471,24 @@ class BatchTranslationProcessor:
                             )
 
                         if finish_reason == "chapter_abort":
+                            if self.chunk_progress_enabled:
+                                with self.progress_lock:
+                                    self.progress_manager.set_chapter_chunk_runtime_status(
+                                        content_hash,
+                                        chunk_idx,
+                                        "pending",
+                                    )
+                                    self.save_progress_fn()
                             continue
 
                         # Handle cancelled chunks (skipped due to stop request)
                         if finish_reason == "cancelled" or (result is None and finish_reason != "stop"):
+                            if self.chunk_progress_enabled:
+                                with self.progress_lock:
+                                    self.progress_manager.reset_in_progress_chapter_chunks(
+                                        content_hash
+                                    )
+                                    self.save_progress_fn()
                             chunk_executor.shutdown(wait=False, cancel_futures=True)
                             raise Exception("Translation stopped by user")
 
@@ -10451,19 +10520,29 @@ class BatchTranslationProcessor:
                                 except Exception:
                                     pass
                             with self.progress_lock:
-                                if self.chunk_progress_enabled and result:
-                                    self.progress_manager.record_chapter_chunk(
-                                        content_hash,
-                                        chunk_idx,
-                                        total_chunks,
-                                        result,
-                                        chunk_budget,
-                                        source_text=chunk_source_by_index.get(
-                                            int(chunk_idx)
-                                        ),
-                                        model_name=chunk_actual_model,
-                                        key_identifier=chunk_actual_key,
-                                        qa_issues=["TRUNCATED"],
+                                if self.chunk_progress_enabled:
+                                    if result:
+                                        self.progress_manager.record_chapter_chunk(
+                                            content_hash,
+                                            chunk_idx,
+                                            total_chunks,
+                                            result,
+                                            chunk_budget,
+                                            source_text=chunk_source_by_index.get(
+                                                int(chunk_idx)
+                                            ),
+                                            model_name=chunk_actual_model,
+                                            key_identifier=chunk_actual_key,
+                                            qa_issues=qa_issue,
+                                        )
+                                    else:
+                                        self.progress_manager.set_chapter_chunk_qa(
+                                            content_hash,
+                                            chunk_idx,
+                                            qa_issue,
+                                        )
+                                    self.progress_manager.reset_in_progress_chapter_chunks(
+                                        content_hash
                                     )
                                 self.update_progress_fn(
                                     chapter_progress_idx, actual_num, content_hash, fname,
@@ -10497,6 +10576,15 @@ class BatchTranslationProcessor:
                                 except Exception:
                                     pass
                             with self.progress_lock:
+                                if self.chunk_progress_enabled:
+                                    self.progress_manager.set_chapter_chunk_qa(
+                                        content_hash,
+                                        chunk_idx,
+                                        ["TIMEOUT"],
+                                    )
+                                    self.progress_manager.reset_in_progress_chapter_chunks(
+                                        content_hash
+                                    )
                                 self.update_progress_fn(
                                     chapter_progress_idx, actual_num, content_hash, fname,
                                     status="qa_failed",
@@ -10528,6 +10616,30 @@ class BatchTranslationProcessor:
                                 except Exception:
                                     pass
                             with self.progress_lock:
+                                if self.chunk_progress_enabled:
+                                    if result:
+                                        self.progress_manager.record_chapter_chunk(
+                                            content_hash,
+                                            chunk_idx,
+                                            total_chunks,
+                                            result,
+                                            chunk_budget,
+                                            source_text=chunk_source_by_index.get(
+                                                int(chunk_idx)
+                                            ),
+                                            model_name=chunk_actual_model,
+                                            key_identifier=chunk_actual_key,
+                                            qa_issues=["TRUNCATED"],
+                                        )
+                                    else:
+                                        self.progress_manager.set_chapter_chunk_qa(
+                                            content_hash,
+                                            chunk_idx,
+                                            ["TRUNCATED"],
+                                        )
+                                    self.progress_manager.reset_in_progress_chapter_chunks(
+                                        content_hash
+                                    )
                                 self.update_progress_fn(
                                     chapter_progress_idx, actual_num, content_hash, fname,
                                     status="qa_failed",
@@ -10984,6 +11096,19 @@ class BatchTranslationProcessor:
             error_msg = str(e)
             error_lower = (error_msg or "").lower()
             error_type = getattr(e, 'error_type', None)
+            if (
+                self.chunk_progress_enabled
+                and self.progress_manager is not None
+                and content_hash
+            ):
+                try:
+                    with self.progress_lock:
+                        if self.progress_manager.reset_in_progress_chapter_chunks(
+                            content_hash
+                        ):
+                            self.save_progress_fn()
+                except Exception:
+                    pass
             if chapter_fatal_qa_issue:
                 try:
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
@@ -28288,6 +28413,12 @@ def main(log_callback=None, stop_callback=None):
                     )
 
                 def _restore_current_sequential_progress():
+                    if chunk_progress_enabled:
+                        progress_manager.set_chapter_chunk_runtime_status(
+                            chapter_key_str,
+                            chunk_idx,
+                            "pending",
+                        )
                     if merge_info is not None:
                         for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
                             g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
@@ -28324,6 +28455,12 @@ def main(log_callback=None, stop_callback=None):
                             progress_manager.update(g_idx, g_actual_num, g_content_hash, g_fname, status="in_progress", chapter_obj=g_chapter)
                     else:
                         progress_manager.update(idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=c)
+                    if chunk_progress_enabled:
+                        progress_manager.set_chapter_chunk_runtime_status(
+                            chapter_key_str,
+                            chunk_idx,
+                            "in_progress",
+                        )
                     progress_manager.save()
 
                 result, finish_reason, raw_obj = translation_processor.translate_with_retry(
@@ -28371,6 +28508,12 @@ def main(log_callback=None, stop_callback=None):
                         qa_issues_found=qa_issue,
                         chapter_obj=c
                     )
+                    if chunk_progress_enabled:
+                        progress_manager.set_chapter_chunk_qa(
+                            chapter_key_str,
+                            chunk_idx,
+                            qa_issue,
+                        )
                     progress_manager.save()
                     print(f"❌ Chunk {chunk_idx}/{total_chunks} hit content filter/prohibited; aborting chapter {actual_num}")
                     chunk_abort = True
@@ -28407,6 +28550,12 @@ def main(log_callback=None, stop_callback=None):
                                 qa_issues_found=["TRUNCATED"] if had_partial_content else ["PARTIAL"],
                                 chapter_obj=c
                             )
+                            if chunk_progress_enabled:
+                                progress_manager.set_chapter_chunk_qa(
+                                    chapter_key_str,
+                                    chunk_idx,
+                                    ["TRUNCATED"] if had_partial_content else ["PARTIAL"],
+                                )
                             progress_manager.save()
                             saved_label = "truncated" if had_partial_content else "original source"
                             print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — saved {saved_label}")
@@ -28417,6 +28566,12 @@ def main(log_callback=None, stop_callback=None):
                                 qa_issues_found=["PARTIAL"],
                                 chapter_obj=c
                             )
+                            if chunk_progress_enabled:
+                                progress_manager.set_chapter_chunk_qa(
+                                    chapter_key_str,
+                                    chunk_idx,
+                                    ["PARTIAL"],
+                                )
                             progress_manager.save()
                             print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
                     elif chapter_truncated:
@@ -28426,10 +28581,22 @@ def main(log_callback=None, stop_callback=None):
                             qa_issues_found=["TRUNCATED"],
                             chapter_obj=c
                         )
+                        if chunk_progress_enabled:
+                            progress_manager.set_chapter_chunk_qa(
+                                chapter_key_str,
+                                chunk_idx,
+                                ["TRUNCATED"],
+                            )
                         progress_manager.save()
                         print(f"⚠️ Chapter {actual_num} stopped (graceful stop) - preserved TRUNCATED status")
                     else:
                         progress_manager.update(idx, actual_num, content_hash, fname, status="pending", chapter_obj=c)
+                        if chunk_progress_enabled:
+                            progress_manager.set_chapter_chunk_runtime_status(
+                                chapter_key_str,
+                                chunk_idx,
+                                "pending",
+                            )
                         progress_manager.save()
                         print(f"⏸️ Chapter {actual_num} skipped (graceful stop)")
                     chunk_abort = True
@@ -28446,11 +28613,23 @@ def main(log_callback=None, stop_callback=None):
                     if result == "[TIMEOUT]" or finish_reason == "timeout":
                         qa_issue = ["TIMEOUT"]
                         progress_manager.update(idx, actual_num, content_hash, fname, status="qa_failed", qa_issues_found=qa_issue, chapter_obj=c)
+                        if chunk_progress_enabled:
+                            progress_manager.set_chapter_chunk_qa(
+                                chapter_key_str,
+                                chunk_idx,
+                                qa_issue,
+                            )
                         print(f"❌ Chunk {chunk_idx}/{total_chunks} timed out; aborting chapter {actual_num}")
                         chunk_abort = True
                     else:
                         qa_issue = ["API_ERROR"]
                         progress_manager.update(idx, actual_num, content_hash, fname, status="failed")
+                        if chunk_progress_enabled:
+                            progress_manager.set_chapter_chunk_runtime_status(
+                                chapter_key_str,
+                                chunk_idx,
+                                "pending",
+                            )
                         print(f"❌ Translation failed for chapter {actual_num} - marked as failed, aborting chapter")
                         chunk_abort = True
                     if _should_save_failure_response(
@@ -28556,6 +28735,16 @@ def main(log_callback=None, stop_callback=None):
                                                             status="qa_failed",
                                                             qa_issues_found=["TRUNCATED"],
                                                             chapter_obj=c)
+                                    if chunk_progress_enabled:
+                                        progress_manager.record_chapter_chunk(
+                                            chapter_key_str,
+                                            chunk_idx,
+                                            total_chunks,
+                                            result,
+                                            chunk_budget,
+                                            source_text=chunk_html,
+                                            qa_issues=["TRUNCATED"],
+                                        )
                                     progress_manager.save()
                                     # Set flag to skip further processing of this chapter
                                     chunk_abort = True
