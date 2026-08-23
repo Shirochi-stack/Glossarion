@@ -1206,7 +1206,10 @@ def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeyp
         "or/vendor/alpha-model",
         "alpha-model",
         "x/alpha-model",
+        "antigravity/gemini-3.7-flash-medium",
+        "ocagy/gemini-3.1-pro-high",
         "authgrok/grok-4.6",
+        "authgpt/gpt-5.6",
         "unrelated-model",
     ]
     combo.addItems(models)
@@ -1225,8 +1228,15 @@ def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeyp
         "or/vendor/alpha-model",
         "x/alpha-model",
     ]
-    completion_model.set_search_text("authgrok12/grok")
-    assert completion_model.stringList() == ["authgrok12/grok-4.6"]
+    numbered_aliases = {
+        "antigravity1/gemini": "antigravity1/gemini-3.7-flash-medium",
+        "ocagy1/gemini": "ocagy1/gemini-3.1-pro-high",
+        "authgrok1/grok": "authgrok1/grok-4.6",
+        "authgpt1/gpt": "authgpt1/gpt-5.6",
+    }
+    for typed, expected in numbered_aliases.items():
+        completion_model.set_search_text(typed)
+        assert completion_model.stringList() == [expected]
     assert combo._model_completer_search_timer.isSingleShot()
     app.processEvents()
 
