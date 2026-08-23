@@ -766,20 +766,69 @@ def test_progress_manager_labels_split_pdf_bookmark_parts_as_chunks(
     mixin._rebuild_chapter_display_info(data)
 
     rows = data["chapter_display_info"]
-    assert len(rows) == 3
-    assert [row["pdf_split_chunk_index"] for row in rows] == [1, 2, 3]
-    assert {row["pdf_split_total_chunks"] for row in rows} == {3}
+    assert len(rows) == 4
+    assert rows[0]["is_pdf_split_parent"] is True
+    assert rows[0]["status"] == "in_progress"
+    assert len(rows[0]["pdf_split_children"]) == 3
+    assert [row["pdf_split_chunk_index"] for row in rows[1:]] == [1, 2, 3]
+    assert {row["pdf_split_total_chunks"] for row in rows[1:]} == {3}
     displays = [
         mixin._progress_list_display_text(row, data, 20, 25)[0]
         for row in rows
     ]
-    assert displays[0].startswith("Section 002 Chunk 1/3")
-    assert displays[1].startswith("Section 002 Chunk 2/3")
-    assert displays[2].startswith("Section 002 Chunk 3/3")
+    assert displays[0].startswith("Section 002 |")
+    assert displays[1].startswith("   ↳ Section 002 Chunk 1/3")
+    assert displays[2].startswith("   ↳ Section 002 Chunk 2/3")
+    assert displays[3].startswith("   ↳ Section 002 Chunk 3/3")
     assert all("002.1" not in display and "002.2" not in display
                for display in displays)
     assert all("Pages 3-16" in display for display in displays)
     assert all("provider/model-a" in display for display in displays)
+
+    assert mixin._expand_pdf_split_parent_rows([rows[0], rows[2]]) == rows[1:]
+
+
+def test_pdf_split_parent_aggregates_child_status_and_model():
+    from Retranslation_GUI import RetranslationMixin
+
+    rows = []
+    for actual_num, chunk_index, status, model in (
+        (4.0, 1, "completed", "provider/model-a"),
+        (4.1, 2, "pending", "provider/model-b"),
+    ):
+        progress_key = f"pdf:section-four:{actual_num}"
+        entry = {
+            "actual_num": actual_num,
+            "output_file": f"part-{chunk_index}.html",
+            "status": status,
+            "model_name": model,
+            "pdf_toc_section": True,
+            "pdf_section_id": "section-four",
+            "pdf_progress_key": progress_key,
+            "pdf_split_chunk_index": chunk_index,
+            "pdf_split_total_chunks": 2,
+            "pdf_split_parent_num": 4,
+        }
+        rows.append({
+            "key": progress_key,
+            "progress_key": progress_key,
+            "num": actual_num,
+            "info": entry,
+            "output_file": entry["output_file"],
+            "status": status,
+        })
+
+    mixin = object.__new__(RetranslationMixin)
+    mixin._annotate_pdf_split_chunk_display_info(rows)
+
+    assert len(rows) == 3
+    assert rows[0]["is_pdf_split_parent"] is True
+    assert rows[0]["status"] == "pending"
+    assert rows[0]["info"]["model_name"] == "(multiple models)"
+    assert [row["info"]["model_name"] for row in rows[1:]] == [
+        "provider/model-a",
+        "provider/model-b",
+    ]
 
 
 def test_progress_manager_seeds_bookmark_rows_and_hides_source_sidecar(tmp_path):

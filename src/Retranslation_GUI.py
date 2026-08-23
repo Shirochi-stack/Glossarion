@@ -24792,7 +24792,12 @@ class RetranslationMixin:
         # their own legend status and are excluded from the regular
         # status counts so they aren't double-counted as Not Translated.
         _stats_data = {'prog': prog}
-        _stats_entries = spine_chapters if spine_chapters else chapter_display_info
+        _stats_entries = spine_chapters if spine_chapters else [
+            info
+            for info in chapter_display_info
+            if not info.get("is_chunk_progress")
+            and not info.get("is_pdf_split_chunk")
+        ]
         total_chapters = len(_stats_entries)
         completed = merged = in_progress = pending = missing = failed = skipped = 0
         for ch in _stats_entries:
@@ -25172,7 +25177,9 @@ class RetranslationMixin:
                 return
 
             selected_indices = [data['listbox'].row(item) for item in selected_items]
-            selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
+            selected_chapters = self._expand_pdf_split_parent_rows(
+                [data['chapter_display_info'][i] for i in selected_indices]
+            )
             in_progress_chapters = [ch for ch in selected_chapters if ch.get('status') == 'in_progress']
 
             if not in_progress_chapters:
@@ -25236,7 +25243,9 @@ class RetranslationMixin:
             
 
             selected_indices = [data['listbox'].row(item) for item in selected_items]
-            selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
+            selected_chapters = self._expand_pdf_split_parent_rows(
+                [data['chapter_display_info'][i] for i in selected_indices]
+            )
             failed_chapters = [ch for ch in selected_chapters if ch['status'] in ['qa_failed', 'failed']]
             
             if not failed_chapters:
@@ -25324,10 +25333,10 @@ class RetranslationMixin:
             selected_indices = [
                 data['listbox'].row(item) for item in selected_items
             ]
-            selected_chapters = [
+            selected_chapters = self._expand_pdf_split_parent_rows([
                 data['chapter_display_info'][index]
                 for index in selected_indices
-            ]
+            ])
             chapters = data.get('prog', {}).get('chapters', {})
             matching_keys = set()
             for info in selected_chapters:
@@ -25413,7 +25422,9 @@ class RetranslationMixin:
             # Do NOT dedup here; it can collapse distinct chapters sharing filenames
             
             selected_indices = [data['listbox'].row(item) for item in selected_items]
-            selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
+            selected_chapters = self._expand_pdf_split_parent_rows(
+                [data['chapter_display_info'][i] for i in selected_indices]
+            )
             selected_parent_keys = {
                 chapter.get("progress_key")
                 for chapter in selected_chapters
@@ -28848,8 +28859,76 @@ class RetranslationMixin:
                 })
         chapter_display_info[:] = expanded
 
+    @staticmethod
+    def _pdf_split_parent_status(members):
+        """Summarize real PDF part rows without hiding incomplete work."""
+        statuses = []
+        for row, entry in members:
+            status = str(
+                row.get("status") or entry.get("status") or "unknown"
+            ).lower()
+            if status in ("completed_empty", "completed_image_only"):
+                status = "completed"
+            statuses.append(status)
+        if not statuses:
+            return "unknown"
+        if all(status == "completed" for status in statuses):
+            return "completed"
+        if "qa_failed" in statuses:
+            return "qa_failed"
+        if any(status in ("failed", "error", "refine_failed") for status in statuses):
+            return "failed"
+        if "in_progress" in statuses:
+            return "in_progress"
+        if "pending" in statuses or "completed" in statuses:
+            return "pending"
+        if all(status == "not_translated" for status in statuses):
+            return "not_translated"
+        if all(status == "merged" for status in statuses):
+            return "merged"
+        return statuses[0]
+
+    @staticmethod
+    def _pdf_split_parent_model(members):
+        models = []
+        for row, entry in members:
+            model = str(
+                entry.get("model_name")
+                or entry.get("model")
+                or row.get("model_name")
+                or row.get("model")
+                or ""
+            ).strip()
+            if model and model not in models:
+                models.append(model)
+        if not models:
+            return ""
+        if len(models) == 1:
+            return models[0]
+        return "(multiple models)"
+
+    def _expand_pdf_split_parent_rows(self, rows):
+        """Replace selected PDF section headings with their real part rows."""
+        expanded = []
+        seen = set()
+        for row in rows or []:
+            candidates = (
+                row.get("pdf_split_children", [])
+                if isinstance(row, dict) and row.get("is_pdf_split_parent")
+                else [row]
+            )
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                identity = self._progress_list_item_key(candidate)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                expanded.append(candidate)
+        return expanded
+
     def _annotate_pdf_split_chunk_display_info(self, chapter_display_info):
-        """Label source-split PDF bookmark parts as chunks, not decimals."""
+        """Group source-split PDF bookmark parts under a section parent row."""
         groups = {}
         for row in chapter_display_info or []:
             if not isinstance(row, dict):
@@ -28879,7 +28958,9 @@ class RetranslationMixin:
             )
             groups.setdefault(group_key, []).append((row, entry))
 
-        for members in groups.values():
+        parent_rows = {}
+        row_groups = {}
+        for group_key, members in groups.items():
             def _member_sort_key(member):
                 row, entry = member
                 try:
@@ -28933,6 +29014,82 @@ class RetranslationMixin:
                 row["pdf_split_chunk_index"] = chunk_index
                 row["pdf_split_total_chunks"] = total_chunks
                 row["pdf_split_parent_num"] = parent_num
+                row["pdf_split_group_key"] = group_key
+                row_groups[id(row)] = group_key
+
+            first_row, first_entry = members[0]
+            start_pages = [
+                entry.get("pdf_start_page")
+                for _row, entry in members
+                if entry.get("pdf_start_page") is not None
+            ]
+            end_pages = [
+                entry.get("pdf_end_page")
+                for _row, entry in members
+                if entry.get("pdf_end_page") is not None
+            ]
+            title = str(first_entry.get("pdf_toc_title") or "").strip()
+            title = re.sub(
+                r"\s*\(Part\s+\d+\s*/\s*\d+\)\s*$",
+                "",
+                title,
+                flags=re.IGNORECASE,
+            )
+            parent_status = self._pdf_split_parent_status(members)
+            parent_model = self._pdf_split_parent_model(members)
+            parent_entry = {
+                "actual_num": parent_num,
+                "status": parent_status,
+                "output_file": first_row.get("output_file", ""),
+                "pdf_toc_section": True,
+                "pdf_split_parent": True,
+                "pdf_section_id": group_key,
+                "pdf_toc_title": title,
+                "pdf_start_page": min(start_pages) if start_pages else None,
+                "pdf_end_page": max(end_pages) if end_pages else None,
+                "pdf_split_total_chunks": total_chunks,
+            }
+            if parent_model:
+                parent_entry["model_name"] = parent_model
+            parent_rows[group_key] = {
+                "key": f"pdf-split-parent:{group_key}",
+                "num": parent_num,
+                "info": parent_entry,
+                "output_file": first_row.get("output_file", ""),
+                "status": parent_status,
+                "duplicate_count": 1,
+                "entries": [],
+                "original_filename": first_row.get("original_filename", ""),
+                "is_special": first_row.get("is_special", False),
+                "is_pdf_split_parent": True,
+                "pdf_toc_section": True,
+                "pdf_split_group_key": group_key,
+                "pdf_split_total_chunks": total_chunks,
+                "pdf_split_parent_num": parent_num,
+                "pdf_start_page": parent_entry["pdf_start_page"],
+                "pdf_end_page": parent_entry["pdf_end_page"],
+                "pdf_toc_title": title,
+                "pdf_split_children": [row for row, _entry in members],
+            }
+
+        if not parent_rows:
+            return
+
+        grouped_rows = []
+        emitted_groups = set()
+        for row in chapter_display_info or []:
+            group_key = row_groups.get(id(row))
+            if group_key is None:
+                grouped_rows.append(row)
+                continue
+            if group_key in emitted_groups:
+                continue
+            emitted_groups.add(group_key)
+            grouped_rows.append(parent_rows[group_key])
+            grouped_rows.extend(
+                member_row for member_row, _entry in groups[group_key]
+            )
+        chapter_display_info[:] = grouped_rows
 
     def _append_pdf_ocr_display_info(self, data, chapter_display_info):
         """Add a lightweight summary row for PDF Vision OCR progress."""
@@ -29466,6 +29623,8 @@ class RetranslationMixin:
         """Update chapter status information after refresh"""
         # Re-check file existence and update status for each chapter
         for info in data['chapter_display_info']:
+            if info.get("is_pdf_split_parent"):
+                continue
             if info.get("is_chunk_progress"):
                 chunk_entry = data.get("prog", {}).get(
                     "chapter_chunks", {}
@@ -29590,6 +29749,26 @@ class RetranslationMixin:
                 info.pop('progress_entry', None)
                 info.pop('progress_key', None)
 
+        for info in data['chapter_display_info']:
+            if not info.get("is_pdf_split_parent"):
+                continue
+            children = info.get("pdf_split_children", [])
+            members = [
+                (child, child.get("info") or child.get("progress_entry") or {})
+                for child in children
+                if isinstance(child, dict)
+            ]
+            status = self._pdf_split_parent_status(members)
+            model = self._pdf_split_parent_model(members)
+            info["status"] = status
+            entry = info.get("info")
+            if isinstance(entry, dict):
+                entry["status"] = status
+                if model:
+                    entry["model_name"] = model
+                else:
+                    entry.pop("model_name", None)
+
     def _progress_entry_model_name(self, info, data=None):
         """Return the model name attached to a progress row, with old-file fallbacks."""
         candidates = []
@@ -29667,6 +29846,8 @@ class RetranslationMixin:
     def _progress_list_item_key(self, info):
         if not isinstance(info, dict):
             return None
+        if info.get("is_pdf_split_parent"):
+            return f"pdf-split-parent:{info.get('pdf_split_group_key')}"
         if info.get("is_chunk_progress"):
             return (
                 f"chunk:{info.get('chunk_progress_key')}:"
@@ -29772,7 +29953,7 @@ class RetranslationMixin:
             except (TypeError, ValueError):
                 section_label = str(parent_num)
             display = (
-                f"Section {section_label} Chunk "
+                f"   ↳ Section {section_label} Chunk "
                 f"{info.get('pdf_split_chunk_index')}/"
                 f"{info.get('pdf_split_total_chunks')} | "
                 f"{icon} {status_label:14s} | {page_label} | {output_display}"
@@ -30230,6 +30411,7 @@ class RetranslationMixin:
                 info
                 for info in data.get('chapter_display_info', [])
                 if not info.get("is_chunk_progress")
+                and not info.get("is_pdf_split_chunk")
             ]
             pdf_rows = [info for info in chapter_display_info if info.get('pdf_ocr')]
             if pdf_rows and len(pdf_rows) == len(chapter_display_info):
