@@ -1196,6 +1196,7 @@ def test_model_completer_ranks_matches_without_python_sort_proxy(monkeypatch):
 def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_test = pytest.importorskip("PySide6.QtTest")
     qt_widgets = pytest.importorskip("PySide6.QtWidgets")
     import multi_api_key_manager
 
@@ -1229,15 +1230,21 @@ def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeyp
         "x/alpha-model",
     ]
     numbered_aliases = {
-        "antigravity1/gemini": "antigravity1/gemini-3.7-flash-medium",
-        "ocagy1/gemini": "ocagy1/gemini-3.1-pro-high",
-        "authgrok1/grok": "authgrok1/grok-4.6",
-        "authgpt1/gpt": "authgpt1/gpt-5.6",
+        "antigravity1": "antigravity1/gemini-3.7-flash-medium",
+        "ocagy1": "ocagy1/gemini-3.1-pro-high",
+        "authgrok1": "authgrok1/grok-4.6",
+        "authgpt1": "authgpt1/gpt-5.6",
     }
     for typed, expected in numbered_aliases.items():
-        completion_model.set_search_text(typed)
-        assert completion_model.stringList() == [expected]
-    assert combo._model_completer_search_timer.isSingleShot()
+        editor = combo.lineEdit()
+        editor.selectAll()
+        qt_test.QTest.keyClicks(editor, typed)
+        app.processEvents()
+        assert expected in completion_model.stringList()
+        assert all(
+            value.startswith(typed + "/")
+            for value in completion_model.stringList()
+        )
     app.processEvents()
 
 

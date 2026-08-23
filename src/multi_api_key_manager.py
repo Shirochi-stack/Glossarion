@@ -5586,7 +5586,7 @@ class MultiAPIKeyDialog(QDialog):
         combo = QComboBox()
         combo.setEditable(True)
         combo.setInsertPolicy(QComboBox.NoInsert)
-        self._attach_model_autofill(combo, None, model_values=all_models, search_debounce_ms=180)
+        self._attach_model_autofill(combo, None, model_values=all_models)
         combo.setCurrentText(current_value)
         self._apply_combobox_icon(combo)
         if combo.lineEdit():
@@ -7636,7 +7636,7 @@ class MultiAPIKeyDialog(QDialog):
         self._refusal_patterns_dialog.raise_()
         self._refusal_patterns_dialog.activateWindow()
 
-    def _attach_model_autofill(self, combo: QComboBox, on_change=None, model_values=None, search_debounce_ms=80):
+    def _attach_model_autofill(self, combo: QComboBox, on_change=None, model_values=None):
         """Attach the same prefix-priority contains completer used by translator_gui."""
         from PySide6.QtCore import QStringListModel
 
@@ -7705,26 +7705,17 @@ class MultiAPIKeyDialog(QDialog):
             combo.currentTextChanged.connect(lambda: _notify_model_change(False))
             combo.editTextChanged.connect(lambda: _notify_model_change(False))
 
-        search_text = {"value": ""}
-        search_timer = QTimer(combo)
-        search_timer.setSingleShot(True)
-        search_timer.timeout.connect(
-            lambda: completion_model.set_search_text(search_text["value"])
-        )
-
-        def _schedule_search_text(text):
-            search_text["value"] = text
-            search_timer.start(search_debounce_ms)
-
         if combo.lineEdit():
             if on_change:
                 combo.lineEdit().editingFinished.connect(lambda: _notify_model_change(True))
-            combo.lineEdit().textEdited.connect(_schedule_search_text)
+            # Completion filtering is now inexpensive, so update immediately.
+            # Delaying this left the canonical catalog active for one extra
+            # keystroke: ``authgpt1`` showed no results until ``/`` was typed.
+            combo.lineEdit().textEdited.connect(completion_model.set_search_text)
 
         combo._model_completer = completer
         combo._model_completer_proxy = completion_model
         combo._model_completer_source = completion_model
-        combo._model_completer_search_timer = search_timer
 
     def _notify_authgpt_visibility(self):
         """Notify the translator GUI to re-evaluate AuthGPT/AuthGem login button visibility."""
