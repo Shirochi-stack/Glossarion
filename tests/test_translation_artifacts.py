@@ -660,11 +660,12 @@ def test_html_scanner_marks_and_clears_only_the_failing_chunk(tmp_path):
         budget,
         source_text="<p>Source one</p>",
     )
+    failing_chunk = "<p>BADTOKEN output</p>" + ("unwrapped prose " * 8)
     progress.record_chapter_chunk(
         "chapter-hash",
         2,
         2,
-        "<p>BADTOKEN output</p>",
+        failing_chunk,
         budget,
         source_text="<p>Source two</p>",
     )
@@ -677,7 +678,7 @@ def test_html_scanner_marks_and_clears_only_the_failing_chunk(tmp_path):
                     "chapter-hash", 1, 2, "<p>Good output</p>"
                 ),
                 wrap_chunk_html(
-                    "chapter-hash", 2, 2, "<p>BADTOKEN output</p>"
+                    "chapter-hash", 2, 2, failing_chunk
                 ),
             ]
         ),
@@ -691,7 +692,10 @@ def test_html_scanner_marks_and_clears_only_the_failing_chunk(tmp_path):
         "filepath": str(output_path),
         "file_index": 0,
         "chapter_num": 1,
-        "issues": ["llm_token_issue: 'BADTOKEN'"],
+        "issues": [
+            "llm_token_issue: 'BADTOKEN'",
+            "unwrapped_text_content",
+        ],
         "qa_issue_previews": {},
         "duplicate_confidence": 0,
     }
@@ -702,6 +706,15 @@ def test_html_scanner_marks_and_clears_only_the_failing_chunk(tmp_path):
         logs.append,
         progress_path=progress.PROGRESS_FILE,
     ) == 1
+    chunk_issues = {
+        result["chunk_index"]: result["issues"]
+        for result in faulty["chunk_results"]
+    }
+    assert chunk_issues[1] == []
+    assert set(chunk_issues[2]) == {
+        "llm_token_issue: 'BADTOKEN'",
+        "unwrapped_text_content",
+    }
     update_new_format_progress(
         progress.prog, [faulty], [], logs.append, str(tmp_path)
     )

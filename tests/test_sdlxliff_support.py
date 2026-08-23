@@ -1459,6 +1459,39 @@ def test_qa_structure_checks_list_tag_balance(tmp_path):
     assert "unclosed_html_tags" in invalid_issues
 
 
+def test_qa_structure_ignores_chunk_marker_comments_but_detects_visible_unwrapped_text(
+    tmp_path,
+):
+    marker_only_path = tmp_path / "marker_only.html"
+    marker_only_path.write_text(
+        "<html><body>"
+        "<!-- GLOSSARION_CHUNK_START key=chapter-hash idx=1 total=1 -->"
+        "<p>Wrapped chapter text.</p>"
+        "<!-- GLOSSARION_CHUNK_END key=chapter-hash idx=1 -->"
+        "</body></html>",
+        encoding="utf-8",
+    )
+    visible_unwrapped_path = tmp_path / "visible_unwrapped.html"
+    visible_unwrapped_path.write_text(
+        "<html><body><p>Wrapped text.</p>"
+        + ("visible unwrapped prose " * 6)
+        + "</body></html>",
+        encoding="utf-8",
+    )
+
+    marker_has_issues, marker_issues = check_html_structure_issues(
+        str(marker_only_path), lambda _message: None, check_header_tags=False
+    )
+    visible_has_issues, visible_issues = check_html_structure_issues(
+        str(visible_unwrapped_path), lambda _message: None, check_header_tags=False
+    )
+
+    assert marker_has_issues is False
+    assert "unwrapped_text_content" not in marker_issues
+    assert visible_has_issues is True
+    assert "unwrapped_text_content" in visible_issues
+
+
 def test_sdlxliff_review_heading_level_change_is_yellow(tmp_path):
     sidecar = tmp_path / "response_chapter_heading.html.sdlxliff"
     source_html = "<html><body><h1>Source heading</h1><p>Source body</p></body></html>"

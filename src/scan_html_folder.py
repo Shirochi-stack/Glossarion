@@ -26,7 +26,7 @@ import hashlib
 import json
 import zipfile
 import csv
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment, NavigableString
 from _empty_attr_fix import count_empty_attr_tags, find_empty_attr_tags
 from langdetect import detect, LangDetectException
 from difflib import SequenceMatcher
@@ -4955,6 +4955,26 @@ def _clear_refinement_progress_fields(entry):
     return changed
 
 
+def _count_unwrapped_text_chars(html_content):
+    """Count visible text nodes that are direct children of an HTML container."""
+    try:
+        soup = BeautifulSoup(str(html_content or ""), "html.parser")
+        container = soup.find("body") or soup
+    except Exception:
+        return 0
+
+    total = 0
+    for element in container.children:
+        # Beautiful Soup comments inherit from NavigableString, but comments
+        # (including our chunk boundary markers) are not visible page content.
+        if not isinstance(element, NavigableString) or isinstance(element, Comment):
+            continue
+        text = str(element).strip()
+        if text:
+            total += len(text)
+    return total
+
+
 def _chunk_issue_matches(issue, chunk_html, chunk_text, source_text, qa_settings):
     """Best-effort deterministic localization of one file QA issue."""
     issue_text = str(issue or "")
@@ -4987,6 +5007,11 @@ def _chunk_issue_matches(issue, chunk_html, chunk_text, source_text, qa_settings
             )
         except Exception:
             return False
+    if issue_lower == "unwrapped_text_content":
+        # The file-level detector decides whether the combined amount is large
+        # enough to report. Attribute it only to chunks that actually contain
+        # direct, visible text outside an element.
+        return _count_unwrapped_text_chars(chunk_html) > 0
     if issue_lower == "excessive_repetition":
         try:
             source_visible = BeautifulSoup(
@@ -12004,23 +12029,9 @@ def check_html_structure_issues(file_path, log, check_body_tag=False, check_head
             return True, issues
         
         # Check 3: Large blocks of unwrapped text
-        from bs4 import BeautifulSoup, NavigableString
         try:
-            soup = BeautifulSoup(content, 'html.parser')
-            
-            # Look for text that's sitting directly in body (not in any tag)
-            body = soup.find('body')
-            if body:
-                unwrapped_text_total = 0
-                
-                # Check all direct children of body
-                for element in body.children:
-                    if isinstance(element, NavigableString):
-                        text = str(element).strip()
-                        # Count any non-whitespace text
-                        if text and not text.isspace():
-                            unwrapped_text_total += len(text)
-                
+            unwrapped_text_total = _count_unwrapped_text_chars(content)
+            if BeautifulSoup(content, 'html.parser').find('body'):
                 # If we found significant unwrapped text, that's a problem
                 if unwrapped_text_total > 100:  # More than 100 chars of unwrapped text
                     issues.append('unwrapped_text_content')
