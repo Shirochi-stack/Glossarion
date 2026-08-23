@@ -1,6 +1,6 @@
 # 📚 Glossarion — The Complete, Monkey-Proof User Guide
 
-**Version 9.6.9 · Updated August 21, 2026**
+**Version 9.6.9 · Updated August 23, 2026**
 
 This guide explains **every button, box, and toggle** in Glossarion in plain English. You do **not** need to know anything about coding, AI, or computers beyond clicking, typing, and dragging files. If you can use a web browser, you can use this guide.
 
@@ -49,7 +49,7 @@ A few more you'll bump into:
 
 - **EPUB** — the most common e-book file (`.epub`). Glossarion's favorite input.
 - **Token** — a chunk of text (roughly ¾ of a word). AI companies bill per token and limit how many you can send at once. You don't have to count them; just know "token limit" = "how much text at a time."
-- **Chunk** — when a chapter is too big, Glossarion splits it into smaller pieces called chunks and translates them one by one.
+- **Chunk** — when an EPUB chapter or PDF section is too big, Glossarion splits it into smaller pieces. Each piece can be saved, resumed, checked, and retranslated independently.
 - **OCR** — "reading" text out of an image (used for manga and scanned pages).
 - **Inpainting** — erasing the original text from a manga bubble so the translation can be drawn in its place.
 
@@ -114,7 +114,7 @@ Do exactly this the first time. Don't touch anything not mentioned. You'll have 
 
 > **✅ DO start small and cheap.** For your first run, set **Chapter range** to `1-2` (see [Section 6](#6-main-settings-the-middle-of-the-window)) so you only translate two chapters. Check they look good *before* spending money on the whole book.
 
-> **🛑 The Stop button is safe.** `Stop Translation` finishes the current piece and stops cleanly. Your already-translated chapters are saved. You can resume later and it skips what's done.
+> **🛑 The Stop button is safe.** `Stop Translation` finishes the current piece and stops cleanly. Your already-translated chapters are saved. For a split EPUB chapter or PDF section, its successfully finished chunks are saved too, so the next run sends only the unfinished chunks.
 
 ---
 
@@ -275,6 +275,23 @@ Click **⚙️ Other Setting** to open the advanced window. **You can translate 
 - **Save partial/stopped chapters as QA-failed** — chapters you interrupt with Stop are saved and marked failed (instead of vanishing), so you can retry just them.
 - **Streaming** — "Streams tokens as they're generated to reduce wait time. Some providers (e.g. Google Gemini) may truncate streams silently — turn streaming off if you see incomplete output."
 - **Show thinking logs** — show the AI's 🧠 reasoning in the log for models that support it.
+
+### Resuming incomplete EPUB/PDF chapters from saved chunks
+
+**Resume incomplete EPUB/PDF chapters from saved chunks** is enabled by default. It prevents a stopped or partially failed large chapter from starting over at chunk 1.
+
+Here is what happens:
+
+1. **Glossarion calculates a safe chunk size.** It starts with your Output Token Limit and compression factor, then uses the safest applicable limit across the global setting, individual limits assigned to enabled Multi API Key Manager routes, model/provider caps, and any lower limit learned and cached by the Unified API Client. A small safety margin is kept for the response.
+2. **Every successful chunk is recorded immediately.** For a genuinely split chapter or PDF section, `translation_progress.json` stores the chunk count, translated result, status, model/API-key identity, and the chunk-budget fingerprints. The output HTML also gets invisible chunk markers so Glossarion can later replace one chunk without deleting its siblings.
+3. **A resumed run validates the old split before reusing it.** Glossarion compares the saved chunk count plus both the original/configured and API-cached chunk sizes with the current values. If they still match, completed chunks are loaded from the progress file and only pending, failed, or interrupted chunks are sent again.
+4. **A changed split is invalidated safely.** If either chunk size or the number of chunks changed — for example after changing the Output Token Limit, compression factor, per-key limit, active model/key pool, or after discovering a lower provider limit — all saved chunks for that incomplete chapter are discarded and the chapter is split again. This avoids joining results made from incompatible boundaries.
+
+> **Batch mode is supported.** Missing chunks may be sent by parallel API requests. Each request still knows its own `Chunk X/Y` boundary and records its actual model separately. Already completed chunks are reused; missing chunks are translated normally and are **not** silently replaced with untranslated source text.
+
+> **One chunk means one whole document.** If a chapter or PDF section fits in a single request, Glossarion does not create redundant `Chunk 1/1` progress data, chunk markers, or a collapsible child row.
+
+Turn this setting off only if you want every incomplete multi-chunk EPUB/PDF chapter to restart from scratch. Click **Save Config** after changing it.
 
 ### Reasoning / "thinking" models
 
@@ -603,7 +620,7 @@ You can run Glossarion against a **local AI** on your own computer (free, privat
 
 ## 11. Retranslation (fixing single chapters)
 
-Don't redo a whole 200-chapter book because three chapters came out badly. Use **Retranslation**.
+Don't redo a whole 200-chapter book — or even a whole split chapter — because one piece came out badly. Use the **Progress Manager** retranslation controls.
 
 1. **Open the Retranslation tab** and **Select Folder** — pick your translated output folder.
 2. **Read the status colors:**
@@ -611,10 +628,12 @@ Don't redo a whole 200-chapter book because three chapters came out badly. Use *
    - ❌ Red = failed (or failed a QA check)
    - ⬜ White = not translated yet
    - 🔄 Spinning = in progress
-3. **Tick the chapters** you want to redo.
-4. **Retranslate Selected** — deletes the old version and translates those again. **Refresh List** updates the icons.
+3. **Tick a chapter or a specific `Chunk X/Y` row** you want to redo. Split PDF bookmark sections use the same chunk wording instead of confusing decimal section names.
+4. **Retranslate Selected** — a whole-chapter selection deletes and rebuilds that chapter. For an API-split chapter, a chunk selection removes only that marker-delimited segment from the shared HTML output, deletes only its cached result, and marks only that chunk pending. For a PDF bookmark section split into separate source parts, the selected part has its own stable progress row and output, so only that part is reset. In both cases, completed sibling chunks stay intact. **Refresh** updates the icons.
 
-> Handy extras here: **Show skipped files** reveals files the pipeline normally skips; you can also switch the second column to show **which model** was used per chapter, or view **glossary extraction progress**.
+The parent chapter cannot show **Completed** while any child chunk is pending or in progress. Every chunk records its own model information because parallel requests or key rotation can use different models for different chunks. The Progress Manager and EPUB Library details page both display those per-chunk statuses and models for EPUB and PDF jobs. Chapters that were never split stay as a single normal row.
+
+> Handy extras here: **Show special files** reveals files the pipeline normally hides; **Show Model Info** displays the model used for each chapter or chunk; **🔍 Edit Translation** opens the side-by-side source/output editor; and **Glossary Progress** shows glossary extraction progress.
 
 ---
 
@@ -647,6 +666,8 @@ Scans finished translations for problems and produces a clickable report.
    - **Untranslated text** — leftover Korean/Japanese/Chinese.
    - **Duplicates** — accidentally repeated chapters.
 4. **Run Scan** — makes `qa_report.html`. Anything that fails is marked ❌ in the Retranslation tab, so your fix-it list is ready.
+
+For marker-delimited EPUB/PDF output, the scanner maps a localized problem to the affected `Chunk X/Y` row instead of failing the entire chapter. Separately stored PDF bookmark chunks are scanned and tracked by their own stable progress rows. That lets **Select QA Failed** and **Retranslate Selected** repair just the bad chunks. Findings that genuinely apply to the whole document can still remain chapter-level.
 
 > **The natural workflow:** Translate → **QA Scan** → open the Retranslation tab → redo the ❌ chapters → QA Scan again.
 
@@ -932,6 +953,8 @@ You do **not** need Glossarion's local proxy, port `3000`, or an API key when us
 |---------|------------------|-----|
 | **"Rate limit" / error 429** | Sending requests too fast | Raise **API call delay** to `2`+ (Section 6). If you have several keys, enable **Multi-Key Mode** (Section 14). |
 | **Output is cut off mid-sentence** | Output token limit too low, or silent truncation | Raise **Output Token limit**; keep **Auto-retry Truncated Responses** on. For Gemini, try turning **Streaming OFF**. |
+| **A resumed chapter starts over instead of reusing chunks** | Its original/cached chunk size or chunk count changed, so the old boundaries are no longer safe | This is intentional invalidation. Keep the new limits and let Glossarion rebuild the chapter, or restore the prior Output Token Limit, compression factor, model/key pool, and per-key limits before retrying. |
+| **An output HTML file exists but its chapter is still Pending** | One or more saved chunk rows are pending or in progress | The file can contain only the chunks completed so far. Expand the chapter in Progress Manager, then resume or retranslate the missing `Chunk X/Y` rows. |
 | **Translation fails / "invalid model" / auth error** | Key and model are from different providers, or wrong key | Make the **Model** prefix match the **API Key**'s provider (Section 5). Re-paste the key and click **Show** to check it. |
 | **Polling says "no provider credential"** | The API-key field belongs to another selected provider, or no matching environment variable exists | Select a model owned by the provider you want to check, enter that provider's key, and poll again. Glossarion will not send one company's key to another company. |
 | **Polling uses a static fallback** | The catalog needs credentials, is offline, rejected the request, or has no pollable endpoint | Read the detailed polling lines in the bottom log. The built-in list remains available, and you can still type a valid model ID manually. |
@@ -984,4 +1007,4 @@ You do **not** need Glossarion's local proxy, port `3000`, or an API key when us
 
 ---
 
-*Made with 🌸 for the translation community. This guide reflects Glossarion v9.6.9 as of August 21, 2026 and is built directly from the in-app tooltips and the program's own code. If a button looks different from this guide, hover it — the live tooltip is always the final word.*
+*Made with 🌸 for the translation community. This guide reflects Glossarion v9.6.9 as of August 23, 2026 and is built directly from the in-app tooltips and the program's own code. If a button looks different from this guide, hover it — the live tooltip is always the final word.*
