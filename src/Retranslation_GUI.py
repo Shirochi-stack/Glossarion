@@ -28760,6 +28760,7 @@ class RetranslationMixin:
 
     def _append_chunk_progress_display_info(self, data, chapter_display_info):
         """Insert selectable per-chunk rows after their EPUB/PDF chapter."""
+        self._annotate_pdf_split_chunk_display_info(chapter_display_info)
         prog = data.get("prog") if isinstance(data, dict) else None
         if not isinstance(prog, dict):
             return
@@ -28832,8 +28833,106 @@ class RetranslationMixin:
                     "chunk_progress_key": chunk_key,
                     "parent_progress_key": parent_key,
                     "parent_info": parent_entry,
+                    "pdf_source_split_chunk": bool(
+                        parent.get("is_pdf_split_chunk")
+                    ),
+                    "pdf_split_chunk_index": parent.get(
+                        "pdf_split_chunk_index"
+                    ),
+                    "pdf_split_total_chunks": parent.get(
+                        "pdf_split_total_chunks"
+                    ),
+                    "pdf_split_parent_num": parent.get(
+                        "pdf_split_parent_num"
+                    ),
                 })
         chapter_display_info[:] = expanded
+
+    def _annotate_pdf_split_chunk_display_info(self, chapter_display_info):
+        """Label source-split PDF bookmark parts as chunks, not decimals."""
+        groups = {}
+        for row in chapter_display_info or []:
+            if not isinstance(row, dict):
+                continue
+            entry = row.get("info") or row.get("progress_entry") or {}
+            if not isinstance(entry, dict) or not entry.get("pdf_toc_section"):
+                continue
+            section_id = str(entry.get("pdf_section_id") or "").strip()
+            progress_key = str(
+                entry.get("pdf_progress_key")
+                or row.get("progress_key")
+                or row.get("key")
+                or ""
+            )
+            try:
+                explicit_total = int(entry.get("pdf_split_total_chunks") or 0)
+            except (TypeError, ValueError):
+                explicit_total = 0
+            stable_split_key = bool(
+                section_id
+                and progress_key.startswith(f"pdf:{section_id}:")
+            )
+            if explicit_total <= 1 and not stable_split_key:
+                continue
+            group_key = section_id or str(
+                entry.get("pdf_split_parent_num") or row.get("num") or ""
+            )
+            groups.setdefault(group_key, []).append((row, entry))
+
+        for members in groups.values():
+            def _member_sort_key(member):
+                row, entry = member
+                try:
+                    explicit_index = int(
+                        entry.get("pdf_split_chunk_index") or 0
+                    )
+                except (TypeError, ValueError):
+                    explicit_index = 0
+                if explicit_index > 0:
+                    return (0, explicit_index)
+                try:
+                    return (1, float(row.get("num")))
+                except (TypeError, ValueError):
+                    return (2, str(row.get("key") or ""))
+
+            members.sort(key=_member_sort_key)
+            explicit_totals = []
+            for _row, entry in members:
+                try:
+                    explicit_totals.append(
+                        int(entry.get("pdf_split_total_chunks") or 0)
+                    )
+                except (TypeError, ValueError):
+                    pass
+            total_chunks = max([len(members), *explicit_totals])
+            if total_chunks <= 1:
+                continue
+
+            parent_num = next(
+                (
+                    entry.get("pdf_split_parent_num")
+                    for _row, entry in members
+                    if entry.get("pdf_split_parent_num") is not None
+                ),
+                None,
+            )
+            if parent_num is None:
+                try:
+                    parent_num = int(float(members[0][0].get("num")))
+                except (TypeError, ValueError):
+                    parent_num = members[0][0].get("num")
+
+            for ordinal, (row, entry) in enumerate(members, start=1):
+                try:
+                    chunk_index = int(
+                        entry.get("pdf_split_chunk_index") or ordinal
+                    )
+                except (TypeError, ValueError):
+                    chunk_index = ordinal
+                row["is_pdf_split_chunk"] = True
+                row["pdf_split_chunk_index"] = chunk_index
+                row["pdf_split_total_chunks"] = total_chunks
+                row["pdf_split_parent_num"] = parent_num
 
     def _append_pdf_ocr_display_info(self, data, chapter_display_info):
         """Add a lightweight summary row for PDF Vision OCR progress."""
@@ -29643,14 +29742,59 @@ class RetranslationMixin:
             if ocr_total > 0:
                 status_label = f"{status_label} ({min(ocr_done, ocr_total)}/{ocr_total})"
 
-        if info.get("is_chunk_progress"):
-            try:
-                chapter_label = (
-                    f"Ch.{int(chapter_num):03d}"
-                    if not isinstance(chapter_num, float)
-                    or chapter_num.is_integer()
-                    else f"Ch.{chapter_num:06.1f}"
+        if info.get("is_pdf_split_chunk"):
+            start_page = (
+                info.get('pdf_start_page')
+                if info.get('pdf_start_page') is not None
+                else chapter_info.get('pdf_start_page')
+            )
+            end_page = (
+                info.get('pdf_end_page')
+                if info.get('pdf_end_page') is not None
+                else chapter_info.get('pdf_end_page')
+            )
+            if start_page is not None and end_page is not None:
+                page_label = (
+                    f"Page {start_page}"
+                    if str(start_page) == str(end_page)
+                    else f"Pages {start_page}-{end_page}"
                 )
+            else:
+                page_label = "Pages unknown"
+            parent_num = info.get("pdf_split_parent_num", chapter_num)
+            try:
+                numeric_parent = float(parent_num)
+                section_label = (
+                    f"{int(numeric_parent):03d}"
+                    if numeric_parent.is_integer()
+                    else str(parent_num)
+                )
+            except (TypeError, ValueError):
+                section_label = str(parent_num)
+            display = (
+                f"Section {section_label} Chunk "
+                f"{info.get('pdf_split_chunk_index')}/"
+                f"{info.get('pdf_split_total_chunks')} | "
+                f"{icon} {status_label:14s} | {page_label} | {output_display}"
+            )
+        elif info.get("is_chunk_progress"):
+            try:
+                if info.get("pdf_source_split_chunk"):
+                    pdf_parent = float(
+                        info.get("pdf_split_parent_num", chapter_num)
+                    )
+                    chapter_label = (
+                        f"Section {int(pdf_parent):03d} Chunk "
+                        f"{info.get('pdf_split_chunk_index')}/"
+                        f"{info.get('pdf_split_total_chunks')} · API"
+                    )
+                else:
+                    chapter_label = (
+                        f"Ch.{int(chapter_num):03d}"
+                        if not isinstance(chapter_num, float)
+                        or chapter_num.is_integer()
+                        else f"Ch.{chapter_num:06.1f}"
+                    )
             except (TypeError, ValueError):
                 chapter_label = f"Ch.{chapter_num}"
             display = (

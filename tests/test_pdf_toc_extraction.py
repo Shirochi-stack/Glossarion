@@ -688,6 +688,18 @@ def test_split_pdf_bookmark_keeps_distinct_chunk_qa_mapping(
         entry["content_hash"]
         for entry in manager.prog["chapters"].values()
     } == {"pdf-part-one-hash", "pdf-part-two-hash"}
+    assert {
+        entry["pdf_split_chunk_index"]
+        for entry in manager.prog["chapters"].values()
+    } == {1, 2}
+    assert {
+        entry["pdf_split_total_chunks"]
+        for entry in manager.prog["chapters"].values()
+    } == {2}
+    assert {
+        entry["pdf_split_parent_num"]
+        for entry in manager.prog["chapters"].values()
+    } == {1}
     assert set(manager.prog["chapter_chunks"]) == {
         "pdf-part-one-hash", "pdf-part-two-hash"
     }
@@ -715,6 +727,59 @@ def test_pdf_toc_setting_is_defaulted_exported_and_persisted():
     assert "('pdf_use_toc_sections', ['pdf_use_toc_sections_var'], True, bool)" in gui_source
     assert "Use PDF table of contents for sections" in settings_source
     assert "legacy page-by-page extraction" in settings_source
+
+
+def test_progress_manager_labels_split_pdf_bookmark_parts_as_chunks(
+        tmp_path):
+    from Retranslation_GUI import RetranslationMixin
+
+    section_id = "stable-section"
+    chapters = {}
+    for actual_num, chunk_index in ((2.0, 1), (2.1, 2), (2.2, 3)):
+        progress_key = f"pdf:{section_id}:{actual_num}"
+        chapters[progress_key] = {
+            "actual_num": actual_num,
+            "content_hash": f"hash-{chunk_index}",
+            "output_file": f"response_pdf_part_{chunk_index}.html",
+            "status": "in_progress",
+            "model_name": "provider/model-a",
+            "pdf_toc_section": True,
+            "pdf_section_id": section_id,
+            "pdf_progress_key": progress_key,
+            "pdf_toc_title": f"Middle (Part {chunk_index}/3)",
+            "pdf_start_page": 3,
+            "pdf_end_page": 16,
+        }
+
+    mixin = object.__new__(RetranslationMixin)
+    mixin.config = {"pdf_use_toc_sections": True}
+    mixin.pdf_use_toc_sections_var = True
+    mixin._is_special_file = lambda _name: False
+    data = {
+        "prog": {"chapters": chapters, "chapter_chunks": {}},
+        "output_dir": str(tmp_path),
+        "file_path": str(tmp_path / "book.pdf"),
+        "show_special_files_state": False,
+        "show_model_info_state": True,
+    }
+
+    mixin._rebuild_chapter_display_info(data)
+
+    rows = data["chapter_display_info"]
+    assert len(rows) == 3
+    assert [row["pdf_split_chunk_index"] for row in rows] == [1, 2, 3]
+    assert {row["pdf_split_total_chunks"] for row in rows} == {3}
+    displays = [
+        mixin._progress_list_display_text(row, data, 20, 25)[0]
+        for row in rows
+    ]
+    assert displays[0].startswith("Section 002 Chunk 1/3")
+    assert displays[1].startswith("Section 002 Chunk 2/3")
+    assert displays[2].startswith("Section 002 Chunk 3/3")
+    assert all("002.1" not in display and "002.2" not in display
+               for display in displays)
+    assert all("Pages 3-16" in display for display in displays)
+    assert all("provider/model-a" in display for display in displays)
 
 
 def test_progress_manager_seeds_bookmark_rows_and_hides_source_sidecar(tmp_path):
