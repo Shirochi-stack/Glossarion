@@ -29,7 +29,9 @@ from qa_scan_runtime import (
 from scan_html_folder import (
     _format_ai_truncation_last_p_preview,
     _count_quotation_marks,
+    _html_preservation_profile,
     _missing_ending_quotation_paragraphs,
+    _preservation_count_issues,
     _record_ai_truncation_issue,
     build_pdf_qa_source_aliases,
     cross_reference_word_counts,
@@ -347,6 +349,30 @@ def test_missing_image_check_detects_replacement_and_honors_rename_map():
     )
     assert renamed is False
     assert renamed_issues == []
+
+
+def test_svg_graphic_reference_check_honors_image_rename_map():
+    rename_map = {"kuchie-002.jpg": "p-fmatter-002_img_1.jpg"}
+    source = (
+        '<html><body><svg><image xlink:href="../image/kuchie-002.jpg"/>'
+        '</svg></body></html>'
+    )
+    output = (
+        '<html><body><svg><image '
+        'xlink:href="../image/p-fmatter-002_img_1.jpg"/></svg></body></html>'
+    )
+
+    source_profile = _html_preservation_profile(source, rename_map)
+    output_profile = _html_preservation_profile(output, rename_map)
+
+    assert source_profile["graphic_refs"] == output_profile["graphic_refs"]
+    assert not any(
+        issue.startswith("changed_graphic_references_")
+        for issue, _preview in _preservation_count_issues(
+            source_profile,
+            output_profile,
+        )
+    )
 
 
 def test_pdf_bookmark_qa_preserves_structure_without_exact_sdlxliff_name(tmp_path):

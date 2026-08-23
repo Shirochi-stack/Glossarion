@@ -7436,7 +7436,12 @@ def _html_preservation_profile(html_content, image_rename_map=None):
         ('use', 'xlink:href'),
     ):
         for element in soup.find_all(tag):
-            reference = _normalize_preserved_reference(element.get(attribute, ''))
+            is_svg_image_reference = tag == 'image'
+            reference = _normalize_preserved_reference(
+                element.get(attribute, ''),
+                normalized_map if is_svg_image_reference else None,
+                image=is_svg_image_reference,
+            )
             if reference:
                 graphic_refs[f'{tag}.{attribute}:{reference}'] += 1
 
