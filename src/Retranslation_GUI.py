@@ -92,6 +92,7 @@ from chapter_chunk_progress import (
     chunk_failure_summary,
     effective_parent_status,
     ensure_chunk_entry_schema,
+    is_multi_chunk_entry,
     remove_chunk_segments,
     reset_chunks_for_retranslation,
     set_chunk_qa,
@@ -28797,7 +28798,7 @@ class RetranslationMixin:
                 or ""
             )
             chunk_entry = chapter_chunks.get(chunk_key)
-            if not isinstance(chunk_entry, dict):
+            if not is_multi_chunk_entry(chunk_entry):
                 continue
             ensure_chunk_entry_schema(chunk_entry)
             parent["status"] = effective_parent_status(

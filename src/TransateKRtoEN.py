@@ -166,6 +166,8 @@ from chapter_chunk_progress import (
     chunk_entry_needs_translation,
     chunk_failure_summary,
     ensure_chunk_entry_schema,
+    is_multi_chunk_entry,
+    prune_single_chunk_entries,
     record_chunk_result,
     reset_in_progress_chunks,
     reset_chunks_for_retranslation,
@@ -3735,6 +3737,11 @@ class ProgressManager:
                 "version": "2.1"
             }
 
+        # Old builds persisted a redundant Chunk 1/1 record for every
+        # unsplit EPUB chapter. Keep those out of the in-memory model; the
+        # next normal save also removes them from disk.
+        prune_single_chunk_entries(prog.get("chapter_chunks"))
+
         _env_output_mode = os.getenv("OUTPUT_MODE", "").lower().strip()
         if _env_output_mode == "refine":
             _env_output_mode = "refinement"
@@ -3794,12 +3801,12 @@ class ProgressManager:
         with self._save_lock:
             chapter_chunks = self.prog.setdefault("chapter_chunks", {})
             changed = False
-            if not enabled:
+            if not enabled or total_chunks <= 1:
                 for key in [chapter_key, *legacy_keys]:
                     if key in chapter_chunks:
                         chapter_chunks.pop(key, None)
                         changed = True
-                return None, "disabled", changed
+                return None, "disabled" if not enabled else None, changed
 
             if chapter_key not in chapter_chunks:
                 for legacy_key in legacy_keys:
@@ -3957,6 +3964,8 @@ class ProgressManager:
         """Return only completed, QA-clean cached results for one chapter."""
         with self._save_lock:
             entry = self.prog.get("chapter_chunks", {}).get(str(chapter_key))
+            if not is_multi_chunk_entry(entry):
+                return {}
             return dict(reusable_chunk_results(entry))
 
     def set_chapter_chunk_runtime_status(
@@ -4688,6 +4697,7 @@ class ProgressManager:
 
                 self._preserve_disk_previous_progress_entries()
                 self._refresh_subtitle_file_progress()
+                prune_single_chunk_entries(self.prog.get("chapter_chunks"))
 
                 self.prog["completed_list"] = []
                 for chapter_key, chapter_info in self.prog.get("chapters", {}).items():

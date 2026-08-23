@@ -48,8 +48,31 @@ def chunk_html_markers(chapter_key, chunk_index, total_chunks):
 
 
 def wrap_chunk_html(chapter_key, chunk_index, total_chunks, content) -> str:
+    # A 1/1 "chunk" is the complete document. Markers only add bookkeeping
+    # noise when there is nothing smaller to resume or retranslate.
+    if _positive_int(total_chunks) <= 1:
+        return str(content or "")
     start, end = chunk_html_markers(chapter_key, chunk_index, total_chunks)
     return f"{start}\n{str(content or '')}\n{end}"
+
+
+def is_multi_chunk_entry(entry) -> bool:
+    """Return True only for a persisted, genuinely split chapter plan."""
+    return bool(
+        isinstance(entry, dict) and _positive_int(entry.get("total")) > 1
+    )
+
+
+def prune_single_chunk_entries(chapter_chunks) -> list[str]:
+    """Remove obsolete 1/1 plans from a ``chapter_chunks`` mapping."""
+    if not isinstance(chapter_chunks, dict):
+        return []
+    removed = []
+    for chapter_key, entry in list(chapter_chunks.items()):
+        if isinstance(entry, dict) and _positive_int(entry.get("total")) == 1:
+            chapter_chunks.pop(chapter_key, None)
+            removed.append(str(chapter_key))
+    return removed
 
 
 def extract_marked_chunks(html_text, chapter_key=None):
@@ -183,7 +206,7 @@ def ensure_chunk_entry_schema(entry, total_chunks=None):
 
 
 def reusable_chunk_results(entry):
-    if not isinstance(entry, dict):
+    if not is_multi_chunk_entry(entry):
         return {}
     ensure_chunk_entry_schema(entry)
     chunks = entry.get("chunks", {})
@@ -425,7 +448,7 @@ def remove_chunk_segments(html_text, chapter_key, chunk_indices, entry=None):
 
 
 def chunk_failure_summary(entry):
-    if not isinstance(entry, dict):
+    if not is_multi_chunk_entry(entry):
         return {"total": 0, "completed": 0, "failed": 0, "pending": 0}
     ensure_chunk_entry_schema(entry)
     records = entry.get("entries", {})
@@ -468,7 +491,7 @@ def effective_parent_status(status, entry):
 
 
 def chunk_status_summary_text(entry, limit=8):
-    if not isinstance(entry, dict):
+    if not is_multi_chunk_entry(entry):
         return ""
     ensure_chunk_entry_schema(entry)
     icons = {

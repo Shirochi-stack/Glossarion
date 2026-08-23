@@ -43,6 +43,7 @@ from chapter_chunk_progress import (
     chunk_status_summary_text,
     effective_parent_status,
     ensure_chunk_entry_schema,
+    is_multi_chunk_entry,
     reset_chunks_for_retranslation,
 )
 
@@ -1618,7 +1619,7 @@ def _mark_chapter_pending_for_retranslation(output_folder: str,
                 changed = True
             chunk_key = str(ch.get("content_hash") or key)
             chunk_entry = prog.get("chapter_chunks", {}).get(chunk_key)
-            if isinstance(chunk_entry, dict):
+            if is_multi_chunk_entry(chunk_entry):
                 ensure_chunk_entry_schema(chunk_entry)
                 reset = reset_chunks_for_retranslation(
                     chunk_entry,
@@ -2490,7 +2491,7 @@ def _read_progress_summary(progress_file: str, exclude_special: bool = False,
         status = ch.get("status", "")
         chunk_key = str(ch.get("content_hash") or key)
         chunk_entry = prog.get("chapter_chunks", {}).get(chunk_key)
-        if isinstance(chunk_entry, dict):
+        if is_multi_chunk_entry(chunk_entry):
             chunk_summary = chunk_failure_summary(chunk_entry)
             status = effective_parent_status(status, chunk_entry)
             # Keep the parent chapter row individually complete for scanner
@@ -14851,7 +14852,7 @@ class _BookDetailsLoader(QThread):
                     chunk_entry = (prog or {}).get("chapter_chunks", {}).get(
                         chunk_key
                     )
-                    if isinstance(chunk_entry, dict):
+                    if is_multi_chunk_entry(chunk_entry):
                         ensure_chunk_entry_schema(chunk_entry)
                         summary = chunk_failure_summary(chunk_entry)
                         resolved["status"] = effective_parent_status(

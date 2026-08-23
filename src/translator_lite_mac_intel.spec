@@ -72,6 +72,7 @@ app_files = [
     ('gemini_policy.py', '.'),
     ('epub_package.py', '.'),
     ('title_tag_translation.py', '.'),
+    ('chapter_chunk_progress.py', '.'),
     # Core GUI
     ('translator_gui.py', '.'),
     ('parallel_epub_glossary.py', '.'),
@@ -226,6 +227,7 @@ app_modules = [
     'gemini_policy',
     'epub_package',
     'title_tag_translation',
+    'chapter_chunk_progress',
     'TransateKRtoEN',
     'metadata_translation_worker',
     'subtitle_processor',

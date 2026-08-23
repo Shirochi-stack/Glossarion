@@ -872,6 +872,60 @@ def test_disabled_chunk_progress_removes_incomplete_cache(tmp_path):
     assert "hash-1" not in progress.prog["chapter_chunks"]
 
 
+def test_single_chunk_chapter_has_no_chunk_cache_markers_or_child_row(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    progress.prog["chapter_chunks"]["hash-1"] = {
+        "schema_version": 2,
+        "total": 1,
+        "completed": [1],
+        "chunks": {"1": "<p>legacy cached chapter</p>"},
+        "entries": {"1": {"index": 1, "status": "completed"}},
+    }
+
+    entry, reason, changed = progress.prepare_chapter_chunk_progress(
+        "hash-1", 1, _epub_chunk_budget(), enabled=True
+    )
+
+    assert entry is None
+    assert reason is None
+    assert changed is True
+    assert "hash-1" not in progress.prog["chapter_chunks"]
+    assert not progress.record_chapter_chunk(
+        "hash-1", 1, 1, "translated", _epub_chunk_budget()
+    )
+    assert progress.get_reusable_chapter_chunks("hash-1") == {}
+    assert wrap_chunk_html("hash-1", 1, 1, "<p>whole chapter</p>") == (
+        "<p>whole chapter</p>"
+    )
+
+    progress.prog["chapters"]["1"] = {
+        "actual_num": 1,
+        "content_hash": "hash-1",
+        "output_file": "chapter.html",
+        "status": "completed",
+    }
+    # A stale record loaded by a GUI path is ignored defensively.
+    progress.prog["chapter_chunks"]["hash-1"] = {
+        "total": 1,
+        "entries": {"1": {"index": 1, "status": "completed"}},
+    }
+    rows = [{
+        "key": "1",
+        "num": 1,
+        "info": progress.prog["chapters"]["1"],
+        "output_file": "chapter.html",
+        "status": "completed",
+    }]
+    RetranslationMixin()._append_chunk_progress_display_info(
+        {"prog": progress.prog}, rows
+    )
+    assert len(rows) == 1
+
+    progress.save()
+    saved = json.loads(Path(progress.PROGRESS_FILE).read_text(encoding="utf-8"))
+    assert "hash-1" not in saved["chapter_chunks"]
+
+
 def test_chunk_budget_uses_global_individual_and_cached_model_limits(
     monkeypatch,
 ):

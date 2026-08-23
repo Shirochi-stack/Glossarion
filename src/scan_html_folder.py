@@ -59,6 +59,7 @@ from chapter_chunk_progress import (
     chunk_failure_summary,
     ensure_chunk_entry_schema,
     extract_marked_chunks,
+    is_multi_chunk_entry,
     set_chunk_qa,
 )
 
@@ -5178,7 +5179,7 @@ def _attach_chunk_results_to_scan(
         output_file = os.path.basename(str(chapter_info.get("output_file") or ""))
         chunk_key = str(chapter_info.get("content_hash") or chapter_key)
         chunk_entry = chapter_chunks.get(chunk_key)
-        if output_file and isinstance(chunk_entry, dict):
+        if output_file and is_multi_chunk_entry(chunk_entry):
             ensure_chunk_entry_schema(chunk_entry)
             by_output[output_file.casefold()] = (chunk_key, chunk_entry)
 
@@ -5303,7 +5304,7 @@ def _apply_chunk_scan_to_progress(
         or chapter_key
     )
     chunk_entry = prog.get("chapter_chunks", {}).get(chunk_key)
-    if not isinstance(chunk_entry, dict):
+    if not is_multi_chunk_entry(chunk_entry):
         return False
     ensure_chunk_entry_schema(chunk_entry)
     for chunk_result in chunk_results:
