@@ -1386,7 +1386,7 @@ def test_main_model_search_marks_polled_rows_and_hides_unpolled_without_changing
     assert combo.itemData(1, translator_gui._MODEL_POLL_MARKER_ROLE) is False
     combo.setCurrentIndex(0)
     app.processEvents()
-    assert combo.lineEdit().textMargins().left() == 13
+    assert combo.lineEdit().textMargins().left() == 11
     assert not combo._model_poll_marker_label.isHidden()
     assert combo._model_poll_marker_label.autoFillBackground() is False
     assert "background-color: transparent" in (
@@ -1543,7 +1543,7 @@ def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeyp
     ) is True
     combo.setCurrentIndex(models.index("authgpt/gpt-5.6"))
     app.processEvents()
-    assert combo.lineEdit().textMargins().left() == 13
+    assert combo.lineEdit().textMargins().left() == 11
     assert not combo._model_poll_marker_label.isHidden()
     assert combo._model_poll_marker_label.autoFillBackground() is False
     combo.setCurrentIndex(models.index("alpha-model"))

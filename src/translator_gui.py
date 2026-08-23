@@ -733,10 +733,10 @@ def _update_model_field_poll_marker(combo):
         marker.move(0, max(0, (line_edit.height() - marker.height()) // 2))
         marker.setVisible(has_check)
         margins = line_edit.textMargins()
-        # The marker occupies a 14 px transparent canvas. A 13 px margin lets
+        # The marker occupies a 14 px transparent canvas. An 11 px margin lets
         # the text use that transparent edge and gives the visible glyph a
         # moderate gap without placing text underneath painted pixels.
-        desired_left = 13 if has_check else 0
+        desired_left = 11 if has_check else 0
         if margins.left() != desired_left:
             line_edit.setTextMargins(
                 desired_left,
