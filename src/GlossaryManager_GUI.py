@@ -168,6 +168,12 @@ class GlossaryManagerMixin:
             return 'separate'
         return None
 
+    @classmethod
+    def _glossary_refinement_chunking_combo_index(cls, config):
+        """Return the request-mode combo index, defaulting the GUI to all types."""
+        saved_mode = cls._configured_glossary_refinement_chunking_mode(config)
+        return 0 if saved_mode == 'separate' else 1
+
     def _glossary_editor_input_sources(self):
         """Return the current source identities used by the glossary editor.
 
@@ -6046,9 +6052,9 @@ Do not stop after the glossary."""
         self.glossary_refinement_chunking_combo = QComboBox()
         self.glossary_refinement_chunking_combo.addItems(["Send each entry type in a separate request", "Send all entry types"])
         self._apply_halgakos_combo_icons(self.glossary_refinement_chunking_combo)
-        saved_chunking = self._configured_glossary_refinement_chunking_mode(self.config)
-        if saved_chunking == 'all':
-            self.glossary_refinement_chunking_combo.setCurrentIndex(1)
+        self.glossary_refinement_chunking_combo.setCurrentIndex(
+            self._glossary_refinement_chunking_combo_index(self.config)
+        )
         self.glossary_refinement_chunking_combo.wheelEvent = lambda event: None
         request_layout.addWidget(self.glossary_refinement_chunking_combo)
         request_layout.addStretch()

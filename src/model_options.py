@@ -488,6 +488,7 @@ class ModelCatalogRefreshResult:
     provider_models: Dict[str, List[str]]
     statuses: Dict[str, str]
     requested_provider: Optional[str] = None
+    restore_removed_models: bool = False
 
 
 _MODEL_CATALOG_CACHE_VERSION = 3

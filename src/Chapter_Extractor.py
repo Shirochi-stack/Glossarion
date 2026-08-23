@@ -324,6 +324,124 @@ def _collect_image_srcs(soup):
     return image_srcs
 
 
+def _unmapped_workspace_image_filenames(zf, output_dir):
+    """Return existing image files referenced only by workspace HTML outside the OPF.
+
+    Translation workspaces can retain completed ``response_*.html`` files while
+    the newly selected EPUB contains only a later, partial chapter range. Those
+    HTML files are intentionally available to the EPUB compiler, so their local
+    image assets must survive the source-resource refresh as well.
+    """
+    images_dir = os.path.join(output_dir, 'images')
+    if not os.path.isdir(images_dir) or not os.path.isdir(output_dir):
+        return set()
+
+    opf_member = find_epub_opf_member(zf)
+    if not opf_member:
+        return set()
+    try:
+        import xml.etree.ElementTree as ET
+
+        root = ET.fromstring(zf.read(opf_member))
+        namespace = ''
+        if root.tag.startswith('{'):
+            namespace = root.tag[1:root.tag.index('}')]
+        prefix = f'{{{namespace}}}' if namespace else ''
+        manifest = {
+            item.get('id'): item.get('href')
+            for item in root.findall(f'.//{prefix}manifest/{prefix}item')
+            if item.get('id') and item.get('href')
+            and (
+                'html' in item.get('media-type', '').lower()
+                or item.get('href', '').lower().endswith(('.html', '.xhtml', '.htm'))
+            )
+        }
+        spine = root.find(f'.//{prefix}spine')
+        if spine is None:
+            return set()
+        mapped_cores = {
+            _special_file_stem(manifest.get(itemref.get('idref'), ''))
+            for itemref in spine.findall(f'{prefix}itemref')
+            if manifest.get(itemref.get('idref'))
+        }
+    except (ET.ParseError, KeyError, OSError, TypeError, ValueError):
+        return set()
+
+    try:
+        image_names = {
+            name for name in os.listdir(images_dir)
+            if os.path.isfile(os.path.join(images_dir, name))
+        }
+        workspace_html = [
+            name for name in os.listdir(output_dir)
+            if (
+                name.lower().endswith(('.html', '.xhtml', '.htm'))
+                and os.path.isfile(os.path.join(output_dir, name))
+                and _special_file_stem(name) not in mapped_cores
+            )
+        ]
+    except OSError:
+        return set()
+    if not image_names or not workspace_html:
+        return set()
+
+    image_name_by_fold = {name.casefold(): name for name in image_names}
+    rename_exact, rename_folded = _load_image_rename_targets(output_dir)
+    protected = set()
+    for html_name in workspace_html:
+        try:
+            with open(
+                os.path.join(output_dir, html_name),
+                'r',
+                encoding='utf-8',
+                errors='ignore',
+            ) as handle:
+                image_refs = _collect_image_srcs(
+                    BeautifulSoup(handle.read(), 'html.parser')
+                )
+        except OSError:
+            continue
+        for image_ref in image_refs:
+            try:
+                parsed = urllib.parse.urlsplit(str(image_ref).strip())
+            except (TypeError, ValueError):
+                continue
+            if parsed.scheme.lower() in {'data', 'http', 'https'}:
+                continue
+            referenced_name = os.path.basename(
+                urllib.parse.unquote(parsed.path).replace('\\', '/')
+            )
+            if not referenced_name:
+                continue
+            actual_name = image_name_by_fold.get(referenced_name.casefold())
+            if actual_name is None:
+                mapped_name = (
+                    rename_exact.get(referenced_name)
+                    or rename_folded.get(referenced_name.casefold())
+                )
+                if mapped_name:
+                    actual_name = image_name_by_fold.get(mapped_name.casefold())
+            if actual_name:
+                protected.add(actual_name)
+
+    # A same-named resource packaged by the current source is refreshed normally
+    # and belongs to the current rename pass, not to the retained workspace set.
+    source_image_names = {
+        sanitize_resource_filename(os.path.basename(member)).casefold()
+        for member in zf.namelist()
+        if (
+            member
+            and not member.endswith('/')
+            and os.path.splitext(member)[1].lower()
+            in _REMOTE_CACHE_IMAGE_EXTENSIONS
+        )
+    }
+    return {
+        name for name in protected
+        if name.casefold() not in source_image_names
+    }
+
+
 def _is_remote_image_url(value):
     """Return True when *value* is an absolute HTTP(S) image reference."""
     if not isinstance(value, str):
@@ -1502,7 +1620,12 @@ def prepare_epub_image_assets(epub_path, output_dir, progress_callback=None):
     return result
 
 
-def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=None):
+def _rename_images_to_chapter_format(
+    chapters,
+    output_dir,
+    progress_callback=None,
+    preserve_image_filenames=None,
+):
     """Rename image files to chapter-based format and update all references.
     
     Format: chapter{NNN}_img_{M}.{ext}
@@ -1532,6 +1655,21 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
         print("📸 No image files found — skipping image rename")
         return chapters
 
+    protected_names = {
+        os.path.basename(str(name or '').replace('\\', '/')).casefold()
+        for name in (preserve_image_filenames or ())
+        if name
+    }
+    protected_images = {
+        name for name in existing_images if name.casefold() in protected_names
+    }
+    renamable_images = existing_images - protected_images
+    if protected_images:
+        print(
+            f"   🛡️ Preserving {len(protected_images)} image file(s) "
+            "referenced by unmapped workspace HTML"
+        )
+
     # A valid resource fingerprint reuses the already-renamed image files.
     # Freshly parsed chapter HTML still contains the source EPUB names, so a
     # second full rename pass would otherwise classify every canonical file as
@@ -1539,7 +1677,7 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
     # Replay a complete map instead when its terminal targets exactly match the
     # current image directory.
     existing_rename_map, _ = _load_image_rename_targets(output_dir)
-    current_image_names = {name.casefold() for name in existing_images}
+    current_image_names = {name.casefold() for name in renamable_images}
     mapped_target_names = {
         name.casefold() for name in existing_rename_map.values()
     }
@@ -1555,7 +1693,7 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
             status_context='Full extraction',
         )
     
-    print(f"\n🖼️ Renaming {len(existing_images)} images to chapter-based format...")
+    print(f"\n🖼️ Renaming {len(renamable_images)} images to chapter-based format...")
     
     # Build mapping: scan each chapter body for <img> references
     # Track which images belong to which chapter (first reference wins)
@@ -1610,10 +1748,10 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
                 continue
             
             # Check if file actually exists
-            if basename not in existing_images:
+            if basename not in renamable_images:
                 # Try case-insensitive match
                 matched = None
-                for existing in existing_images:
+                for existing in renamable_images:
                     if existing.lower() == basename.lower():
                         matched = existing
                         break
@@ -1636,7 +1774,7 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
             img_counter += 1
     
     # Handle unclaimed images (not referenced by any chapter) — name as Cover
-    unclaimed = existing_images - claimed_images
+    unclaimed = renamable_images - claimed_images
     unclaimed_to_rename = sorted(unclaimed)
     if unclaimed_to_rename:
         for idx, img_name in enumerate(unclaimed_to_rename):
@@ -2116,6 +2254,17 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     # workspace damaged by the old targeted-run cleanup), restore packaged
     # resources once; only the selected HTML file is still parsed below.
     _single_mode = bool((os.getenv("SINGLE_CHAPTER_FILTER", "") or "").strip())
+    preserved_unmapped_images = set()
+    if not _single_mode:
+        preserved_unmapped_images = _unmapped_workspace_image_filenames(
+            zf,
+            output_dir,
+        )
+        if preserved_unmapped_images:
+            print(
+                f"🛡️ Found {len(preserved_unmapped_images)} image file(s) "
+                "used by HTML outside the current OPF spine"
+            )
     images_dir = os.path.join(output_dir, 'images')
     try:
         existing_packaged_images = [
@@ -2154,6 +2303,7 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
             output_dir,
             progress_callback,
             preserve_images=(preserve_remote_images or _single_resource_bootstrap),
+            preserve_image_filenames=preserved_unmapped_images,
         )
 
     # Check stop after resource extraction
@@ -2241,7 +2391,12 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     # Skipped in single-chapter mode — renaming with a one-chapter list would
     # mis-claim images that belong to chapters not present in this run.
     if not _single_mode:
-        chapters = _rename_images_to_chapter_format(chapters, output_dir, progress_callback)
+        chapters = _rename_images_to_chapter_format(
+            chapters,
+            output_dir,
+            progress_callback,
+            preserve_image_filenames=preserved_unmapped_images,
+        )
     else:
         print("🎯 Single-chapter mode: preparing canonical image names")
         chapters = _prepare_single_chapter_image_renames(
@@ -2953,6 +3108,7 @@ def _extract_all_resources(
     output_dir,
     progress_callback=None,
     preserve_images=False,
+    preserve_image_filenames=None,
 ):
     """Extract all resources with parallel processing"""
     import time
@@ -3011,7 +3167,11 @@ def _extract_all_resources(
         except OSError:
             pass
     
-    _cleanup_old_resources(output_dir, preserve_images=preserve_images)
+    _cleanup_old_resources(
+        output_dir,
+        preserve_images=preserve_images,
+        preserve_image_filenames=preserve_image_filenames,
+    )
     
     # Create directories
     for resource_type in ['css', 'fonts', 'images']:
@@ -4420,12 +4580,21 @@ def _categorize_resource( file_path, file_name):
     
     return None
 
-def _cleanup_old_resources(output_dir, preserve_images=False):
+def _cleanup_old_resources(
+    output_dir,
+    preserve_images=False,
+    preserve_image_filenames=None,
+):
     """Clean up old resource directories and EPUB structure files"""
     print("🧹 Cleaning up any existing resource directories...")
     
     cleanup_success = True
     preserve_remote_images = bool(preserve_images)
+    protected_image_names = {
+        os.path.basename(str(name or '').replace('\\', '/')).casefold()
+        for name in (preserve_image_filenames or ())
+        if name
+    }
     
     for resource_type in ['css', 'fonts', 'images']:
         resource_dir = os.path.join(output_dir, resource_type)
@@ -4435,6 +4604,36 @@ def _cleanup_old_resources(output_dir, preserve_images=False):
                     "   ♻️ Preserving images directory and remote download cache"
                 )
             continue
+        if (
+            resource_type == 'images'
+            and protected_image_names
+            and os.path.isdir(resource_dir)
+        ):
+            preserved_count = 0
+            try:
+                for entry in os.scandir(resource_dir):
+                    if (
+                        entry.is_file(follow_symlinks=False)
+                        and entry.name.casefold() in protected_image_names
+                    ):
+                        preserved_count += 1
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        shutil.rmtree(entry.path)
+                    else:
+                        os.remove(entry.path)
+                print(
+                    f"   🛡️ Preserved {preserved_count} image file(s) "
+                    "referenced by unmapped workspace HTML"
+                )
+                continue
+            except Exception as e:
+                print(
+                    "   ⚠️ Could not selectively clean the images "
+                    f"directory: {e} - will merge with existing files"
+                )
+                cleanup_success = False
+                continue
         if os.path.exists(resource_dir):
             try:
                 shutil.rmtree(resource_dir)

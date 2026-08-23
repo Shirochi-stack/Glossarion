@@ -8099,6 +8099,17 @@ class MultiAPIKeyDialog(QDialog):
             # Delaying this left the canonical catalog active for one extra
             # keystroke: ``authgpt1`` showed no results until ``/`` was typed.
             combo.lineEdit().textEdited.connect(completion_model.set_search_text)
+            restore_model = getattr(
+                getattr(self, 'translator_gui', None),
+                '_restore_removed_model_choices',
+                None,
+            )
+            if callable(restore_model):
+                combo.lineEdit().textEdited.connect(
+                    lambda text: restore_model(
+                        [text], add_to_saved=True, refresh=True
+                    )
+                )
 
         combo._model_completer = completer
         combo._model_completer_proxy = completion_model

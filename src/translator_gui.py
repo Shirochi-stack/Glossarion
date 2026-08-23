@@ -82,6 +82,7 @@ if __name__ == '__main__':
 import sys
 import os
 import tempfile
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from app_version import (
     APP_DISPLAY_NAME,
@@ -20248,6 +20249,9 @@ Recent translations to summarize:
 
     def _on_model_editor_text_edited(self, _text=None):
         """Track real user typing separately from programmatic text changes."""
+        restore_model = getattr(self, '_restore_removed_model_choices', None)
+        if callable(restore_model):
+            restore_model([_text], add_to_saved=True, refresh=True)
         self._model_editor_typing = True
         timer = getattr(self, '_model_editor_idle_timer', None)
         if timer is None:
@@ -20670,6 +20674,8 @@ Recent translations to summarize:
 
         def deliver(result):
             try:
+                if not automatic:
+                    result = replace(result, restore_removed_models=True)
                 self.model_catalog_updated_signal.emit(result)
             except RuntimeError:
                 pass
@@ -20682,6 +20688,104 @@ Recent translations to summarize:
             custom_routes=custom_routes,
             only_provider=only_provider,
         )
+        return True
+
+    def _restore_removed_model_choices(
+        self,
+        model_values,
+        *,
+        add_to_saved=False,
+        refresh=False,
+    ):
+        """Clear exact deletion tombstones after an explicit user re-add.
+
+        Passive cache/startup merges still honor ``model_manager_removed_models``.
+        Only a manual entry or a user-triggered successful poll calls this path.
+        """
+        values = []
+        seen_values = set()
+        for model in model_values or ():
+            value = str(model or '').strip()
+            key = value.casefold()
+            if not value or key in seen_values:
+                continue
+            values.append(value)
+            seen_values.add(key)
+        if not values:
+            return False
+
+        config = getattr(self, 'config', None)
+        if not isinstance(config, dict):
+            return False
+        old_removed = config.get('model_manager_removed_models')
+        removed = [
+            str(model).strip()
+            for model in (old_removed if isinstance(old_removed, list) else [])
+            if str(model).strip()
+        ]
+        restored_keys = {
+            model.casefold() for model in removed
+            if model.casefold() in seen_values
+        }
+        if not restored_keys:
+            return False
+
+        remaining_removed = [
+            model for model in removed if model.casefold() not in restored_keys
+        ]
+        had_custom = 'custom_model_list' in config
+        old_custom = config.get('custom_model_list')
+        custom_models = list(old_custom) if isinstance(old_custom, list) else []
+        if add_to_saved:
+            custom_keys = {
+                str(model).strip().casefold()
+                for model in custom_models
+                if str(model).strip()
+            }
+            for value in values:
+                if (
+                    value.casefold() in restored_keys
+                    and value.casefold() not in custom_keys
+                ):
+                    custom_models.append(value)
+                    custom_keys.add(value.casefold())
+
+        config['model_manager_removed_models'] = remaining_removed
+        if add_to_saved:
+            config['custom_model_list'] = custom_models
+
+        save_config = getattr(self, 'save_config', None)
+        try:
+            saved = save_config(show_message=False) if callable(save_config) else True
+        except Exception:
+            saved = False
+        if saved is False:
+            if old_removed is None:
+                config.pop('model_manager_removed_models', None)
+            else:
+                config['model_manager_removed_models'] = old_removed
+            if add_to_saved:
+                if had_custom:
+                    config['custom_model_list'] = old_custom
+                else:
+                    config.pop('custom_model_list', None)
+            append_log = getattr(self, 'append_log', None)
+            if callable(append_log):
+                append_log("❌ Explicit model re-add was not saved; config.json write failed")
+            return False
+
+        if refresh:
+            display_models = merge_saved_model_options(
+                config.get('custom_model_list'),
+                get_model_options(),
+                remaining_removed,
+            )
+            refresh_catalog = getattr(self, '_refresh_model_combo_catalog', None)
+            if callable(refresh_catalog):
+                refresh_catalog(display_models)
+            refresh_search = getattr(self, '_refresh_model_search_poll_state', None)
+            if callable(refresh_search):
+                refresh_search()
         return True
 
     def _start_selected_provider_then_full_catalog_refresh(self, show_feedback=False):
@@ -20889,6 +20993,9 @@ Recent translations to summarize:
 
     def _apply_provider_model_catalog_refresh(self, result):
         """Apply a completed catalog refresh on Qt's GUI thread."""
+        explicit_poll = bool(
+            getattr(result, 'restore_removed_models', False)
+        )
         online_models = list(getattr(result, 'models', []) or [])
         if not online_models or not hasattr(self, 'model_combo'):
             return
@@ -20898,6 +21005,29 @@ Recent translations to summarize:
             for index in range(self.model_combo.count())
         }
 
+        provider_models = dict(getattr(result, 'provider_models', {}) or {})
+        confirmed_models = [
+            model
+            for models in provider_models.values()
+            for model in (models or [])
+        ]
+        confirmed_model_keys = {
+            str(model).strip().casefold()
+            for model in confirmed_models
+            if str(model).strip()
+        }
+        manager = getattr(self, '_model_manager_dialog', None)
+        explicit_poll = explicit_poll or bool(
+            manager is not None
+            and getattr(manager, '_catalog_poll_pending', False)
+        )
+        if explicit_poll and confirmed_models:
+            self._restore_removed_model_choices(
+                confirmed_models,
+                add_to_saved=False,
+                refresh=False,
+            )
+
         custom_models = self.config.get('custom_model_list')
         removed_models = self.config.get('model_manager_removed_models', [])
         display_models = merge_saved_model_options(
@@ -20906,7 +21036,6 @@ Recent translations to summarize:
             removed_models,
         )
 
-        manager = getattr(self, '_model_manager_dialog', None)
         manager_list = getattr(manager, '_model_list_widget', None)
         if (
             manager_list is not None
@@ -20924,7 +21053,6 @@ Recent translations to summarize:
 
         statuses = dict(getattr(result, 'statuses', {}) or {})
         online = [name for name, status in statuses.items() if str(status).startswith('online')]
-        provider_models = dict(getattr(result, 'provider_models', {}) or {})
         online_model_count = sum(
             len(provider_models.get(name, []) or []) for name in online
         )
@@ -20998,9 +21126,11 @@ Recent translations to summarize:
                     str(model).casefold()
                     for model in self.config.get('model_manager_removed_models', [])
                 }
-                # Also retain deletions made in this still-open manager before
-                # the user presses Poll Providers and then Save.
+                # Retain draft deletions that the current poll did not confirm.
+                # Confirmed models are explicit re-adds when this is a manual poll.
                 removed_keys.update(known_models - previous_keys)
+                if explicit_poll:
+                    removed_keys.difference_update(confirmed_model_keys)
                 refreshed_models = merge_saved_model_options(
                     None,
                     online_models,

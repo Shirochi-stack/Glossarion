@@ -81,6 +81,7 @@ def test_glossary_refinement_request_mode_defaults_to_all_types(monkeypatch):
 
 def test_glossary_refinement_gui_only_applies_explicit_request_mode():
     resolve = GlossaryManagerMixin._configured_glossary_refinement_chunking_mode
+    combo_index = GlossaryManagerMixin._glossary_refinement_chunking_combo_index
     config = {}
 
     assert resolve(config) is None
@@ -88,6 +89,10 @@ def test_glossary_refinement_gui_only_applies_explicit_request_mode():
     assert resolve({"glossary_refinement_chunking_mode": "unknown"}) is None
     assert resolve({"glossary_refinement_chunking_mode": "separate"}) == "separate"
     assert resolve({"glossary_refinement_chunking_mode": "all"}) == "all"
+    assert combo_index(config) == 1
+    assert combo_index({"glossary_refinement_chunking_mode": "unknown"}) == 1
+    assert combo_index({"glossary_refinement_chunking_mode": "separate"}) == 0
+    assert combo_index({"glossary_refinement_chunking_mode": "all"}) == 1
 
 
 def test_glossary_filter_apply_uses_all_checked_values_without_a_search():

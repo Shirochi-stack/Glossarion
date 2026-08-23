@@ -3708,6 +3708,72 @@ def test_chapter_extractor_preserves_cache_only_for_matching_source_count(
     ) is False
 
 
+def test_changed_partial_epub_preserves_images_used_by_unmapped_html(
+    monkeypatch,
+    tmp_path,
+):
+    source_epub = tmp_path / 'partial.epub'
+    opf = '''<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Partial update</dc:title>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="c3000" href="Text/chapter3000.xhtml"
+          media-type="application/xhtml+xml"/>
+    <item id="current-image" href="Images/current.png" media-type="image/png"/>
+  </manifest>
+  <spine><itemref idref="c3000"/></spine>
+</package>'''
+    chapter = (
+        '<html><body><h1>Chapter 3000</h1>'
+        '<p>Current partial source chapter.</p>'
+        '<img src="../Images/current.png"/>'
+        '</body></html>'
+    )
+    with zipfile.ZipFile(source_epub, 'w') as archive:
+        archive.writestr('OEBPS/content.opf', opf)
+        archive.writestr('OEBPS/Text/chapter3000.xhtml', chapter)
+        archive.writestr('OEBPS/Images/current.png', b'current-image-bytes')
+
+    output_dir = tmp_path / 'output'
+    images_dir = output_dir / 'images'
+    images_dir.mkdir(parents=True)
+    retained_image = images_dir / 'chapter0001_img_1.png'
+    retained_image.write_bytes(b'retained-image-bytes')
+    stale_image = images_dir / 'unused-stale.png'
+    stale_image.write_bytes(b'unused-stale-bytes')
+    retained_html = output_dir / 'response_chapter0001.html'
+    retained_html.write_text(
+        '<html><body><img src="images/chapter0001_img_1.png"/></body></html>',
+        encoding='utf-8',
+    )
+
+    monkeypatch.delenv('SINGLE_CHAPTER_FILTER', raising=False)
+    monkeypatch.setenv('EXTRACTION_MODE', 'comprehensive')
+    monkeypatch.setenv('EXTRACTION_WORKERS', '1')
+    monkeypatch.setenv('DOWNLOAD_REMOTE_IMAGE_URLS', '0')
+    monkeypatch.setenv('DISABLE_CHAPTER_MERGING', '1')
+
+    with zipfile.ZipFile(source_epub, 'r') as archive:
+        chapters = chapter_extractor.extract_chapters(
+            archive,
+            str(output_dir),
+            parser='html.parser',
+        )
+
+    assert len(chapters) == 1
+    assert retained_image.read_bytes() == b'retained-image-bytes'
+    assert not stale_image.exists()
+    assert (images_dir / 'chapter3000_img_1.png').read_bytes() == b'current-image-bytes'
+    assert 'chapter0001_img_1.png' in retained_html.read_text(encoding='utf-8')
+    rename_map = json.loads(
+        (output_dir / 'image_rename_map.json').read_text(encoding='utf-8')
+    )
+    assert rename_map == {'current.png': 'chapter3000_img_1.png'}
+
+
 def test_resource_marker_does_not_suppress_mismatched_remote_cache_refresh(
     monkeypatch, tmp_path
 ):

@@ -200,6 +200,91 @@ def test_saved_model_merge_adds_new_entries_without_restoring_removed_ones():
     ]
 
 
+def test_explicit_manual_model_entry_clears_tombstone_and_persists_choice(monkeypatch):
+    import translator_gui
+
+    saved = []
+    refreshed = []
+    gui = SimpleNamespace(
+        config={
+            "custom_model_list": ["provider/kept"],
+            "model_manager_removed_models": [
+                "provider/deleted",
+                "gemini-3.7-flash",
+            ],
+        },
+        save_config=lambda show_message=False: saved.append(show_message) or True,
+        _refresh_model_combo_catalog=lambda models: refreshed.append(list(models)),
+        _refresh_model_search_poll_state=lambda: None,
+    )
+    monkeypatch.setattr(
+        translator_gui,
+        "get_model_options",
+        lambda: ["provider/kept", "gemini-3.7-flash"],
+    )
+
+    assert translator_gui.TranslatorGUI._restore_removed_model_choices(
+        gui,
+        ["gemini-3.7-flash"],
+        add_to_saved=True,
+        refresh=True,
+    )
+
+    assert gui.config["model_manager_removed_models"] == ["provider/deleted"]
+    assert gui.config["custom_model_list"] == [
+        "provider/kept",
+        "gemini-3.7-flash",
+    ]
+    assert refreshed[-1] == ["provider/kept", "gemini-3.7-flash"]
+    assert saved == [False]
+
+
+def test_explicit_poll_restores_confirmed_model_but_not_other_tombstones():
+    import translator_gui
+
+    displayed = ["provider/kept"]
+    saved = []
+    gui = SimpleNamespace(
+        config={
+            "custom_model_list": list(displayed),
+            "model_manager_removed_models": [
+                "gemini-3.7-flash",
+                "provider/still-deleted",
+            ],
+        },
+        model_combo=SimpleNamespace(
+            count=lambda: len(displayed),
+            itemText=lambda index: displayed[index],
+        ),
+        _refresh_model_combo_catalog=lambda models: displayed.__setitem__(
+            slice(None), list(models)
+        ),
+        _ensure_polled_model_marker_state=lambda: {},
+        save_config=lambda show_message=False: saved.append(show_message) or True,
+        append_log=lambda _message: None,
+    )
+    gui._restore_removed_model_choices = types.MethodType(
+        translator_gui.TranslatorGUI._restore_removed_model_choices,
+        gui,
+    )
+    result = SimpleNamespace(
+        models=["provider/kept", "gemini-3.7-flash"],
+        statuses={"gemini": "online (1 models)"},
+        provider_models={"gemini": ["gemini-3.7-flash"]},
+        requested_provider=None,
+        restore_removed_models=True,
+    )
+
+    translator_gui.TranslatorGUI._apply_provider_model_catalog_refresh(gui, result)
+
+    assert gui.config["model_manager_removed_models"] == [
+        "provider/still-deleted"
+    ]
+    assert displayed == ["provider/kept", "gemini-3.7-flash"]
+    assert gui._polled_online_model_ids == {"gemini-3.7-flash"}
+    assert saved == [False]
+
+
 def test_openrouter_online_catalog_replaces_static_provider_section(tmp_path, monkeypatch):
     cache_path = _isolated_cache(tmp_path, monkeypatch)
 
