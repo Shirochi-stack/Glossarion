@@ -29,6 +29,9 @@ import requests
 BUILD_BASE_URL = "https://build.nvidia.com"
 API_BASE_URL = "https://api.ngc.nvidia.com"
 DEFAULT_ORG_ID = "qc69jvmznzxy"
+CATALOG_SEARCH_URL = f"{API_BASE_URL}/v2/search/catalog/resources/ENDPOINT"
+CATALOG_PAGE_SIZE = 200
+CATALOG_MAX_PAGES = 50
 DEFAULT_HCAPTCHA_SITEKEY = "0c6a1e45-75d7-43cc-b836-a0c9d886b8ee"
 DEFAULT_PUBLISHER = "z-ai"
 DEFAULT_TIMEOUT = 180
@@ -485,26 +488,163 @@ def _resolve_model_metadata(page_url: str) -> Dict[str, str]:
     return metadata
 
 
-def fetch_available_models(timeout: int = 15) -> List[str]:
-    """Return NVIDIA's current public NIM catalog model IDs."""
-    response = requests.get(
-        "https://integrate.api.nvidia.com/v1/models",
-        headers={"Accept": "application/json", "User-Agent": USER_AGENT},
-        timeout=max(1, int(round(timeout))),
-    )
-    response.raise_for_status()
-    payload = response.json()
-    entries = payload.get("data", []) if isinstance(payload, dict) else []
-    models: List[str] = []
-    seen = set()
-    for entry in entries:
-        if not isinstance(entry, dict):
+def _catalog_label_values(entry: Dict[str, Any]) -> set:
+    """Return normalized values from the NGC search result's label variants."""
+    values = set()
+    labels = entry.get("labels", [])
+    if not isinstance(labels, list):
+        return values
+    for label in labels:
+        if isinstance(label, str):
+            candidates = (label,)
+        elif isinstance(label, dict):
+            candidates_list: List[Any] = []
+            for field in ("values", "unresolvedValues", "unresolved_values"):
+                field_values = label.get(field, [])
+                if isinstance(field_values, (list, tuple, set)):
+                    candidates_list.extend(field_values)
+                elif isinstance(field_values, str):
+                    candidates_list.append(field_values)
+            candidates = tuple(candidates_list)
+        else:
             continue
-        model = str(entry.get("id") or entry.get("name") or "").strip()
-        key = model.casefold()
-        if model and key not in seen:
-            seen.add(key)
+        for candidate in candidates:
+            value = str(candidate or "").strip().casefold()
+            if value:
+                values.add(value)
+                # Endpoint detail records sometimes qualify labels with a
+                # namespace, e.g. playgroundType:endpoint:playgroundtype_chat.
+                values.add(value.rsplit(":", 1)[-1])
+    return values
+
+
+def _catalog_entry_publisher(entry: Dict[str, Any]) -> str:
+    publisher = str(entry.get("publisher") or "").strip()
+    if publisher:
+        return publisher
+    labels = entry.get("labels", [])
+    if not isinstance(labels, list):
+        return ""
+    for label in labels:
+        if (
+            not isinstance(label, dict)
+            or str(label.get("key") or "").strip().casefold() != "publisher"
+        ):
+            continue
+        values = label.get("values", [])
+        if isinstance(values, str):
+            values = [values]
+        if isinstance(values, (list, tuple)):
+            publisher = next((str(value).strip() for value in values if str(value).strip()), "")
+            if publisher:
+                return publisher
+    return ""
+
+
+def _catalog_model_id(entry: Dict[str, Any]) -> Optional[str]:
+    """Return an AuthND-compatible ID for a free chat endpoint, if applicable."""
+    labels = _catalog_label_values(entry)
+    is_chat = bool(labels.intersection({"chat", "playgroundtype_chat"}))
+    is_free_endpoint = bool(labels.intersection({"free endpoint", "nim_type_preview"}))
+    if not is_chat or not is_free_endpoint:
+        return None
+
+    publisher = _catalog_entry_publisher(entry).strip("/")
+    display_name = str(
+        entry.get("displayName")
+        or entry.get("display_name")
+        or entry.get("name")
+        or ""
+    ).strip("/")
+    model = f"{publisher}/{display_name}" if publisher and display_name else ""
+    if (
+        not model
+        or len(model) > 300
+        or any(character.isspace() for character in model)
+        or "//" in model
+    ):
+        raise ValueError(
+            "NVIDIA Build returned a free chat endpoint without a usable publisher/model ID"
+        )
+    return model
+
+
+def fetch_available_models(timeout: int = 15) -> List[str]:
+    """Return AuthND-compatible free chat IDs from NVIDIA's public Build catalog."""
+    request_timeout = max(1, int(round(timeout)))
+    resources: Dict[str, Dict[str, Any]] = {}
+    expected_total: Optional[int] = None
+
+    for page in range(CATALOG_MAX_PAGES):
+        query = {
+            "query": "*",
+            "filters": [{"field": "orgName", "value": DEFAULT_ORG_ID}],
+            "page": page,
+            "pageSize": CATALOG_PAGE_SIZE,
+        }
+        response = requests.get(
+            CATALOG_SEARCH_URL,
+            params={"q": json.dumps(query, separators=(",", ":"))},
+            headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+            timeout=request_timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            raise ValueError("NVIDIA Build returned a malformed endpoint catalog")
+        try:
+            page_total = int(payload["resultTotal"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("NVIDIA Build catalog did not include a valid result total") from exc
+        if page_total < 0 or (expected_total is not None and page_total != expected_total):
+            raise ValueError("NVIDIA Build catalog result total changed during pagination")
+        expected_total = page_total
+
+        added = 0
+        for group in payload["results"]:
+            if not isinstance(group, dict):
+                raise ValueError("NVIDIA Build returned a malformed catalog result group")
+            group_resources = group.get("resources", [])
+            if not isinstance(group_resources, list):
+                raise ValueError("NVIDIA Build returned a malformed catalog resource group")
+            for entry in group_resources:
+                if not isinstance(entry, dict):
+                    raise ValueError("NVIDIA Build returned a malformed endpoint record")
+                resource_id = str(entry.get("resourceId") or entry.get("resource_id") or "").strip()
+                if not resource_id:
+                    raise ValueError("NVIDIA Build returned an endpoint without a resource ID")
+                key = resource_id.casefold()
+                if key not in resources:
+                    resources[key] = entry
+                    added += 1
+
+        if len(resources) >= expected_total:
+            break
+        if not added:
+            raise RuntimeError(
+                f"NVIDIA Build catalog pagination stopped at {len(resources)}/{expected_total} endpoints"
+            )
+    else:
+        raise RuntimeError(
+            f"NVIDIA Build catalog exceeded {CATALOG_MAX_PAGES} pages "
+            f"with {len(resources)}/{expected_total or 0} endpoints"
+        )
+
+    if expected_total is None or len(resources) < expected_total:
+        raise RuntimeError(
+            f"NVIDIA Build catalog was incomplete ({len(resources)}/{expected_total or 0} endpoints)"
+        )
+
+    models: List[str] = []
+    seen_models = set()
+    for entry in resources.values():
+        model = _catalog_model_id(entry)
+        key = str(model or "").casefold()
+        if model and key not in seen_models:
+            seen_models.add(key)
             models.append(model)
+    if not models:
+        raise ValueError("NVIDIA Build returned no compatible free chat model IDs")
     return models
 
 

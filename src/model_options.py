@@ -1149,23 +1149,13 @@ def _fetch_authenticated_catalog(
     if route == "authnd":
         import authnd_auth
 
-        advertised = {
-            str(model).strip().casefold()
-            for model in authnd_auth.fetch_available_models(
-                timeout=max(1, int(round(timeout)))
-            )
-            if str(model).strip()
-        }
-        # AuthND's hidden /predict transport supports the curated chat subset,
-        # while NVIDIA's public endpoint also contains embeddings, parsers,
-        # safety models, and other incompatible NIM types. Preserve the trusted
-        # chat order and validate it against the live catalog.
-        raw_models = [
-            model[len("authnd/"):]
-            for model in _get_static_model_options()
-            if model.casefold().startswith("authnd/")
-            and model[len("authnd/"):].casefold() in advertised
-        ]
+        # The AuthND helper reads NVIDIA Build's public endpoint metadata and
+        # returns only models explicitly labeled as free chat playgrounds. Do
+        # not intersect this live result with the curated fallback: doing so
+        # hides newly released models and models omitted by /v1/models.
+        raw_models = authnd_auth.fetch_available_models(
+            timeout=max(1, int(round(timeout)))
+        )
     elif route == "authza":
         import authza_auth
 

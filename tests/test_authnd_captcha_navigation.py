@@ -41,6 +41,167 @@ def test_deepseek_v4_none_is_sent_as_reasoning_effort(monkeypatch):
     assert payload["chat_template_kwargs"]["enable_thinking"] is True
 
 
+def _catalog_endpoint(
+    name,
+    publisher,
+    *,
+    values=(),
+    unresolved_values=(),
+    available="true",
+):
+    return {
+        "resourceType": "ENDPOINT",
+        "resourceId": f"{authnd.DEFAULT_ORG_ID}/{name}",
+        "orgName": authnd.DEFAULT_ORG_ID,
+        "name": name.replace(".", "_"),
+        "displayName": name,
+        "isPublic": True,
+        "guestAccess": True,
+        "labels": [
+            {
+                "key": "general",
+                "values": list(values),
+                "unresolvedValues": list(unresolved_values),
+            },
+            {"key": "publisher", "values": [publisher]},
+        ],
+        "attributes": [{"key": "AVAILABLE", "value": available}],
+    }
+
+
+class _CatalogResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+def test_fetch_available_models_uses_paginated_build_free_chat_catalog(monkeypatch):
+    monkeypatch.setattr(authnd, "CATALOG_PAGE_SIZE", 2)
+    requested_pages = []
+    deepseek = _catalog_endpoint(
+        "deepseek-v4-flash-0731",
+        "deepseek-ai",
+        values=("chat", "Free Endpoint"),
+        # This flag is inconsistent with real hidden-route usability and must
+        # not override the explicit free-chat labels.
+        available="false",
+    )
+    embedding = _catalog_endpoint(
+        "bge-m3",
+        "baai",
+        values=("Embeddings", "Free Endpoint"),
+    )
+    glm = _catalog_endpoint(
+        "glm-5.2",
+        "z-ai",
+        unresolved_values=("playgroundtype_chat", "nim_type_preview"),
+    )
+    image_model = _catalog_endpoint(
+        "image-only",
+        "example",
+        values=("Image Generation", "Free Endpoint"),
+    )
+    pages = {
+        0: {
+            "resultTotal": 4,
+            "results": [
+                {"resources": [deepseek, embedding]},
+                # NGC can repeat records in multiple result groups.
+                {"resources": [deepseek]},
+            ],
+        },
+        1: {
+            "resultTotal": 4,
+            "results": [{"resources": [glm, image_model]}],
+        },
+    }
+
+    def fake_get(url, *, params, headers, timeout):
+        assert url == authnd.CATALOG_SEARCH_URL
+        assert headers["Accept"] == "application/json"
+        assert timeout == 7
+        query = json.loads(params["q"])
+        requested_pages.append(query["page"])
+        assert query["pageSize"] == 2
+        assert query["filters"] == [
+            {"field": "orgName", "value": authnd.DEFAULT_ORG_ID}
+        ]
+        return _CatalogResponse(pages[query["page"]])
+
+    monkeypatch.setattr(authnd.requests, "get", fake_get)
+
+    assert authnd.fetch_available_models(timeout=7) == [
+        "deepseek-ai/deepseek-v4-flash-0731",
+        "z-ai/glm-5.2",
+    ]
+    assert requested_pages == [0, 1]
+
+
+def test_fetch_available_models_rejects_incomplete_pagination(monkeypatch):
+    monkeypatch.setattr(authnd, "CATALOG_PAGE_SIZE", 1)
+    first_model = _catalog_endpoint(
+        "deepseek-v4-flash-0731",
+        "deepseek-ai",
+        values=("chat", "Free Endpoint"),
+    )
+
+    def fake_get(_url, *, params, **_kwargs):
+        page = json.loads(params["q"])["page"]
+        if page:
+            raise RuntimeError("second catalog page failed")
+        return _CatalogResponse({
+            "resultTotal": 2,
+            "results": [{"resources": [first_model]}],
+        })
+
+    monkeypatch.setattr(authnd.requests, "get", fake_get)
+
+    with pytest.raises(RuntimeError, match="second catalog page failed"):
+        authnd.fetch_available_models(timeout=3)
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        ({"resultTotal": 1, "results": "not-a-list"}, "malformed endpoint catalog"),
+        ({"resultTotal": 0, "results": []}, "no compatible free chat model IDs"),
+    ],
+)
+def test_fetch_available_models_rejects_malformed_or_empty_catalogs(
+    monkeypatch, payload, error
+):
+    monkeypatch.setattr(
+        authnd.requests,
+        "get",
+        lambda *_args, **_kwargs: _CatalogResponse(payload),
+    )
+
+    with pytest.raises(ValueError, match=error):
+        authnd.fetch_available_models()
+
+
+def test_fetch_available_models_rejects_chat_endpoint_without_publisher(monkeypatch):
+    malformed = _catalog_endpoint(
+        "missing-publisher",
+        "",
+        values=("chat", "Free Endpoint"),
+    )
+    payload = {"resultTotal": 1, "results": [{"resources": [malformed]}]}
+    monkeypatch.setattr(
+        authnd.requests,
+        "get",
+        lambda *_args, **_kwargs: _CatalogResponse(payload),
+    )
+
+    with pytest.raises(ValueError, match="without a usable publisher/model ID"):
+        authnd.fetch_available_models()
+
+
 class _Signal:
     def __init__(self):
         self._callbacks = []

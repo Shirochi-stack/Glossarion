@@ -543,14 +543,14 @@ def test_authgem_poll_uses_selected_account_quota_catalog(tmp_path, monkeypatch)
     ]
 
 
-def test_authnd_poll_validates_curated_chat_models_against_public_catalog(
+def test_authnd_poll_uses_complete_compatible_build_catalog_without_static_intersection(
     tmp_path, monkeypatch
 ):
     _isolated_cache(tmp_path, monkeypatch)
     fake_authnd = types.SimpleNamespace(
         fetch_available_models=lambda timeout: [
-            "nvidia/nemotron-3-ultra-550b-a55b",
-            "baai/bge-m3",
+            "deepseek-ai/deepseek-v4-flash-0731",
+            "z-ai/glm-5.2",
         ],
     )
     monkeypatch.setitem(sys.modules, "authnd_auth", fake_authnd)
@@ -562,9 +562,64 @@ def test_authnd_poll_validates_curated_chat_models_against_public_catalog(
     )
 
     assert result.provider_models["authnd"] == [
-        "authnd/nvidia/nemotron-3-ultra-550b-a55b",
+        "authnd/deepseek-ai/deepseek-v4-flash-0731",
+        "authnd/z-ai/glm-5.2",
     ]
-    assert "authnd/baai/bge-m3" not in result.models
+    assert "authnd/deepseek-ai/deepseek-v4-flash-0731" in result.models
+    assert "authnd/z-ai/glm-5.2" in result.models
+
+
+def test_authnd_catalog_failure_preserves_last_successful_markers_and_static_fallback(
+    tmp_path, monkeypatch
+):
+    _isolated_cache(tmp_path, monkeypatch)
+    live_model = "deepseek-ai/deepseek-v4-flash-0731"
+    fake_authnd = types.SimpleNamespace(
+        fetch_available_models=lambda timeout: [live_model],
+    )
+    monkeypatch.setitem(sys.modules, "authnd_auth", fake_authnd)
+
+    successful = model_options.refresh_provider_model_catalogs(
+        active_model="authnd/deepseek-ai/old",
+        only_provider="authnd",
+        timeout=0.1,
+    )
+    assert successful.provider_models["authnd"] == [f"authnd/{live_model}"]
+
+    def offline(timeout):
+        assert timeout == 1
+        raise OSError("offline")
+
+    fake_authnd.fetch_available_models = offline
+    failed = model_options.refresh_provider_model_catalogs(
+        active_model="authnd/deepseek-ai/old",
+        only_provider="authnd",
+        timeout=0.1,
+    )
+
+    assert failed.provider_models == {}
+    assert failed.statuses["authnd"] == "static fallback (OSError — offline)"
+    assert f"authnd/{live_model}" not in failed.models
+    assert "authnd/nvidia/nemotron-3-ultra-550b-a55b" in failed.models
+    assert model_options.get_last_successful_provider_models()["authnd"] == [
+        f"authnd/{live_model}"
+    ]
+
+
+def test_numbered_authnd_poll_preserves_selected_route_prefix(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    fake_authnd = types.SimpleNamespace(
+        fetch_available_models=lambda timeout: ["z-ai/glm-5.2"],
+    )
+    monkeypatch.setitem(sys.modules, "authnd_auth", fake_authnd)
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authnd4/z-ai/glm-old",
+        only_provider="authnd:4",
+        timeout=0.1,
+    )
+
+    assert result.provider_models["authnd:4"] == ["authnd4/z-ai/glm-5.2"]
 
 
 def test_authza_poll_reads_existing_selector_without_login(tmp_path, monkeypatch):
