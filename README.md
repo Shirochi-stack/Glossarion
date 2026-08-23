@@ -342,7 +342,7 @@ Glossarion/
 ├── requirements.txt                # Windows dependencies
 ├── requirements-macos.txt          # macOS dependencies
 ├── translator.spec                 # PyInstaller build config
-└── LICENSE                         # MIT License
+└── LICENSE                         # GNU AGPL v3.0
 ```
 
 ---
@@ -389,7 +389,11 @@ Built using:
 
 ## 📜 License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+Copyright (C) 2025 Shirochi-stack.
+
+This project is licensed under the GNU Affero General Public License v3.0 only
+(`AGPL-3.0-only`) — see the [LICENSE](LICENSE) file for details. Third-party
+components remain subject to their respective licenses.
 
 ---
 
