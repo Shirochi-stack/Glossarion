@@ -1165,6 +1165,7 @@ def test_last_successful_catalog_history_survives_failure_without_marking_fallba
 
 def test_gui_catalog_refresh_updates_stealthily_while_model_editor_is_active(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
     qt_widgets = pytest.importorskip("PySide6.QtWidgets")
     import translator_gui
 
@@ -1214,6 +1215,8 @@ def test_gui_catalog_refresh_updates_stealthily_while_model_editor_is_active(mon
     qt_gui = pytest.importorskip("PySide6.QtGui")
     assert completer_popup.objectName() == "modelCompleterPopup"
     assert combo_popup.objectName() == "modelComboPopup"
+    assert completer_popup.iconSize() == qt_core.QSize(14, 14)
+    assert combo_popup.iconSize() == qt_core.QSize(14, 14)
     assert "background-color: #2d2d2d" in completer_popup.styleSheet()
     assert "background-color: #2d2d2d" in combo_popup.styleSheet()
     assert "QAbstractItemView::item {\n        min-height" not in (
@@ -1377,8 +1380,36 @@ def test_main_model_search_marks_polled_rows_and_hides_unpolled_without_changing
     assert completion_model.data(
         completion_model.index(confirmed_row, 0), qt_core.Qt.EditRole
     ) == "provider/confirmed"
-    assert not combo.itemIcon(0).isNull()
+    assert combo.itemIcon(0).isNull()
     assert combo.itemIcon(1).isNull()
+    assert combo.itemData(0, translator_gui._MODEL_POLL_MARKER_ROLE) is True
+    assert combo.itemData(1, translator_gui._MODEL_POLL_MARKER_ROLE) is False
+    combo.setCurrentIndex(0)
+    app.processEvents()
+    assert combo.lineEdit().textMargins().left() == 13
+    assert not combo._model_poll_marker_label.isHidden()
+    assert combo._model_poll_marker_label.autoFillBackground() is False
+    assert "background-color: transparent" in (
+        combo._model_poll_marker_label.styleSheet()
+    )
+    marker_image = combo._model_poll_marker_label.pixmap().toImage()
+    assert marker_image.pixelColor(0, 0).alpha() == 0
+    assert isinstance(
+        combo.view().itemDelegate(),
+        translator_gui._ModelPollMarkerDelegate,
+    )
+    assert isinstance(
+        combo.completer().popup().itemDelegate(),
+        translator_gui._ModelPollMarkerDelegate,
+    )
+    assert completion_model.data(
+        completion_model.index(confirmed_row, 0),
+        translator_gui._MODEL_POLL_MARKER_ROLE,
+    ) is True
+    combo.setCurrentIndex(1)
+    app.processEvents()
+    assert combo.lineEdit().textMargins().left() == 0
+    assert combo._model_poll_marker_label.isHidden()
 
     combo.setCurrentText("provider/unpolled")
     harness.config["model_manager_hide_unpolled_models"] = True
@@ -1468,6 +1499,8 @@ def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeyp
     completion_model = combo._model_completer_proxy
 
     assert not isinstance(completion_model, qt_core.QSortFilterProxyModel)
+    assert combo.completer().popup().iconSize() == qt_core.QSize(14, 14)
+    assert combo.iconSize() == qt_core.QSize(14, 14)
     completion_model.set_search_text("alpha")
     assert completion_model.stringList() == [
         "alpha-model",
@@ -1497,8 +1530,26 @@ def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeyp
         completion_model.index(marked_index, 0), qt_core.Qt.DecorationRole
     ).isNull()
     assert completion_model.data(
+        completion_model.index(marked_index, 0),
+        multi_api_key_manager._MODEL_POLL_MARKER_ROLE,
+    ) is True
+    assert completion_model.data(
         completion_model.index(marked_index, 0), qt_core.Qt.EditRole
     ) == "authgpt1/gpt-5.6"
+    assert combo.itemIcon(models.index("authgpt/gpt-5.6")).isNull()
+    assert combo.itemData(
+        models.index("authgpt/gpt-5.6"),
+        multi_api_key_manager._MODEL_POLL_MARKER_ROLE,
+    ) is True
+    combo.setCurrentIndex(models.index("authgpt/gpt-5.6"))
+    app.processEvents()
+    assert combo.lineEdit().textMargins().left() == 13
+    assert not combo._model_poll_marker_label.isHidden()
+    assert combo._model_poll_marker_label.autoFillBackground() is False
+    combo.setCurrentIndex(models.index("alpha-model"))
+    app.processEvents()
+    assert combo.lineEdit().textMargins().left() == 0
+    assert combo._model_poll_marker_label.isHidden()
 
     translator.config["model_manager_hide_unpolled_models"] = True
     multi_api_key_manager.MultiAPIKeyDialog._refresh_model_poll_markers(owner)

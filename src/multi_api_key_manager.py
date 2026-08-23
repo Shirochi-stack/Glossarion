@@ -22,9 +22,10 @@ try:
         QTextEdit, QScrollArea, QFileDialog, QMessageBox, QComboBox, QCheckBox,
         QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox, QDoubleSpinBox,
         QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
-        QCompleter, QDialogButtonBox, QInputDialog, QAbstractSpinBox
+        QCompleter, QDialogButtonBox, QInputDialog, QAbstractSpinBox,
+        QStyledItemDelegate, QStyleOptionViewItem, QStyle
     )
-    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot
+    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot, QSize, QRect
     from PySide6.QtGui import QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform
     from spinning import create_icon_label, animate_icon
     HAS_GUI = True
@@ -61,6 +62,8 @@ except ImportError:
     QFrame = object
     QCompleter = object
     QDialogButtonBox = object
+    QStyleOptionViewItem = object
+    QStyle = object
     QIcon = object
     QFont = object
     QPixmap = object
@@ -101,6 +104,141 @@ except Exception:
     IndividualEndpointDialog = None
 
 logger = logging.getLogger(__name__)
+
+
+_MODEL_POLL_MARKER_ROLE = Qt.UserRole + 73 if HAS_GUI else 73
+
+
+if HAS_GUI:
+    class _ModelPollMarkerDelegate(QStyledItemDelegate):
+        """Paint popup checks with an explicit compact check-to-text gap."""
+
+        def __init__(self, checked_icon, parent=None):
+            super().__init__(parent)
+            self._checked_icon = checked_icon
+
+        def set_checked_icon(self, checked_icon):
+            self._checked_icon = checked_icon
+
+        def paint(self, painter, option, index):
+            opt = QStyleOptionViewItem(option)
+            super().initStyleOption(opt, index)
+            text = opt.text
+            marked = bool(index.data(_MODEL_POLL_MARKER_ROLE))
+
+            opt.text = ""
+            opt.icon = QIcon()
+            style = opt.widget.style() if opt.widget is not None else QApplication.style()
+            style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+
+            content = option.rect.adjusted(4, 0, -4, 0)
+            text_left = content.left()
+            if marked:
+                icon_rect = QRect(
+                    content.left(),
+                    content.top() + max(0, (content.height() - 14) // 2),
+                    14,
+                    14,
+                )
+                self._checked_icon.paint(painter, icon_rect, Qt.AlignCenter)
+                text_left = icon_rect.right() + 3
+
+            text_rect = QRect(
+                text_left,
+                content.top(),
+                max(0, content.right() - text_left + 1),
+                content.height(),
+            )
+            color = (
+                opt.palette.highlightedText().color()
+                if option.state & QStyle.State_Selected
+                else opt.palette.text().color()
+            )
+            painter.save()
+            try:
+                painter.setPen(color)
+                painter.setFont(opt.font)
+                rendered = opt.fontMetrics.elidedText(
+                    text,
+                    Qt.ElideRight,
+                    text_rect.width(),
+                )
+                painter.drawText(
+                    text_rect,
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    rendered,
+                )
+            finally:
+                painter.restore()
+
+
+def _update_model_field_poll_marker(combo):
+    """Render a compact transparent check inside an editable model field."""
+    if not HAS_GUI or combo is None or not combo.isEditable():
+        return
+    try:
+        line_edit = combo.lineEdit()
+        marker = getattr(combo, "_model_poll_marker_label", None)
+        if marker is None:
+            return
+        current_index = combo.currentIndex()
+        has_check = bool(
+            current_index >= 0
+            and combo.itemData(current_index, _MODEL_POLL_MARKER_ROLE)
+        )
+        marker.move(0, max(0, (line_edit.height() - marker.height()) // 2))
+        marker.setVisible(has_check)
+        margins = line_edit.textMargins()
+        desired_left = 13 if has_check else 0
+        if margins.left() != desired_left:
+            line_edit.setTextMargins(
+                desired_left,
+                margins.top(),
+                margins.right(),
+                margins.bottom(),
+            )
+        if has_check:
+            marker.raise_()
+    except RuntimeError:
+        pass
+
+
+def _install_model_field_poll_marker(combo, checked_icon):
+    """Install popup-only decoration and the compact field check overlay."""
+    if not HAS_GUI or combo is None or not combo.isEditable():
+        return
+    try:
+        popup = combo.view()
+        delegate = getattr(combo, "_model_poll_marker_delegate", None)
+        if delegate is None:
+            delegate = _ModelPollMarkerDelegate(checked_icon, popup)
+            popup.setItemDelegate(delegate)
+            combo._model_poll_marker_delegate = delegate
+        else:
+            delegate.set_checked_icon(checked_icon)
+
+        line_edit = combo.lineEdit()
+        marker = getattr(combo, "_model_poll_marker_label", None)
+        if marker is None:
+            marker = QLabel(line_edit)
+            marker.setFixedSize(14, 14)
+            marker.setAlignment(Qt.AlignCenter)
+            marker.setAutoFillBackground(False)
+            marker.setAttribute(Qt.WA_TransparentForMouseEvents)
+            marker.setStyleSheet(
+                "QLabel { background-color: transparent; border: none; padding: 0px; }"
+            )
+            combo._model_poll_marker_label = marker
+        marker.setPixmap(checked_icon.pixmap(QSize(14, 14)))
+
+        if not getattr(combo, "_model_poll_marker_connected", False):
+            combo.currentIndexChanged.connect(
+                lambda _index, target=combo: _update_model_field_poll_marker(target)
+            )
+            combo._model_poll_marker_connected = True
+        _update_model_field_poll_marker(combo)
+    except RuntimeError:
+        pass
 
 
 def preview_pool_button_stylesheet() -> str:
@@ -7700,11 +7838,13 @@ class MultiAPIKeyDialog(QDialog):
         combo_blocked = combo.blockSignals(True)
         line_blocked = line_edit.blockSignals(True) if line_edit is not None else False
         try:
+            combo.setIconSize(QSize(14, 14))
             popup = combo.view()
             for row in range(combo.count()):
                 model = combo.itemText(row)
                 is_polled = model_has_polled_marker(model, polled_model_keys)
-                combo.setItemIcon(row, checked_icon if is_polled else empty_icon)
+                combo.setItemIcon(row, empty_icon)
+                combo.setItemData(row, is_polled, _MODEL_POLL_MARKER_ROLE)
                 if popup is not None:
                     popup.setRowHidden(row, bool(hide_unpolled and not is_polled))
         except RuntimeError:
@@ -7724,6 +7864,7 @@ class MultiAPIKeyDialog(QDialog):
                 combo.blockSignals(combo_blocked)
             except RuntimeError:
                 pass
+        _install_model_field_poll_marker(combo, checked_icon)
 
     def _refresh_model_poll_markers(self):
         """Refresh every registered model picker after polling/filter changes."""
@@ -7833,12 +7974,18 @@ class MultiAPIKeyDialog(QDialog):
                 self.set_search_text("")
 
             def data(self, index, role=Qt.DisplayRole):
-                if index.isValid() and role in (Qt.DecorationRole, Qt.ToolTipRole):
+                if index.isValid() and role in (
+                    Qt.DecorationRole,
+                    Qt.ToolTipRole,
+                    _MODEL_POLL_MARKER_ROLE,
+                ):
                     value = super().data(index, Qt.DisplayRole)
                     is_polled = model_has_polled_marker(
                         value,
                         self._polled_model_keys,
                     )
+                    if role == _MODEL_POLL_MARKER_ROLE:
+                        return is_polled
                     if role == Qt.DecorationRole:
                         return self._checked_icon if is_polled else QIcon()
                     return (
@@ -7924,6 +8071,13 @@ class MultiAPIKeyDialog(QDialog):
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setCompletionMode(QCompleter.PopupCompletion)
         completer.setFilterMode(Qt.MatchContains)
+        # The completer owns a separate popup that does not inherit the combo
+        # icon size.  Match the actual poll-check size so Qt does not reserve
+        # an oversized decoration column between the check and model text.
+        completer.popup().setIconSize(QSize(14, 14))
+        completer.popup().setItemDelegate(
+            _ModelPollMarkerDelegate(checked_icon, completer.popup())
+        )
         combo.setCompleter(completer)
 
         # Store callback for changes. This used to call the parent model refresh
