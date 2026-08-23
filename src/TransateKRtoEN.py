@@ -5042,7 +5042,7 @@ class ProgressManager:
                     self.prog["chapters"][key] = failed
         self._progress_file_delete_invalidated = True
     
-    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None, chapter_obj=None, merged_chapters=None, qa_issues_found=None, *, prefer_thread_model=None):
+    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None, chapter_obj=None, merged_chapters=None, qa_issues_found=None, *, prefer_thread_model=None, model_name=None, key_identifier=None):
         """Update progress for a chapter"""
         # Use helper method to get consistent key
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
@@ -5116,6 +5116,20 @@ class ProgressManager:
             existing_info,
             prefer_thread=bool(prefer_thread_model),
         )
+        # Non-API completion paths (for example an image-only XHTML copied
+        # unchanged) can provide an authoritative display label. An explicit
+        # model also clears any stale API-key route from an older attempt.
+        if model_name is not None:
+            explicit_model = self._clean_model_name(model_name)
+            if explicit_model:
+                chapter_info["model_name"] = explicit_model
+            else:
+                chapter_info.pop("model_name", None)
+            explicit_key = self._clean_key_identifier(key_identifier)
+            if explicit_key:
+                chapter_info["key_identifier"] = explicit_key
+            else:
+                chapter_info.pop("key_identifier", None)
         # A normal translation can dispatch the concrete API request on a
         # helper thread. In that case its thread-local actual-model metadata is
         # unavailable when the coordinator writes the terminal chapter row.
@@ -26614,7 +26628,15 @@ def main(log_callback=None, stop_callback=None):
                     write_utf8_html_file(output_path, original_markup)
                     retroactive_update_image_references(out)
 
-                    progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
+                    progress_manager.update(
+                        idx,
+                        actual_num,
+                        content_hash,
+                        fname,
+                        status="completed",
+                        chapter_obj=c,
+                        model_name="COPIED",
+                    )
                     progress_manager.save()
                     chapters_completed += 1
                     continue
@@ -27711,7 +27733,15 @@ def main(log_callback=None, stop_callback=None):
                     write_utf8_html_file(output_path, original_markup)
                     retroactive_update_image_references(out)
 
-                    progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
+                    progress_manager.update(
+                        idx,
+                        actual_num,
+                        content_hash,
+                        fname,
+                        status="completed",
+                        chapter_obj=c,
+                        model_name="COPIED",
+                    )
                     progress_manager.save()
                     chapters_completed += 1
                     continue
@@ -27806,6 +27836,7 @@ def main(log_callback=None, stop_callback=None):
                 # Step 2: Check for headers/titles that need translation
                 from bs4 import BeautifulSoup
                 soup = BeautifulSoup(c["body"], 'html.parser')
+                header_translation_attempted = False
                 
                 # Look for headers
                 header_names = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']
@@ -27824,6 +27855,7 @@ def main(log_callback=None, stop_callback=None):
                     
                     if headers_html:
                         print(f"📤 Translating chapter headers...")
+                        header_translation_attempted = True
                         
                         # Send just the headers for translation
                         header_msgs = base_msg + [{"role": "user", "content": headers_html}]
@@ -27880,7 +27912,20 @@ def main(log_callback=None, stop_callback=None):
                 write_utf8_html_file(os.path.join(out, fname), translated_html)
                 
                 print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-only chapter")
-                progress_manager.update(idx, actual_num, content_hash, fname, status=status, chapter_obj=c)
+                progress_manager.update(
+                    idx,
+                    actual_num,
+                    content_hash,
+                    fname,
+                    status=status,
+                    chapter_obj=c,
+                    model_name=(
+                        "COPIED"
+                        if not image_processing_attempted
+                        and not header_translation_attempted
+                        else None
+                    ),
+                )
                 progress_manager.save()
                 chapters_completed += 1
                 continue

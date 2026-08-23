@@ -1261,6 +1261,42 @@ def test_progress_update_bookkeeping_can_ignore_stale_thread_model(tmp_path):
     assert entry["key_identifier"] == "MAIN KEY (gemini-3.1-flash-lite)"
 
 
+def test_progress_update_accepts_copied_non_api_model_label(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    progress.prog["chapters"]["4"] = {
+        "actual_num": 4,
+        "content_hash": "old-hash",
+        "output_file": "p-fmatter-004.xhtml",
+        "status": "completed",
+        "model_name": "old-api-model",
+        "key_identifier": "OLD KEY",
+    }
+    set_current_thread_actual_request_model(
+        "stale-thread-model",
+        "STALE KEY",
+    )
+
+    progress.update(
+        3,
+        4,
+        "new-hash",
+        "p-fmatter-004.xhtml",
+        status="completed",
+        model_name="COPIED",
+    )
+
+    entry = progress.prog["chapters"]["4"]
+    assert entry["status"] == "completed"
+    assert entry["model_name"] == "COPIED"
+    assert "key_identifier" not in entry
+    progress.save()
+    saved = json.loads((tmp_path / "translation_progress.json").read_text(
+        encoding="utf-8"
+    ))
+    assert saved["chapters"]["4"]["model_name"] == "COPIED"
+    assert "key_identifier" not in saved["chapters"]["4"]
+
+
 def test_completed_progress_uses_configured_model_when_request_thread_metadata_is_missing(
     tmp_path,
     monkeypatch,
