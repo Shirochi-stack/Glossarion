@@ -61,6 +61,7 @@ app_files = [
     ('manga_ocr_io.py', '.'),
     ('gemini_policy.py', '.'),
     ('epub_package.py', '.'),
+    ('title_tag_translation.py', '.'),
     # Core GUI
     ('translator_gui.py', '.'),
     ('parallel_epub_glossary.py', '.'),
@@ -215,6 +216,7 @@ app_modules = [
     'manga_ocr_io',
     'gemini_policy',
     'epub_package',
+    'title_tag_translation',
     'TransateKRtoEN',
     'metadata_translation_worker',
     'subtitle_processor',
