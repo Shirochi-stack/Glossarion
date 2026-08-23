@@ -93,7 +93,7 @@ from chapter_chunk_progress import (
     effective_parent_status,
     ensure_chunk_entry_schema,
     is_multi_chunk_entry,
-    remove_chunk_segments,
+    remove_chunk_segments_from_file,
     reset_chunks_for_retranslation,
     set_chunk_qa,
 )
@@ -25444,6 +25444,31 @@ class RetranslationMixin:
                 for chapter in selected_chapters
                 if chapter.get("is_chunk_progress")
             ]
+            selected_chunk_indices = {}
+            for chapter in chunk_selected:
+                chunk_key = str(chapter.get("chunk_progress_key") or "")
+                try:
+                    chunk_index = int(chapter.get("chunk_index"))
+                except (TypeError, ValueError):
+                    continue
+                if chunk_key and chunk_index > 0:
+                    selected_chunk_indices.setdefault(chunk_key, set()).add(
+                        chunk_index
+                    )
+            fully_selected_chunk_keys = set()
+            for chunk_key, indices in selected_chunk_indices.items():
+                chunk_entry = data['prog'].get("chapter_chunks", {}).get(
+                    chunk_key
+                )
+                try:
+                    total_chunks = int((chunk_entry or {}).get("total") or 0)
+                except (TypeError, ValueError):
+                    total_chunks = 0
+                if (
+                    total_chunks > 1
+                    and indices == set(range(1, total_chunks + 1))
+                ):
+                    fully_selected_chunk_keys.add(chunk_key)
 
             metadata_selected = [ch for ch in selected_chapters if self._is_metadata_progress_info(ch)]
             artifact_selected = [
@@ -25664,14 +25689,39 @@ class RetranslationMixin:
                     f"{chapter.get('chunk_index')}/{chapter.get('total_chunks')}"
                     for chapter in chunk_selected
                 ]
-                confirm_msg = (
-                    "This will remove only the selected translated chunk "
-                    "segment(s) from their HTML files, preserve every other "
-                    "cached chunk, and mark the selected chunks pending:\n\n"
-                    + ", ".join(chunk_labels[:20])
-                    + (f" (+{len(chunk_labels) - 20} more)" if len(chunk_labels) > 20 else "")
-                    + "\n\nContinue?"
-                )
+                if fully_selected_chunk_keys:
+                    complete_count = len(fully_selected_chunk_keys)
+                    partial_count = sum(
+                        1
+                        for chapter in chunk_selected
+                        if str(chapter.get("chunk_progress_key") or "")
+                        not in fully_selected_chunk_keys
+                    )
+                    action_text = (
+                        f"delete the translated HTML file for {complete_count} "
+                        "chapter/section(s) because every chunk is selected"
+                    )
+                    if partial_count:
+                        action_text += (
+                            f", remove {partial_count} individually selected "
+                            "chunk segment(s) from other HTML files"
+                        )
+                    confirm_msg = (
+                        "This will " + action_text + ", reset the selected chunk "
+                        "progress, and preserve unselected sibling chunks:\n\n"
+                        + ", ".join(chunk_labels[:20])
+                        + (f" (+{len(chunk_labels) - 20} more)" if len(chunk_labels) > 20 else "")
+                        + "\n\nContinue?"
+                    )
+                else:
+                    confirm_msg = (
+                        "This will remove only the selected translated chunk "
+                        "segment(s) from their HTML files, preserve every other "
+                        "cached chunk, and mark the selected chunks pending:\n\n"
+                        + ", ".join(chunk_labels[:20])
+                        + (f" (+{len(chunk_labels) - 20} more)" if len(chunk_labels) > 20 else "")
+                        + "\n\nContinue?"
+                    )
             elif count > 10:
                 if missing_count > 0 and existing_count > 0:
                     existing_action = (
@@ -25796,6 +25846,7 @@ class RetranslationMixin:
             full_chapter_chunk_reset_count = 0
             chunk_segment_deleted_count = 0
             chunk_segment_removal_failures = []
+            processed_full_chunk_keys = set()
             compiled_pdf_section_removed_count = 0
             compiled_pdf_chunk_segment_removed_count = 0
             compiled_pdf_deleted_count = 0
@@ -25870,6 +25921,21 @@ class RetranslationMixin:
                     chunk_key = str(ch_info.get("chunk_progress_key") or "")
                     parent_key = ch_info.get("parent_progress_key")
                     chunk_index = ch_info.get("chunk_index")
+                    delete_complete_chunk_file = (
+                        chunk_key in fully_selected_chunk_keys
+                    )
+                    if (
+                        delete_complete_chunk_file
+                        and chunk_key in processed_full_chunk_keys
+                    ):
+                        continue
+                    chunk_indices = (
+                        sorted(selected_chunk_indices.get(chunk_key, set()))
+                        if delete_complete_chunk_file
+                        else [chunk_index]
+                    )
+                    if delete_complete_chunk_file:
+                        processed_full_chunk_keys.add(chunk_key)
                     chunk_entry = data['prog'].get("chapter_chunks", {}).get(
                         chunk_key
                     )
@@ -25920,43 +25986,25 @@ class RetranslationMixin:
                     response_segment_removed = not output_exists
                     if output_exists:
                         try:
-                            with open(
-                                output_path,
-                                'r',
-                                encoding='utf-8',
-                                errors='replace',
-                            ) as source_file:
-                                original_output = source_file.read()
-                            updated_output, removed = remove_chunk_segments(
-                                original_output,
-                                chunk_key,
-                                [chunk_index],
-                                chunk_entry,
+                            removed, file_deleted = (
+                                remove_chunk_segments_from_file(
+                                    output_path,
+                                    chunk_key,
+                                    chunk_indices,
+                                    chunk_entry,
+                                )
                             )
                             if removed:
-                                temporary = (
-                                    f"{output_path}.{os.getpid()}."
-                                    f"{threading.get_ident()}.chunk-reset.tmp"
-                                )
-                                try:
-                                    with open(
-                                        temporary,
-                                        'w',
-                                        encoding='utf-8',
-                                        newline='',
-                                    ) as target_file:
-                                        target_file.write(updated_output)
-                                    os.replace(temporary, output_path)
-                                finally:
-                                    if os.path.isfile(temporary):
-                                        os.remove(temporary)
-                                chunk_segment_deleted_count += len(removed)
+                                if file_deleted:
+                                    deleted_count += 1
+                                else:
+                                    chunk_segment_deleted_count += len(removed)
                                 response_segment_removed = True
                             else:
                                 chunk_segment_removal_failures.append(
                                     (
                                         actual_num,
-                                        chunk_index,
+                                        ",".join(str(index) for index in chunk_indices),
                                         output_path,
                                         "chunk boundary/result was not found",
                                     )
@@ -25965,14 +26013,14 @@ class RetranslationMixin:
                             chunk_segment_removal_failures.append(
                                 (
                                     actual_num,
-                                    chunk_index,
+                                    ",".join(str(index) for index in chunk_indices),
                                     output_path,
                                     str(exc),
                                 )
                             )
                             print(
-                                f"Failed to remove chapter {actual_num} chunk "
-                                f"{chunk_index} from {output_path}: {exc}"
+                                f"Failed to remove chapter {actual_num} chunk(s) "
+                                f"{chunk_indices} from {output_path}: {exc}"
                             )
 
                     if not response_segment_removed:
@@ -25984,19 +26032,30 @@ class RetranslationMixin:
 
                     if parent_entry.get("pdf_toc_section"):
                         try:
-                            from pdf_workspace_compiler import (
-                                invalidate_compiled_pdf_api_chunks,
-                            )
-
-                            invalidated = invalidate_compiled_pdf_api_chunks(
-                                data['output_dir'],
-                                chunk_key,
-                                [chunk_index],
-                                entry=chunk_entry,
-                            )
-                            compiled_pdf_chunk_segment_removed_count += int(
-                                invalidated.get("chunk_segments_removed") or 0
-                            )
+                            if delete_complete_chunk_file:
+                                from pdf_workspace_compiler import (
+                                    invalidate_compiled_pdf_source_output,
+                                )
+                                invalidated = invalidate_compiled_pdf_source_output(
+                                    data['output_dir'],
+                                    output_file,
+                                )
+                                compiled_pdf_section_removed_count += int(
+                                    invalidated.get("sections_removed") or 0
+                                )
+                            else:
+                                from pdf_workspace_compiler import (
+                                    invalidate_compiled_pdf_api_chunks,
+                                )
+                                invalidated = invalidate_compiled_pdf_api_chunks(
+                                    data['output_dir'],
+                                    chunk_key,
+                                    chunk_indices,
+                                    entry=chunk_entry,
+                                )
+                                compiled_pdf_chunk_segment_removed_count += int(
+                                    invalidated.get("chunk_segments_removed") or 0
+                                )
                             compiled_pdf_deleted_count += int(
                                 invalidated.get("pdf_files_deleted") or 0
                             )
@@ -26008,7 +26067,7 @@ class RetranslationMixin:
 
                     reset = reset_chunks_for_retranslation(
                         chunk_entry,
-                        [chunk_index],
+                        chunk_indices,
                     )
                     if reset:
                         parent_entry["status"] = "pending"
@@ -26294,7 +26353,7 @@ class RetranslationMixin:
             if compiled_pdf_section_removed_count > 0:
                 success_parts.append(
                     "removed "
-                    f"{compiled_pdf_section_removed_count} selected PDF section chunk(s) "
+                    f"{compiled_pdf_section_removed_count} selected PDF section(s) "
                     "from compiled HTML"
                 )
             if compiled_pdf_chunk_segment_removed_count > 0:

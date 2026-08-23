@@ -8,6 +8,7 @@ importing the full translation pipeline.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import time
 from typing import Iterable
@@ -521,6 +522,49 @@ def remove_chunk_segments(html_text, chapter_key, chunk_indices, entry=None):
                     removed.append(index)
                     break
     return text, sorted(removed)
+
+
+def remove_chunk_segments_from_file(
+    path,
+    chapter_key,
+    chunk_indices,
+    entry=None,
+):
+    """Apply a chunk reset to disk, deleting the file for a complete plan.
+
+    Returns ``(removed_indices, file_deleted)``. Selecting every chunk is
+    equivalent to resetting the whole translated chapter/section, so retaining
+    an empty HTML document would be misleading.
+    """
+    wanted = {_positive_int(index) for index in chunk_indices or []}
+    wanted.discard(0)
+    total = _positive_int(entry.get("total") if isinstance(entry, dict) else 0)
+    complete_plan = bool(total > 1 and wanted == set(range(1, total + 1)))
+
+    if complete_plan:
+        os.remove(path)
+        return sorted(wanted), True
+
+    with open(path, "r", encoding="utf-8", errors="replace") as source_file:
+        original = source_file.read()
+    updated, removed = remove_chunk_segments(
+        original,
+        chapter_key,
+        wanted,
+        entry,
+    )
+    if not removed:
+        return [], False
+
+    temporary = f"{path}.{os.getpid()}.{time.time_ns()}.chunk-reset.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8", newline="") as target_file:
+            target_file.write(updated)
+        os.replace(temporary, path)
+    finally:
+        if os.path.isfile(temporary):
+            os.remove(temporary)
+    return removed, False
 
 
 def chunk_failure_summary(entry):

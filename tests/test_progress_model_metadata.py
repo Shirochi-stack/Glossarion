@@ -16,6 +16,7 @@ from chapter_chunk_progress import (
     effective_parent_status,
     extract_marked_chunks,
     remove_chunk_segments,
+    remove_chunk_segments_from_file,
     wrap_chunk_html,
 )
 from Retranslation_GUI import (
@@ -660,6 +661,82 @@ def test_stale_marker_fallback_rejects_multi_chapter_compiled_html():
 
     assert removed == []
     assert updated_html == html
+
+
+def test_selecting_every_chunk_deletes_the_response_html(tmp_path):
+    output_path = tmp_path / "response_pdf_section_002.html"
+    output_path.write_text(
+        "\n".join(
+            wrap_chunk_html(
+                "pdf-section-hash",
+                index,
+                3,
+                f"<p>translated {index}</p>",
+            )
+            for index in (1, 2, 3)
+        ),
+        encoding="utf-8",
+    )
+    entry = {
+        "schema_version": 2,
+        "total": 3,
+        "chunks": {
+            str(index): f"<p>translated {index}</p>"
+            for index in (1, 2, 3)
+        },
+    }
+
+    removed, file_deleted = remove_chunk_segments_from_file(
+        str(output_path),
+        "pdf-section-hash",
+        [1, 2, 3],
+        entry,
+    )
+
+    assert removed == [1, 2, 3]
+    assert file_deleted is True
+    assert not output_path.exists()
+
+
+def test_selecting_some_chunks_rewrites_instead_of_deleting_response_html(
+        tmp_path):
+    output_path = tmp_path / "response_pdf_section_002.html"
+    output_path.write_text(
+        "\n".join(
+            wrap_chunk_html(
+                "pdf-section-hash",
+                index,
+                3,
+                f"<p>translated {index}</p>",
+            )
+            for index in (1, 2, 3)
+        ),
+        encoding="utf-8",
+    )
+    entry = {
+        "schema_version": 2,
+        "total": 3,
+        "chunks": {
+            str(index): f"<p>translated {index}</p>"
+            for index in (1, 2, 3)
+        },
+    }
+
+    removed, file_deleted = remove_chunk_segments_from_file(
+        str(output_path),
+        "pdf-section-hash",
+        [2],
+        entry,
+    )
+
+    assert removed == [2]
+    assert file_deleted is False
+    assert output_path.exists()
+    remaining = extract_marked_chunks(
+        output_path.read_text(encoding="utf-8"),
+        "pdf-section-hash",
+    )
+    assert sorted(remaining) == [1, 3]
 
 
 def test_chunk_qa_state_excludes_only_failed_chunk_from_resume_cache(tmp_path):
