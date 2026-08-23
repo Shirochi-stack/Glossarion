@@ -20944,7 +20944,7 @@ class RetranslationMixin:
         def _text_analysis_sidecars():
             return _sdlxliff_sidecar_paths_for_output_dir(output_dir)
 
-        text_analysis_btn = QPushButton("🔍 Review source -> output")
+        text_analysis_btn = QPushButton("🔍 Edit Translation")
         text_analysis_btn.setCursor(Qt.PointingHandCursor)
         text_analysis_btn.setStyleSheet("""
             QPushButton {
@@ -27485,7 +27485,7 @@ class RetranslationMixin:
                     (_manual_editing_enabled() and _progress_item_is_html(display_info))
                     or (_source_exists_for_item(display_info) and qa_file_path)
                 ):
-                    act_review_sdlxliff = menu.addAction("🔍 Review source -> output")
+                    act_review_sdlxliff = menu.addAction("🔍 Edit Translation")
                 if _find_audio_file_for_item(display_info):
                     act_open_audio = menu.addAction("🔊 Open Audio File")
                     act_delete_audio = menu.addAction("🗑️ Delete Audio File")

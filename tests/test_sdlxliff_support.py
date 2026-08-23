@@ -816,7 +816,7 @@ def test_translation_chunk_prompt_ui_and_paths_use_new_toggle_contract():
 def test_sdlxliff_review_button_is_not_extraction_mode_gated():
     source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
 
-    assert "Review source -> output" in source
+    assert source.count("🔍 Edit Translation") == 2
     assert "text_analysis_btn.setVisible(True)" in source
     assert "text_analysis_btn.setEnabled(True)" in source
     assert "No BeautifulSoup SDLXLIFF sidecars" not in source

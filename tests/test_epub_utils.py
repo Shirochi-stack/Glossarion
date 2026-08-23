@@ -2235,6 +2235,71 @@ def test_standalone_header_progress_uses_current_output_directory(
     assert json.loads(stale_progress_path.read_text(encoding="utf-8")) == stale_progress
 
 
+def test_standalone_headers_without_source_header_tags_complete_as_noop(
+    tmp_path,
+):
+    source_epub = tmp_path / "no-headers.epub"
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    container_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OPS/content.opf"
+              media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+"""
+    content_opf = """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="chapter-1" href="chapter0001.xhtml"
+          media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="chapter-1"/></spine>
+</package>
+"""
+    with zipfile.ZipFile(source_epub, "w") as archive:
+        archive.writestr("META-INF/container.xml", container_xml)
+        archive.writestr("OPS/content.opf", content_opf)
+        archive.writestr(
+            "OPS/chapter0001.xhtml",
+            "<html><body><p>This chapter has no heading tags.</p></body></html>",
+        )
+
+    progress_path = output_dir / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps({
+            "version": "2.1",
+            "chapters": {
+                "__translation_artifact__:headers": {
+                    "status": "pending",
+                    "model_name": "old-model",
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+    logs = []
+
+    result = translate_headers_standalone.translate_headers_standalone(
+        epub_path=str(source_epub),
+        output_dir=str(output_dir),
+        api_client=object(),
+        config={},
+        log_callback=logs.append,
+    )
+
+    assert result == {}
+    assert bool(result) is True
+    assert result.successful_noop is True
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    entry = progress["chapters"]["__translation_artifact__:headers"]
+    assert entry["status"] == "completed"
+    assert entry["model_name"] == "No Header Tags Founds"
+    assert "error_message" not in entry
+    assert any("No source header tags found" in message for message in logs)
+
+
 def test_epub_compile_accepts_live_client_from_standalone_rebuild(
     tmp_path, monkeypatch
 ):

@@ -2411,7 +2411,16 @@ class EPUBCompiler:
                             )
                             
                             if result:
-                                self.log("✅ Standalone header translation completed successfully")
+                                successful_noop = bool(
+                                    getattr(result, "successful_noop", False)
+                                )
+                                if successful_noop:
+                                    self.log(
+                                        "✅ Standalone header translation complete: "
+                                        "no source header tags found"
+                                    )
+                                else:
+                                    self.log("✅ Standalone header translation completed successfully")
                                 standalone_success = True
                                 
                                 # CRITICAL: Update chapter_titles_info so TOC uses translated titles
@@ -2422,7 +2431,8 @@ class EPUBCompiler:
                                     if base in result:
                                         chapter_titles_info[chap_num] = (result[base], max(conf, 0.95), 'standalone_translation')
                                         updated_for_toc += 1
-                                self.log(f"📝 Updated TOC titles from standalone translation: {updated_for_toc} entries")
+                                if not successful_noop:
+                                    self.log(f"📝 Updated TOC titles from standalone translation: {updated_for_toc} entries")
                             else:
                                 self.log("⚠️ Standalone header translation returned no result")
                         else:

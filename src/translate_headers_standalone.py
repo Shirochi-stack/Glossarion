@@ -19,6 +19,18 @@ from epub_package import find_epub_opf_member
 
 DEFAULT_FAILED_TRANSLATION_RETRY_ATTEMPTS = 3
 MAX_FAILED_TRANSLATION_RETRY_ATTEMPTS = 20
+NO_HEADER_TAGS_MODEL_NAME = "No Header Tags Founds"
+
+
+class StandaloneHeaderTranslationResult(dict):
+    """Dictionary result that can also represent a successful empty workload."""
+
+    def __init__(self, *args, successful_noop=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.successful_noop = bool(successful_noop)
+
+    def __bool__(self):
+        return self.successful_noop or super().__bool__()
 
 
 def get_failed_translation_retry_attempts(value=None) -> int:
@@ -231,6 +243,47 @@ def extract_source_chapters_with_opf_mapping(
         log(traceback.format_exc())
     
     return chapter_mapping, spine_order
+
+
+def _source_header_tag_state(epub_path: str, spine_order: List[str]) -> str:
+    """Return ``present``, ``none``, or ``unknown`` for source h1-h6 tags.
+
+    This verification deliberately runs only for an otherwise empty source
+    mapping. It prevents a missing/corrupt EPUB from being mistaken for the
+    valid no-op case where readable spine documents simply have no headers.
+    """
+    if not epub_path or not os.path.isfile(epub_path):
+        return "unknown"
+    try:
+        with zipfile.ZipFile(epub_path, "r") as archive:
+            content_files = list(spine_order or [])
+            if not content_files:
+                skip_keywords = ("nav", "toc", "contents", "cover")
+                content_files = sorted(
+                    name
+                    for name in archive.namelist()
+                    if name.lower().endswith((".html", ".xhtml", ".htm"))
+                    and not name.startswith("__MACOSX")
+                    and not (
+                        not re.search(r"\d", os.path.basename(name))
+                        and any(
+                            keyword in os.path.basename(name).lower()
+                            for keyword in skip_keywords
+                        )
+                    )
+                )
+            if not content_files:
+                return "unknown"
+            for content_file in content_files:
+                raw_html = archive.read(content_file).decode(
+                    "utf-8", errors="ignore"
+                )
+                soup = BeautifulSoup(raw_html, "html.parser")
+                if soup.find(["h1", "h2", "h3", "h4", "h5", "h6"]):
+                    return "present"
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+        return "unknown"
+    return "none"
 
 
 def match_output_to_source_chapters(
@@ -1088,6 +1141,20 @@ def translate_headers_standalone(
     source_mapping, spine_order = extract_source_chapters_with_opf_mapping(epub_path, log_callback)
     
     if not source_mapping:
+        if _source_header_tag_state(epub_path, spine_order) == "none":
+            from translation_artifacts import update_translation_artifact_progress
+
+            update_translation_artifact_progress(
+                output_dir,
+                "headers",
+                "completed",
+                model_name=NO_HEADER_TAGS_MODEL_NAME,
+            )
+            log(
+                "✅ No source header tags found; chapter-header translation "
+                "is already complete"
+            )
+            return StandaloneHeaderTranslationResult(successful_noop=True)
         log("ERROR: No source chapters found!")
         return {}
     
@@ -1848,6 +1915,11 @@ def run_translate_headers_gui(gui_instance):
                 gui_instance.append_log(f"⛔ Translation stopped for: {epub_base}")
                 failed += 1
             # Log results
+            elif getattr(result, "successful_noop", False):
+                gui_instance.append_log(
+                    "✅ Chapter headers complete: no source header tags found"
+                )
+                successful += 1
             elif result:
                 gui_instance.append_log(f"✅ Successfully translated {len(result)} chapter headers!")
                 # Show the translated_headers.txt file path only if saving was enabled
