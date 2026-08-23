@@ -35,7 +35,7 @@ from statistics import median
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 
-FAST_EXTRACTOR_VERSION = 6
+FAST_EXTRACTOR_VERSION = 7
 FAST_MODES = {"fast_semantic", "fast_layout"}
 PDF_PARAGRAPH_ALIGNMENTS = {"source", "left", "center", "right"}
 PDF_HEADER_ALIGNMENTS = {"source", "left", "center", "right"}
@@ -1388,6 +1388,7 @@ def _semantic_page_html(
 
     title_key = _semantic_title_key(section_title)
     title_written = False
+    written_title_text_key = ""
     rtl_layout = pdf_rtl_paragraph_layout_enabled()
     article_classes = "pdf-fast-semantic-page"
     article_attributes = ""
@@ -1465,13 +1466,21 @@ def _semantic_page_html(
                 f'style="text-align:{alignment}">{escaped}</h1>'
             )
             title_written = True
+            written_title_text_key = text_key
         else:
-            source_alignment = _layout_paragraph_alignment(
-                value.get("layout"),
-                float(page.rect.width),
-                column_bounds,
-                text_value,
-            )
+            if written_title_text_key and text_key == written_title_text_key:
+                # Some PDFs repeat the bookmark title as a second text block.
+                # Only the promoted h1 is a heading.  Treat an exact repeated
+                # block as ordinary paragraph flow instead of letting its
+                # centered/inset geometry masquerade as right alignment.
+                source_alignment = "left"
+            else:
+                source_alignment = _layout_paragraph_alignment(
+                    value.get("layout"),
+                    float(page.rect.width),
+                    column_bounds,
+                    text_value,
+                )
             alignment = resolve_pdf_paragraph_alignment(
                 source_alignment,
                 text_value,

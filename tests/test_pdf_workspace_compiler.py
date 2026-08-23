@@ -339,6 +339,45 @@ def test_source_alignment_is_restored_from_pdf_page_cache(tmp_path, monkeypatch)
     assert normalized_response["style"] == "text-align:left"
 
 
+def test_cached_repeated_heading_paragraph_is_restored_as_left_aligned(tmp_path):
+    workspace = tmp_path / "Repeated_Title_PDF"
+    cache = workspace / ".pdf_extraction_cache" / "pages" / "fast_semantic"
+    cache.mkdir(parents=True)
+    source_html = (
+        '<article class="pdf-fast-semantic-page" data-pdf-page="3">'
+        '<h1 data-pdf-source-alignment="center" style="text-align:center">'
+        'Repeated title</h1>'
+        '<p class="pdf-align-right" data-pdf-source-alignment="right" '
+        'style="text-align:right">Repeated title</p>'
+        '<p class="pdf-align-left" data-pdf-source-alignment="left" '
+        'style="text-align:left">Source body.</p></article>'
+    )
+    (cache / "page_000003.json").write_text(
+        json.dumps({"page_number": 3, "html": source_html}),
+        encoding="utf-8",
+    )
+    translated_html = (
+        '<article class="pdf-fast-semantic-page" data-pdf-page="3">'
+        '<h1 style="text-align:center">Translated title</h1>'
+        '<p style="text-align:right">Translated title wording</p>'
+        '<p style="text-align:left">Translated body.</p></article>'
+    )
+
+    restored = BeautifulSoup(
+        restore_pdf_source_paragraph_alignment(
+            translated_html,
+            str(workspace),
+        ),
+        "html.parser",
+    )
+
+    paragraphs = restored.find_all("p")
+    assert paragraphs[0]["data-pdf-source-alignment"] == "left"
+    assert paragraphs[0]["class"] == ["pdf-align-left"]
+    assert paragraphs[0]["style"] == "text-align:left"
+    assert paragraphs[1]["data-pdf-source-alignment"] == "left"
+
+
 def test_compile_persists_source_alignment_repair_to_response_html(
     tmp_path,
     monkeypatch,

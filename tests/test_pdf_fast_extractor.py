@@ -354,6 +354,69 @@ def test_multiline_alignment_requires_both_edges_to_move_for_centering():
     ) == "center"
 
 
+def test_repeated_bookmark_title_is_left_aligned_as_a_paragraph(monkeypatch):
+    monkeypatch.setenv("PDF_HEADER_ALIGNMENT", "source")
+    monkeypatch.setenv("PDF_PARAGRAPH_ALIGNMENT", "source")
+    monkeypatch.setenv("PDF_PARAGRAPH_JUSTIFICATION", "source")
+
+    class _Rect:
+        width = 595.28
+
+    class _Page:
+        rect = _Rect()
+
+        @staticmethod
+        def get_text(kind, **_kwargs):
+            if kind == "dict":
+                return {
+                    "blocks": [
+                        {
+                            "number": 0,
+                            "type": 0,
+                            "bbox": [134.03, 112.66, 461.29, 144.58],
+                            "lines": [{
+                                "bbox": [134.03, 112.66, 461.29, 144.58],
+                                "spans": [{"text": "Repeated title"}],
+                            }],
+                        },
+                        {
+                            "number": 1,
+                            "type": 0,
+                            "bbox": [174.93, 185.29, 420.38, 209.23],
+                            "lines": [{
+                                "bbox": [174.93, 185.29, 420.38, 209.23],
+                                "spans": [{"text": "Repeated title"}],
+                            }],
+                        },
+                        {
+                            "number": 2,
+                            "type": 0,
+                            "bbox": [81.03, 276.05, 324.07, 292.01],
+                            "lines": [{
+                                "bbox": [81.03, 276.05, 324.07, 292.01],
+                                "spans": [{"text": "Body paragraph"}],
+                            }],
+                        },
+                    ]
+                }
+            return [
+                (134.03, 112.66, 461.29, 144.58, "Repeated title", 0, 0),
+                (174.93, 185.29, 420.38, 209.23, "Repeated title", 1, 0),
+                (81.03, 276.05, 324.07, 292.01, "Body paragraph", 2, 0),
+            ]
+
+    rendered = BeautifulSoup(
+        _semantic_page_html(_Page(), 3, [], "Repeated title"),
+        "html.parser",
+    )
+
+    assert rendered.h1["style"] == "text-align:center"
+    repeated_paragraph = rendered.find_all("p")[0]
+    assert repeated_paragraph["data-pdf-source-alignment"] == "left"
+    assert repeated_paragraph["class"] == ["pdf-align-left"]
+    assert repeated_paragraph["style"] == "text-align:left"
+
+
 def test_fast_semantic_detects_source_justification_and_honors_overrides(monkeypatch):
     class _Rect:
         width = 595.0

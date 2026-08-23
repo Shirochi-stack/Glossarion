@@ -1284,12 +1284,28 @@ def restore_pdf_source_paragraph_alignment(content: str, folder: str) -> str:
                     str(page_payload.get("html") or ""),
                     "html.parser",
                 )
-                page_cache[page_number] = [
-                    _paragraph_alignment_value(paragraph)
-                    for paragraph in source_soup.select(
-                        ".pdf-fast-semantic-page p"
+                source_headings = {
+                    _source_alignment_text_key(heading.get_text(" ", strip=True))
+                    for heading in source_soup.select(
+                        ".pdf-fast-semantic-page h1"
                     )
-                ]
+                }
+                source_headings.discard("")
+                source_alignments = []
+                for paragraph in source_soup.select(
+                    ".pdf-fast-semantic-page p"
+                ):
+                    paragraph_key = _source_alignment_text_key(
+                        paragraph.get_text(" ", strip=True)
+                    )
+                    alignment = _paragraph_alignment_value(paragraph)
+                    if paragraph_key and paragraph_key in source_headings:
+                        # Older extraction caches may have classified the
+                        # repeated bookmark title by its inset geometry. Only
+                        # the h1 is a heading; the duplicate p is normal flow.
+                        alignment = "left"
+                    source_alignments.append(alignment)
+                page_cache[page_number] = source_alignments
             except (OSError, ValueError, TypeError):
                 page_cache[page_number] = None
         source_alignments = page_cache.get(page_number)
