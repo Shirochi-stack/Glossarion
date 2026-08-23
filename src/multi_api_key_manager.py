@@ -7638,65 +7638,56 @@ class MultiAPIKeyDialog(QDialog):
 
     def _attach_model_autofill(self, combo: QComboBox, on_change=None, model_values=None, search_debounce_ms=80):
         """Attach the same prefix-priority contains completer used by translator_gui."""
-        from PySide6.QtCore import QSortFilterProxyModel, QStringListModel
+        from PySide6.QtCore import QStringListModel
 
-        class _PrefixPriorityProxy(QSortFilterProxyModel):
+        class _PrefixPriorityCompletionModel(QStringListModel):
+            """Rank only matching models without a Python-sorted Qt proxy."""
+
             def __init__(self, base_model_values, parent=None):
-                super().__init__(parent)
+                super().__init__(list(base_model_values), parent)
                 self._search = ""
                 self._base_model_values = list(base_model_values)
-                self.setDynamicSortFilter(True)
 
-            def set_search_text(self, text):
-                self._search = (text or "").lower()
-                source_model = self.sourceModel()
-                if source_model is not None:
-                    source_model.setStringList(
-                        numbered_model_completion_values(
-                            self._base_model_values,
-                            text,
-                        )
-                    )
-                self.invalidate()
-                self.sort(0)
-
-            def lessThan(self, left, right):
-                l_val = (self.sourceModel().data(left, Qt.DisplayRole) or "").lower()
-                r_val = (self.sourceModel().data(right, Qt.DisplayRole) or "").lower()
-                l_score = self._score(l_val)
-                r_score = self._score(r_val)
-                if l_score != r_score:
-                    return l_score < r_score
-                return l_val < r_val
-
-            def _score(self, text):
-                search = self._search
+            @staticmethod
+            def _score(text, search):
                 if not search:
                     return 0
                 if text == search:
                     return 0
                 if text.startswith(search):
                     return 1
-                pos = 0
-                while True:
-                    slash = text.find('/', pos)
-                    if slash < 0:
-                        break
-                    if text[slash + 1:].startswith(search):
-                        return 2
-                    pos = slash + 1
-                return 3
+                return 2 if any(
+                    part.startswith(search) for part in text.split('/')[1:]
+                ) else 3
+
+            def set_search_text(self, text):
+                self._search = (text or "").lower()
+                rendered = numbered_model_completion_values(
+                    self._base_model_values,
+                    text,
+                )
+                if self._search:
+                    rendered = [
+                        value for value in rendered
+                        if self._search in str(value).lower()
+                    ]
+                ranked = sorted(
+                    rendered,
+                    key=lambda value: (
+                        self._score(str(value).lower(), self._search),
+                        str(value).lower(),
+                    ),
+                )
+                if ranked != self.stringList():
+                    self.setStringList(ranked)
 
         if model_values is None:
             model_values = [combo.itemText(i) for i in range(combo.count())]
         else:
             model_values = list(model_values)
-        source = QStringListModel(model_values, combo)
-        proxy = _PrefixPriorityProxy(model_values, combo)
-        proxy.setSourceModel(source)
-        proxy.sort(0)
+        completion_model = _PrefixPriorityCompletionModel(model_values, combo)
 
-        completer = QCompleter(proxy, combo)
+        completer = QCompleter(completion_model, combo)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setCompletionMode(QCompleter.PopupCompletion)
         completer.setFilterMode(Qt.MatchContains)
@@ -7717,7 +7708,9 @@ class MultiAPIKeyDialog(QDialog):
         search_text = {"value": ""}
         search_timer = QTimer(combo)
         search_timer.setSingleShot(True)
-        search_timer.timeout.connect(lambda: proxy.set_search_text(search_text["value"]))
+        search_timer.timeout.connect(
+            lambda: completion_model.set_search_text(search_text["value"])
+        )
 
         def _schedule_search_text(text):
             search_text["value"] = text
@@ -7729,8 +7722,8 @@ class MultiAPIKeyDialog(QDialog):
             combo.lineEdit().textEdited.connect(_schedule_search_text)
 
         combo._model_completer = completer
-        combo._model_completer_proxy = proxy
-        combo._model_completer_source = source
+        combo._model_completer_proxy = completion_model
+        combo._model_completer_source = completion_model
         combo._model_completer_search_timer = search_timer
 
     def _notify_authgpt_visibility(self):

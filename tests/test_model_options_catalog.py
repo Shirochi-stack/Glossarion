@@ -1193,6 +1193,44 @@ def test_model_completer_ranks_matches_without_python_sort_proxy(monkeypatch):
     app.processEvents()
 
 
+def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import multi_api_key_manager
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    models = [
+        "or/vendor/alpha-model",
+        "alpha-model",
+        "x/alpha-model",
+        "authgrok/grok-4.6",
+        "unrelated-model",
+    ]
+    combo.addItems(models)
+
+    multi_api_key_manager.MultiAPIKeyDialog._attach_model_autofill(
+        SimpleNamespace(),
+        combo,
+        model_values=models,
+    )
+    completion_model = combo._model_completer_proxy
+
+    assert not isinstance(completion_model, qt_core.QSortFilterProxyModel)
+    completion_model.set_search_text("alpha")
+    assert completion_model.stringList() == [
+        "alpha-model",
+        "or/vendor/alpha-model",
+        "x/alpha-model",
+    ]
+    completion_model.set_search_text("authgrok12/grok")
+    assert completion_model.stringList() == ["authgrok12/grok-4.6"]
+    assert combo._model_completer_search_timer.isSingleShot()
+    app.processEvents()
+
+
 def test_model_text_provider_refresh_is_debounced(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     qt_core = pytest.importorskip("PySide6.QtCore")
