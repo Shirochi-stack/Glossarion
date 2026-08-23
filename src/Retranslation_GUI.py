@@ -1189,7 +1189,14 @@ def _snapshot_progress_output_dir(output_dir):
 
 
 def _write_progress_snapshot_atomic(path, payload):
-    """Atomically persist a Progress Manager snapshot."""
+    """Atomically persist a Progress Manager snapshot.
+
+    Windows can briefly deny replacement while the translator, a file
+    watcher, or antivirus software has the destination open.  The main
+    translation progress writer already tolerates that sharing window; the
+    Progress Manager must do the same because its HTML edits happen before
+    this commit.
+    """
     progress_dir = os.path.dirname(os.path.abspath(path))
     os.makedirs(progress_dir, exist_ok=True)
     temp_path = (
@@ -1199,7 +1206,29 @@ def _write_progress_snapshot_atomic(path, payload):
     try:
         with open(temp_path, "w", encoding="utf-8") as target:
             json.dump(payload, target, ensure_ascii=False, indent=2)
-        os.replace(temp_path, path)
+            target.flush()
+            try:
+                os.fsync(target.fileno())
+            except OSError:
+                pass
+        last_error = None
+        for attempt in range(20):
+            try:
+                os.replace(temp_path, path)
+                return
+            except OSError as exc:
+                last_error = exc
+                winerror = getattr(exc, "winerror", None)
+                retryable = winerror in {5, 32} or (
+                    os.name == "nt" and isinstance(exc, PermissionError)
+                )
+                if not retryable or attempt >= 19:
+                    raise
+                # Keep this bounded while covering the transient sharing
+                # locks commonly produced by Windows scanners/watchers.
+                time.sleep(min(0.4, 0.03 * (2 ** min(attempt, 4))))
+        if last_error is not None:  # pragma: no cover - loop always returns/raises
+            raise last_error
     finally:
         if os.path.exists(temp_path):
             try:

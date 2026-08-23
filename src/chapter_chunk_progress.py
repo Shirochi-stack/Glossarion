@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import time
+from html.parser import HTMLParser
 from typing import Iterable
 
 
@@ -612,6 +613,101 @@ def remove_chunk_segments(html_text, chapter_key, chunk_indices, entry=None):
     return text, sorted(removed)
 
 
+class _ChunkOutputPayloadProbe(HTMLParser):
+    """Detect real output inside an otherwise empty HTML document shell."""
+
+    _PAYLOAD_TAGS = frozenset({
+        "audio", "canvas", "embed", "iframe", "img", "math", "object",
+        "picture", "source", "svg", "video",
+    })
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.head_depth = 0
+        self.body_depth = 0
+        self.saw_body = False
+        self.has_payload = False
+
+    def handle_starttag(self, tag, attrs):
+        tag = str(tag or "").lower()
+        if tag == "head":
+            self.head_depth += 1
+            return
+        if tag == "body":
+            self.saw_body = True
+            self.body_depth += 1
+            return
+        if (
+            not self.head_depth
+            and (self.body_depth or not self.saw_body)
+            and tag in self._PAYLOAD_TAGS
+        ):
+            self.has_payload = True
+
+    def handle_startendtag(self, tag, attrs):
+        tag = str(tag or "").lower()
+        if (
+            not self.head_depth
+            and (self.body_depth or not self.saw_body)
+            and tag in self._PAYLOAD_TAGS
+        ):
+            self.has_payload = True
+
+    def handle_endtag(self, tag):
+        tag = str(tag or "").lower()
+        if tag == "head" and self.head_depth:
+            self.head_depth -= 1
+        elif tag == "body" and self.body_depth:
+            self.body_depth -= 1
+
+    def handle_data(self, data):
+        if (
+            str(data or "").strip()
+            and not self.head_depth
+            and (self.body_depth or not self.saw_body)
+        ):
+            self.has_payload = True
+
+
+def _chunk_output_is_effectively_empty(html_text):
+    """Return whether only document scaffolding remains after chunk removal."""
+    if not str(html_text or "").strip():
+        return True
+    probe = _ChunkOutputPayloadProbe()
+    try:
+        probe.feed(str(html_text))
+        probe.close()
+    except Exception:
+        # Never delete an unfamiliar malformed document merely because the
+        # conservative payload check could not parse it.
+        return False
+    return not probe.has_payload
+
+
+def _retry_windows_file_operation(
+    operation,
+    max_attempts=20,
+    *,
+    missing_is_success=False,
+):
+    """Run one file mutation through transient Windows sharing violations."""
+    for attempt in range(max_attempts):
+        try:
+            return operation()
+        except FileNotFoundError:
+            if missing_is_success:
+                return None
+            raise
+        except OSError as exc:
+            winerror = getattr(exc, "winerror", None)
+            retryable = winerror in {5, 32} or (
+                os.name == "nt" and isinstance(exc, PermissionError)
+            )
+            if not retryable or attempt >= max_attempts - 1:
+                raise
+            time.sleep(min(0.4, 0.03 * (2 ** min(attempt, 4))))
+
+
 def remove_chunk_segments_from_file(
     path,
     chapter_key,
@@ -630,11 +726,19 @@ def remove_chunk_segments_from_file(
     complete_plan = bool(total > 1 and wanted == set(range(1, total + 1)))
 
     if complete_plan:
-        os.remove(path)
+        _retry_windows_file_operation(
+            lambda: os.remove(path),
+            missing_is_success=True,
+        )
         return sorted(wanted), True
 
-    with open(path, "r", encoding="utf-8", errors="replace") as source_file:
-        original = source_file.read()
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as source_file:
+            original = source_file.read()
+    except FileNotFoundError:
+        # A concurrent reset already removed the whole output, which also
+        # proves that none of the requested segments remain on disk.
+        return sorted(wanted), True
     updated, removed = remove_chunk_segments(
         original,
         chapter_key,
@@ -654,15 +758,24 @@ def remove_chunk_segments_from_file(
         cached_indices.discard(0)
     remaining_cached = cached_indices.difference(removed)
     remaining_marked = extract_marked_chunks(updated)
-    if not remaining_cached and not remaining_marked:
-        os.remove(path)
+    if (
+        not remaining_marked
+        and (
+            not remaining_cached
+            or _chunk_output_is_effectively_empty(updated)
+        )
+    ):
+        _retry_windows_file_operation(
+            lambda: os.remove(path),
+            missing_is_success=True,
+        )
         return removed, True
 
     temporary = f"{path}.{os.getpid()}.{time.time_ns()}.chunk-reset.tmp"
     try:
         with open(temporary, "w", encoding="utf-8", newline="") as target_file:
             target_file.write(updated)
-        os.replace(temporary, path)
+        _retry_windows_file_operation(lambda: os.replace(temporary, path))
     finally:
         if os.path.isfile(temporary):
             os.remove(temporary)

@@ -66,6 +66,7 @@ from extract_glossary_from_epub import (
     save_progress as save_glossary_progress,
 )
 import extract_glossary_from_epub as glossary_extractor
+import Retranslation_GUI as retranslation_gui_module
 
 
 @pytest.fixture(autouse=True)
@@ -796,6 +797,74 @@ def test_retranslating_epub_chunks_separately_deletes_file_after_last_chunk(
     assert not output_path.exists()
 
 
+def test_last_physical_chunk_deletes_empty_html_shell_with_stale_cache(
+        tmp_path):
+    output_path = tmp_path / "response_pdf_section_003.html"
+    output_path.write_text(
+        """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"/></head>
+<body>
+{chunk}
+</body>
+</html>""".format(
+            chunk=wrap_chunk_html(
+                "pdf-section-hash",
+                2,
+                2,
+                "<p>translated 2</p>",
+            )
+        ),
+        encoding="utf-8",
+    )
+    # Chunk 1 is stale in progress but is already absent from the physical
+    # response, reproducing a prior progress-write interruption.
+    entry = {
+        "schema_version": 2,
+        "total": 2,
+        "chunks": {
+            "1": "<p>translated 1</p>",
+            "2": "<p>translated 2</p>",
+        },
+    }
+
+    removed, file_deleted = remove_chunk_segments_from_file(
+        str(output_path),
+        "pdf-section-hash",
+        [2],
+        entry,
+    )
+
+    assert removed == [2]
+    assert file_deleted is True
+    assert not output_path.exists()
+
+
+def test_empty_shell_detection_preserves_image_only_chunk_output(tmp_path):
+    output_path = tmp_path / "response_image_only.html"
+    output_path.write_text(
+        """<!DOCTYPE html><html><head></head><body>
+{chunk}<img src="cover.jpg"/>
+</body></html>""".format(
+            chunk=wrap_chunk_html("image-section", 2, 2, "<p>remove me</p>")
+        ),
+        encoding="utf-8",
+    )
+    entry = {
+        "schema_version": 2,
+        "total": 2,
+        "chunks": {"1": "stale", "2": "<p>remove me</p>"},
+    }
+
+    removed, file_deleted = remove_chunk_segments_from_file(
+        str(output_path), "image-section", [2], entry
+    )
+
+    assert removed == [2]
+    assert file_deleted is False
+    assert '<img src="cover.jpg"/>' in output_path.read_text(encoding="utf-8")
+
+
 def test_chunk_qa_state_excludes_only_failed_chunk_from_resume_cache(tmp_path):
     progress = ProgressManager(str(tmp_path))
     progress.prepare_chapter_chunk_progress(
@@ -1243,6 +1312,42 @@ def test_retranslate_selected_persistently_deletes_chunk_cache_despite_race(
 
     persisted = json.loads(progress_path.read_text(encoding="utf-8"))
     assert persisted == saved
+
+
+def test_retranslation_progress_write_retries_windows_access_denied(
+        tmp_path, monkeypatch):
+    progress_path = tmp_path / "translation_progress.json"
+    baseline = {"chapters": {}, "chapter_chunks": {}}
+    progress_path.write_text(json.dumps(baseline), encoding="utf-8")
+    changed = json.loads(json.dumps(baseline))
+    changed["new_value"] = True
+
+    real_replace = os.replace
+    replace_attempts = []
+
+    def transiently_locked_replace(source, destination):
+        replace_attempts.append((source, destination))
+        if len(replace_attempts) < 3:
+            error = PermissionError(5, "Access is denied", destination)
+            error.winerror = 5
+            raise error
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(
+        retranslation_gui_module.os,
+        "replace",
+        transiently_locked_replace,
+    )
+    monkeypatch.setattr(retranslation_gui_module.time, "sleep", lambda _delay: None)
+
+    saved = _merge_and_write_retranslation_progress(
+        str(progress_path), baseline, changed
+    )
+
+    assert len(replace_attempts) == 3
+    assert saved["new_value"] is True
+    assert json.loads(progress_path.read_text(encoding="utf-8")) == saved
+    assert not list(tmp_path.glob("translation_progress.json.*.tmp"))
 
 
 def test_completed_parent_with_marked_output_and_missing_ledger_retranslates(
