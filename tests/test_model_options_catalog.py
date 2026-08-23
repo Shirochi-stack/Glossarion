@@ -167,6 +167,39 @@ def test_ordinary_model_completion_values_are_unchanged():
     ) == values
 
 
+def test_polled_marker_matches_exact_and_rendered_numbered_models():
+    confirmed = {"AUTHND/deepseek-ai/deepseek-v4-flash-0731"}
+
+    assert model_options.model_has_polled_marker(
+        "authnd/deepseek-ai/deepseek-v4-flash-0731",
+        confirmed,
+    )
+    assert model_options.model_has_polled_marker(
+        "authnd7/deepseek-ai/deepseek-v4-flash-0731",
+        confirmed,
+    )
+    assert not model_options.model_has_polled_marker(
+        "authnd/deepseek-ai/deepseek-v4-pro",
+        confirmed,
+    )
+
+
+def test_saved_model_merge_adds_new_entries_without_restoring_removed_ones():
+    assert model_options.merge_saved_model_options(
+        ["provider/kept"],
+        [
+            "PROVIDER/KEPT",
+            "provider/deleted",
+            "provider/new-model",
+            "provider/new-model",
+        ],
+        ["PROVIDER/DELETED"],
+    ) == [
+        "provider/kept",
+        "provider/new-model",
+    ]
+
+
 def test_openrouter_online_catalog_replaces_static_provider_section(tmp_path, monkeypatch):
     cache_path = _isolated_cache(tmp_path, monkeypatch)
 
@@ -658,35 +691,50 @@ def test_only_vertex_style_routes_remain_static_by_design():
     assert "authgem/" not in static_routes
     assert "authnd/" not in static_routes
     assert "authza/" not in static_routes
+    assert "authgem-key/" in static_routes
     assert "authgem-vertex*/" in static_routes
 
 
-def test_authgem_key_catalog_strips_gemini_resource_prefix(tmp_path, monkeypatch):
+def test_authgem_key_is_excluded_from_polling_and_legacy_cache(tmp_path, monkeypatch):
     _isolated_cache(tmp_path, monkeypatch)
+    legacy_model = "authgem-key/gemini-legacy-cached"
+    legacy_record = {"fetched_at": 9_999_999_999, "models": [legacy_model]}
+    monkeypatch.setattr(
+        model_options,
+        "_MODEL_CATALOG_MEMORY_CACHE",
+        {
+            "version": model_options._MODEL_CATALOG_CACHE_VERSION,
+            "providers": {"authgem_key": legacy_record},
+            "last_successful": {"authgem_key": legacy_record},
+            "attempts": {"authgem_key": 9_999_999_999},
+        },
+    )
 
-    def fake_get(url, headers, timeout):
-        if "openrouter.ai" in url:
-            return {"data": [{"id": "openrouter/free"}]}
-        if "generativelanguage.googleapis.com" in url:
-            assert "key=gemini-secret" in url
-            return {
-                "models": [{
-                    "name": "models/gemini-current",
-                    "supportedGenerationMethods": ["generateContent"],
-                }]
-            }
-        raise OSError("local proxy is not running")
+    assert model_options.catalog_provider_for_model(
+        "authgem-key/gemini-current"
+    ) is None
+    assert model_options.due_provider_catalog_for_model(
+        "authgem-key/gemini-current",
+        active_api_key="gemini-secret",
+    ) is None
+    assert legacy_model not in model_options.get_model_options()
+    assert "authgem_key" not in model_options.get_last_successful_provider_models()
 
-    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    fetch_calls = []
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda *args, **kwargs: fetch_calls.append((args, kwargs)),
+    )
     result = model_options.refresh_provider_model_catalogs(
         active_model="authgem-key/gemini-current",
         active_api_key="gemini-secret",
+        only_provider="authgem_key",
         timeout=0.1,
     )
 
-    assert result.provider_models["authgem_key"] == [
-        "authgem-key/gemini-current",
-    ]
+    assert fetch_calls == []
+    assert result.provider_models == {}
 
 
 def test_gemini_catalog_keeps_native_video_and_lyria_music_models(tmp_path, monkeypatch):
@@ -1035,7 +1083,10 @@ def test_model_catalog_cache_uses_macos_caches_directory(monkeypatch):
     )
 
 
-def test_last_successful_catalog_markers_survive_failure_and_reload(tmp_path, monkeypatch):
+def test_last_successful_catalog_history_survives_failure_without_marking_fallback(
+    tmp_path,
+    monkeypatch,
+):
     _isolated_cache(tmp_path, monkeypatch)
 
     monkeypatch.setattr(
@@ -1052,6 +1103,9 @@ def test_last_successful_catalog_markers_survive_failure_and_reload(tmp_path, mo
     assert model_options.get_last_successful_provider_models()["xai"] == [
         "grok-confirmed"
     ]
+    assert model_options.get_current_polled_provider_models()["xai"] == [
+        "grok-confirmed"
+    ]
 
     monkeypatch.setattr(
         model_options,
@@ -1065,13 +1119,15 @@ def test_last_successful_catalog_markers_survive_failure_and_reload(tmp_path, mo
         timeout=0.1,
     )
     assert failed.provider_models == {}
+    assert "xai" not in model_options.get_current_polled_provider_models()
 
-    # Force a disk reload to prove the marker state survives app restarts, not
-    # merely the current process's in-memory cache.
+    # Historical success remains available for diagnostics, but it is no
+    # longer marker state once the provider falls back to its static list.
     monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
     assert model_options.get_last_successful_provider_models()["xai"] == [
         "grok-confirmed"
     ]
+    assert "xai" not in model_options.get_current_polled_provider_models()
 
     monkeypatch.setattr(
         model_options,
@@ -1185,6 +1241,8 @@ def test_gui_catalog_refresh_updates_stealthily_while_model_editor_is_active(mon
     assert editor.hasFocus()
     assert combo.completer() is original_completer
     assert harness._model_completer_proxy._base_model_values == new_models
+    harness._model_completer_proxy.set_search_text("old-model")
+    assert harness._model_completer_proxy.stringList() == []
 
     # An actual selected model survives catalog additions and reordering too.
     combo.setCurrentText("authnd/new-model")
@@ -1201,12 +1259,22 @@ def test_gui_catalog_refresh_updates_stealthily_while_model_editor_is_active(mon
     assert editor.selectedText() == "authnd/new"
     assert editor.hasFocus()
 
+    # A Manage Models save is authoritative even if a typing debounce happens
+    # to still be active when the user clicks Save.
+    harness._model_editor_typing = True
+    saved_models = ["authnd/new-model"]
+    assert harness._refresh_model_combo_catalog(saved_models, force=True)
+    assert [combo.itemText(index) for index in range(combo.count())] == saved_models
+    harness._model_completer_proxy.set_search_text("newer-model")
+    assert harness._model_completer_proxy.stringList() == []
+    assert harness._pending_model_combo_catalog is None
+
     # Moving on to the next field does not trigger another catalog rebuild.
     other_field.setFocus()
     app.processEvents()
     app.processEvents()
 
-    assert [combo.itemText(index) for index in range(combo.count())] == reordered_models
+    assert [combo.itemText(index) for index in range(combo.count())] == saved_models
     assert editor.text() == "authnd/new-model"
     assert other_field.hasFocus()
 
@@ -1248,9 +1316,102 @@ def test_model_completer_ranks_matches_without_python_sort_proxy(monkeypatch):
     app.processEvents()
 
 
+def test_main_model_search_marks_polled_rows_and_hides_unpolled_without_changing_ids(
+    monkeypatch,
+):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    models = [
+        "provider/confirmed",
+        "provider/unpolled",
+        "authnd/deepseek-ai/deepseek-v4-flash-0731",
+    ]
+    combo.addItems(models)
+    checked_icon = translator_gui.TranslatorGUI._create_polled_model_icon()
+    harness = SimpleNamespace(
+        model_combo=combo,
+        config={"model_manager_hide_unpolled_models": False},
+        _polled_online_model_ids={
+            "PROVIDER/CONFIRMED",
+            "authnd/deepseek-ai/deepseek-v4-flash-0731",
+        },
+        _model_polled_icon=checked_icon,
+    )
+
+    translator_gui.TranslatorGUI._install_model_completer(harness, models)
+    completion_model = harness._model_completer_proxy
+    completion_model.set_search_text("provider/")
+    confirmed_row = completion_model.stringList().index("provider/confirmed")
+    unpolled_row = completion_model.stringList().index("provider/unpolled")
+
+    assert not completion_model.data(
+        completion_model.index(confirmed_row, 0), qt_core.Qt.DecorationRole
+    ).isNull()
+    assert completion_model.data(
+        completion_model.index(unpolled_row, 0), qt_core.Qt.DecorationRole
+    ).isNull()
+    assert completion_model.data(
+        completion_model.index(confirmed_row, 0), qt_core.Qt.EditRole
+    ) == "provider/confirmed"
+    assert not combo.itemIcon(0).isNull()
+    assert combo.itemIcon(1).isNull()
+
+    combo.setCurrentText("provider/unpolled")
+    harness.config["model_manager_hide_unpolled_models"] = True
+    translator_gui.TranslatorGUI._refresh_model_search_poll_state(
+        harness,
+        notify_multi_key_managers=False,
+    )
+    completion_model.set_search_text("provider/")
+
+    assert completion_model.stringList() == ["provider/confirmed"]
+    assert combo.currentText() == "provider/unpolled"
+    assert not combo.view().isRowHidden(0)
+    assert combo.view().isRowHidden(1)
+
+    completion_model.set_search_text("authnd7/")
+    assert completion_model.stringList() == [
+        "authnd7/deepseek-ai/deepseek-v4-flash-0731"
+    ]
+    assert not completion_model.data(
+        completion_model.index(0, 0), qt_core.Qt.DecorationRole
+    ).isNull()
+    assert "✓" not in completion_model.data(
+        completion_model.index(0, 0), qt_core.Qt.EditRole
+    )
+
+    harness.config["model_manager_hide_unpolled_models"] = False
+    translator_gui.TranslatorGUI._refresh_model_search_poll_state(
+        harness,
+        notify_multi_key_managers=False,
+    )
+    completion_model.set_search_text("provider/")
+    assert completion_model.stringList() == [
+        "provider/confirmed",
+        "provider/unpolled",
+    ]
+    assert not combo.view().isRowHidden(1)
+    assert combo.currentText() == "provider/unpolled"
+
+    manager_refreshes = []
+    harness._multi_api_key_dialog = SimpleNamespace(
+        _refresh_model_catalog_choices=lambda: manager_refreshes.append(True)
+    )
+    translator_gui.TranslatorGUI._refresh_model_search_poll_state(harness)
+    assert manager_refreshes == [True]
+    app.processEvents()
+
+
 def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_gui = pytest.importorskip("PySide6.QtGui")
     qt_test = pytest.importorskip("PySide6.QtTest")
     qt_widgets = pytest.importorskip("PySide6.QtWidgets")
     import multi_api_key_manager
@@ -1270,8 +1431,19 @@ def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeyp
     ]
     combo.addItems(models)
 
+    icon_pixmap = qt_gui.QPixmap(2, 2)
+    icon_pixmap.fill(qt_core.Qt.green)
+    checked_icon = qt_gui.QIcon(icon_pixmap)
+    translator = SimpleNamespace(
+        config={"model_manager_hide_unpolled_models": False},
+        _polled_online_model_ids={"authgpt/gpt-5.6"},
+        _model_polled_icon=checked_icon,
+        _model_all_values=list(models),
+    )
+    owner = SimpleNamespace(translator_gui=translator)
+
     multi_api_key_manager.MultiAPIKeyDialog._attach_model_autofill(
-        SimpleNamespace(),
+        owner,
         combo,
         model_values=models,
     )
@@ -1300,7 +1472,103 @@ def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeyp
             value.startswith(typed + "/")
             for value in completion_model.stringList()
         )
+
+    completion_model.set_search_text("authgpt1")
+    marked_index = completion_model.stringList().index("authgpt1/gpt-5.6")
+    assert not completion_model.data(
+        completion_model.index(marked_index, 0), qt_core.Qt.DecorationRole
+    ).isNull()
+    assert completion_model.data(
+        completion_model.index(marked_index, 0), qt_core.Qt.EditRole
+    ) == "authgpt1/gpt-5.6"
+
+    translator.config["model_manager_hide_unpolled_models"] = True
+    multi_api_key_manager.MultiAPIKeyDialog._refresh_model_poll_markers(owner)
+    completion_model.set_search_text("alpha")
+    assert completion_model.stringList() == []
+    completion_model.set_search_text("authgpt1")
+    assert completion_model.stringList() == ["authgpt1/gpt-5.6"]
+    assert combo.view().isRowHidden(models.index("alpha-model"))
+    assert not combo.view().isRowHidden(models.index("authgpt/gpt-5.6"))
+    assert combo.itemText(models.index("authgpt/gpt-5.6")) == "authgpt/gpt-5.6"
+
+    translator.config["model_manager_hide_unpolled_models"] = False
+    multi_api_key_manager.MultiAPIKeyDialog._refresh_model_poll_markers(owner)
+    completion_model.set_search_text("alpha")
+    assert completion_model.stringList() == [
+        "alpha-model",
+        "or/vendor/alpha-model",
+        "x/alpha-model",
+    ]
+    assert not combo.view().isRowHidden(models.index("alpha-model"))
+
+    # Already-open manager fields must drop a saved deletion from their combo
+    # rows and from their separate completion source immediately.
+    combo.setCurrentText("alpha-model")
+    translator._model_all_values = ["authgpt/gpt-5.6"]
+    multi_api_key_manager.MultiAPIKeyDialog._refresh_model_catalog_choices(owner)
+    assert [combo.itemText(index) for index in range(combo.count())] == [
+        "authgpt/gpt-5.6"
+    ]
+    completion_model.set_search_text("alpha")
+    assert completion_model.stringList() == []
+    assert combo.currentText() == "alpha-model"
     app.processEvents()
+
+
+def test_model_manager_save_tracks_deletions_and_forces_completer_refresh():
+    import translator_gui
+
+    class FakeList:
+        def __init__(self, values):
+            self.values = values
+
+        def count(self):
+            return len(self.values)
+
+        def item(self, index):
+            return SimpleNamespace(text=lambda: self.values[index])
+
+    old_models = ["provider/kept", "provider/deleted", "provider/readded"]
+    refreshes = []
+    notifications = []
+    gui = SimpleNamespace(
+        config={
+            "model_manager_removed_models": [
+                "provider/readded",
+                "older/deleted",
+            ]
+        },
+        _model_all_values=list(old_models),
+        model_combo=SimpleNamespace(
+            count=lambda: len(old_models),
+            itemText=lambda index: old_models[index],
+        ),
+        _refresh_model_combo_catalog=lambda models, force=False: refreshes.append(
+            (list(models), force)
+        ),
+        _refresh_model_search_poll_state=lambda: notifications.append(True),
+        save_config=lambda show_message=False: None,
+        append_log=lambda _message: None,
+    )
+    dialog = SimpleNamespace(accept=lambda: None)
+
+    translator_gui.TranslatorGUI._save_model_order(
+        gui,
+        FakeList(["provider/kept", "provider/readded"]),
+        dialog,
+    )
+
+    assert gui.config["custom_model_list"] == [
+        "provider/kept",
+        "provider/readded",
+    ]
+    assert gui.config["model_manager_removed_models"] == [
+        "older/deleted",
+        "provider/deleted",
+    ]
+    assert refreshes == [(["provider/kept", "provider/readded"], True)]
+    assert notifications == [True]
 
 
 def test_model_text_provider_refresh_is_debounced(monkeypatch):
@@ -1468,6 +1736,43 @@ def test_gui_auto_poll_log_counts_models_not_already_displayed(
     assert logs == [
         f"✅ Auto-poll complete: electronhub — 3 models · {expected_new_label}"
     ]
+
+
+def test_gui_static_fallback_models_do_not_keep_checkmarks_from_older_poll():
+    import translator_gui
+
+    displayed_models = ["or/router/current", "grok-static-fallback"]
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(
+            count=lambda: len(displayed_models),
+            itemText=lambda index: displayed_models[index],
+        ),
+        _refresh_model_combo_catalog=lambda models: displayed_models.__setitem__(
+            slice(None), list(models)
+        ),
+        _ensure_polled_model_marker_state=lambda: {
+            "openrouter": {"or/router/older"},
+            "xai": {"grok-static-fallback"},
+        },
+        append_log=lambda _message: None,
+    )
+    result = SimpleNamespace(
+        models=["or/router/current", "grok-static-fallback"],
+        statuses={
+            "openrouter": "online (1 models)",
+            "xai": "static fallback (OSError — offline)",
+        },
+        provider_models={"openrouter": ["or/router/current"]},
+        requested_provider=None,
+    )
+
+    translator_gui.TranslatorGUI._apply_provider_model_catalog_refresh(gui, result)
+
+    assert gui._polled_online_models_by_provider == {
+        "openrouter": {"or/router/current"}
+    }
+    assert gui._polled_online_model_ids == {"or/router/current"}
 
 
 def test_model_manager_unpolled_filter_is_off_by_default_and_reversible(monkeypatch):

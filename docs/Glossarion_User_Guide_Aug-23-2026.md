@@ -210,8 +210,11 @@ The built-in model list is a safety net, not a promise that every entry is still
 
 **How to read the result:**
 
-- A subtle green **✓** in **Manage Models** means that model was confirmed by a successful online provider poll. The checkmark is visual only and is not part of the model ID. A failed later attempt does **not** erase the last successful checkmarks; that provider's markers remain until its next successful poll replaces them.
+- A subtle green **✓** in **Manage Models**, the main Model search, and Multi API Key Manager model searches means that entry comes from a fresh successful online provider poll. The checkmark is visual only and is not part of the model ID. Entries currently supplied by a static fallback never receive the checkmark, even if that provider succeeded on an older poll.
+- **Hide unpolled models** filters all of those lists and searches to confirmed entries without deleting models or changing a currently typed/selected model ID.
+- Deleting a model in **Manage Models** removes it from the main and Multi API Key Manager searches immediately. Later default-catalog updates or provider polls do not restore an explicitly deleted model; add it again in **Manage Models** if you want it back.
 - **Static fallback** means Glossarion kept its built-in list because the online catalog could not be queried. Translation can still work if the model ID and credentials are valid.
+- `authgem-key/` model IDs are explicitly configured and are not included in provider catalog polling.
 - **No provider credential** means the catalog supports polling, but Glossarion had no key it could safely send to that provider. Select one of that provider's models and enter its key, then poll again.
 - **Not pollable by design** means that route has no stable, safe general model-list endpoint. Glossarion intentionally keeps its curated static entries.
 

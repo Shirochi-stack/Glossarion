@@ -646,8 +646,10 @@ def _style_model_popup_view(view):
 from model_options import (
     STATIC_ONLY_PROVIDER_PREFIXES,
     due_provider_catalog_for_model,
-    get_last_successful_provider_models,
+    get_current_polled_provider_models,
     get_model_options,
+    merge_saved_model_options,
+    model_has_polled_marker,
     numbered_model_completion_values,
     provider_model_catalog_supports_anonymous_poll,
     provider_model_catalog_refresh_due,
@@ -20281,13 +20283,18 @@ Recent translations to summarize:
                 line_edit.blockSignals(line_edit_blocked)
             combo.blockSignals(blocked)
 
-    def _refresh_model_combo_catalog(self, model_values):
+    def _refresh_model_combo_catalog(self, model_values, force=False):
         """Queue catalog changes while typing, then apply the newest one."""
         model_values = list(model_values)
         self._model_all_values = model_values
-        if getattr(self, '_model_editor_typing', False):
+        if getattr(self, '_model_editor_typing', False) and not force:
             self._pending_model_combo_catalog = model_values
             return True
+
+        if force:
+            # A saved Manage Models edit is authoritative. Do not leave its
+            # completer update behind a stale editor-idle callback.
+            self._pending_model_combo_catalog = None
 
         return self._apply_model_combo_catalog_now(model_values)
 
@@ -20557,12 +20564,12 @@ Recent translations to summarize:
             )
 
     def _ensure_polled_model_marker_state(self):
-        """Load persistent last-successful catalogs used by Model Manager icons."""
+        """Load fresh successful catalogs currently supplying dropdown models."""
         existing = getattr(self, '_polled_online_models_by_provider', None)
         if isinstance(existing, dict):
             return existing
         try:
-            catalogs = get_last_successful_provider_models()
+            catalogs = get_current_polled_provider_models()
         except Exception:
             catalogs = {}
         by_provider = {
@@ -20597,6 +20604,106 @@ Recent translations to summarize:
             painter.end()
         return QIcon(pixmap)
 
+    @staticmethod
+    def _apply_polled_model_combo_rows(combo, polled_model_keys, checked_icon, hide_unpolled):
+        """Decorate/filter a combo popup without changing any stored model text."""
+        if combo is None:
+            return
+        empty_icon = QIcon()
+        line_edit = combo.lineEdit() if combo.isEditable() else None
+        current_index = combo.currentIndex()
+        current_text = line_edit.text() if line_edit is not None else combo.currentText()
+        cursor_position = line_edit.cursorPosition() if line_edit is not None else 0
+        selection_start = line_edit.selectionStart() if line_edit is not None else -1
+        selection_length = (
+            len(line_edit.selectedText())
+            if line_edit is not None and selection_start >= 0
+            else 0
+        )
+        combo_blocked = combo.blockSignals(True)
+        line_blocked = line_edit.blockSignals(True) if line_edit is not None else False
+        try:
+            combo.setIconSize(QSize(14, 14))
+            popup = combo.view()
+            for row in range(combo.count()):
+                model = combo.itemText(row)
+                is_polled = model_has_polled_marker(model, polled_model_keys)
+                combo.setItemIcon(row, checked_icon if is_polled else empty_icon)
+                if popup is not None:
+                    popup.setRowHidden(row, bool(hide_unpolled and not is_polled))
+        except RuntimeError:
+            pass
+        finally:
+            try:
+                combo.setCurrentIndex(current_index)
+                if line_edit is not None:
+                    line_edit.setText(current_text)
+                    if selection_start >= 0:
+                        line_edit.setSelection(selection_start, selection_length)
+                    else:
+                        line_edit.setCursorPosition(
+                            max(0, min(cursor_position, len(current_text)))
+                        )
+                    line_edit.blockSignals(line_blocked)
+                combo.blockSignals(combo_blocked)
+            except RuntimeError:
+                pass
+
+    def _refresh_model_search_poll_state(self, notify_multi_key_managers=True):
+        """Refresh checkmarks and the hide-unpolled filter in every model picker."""
+        ensure_state = getattr(self, '_ensure_polled_model_marker_state', None)
+        if callable(ensure_state):
+            ensure_state()
+        polled_model_keys = set(getattr(self, '_polled_online_model_ids', set()) or set())
+        hide_unpolled = bool(
+            getattr(self, 'config', {}).get('model_manager_hide_unpolled_models', False)
+        )
+        checked_icon = getattr(self, '_model_polled_icon', None)
+        if not isinstance(checked_icon, QIcon) or checked_icon.isNull():
+            checked_icon = TranslatorGUI._create_polled_model_icon()
+            self._model_polled_icon = checked_icon
+
+        combo = getattr(self, 'model_combo', None)
+        TranslatorGUI._apply_polled_model_combo_rows(
+            combo,
+            polled_model_keys,
+            checked_icon,
+            hide_unpolled,
+        )
+        completion_model = getattr(self, '_model_completer_proxy', None)
+        update_completion_state = getattr(completion_model, 'set_polled_state', None)
+        if callable(update_completion_state):
+            update_completion_state(
+                polled_model_keys,
+                checked_icon,
+                hide_unpolled,
+            )
+
+        if notify_multi_key_managers:
+            try:
+                dialogs = [
+                    value for name, value in vars(self).items()
+                    if name.startswith('_multi_api_key_dialog') and value is not None
+                ]
+            except (AttributeError, TypeError):
+                dialogs = []
+            for dialog in dialogs:
+                refresh_catalog = getattr(
+                    dialog, '_refresh_model_catalog_choices', None
+                )
+                if callable(refresh_catalog):
+                    try:
+                        refresh_catalog()
+                        continue
+                    except RuntimeError:
+                        pass
+                refresh = getattr(dialog, '_refresh_model_poll_markers', None)
+                if callable(refresh):
+                    try:
+                        refresh()
+                    except RuntimeError:
+                        pass
+
     def _apply_provider_model_catalog_refresh(self, result):
         """Apply a completed catalog refresh on Qt's GUI thread."""
         online_models = list(getattr(result, 'models', []) or [])
@@ -20609,15 +20716,12 @@ Recent translations to summarize:
         }
 
         custom_models = self.config.get('custom_model_list')
-        if isinstance(custom_models, list):
-            display_models = list(custom_models)
-            existing = {str(model).casefold() for model in display_models}
-            display_models.extend(
-                model for model in online_models
-                if str(model).casefold() not in existing
-            )
-        else:
-            display_models = online_models
+        removed_models = self.config.get('model_manager_removed_models', [])
+        display_models = merge_saved_model_options(
+            custom_models if isinstance(custom_models, list) else None,
+            online_models,
+            removed_models,
+        )
 
         self._refresh_model_combo_catalog(display_models)
 
@@ -20630,12 +20734,19 @@ Recent translations to summarize:
         requested_provider = getattr(result, 'requested_provider', None)
         polled_by_provider = dict(self._ensure_polled_model_marker_state())
         if requested_provider:
+            # A scoped failure displays that provider's static fallback, so
+            # its previous success must no longer decorate those fallback rows.
+            polled_by_provider.pop(requested_provider, None)
             if requested_provider in online:
                 polled_by_provider[requested_provider] = {
                     str(model).casefold()
                     for model in (provider_models.get(requested_provider, []) or [])
                 }
         else:
+            # A full refresh's provider_models contains successes only. Build
+            # marker state solely from those current polled catalogs rather
+            # than retaining IDs for providers now shown via static fallback.
+            polled_by_provider = {}
             for name in online:
                 polled_by_provider[name] = {
                     str(model).casefold()
@@ -20648,6 +20759,9 @@ Recent translations to summarize:
             for model in models
         }
         self._polled_online_model_ids = polled_model_keys
+        refresh_search_markers = getattr(self, '_refresh_model_search_poll_state', None)
+        if callable(refresh_search_markers):
+            refresh_search_markers()
         credential_skip_count = sum(
             1 for status in statuses.values()
             if 'no provider credential' in str(status)
@@ -20681,11 +20795,28 @@ Recent translations to summarize:
                     model for model in previous_models
                     if str(model).casefold() not in known_models
                 ]
-                refreshed_models = list(online_models)
+                previous_keys = {
+                    str(model).casefold() for model in previous_models
+                }
+                removed_keys = {
+                    str(model).casefold()
+                    for model in self.config.get('model_manager_removed_models', [])
+                }
+                # Also retain deletions made in this still-open manager before
+                # the user presses Poll Providers and then Save.
+                removed_keys.update(known_models - previous_keys)
+                refreshed_models = merge_saved_model_options(
+                    None,
+                    online_models,
+                    removed_keys,
+                )
                 refreshed_keys = {str(model).casefold() for model in refreshed_models}
                 refreshed_models.extend(
                     model for model in custom_models
-                    if str(model).casefold() not in refreshed_keys
+                    if (
+                        str(model).casefold() not in refreshed_keys
+                        and str(model).casefold() not in removed_keys
+                    )
                 )
 
                 selected_model = manager_list.currentItem().text() if manager_list.currentItem() else ''
@@ -20798,7 +20929,6 @@ Recent translations to summarize:
                 'authgem': 'AuthGem',
                 'authnd': 'AuthND',
                 'authza': 'AuthZA',
-                'authgem_key': 'AuthGem Key',
                 'ocagy': 'OcAgy',
                 'gemini': 'Gemini',
                 'xai': 'xAI',
@@ -20885,10 +21015,36 @@ Recent translations to summarize:
             thousands of Python ``lessThan`` callbacks from Qt.
             """
 
-            def __init__(self, base_model_values, parent=None):
-                super().__init__(list(base_model_values), parent)
+            def __init__(
+                self,
+                base_model_values,
+                polled_model_keys,
+                checked_icon,
+                hide_unpolled,
+                parent=None,
+            ):
+                super().__init__([], parent)
                 self._search = ""
                 self._base_model_values = list(base_model_values)
+                self._polled_model_keys = set(polled_model_keys or set())
+                self._checked_icon = checked_icon
+                self._hide_unpolled = bool(hide_unpolled)
+                self.set_search_text("")
+
+            def data(self, index, role=Qt.DisplayRole):
+                if index.isValid() and role in (Qt.DecorationRole, Qt.ToolTipRole):
+                    value = super().data(index, Qt.DisplayRole)
+                    is_polled = model_has_polled_marker(
+                        value,
+                        self._polled_model_keys,
+                    )
+                    if role == Qt.DecorationRole:
+                        return self._checked_icon if is_polled else QIcon()
+                    return (
+                        "✓ Confirmed by the latest successful online provider poll"
+                        if is_polled else ""
+                    )
+                return super().data(index, role)
 
             @staticmethod
             def _score(text, search):
@@ -20913,6 +21069,11 @@ Recent translations to summarize:
                         value for value in rendered
                         if self._search in str(value).lower()
                     ]
+                if self._hide_unpolled:
+                    rendered = [
+                        value for value in rendered
+                        if model_has_polled_marker(value, self._polled_model_keys)
+                    ]
                 ranked = sorted(
                     rendered,
                     key=lambda value: (
@@ -20930,6 +21091,20 @@ Recent translations to summarize:
                     search_text = self._search
                 self.set_search_text(search_text)
 
+            def set_polled_state(self, polled_model_keys, checked_icon, hide_unpolled):
+                """Update icons/filtering without replacing the completer object."""
+                self._polled_model_keys = set(polled_model_keys or set())
+                self._checked_icon = checked_icon
+                self._hide_unpolled = bool(hide_unpolled)
+                previous_values = self.stringList()
+                self.set_search_text(self._search)
+                if previous_values == self.stringList() and self.rowCount():
+                    self.dataChanged.emit(
+                        self.index(0, 0),
+                        self.index(self.rowCount() - 1, 0),
+                        [Qt.DecorationRole, Qt.ToolTipRole],
+                    )
+
         old_proxy = getattr(self, '_model_completer_proxy', None)
         if old_proxy is not None:
             try:
@@ -20937,7 +21112,25 @@ Recent translations to summarize:
             except (RuntimeError, TypeError):
                 pass
 
-        completion_model = _PrefixPriorityCompletionModel(model_list)
+        ensure_state = getattr(self, '_ensure_polled_model_marker_state', None)
+        if callable(ensure_state):
+            ensure_state()
+        polled_model_keys = set(getattr(self, '_polled_online_model_ids', set()) or set())
+        hide_unpolled = bool(
+            getattr(self, 'config', {}).get('model_manager_hide_unpolled_models', False)
+        )
+        checked_icon = getattr(self, '_model_polled_icon', None)
+        if not isinstance(checked_icon, QIcon) or checked_icon.isNull():
+            create_icon = getattr(self, '_create_polled_model_icon', None)
+            checked_icon = create_icon() if callable(create_icon) else QIcon()
+            self._model_polled_icon = checked_icon
+
+        completion_model = _PrefixPriorityCompletionModel(
+            model_list,
+            polled_model_keys,
+            checked_icon,
+            hide_unpolled,
+        )
 
         completer = QCompleter(self.model_combo)
         completer.setModel(completion_model)
@@ -20958,6 +21151,12 @@ Recent translations to summarize:
         # prevent GC
         self._model_completer_proxy = completion_model
         self._model_completer_source = completion_model
+        TranslatorGUI._apply_polled_model_combo_rows(
+            self.model_combo,
+            polled_model_keys,
+            checked_icon,
+            hide_unpolled,
+        )
         
     # Note: These Tkinter-specific methods are replaced by PySide6's QCompleter
     # which provides built-in autocomplete functionality
@@ -20971,17 +21170,11 @@ Recent translations to summarize:
         default_model = self.config.get('model', 'authgpt/gpt-5.6-luna')
         self.model_var = default_model
         # Use custom model list from config if saved, otherwise default catalog
-        models = self.config.get('custom_model_list', None)
-        if models is None:
-            models = get_model_options()
-        else:
-            # Merge in any NEW models from the default catalog that the user
-            # doesn't have yet (e.g. authgem/ models added after their list was saved)
-            default_catalog = get_model_options()
-            existing_set = set(models)
-            new_models = [m for m in default_catalog if m not in existing_set]
-            if new_models:
-                models = list(models) + new_models
+        models = merge_saved_model_options(
+            self.config.get('custom_model_list'),
+            get_model_options(),
+            self.config.get('model_manager_removed_models', []),
+        )
         self._model_all_values = list(models)
         
         # Create editable combobox
@@ -22386,8 +22579,8 @@ Recent translations to summarize:
         reset_btn.clicked.connect(reset_defaults)
         button_column.addWidget(reset_btn)
 
-        # Temporary testing view only. Hiding an item never removes it from the
-        # editable list or from the saved model order.
+        # Visibility filter shared by Model Manager and searchable model
+        # dropdowns. Hiding an item never removes it from the saved model order.
         hide_unpolled_toggle = self._create_styled_checkbox(
             "🧪 Hide unpolled models"
         )
@@ -22397,7 +22590,7 @@ Recent translations to summarize:
         ))
         hide_unpolled_toggle.setToolTip(
             "Show only models marked ✓ by successful provider catalog polls. "
-            "This testing filter does not change or save the model list."
+            "This also filters model search dropdowns without changing the saved model list."
         )
         button_column.addWidget(hide_unpolled_toggle)
 
@@ -22443,6 +22636,7 @@ Recent translations to summarize:
             self._apply_polled_model_icons(
                 dialog, getattr(self, '_polled_online_model_ids', set())
             )
+            self._refresh_model_search_poll_state()
         hide_unpolled_toggle.toggled.connect(update_hide_unpolled_filter)
 
         def poll_provider_catalogs():
@@ -22895,12 +23089,38 @@ Recent translations to summarize:
                                 "The model list cannot be empty. Add at least one model.")
             return
 
+        # Remember explicit removals so startup/default/online catalog merges
+        # can add genuinely new entries without resurrecting deleted ones.
+        previous_models = list(getattr(self, '_model_all_values', []) or [])
+        if not previous_models:
+            previous_models = [
+                self.model_combo.itemText(index)
+                for index in range(self.model_combo.count())
+            ]
+        new_keys = {str(model).strip().casefold() for model in new_order}
+        removed_keys = {
+            str(model).strip().casefold()
+            for model in self.config.get('model_manager_removed_models', [])
+            if str(model).strip()
+        }
+        removed_keys.update(
+            str(model).strip().casefold()
+            for model in previous_models
+            if str(model).strip() and str(model).strip().casefold() not in new_keys
+        )
+        removed_keys.difference_update(new_keys)
+
         # Persist to config
         self.config['custom_model_list'] = new_order
+        self.config['model_manager_removed_models'] = sorted(removed_keys)
         self._model_all_values = list(new_order)
 
-        # Refresh combobox
-        self._refresh_model_combo_catalog(new_order)
+        # Refresh the combo and completer immediately; a Manage Models save
+        # must not wait on a pending typing debounce.
+        self._refresh_model_combo_catalog(new_order, force=True)
+        refresh_search_state = getattr(self, '_refresh_model_search_poll_state', None)
+        if callable(refresh_search_state):
+            refresh_search_state()
 
         # Save config
         self.save_config(show_message=False)

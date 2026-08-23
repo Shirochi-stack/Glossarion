@@ -85,7 +85,13 @@ from typing import Dict, List, Optional, Tuple
 import requests
 from datetime import datetime, timedelta
 import logging
-from model_options import get_model_options, numbered_model_completion_values
+from model_options import (
+    get_current_polled_provider_models,
+    get_model_options,
+    merge_saved_model_options,
+    model_has_polled_marker,
+    numbered_model_completion_values,
+)
 # Dialog for configuring per-key endpoint
 try:
     if _HEADLESS_IMPORT:
@@ -1653,6 +1659,7 @@ class MultiAPIKeyDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._refresh_model_catalog_choices()
         self._start_deferred_key_pool_render()
         QTimer.singleShot(0, self._apply_manager_transient_owner)
 
@@ -2326,20 +2333,24 @@ class MultiAPIKeyDialog(QDialog):
     def _get_model_options_for_dropdown(self):
         """Return the same model list shape used by the main translator dropdown."""
         models = None
+        removed_models = []
         try:
+            live_models = getattr(self.translator_gui, '_model_all_values', None)
+            if isinstance(live_models, list):
+                return list(live_models)
             if hasattr(self.translator_gui, 'config'):
                 models = self.translator_gui.config.get('custom_model_list')
+                removed_models = self.translator_gui.config.get(
+                    'model_manager_removed_models', []
+                )
         except Exception:
             models = None
 
-        default_catalog = get_model_options()
-        if models is None:
-            return list(default_catalog)
-
-        models = list(models)
-        existing = set(models)
-        models.extend([m for m in default_catalog if m not in existing])
-        return models
+        return merge_saved_model_options(
+            models,
+            get_model_options(),
+            removed_models,
+        )
 
     def _model_needs_google_creds(self, model: str) -> bool:
         model = (model or '').strip().lower()
@@ -7636,6 +7647,168 @@ class MultiAPIKeyDialog(QDialog):
         self._refusal_patterns_dialog.raise_()
         self._refusal_patterns_dialog.activateWindow()
 
+    @staticmethod
+    def _current_model_poll_state(owner):
+        """Read the translator's live/persisted marker and visibility state."""
+        translator = getattr(owner, 'translator_gui', None)
+        ensure_state = getattr(translator, '_ensure_polled_model_marker_state', None)
+        if callable(ensure_state):
+            try:
+                ensure_state()
+            except Exception:
+                pass
+
+        polled_model_keys = set(
+            getattr(translator, '_polled_online_model_ids', set()) or set()
+        )
+        if not polled_model_keys:
+            try:
+                catalogs = get_current_polled_provider_models()
+                polled_model_keys = {
+                    str(model).casefold()
+                    for models in catalogs.values()
+                    for model in (models or [])
+                }
+            except Exception:
+                polled_model_keys = set()
+
+        config = getattr(translator, 'config', {}) or {}
+        hide_unpolled = bool(config.get('model_manager_hide_unpolled_models', False))
+        checked_icon = getattr(translator, '_model_polled_icon', None)
+        if not isinstance(checked_icon, QIcon) or checked_icon.isNull():
+            create_icon = getattr(translator, '_create_polled_model_icon', None)
+            try:
+                checked_icon = create_icon() if callable(create_icon) else QIcon()
+            except Exception:
+                checked_icon = QIcon()
+        return polled_model_keys, checked_icon, hide_unpolled
+
+    @staticmethod
+    def _apply_model_combo_poll_rows(combo, polled_model_keys, checked_icon, hide_unpolled):
+        """Apply marker icons and row visibility without changing item text."""
+        empty_icon = QIcon()
+        line_edit = combo.lineEdit() if combo.isEditable() else None
+        current_index = combo.currentIndex()
+        current_text = line_edit.text() if line_edit is not None else combo.currentText()
+        cursor_position = line_edit.cursorPosition() if line_edit is not None else 0
+        selection_start = line_edit.selectionStart() if line_edit is not None else -1
+        selection_length = (
+            len(line_edit.selectedText())
+            if line_edit is not None and selection_start >= 0
+            else 0
+        )
+        combo_blocked = combo.blockSignals(True)
+        line_blocked = line_edit.blockSignals(True) if line_edit is not None else False
+        try:
+            popup = combo.view()
+            for row in range(combo.count()):
+                model = combo.itemText(row)
+                is_polled = model_has_polled_marker(model, polled_model_keys)
+                combo.setItemIcon(row, checked_icon if is_polled else empty_icon)
+                if popup is not None:
+                    popup.setRowHidden(row, bool(hide_unpolled and not is_polled))
+        except RuntimeError:
+            pass
+        finally:
+            try:
+                combo.setCurrentIndex(current_index)
+                if line_edit is not None:
+                    line_edit.setText(current_text)
+                    if selection_start >= 0:
+                        line_edit.setSelection(selection_start, selection_length)
+                    else:
+                        line_edit.setCursorPosition(
+                            max(0, min(cursor_position, len(current_text)))
+                        )
+                    line_edit.blockSignals(line_blocked)
+                combo.blockSignals(combo_blocked)
+            except RuntimeError:
+                pass
+
+    def _refresh_model_poll_markers(self):
+        """Refresh every registered model picker after polling/filter changes."""
+        polled_model_keys, checked_icon, hide_unpolled = (
+            MultiAPIKeyDialog._current_model_poll_state(self)
+        )
+        live_combos = []
+        for combo in list(getattr(self, '_model_search_combos', []) or []):
+            try:
+                MultiAPIKeyDialog._apply_model_combo_poll_rows(
+                    combo,
+                    polled_model_keys,
+                    checked_icon,
+                    hide_unpolled,
+                )
+                completion_model = getattr(combo, '_model_completer_proxy', None)
+                update_state = getattr(completion_model, 'set_polled_state', None)
+                if callable(update_state):
+                    update_state(polled_model_keys, checked_icon, hide_unpolled)
+                live_combos.append(combo)
+            except RuntimeError:
+                continue
+        self._model_search_combos = live_combos
+
+    def _refresh_model_catalog_choices(self):
+        """Synchronize live model pickers with the translator's saved model list."""
+        model_values = MultiAPIKeyDialog._get_model_options_for_dropdown(self)
+        live_combos = []
+        for combo in list(getattr(self, '_model_search_combos', []) or []):
+            try:
+                line_edit = combo.lineEdit() if combo.isEditable() else None
+                current_text = (
+                    line_edit.text() if line_edit is not None else combo.currentText()
+                )
+                cursor_position = (
+                    line_edit.cursorPosition() if line_edit is not None else 0
+                )
+                selection_start = (
+                    line_edit.selectionStart() if line_edit is not None else -1
+                )
+                selection_length = (
+                    len(line_edit.selectedText())
+                    if line_edit is not None and selection_start >= 0
+                    else 0
+                )
+                combo_blocked = combo.blockSignals(True)
+                line_blocked = (
+                    line_edit.blockSignals(True) if line_edit is not None else False
+                )
+                try:
+                    current_values = [
+                        combo.itemText(index) for index in range(combo.count())
+                    ]
+                    if current_values != model_values:
+                        combo.clear()
+                        combo.addItems(model_values)
+                    matching_index = combo.findText(current_text)
+                    combo.setCurrentIndex(matching_index)
+                    if line_edit is not None:
+                        line_edit.setText(current_text)
+                        if selection_start >= 0:
+                            line_edit.setSelection(selection_start, selection_length)
+                        else:
+                            line_edit.setCursorPosition(
+                                max(0, min(cursor_position, len(current_text)))
+                            )
+
+                    completion_model = getattr(
+                        combo, '_model_completer_proxy', None
+                    )
+                    update_models = getattr(
+                        completion_model, 'set_model_values', None
+                    )
+                    if callable(update_models):
+                        update_models(model_values, current_text)
+                finally:
+                    if line_edit is not None:
+                        line_edit.blockSignals(line_blocked)
+                    combo.blockSignals(combo_blocked)
+                live_combos.append(combo)
+            except RuntimeError:
+                continue
+        self._model_search_combos = live_combos
+        MultiAPIKeyDialog._refresh_model_poll_markers(self)
+
     def _attach_model_autofill(self, combo: QComboBox, on_change=None, model_values=None):
         """Attach the same prefix-priority contains completer used by translator_gui."""
         from PySide6.QtCore import QStringListModel
@@ -7643,10 +7816,36 @@ class MultiAPIKeyDialog(QDialog):
         class _PrefixPriorityCompletionModel(QStringListModel):
             """Rank only matching models without a Python-sorted Qt proxy."""
 
-            def __init__(self, base_model_values, parent=None):
-                super().__init__(list(base_model_values), parent)
+            def __init__(
+                self,
+                base_model_values,
+                polled_model_keys,
+                checked_icon,
+                hide_unpolled,
+                parent=None,
+            ):
+                super().__init__([], parent)
                 self._search = ""
                 self._base_model_values = list(base_model_values)
+                self._polled_model_keys = set(polled_model_keys or set())
+                self._checked_icon = checked_icon
+                self._hide_unpolled = bool(hide_unpolled)
+                self.set_search_text("")
+
+            def data(self, index, role=Qt.DisplayRole):
+                if index.isValid() and role in (Qt.DecorationRole, Qt.ToolTipRole):
+                    value = super().data(index, Qt.DisplayRole)
+                    is_polled = model_has_polled_marker(
+                        value,
+                        self._polled_model_keys,
+                    )
+                    if role == Qt.DecorationRole:
+                        return self._checked_icon if is_polled else QIcon()
+                    return (
+                        "✓ Confirmed by the latest successful online provider poll"
+                        if is_polled else ""
+                    )
+                return super().data(index, role)
 
             @staticmethod
             def _score(text, search):
@@ -7671,6 +7870,11 @@ class MultiAPIKeyDialog(QDialog):
                         value for value in rendered
                         if self._search in str(value).lower()
                     ]
+                if self._hide_unpolled:
+                    rendered = [
+                        value for value in rendered
+                        if model_has_polled_marker(value, self._polled_model_keys)
+                    ]
                 ranked = sorted(
                     rendered,
                     key=lambda value: (
@@ -7681,11 +7885,40 @@ class MultiAPIKeyDialog(QDialog):
                 if ranked != self.stringList():
                     self.setStringList(ranked)
 
+            def set_polled_state(self, polled_model_keys, checked_icon, hide_unpolled):
+                self._polled_model_keys = set(polled_model_keys or set())
+                self._checked_icon = checked_icon
+                self._hide_unpolled = bool(hide_unpolled)
+                previous_values = self.stringList()
+                self.set_search_text(self._search)
+                if previous_values == self.stringList() and self.rowCount():
+                    self.dataChanged.emit(
+                        self.index(0, 0),
+                        self.index(self.rowCount() - 1, 0),
+                        [Qt.DecorationRole, Qt.ToolTipRole],
+                    )
+
+            def set_model_values(self, model_values, search_text=None):
+                """Replace stale completion choices after Manage Models saves."""
+                self._base_model_values = list(model_values)
+                if search_text is None:
+                    search_text = self._search
+                self.set_search_text(search_text)
+
         if model_values is None:
             model_values = [combo.itemText(i) for i in range(combo.count())]
         else:
             model_values = list(model_values)
-        completion_model = _PrefixPriorityCompletionModel(model_values, combo)
+        polled_model_keys, checked_icon, hide_unpolled = (
+            MultiAPIKeyDialog._current_model_poll_state(self)
+        )
+        completion_model = _PrefixPriorityCompletionModel(
+            model_values,
+            polled_model_keys,
+            checked_icon,
+            hide_unpolled,
+            combo,
+        )
 
         completer = QCompleter(completion_model, combo)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
@@ -7716,6 +7949,16 @@ class MultiAPIKeyDialog(QDialog):
         combo._model_completer = completer
         combo._model_completer_proxy = completion_model
         combo._model_completer_source = completion_model
+        MultiAPIKeyDialog._apply_model_combo_poll_rows(
+            combo,
+            polled_model_keys,
+            checked_icon,
+            hide_unpolled,
+        )
+        registered_combos = list(getattr(self, '_model_search_combos', []) or [])
+        if combo not in registered_combos:
+            registered_combos.append(combo)
+        self._model_search_combos = registered_combos
 
     def _notify_authgpt_visibility(self):
         """Notify the translator GUI to re-evaluate AuthGPT/AuthGem login button visibility."""

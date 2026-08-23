@@ -517,11 +517,6 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
         ("GEMINI_API_KEY", "GOOGLE_API_KEY"), auth_style="query",
     ),
     ProviderCatalogSpec(
-        "authgem_key", "authgem-key/",
-        "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
-        ("GEMINI_API_KEY", "GOOGLE_API_KEY"), auth_style="query",
-    ),
-    ProviderCatalogSpec(
         "mistral", "", "https://api.mistral.ai/v1/models", ("MISTRAL_API_KEY",),
     ),
     ProviderCatalogSpec(
@@ -598,6 +593,7 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
 
 
 STATIC_ONLY_PROVIDER_PREFIXES: Mapping[str, str] = {
+    "authgem-key/": "API-key routing uses explicitly configured model IDs",
     "authgem-vertex*/": "Vertex publisher inference resources do not expose a list operation",
     "vertex/": "Vertex catalogs are project and region specific",
     "search/": "Search route is a fixed service rather than a model catalog",
@@ -608,7 +604,7 @@ STATIC_ONLY_PROVIDER_PREFIXES: Mapping[str, str] = {
 _PREFIX_PROVIDER_MAP: Tuple[Tuple[str, str], ...] = (
     ("authgem-vertex/", "static"),
     ("authgrok/", "authgrok"),
-    ("authgem-key/", "authgem_key"),
+    ("authgem-key/", "static"),
     ("ocagy/", "ocagy"),
     ("antigravity/", "antigravity"),
     ("vertex/", "static"),
@@ -691,6 +687,57 @@ def numbered_model_completion_values(
             seen.add(dedupe_key)
             rendered.append(text)
     return rendered
+
+
+def model_has_polled_marker(model: str, polled_model_keys: Iterable[str]) -> bool:
+    """Match a displayed model, including a rendered numbered route, to poll state."""
+    value = str(model or "").strip().casefold()
+    if not value:
+        return False
+    keys = {
+        str(candidate).strip().casefold()
+        for candidate in (polled_model_keys or ())
+        if str(candidate).strip()
+    }
+    if value in keys:
+        return True
+
+    # Completers render canonical entries such as authgpt/model as the account
+    # prefix currently being typed (authgpt4/model). A successful canonical
+    # catalog poll should keep its marker on that temporary display alias.
+    numbered = _NUMBERED_MODEL_COMPLETION_RE.match(value)
+    if not numbered:
+        return False
+    suffix = value[numbered.end():].lstrip("/")
+    canonical = f"{numbered.group(1).casefold()}/{suffix}"
+    return canonical in keys
+
+
+def merge_saved_model_options(
+    saved_models: Optional[Iterable[str]],
+    discovered_models: Iterable[str],
+    removed_models: Iterable[str] = (),
+) -> List[str]:
+    """Merge new catalog entries without resurrecting explicitly removed models."""
+    removed_keys = {
+        str(model).strip().casefold()
+        for model in (removed_models or ())
+        if str(model).strip()
+    }
+    combined = list(saved_models or ())
+    seen = {
+        str(model).strip().casefold()
+        for model in combined
+        if str(model).strip()
+    }
+    for model in discovered_models or ():
+        value = str(model).strip()
+        key = value.casefold()
+        if not value or key in seen or key in removed_keys:
+            continue
+        combined.append(value)
+        seen.add(key)
+    return combined
 
 
 def _catalog_provider_for_model(model: str) -> Optional[str]:
@@ -806,6 +853,10 @@ def _cached_provider_models(*, max_age: int = _MODEL_CATALOG_CACHE_TTL_SECONDS) 
     providers = _load_model_catalog_cache().get("providers", {})
     result: Dict[str, List[str]] = {}
     for name, record in providers.items():
+        # authgem-key is intentionally no longer polled. Ignore any catalog
+        # left in an older cache so it cannot affect dropdowns after upgrade.
+        if str(name) == "authgem_key":
+            continue
         if not isinstance(record, dict):
             continue
         try:
@@ -825,6 +876,8 @@ def get_last_successful_provider_models() -> Dict[str, List[str]]:
     records = _load_model_catalog_cache().get("last_successful", {})
     result: Dict[str, List[str]] = {}
     for name, record in records.items():
+        if str(name) == "authgem_key":
+            continue
         if not isinstance(record, dict):
             continue
         models = record.get("models")
@@ -837,6 +890,11 @@ def get_last_successful_provider_models() -> Dict[str, List[str]]:
         if cleaned:
             result[str(name)] = cleaned
     return result
+
+
+def get_current_polled_provider_models() -> Dict[str, List[str]]:
+    """Return fresh successful catalogs that currently supply dropdown models."""
+    return _cached_provider_models()
 
 
 def _deduplicate_models(models: Iterable[str]) -> List[str]:
@@ -990,7 +1048,7 @@ def _extract_catalog_entries(payload: object, spec: ProviderCatalogSpec) -> List
 
 def _normalize_catalog_model_id(spec: ProviderCatalogSpec, model_id: object) -> Optional[str]:
     value = str(model_id or "").strip()
-    if spec.name in ("gemini", "authgem_key") and value.startswith("models/"):
+    if spec.name == "gemini" and value.startswith("models/"):
         value = value[len("models/"):]
     if not value or len(value) > 300 or any(ch.isspace() for ch in value):
         return None
@@ -1033,7 +1091,7 @@ def _fetch_provider_catalog(
                 model_type = str(entry.get("type", "") or "").strip().casefold()
                 if model_type and model_type not in spec.allowed_types:
                     continue
-            if spec.name in ("gemini", "authgem_key"):
+            if spec.name == "gemini":
                 actions = entry.get("supportedGenerationMethods", entry.get("supported_actions", []))
                 if isinstance(actions, list) and actions:
                     normalized_actions = {str(action).strip().casefold() for action in actions}
