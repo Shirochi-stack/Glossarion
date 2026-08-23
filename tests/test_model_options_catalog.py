@@ -1040,6 +1040,7 @@ def test_gui_catalog_refresh_updates_stealthily_while_model_editor_is_active(mon
     import translator_gui
 
     class ModelComboHarness:
+        _schedule_current_provider_catalog_refresh = lambda *_args, **_kwargs: None
         setup_model_combobox_bindings = (
             translator_gui.TranslatorGUI.setup_model_combobox_bindings
         )
@@ -1055,6 +1056,12 @@ def test_gui_catalog_refresh_updates_stealthily_while_model_editor_is_active(mon
         )
         _refresh_model_combo_catalog = (
             translator_gui.TranslatorGUI._refresh_model_combo_catalog
+        )
+        _apply_model_combo_catalog_now = (
+            translator_gui.TranslatorGUI._apply_model_combo_catalog_now
+        )
+        _finish_model_editor_typing = (
+            translator_gui.TranslatorGUI._finish_model_editor_typing
         )
 
     app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
@@ -1111,7 +1118,12 @@ def test_gui_catalog_refresh_updates_stealthily_while_model_editor_is_active(mon
 
     new_models = ["authnd/new-model", "authnd/newer-model"]
     original_completer = combo.completer()
+    harness._model_editor_typing = True
     assert harness._refresh_model_combo_catalog(new_models)
+    assert [combo.itemText(index) for index in range(combo.count())] == old_models
+    assert harness._pending_model_combo_catalog == new_models
+
+    harness._finish_model_editor_typing()
     assert [combo.itemText(index) for index in range(combo.count())] == new_models
     assert editor.text() == "authnd/partially-typed"
     assert editor.cursorPosition() == len("authnd/partially")
@@ -1144,6 +1156,106 @@ def test_gui_catalog_refresh_updates_stealthily_while_model_editor_is_active(mon
     assert other_field.hasFocus()
 
     window.close()
+
+
+def test_model_completer_ranks_matches_without_python_sort_proxy(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    models = [
+        "or/vendor/alpha-model",
+        "alpha-model",
+        "x/alpha-model",
+        "authgrok/grok-4.6",
+        "unrelated-model",
+    ]
+    combo.addItems(models)
+    harness = SimpleNamespace(model_combo=combo)
+
+    translator_gui.TranslatorGUI._install_model_completer(harness, models)
+    completion_model = harness._model_completer_proxy
+
+    assert not isinstance(completion_model, qt_core.QSortFilterProxyModel)
+    completion_model.set_search_text("alpha")
+    assert completion_model.stringList() == [
+        "alpha-model",
+        "or/vendor/alpha-model",
+        "x/alpha-model",
+    ]
+
+    completion_model.set_search_text("authgrok12/grok")
+    assert completion_model.stringList() == ["authgrok12/grok-4.6"]
+    app.processEvents()
+
+
+def test_model_text_provider_refresh_is_debounced(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_test = pytest.importorskip("PySide6.QtTest")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+
+    class DebounceHarness(qt_core.QObject):
+        _on_model_text_changed = translator_gui.TranslatorGUI._on_model_text_changed
+        _on_model_editor_text_edited = (
+            translator_gui.TranslatorGUI._on_model_editor_text_edited
+        )
+        _finish_model_editor_typing = (
+            translator_gui.TranslatorGUI._finish_model_editor_typing
+        )
+        _apply_pending_model_text_change = (
+            translator_gui.TranslatorGUI._apply_pending_model_text_change
+        )
+
+        def __init__(self):
+            super().__init__()
+            self.model_var = ""
+            self.provider_refreshes = 0
+            self.poe_checks = 0
+            self.output_checks = 0
+            self.catalog_poll_schedules = 0
+
+        def on_model_change(self):
+            self.provider_refreshes += 1
+
+        def _check_poe_model(self):
+            self.poe_checks += 1
+
+        def _enforce_image_output_dependency(self):
+            self.output_checks += 1
+
+        def _schedule_current_provider_catalog_refresh(self):
+            self.catalog_poll_schedules += 1
+
+        def _apply_model_combo_catalog_now(self, _models):
+            raise AssertionError("no catalog should be queued in this test")
+
+    harness = DebounceHarness()
+    harness._on_model_text_changed("a")
+    harness._on_model_text_changed("au")
+    harness._on_model_text_changed("authnd/")
+
+    assert harness.model_var == "authnd/"
+    assert harness.provider_refreshes == 0
+    qt_test.QTest.qWait(225)
+    app.processEvents()
+    assert harness.provider_refreshes == 1
+    assert harness.poe_checks == 1
+    assert harness.output_checks == 1
+
+    harness._on_model_editor_text_edited("authnd/")
+    assert harness._model_editor_typing is True
+    assert harness.catalog_poll_schedules == 1
+    qt_test.QTest.qWait(325)
+    app.processEvents()
+    assert harness._model_editor_typing is False
 
 
 @pytest.mark.parametrize(

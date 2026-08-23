@@ -20070,20 +20070,54 @@ Recent translations to summarize:
     
     # PySide6 helper method for model text changes
     def _on_model_text_changed(self, text):
-        """Handle model combobox text changes"""
-        # Update the model_var to the current text
+        """Record edits immediately and debounce the expensive UI refresh."""
         self.model_var = text
-        
-        # Re-check model requirements (GCloud, POE, etc.)
+
+        timer = getattr(self, '_model_text_change_timer', None)
+        if timer is None:
+            timer = QTimer(self if isinstance(self, QObject) else None)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._apply_pending_model_text_change)
+            self._model_text_change_timer = timer
+        timer.start(175)
+
+    def _on_model_index_changed(self, _index=None):
+        """Debounce dropdown index changes through the same model-text path."""
+        try:
+            text = self.model_combo.currentText()
+        except (AttributeError, RuntimeError):
+            text = getattr(self, 'model_var', '')
+        self._on_model_text_changed(text)
+
+    def _apply_pending_model_text_change(self):
+        """Refresh provider-dependent controls once model typing pauses."""
         self.on_model_change()
-        
-        # Check for POE model
+
         if hasattr(self, '_check_poe_model'):
             self._check_poe_model()
-        
-        # Enforce image output dependency when model changes
+
         if hasattr(self, '_enforce_image_output_dependency'):
             self._enforce_image_output_dependency()
+
+    def _on_model_editor_text_edited(self, _text=None):
+        """Track real user typing separately from programmatic text changes."""
+        self._model_editor_typing = True
+        timer = getattr(self, '_model_editor_idle_timer', None)
+        if timer is None:
+            timer = QTimer(self if isinstance(self, QObject) else None)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._finish_model_editor_typing)
+            self._model_editor_idle_timer = timer
+        timer.start(275)
+        self._schedule_current_provider_catalog_refresh()
+
+    def _finish_model_editor_typing(self):
+        """Apply the latest queued online catalog after typing becomes idle."""
+        self._model_editor_typing = False
+        pending = getattr(self, '_pending_model_combo_catalog', None)
+        self._pending_model_combo_catalog = None
+        if pending is not None:
+            self._apply_model_combo_catalog_now(pending)
 
 
     # Also add this to bind manual typing events to the combobox
@@ -20093,7 +20127,7 @@ Recent translations to summarize:
         line_edit = self.model_combo.lineEdit()
         if line_edit is not None and not getattr(self, '_model_auto_poll_text_connected', False):
             line_edit.textEdited.connect(
-                lambda _text: self._schedule_current_provider_catalog_refresh()
+                lambda text: self._on_model_editor_text_edited(text)
             )
             self.model_combo.activated.connect(
                 lambda *_args: self._schedule_current_provider_catalog_refresh(250)
@@ -20248,9 +20282,17 @@ Recent translations to summarize:
             combo.blockSignals(blocked)
 
     def _refresh_model_combo_catalog(self, model_values):
-        """Apply catalog choices without interrupting the current selection."""
+        """Queue catalog changes while typing, then apply the newest one."""
         model_values = list(model_values)
         self._model_all_values = model_values
+        if getattr(self, '_model_editor_typing', False):
+            self._pending_model_combo_catalog = model_values
+            return True
+
+        return self._apply_model_combo_catalog_now(model_values)
+
+    def _apply_model_combo_catalog_now(self, model_values):
+        """Apply catalog choices without interrupting the current selection."""
         if self._model_editor_or_popup_is_active():
             self._update_active_model_combo_catalog(model_values)
             return True
@@ -20831,30 +20873,55 @@ Recent translations to summarize:
         text only appears after a provider prefix (e.g. ``chutes/``, ``or/``).
         """
         from PySide6.QtWidgets import QCompleter
-        from PySide6.QtCore import Qt, QSortFilterProxyModel
-        from PySide6.QtCore import QStringListModel
+        from PySide6.QtCore import Qt, QStringListModel
 
-        class _PrefixPriorityProxy(QSortFilterProxyModel):
-            """Sorts completer results so prefix matches beat substring matches."""
+        class _PrefixPriorityCompletionModel(QStringListModel):
+            """Keep only ranked matches without a Python-sorted Qt proxy.
+
+            Resetting a 1,700-row source model underneath a dynamic
+            ``QSortFilterProxyModel`` caused hundreds of milliseconds of GUI
+            work for every character.  Ranking the matching strings directly
+            is linear apart from a small native Python string sort and avoids
+            thousands of Python ``lessThan`` callbacks from Qt.
+            """
 
             def __init__(self, base_model_values, parent=None):
-                super().__init__(parent)
+                super().__init__(list(base_model_values), parent)
                 self._search = ""
                 self._base_model_values = list(base_model_values)
-                self.setDynamicSortFilter(True)
+
+            @staticmethod
+            def _score(text, search):
+                if not search:
+                    return 0
+                if text == search:
+                    return 0
+                if text.startswith(search):
+                    return 1
+                return 2 if any(
+                    part.startswith(search) for part in text.split('/')[1:]
+                ) else 3
 
             def set_search_text(self, text):
                 self._search = (text or "").lower()
-                source_model = self.sourceModel()
-                if source_model is not None:
-                    source_model.setStringList(
-                        numbered_model_completion_values(
-                            self._base_model_values,
-                            text,
-                        )
-                    )
-                self.invalidate()
-                self.sort(0)
+                rendered = numbered_model_completion_values(
+                    self._base_model_values,
+                    text,
+                )
+                if self._search:
+                    rendered = [
+                        value for value in rendered
+                        if self._search in str(value).lower()
+                    ]
+                ranked = sorted(
+                    rendered,
+                    key=lambda value: (
+                        self._score(str(value).lower(), self._search),
+                        str(value).lower(),
+                    ),
+                )
+                if ranked != self.stringList():
+                    self.setStringList(ranked)
 
             def set_model_values(self, model_values, search_text=None):
                 """Refresh completion choices without replacing the completer."""
@@ -20863,34 +20930,6 @@ Recent translations to summarize:
                     search_text = self._search
                 self.set_search_text(search_text)
 
-            def lessThan(self, left, right):
-                l_val = (self.sourceModel().data(left, Qt.DisplayRole) or "").lower()
-                r_val = (self.sourceModel().data(right, Qt.DisplayRole) or "").lower()
-                l_s = self._score(l_val)
-                r_s = self._score(r_val)
-                if l_s != r_s:
-                    return l_s < r_s
-                return l_val < r_val
-
-            def _score(self, text):
-                s = self._search
-                if not s:
-                    return 0
-                if text == s:
-                    return 0          # exact
-                if text.startswith(s):
-                    return 1          # prefix
-                # any segment after '/' starts with the search text
-                pos = 0
-                while True:
-                    slash = text.find('/', pos)
-                    if slash < 0:
-                        break
-                    if text[slash + 1:].startswith(s):
-                        return 2      # segment-start
-                    pos = slash + 1
-                return 3              # plain substring
-
         old_proxy = getattr(self, '_model_completer_proxy', None)
         if old_proxy is not None:
             try:
@@ -20898,14 +20937,10 @@ Recent translations to summarize:
             except (RuntimeError, TypeError):
                 pass
 
-        base_model_values = list(model_list)
-        source = QStringListModel(base_model_values)
-        proxy = _PrefixPriorityProxy(base_model_values)
-        proxy.setSourceModel(source)
-        proxy.sort(0)
+        completion_model = _PrefixPriorityCompletionModel(model_list)
 
         completer = QCompleter(self.model_combo)
-        completer.setModel(proxy)
+        completer.setModel(completion_model)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setFilterMode(Qt.MatchContains)
         completer_popup = completer.popup()
@@ -20915,12 +20950,14 @@ Recent translations to summarize:
         self.model_combo.view().setObjectName("modelComboPopup")
         _style_model_popup_view(self.model_combo.view())
 
-        # Re-sort proxy whenever the user types
-        self.model_combo.lineEdit().textEdited.connect(proxy.set_search_text)
+        # Re-rank the small matching completion list whenever the user types.
+        self.model_combo.lineEdit().textEdited.connect(
+            completion_model.set_search_text
+        )
 
         # prevent GC
-        self._model_completer_proxy = proxy
-        self._model_completer_source = source
+        self._model_completer_proxy = completion_model
+        self._model_completer_source = completion_model
         
     # Note: These Tkinter-specific methods are replaced by PySide6's QCompleter
     # which provides built-in autocomplete functionality
@@ -21361,7 +21398,7 @@ Recent translations to summarize:
         self._model_prev_text = default_model
         
         # Connect signals
-        self.model_combo.currentIndexChanged.connect(self.on_model_change)
+        self.model_combo.currentIndexChanged.connect(self._on_model_index_changed)
         self.model_combo.editTextChanged.connect(self._on_model_text_changed)
         
         # Setup autocomplete bindings
