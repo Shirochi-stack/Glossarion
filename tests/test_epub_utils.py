@@ -290,11 +290,11 @@ def test_pdf_qa_source_aliases_use_progress_and_normalize_section_names(tmp_path
     word_count = workspace / "word_count"
     word_count.mkdir(parents=True)
     (word_count / "pdf_section_1.html").write_text("one", encoding="utf-8")
-    (word_count / "pdf_section_2_0.html").write_text("two", encoding="utf-8")
+    (word_count / "pdf_section_2.html").write_text("two", encoding="utf-8")
     (workspace / "response_pdf_section_stable-bookmark-id.html").write_text(
         "one", encoding="utf-8"
     )
-    (workspace / "response_pdf_section_002_part_1.html").write_text(
+    (workspace / "response_pdf_section_002.html").write_text(
         "two", encoding="utf-8"
     )
     (workspace / "translation_progress.json").write_text(
@@ -306,11 +306,11 @@ def test_pdf_qa_source_aliases_use_progress_and_normalize_section_names(tmp_path
                     "pdf_toc_section": True,
                     "pdf_section_id": "stable-bookmark-id",
                 },
-                "pdf:split:2": {
-                    "actual_num": 2.0,
-                    "output_file": "response_pdf_section_002_part_1.html",
+                "pdf:second-section": {
+                    "actual_num": 2,
+                    "output_file": "response_pdf_section_002.html",
                     "pdf_toc_section": True,
-                    "pdf_section_id": "split",
+                    "pdf_section_id": "second-section",
                 },
             }
         }),
@@ -320,7 +320,7 @@ def test_pdf_qa_source_aliases_use_progress_and_normalize_section_names(tmp_path
     aliases = build_pdf_qa_source_aliases(str(workspace))
 
     assert aliases["pdf_section_stable-bookmark-id.html"] == "pdf_section_1.html"
-    assert aliases["pdf_section_002_part_1.html"] == "pdf_section_2_0.html"
+    assert aliases["pdf_section_002.html"] == "pdf_section_2.html"
 
 
 def test_missing_image_check_detects_replacement_and_honors_rename_map():

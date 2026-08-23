@@ -4003,7 +4003,7 @@ class ProgressManager:
         previews=None,
         duplicate_confidence=0,
     ):
-        """Set or clear QA state for one persisted EPUB chunk."""
+        """Set or clear QA state for one persisted EPUB/PDF chapter chunk."""
         with self._save_lock:
             entry = self.prog.get("chapter_chunks", {}).get(str(chapter_key))
             if not isinstance(entry, dict):
@@ -4354,31 +4354,6 @@ class ProgressManager:
         self.prog["chapters"] = new_chapters
         # NOTE: caller is responsible for saving after dedup
     
-    @staticmethod
-    def _apply_pdf_split_progress_metadata(target, chapter_obj):
-        """Persist source-level PDF split identity for progress UIs."""
-        if not isinstance(target, dict) or not isinstance(chapter_obj, dict):
-            return
-        chunk_info = chapter_obj.get("chunk_info")
-        if not (
-            chapter_obj.get("pdf_toc_section")
-            and chapter_obj.get("is_chunk")
-            and isinstance(chunk_info, dict)
-        ):
-            return
-        try:
-            chunk_index = int(chunk_info.get("chunk_idx"))
-            total_chunks = int(chunk_info.get("total_chunks"))
-        except (TypeError, ValueError):
-            return
-        if chunk_index < 1 or total_chunks <= 1 or chunk_index > total_chunks:
-            return
-        target["pdf_split_chunk_index"] = chunk_index
-        target["pdf_split_total_chunks"] = total_chunks
-        target["pdf_split_parent_num"] = chunk_info.get(
-            "original_chapter", chapter_obj.get("num")
-        )
-
     def _get_chapter_key(self, actual_num, output_file=None, chapter_obj=None, content_hash=None):
         """Generate consistent chapter key, handling collisions with composite keys.
         
@@ -4427,10 +4402,7 @@ class ProgressManager:
         if chapter_obj and chapter_obj.get("pdf_toc_section"):
             section_id = str(chapter_obj.get("pdf_section_id") or "").strip()
             if section_id:
-                stable_key = f"pdf:{section_id}"
-                if chapter_obj.get("is_chunk"):
-                    stable_key = f"{stable_key}:{actual_num}"
-                return stable_key
+                return f"pdf:{section_id}"
 
         spine_pos = None
         if chapter_obj:
@@ -5239,9 +5211,6 @@ class ProgressManager:
                     chapter_info['pdf_progress_key'] = chapter_key
                     chapter_info['pdf_content_hash_version'] = 2
                     chapter_info.pop('pdf_hash_migration_pending', None)
-                self._apply_pdf_split_progress_metadata(
-                    chapter_info, chapter_obj
-                )
             if chapter_obj.get("subtitle_batch"):
                 chapter_info["subtitle_progress_key"] = chapter_key
                 subtitle_source = (
@@ -5770,9 +5739,6 @@ class ProgressManager:
                 merged_info['pdf_progress_key'] = chapter_key
                 merged_info['pdf_content_hash_version'] = 2
                 merged_info.pop('pdf_hash_migration_pending', None)
-            self._apply_pdf_split_progress_metadata(
-                merged_info, chapter_obj
-            )
         
         self.prog["chapters"][chapter_key] = merged_info
     
@@ -6058,9 +6024,6 @@ class ProgressManager:
                     if chapter_obj.get("pdf_section_id"):
                         discovered_info["pdf_progress_key"] = chapter_key
                         discovered_info["pdf_content_hash_version"] = 2
-                    self._apply_pdf_split_progress_metadata(
-                        discovered_info, chapter_obj
-                    )
                 self.prog["chapters"][chapter_key] = discovered_info
                 self._apply_model_info(self.prog["chapters"][chapter_key])
                 
@@ -6258,8 +6221,6 @@ class ProgressManager:
             section_id = str(chapter.get("pdf_section_id") or "").strip()
             if chapter.get("pdf_toc_section") and section_id:
                 pdf_progress_key = f"pdf:{section_id}"
-                if chapter.get("is_chunk"):
-                    pdf_progress_key = f"{pdf_progress_key}:{actual_num}"
                 section_record = {
                     "progress_key": pdf_progress_key,
                     "actual_num": actual_num,
@@ -6457,9 +6418,6 @@ class ProgressManager:
                         entry[pdf_key] = current_section[pdf_key]
                 entry["pdf_progress_key"] = current_section["progress_key"]
                 current_chapter = current_section.get("chapter")
-                self._apply_pdf_split_progress_metadata(
-                    entry, current_chapter
-                )
                 preferred_output = current_section.get("output_file")
                 current_output = entry.get("output_file")
                 if current_chapter is not None and preferred_output:

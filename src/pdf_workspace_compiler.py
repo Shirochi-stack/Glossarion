@@ -30,13 +30,6 @@ _COMPILED_PDF_SOURCE_BLOCK_RE = re.compile(
     r"<!--\s*GLOSSARION_PDF_SOURCE_END\s+key=(?P=key)\s*-->",
     re.IGNORECASE | re.DOTALL,
 )
-_COMPILED_PDF_SECTION_START_RE = re.compile(
-    r"<section\b(?=[^>]*\bclass=[\"'][^\"']*\bcompiled-pdf-section\b[^\"']*[\"'])"
-    r"[^>]*>",
-    re.IGNORECASE,
-)
-
-
 class PDFCompilationCancelled(RuntimeError):
     """Raised when compilation is cancelled between renderer phases."""
 
@@ -67,7 +60,7 @@ def compiled_pdf_source_markers(output_file: str) -> tuple[str, str]:
 
 
 def wrap_compiled_pdf_source_section(output_file: str, content: str) -> str:
-    """Wrap one compiled PDF source part for targeted invalidation."""
+    """Wrap one compiled PDF bookmark section for targeted invalidation."""
     start, end = compiled_pdf_source_markers(output_file)
     return f"{start}\n{str(content or '')}\n{end}"
 
@@ -75,10 +68,8 @@ def wrap_compiled_pdf_source_section(output_file: str, content: str) -> str:
 def remove_compiled_pdf_source_section(
     html_text: str,
     output_file: str,
-    *,
-    legacy_section_ordinal: int | None = None,
 ) -> tuple[str, bool, str | None]:
-    """Remove one PDF source part by marker, with a pre-marker fallback."""
+    """Remove one marker-delimited PDF bookmark section."""
     text = str(html_text or "")
     marker_key = compiled_pdf_source_marker_key(output_file)
     for match in _COMPILED_PDF_SOURCE_BLOCK_RE.finditer(text):
@@ -86,34 +77,7 @@ def remove_compiled_pdf_source_section(
             continue
         return text[:match.start()] + text[match.end():], True, "marker"
 
-    try:
-        wanted_ordinal = int(legacy_section_ordinal or 0)
-    except (TypeError, ValueError):
-        wanted_ordinal = 0
-    if wanted_ordinal <= 0:
-        return text, False, None
-
-    starts = list(_COMPILED_PDF_SECTION_START_RE.finditer(text))
-    target_position = None
-    for position, match in enumerate(starts):
-        ordinal_match = re.search(
-            r"\bdata-section=[\"'](?P<ordinal>\d+)[\"']",
-            match.group(0),
-            flags=re.IGNORECASE,
-        )
-        if ordinal_match and int(ordinal_match.group("ordinal")) == wanted_ordinal:
-            target_position = position
-            break
-    if target_position is None:
-        return text, False, None
-
-    start = starts[target_position].start()
-    if target_position + 1 < len(starts):
-        end = starts[target_position + 1].start()
-    else:
-        body_end = re.search(r"</body\s*>", text[start:], flags=re.IGNORECASE)
-        end = start + body_end.start() if body_end else len(text)
-    return text[:start] + text[end:], True, "legacy_ordinal"
+    return text, False, None
 
 
 def _compiled_workspace_artifact_candidates(folder: str, extension: str) -> list[str]:
@@ -151,10 +115,8 @@ def _compiled_workspace_artifact_candidates(folder: str, extension: str) -> list
 def invalidate_compiled_pdf_source_output(
     folder: str,
     output_file: str,
-    *,
-    legacy_section_ordinal: int | None = None,
 ) -> dict:
-    """Remove a source part from compiled HTML and retire stale compiled PDFs."""
+    """Remove a bookmark section from compiled HTML and retire stale PDFs."""
     result = {
         "html_files_updated": 0,
         "sections_removed": 0,
@@ -168,7 +130,6 @@ def invalidate_compiled_pdf_source_output(
             updated, removed, method = remove_compiled_pdf_source_section(
                 original,
                 output_file,
-                legacy_section_ordinal=legacy_section_ordinal,
             )
             if not removed:
                 continue

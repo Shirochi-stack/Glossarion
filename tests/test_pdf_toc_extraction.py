@@ -443,7 +443,7 @@ def test_worker_serializes_toc_sections(tmp_path, monkeypatch):
     assert legacy_result["section_info"] == []
 
 
-def test_toc_section_can_split_when_it_exceeds_token_budget(tmp_path, monkeypatch):
+def test_toc_section_stays_whole_for_shared_chunk_progress(tmp_path, monkeypatch):
     from txt_processor import TextFileProcessor
 
     class Splitter:
@@ -453,14 +453,16 @@ def test_toc_section_can_split_when_it_exceeds_token_budget(tmp_path, monkeypatc
 
         @staticmethod
         def split_chapter(_content, _available, filename=None):
-            assert filename.endswith(".pdf")
-            return [("<p>part one</p>", 1, 2), ("<p>part two</p>", 2, 2)]
+            raise AssertionError(
+                "PDF bookmark sections must reach translation-time splitting whole"
+            )
 
     processor = object.__new__(TextFileProcessor)
     processor.file_path = str(tmp_path / "book.pdf")
     processor.output_dir = str(tmp_path / "out")
     processor.cache_suffix = ""
     processor.chapter_splitter = Splitter()
+    processor.pdf_render_mode = "legacy_layout"
     monkeypatch.setenv("MAX_OUTPUT_TOKENS", "1500")
     monkeypatch.setenv("COMPRESSION_FACTOR", "1")
 
@@ -475,11 +477,11 @@ def test_toc_section_can_split_when_it_exceeds_token_budget(tmp_path, monkeypatc
         "pdf_end_page": 20,
     }])
 
-    assert [chapter["filename"] for chapter in chapters] == [
-        "pdf_section_1_0.html",
-        "pdf_section_1_1.html",
-    ]
-    assert all(chapter["pdf_toc_section"] for chapter in chapters)
+    assert len(chapters) == 1
+    assert chapters[0]["filename"] == "pdf_section_1.html"
+    assert chapters[0]["pdf_toc_section"] is True
+    assert chapters[0]["is_chunk"] is False
+    assert chapters[0]["body"] == "<html><body><p>long</p></body></html>"
 
 
 def test_pdf_progress_reconciliation_removes_old_page_rows(monkeypatch):
@@ -553,10 +555,6 @@ def test_pdf_progress_reconciliation_removes_old_page_rows(monkeypatch):
     assert FileUtilities.create_chapter_filename(current_sections[0], 1) == (
         "response_pdf_section_001.html"
     )
-    assert FileUtilities.create_chapter_filename(
-        {**current_sections[0], "num": 1.1, "is_chunk": True},
-        1.1,
-    ) == "response_pdf_section_001_100.html"
     very_long_title = "A" * 1000
     assert FileUtilities.create_chapter_filename(
         {**current_sections[0], "title": very_long_title},
@@ -568,7 +566,7 @@ def test_pdf_progress_reconciliation_removes_old_page_rows(monkeypatch):
     assert len(bounded_book_stem.encode("utf-16-le")) // 2 <= 180
 
 
-def test_split_pdf_bookmark_keeps_distinct_chunk_qa_mapping(
+def test_pdf_bookmark_uses_one_progress_entry_and_chunk_qa_mapping(
         tmp_path, monkeypatch):
     from chapter_chunk_progress import wrap_chunk_html
     from scan_html_folder import _attach_chunk_results_to_scan
@@ -586,123 +584,85 @@ def test_split_pdf_bookmark_keeps_distinct_chunk_qa_mapping(
         "initial_chunk_size": 5750,
         "cached_chunk_size": 4250,
     }
-    chapters = []
-    scan_rows = []
+    content_hash = "whole-pdf-section-hash"
+    chapter = {
+        "num": 1,
+        "actual_chapter_num": 1,
+        "title": "Bookmark",
+        "body": "whole source section",
+        "filename": "pdf_section_1.html",
+        "content_hash": content_hash,
+        "pdf_toc_section": True,
+        "pdf_section_id": section_id,
+        "pdf_section_title": "Bookmark",
+        "pdf_start_page": 1,
+        "pdf_end_page": 20,
+        "is_chunk": False,
+    }
+    output_name = FileUtilities.create_chapter_filename(chapter, 1)
+    progress_key = f"pdf:{section_id}"
+    manager.prog["chapters"][progress_key] = {
+        "actual_num": 1,
+        "content_hash": content_hash,
+        "output_file": output_name,
+        "status": "completed",
+        "pdf_toc_section": True,
+        "pdf_section_id": section_id,
+        "pdf_progress_key": progress_key,
+        "pdf_content_hash_version": 2,
+    }
+    manager.prepare_chapter_chunk_progress(
+        content_hash, 2, budget, enabled=True
+    )
+    manager.record_chapter_chunk(
+        content_hash,
+        1,
+        2,
+        "<p>Good first chunk</p>",
+        budget,
+        source_text="source first chunk",
+        model_name="provider/model-a",
+    )
+    failing_html = "<p>BADTWO second chunk</p>"
+    manager.record_chapter_chunk(
+        content_hash,
+        2,
+        2,
+        failing_html,
+        budget,
+        source_text="source second chunk",
+        model_name="provider/model-b",
+    )
+    manager.mark_chapter_chunk_progress_status(content_hash, "completed")
+    output_path = tmp_path / output_name
+    output_path.write_text(
+        "\n".join((
+            wrap_chunk_html(
+                content_hash, 1, 2, "<p>Good first chunk</p>"
+            ),
+            wrap_chunk_html(content_hash, 2, 2, failing_html),
+        )),
+        encoding="utf-8",
+    )
+    scan_rows = [{
+        "filename": output_name,
+        "filepath": str(output_path),
+        "file_index": 0,
+        "chapter_num": 1,
+        "issues": ["llm_token_issue: 'BADTWO'"],
+        "qa_issue_previews": {},
+        "duplicate_confidence": 0,
+    }]
 
-    for actual_num, part_index, content_hash, bad_token in (
-        (1.0, 1, "pdf-part-one-hash", "BADONE"),
-        (1.1, 2, "pdf-part-two-hash", "BADTWO"),
-    ):
-        chapter = {
-            "num": actual_num,
-            "actual_chapter_num": actual_num,
-            "title": f"Bookmark (Part {part_index}/2)",
-            "body": f"source part {part_index}",
-            "filename": f"pdf_section_1_{part_index - 1}.html",
-            "content_hash": content_hash,
-            "pdf_toc_section": True,
-            "pdf_section_id": section_id,
-            "pdf_section_title": "Bookmark",
-            "pdf_start_page": 1,
-            "pdf_end_page": 20,
-            "is_chunk": True,
-            "chunk_info": {
-                "chunk_idx": part_index,
-                "total_chunks": 2,
-                "original_chapter": 1,
-            },
-        }
-        output_name = FileUtilities.create_chapter_filename(
-            chapter, actual_num
-        )
-        progress_key = f"pdf:{section_id}:{actual_num}"
-        manager.prog["chapters"][progress_key] = {
-            "actual_num": actual_num,
-            "content_hash": content_hash,
-            "output_file": output_name,
-            "status": "completed",
-            "pdf_toc_section": True,
-            "pdf_section_id": section_id,
-            "pdf_progress_key": progress_key,
-            "pdf_content_hash_version": 2,
-        }
-        manager.prepare_chapter_chunk_progress(
-            content_hash, 2, budget, enabled=True
-        )
-        manager.record_chapter_chunk(
-            content_hash,
-            1,
-            2,
-            f"<p>Good part {part_index}</p>",
-            budget,
-            source_text=f"source good {part_index}",
-        )
-        failing_html = f"<p>{bad_token} part {part_index}</p>"
-        manager.record_chapter_chunk(
-            content_hash,
-            2,
-            2,
-            failing_html,
-            budget,
-            source_text=f"source bad {part_index}",
-        )
-        manager.mark_chapter_chunk_progress_status(
-            content_hash, "completed"
-        )
-        output_path = tmp_path / output_name
-        output_path.write_text(
-            "\n".join((
-                wrap_chunk_html(
-                    content_hash,
-                    1,
-                    2,
-                    f"<p>Good part {part_index}</p>",
-                ),
-                wrap_chunk_html(
-                    content_hash, 2, 2, failing_html
-                ),
-            )),
-            encoding="utf-8",
-        )
-        scan_rows.append({
-            "filename": output_name,
-            "filepath": str(output_path),
-            "file_index": part_index - 1,
-            "chapter_num": actual_num,
-            "issues": [f"llm_token_issue: '{bad_token}'"],
-            "qa_issue_previews": {},
-            "duplicate_confidence": 0,
-        })
-        chapters.append(chapter)
-
-    assert manager.reconcile_pdf_chapter_entries(chapters) == 0
-    manager.migrate_to_content_hash(chapters)
+    assert manager.reconcile_pdf_chapter_entries([chapter]) == 0
+    manager.migrate_to_content_hash([chapter])
     manager.save()
 
-    expected_progress_keys = {
-        f"pdf:{section_id}:1.0",
-        f"pdf:{section_id}:1.1",
-    }
-    assert set(manager.prog["chapters"]) == expected_progress_keys
-    assert {
-        entry["content_hash"]
-        for entry in manager.prog["chapters"].values()
-    } == {"pdf-part-one-hash", "pdf-part-two-hash"}
-    assert {
-        entry["pdf_split_chunk_index"]
-        for entry in manager.prog["chapters"].values()
-    } == {1, 2}
-    assert {
-        entry["pdf_split_total_chunks"]
-        for entry in manager.prog["chapters"].values()
-    } == {2}
-    assert {
-        entry["pdf_split_parent_num"]
-        for entry in manager.prog["chapters"].values()
-    } == {1}
-    assert set(manager.prog["chapter_chunks"]) == {
-        "pdf-part-one-hash", "pdf-part-two-hash"
-    }
+    assert set(manager.prog["chapters"]) == {progress_key}
+    assert manager.prog["chapters"][progress_key]["output_file"] == (
+        "response_pdf_section_001.html"
+    )
+    assert set(manager.prog["chapter_chunks"]) == {content_hash}
 
     logs = []
     assert _attach_chunk_results_to_scan(
@@ -711,10 +671,9 @@ def test_split_pdf_bookmark_keeps_distinct_chunk_qa_mapping(
         {},
         logs.append,
         progress_path=manager.PROGRESS_FILE,
-    ) == 2
-    for row in scan_rows:
-        assert row["chunk_results"][0]["issues"] == []
-        assert row["chunk_results"][1]["issues"] == row["issues"]
+    ) == 1
+    assert scan_rows[0]["chunk_results"][0]["issues"] == []
+    assert scan_rows[0]["chunk_results"][1]["issues"] == scan_rows[0]["issues"]
 
 
 def test_pdf_toc_setting_is_defaulted_exported_and_persisted():
@@ -729,34 +688,58 @@ def test_pdf_toc_setting_is_defaulted_exported_and_persisted():
     assert "legacy page-by-page extraction" in settings_source
 
 
-def test_progress_manager_labels_split_pdf_bookmark_parts_as_chunks(
-        tmp_path):
+def test_progress_manager_labels_pdf_api_chunks_like_epub(tmp_path):
     from Retranslation_GUI import RetranslationMixin
+    from TransateKRtoEN import ProgressManager
 
     section_id = "stable-section"
-    chapters = {}
-    for actual_num, chunk_index in ((2.0, 1), (2.1, 2), (2.2, 3)):
-        progress_key = f"pdf:{section_id}:{actual_num}"
-        chapters[progress_key] = {
-            "actual_num": actual_num,
-            "content_hash": f"hash-{chunk_index}",
-            "output_file": f"response_pdf_part_{chunk_index}.html",
-            "status": "in_progress",
-            "model_name": "provider/model-a",
-            "pdf_toc_section": True,
-            "pdf_section_id": section_id,
-            "pdf_progress_key": progress_key,
-            "pdf_toc_title": f"Middle (Part {chunk_index}/3)",
-            "pdf_start_page": 3,
-            "pdf_end_page": 16,
-        }
+    content_hash = "whole-section-hash"
+    progress_key = f"pdf:{section_id}"
+    output_file = "response_pdf_section_002.html"
+    (tmp_path / output_file).write_text("translated", encoding="utf-8")
+    manager = ProgressManager(str(tmp_path))
+    manager.prog["chapters"][progress_key] = {
+        "actual_num": 2,
+        "content_hash": content_hash,
+        "output_file": output_file,
+        "status": "completed",
+        "model_name": "provider/model-parent",
+        "pdf_toc_section": True,
+        "pdf_section_id": section_id,
+        "pdf_progress_key": progress_key,
+        "pdf_toc_title": "Middle",
+        "pdf_start_page": 3,
+        "pdf_end_page": 16,
+    }
+    budget = {
+        "initial_output_token_limit": 12000,
+        "cached_output_token_limit": 9000,
+        "compression_factor": 2.0,
+        "safety_margin": 500,
+        "minimum_chunk_size": 1000,
+        "initial_chunk_size": 5750,
+        "cached_chunk_size": 4250,
+    }
+    for index, model in enumerate((
+        "provider/model-a", "provider/model-b", "provider/model-c"
+    ), 1):
+        manager.record_chapter_chunk(
+            content_hash,
+            index,
+            3,
+            f"<p>chunk {index}</p>",
+            budget,
+            source_text=f"source {index}",
+            model_name=model,
+        )
+    manager.mark_chapter_chunk_progress_status(content_hash, "completed")
 
     mixin = object.__new__(RetranslationMixin)
     mixin.config = {"pdf_use_toc_sections": True}
     mixin.pdf_use_toc_sections_var = True
     mixin._is_special_file = lambda _name: False
     data = {
-        "prog": {"chapters": chapters, "chapter_chunks": {}},
+        "prog": manager.prog,
         "output_dir": str(tmp_path),
         "file_path": str(tmp_path / "book.pdf"),
         "show_special_files_state": False,
@@ -767,11 +750,11 @@ def test_progress_manager_labels_split_pdf_bookmark_parts_as_chunks(
 
     rows = data["chapter_display_info"]
     assert len(rows) == 4
-    assert rows[0]["is_pdf_split_parent"] is True
-    assert rows[0]["status"] == "in_progress"
-    assert len(rows[0]["pdf_split_children"]) == 3
-    assert [row["pdf_split_chunk_index"] for row in rows[1:]] == [1, 2, 3]
-    assert {row["pdf_split_total_chunks"] for row in rows[1:]} == {3}
+    assert rows[0]["progress_key"] == progress_key
+    assert rows[0]["status"] == "completed"
+    assert [row["chunk_index"] for row in rows[1:]] == [1, 2, 3]
+    assert all(row["is_chunk_progress"] for row in rows[1:])
+    assert all(row["pdf_toc_section"] for row in rows[1:])
     displays = [
         mixin._progress_list_display_text(row, data, 20, 25)[0]
         for row in rows
@@ -780,55 +763,11 @@ def test_progress_manager_labels_split_pdf_bookmark_parts_as_chunks(
     assert displays[1].startswith("   ↳ Section 002 Chunk 1/3")
     assert displays[2].startswith("   ↳ Section 002 Chunk 2/3")
     assert displays[3].startswith("   ↳ Section 002 Chunk 3/3")
-    assert all("002.1" not in display and "002.2" not in display
-               for display in displays)
-    assert all("Pages 3-16" in display for display in displays)
-    assert all("provider/model-a" in display for display in displays)
-
-    assert mixin._expand_pdf_split_parent_rows([rows[0], rows[2]]) == rows[1:]
-    assert mixin._pdf_compiled_section_ordinal(data["prog"], rows[2]) == 2
-
-
-def test_pdf_split_parent_aggregates_child_status_and_model():
-    from Retranslation_GUI import RetranslationMixin
-
-    rows = []
-    for actual_num, chunk_index, status, model in (
-        (4.0, 1, "completed", "provider/model-a"),
-        (4.1, 2, "pending", "provider/model-b"),
-    ):
-        progress_key = f"pdf:section-four:{actual_num}"
-        entry = {
-            "actual_num": actual_num,
-            "output_file": f"part-{chunk_index}.html",
-            "status": status,
-            "model_name": model,
-            "pdf_toc_section": True,
-            "pdf_section_id": "section-four",
-            "pdf_progress_key": progress_key,
-            "pdf_split_chunk_index": chunk_index,
-            "pdf_split_total_chunks": 2,
-            "pdf_split_parent_num": 4,
-        }
-        rows.append({
-            "key": progress_key,
-            "progress_key": progress_key,
-            "num": actual_num,
-            "info": entry,
-            "output_file": entry["output_file"],
-            "status": status,
-        })
-
-    mixin = object.__new__(RetranslationMixin)
-    mixin._annotate_pdf_split_chunk_display_info(rows)
-
-    assert len(rows) == 3
-    assert rows[0]["is_pdf_split_parent"] is True
-    assert rows[0]["status"] == "pending"
-    assert rows[0]["info"]["model_name"] == "(multiple models)"
-    assert [row["info"]["model_name"] for row in rows[1:]] == [
+    assert "Pages 3-16" in displays[0]
+    assert [mixin._progress_entry_model_name(row, data) for row in rows[1:]] == [
         "provider/model-a",
         "provider/model-b",
+        "provider/model-c",
     ]
 
 
@@ -974,42 +913,3 @@ def test_progress_manager_merges_stable_pdf_rows_with_outline_seeds(tmp_path):
     assert entry["pdf_section_id"] == section_id
     assert entry["pdf_progress_key"] == f"pdf:{section_id}"
     assert entry["pdf_hash_migration_pending"] is True
-
-
-def test_old_pdf_split_cache_rehydrates_stable_bookmark_identity(
-        tmp_path, monkeypatch):
-    from txt_processor import TextFileProcessor
-
-    pdf_path = tmp_path / "book.pdf"
-    pdf_path.write_bytes(b"pdf")
-    output_dir = tmp_path / "out"
-    processor = TextFileProcessor(str(pdf_path), str(output_dir))
-    processor.pdf_render_mode = "legacy_layout"
-    monkeypatch.setattr(
-        processor,
-        "_load_split_cache",
-        lambda *_args: [{
-            "num": 1,
-            "title": "Opening",
-            "filename": "pdf_section_1.html",
-            "body": "<p>opening</p>",
-            "content_hash": "cached-hash",
-            "is_chunk": False,
-            "pdf_toc_section": True,
-        }],
-    )
-    section_id = "stable-bookmark-id"
-    chapters = processor._process_chapters_for_splitting([{
-        "num": 1,
-        "title": "Opening",
-        "content": "<p>opening</p>",
-        "is_html": True,
-        "pdf_toc_section": True,
-        "pdf_section_id": section_id,
-        "pdf_section_title": "Opening",
-        "pdf_start_page": 1,
-        "pdf_end_page": 3,
-    }])
-
-    assert chapters[0]["pdf_section_id"] == section_id
-    assert chapters[0]["pdf_section_title"] == "Opening"

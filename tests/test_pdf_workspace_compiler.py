@@ -205,19 +205,19 @@ def test_workspace_responses_prefer_translated_pdf_bookmark_titles(tmp_path):
     assert entries[0][1] == "Translated Chapter Two"
 
 
-def test_compiled_pdf_source_markers_remove_only_selected_part():
+def test_compiled_pdf_source_markers_remove_only_selected_section():
     first = wrap_compiled_pdf_source_section(
-        "response_pdf_section_002_part_1.html",
+        "response_pdf_section_002.html",
         '<section class="compiled-pdf-section" data-section="2">One</section>',
     )
     second = wrap_compiled_pdf_source_section(
-        "response_pdf_section_002_100_part_2.html",
+        "response_pdf_section_003.html",
         '<section class="compiled-pdf-section" data-section="3">Two</section>',
     )
 
     updated, removed, method = remove_compiled_pdf_source_section(
         first + second,
-        "response_pdf_section_002_100_part_2.html",
+        "response_pdf_section_003.html",
     )
 
     assert removed is True
@@ -226,59 +226,21 @@ def test_compiled_pdf_source_markers_remove_only_selected_part():
     assert "Two" not in updated
 
 
-def test_invalidate_compiled_pdf_source_uses_legacy_ordinal_and_deletes_pdf(
-        tmp_path):
-    workspace = tmp_path / "legacy-pdf"
-    workspace.mkdir()
-    compiled_html = workspace / "Book_translated.html"
-    compiled_pdf = workspace / "Book_translated.pdf"
-    compiled_html.write_text(
-        "<html><body>"
-        '<section class="compiled-pdf-section" data-section="1">One</section>'
-        '<section class="compiled-pdf-section" data-section="2">Two</section>'
-        '<section class="compiled-pdf-section" data-section="3">Three</section>'
-        "</body></html>",
-        encoding="utf-8",
-    )
-    compiled_pdf.write_bytes(b"stale")
-    (workspace / "metadata.json").write_text(
-        json.dumps({
-            "compiled_html_file": compiled_html.name,
-            "compiled_pdf_file": compiled_pdf.name,
-        }),
-        encoding="utf-8",
-    )
-
-    result = invalidate_compiled_pdf_source_output(
-        str(workspace),
-        "response_pdf_section_002_100_part_2.html",
-        legacy_section_ordinal=2,
-    )
-
-    updated = compiled_html.read_text(encoding="utf-8")
-    assert result["sections_removed"] == 1
-    assert result["methods"] == ["legacy_ordinal"]
-    assert "One" in updated
-    assert "Two" not in updated
-    assert "Three" in updated
-    assert not compiled_pdf.exists()
-
-
 def test_invalidate_compiled_pdf_api_chunk_updates_compiled_html(tmp_path):
     workspace = tmp_path / "api-chunk-pdf"
     workspace.mkdir()
     compiled_html = workspace / "Book_translated.html"
     compiled_html.write_text(
         "<html><body>"
-        + wrap_chunk_html("part-hash", 1, 2, "First API chunk")
-        + wrap_chunk_html("part-hash", 2, 2, "Second API chunk")
+        + wrap_chunk_html("section-hash", 1, 2, "First API chunk")
+        + wrap_chunk_html("section-hash", 2, 2, "Second API chunk")
         + "</body></html>",
         encoding="utf-8",
     )
 
     result = invalidate_compiled_pdf_api_chunks(
         str(workspace),
-        "part-hash",
+        "section-hash",
         [2],
     )
 

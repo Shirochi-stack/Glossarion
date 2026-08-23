@@ -377,6 +377,7 @@ def test_pdf_book_details_uses_bookmark_entries_not_workspace_artifacts(
                     },
                     "pdf:outline:1": {
                         "actual_num": 1,
+                        "content_hash": "pdf-section-hash",
                         "output_file": response.name,
                         "original_basename": "pdf_section_1.html",
                         "status": "completed",
@@ -385,7 +386,29 @@ def test_pdf_book_details_uses_bookmark_entries_not_workspace_artifacts(
                         "pdf_start_page": 1,
                         "pdf_end_page": 4,
                     },
-                }
+                },
+                "chapter_chunks": {
+                    "pdf-section-hash": {
+                        "schema_version": 2,
+                        "total": 2,
+                        "completed": [1],
+                        "chunks": {"1": "translated first chunk"},
+                        "entries": {
+                            "1": {
+                                "index": 1,
+                                "status": "completed",
+                                "model_name": "provider/model-a",
+                                "qa_issues_found": [],
+                            },
+                            "2": {
+                                "index": 2,
+                                "status": "pending",
+                                "model_name": "provider/model-b",
+                                "qa_issues_found": [],
+                            },
+                        },
+                    }
+                },
             }
         ),
         encoding="utf-8",
@@ -413,6 +436,11 @@ def test_pdf_book_details_uses_bookmark_entries_not_workspace_artifacts(
     assert chapters[0]["output_file"] == response.name
     assert chapters[0]["pdf_start_page"] == 1
     assert chapters[0]["pdf_end_page"] == 4
+    assert chapters[0]["chunk_status_text"] == "Chunks 1✓ 2○"
+    assert [chunk["model_name"] for chunk in chapters[0]["chunks"]] == [
+        "provider/model-a",
+        "provider/model-b",
+    ]
 
 
 def test_library_pagination_only_builds_current_card_page(qapp):

@@ -109,12 +109,6 @@ def readable_pdf_section_filename(chapter, actual_num=None, retain=False):
         actual_num = chapter.get("actual_chapter_num", chapter.get("num", 0))
     stem = f"pdf_section_{_number_token(actual_num)}"
 
-    if chapter.get("is_chunk"):
-        chunk_info = chapter.get("chunk_info") or {}
-        chunk_index = chunk_info.get("chunk_idx")
-        if chunk_index is not None:
-            stem = f"{stem}_part_{chunk_index}"
-
     return f"{stem}.html" if retain else f"response_{stem}.html"
 
 

@@ -7195,36 +7195,18 @@ def _qa_source_basename(name):
 
 
 def _pdf_section_filename_identity(name):
-    """Normalize old, readable, and split PDF section filenames.
+    """Normalize stable-ID and numbered PDF bookmark section filenames.
 
-    Raw bookmark chunks historically use unpadded names such as
+    Raw bookmark sections use unpadded names such as
     ``pdf_section_1.html`` while translated files now use readable padded
-    names such as ``response_pdf_section_001.html``. Split sections also have
-    old ``_1_0`` and new ``_001_part_1`` / ``_001_100`` spellings.  Return a
-    shared logical identity without confusing bookmark titles or stable IDs
-    with filesystem names.
+    names such as ``response_pdf_section_001.html``. Return a shared logical
+    identity without confusing stable bookmark IDs with filesystem names.
     """
     stem = _qa_source_basename(name)
     prefix = 'pdf_section_'
     if not stem.startswith(prefix):
         return None
     suffix = stem[len(prefix):]
-
-    part_match = re.fullmatch(r'(\d+)(?:_(\d{3}))?_part_(\d+)', suffix)
-    if part_match:
-        major = int(part_match.group(1))
-        return ('pdf-section-chunk', major, max(0, int(part_match.group(3)) - 1))
-
-    numeric_pair = re.fullmatch(r'(\d+)_(\d+)', suffix)
-    if numeric_pair:
-        major_token, minor_token = numeric_pair.groups()
-        major = int(major_token)
-        minor = int(minor_token)
-        # Readable decimal chapter tokens use thousandths (1.1 -> 001_100),
-        # whereas raw split chunks use their zero-based suffix directly.
-        if len(minor_token) == 3 and minor % 100 == 0:
-            minor //= 100
-        return ('pdf-section-chunk', major, minor)
 
     if re.fullmatch(r'\d+', suffix):
         return ('pdf-section', int(suffix))
@@ -7234,7 +7216,7 @@ def _pdf_section_filename_identity(name):
 
 
 def _pdf_identity_from_progress_entry(entry, output_file=''):
-    """Resolve a raw bookmark-chunk identity from a PDF progress row."""
+    """Resolve a raw bookmark-section identity from a PDF progress row."""
     if not isinstance(entry, dict):
         return None
 
@@ -7246,25 +7228,17 @@ def _pdf_identity_from_progress_entry(entry, output_file=''):
 
     if actual_num is not None:
         major = int(actual_num)
-        part_match = re.search(r'_part_(\d+)', _qa_source_basename(output_file))
-        if part_match:
-            return ('pdf-section-chunk', major, max(0, int(part_match.group(1)) - 1))
-        if not actual_num.is_integer():
-            return ('pdf-section-chunk', major, int(round((actual_num - major) * 10)))
-        if output_identity and output_identity[0] == 'pdf-section-chunk':
-            return output_identity
         return ('pdf-section', major)
 
     return output_identity
 
 
 def build_pdf_qa_source_aliases(folder_path, progress_path=None):
-    """Map translated PDF section names to their raw ``word_count`` chunks.
+    """Map translated PDF section names to whole ``word_count`` sections.
 
     Stable bookmark IDs and page ranges live in ``translation_progress.json``;
     the raw extraction sidecars remain numbered. Progress output mappings are
-    therefore authoritative, with normalized numbered filenames retained as a
-    compatibility fallback for older workspaces.
+    therefore authoritative, with normalized numbered filenames as a fallback.
     """
     word_count_folder = os.path.join(folder_path, 'word_count')
     if not os.path.isdir(word_count_folder):
@@ -7319,8 +7293,6 @@ def build_pdf_qa_source_aliases(folder_path, progress_path=None):
                         _pdf_identity_from_progress_entry(entry, output_file)
                     )
 
-                # Older hashed output files can still be resolved through the
-                # stable progress row's current section number.
                 if raw_name is None and entry.get('pdf_section_id'):
                     raw_name = raw_by_identity.get(
                         ('pdf-section-id', str(entry['pdf_section_id']).casefold())
@@ -7329,8 +7301,8 @@ def build_pdf_qa_source_aliases(folder_path, progress_path=None):
         except (OSError, ValueError, TypeError):
             pass
 
-    # Progress files may be missing or predate bookmark metadata. Match all
-    # visible translated files through the normalized legacy/readable identity.
+    # Match visible translated files through the normalized numbered identity
+    # when a progress entry is temporarily unavailable.
     try:
         translated_names = [
             name for name in os.listdir(folder_path)
@@ -10709,7 +10681,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         if pdf_source_aliases:
             log(
                 f"PDF bookmark QA mapping: resolved "
-                f"{len(pdf_source_aliases)} translated section(s) to raw bookmark chunks"
+                f"{len(pdf_source_aliases)} translated section(s) to source sections"
             )
         elif os.path.isdir(os.path.join(folder_path, 'word_count')):
             log(

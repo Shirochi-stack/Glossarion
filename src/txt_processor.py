@@ -213,7 +213,7 @@ class TextFileProcessor:
         # Process for splitting if needed
         final_chapters = self._process_chapters_for_splitting(raw_chapters)
         
-        print(f"📚 Extracted {len(final_chapters)} total chunks")
+        print(f"📚 Extracted {len(final_chapters)} translation entries")
         return final_chapters
     
     def _html_to_markdown(self, html_content: str) -> str:
@@ -262,41 +262,21 @@ class TextFileProcessor:
                 print(f"📦 Migrated {cache_name} → .cache/{cache_name}")
             except Exception:
                 cache_path = old_cache_path  # fallback to old location
-        source_hash = self._generate_hash(
-            ''.join(ch.get('content', '') for ch in raw_chapters)
+        source_signature = ''.join(
+            ch.get('content', '') for ch in raw_chapters
         )
+        if (
+            self.file_path.lower().endswith('.pdf')
+            and any(ch.get('pdf_toc_section') for ch in raw_chapters)
+        ):
+            # PDF bookmark sections are cached as whole source sections. Their
+            # API-sized chunks belong exclusively to translation_progress.json.
+            source_signature = f'pdf-toc-sections-v2\0{source_signature}'
+        source_hash = self._generate_hash(source_signature)
         
         cached = self._load_split_cache(cache_path, source_hash, word_count_dir)
         if cached is not None:
-            # Split caches created before stable PDF bookmark identities were
-            # persisted only contain the display number (pdf_section_1, ...).
-            # Rehydrate the identity from the freshly-read outline so an old
-            # cache cannot turn bookmark sections back into numeric chapters
-            # and bypass their completed ``pdf:<section_id>`` progress rows.
-            if self.file_path.lower().endswith('.pdf'):
-                raw_pdf_sections = {
-                    str(chapter.get('num')): chapter
-                    for chapter in raw_chapters
-                    if chapter.get('pdf_toc_section')
-                }
-                for chapter in cached:
-                    source_num = chapter.get('num')
-                    chunk_info = chapter.get('chunk_info') or {}
-                    if chapter.get('is_chunk'):
-                        source_num = chunk_info.get(
-                            'original_chapter', source_num
-                        )
-                    raw_section = raw_pdf_sections.get(str(source_num))
-                    if not raw_section:
-                        continue
-                    for key in (
-                        'pdf_toc_section', 'pdf_toc_level',
-                        'pdf_start_page', 'pdf_end_page',
-                        'pdf_section_id', 'pdf_section_title',
-                    ):
-                        if raw_section.get(key) is not None:
-                            chapter[key] = raw_section[key]
-            print(f"📊 Loaded split cache ({len(cached)} chunks) — token limit changes won't alter chunk count")
+            print(f"📊 Loaded split cache ({len(cached)} translation entries)")
             if (
                 self.file_path.lower().endswith('.pdf')
                 and getattr(
@@ -331,18 +311,26 @@ class TextFileProcessor:
             is_html = chapter_data.get('is_html', False)
             images_info = chapter_data.get('images_info', {})
             
-            # Legacy PDF entries are already bounded to one page.  TOC sections
-            # can span many pages, so they still need the normal token safety
-            # split when a section is larger than the configured model budget.
+            # Legacy PDF page entries are already bounded to one page. Bookmark
+            # sections stay whole here and use the same translation-time chunk
+            # plan/progress cache as EPUB chapters.
             is_pdf_page = (
                 self.file_path.lower().endswith('.pdf')
                 and is_html
                 and not chapter_data.get('allow_token_splitting', False)
             )
+            is_pdf_toc_section = bool(
+                self.file_path.lower().endswith('.pdf')
+                and chapter_data.get('pdf_toc_section')
+            )
             
             chapter_tokens = self.chapter_splitter.count_tokens(chapter_content)
             
-            if not is_pdf_page and chapter_tokens > available_tokens:
+            if (
+                not is_pdf_page
+                and not is_pdf_toc_section
+                and chapter_tokens > available_tokens
+            ):
                 # Chapter needs splitting
                 print(f"Chapter {chapter_data['num']} ({chapter_data['title']}) has {chapter_tokens} tokens, splitting...")
                 
@@ -633,7 +621,7 @@ class TextFileProcessor:
             with open(cache_path, 'w', encoding='utf-8') as f:
                 json.dump(cache_data, f, ensure_ascii=False, indent=2)
             
-            print(f"📊 Saved split cache ({len(chapters)} chunks)")
+            print(f"📊 Saved split cache ({len(chapters)} translation entries)")
         except Exception as e:
             print(f"⚠️ Could not save split cache: {e}")
     
