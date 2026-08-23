@@ -221,6 +221,46 @@ def reusable_chunk_results(entry):
     }
 
 
+def chunk_entry_is_fully_completed(entry) -> bool:
+    """Return whether every chunk in a persisted multi-chunk plan is complete.
+
+    This deliberately checks the concrete result set and each child status
+    instead of trusting the parent ``chapter_status`` mirror.  A complete
+    chapter is immutable resume history; budget changes only invalidate a
+    partially translated plan.
+    """
+    if not is_multi_chunk_entry(entry):
+        return False
+    total = _positive_int(entry.get("total"))
+    expected = {str(index) for index in range(1, total + 1)}
+    chunks = entry.get("chunks")
+    chunks = chunks if isinstance(chunks, dict) else {}
+    concrete_results = {
+        str(_positive_int(index)): result
+        for index, result in chunks.items()
+        if _positive_int(index) and isinstance(result, str)
+    }
+    if total <= 1 or set(concrete_results) != expected:
+        return False
+    records = entry.get("entries")
+    records = records if isinstance(records, dict) else {}
+    completed = {
+        str(_positive_int(index))
+        for index in entry.get("completed", [])
+        if _positive_int(index)
+    } if isinstance(entry.get("completed"), list) else set()
+    for index in expected:
+        record = records.get(index)
+        if isinstance(record, dict):
+            if str(record.get("status") or "").lower() != "completed":
+                return False
+            if record.get("qa_issues_found"):
+                return False
+        elif index not in completed:
+            return False
+    return True
+
+
 def record_chunk_result(
     entry,
     chunk_index,

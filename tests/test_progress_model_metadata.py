@@ -1057,6 +1057,37 @@ def test_incomplete_chunk_progress_is_invalidated_when_budget_changes(
     assert entry["chunks"] == {}
 
 
+def test_completed_chunk_progress_survives_budget_and_split_changes(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    original_budget = _epub_chunk_budget()
+    progress.prepare_chapter_chunk_progress(
+        "hash-1", 2, original_budget, enabled=True
+    )
+    for index in (1, 2):
+        progress.record_chapter_chunk(
+            "hash-1",
+            index,
+            2,
+            f"translated {index}",
+            original_budget,
+        )
+    progress.mark_chapter_chunk_progress_status("hash-1", "completed")
+
+    entry, reason, changed = progress.prepare_chapter_chunk_progress(
+        "hash-1",
+        3,
+        _epub_chunk_budget(initial=5000, cached=3500),
+        enabled=True,
+    )
+
+    assert reason is None
+    assert changed is False
+    assert entry["total"] == 2
+    assert entry["completed"] == [1, 2]
+    assert set(entry["chunks"]) == {"1", "2"}
+    assert entry["chapter_status"] == "completed"
+
+
 def test_disabled_chunk_progress_removes_incomplete_cache(tmp_path):
     progress = ProgressManager(str(tmp_path))
     progress.prepare_chapter_chunk_progress(

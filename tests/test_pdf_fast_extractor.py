@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from bs4 import BeautifulSoup
+from chapter_chunk_progress import wrap_chunk_html
 
 from pdf_extractor import build_pdf_toc_section_plan, group_pdf_pages_by_toc
 from pdf_fast_extractor import (
@@ -1156,6 +1157,196 @@ def test_legacy_pdf_progress_hash_migrates_once_then_detects_source_changes(
     changed = dict(current, content_hash="genuinely-updated-source")
     assert manager.reconcile_pdf_chapter_entries([changed]) == 1
     assert manager.prog["chapters"] == {}
+
+
+def test_pdf_hash_change_preserves_fully_completed_chunk_plan(tmp_path):
+    payloads = tmp_path / "Payloads"
+    payloads.mkdir()
+    manager = ProgressManager(str(payloads))
+    section_id = "stable-completed-section"
+    old_hash = "old-extracted-html-hash"
+    output_file = "response_pdf_section_003.html"
+    (payloads / output_file).write_text("translated", encoding="utf-8")
+    progress_key = f"pdf:{section_id}"
+    manager.prog["chapters"] = {
+        progress_key: {
+            "actual_num": 3,
+            "content_hash": old_hash,
+            "output_file": output_file,
+            "status": "completed",
+            "pdf_toc_section": True,
+            "pdf_section_id": section_id,
+            "pdf_progress_key": progress_key,
+            "pdf_content_hash_version": 2,
+        }
+    }
+    budget = {
+        "initial_output_token_limit": 12000,
+        "cached_output_token_limit": 9000,
+        "compression_factor": 2.0,
+        "safety_margin": 500,
+        "minimum_chunk_size": 1000,
+        "initial_chunk_size": 5750,
+        "cached_chunk_size": 4250,
+    }
+    for index in (1, 2):
+        manager.record_chapter_chunk(
+            old_hash,
+            index,
+            2,
+            f"translated {index}",
+            budget,
+        )
+    manager.mark_chapter_chunk_progress_status(old_hash, "completed")
+    current = {
+        "num": 3,
+        "title": "Chapter",
+        "filename": "pdf_section_3.html",
+        "content_hash": "new-extracted-html-hash",
+        "pdf_toc_section": True,
+        "pdf_section_id": section_id,
+    }
+
+    assert manager.reconcile_pdf_chapter_entries([current]) == 0
+    preserved = manager.prog["chapters"][progress_key]
+    assert preserved["status"] == "completed"
+    assert preserved["content_hash"] == old_hash
+    assert set(manager.prog["chapter_chunks"]) == {old_hash}
+
+    should_translate, _message, existing_output = manager.check_chapter_status(
+        2,
+        3,
+        current["content_hash"],
+        str(payloads),
+        chapter_obj=current,
+    )
+    assert should_translate is False
+    assert existing_output == output_file
+
+
+def test_pdf_hash_change_discards_partially_completed_chunk_plan(tmp_path):
+    payloads = tmp_path / "Payloads"
+    payloads.mkdir()
+    manager = ProgressManager(str(payloads))
+    section_id = "stable-partial-section"
+    old_hash = "old-partial-hash"
+    output_file = "response_pdf_section_003.html"
+    (payloads / output_file).write_text("partial", encoding="utf-8")
+    progress_key = f"pdf:{section_id}"
+    manager.prog["chapters"] = {
+        progress_key: {
+            "actual_num": 3,
+            "content_hash": old_hash,
+            "output_file": output_file,
+            "status": "completed",
+            "pdf_toc_section": True,
+            "pdf_section_id": section_id,
+            "pdf_progress_key": progress_key,
+            "pdf_content_hash_version": 2,
+        }
+    }
+    budget = {
+        "initial_output_token_limit": 12000,
+        "cached_output_token_limit": 9000,
+        "compression_factor": 2.0,
+        "safety_margin": 500,
+        "minimum_chunk_size": 1000,
+        "initial_chunk_size": 5750,
+        "cached_chunk_size": 4250,
+    }
+    manager.prepare_chapter_chunk_progress(
+        old_hash, 2, budget, enabled=True
+    )
+    manager.record_chapter_chunk(
+        old_hash, 1, 2, "translated 1", budget
+    )
+    current = {
+        "num": 3,
+        "title": "Chapter",
+        "filename": "pdf_section_3.html",
+        "content_hash": "new-extracted-html-hash",
+        "pdf_toc_section": True,
+        "pdf_section_id": section_id,
+    }
+
+    assert manager.reconcile_pdf_chapter_entries([current]) == 1
+    assert progress_key not in manager.prog["chapters"]
+    assert old_hash not in manager.prog["chapter_chunks"]
+
+
+def test_pdf_reconcile_recovers_completed_ledger_after_false_invalidation(
+        tmp_path):
+    payloads = tmp_path / "Payloads"
+    payloads.mkdir()
+    manager = ProgressManager(str(payloads))
+    section_id = "recover-completed-section"
+    complete_hash = "original-completed-hash"
+    invalid_hash = "new-falsely-invalidated-hash"
+    output_file = "response_pdf_section_003.html"
+    (payloads / output_file).write_text(
+        "\n".join(
+            wrap_chunk_html(
+                complete_hash,
+                index,
+                2,
+                f"<p>translated {index}</p>",
+            )
+            for index in (1, 2)
+        ),
+        encoding="utf-8",
+    )
+    progress_key = f"pdf:{section_id}"
+    manager.prog["chapters"] = {
+        progress_key: {
+            "actual_num": 3,
+            "content_hash": invalid_hash,
+            "output_file": output_file,
+            "status": "pending",
+            "pdf_toc_section": True,
+            "pdf_section_id": section_id,
+            "pdf_progress_key": progress_key,
+            "pdf_content_hash_version": 2,
+        }
+    }
+    budget = {
+        "initial_output_token_limit": 12000,
+        "cached_output_token_limit": 9000,
+        "compression_factor": 2.0,
+        "safety_margin": 500,
+        "minimum_chunk_size": 1000,
+        "initial_chunk_size": 5750,
+        "cached_chunk_size": 4250,
+    }
+    for index in (1, 2):
+        manager.record_chapter_chunk(
+            complete_hash,
+            index,
+            2,
+            f"<p>translated {index}</p>",
+            budget,
+        )
+    manager.mark_chapter_chunk_progress_status(complete_hash, "completed")
+    manager.prepare_chapter_chunk_progress(
+        invalid_hash,
+        2,
+        budget,
+        enabled=True,
+    )
+    current = {
+        "num": 3,
+        "title": "Chapter",
+        "filename": "pdf_section_3.html",
+        "content_hash": invalid_hash,
+        "pdf_toc_section": True,
+        "pdf_section_id": section_id,
+    }
+
+    assert manager.reconcile_pdf_chapter_entries([current]) == 0
+    recovered = manager.prog["chapters"][progress_key]
+    assert recovered["status"] == "completed"
+    assert recovered["content_hash"] == complete_hash
+    assert invalid_hash not in manager.prog["chapter_chunks"]
+    assert complete_hash in manager.prog["chapter_chunks"]
 
 
 def test_workspace_reader_manifest_orders_pdf_entries_and_hides_sidecars(tmp_path):

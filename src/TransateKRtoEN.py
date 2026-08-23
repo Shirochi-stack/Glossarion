@@ -163,9 +163,11 @@ from history_manager import HistoryManager
 from chapter_splitter import ChapterSplitter
 from chapter_chunk_progress import (
     CHUNK_PROGRESS_SCHEMA_VERSION,
+    chunk_entry_is_fully_completed,
     chunk_entry_needs_translation,
     chunk_failure_summary,
     ensure_chunk_entry_schema,
+    extract_marked_chunks,
     is_multi_chunk_entry,
     prune_single_chunk_entries,
     record_chunk_result,
@@ -3822,6 +3824,13 @@ class ProgressManager:
             invalidation_reason = None
             if not isinstance(existing, dict):
                 existing = None
+            elif chunk_entry_is_fully_completed(existing):
+                # A complete result set is final chapter history, not a resume
+                # cache. Only incomplete plans are sensitive to a new split
+                # count or token-budget fingerprint.
+                if ensure_chunk_entry_schema(existing):
+                    changed = True
+                return existing, None, changed
             elif existing.get("schema_version") not in (
                 1,
                 CHUNK_PROGRESS_SCHEMA_VERSION,
@@ -6246,6 +6255,61 @@ class ProgressManager:
         removed_chunk_keys = set()
         progress_chapters = self.prog.setdefault("chapters", {})
 
+        def _pdf_output_exists(output_file):
+            output_path = os.fspath(output_file or "")
+            if not output_path:
+                return False
+            if not os.path.isabs(output_path):
+                payloads_dir = getattr(self, "payloads_dir", "") or os.path.dirname(
+                    str(getattr(self, "PROGRESS_FILE", "") or "")
+                )
+                output_path = os.path.join(payloads_dir, output_path)
+            return os.path.isfile(output_path)
+
+        def _completed_chunk_plan_for_output(entry):
+            """Find the unique complete ledger represented by this PDF HTML."""
+            stored_key = str(entry.get("content_hash") or "")
+            chapter_chunks = self.prog.get("chapter_chunks", {})
+            direct_entry = chapter_chunks.get(stored_key)
+            if chunk_entry_is_fully_completed(direct_entry):
+                return stored_key, direct_entry
+
+            output_file = entry.get("output_file")
+            if not output_file or not _pdf_output_exists(output_file):
+                return "", None
+            output_path = os.fspath(output_file)
+            if not os.path.isabs(output_path):
+                payloads_dir = getattr(self, "payloads_dir", "") or os.path.dirname(
+                    str(getattr(self, "PROGRESS_FILE", "") or "")
+                )
+                output_path = os.path.join(payloads_dir, output_path)
+            try:
+                with open(
+                    output_path,
+                    "r",
+                    encoding="utf-8",
+                    errors="replace",
+                ) as translated_file:
+                    translated_html = translated_file.read()
+            except OSError:
+                return "", None
+
+            matches = []
+            for candidate_key, candidate_entry in chapter_chunks.items():
+                candidate_key = str(candidate_key)
+                if candidate_key == stored_key or not chunk_entry_is_fully_completed(
+                    candidate_entry
+                ):
+                    continue
+                total = int(candidate_entry.get("total") or 0)
+                marked = extract_marked_chunks(
+                    translated_html,
+                    candidate_key,
+                )
+                if set(marked) == set(range(1, total + 1)):
+                    matches.append((candidate_key, candidate_entry))
+            return matches[0] if len(matches) == 1 else ("", None)
+
         def _progress_section_id(progress_key, entry, normalized_output=""):
             entry_section_id = str(
                 entry.get("pdf_section_id") or ""
@@ -6390,6 +6454,45 @@ class ProgressManager:
                 or not expected_hashes
                 or stored_hash in expected_hashes
             )
+            completed_chunk_key, completed_chunk_entry = (
+                _completed_chunk_plan_for_output(entry)
+            )
+            recovered_completed_chunk_plan = bool(
+                stable_section_matches
+                and completed_chunk_key
+                and completed_chunk_key != stored_hash
+            )
+            if recovered_completed_chunk_plan:
+                current_chunk_entry = self.prog.get("chapter_chunks", {}).get(
+                    stored_hash
+                )
+                if not chunk_entry_is_fully_completed(current_chunk_entry):
+                    self.prog.get("chapter_chunks", {}).pop(stored_hash, None)
+                entry["content_hash"] = completed_chunk_key
+                entry["status"] = "completed"
+                entry["last_updated"] = time.time()
+                entry.pop("failure_reason", None)
+                entry.pop("error_message", None)
+                entry.pop("auto_restored_from_output", None)
+                stored_hash = completed_chunk_key
+                hash_matches = True
+            preserve_completed_chunk_plan = bool(
+                stable_section_matches
+                and not hash_matches
+                and str(entry.get("status") or "").lower() in {
+                    "completed", "completed_empty", "completed_image_only"
+                }
+                and entry.get("output_file")
+                and _pdf_output_exists(entry["output_file"])
+                and chunk_entry_is_fully_completed(completed_chunk_entry)
+            )
+            if preserve_completed_chunk_plan:
+                # Fast-PDF extraction/cache revisions can alter normalized
+                # source HTML and therefore its hash without making an already
+                # translated 2/2 (or N/N) result incomplete. Match EPUB's
+                # behavior: preserve a fully completed ledger, but continue to
+                # invalidate partial ledgers below.
+                hash_matches = True
             try:
                 pdf_hash_version = int(
                     entry.get("pdf_content_hash_version") or 0
