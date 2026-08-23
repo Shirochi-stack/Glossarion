@@ -13853,7 +13853,11 @@ Text to analyze:
         self.save_header_translations_var = self.config.get('save_header_translations', True)
         self.ignore_header_var = self.config.get('ignore_header', False)
         self.allow_ai_markdown_headers_var = self.config.get('allow_ai_markdown_headers', False)
-        self.use_title_var = self.config.get('use_title', False)
+        self.skip_title_tag_translation_var = bool(
+            self.config.get('skip_title_tag_translation', False)
+        )
+        # Retain the inverse legacy value for compatibility with old readers.
+        self.use_title_var = not self.skip_title_tag_translation_var
         self.remove_duplicate_h1_p_var = self.config.get('remove_duplicate_h1_p', False)
         self.use_sorted_fallback_var = self.config.get('use_sorted_fallback', False)  # Disabled by default
         self.attach_css_to_chapters_var = self.config.get('attach_css_to_chapters', False)
@@ -15946,6 +15950,10 @@ Recent translations to summarize:
         
         self.translate_special_files_var = self.config.get('translate_special_files', False)
         self.skip_image_title_translation_var = bool(self.config.get('skip_image_title_translation', True))
+        self.skip_title_tag_translation_var = bool(
+            self.config.get('skip_title_tag_translation', False)
+        )
+        self.use_title_var = not self.skip_title_tag_translation_var
         # Custom special file keywords (comma-separated)
         _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, copyright, preface, nav, message, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
         _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension'
@@ -29740,7 +29748,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if self.config.get('batch_translate_headers', True) else '0'
                 os.environ['IGNORE_HEADER'] = '1' if self.config.get('ignore_header', False) else '0'
                 os.environ['ALLOW_AI_MARKDOWN_HEADERS'] = '1' if self.config.get('allow_ai_markdown_headers', False) else '0'
-                os.environ['USE_TITLE'] = '1' if self.config.get('use_title', False) else '0'
+                skip_title_tag = bool(self.config.get('skip_title_tag_translation', False))
+                os.environ['SKIP_TITLE_TAG_TRANSLATION'] = '1' if skip_title_tag else '0'
+                os.environ['USE_TITLE'] = '0' if skip_title_tag else '1'
                 os.environ['REMOVE_DUPLICATE_H1_P'] = '1' if self.config.get('remove_duplicate_h1_p', False) else '0'
                 os.environ['FIX_STRAY_P_GT_EPUB'] = '1' if self.config.get('fix_stray_p_gt_epub', False) else '0'
                 os.environ['FIX_STRAY_P_GT_BS'] = '1' if self.config.get('fix_stray_p_gt_bs', False) else '0'
@@ -33279,6 +33289,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SKIP_TXT_TITLE_TRANSLATION': "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0",
             'SKIP_PDF_TITLE_TRANSLATION': "1" if getattr(self, 'skip_pdf_title_translation_var', False) else "0",
             'SKIP_IMAGE_TITLE_TRANSLATION': "1" if getattr(self, 'skip_image_title_translation_var', True) else "0",
+            'SKIP_TITLE_TAG_TRANSLATION': "1" if getattr(self, 'skip_title_tag_translation_var', False) else "0",
+            'USE_TITLE': "0" if getattr(self, 'skip_title_tag_translation_var', False) else "1",
             'BOOK_TITLE_PROMPT': self.book_title_prompt,
             'BOOK_TITLE_SYSTEM_PROMPT': self.config.get('book_title_system_prompt', 
                 "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."),
@@ -35759,6 +35771,9 @@ Important rules:
             os.environ['TRANSLATE_BOOK_TITLE'] = "1" if self.translate_book_title_var else "0"
             os.environ['SKIP_TXT_TITLE_TRANSLATION'] = "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0"
             os.environ['SKIP_PDF_TITLE_TRANSLATION'] = "1" if getattr(self, 'skip_pdf_title_translation_var', False) else "0"
+            skip_title_tag = bool(getattr(self, 'skip_title_tag_translation_var', False))
+            os.environ['SKIP_TITLE_TAG_TRANSLATION'] = "1" if skip_title_tag else "0"
+            os.environ['USE_TITLE'] = "0" if skip_title_tag else "1"
             # Replace {target_lang} variable in book title prompts with output language
             output_lang = self.config.get('output_language', 'English')
             self.append_log(f"[DEBUG] output_language from config: '{output_lang}'")
@@ -44263,6 +44278,7 @@ Important rules:
                 ('skip_txt_title_translation', ['skip_txt_title_translation_var'], False, bool),
                 ('skip_pdf_title_translation', ['skip_pdf_title_translation_var'], False, bool),
                 ('skip_image_title_translation', ['skip_image_title_translation_var'], True, bool),
+                ('skip_title_tag_translation', ['skip_title_tag_translation_var'], False, bool),
                 ('emergency_paragraph_restore', ['emergency_restore_var'], False, bool),
                 ('emergency_image_restore', ['emergency_image_restore_var'], False, bool),
                 ('emergency_glossary_compliance', ['emergency_glossary_compliance_var'], False, bool),
@@ -44325,7 +44341,7 @@ Important rules:
                 ('gui_scale_factor', ['gui_scale_factor_var'], 1.0, lambda v: safe_float(v, 1.0)),
                 ('gui_font_scale', ['gui_font_scale_var'], 1.0, lambda v: safe_float(v, 1.0)),
                 ('ignore_header', ['ignore_header_var'], False, bool),
-                ('use_title', ['use_title_var'], False, bool),
+                ('use_title', ['use_title_var'], True, bool),
                 ('scan_phase_enabled', ['scan_phase_enabled_var'], True, bool),
                 ('disable_qa_marker_checks', ['disable_qa_marker_checks_var'], True, bool),
                 ('qa_marker_length_limit', ['qa_marker_length_limit_var'], 500, lambda v: safe_int(v, 500)),
@@ -45223,6 +45239,7 @@ Important rules:
             'SAVE_HEADER_TRANSLATIONS': 'Save header translations',
             'IGNORE_HEADER': 'Ignore header metadata',
             'USE_TITLE': 'Use title metadata',
+            'SKIP_TITLE_TAG_TRANSLATION': 'Skip HTML/XHTML title tag translation',
             
             # Extraction
             'TEXT_EXTRACTION_METHOD': 'Text extraction method',
@@ -45722,6 +45739,7 @@ Important rules:
                 ('SKIP_TXT_TITLE_TRANSLATION', '1' if getattr(self, 'skip_txt_title_translation_var', True) else '0'),
                 ('SKIP_PDF_TITLE_TRANSLATION', '1' if getattr(self, 'skip_pdf_title_translation_var', False) else '0'),
                 ('SKIP_IMAGE_TITLE_TRANSLATION', '1' if getattr(self, 'skip_image_title_translation_var', True) else '0'),
+                ('SKIP_TITLE_TAG_TRANSLATION', '1' if getattr(self, 'skip_title_tag_translation_var', False) else '0'),
                 ('BOOK_TITLE_PROMPT', getattr(self, 'book_title_prompt', '')),
                 ('GLOSSARY_INCLUDE_BOOK_TITLE', '1' if getattr(self, 'include_book_title_glossary_var', True) else '0'),
                 ('GLOSSARY_AUTO_INJECT_BOOK_TITLE', '1' if getattr(self, 'auto_inject_book_title_var', self.config.get('auto_inject_book_title', False)) else '0'),
@@ -45922,7 +45940,7 @@ Important rules:
                 ('SAVE_HEADER_TRANSLATIONS', '1' if getattr(self, 'save_header_translations_var', True) else '0'),
                 ('IGNORE_HEADER', '1' if getattr(self, 'ignore_header_var', False) else '0'),
                 ('ALLOW_AI_MARKDOWN_HEADERS', '1' if getattr(self, 'allow_ai_markdown_headers_var', False) else '0'),
-                ('USE_TITLE', '1' if getattr(self, 'use_title_var', False) else '0'),
+                ('USE_TITLE', '0' if getattr(self, 'skip_title_tag_translation_var', False) else '1'),
 
                 # Extraction mode
                 ('TEXT_EXTRACTION_METHOD', env_text_extraction_method),

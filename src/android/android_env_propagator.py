@@ -101,7 +101,10 @@ def set_all_env_vars(config):
         _get('failed_translation_retry_attempts', 3)
     )
     os.environ['IGNORE_HEADER'] = '1' if _get('ignore_header', False) else '0'
-    os.environ['USE_TITLE'] = '1' if _get('use_title', False) else '0'
+    skip_title_tag = bool(_get('skip_title_tag_translation', False))
+    os.environ['SKIP_TITLE_TAG_TRANSLATION'] = '1' if skip_title_tag else '0'
+    # Compatibility for older extraction/translation components.
+    os.environ['USE_TITLE'] = '0' if skip_title_tag else '1'
     os.environ['USE_NCX_NAVIGATION'] = '1' if _get('use_ncx_navigation', False) else '0'
     os.environ['ATTACH_CSS_TO_CHAPTERS'] = '1' if _get('attach_css_to_chapters', False) else '0'
     os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if _get('retain_source_extension', True) else '0'

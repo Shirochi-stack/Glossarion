@@ -33,6 +33,7 @@ except ImportError:
 from _empty_attr_fix import fix_empty_attr_tags
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import looks_like_valid_html_tag, unescape_valid_html_tag_entities
+from title_tag_translation import should_translate_title_tags
 
 # Standard HTML / SVG / MathML / common legacy tag names. Used by
 # ``_protect_non_html_angle_brackets`` to decide whether an angle-bracket
@@ -779,7 +780,7 @@ class EnhancedTextExtractor:
             # Respect GUI toggles to exclude headers/titles BEFORE conversion
             try:
                 batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-                use_title_tag = os.getenv('USE_TITLE', '0') == '1' and batch_translate_active
+                use_title_tag = should_translate_title_tags()
                 ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
                 remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
                 

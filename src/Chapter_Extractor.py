@@ -50,6 +50,7 @@ from epub_metadata_utils import (
     restore_truncated_repeatable_metadata,
 )
 from epub_package import find_epub_opf_member, find_opf_path
+from title_tag_translation import should_translate_title_tags
 
 _DEFAULT_SPECIAL_KEYWORDS = [
     'cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message',
@@ -2520,6 +2521,7 @@ def _chapter_extraction_cache_signature(extraction_mode, parser):
         'special_file_exact': os.getenv('SPECIAL_FILE_EXACT', '').strip(),
         'batch_translate_headers': _env_flag('BATCH_TRANSLATE_HEADERS'),
         'use_title': _env_flag('USE_TITLE'),
+        'skip_title_tag_translation': _env_flag('SKIP_TITLE_TAG_TRANSLATION'),
         'ignore_header': _env_flag('IGNORE_HEADER'),
         'remove_duplicate_h1_p': _env_flag('REMOVE_DUPLICATE_H1_P'),
     }
@@ -3936,7 +3938,7 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
     if not chapter_num:
         # Check ignore settings for batch translation
         batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-        use_title_tag = os.getenv('USE_TITLE', '0') == '1' or not batch_translate_active
+        use_title_tag = should_translate_title_tags()
         ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
         
         # Prepare all text sources to check in parallel
@@ -4043,7 +4045,7 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
     if not chapter_title:
         # Check settings for batch translation
         batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-        use_title_tag = os.getenv('USE_TITLE', '0') == '1' or not batch_translate_active
+        use_title_tag = should_translate_title_tags()
         ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
         
         # Try title tag if using titles
@@ -4889,7 +4891,7 @@ def _process_single_html_file(
             
             # Check settings for batch translation
             batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-            use_title_tag = os.getenv('USE_TITLE', '0') == '1' or not batch_translate_active
+            use_title_tag = should_translate_title_tags()
             ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
             
             # Extract from title tag if using titles
@@ -4972,7 +4974,7 @@ def _process_single_html_file(
         
         # Filter content_html for title/header settings (before processing)
         batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-        use_title_tag = os.getenv('USE_TITLE', '0') == '1' or not batch_translate_active
+        use_title_tag = should_translate_title_tags()
         ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
         remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
         

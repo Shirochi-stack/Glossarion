@@ -25,6 +25,11 @@ except ImportError:
     pass
 from collections import Counter
 from epub_package import find_epub_opf_member, find_opf_path
+from title_tag_translation import (
+    restore_translated_title_tags,
+    should_translate_title_tags,
+    title_tag_translation_payload,
+)
 from unified_api_client import (
     UnifiedClient,
     UnifiedClientError,
@@ -7484,6 +7489,8 @@ class ContentProcessor:
     def image_processing_html(chapter):
         """Choose the best HTML source for image translation/OCR."""
         body = ContentProcessor.normalize_escaped_image_tags(chapter.get("body", "") or "")
+        if chapter.get("_title_tag_only_translation"):
+            return body
         original = ContentProcessor.normalize_escaped_image_tags(
             chapter.get("original_html")
             or chapter.get("source_html")
@@ -7648,6 +7655,30 @@ def _original_markup_for_copy(chapter, output_dir):
     if recovered and recovered_has_head and not cached_has_head:
         return recovered
     return cached or recovered or chapter.get("body") or ""
+
+
+def _prepare_image_only_title_translation(chapter, output_dir):
+    """Turn an image-only XHTML page into a safe title-only request.
+
+    The complete source document is retained for reconstruction after the API
+    response.  This lets the regular sequential or parallel translation path
+    handle the title without exposing image markup to the model.
+    """
+    if not should_translate_title_tags():
+        return False
+
+    original_markup = _original_markup_for_copy(chapter, output_dir)
+    payload = title_tag_translation_payload(original_markup)
+    if not payload:
+        return False
+
+    chapter["_title_tag_only_translation"] = True
+    chapter["_title_tag_original_markup"] = original_markup
+    chapter["body"] = payload
+    chapter["has_images"] = False
+    chapter["image_count"] = 0
+    chapter["file_size"] = len(payload.encode("utf-8"))
+    return True
         
 # =====================================================
 # UNIFIED TRANSLATION PROCESSOR
@@ -9044,10 +9075,16 @@ class BatchTranslationProcessor:
         # glossary, and chunk preprocessing may mutate ``chapter`` or derive a
         # different request body; failure preservation must still write the
         # exact source chapter supplied to this worker.
-        original_chapter_body = chapter.get("body", "")
+        request_chapter_body = chapter.get("body", "")
+        original_chapter_body = chapter.get(
+            "_title_tag_original_markup",
+            request_chapter_body,
+        )
         if not isinstance(original_chapter_body, str):
             original_chapter_body = ""
-        chapter_body = original_chapter_body
+        chapter_body = request_chapter_body
+        if not isinstance(chapter_body, str):
+            chapter_body = ""
         
         # Use the pre-calculated actual_chapter_num from the main loop
         actual_num = chapter.get('actual_chapter_num')
@@ -11059,6 +11096,35 @@ class BatchTranslationProcessor:
                 print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: {qa_label}")
                 return False, actual_num, None, None, None
 
+            if chapter.get("_title_tag_only_translation"):
+                restored_title_document = restore_translated_title_tags(
+                    original_chapter_body,
+                    cleaned,
+                )
+                if restored_title_document is None:
+                    write_utf8_html_file(
+                        os.path.join(self.out_dir, fname),
+                        original_chapter_body,
+                    )
+                    with self.progress_lock:
+                        self.update_progress_fn(
+                            chapter_progress_idx,
+                            actual_num,
+                            content_hash,
+                            fname,
+                            status="qa_failed",
+                            ai_features=ai_features,
+                            qa_issues_found=["TITLE_TAG_TRANSLATION_INVALID"],
+                            chapter_obj=chapter,
+                        )
+                        self.save_progress_fn()
+                    print(
+                        f"⚠️ Batch: Chapter {actual_num} returned no usable "
+                        "translated <title>; original XHTML preserved"
+                    )
+                    return False, actual_num, None, None, None
+                cleaned = restored_title_document
+
             if self.is_text_file:
                 # For text files, save as plain text
                 fname_txt = fname.replace('.html', '.txt') if fname.endswith('.html') else fname
@@ -11284,7 +11350,7 @@ class BatchTranslationProcessor:
         
         # Check ignore settings for filtering
         batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-        use_title_tag = os.getenv('USE_TITLE', '0') == '1' and batch_translate_active
+        use_title_tag = should_translate_title_tags()
         ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
         remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
         
@@ -26436,7 +26502,7 @@ def main(log_callback=None, stop_callback=None):
             # -------------------------------------------------------------------------
             if needs_translation and c.get("body"):
                 batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-                use_title_tag = os.getenv('USE_TITLE', '0') == '1' and batch_translate_active
+                use_title_tag = should_translate_title_tags()
                 ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
                 
                 if (not use_title_tag or ignore_header_tags):
@@ -26524,18 +26590,24 @@ def main(log_callback=None, stop_callback=None):
                 chapters_completed += 1
                 continue
             elif is_image_only_chapter and config.OUTPUT_MODE == "text":
-                print(f"📸 Image-only chapter {actual_num} detected (preserving original content as-is)")
+                if _prepare_image_only_title_translation(c, out):
+                    print(
+                        f"📝 Image-only chapter {actual_num}: queued its "
+                        "<title> tag for parallel translation"
+                    )
+                else:
+                    print(f"📸 Image-only chapter {actual_num} detected (preserving original content as-is)")
 
-                fname = FileUtilities.create_chapter_filename(c, actual_num)
-                original_markup = _original_markup_for_copy(c, out)
-                output_path = os.path.join(out, fname)
-                write_utf8_html_file(output_path, original_markup)
-                retroactive_update_image_references(out)
+                    fname = FileUtilities.create_chapter_filename(c, actual_num)
+                    original_markup = _original_markup_for_copy(c, out)
+                    output_path = os.path.join(out, fname)
+                    write_utf8_html_file(output_path, original_markup)
+                    retroactive_update_image_references(out)
 
-                progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
-                progress_manager.save()
-                chapters_completed += 1
-                continue
+                    progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
+                    progress_manager.save()
+                    chapters_completed += 1
+                    continue
             
             # Add to chapters to translate
             chapters_to_translate.append((idx, c))
@@ -27152,6 +27224,9 @@ def main(log_callback=None, stop_callback=None):
                         print(f"⏳ Waiting {config.DELAY}s before next batch...")
                         time.sleep(config.DELAY)
         
+        if any(c.get("_title_tag_only_translation") for c in chapters):
+            retroactive_update_image_references(out)
+
         chapters_completed = batch_processor.chapters_completed
         chunks_completed = batch_processor.chunks_completed
         
@@ -27612,18 +27687,24 @@ def main(log_callback=None, stop_callback=None):
                 continue
 
             elif is_image_only_chapter and config.OUTPUT_MODE == "text":
-                print(f"📸 Image-only chapter {actual_num} detected (preserving original content as-is)")
+                if _prepare_image_only_title_translation(c, out):
+                    print(
+                        f"📝 Image-only chapter {actual_num}: translating only "
+                        "its <title> tag and preserving the remaining XHTML"
+                    )
+                else:
+                    print(f"📸 Image-only chapter {actual_num} detected (preserving original content as-is)")
 
-                fname = FileUtilities.create_chapter_filename(c, actual_num)
-                original_markup = _original_markup_for_copy(c, out)
-                output_path = os.path.join(out, fname)
-                write_utf8_html_file(output_path, original_markup)
-                retroactive_update_image_references(out)
+                    fname = FileUtilities.create_chapter_filename(c, actual_num)
+                    original_markup = _original_markup_for_copy(c, out)
+                    output_path = os.path.join(out, fname)
+                    write_utf8_html_file(output_path, original_markup)
+                    retroactive_update_image_references(out)
 
-                progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
-                progress_manager.save()
-                chapters_completed += 1
-                continue
+                    progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
+                    progress_manager.save()
+                    chapters_completed += 1
+                    continue
 
             elif is_image_only_chapter:
                 print(f"📸 Image-only chapter: {c.get('image_count', 0)} images")
@@ -27717,7 +27798,10 @@ def main(log_callback=None, stop_callback=None):
                 soup = BeautifulSoup(c["body"], 'html.parser')
                 
                 # Look for headers
-                headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title'])
+                header_names = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']
+                if should_translate_title_tags():
+                    header_names.append('title')
+                headers = soup.find_all(header_names)
                 # If we have headers, we should translate them even in "image-only" chapters
                 if headers and any(h.get_text(strip=True) for h in headers):
                     print(f"📝 Found headers to translate in image-only chapter")
@@ -27755,8 +27839,8 @@ def main(log_callback=None, stop_callback=None):
                             soup_body = BeautifulSoup(translated_html, 'html.parser')
                             
                             # Replace headers in the body with translated versions
-                            translated_headers = soup_headers.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title'])
-                            original_headers = soup_body.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title'])
+                            translated_headers = soup_headers.find_all(header_names)
+                            original_headers = soup_body.find_all(header_names)
                             
                             # Match and replace headers
                             for orig, trans in zip(original_headers, translated_headers):
@@ -27980,7 +28064,7 @@ def main(log_callback=None, stop_callback=None):
                 # IMPORTANT: Skip header removal if request merging is active, because
                 # synthetic merge headers are critical for split-the-merge functionality
                 batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-                use_title_tag = os.getenv('USE_TITLE', '0') == '1' and batch_translate_active
+                use_title_tag = should_translate_title_tags()
                 ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
                 
                 # Don't remove headers if this is a merged request
@@ -29722,6 +29806,37 @@ def main(log_callback=None, stop_callback=None):
                 print(f"⚠️ Chapter {actual_num} marked as qa_failed: {qa_label}")
                 continue
 
+            if c.get("_title_tag_only_translation"):
+                original_title_document = c.get(
+                    "_title_tag_original_markup",
+                    "",
+                )
+                restored_title_document = restore_translated_title_tags(
+                    original_title_document,
+                    cleaned,
+                )
+                if restored_title_document is None:
+                    write_utf8_html_file(
+                        os.path.join(out, fname),
+                        original_title_document,
+                    )
+                    progress_manager.update(
+                        idx,
+                        actual_num,
+                        content_hash,
+                        fname,
+                        status="qa_failed",
+                        chapter_obj=c,
+                        qa_issues_found=["TITLE_TAG_TRANSLATION_INVALID"],
+                    )
+                    progress_manager.save()
+                    print(
+                        f"⚠️ Chapter {actual_num} returned no usable "
+                        "translated <title>; original XHTML preserved"
+                    )
+                    continue
+                cleaned = restored_title_document
+
             if is_text_file and not is_pdf_file:
                 # For text files (but NOT PDFs), save as plain text instead of HTML
                 fname_txt = fname.replace('.html', '.txt')  # Change extension to .txt
@@ -29769,6 +29884,8 @@ def main(log_callback=None, stop_callback=None):
                 # For EPUB files, keep original HTML behavior
                 output_path = os.path.join(out, fname)
                 write_utf8_html_file(output_path, cleaned)
+                if c.get("_title_tag_only_translation"):
+                    retroactive_update_image_references(out)
                 
                 # Verify file was actually written before marking as completed
                 if not os.path.exists(output_path):

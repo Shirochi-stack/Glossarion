@@ -468,6 +468,10 @@ def _live_config_from_owner(owner):
         getattr(owner, "use_qa_scan_keys_var", None),
         cfg.get("use_qa_scan_keys", False),
     )
+    cfg["skip_title_tag_translation"] = _checked_value(
+        getattr(owner, "skip_title_tag_translation_var", None),
+        cfg.get("skip_title_tag_translation", False),
+    )
     cfg.setdefault("qa_scan_keys", cfg.get("qa_scan_keys", []))
     cfg["use_ai_truncation_detection_keys"] = _checked_value(
         getattr(owner, "use_ai_truncation_detection_keys_var", None),
@@ -503,6 +507,10 @@ def _live_config_from_worker(config):
         "ai_truncation_detection_keys": _json_list_from_env("AI_TRUNCATION_DETECTION_API_KEYS"),
         "force_key_rotation": os.getenv("FORCE_KEY_ROTATION", "1") == "1",
         "rotation_frequency": _env_int("ROTATION_FREQUENCY", 1),
+        "skip_title_tag_translation": _env_bool(
+            "SKIP_TITLE_TAG_TRANSLATION",
+            False,
+        ),
         "use_custom_openai_endpoint": os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") == "1",
         "openai_base_url": os.getenv("OPENAI_CUSTOM_BASE_URL", ""),
         "use_gemini_openai_endpoint": os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1",
@@ -540,6 +548,12 @@ def prepare_qa_scan_settings(qa_settings, owner=None, config=None, output_mode=N
     settings["_live_model"] = model
     settings["_live_config"] = live_config
     settings["_output_mode"] = output_mode or "text"
+    settings["skip_title_tag_translation"] = bool(
+        live_config.get(
+            "skip_title_tag_translation",
+            _env_bool("SKIP_TITLE_TAG_TRANSLATION", False),
+        )
+    )
 
     output_language = live_config.get("output_language") or live_config.get("output_language_var")
     if output_language and not settings.get("target_language"):

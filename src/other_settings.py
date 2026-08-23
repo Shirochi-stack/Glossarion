@@ -858,7 +858,7 @@ class HeaderTranslationHelpDialog(QDialog):
                 "title": "🚫 Ignore Options",
                 "content": [
                     "• Ignore header: Skip h1/h2/h3 tags (prevents re-translation of visible headers)",
-                    "• Use title: Include <title> tag in translation (translates document titles)"
+                    "• Skip title tag translation: Preserve <title> tags without translating them"
                 ]
             },
             {
@@ -7555,6 +7555,46 @@ def _create_prompt_management_section(self, parent):
 
     skip_img_title_cb.toggled.connect(_on_skip_image_title_toggle)
     section_v.addWidget(skip_img_title_cb)
+
+    # XHTML/HTML document title tags are translated by default. This setting
+    # is intentionally independent from book metadata and image filenames.
+    if not hasattr(self, 'skip_title_tag_translation_var'):
+        self.skip_title_tag_translation_var = bool(
+            self.config.get('skip_title_tag_translation', False)
+        )
+    if 'skip_title_tag_translation' not in self.config:
+        self.config['skip_title_tag_translation'] = False
+    self.use_title_var = not bool(self.skip_title_tag_translation_var)
+
+    skip_title_tag_cb = self._create_styled_checkbox(
+        "Skip title tag translation"
+    )
+    skip_title_tag_cb.setToolTip(
+        "When enabled, HTML/XHTML <title> tags are preserved without "
+        "translation.\nThis does not affect book metadata, visible headings, "
+        "or image filenames."
+    )
+    skip_title_tag_cb.setChecked(
+        bool(self.skip_title_tag_translation_var)
+    )
+
+    def _on_skip_title_tag_toggle(checked):
+        try:
+            skip_title = bool(checked)
+            self.skip_title_tag_translation_var = skip_title
+            self.use_title_var = not skip_title
+            self.config['skip_title_tag_translation'] = skip_title
+            # Keep the inverse legacy value for older components/config readers.
+            self.config['use_title'] = not skip_title
+            os.environ['SKIP_TITLE_TAG_TRANSLATION'] = (
+                '1' if skip_title else '0'
+            )
+            os.environ['USE_TITLE'] = '0' if skip_title else '1'
+        except Exception:
+            pass
+
+    skip_title_tag_cb.toggled.connect(_on_skip_title_tag_toggle)
+    section_v.addWidget(skip_title_tag_cb)
     
     def _on_glossary_title_toggle(checked):
         try:
@@ -7965,25 +8005,6 @@ def _create_prompt_management_section(self, parent):
     )
     ignore_h.addWidget(ignore_header_cb)
     
-    ignore_h.addSpacing(15)
-    
-    use_title_cb = self._create_styled_checkbox("Use title (Legacy)")
-    try:
-        use_title_cb.setChecked(bool(self.use_title_var))
-    except Exception:
-        pass
-    def _on_use_title_toggle(checked):
-        try:
-            self.use_title_var = bool(checked)
-        except Exception:
-            pass
-    use_title_cb.toggled.connect(_on_use_title_toggle)
-    use_title_cb.setToolTip(
-        "Include the title tag in translation.\n"
-        "Translates document titles in the HTML head."
-    )
-    ignore_h.addWidget(use_title_cb)
-    
     ignore_h.addStretch()
     section_v.addWidget(ignore_row)
     
@@ -8250,7 +8271,6 @@ def _create_prompt_management_section(self, parent):
         update_cb.setEnabled(checked)
         save_cb.setEnabled(checked)
         ignore_header_cb.setEnabled(checked)
-        use_title_cb.setEnabled(checked)
         use_fallback_cb.setEnabled(checked)
         translate_now_btn.setEnabled(checked)
     

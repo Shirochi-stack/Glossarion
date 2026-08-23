@@ -54,6 +54,7 @@ from emoticon_patterns import (
     mask_whitelisted_emoticons,
 )
 from epub_package import find_epub_opf_member
+from title_tag_translation import should_translate_title_tags
 from chapter_chunk_progress import (
     chunk_failure_summary,
     ensure_chunk_entry_schema,
@@ -962,6 +963,47 @@ def extract_text_from_html(file_path, include_headers=False):
     
     text, header_text = _extract_text_from_html_cached(cache_key, file_path)
     return (text, header_text) if include_headers else text
+
+
+def _scan_should_translate_title_tags(qa_settings=None):
+    """Resolve the live title-tag policy for QA scanner workers."""
+    settings = qa_settings if isinstance(qa_settings, dict) else {}
+    if "skip_title_tag_translation" in settings:
+        value = settings.get("skip_title_tag_translation")
+        if isinstance(value, str):
+            value = value.strip().lower() in ("1", "true", "yes", "on")
+        return not bool(value)
+    return should_translate_title_tags()
+
+
+def _foreign_character_qa_text(
+    fallback_text,
+    html_content,
+    qa_settings=None,
+    *,
+    headers_only=False,
+):
+    """Return text eligible for foreign-character QA under the title policy."""
+    if _scan_should_translate_title_tags(qa_settings):
+        return str(fallback_text or "")
+    if not isinstance(html_content, str) or not html_content.strip():
+        return str(fallback_text or "")
+
+    try:
+        soup = BeautifulSoup(html_content, "html.parser")
+        if headers_only:
+            return "\n".join(
+                tag.get_text(" ", strip=True)
+                for tag in soup.find_all(
+                    ["h1", "h2", "h3", "h4", "h5", "h6"]
+                )
+                if tag.get_text(" ", strip=True)
+            ).strip()
+        for title_tag in soup.find_all("title"):
+            title_tag.decompose()
+        return soup.get_text(separator="\n", strip=True)
+    except Exception:
+        return str(fallback_text or "")
 
 def _extract_text_from_html_cached(cache_key, file_path):
     """Cached implementation of extract_text_from_html"""
@@ -4979,7 +5021,20 @@ def _chunk_issue_matches(issue, chunk_html, chunk_text, source_text, qa_settings
     """Best-effort deterministic localization of one file QA issue."""
     issue_text = str(issue or "")
     issue_lower = issue_text.lower()
-    haystacks = (str(chunk_html or "").casefold(), str(chunk_text or "").casefold())
+    is_foreign_text_issue = "_text_found_" in issue_lower
+    if is_foreign_text_issue:
+        foreign_chunk_text = _foreign_character_qa_text(
+            chunk_text,
+            chunk_html,
+            qa_settings,
+        )
+        haystacks = (str(foreign_chunk_text or "").casefold(),)
+    else:
+        foreign_chunk_text = chunk_text
+        haystacks = (
+            str(chunk_html or "").casefold(),
+            str(chunk_text or "").casefold(),
+        )
 
     # Most artifact/foreign-text issues carry the actual offending sample.
     samples = []
@@ -4994,9 +5049,14 @@ def _chunk_issue_matches(issue, chunk_html, chunk_text, source_text, qa_settings
         if len(normalized) >= 2 and any(normalized in haystack for haystack in haystacks):
             return True
 
-    if "_text_found_" in issue_lower:
+    if is_foreign_text_issue:
         try:
-            return bool(detect_non_english_content(chunk_text, qa_settings)[0])
+            return bool(
+                detect_non_english_content(
+                    foreign_chunk_text,
+                    qa_settings,
+                )[0]
+            )
         except Exception:
             return False
     if issue_lower == "no_spacing_or_linebreaks":
@@ -8983,6 +9043,18 @@ def process_html_file_batch(args):
             # Skip files that can't be read
             continue
 
+        foreign_qa_text = _foreign_character_qa_text(
+            raw_text,
+            raw_file_content,
+            qa_settings,
+        )
+        qa_header_text = _foreign_character_qa_text(
+            qa_header_text,
+            raw_file_content,
+            qa_settings,
+            headers_only=True,
+        )
+
         # Text used for duplicate detection (may be downsampled in custom mode)
         dup_text = raw_text
         try:
@@ -9929,6 +10001,7 @@ def process_html_file_batch(args):
             "chapter_num": chapter_num,
             "hashes": hashes,
             "raw_text": raw_text,
+            "foreign_qa_text": foreign_qa_text,
             "dup_text": dup_text,
             "translation_artifacts": artifacts,
             "small_file_word_count": translated_wc_hint,
@@ -11287,7 +11360,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         
         # Small files keep their normal exemption, except heading text still
         # receives the foreign-character check.
-        foreign_qa_text = result.get('qa_header_text', '') if result.get('skip_small_file_checks') else raw_text
+        foreign_qa_text = (
+            result.get('qa_header_text', '')
+            if result.get('skip_small_file_checks')
+            else result.get('foreign_qa_text', raw_text)
+        )
         if foreign_qa_text:
             has_non_english, lang_issues = detect_non_english_content(foreign_qa_text, qa_settings)
             if has_non_english:
@@ -11979,6 +12056,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Clean up to save memory
     for result in results:
         result.pop('raw_text', None)
+        result.pop('foreign_qa_text', None)
         result.pop('hashes', None)
         result.pop('semantic_sig', None)
         result.pop('structural_sig', None)

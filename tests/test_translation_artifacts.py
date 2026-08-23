@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from bs4 import BeautifulSoup
 
 import other_settings
 import Retranslation_GUI as retranslation_gui_module
@@ -30,12 +31,16 @@ from TransateKRtoEN import (
 from qa_scan_runtime import (
     apply_qa_scan_env_from_settings,
     default_qa_scan_settings,
+    prepare_qa_scan_settings,
     restore_env,
 )
 from scan_html_folder import (
     _attach_chunk_results_to_scan,
+    _chunk_issue_matches,
+    _foreign_character_qa_text,
     detect_ai_artifacts,
     detect_non_english_content,
+    process_html_file_batch,
     scan_html_folder,
     update_new_format_progress,
 )
@@ -52,6 +57,350 @@ from translation_artifacts import (
     translation_artifact_target_fragment,
     update_translation_artifact_progress,
 )
+from title_tag_translation import (
+    restore_translated_title_tags,
+    should_translate_title_tags,
+    title_tag_translation_payload,
+)
+
+
+def test_title_tag_translation_is_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("SKIP_TITLE_TAG_TRANSLATION", raising=False)
+    monkeypatch.delenv("USE_TITLE", raising=False)
+
+    assert should_translate_title_tags() is True
+
+    monkeypatch.setenv("SKIP_TITLE_TAG_TRANSLATION", "1")
+    assert should_translate_title_tags() is False
+
+    monkeypatch.setenv("SKIP_TITLE_TAG_TRANSLATION", "0")
+    assert should_translate_title_tags() is True
+
+
+def test_legacy_use_title_is_only_a_fallback(monkeypatch):
+    monkeypatch.delenv("SKIP_TITLE_TAG_TRANSLATION", raising=False)
+    monkeypatch.setenv("USE_TITLE", "0")
+    assert should_translate_title_tags() is False
+
+    monkeypatch.setenv("USE_TITLE", "1")
+    assert should_translate_title_tags() is True
+
+    monkeypatch.setenv("SKIP_TITLE_TAG_TRANSLATION", "0")
+    monkeypatch.setenv("USE_TITLE", "0")
+    assert should_translate_title_tags() is True
+
+
+def test_title_only_reconstruction_preserves_image_xhtml_exactly():
+    original = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<html xmlns="http://www.w3.org/1999/xhtml">\n'
+        '<head><title class="book-title">義妹生活</title></head>\n'
+        '<body><svg><image xlink:href="../image/kuchie-004.jpg" /></svg></body>\n'
+        '</html>'
+    )
+
+    assert title_tag_translation_payload(original) == (
+        '<title class="book-title">義妹生活</title>'
+    )
+
+    restored = restore_translated_title_tags(
+        original,
+        "```html\n<title>Days with My Stepsister & More</title>\n```",
+    )
+    assert restored == original.replace(
+        "義妹生活",
+        "Days with My Stepsister &amp; More",
+    )
+
+
+def test_image_only_page_becomes_title_only_translation_unit(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKIP_TITLE_TAG_TRANSLATION", "0")
+    original = (
+        '<html><head><title>義妹生活</title></head>'
+        '<body><img src="../image/kuchie-004.jpg" /></body></html>'
+    )
+    chapter = {
+        "body": original,
+        "original_html": original,
+        "has_images": True,
+        "image_count": 1,
+        "file_size": len(original),
+    }
+
+    assert translation_module._prepare_image_only_title_translation(
+        chapter,
+        str(tmp_path),
+    ) is True
+    assert chapter["body"] == "<title>義妹生活</title>"
+    assert chapter["_title_tag_original_markup"] == original
+    assert chapter["has_images"] is False
+    assert "img" not in chapter["body"]
+
+
+def test_skip_setting_keeps_image_only_page_out_of_title_queue(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("SKIP_TITLE_TAG_TRANSLATION", "1")
+    original = (
+        '<html><head><title>義妹生活</title></head>'
+        '<body><img src="../image/kuchie-004.jpg" /></body></html>'
+    )
+    chapter = {"body": original, "original_html": original}
+
+    assert translation_module._prepare_image_only_title_translation(
+        chapter,
+        str(tmp_path),
+    ) is False
+    assert chapter["body"] == original
+    assert "_title_tag_only_translation" not in chapter
+
+
+def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
+    class Config:
+        MODEL = "gpt-test"
+        BATCH_SIZE = 2
+        CONTEXTUAL = False
+        HIST_LIMIT = 0
+        ENABLE_IMAGE_TRANSLATION = False
+        USE_ROLLING_SUMMARY = False
+        ASSISTANT_PROMPT = ""
+        INCLUDE_PREVIOUS_CHUNK = False
+        TEMP = 0
+        MAX_OUTPUT_TOKENS = 1024
+        MAX_RETRY_TOKENS = 1024
+        EMERGENCY_IMAGE_RESTORE = False
+        REMOVE_AI_ARTIFACTS = "off"
+
+        @staticmethod
+        def get_system_prompt(actual_merge_count=1):
+            return "Translate."
+
+        @staticmethod
+        def get_effective_output_limit():
+            return 4096
+
+        @staticmethod
+        def get_effective_compression_factor():
+            return 1
+
+    sent = []
+
+    class Client:
+        def send(self, messages, **_kwargs):
+            sent.append(messages[-1]["content"])
+            return "<title>Days with My Stepsister</title>", "stop"
+
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.setenv("SEND_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("ORDER_BATCH_REQUESTS_BY_SPINE", "0")
+    monkeypatch.setenv("CHAR_RATIO_TRUNCATION_ENABLED", "0")
+    monkeypatch.setenv("DIRECT_TEXT_ACTIVE", "0")
+    monkeypatch.setattr(
+        translation_module.ContentProcessor,
+        "image_processing_html",
+        staticmethod(lambda chapter: chapter["body"]),
+    )
+    monkeypatch.setattr(
+        translation_module.ContentProcessor,
+        "is_mostly_image_html",
+        staticmethod(lambda _body: False),
+    )
+    monkeypatch.setattr(
+        translation_module,
+        "_split_chapter_for_translation",
+        lambda _splitter, chapter, _tokens, filename=None: [
+            (chapter["body"], 1, 1)
+        ],
+    )
+    monkeypatch.setattr(translation_module, "find_glossary_file", lambda _out: None)
+    monkeypatch.setattr(
+        translation_module,
+        "build_system_prompt",
+        lambda base, *_args, **_kwargs: base,
+    )
+    monkeypatch.setattr(
+        translation_module,
+        "apply_emergency_glossary_compliance",
+        lambda text, _out: text,
+    )
+    monkeypatch.setattr(
+        translation_module,
+        "_build_translation_chunk_prompt_parts",
+        lambda system_prompt, chunk, *_args, **_kwargs: (
+            system_prompt,
+            [],
+            chunk,
+        ),
+    )
+
+    original = (
+        '<html><head><title>義妹生活</title></head>'
+        '<body><img src="../image/kuchie-004.jpg" /></body></html>'
+    )
+    progress_updates = []
+    processor = BatchTranslationProcessor(
+        Config(),
+        Client(),
+        [],
+        str(tmp_path),
+        threading.RLock(),
+        lambda: None,
+        lambda *args, **kwargs: progress_updates.append((args, kwargs)),
+        lambda: False,
+    )
+    result = processor.process_single_chapter(
+        (
+            0,
+            {
+                "num": 1,
+                "actual_chapter_num": 1,
+                "body": "<title>義妹生活</title>",
+                "_title_tag_only_translation": True,
+                "_title_tag_original_markup": original,
+                "filename": "chapter001.xhtml",
+                "original_basename": "chapter001.xhtml",
+            },
+        )
+    )
+
+    assert result[0] is True
+    assert sent == ["<title>義妹生活</title>"]
+    assert progress_updates[-1][1]["status"] == "completed"
+    output_files = [path for path in tmp_path.iterdir() if path.is_file()]
+    assert len(output_files) == 1
+    output_soup = BeautifulSoup(
+        output_files[0].read_text(encoding="utf-8"),
+        "html.parser",
+    )
+    assert output_soup.title.get_text() == "Days with My Stepsister"
+    assert output_soup.img["src"] == "../image/kuchie-004.jpg"
+
+
+def test_other_settings_places_new_toggle_after_image_title_setting():
+    source = Path(translation_module.__file__).with_name(
+        "other_settings.py"
+    ).read_text(encoding="utf-8")
+    image_toggle = source.index(
+        '"Skip image title translation (use original filename)"'
+    )
+    title_tag_toggle = source.index('"Skip title tag translation"')
+
+    assert title_tag_toggle > image_toggle
+    assert "Use title (Legacy)" not in source
+
+
+def test_scanner_foreign_character_filter_respects_title_skip_setting():
+    html = (
+        "<html><head><title>義妹生活</title></head>"
+        "<body><p>English body text.</p></body></html>"
+    )
+    raw_text = BeautifulSoup(html, "html.parser").get_text("\n", strip=True)
+
+    checked_text = _foreign_character_qa_text(
+        raw_text,
+        html,
+        {
+            "skip_title_tag_translation": False,
+            "target_language": "english",
+        },
+    )
+    skipped_text = _foreign_character_qa_text(
+        raw_text,
+        html,
+        {
+            "skip_title_tag_translation": True,
+            "target_language": "english",
+        },
+    )
+
+    assert detect_non_english_content(
+        checked_text,
+        {"target_language": "english", "foreign_char_threshold": 0},
+    )[0] is True
+    assert detect_non_english_content(
+        skipped_text,
+        {"target_language": "english", "foreign_char_threshold": 0},
+    )[0] is False
+    assert "義妹生活" not in skipped_text
+    assert "English body text." in skipped_text
+
+
+def test_scan_worker_excludes_skipped_title_from_foreign_qa(tmp_path):
+    html = (
+        "<html><head><title>義妹生活</title></head>"
+        "<body><p>English body text.</p></body></html>"
+    )
+    (tmp_path / "chapter.html").write_text(html, encoding="utf-8")
+    settings = default_qa_scan_settings()
+    settings["skip_title_tag_translation"] = True
+
+    results = process_html_file_batch(
+        (
+            [(0, "chapter.html")],
+            str(tmp_path),
+            settings,
+            "quick-scan",
+            {},
+            {},
+            False,
+            {},
+            {},
+        )
+    )
+
+    assert len(results) == 1
+    assert "義妹生活" in results[0]["raw_text"]
+    assert "義妹生活" not in results[0]["foreign_qa_text"]
+    assert detect_non_english_content(
+        results[0]["foreign_qa_text"],
+        settings,
+    )[0] is False
+
+
+def test_chunk_foreign_character_localization_ignores_skipped_title():
+    chunk_html = "<head><title>義妹生活</title></head>"
+    chunk_text = "義妹生活"
+    issue = detect_non_english_content(
+        chunk_text,
+        {"target_language": "english", "foreign_char_threshold": 0},
+    )[1][0]
+
+    assert _chunk_issue_matches(
+        issue,
+        chunk_html,
+        chunk_text,
+        "",
+        {
+            "skip_title_tag_translation": False,
+            "target_language": "english",
+            "foreign_char_threshold": 0,
+        },
+    ) is True
+    assert _chunk_issue_matches(
+        issue,
+        chunk_html,
+        chunk_text,
+        "",
+        {
+            "skip_title_tag_translation": True,
+            "target_language": "english",
+            "foreign_char_threshold": 0,
+        },
+    ) is False
+
+
+def test_qa_runtime_copies_live_title_skip_toggle_into_scan_settings():
+    class Owner:
+        config = {
+            "skip_title_tag_translation": False,
+            "output_language": "English",
+        }
+        skip_title_tag_translation_var = True
+
+    settings = prepare_qa_scan_settings({}, owner=Owner())
+
+    assert settings["skip_title_tag_translation"] is True
 
 
 def _contains_cjk(text):
