@@ -1904,7 +1904,7 @@ class TranslationConfig:
         self.WATERMARK_CLAHE_LIMIT = float(os.getenv("WATERMARK_CLAHE_LIMIT", "3.0"))
         self.COMPRESSION_FACTOR = float(os.getenv("COMPRESSION_FACTOR", "2.0"))
         self.ENABLE_CHUNK_PROGRESS = (
-            os.getenv("ENABLE_CHUNK_PROGRESS", "0").strip().lower()
+            os.getenv("ENABLE_CHUNK_PROGRESS", "1").strip().lower()
             in ("1", "true", "yes", "on")
         )
         
@@ -3954,11 +3954,25 @@ class ProgressManager:
             entry = self.prog.get("chapter_chunks", {}).get(str(chapter_key))
             return dict(reusable_chunk_results(entry))
 
-    def set_chapter_chunk_runtime_status(self, chapter_key, chunk_idx, status):
+    def set_chapter_chunk_runtime_status(
+        self,
+        chapter_key,
+        chunk_idx,
+        status,
+        *,
+        model_name=None,
+        key_identifier=None,
+    ):
         """Persist pending/in-progress at the real request lifecycle boundary."""
         with self._save_lock:
             entry = self.prog.get("chapter_chunks", {}).get(str(chapter_key))
-            return set_chunk_runtime_status(entry, chunk_idx, status)
+            return set_chunk_runtime_status(
+                entry,
+                chunk_idx,
+                status,
+                model_name=model_name,
+                key_identifier=key_identifier,
+            )
 
     def reset_in_progress_chapter_chunks(self, chapter_key):
         """Make interrupted API requests resumable without touching results."""
@@ -8862,7 +8876,7 @@ class BatchTranslationProcessor:
         self.chunks_completed = 0
         self.is_text_file = is_text_file
         self.chunk_progress_enabled = bool(
-            getattr(config, "ENABLE_CHUNK_PROGRESS", False)
+            getattr(config, "ENABLE_CHUNK_PROGRESS", True)
             and str(getattr(config, "input_path", "")).lower().endswith(".epub")
             and progress_manager is not None
         )
@@ -9138,10 +9152,15 @@ class BatchTranslationProcessor:
                         and chunk_idx is not None
                         and self.progress_manager is not None
                     ):
+                        chunk_model, chunk_key_identifier = (
+                            _capture_thread_actual_request_metadata()
+                        )
                         self.progress_manager.set_chapter_chunk_runtime_status(
                             content_hash,
                             chunk_idx,
                             "in_progress",
+                            model_name=chunk_model,
+                            key_identifier=chunk_key_identifier,
                         )
                     self.save_progress_fn()
             
@@ -28050,7 +28069,7 @@ def main(log_callback=None, stop_callback=None):
             
             chapter_key_str = content_hash
             chunk_progress_enabled = bool(
-                getattr(config, "ENABLE_CHUNK_PROGRESS", False)
+                getattr(config, "ENABLE_CHUNK_PROGRESS", True)
                 and str(input_path or "").lower().endswith(".epub")
             )
             (
@@ -28456,10 +28475,15 @@ def main(log_callback=None, stop_callback=None):
                     else:
                         progress_manager.update(idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=c)
                     if chunk_progress_enabled:
+                        chunk_model, chunk_key_identifier = (
+                            _capture_thread_actual_request_metadata()
+                        )
                         progress_manager.set_chapter_chunk_runtime_status(
                             chapter_key_str,
                             chunk_idx,
                             "in_progress",
+                            model_name=chunk_model,
+                            key_identifier=chunk_key_identifier,
                         )
                     progress_manager.save()
 

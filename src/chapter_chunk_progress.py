@@ -246,8 +246,15 @@ def record_chunk_result(
     return True
 
 
-def set_chunk_runtime_status(entry, chunk_index, status):
-    """Set a non-terminal runtime status for one planned chunk."""
+def set_chunk_runtime_status(
+    entry,
+    chunk_index,
+    status,
+    *,
+    model_name=None,
+    key_identifier=None,
+):
+    """Set runtime status and the actual route used by one planned chunk."""
     if not isinstance(entry, dict):
         return False
     status = str(status or "").strip().lower()
@@ -257,7 +264,23 @@ def set_chunk_runtime_status(entry, chunk_index, status):
     record = _chunk_record(entry, chunk_index, create=True)
     if record is None:
         return False
+    key = str(_positive_int(chunk_index))
     record["status"] = status
+    if model_name:
+        record["model_name"] = str(model_name).strip()
+    if key_identifier:
+        record["key_identifier"] = str(key_identifier).strip()
+    if model_name or key_identifier:
+        metadata = entry.setdefault("chunk_metadata", {})
+        current_metadata = metadata.get(key)
+        current_metadata = (
+            dict(current_metadata) if isinstance(current_metadata, dict) else {}
+        )
+        if model_name:
+            current_metadata["model_name"] = str(model_name).strip()
+        if key_identifier:
+            current_metadata["key_identifier"] = str(key_identifier).strip()
+        metadata[key] = current_metadata
     record["last_updated"] = time.time()
     ensure_chunk_entry_schema(entry)
     statuses = {

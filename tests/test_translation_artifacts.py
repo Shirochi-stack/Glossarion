@@ -493,10 +493,20 @@ def test_batch_epub_chunk_progress_submits_only_missing_chunks(
     in_flight_seen = {}
 
     def fake_send(messages, *_args, **kwargs):
+        from unified_api_client import set_current_thread_actual_request_model
+
         source = messages[-1]["content"]
+        model_name, key_identifier = {
+            "chunk-2": ("provider/model-two", "key-two"),
+            "chunk-3": ("provider/model-three", "key-three"),
+        }[source]
+        set_current_thread_actual_request_model(model_name, key_identifier)
         callback = kwargs.get("before_send_callback")
-        if callback:
-            callback()
+        try:
+            if callback:
+                callback()
+        finally:
+            set_current_thread_actual_request_model(None, None)
         chunk_index = int(source.rsplit("-", 1)[-1])
         in_flight_seen[source] = progress.prog["chapter_chunks"][
             "hash-1"
@@ -616,6 +626,10 @@ def test_batch_epub_chunk_progress_submits_only_missing_chunks(
     assert entry["chapter_status"] == "completed"
     assert entry["entries"]["2"]["source"] == "chunk-2"
     assert entry["entries"]["3"]["source"] == "chunk-3"
+    assert entry["entries"]["2"]["model_name"] == "provider/model-two"
+    assert entry["entries"]["2"]["key_identifier"] == "key-two"
+    assert entry["entries"]["3"]["model_name"] == "provider/model-three"
+    assert entry["entries"]["3"]["key_identifier"] == "key-three"
 
 
 def test_html_scanner_marks_and_clears_only_the_failing_chunk(tmp_path):

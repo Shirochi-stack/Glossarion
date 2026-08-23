@@ -4637,7 +4637,7 @@ def _create_response_handling_section(self, parent):
             getattr(
                 self,
                 'enable_chunk_progress_var',
-                self.config.get('enable_chunk_progress', False),
+                self.config.get('enable_chunk_progress', True),
             )
         )
     )
@@ -4655,7 +4655,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(chunk_progress_cb)
 
     chunk_progress_desc = QLabel(
-        "Opt-in EPUB resume cache. Completed chunks are reused only while both "
+        "Enabled by default for EPUB resume. Completed chunks are reused only while both "
         "the original and API-cached token budgets still match."
     )
     chunk_progress_desc.setWordWrap(True)

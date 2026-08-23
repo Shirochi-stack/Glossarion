@@ -656,16 +656,38 @@ def test_chunk_runtime_status_tracks_dispatch_and_cancel_without_regressing_cach
     )
 
     assert progress.set_chapter_chunk_runtime_status(
-        "hash-1", 2, "in_progress"
+        "hash-1",
+        2,
+        "in_progress",
+        model_name="provider/model-a",
+        key_identifier="key-a",
     )
     entry = progress.prog["chapter_chunks"]["hash-1"]
     assert entry["entries"]["1"]["status"] == "completed"
     assert entry["entries"]["2"]["status"] == "in_progress"
+    assert entry["entries"]["2"]["model_name"] == "provider/model-a"
+    assert entry["entries"]["2"]["key_identifier"] == "key-a"
+    assert entry["chunk_metadata"]["2"] == {
+        "model_name": "provider/model-a",
+        "key_identifier": "key-a",
+    }
     assert entry["entries"]["3"]["status"] == "pending"
     assert entry["chapter_status"] == "in_progress"
     assert progress.get_reusable_chapter_chunks("hash-1") == {
         "1": "translated one"
     }
+
+    # A retry can rotate to a different key/model; the chunk owns the latest
+    # actual route instead of inheriting a chapter-wide value.
+    assert progress.set_chapter_chunk_runtime_status(
+        "hash-1",
+        2,
+        "in_progress",
+        model_name="provider/model-b",
+        key_identifier="key-b",
+    )
+    assert entry["entries"]["2"]["model_name"] == "provider/model-b"
+    assert entry["entries"]["2"]["key_identifier"] == "key-b"
 
     assert progress.reset_in_progress_chapter_chunks("hash-1") == [2]
     assert entry["entries"]["1"]["status"] == "completed"
@@ -892,6 +914,14 @@ def test_chunk_budget_uses_global_individual_and_cached_model_limits(
     assert config.get_effective_output_limit() == 9000
     assert snapshot["initial_chunk_size"] == 5750
     assert snapshot["cached_chunk_size"] == 4250
+
+
+def test_chunk_progress_defaults_enabled_and_respects_explicit_disable(monkeypatch):
+    monkeypatch.delenv("ENABLE_CHUNK_PROGRESS", raising=False)
+    assert TranslationConfig().ENABLE_CHUNK_PROGRESS is True
+
+    monkeypatch.setenv("ENABLE_CHUNK_PROGRESS", "0")
+    assert TranslationConfig().ENABLE_CHUNK_PROGRESS is False
 
 
 def test_unified_cached_limit_resolves_auth_route_aliases(monkeypatch):
