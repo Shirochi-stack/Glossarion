@@ -45,6 +45,7 @@ from chapter_chunk_progress import (
     ensure_chunk_entry_schema,
     is_multi_chunk_entry,
     reset_chunks_for_retranslation,
+    sorted_chunk_items,
 )
 
 try:
@@ -14874,11 +14875,8 @@ class _BookDetailsLoader(QThread):
                                 "model_name": record.get("model_name"),
                                 "key_identifier": record.get("key_identifier"),
                             }
-                            for chunk_index, record in sorted(
-                                chunk_entry.get("entries", {}).items(),
-                                key=lambda item: int(item[0])
-                                if str(item[0]).isdigit()
-                                else 10**9,
+                            for chunk_index, record in sorted_chunk_items(
+                                chunk_entry.get("entries", {})
                             )
                             if isinstance(record, dict)
                         ]

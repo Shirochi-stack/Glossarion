@@ -33,6 +33,30 @@ def _positive_int(value, default=0):
     return value if value > 0 else int(default)
 
 
+def chunk_index_sort_key(value):
+    """Return a stable numeric-first key for persisted chunk indexes."""
+    index = _positive_int(value)
+    if index:
+        return (0, index)
+    return (1, str(value))
+
+
+def sorted_chunk_items(mapping):
+    """Iterate a chunk-index mapping as 1, 2, ... 9, 10, ... ."""
+    if not isinstance(mapping, dict):
+        return []
+    return sorted(mapping.items(), key=lambda item: chunk_index_sort_key(item[0]))
+
+
+def _mapping_order_differs(current, normalized):
+    """Compare mapping content and insertion order (dict equality ignores order)."""
+    return (
+        not isinstance(current, dict)
+        or current != normalized
+        or list(current) != list(normalized)
+    )
+
+
 def chunk_marker_key(chapter_key) -> str:
     return hashlib.sha256(str(chapter_key or "").encode("utf-8")).hexdigest()[:16]
 
@@ -157,6 +181,7 @@ def ensure_chunk_entry_schema(entry, total_chunks=None):
 
     normalized_records = {}
     normalized_chunks = {}
+    normalized_metadata = {}
     for index in sorted(indexes):
         key = str(index)
         old_record = records.get(key)
@@ -189,6 +214,7 @@ def ensure_chunk_entry_schema(entry, total_chunks=None):
         record["status"] = status
         meta = metadata.get(key)
         if isinstance(meta, dict):
+            normalized_metadata[key] = dict(meta)
             for field in ("model_name", "key_identifier"):
                 if meta.get(field) and not record.get(field):
                     record[field] = meta[field]
@@ -209,11 +235,14 @@ def ensure_chunk_entry_schema(entry, total_chunks=None):
     if entry.get("total") != total:
         entry["total"] = total
         changed = True
-    if entry.get("entries") != normalized_records:
+    if _mapping_order_differs(entry.get("entries"), normalized_records):
         entry["entries"] = normalized_records
         changed = True
-    if entry.get("chunks") != normalized_chunks:
+    if _mapping_order_differs(entry.get("chunks"), normalized_chunks):
         entry["chunks"] = normalized_chunks
+        changed = True
+    if _mapping_order_differs(entry.get("chunk_metadata"), normalized_metadata):
+        entry["chunk_metadata"] = normalized_metadata
         changed = True
     if entry.get("completed") != normalized_completed:
         entry["completed"] = normalized_completed

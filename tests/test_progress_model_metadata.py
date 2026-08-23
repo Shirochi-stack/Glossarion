@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 from chapter_chunk_progress import (
     chunk_entry_needs_translation,
     effective_parent_status,
+    ensure_chunk_entry_schema,
     extract_marked_chunks,
     remove_chunk_segments,
     remove_chunk_segments_from_file,
@@ -1021,6 +1022,64 @@ def test_progress_manager_expands_chapter_into_selectable_chunk_rows(tmp_path):
     assert rows[2]["chunk_index"] == 2
     assert rows[2]["status"] == "pending"
     assert rows[1]["parent_progress_key"] == "1"
+
+
+def test_chunk_schema_and_progress_rows_sort_indexes_numerically():
+    insertion_order = [1, 10, 11, 12, 2, 3, 4, 5, 6, 7, 8, 9]
+    entry = {
+        "schema_version": 2,
+        "total": 12,
+        "entries": {
+            str(index): {
+                "index": index,
+                "status": "completed",
+                "model_name": f"model-{index}",
+            }
+            for index in insertion_order
+        },
+        "chunks": {
+            str(index): f"translated {index}" for index in insertion_order
+        },
+        "chunk_metadata": {
+            str(index): {"model_name": f"model-{index}"}
+            for index in insertion_order
+        },
+        "completed": insertion_order,
+    }
+
+    assert ensure_chunk_entry_schema(entry) is True
+    expected_keys = [str(index) for index in range(1, 13)]
+    assert list(entry["entries"]) == expected_keys
+    assert list(entry["chunks"]) == expected_keys
+    assert list(entry["chunk_metadata"]) == expected_keys
+    assert entry["completed"] == list(range(1, 13))
+
+    for is_pdf in (False, True):
+        parent = {
+            "actual_num": 1,
+            "content_hash": "hash-1",
+            "output_file": "section.html" if is_pdf else "chapter.xhtml",
+            "status": "completed",
+        }
+        if is_pdf:
+            parent["pdf_toc_section"] = True
+        rows = [{
+            "key": "1",
+            "num": 1,
+            "info": parent,
+            "output_file": parent["output_file"],
+            "status": "completed",
+        }]
+        RetranslationMixin()._append_chunk_progress_display_info(
+            {
+                "prog": {
+                    "chapters": {"1": parent},
+                    "chapter_chunks": {"hash-1": entry},
+                }
+            },
+            rows,
+        )
+        assert [row["chunk_index"] for row in rows[1:]] == list(range(1, 13))
 
 
 @pytest.mark.parametrize(

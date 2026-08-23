@@ -96,6 +96,7 @@ from chapter_chunk_progress import (
     remove_chunk_segments_from_file,
     reset_chunks_for_retranslation,
     set_chunk_qa,
+    sorted_chunk_items,
 )
 _LLM_TOKEN_QA_RE = re.compile(
     r"(?:^|[^a-z0-9])llm[_\s-]*token[_\s-]*issue",
@@ -29083,9 +29084,8 @@ class RetranslationMixin:
                 chunk_entry,
             )
             total = int(chunk_entry.get("total") or 0)
-            for raw_index, record in sorted(
-                chunk_entry.get("entries", {}).items(),
-                key=lambda item: int(item[0]) if str(item[0]).isdigit() else 10**9,
+            for raw_index, record in sorted_chunk_items(
+                chunk_entry.get("entries", {})
             ):
                 if not isinstance(record, dict):
                     continue
