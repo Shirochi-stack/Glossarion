@@ -197,6 +197,7 @@ The built-in model list is a safety net, not a promise that every entry is still
 **Manual polling:**
 
 - Right-click the main **Model** box and choose **🌐 Refresh Online Models**, or open **Manage Models** and click **🌐 Poll Providers**.
+- When the selected route is `authnd/` (including numbered account prefixes), **Poll Providers** explicitly polls that AuthND catalog first and then continues with the remaining provider sweep.
 - A manual refresh bypasses the 24-hour automatic-poll limit. Use it when you know a provider just released or removed a model.
 - The bottom log immediately says polling has started, then lists which catalogs responded, which used static fallbacks, which lacked credentials, and the exact safe HTTP error returned by failed providers.
 
@@ -212,7 +213,8 @@ The built-in model list is a safety net, not a promise that every entry is still
 
 - A subtle green **✓** in **Manage Models**, the main Model search, and Multi API Key Manager model searches means that entry comes from a fresh successful online provider poll. The checkmark is visual only and is not part of the model ID. Entries currently supplied by a static fallback never receive the checkmark, even if that provider succeeded on an older poll.
 - **Hide unpolled models** filters all of those lists and searches to confirmed entries without deleting models or changing a currently typed/selected model ID.
-- Deleting a model in **Manage Models** removes it from the main and Multi API Key Manager searches immediately. Later default-catalog updates or provider polls do not restore an explicitly deleted model; add it again in **Manage Models** if you want it back.
+- Deleting a model in **Manage Models** removes it from the main and Multi API Key Manager searches immediately, even while the non-modal manager remains open. **Cancel** restores the original search list; **Save** commits the draft. Later default-catalog updates or provider polls do not restore an explicitly deleted model; add it again in **Manage Models** if you want it back.
+- If `config.json` cannot be written, Manage Models remains open and reports the save failure instead of closing with a false success message.
 - **Static fallback** means Glossarion kept its built-in list because the online catalog could not be queried. Translation can still work if the model ID and credentials are valid.
 - `authgem-key/` model IDs are explicitly configured and are not included in provider catalog polling.
 - **No provider credential** means the catalog supports polling, but Glossarion had no key it could safely send to that provider. Select one of that provider's models and enter its key, then poll again.

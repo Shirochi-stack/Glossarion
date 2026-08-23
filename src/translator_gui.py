@@ -645,6 +645,7 @@ def _style_model_popup_view(view):
 
 from model_options import (
     STATIC_ONLY_PROVIDER_PREFIXES,
+    catalog_provider_for_model,
     due_provider_catalog_for_model,
     get_current_polled_provider_models,
     get_model_options,
@@ -20539,6 +20540,40 @@ Recent translations to summarize:
         )
         return True
 
+    def _start_selected_provider_then_full_catalog_refresh(self, show_feedback=False):
+        """Explicitly poll selected AuthND, then run the general provider sweep."""
+        try:
+            active_model = self.model_combo.currentText().strip()
+        except Exception:
+            active_model = str(
+                getattr(self, 'model_var', self.config.get('model', '')) or ''
+            ).strip()
+        try:
+            custom_routes = self._normalize_custom_prefix_routes(
+                getattr(
+                    self,
+                    'custom_prefix_routes',
+                    self.config.get('custom_prefix_routes', []),
+                )
+            )
+        except Exception:
+            custom_routes = []
+
+        provider = catalog_provider_for_model(active_model, custom_routes)
+        if provider and provider.split(':', 1)[0] == 'authnd':
+            # AuthND is an on-demand route, not a generic ProviderCatalogSpec.
+            # Poll it as an explicit first stage and always follow with the
+            # full sweep, even if another catalog worker is currently active.
+            self._provider_model_catalog_full_refresh_pending = True
+            return self._start_provider_model_catalog_refresh(
+                show_feedback=show_feedback,
+                only_provider=provider,
+            )
+
+        return self._start_provider_model_catalog_refresh(
+            show_feedback=show_feedback,
+        )
+
     @staticmethod
     def _apply_polled_model_icons(manager, polled_model_keys):
         """Mark confirmed models and apply the optional testing filter."""
@@ -20723,6 +20758,20 @@ Recent translations to summarize:
             removed_models,
         )
 
+        manager = getattr(self, '_model_manager_dialog', None)
+        manager_list = getattr(manager, '_model_list_widget', None)
+        if (
+            manager_list is not None
+            and bool(getattr(manager, '_model_manager_draft_active', False))
+        ):
+            # The non-modal manager and main search are two views of the same
+            # live draft. A background poll may update markers, but it must not
+            # replace that draft with the last saved config while editing.
+            display_models = [
+                manager_list.item(index).text()
+                for index in range(manager_list.count())
+            ]
+
         self._refresh_model_combo_catalog(display_models)
 
         statuses = dict(getattr(result, 'statuses', {}) or {})
@@ -20775,7 +20824,6 @@ Recent translations to summarize:
         # If the user explicitly polled from Manage Models, refresh that
         # dialog too. Automatic background refreshes must not disturb unsaved
         # edits in an open manager window.
-        manager = getattr(self, '_model_manager_dialog', None)
         if (
             manager is not None
             and getattr(manager, '_catalog_poll_pending', False)
@@ -20892,10 +20940,7 @@ Recent translations to summarize:
                 online_model_count=online_model_count,
             )
 
-        if (
-            requested_provider
-            and getattr(self, '_provider_model_catalog_full_refresh_pending', False)
-        ):
+        if getattr(self, '_provider_model_catalog_full_refresh_pending', False):
             QTimer.singleShot(100, self._launch_pending_full_provider_catalog_refresh)
 
     def _launch_pending_full_provider_catalog_refresh(self):
@@ -22315,6 +22360,7 @@ Recent translations to summarize:
                 if not show:
                     _prewarm_dialog_offscreen(existing)
                     return existing
+                existing._model_manager_draft_active = True
                 existing.setAttribute(Qt.WA_DontShowOnScreen, False)
                 _center_dialog(existing)
                 try:
@@ -22334,7 +22380,11 @@ Recent translations to summarize:
         dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
         dialog.setAttribute(Qt.WA_DeleteOnClose, True)
         self._model_manager_dialog = dialog
-        dialog.finished.connect(lambda *_: setattr(self, '_model_manager_dialog', None))
+        dialog._model_manager_saved = False
+        dialog._model_manager_draft_active = bool(show)
+        dialog.finished.connect(
+            lambda *_: self._finish_model_manager_dialog(dialog)
+        )
 
         # Use screen ratios for sizing
         screen = QApplication.primaryScreen().availableGeometry()
@@ -22437,6 +22487,7 @@ Recent translations to summarize:
         # Populate from current combo
         current_models = [self.model_combo.itemText(i) for i in range(self.model_combo.count())]
         list_widget.addItems(current_models)
+        dialog._model_manager_original_models = list(current_models)
 
         # Select current model
         current_model = self.model_combo.currentText()
@@ -22456,6 +22507,7 @@ Recent translations to summarize:
                 history_stack.append(current_order)
                 history_index[0] = len(history_stack) - 1
                 update_undo_redo_buttons()
+                self._preview_model_manager_order(list_widget, dialog)
 
         def update_undo_redo_buttons():
             undo_btn.setEnabled(history_index[0] > 0)
@@ -22479,6 +22531,7 @@ Recent translations to summarize:
                     dialog, getattr(self, '_polled_online_model_ids', set())
                 )
                 update_undo_redo_buttons()
+                self._preview_model_manager_order(list_widget, dialog)
         undo_btn.clicked.connect(do_undo)
         button_column.addWidget(undo_btn)
 
@@ -22494,6 +22547,7 @@ Recent translations to summarize:
                     dialog, getattr(self, '_polled_online_model_ids', set())
                 )
                 update_undo_redo_buttons()
+                self._preview_model_manager_order(list_widget, dialog)
         redo_btn.clicked.connect(do_redo)
         button_column.addWidget(redo_btn)
 
@@ -22654,8 +22708,13 @@ Recent translations to summarize:
                 return
 
             poll_btn.setText("⏳ Polling…")
-            poll_status.setText("Contacting provider catalogs in the background…")
-            started = self._start_provider_model_catalog_refresh()
+            if active_model.startswith('authnd'):
+                poll_status.setText(
+                    "Polling selected AuthND catalog, then remaining providers…"
+                )
+            else:
+                poll_status.setText("Contacting provider catalogs in the background…")
+            started = self._start_selected_provider_then_full_catalog_refresh()
             if not started:
                 poll_status.setText("Waiting for the current catalog refresh to finish…")
 
@@ -23068,6 +23127,7 @@ Recent translations to summarize:
             _prewarm_dialog_offscreen(dialog)
             return dialog
 
+        dialog._model_manager_draft_active = True
         dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
         _center_dialog(dialog)
         try:
@@ -23078,6 +23138,40 @@ Recent translations to summarize:
         dialog.raise_()
         dialog.activateWindow()
         return dialog
+
+    def _preview_model_manager_order(self, list_widget, dialog=None):
+        """Mirror an open manager's draft order into every model search."""
+        draft_models = [
+            list_widget.item(index).text()
+            for index in range(list_widget.count())
+        ]
+        if dialog is not None:
+            dialog._model_manager_draft_active = True
+        self._refresh_model_combo_catalog(draft_models, force=True)
+        refresh_search_state = getattr(self, '_refresh_model_search_poll_state', None)
+        if callable(refresh_search_state):
+            refresh_search_state()
+
+    def _finish_model_manager_dialog(self, dialog):
+        """Restore a cancelled draft, or retain the list committed by Save."""
+        try:
+            dialog._model_manager_draft_active = False
+            if not bool(getattr(dialog, '_model_manager_saved', False)):
+                original_models = list(
+                    getattr(dialog, '_model_manager_original_models', []) or []
+                )
+                if original_models:
+                    self._refresh_model_combo_catalog(original_models, force=True)
+                    refresh_search_state = getattr(
+                        self, '_refresh_model_search_poll_state', None
+                    )
+                    if callable(refresh_search_state):
+                        refresh_search_state()
+        except (AttributeError, RuntimeError):
+            pass
+        finally:
+            if getattr(self, '_model_manager_dialog', None) is dialog:
+                self._model_manager_dialog = None
 
     def _save_model_order(self, list_widget, dialog):
         """Save the new model order from the list widget."""
@@ -23091,7 +23185,11 @@ Recent translations to summarize:
 
         # Remember explicit removals so startup/default/online catalog merges
         # can add genuinely new entries without resurrecting deleted ones.
-        previous_models = list(getattr(self, '_model_all_values', []) or [])
+        previous_models = list(
+            getattr(dialog, '_model_manager_original_models', []) or []
+        )
+        if not previous_models:
+            previous_models = list(getattr(self, '_model_all_values', []) or [])
         if not previous_models:
             previous_models = [
                 self.model_combo.itemText(index)
@@ -23111,6 +23209,10 @@ Recent translations to summarize:
         removed_keys.difference_update(new_keys)
 
         # Persist to config
+        had_custom_models = 'custom_model_list' in self.config
+        old_custom_models = self.config.get('custom_model_list')
+        had_removed_models = 'model_manager_removed_models' in self.config
+        old_removed_models = self.config.get('model_manager_removed_models')
         self.config['custom_model_list'] = new_order
         self.config['model_manager_removed_models'] = sorted(removed_keys)
         self._model_all_values = list(new_order)
@@ -23122,10 +23224,31 @@ Recent translations to summarize:
         if callable(refresh_search_state):
             refresh_search_state()
 
-        # Save config
-        self.save_config(show_message=False)
+        # Save config. Never close the dialog and claim success if the atomic
+        # write failed; that made deletions appear to work until restart.
+        saved = self.save_config(show_message=False)
+        if saved is False:
+            if had_custom_models:
+                self.config['custom_model_list'] = old_custom_models
+            else:
+                self.config.pop('custom_model_list', None)
+            if had_removed_models:
+                self.config['model_manager_removed_models'] = old_removed_models
+            else:
+                self.config.pop('model_manager_removed_models', None)
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(
+                dialog,
+                "Model List Not Saved",
+                "Glossarion could not write the model list to config.json. "
+                "The manager will remain open so you can retry.",
+            )
+            self.append_log("❌ Model list was not saved; config.json write failed")
+            return
 
         self.append_log("✓ Model list updated")
+        dialog._model_manager_saved = True
+        dialog._model_manager_draft_active = False
         dialog.accept()
 
     @staticmethod
@@ -44478,10 +44601,10 @@ Important rules:
                         value = source.text().strip() if hasattr(source, 'text') else source.strip()
                         if not is_valid_func(value):
                             QMessageBox.critical(None, "Invalid Input", f"Please enter a valid number for {name}")
-                            return
+                            return False
                     except (AttributeError, ValueError):
                         QMessageBox.critical(None, "Invalid Input", f"Please enter a valid number for {name}")
-                        return
+                        return False
 
             # --- 2. Data-Driven Configuration Mapping ---
             # Helper to get value from a source (widget or variable)
@@ -45353,7 +45476,8 @@ Important rules:
                     winsound.MessageBeep(winsound.MB_OK)
                 except Exception:
                     pass
-                
+            return True
+
         except Exception as e:
             if show_message:
                 from PySide6.QtWidgets import QMessageBox
@@ -45361,6 +45485,7 @@ Important rules:
             else:
                 print(f"Warning: Config save failed (silent): {e}")
             self._restore_config_from_backup()
+            return False
         
     def debug_environment_variables(self, show_all=False):
         """Debug and verify all critical environment variables are set correctly.

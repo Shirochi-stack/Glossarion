@@ -691,8 +691,26 @@ def test_only_vertex_style_routes_remain_static_by_design():
     assert "authgem/" not in static_routes
     assert "authnd/" not in static_routes
     assert "authza/" not in static_routes
-    assert "authgem-key/" in static_routes
+    assert "authgem-key/" not in static_routes
     assert "authgem-vertex*/" in static_routes
+
+
+def test_provider_poll_log_omits_authgem_key_from_nonpollable_routes():
+    import translator_gui
+
+    logs = []
+    gui = SimpleNamespace(append_log=logs.append)
+    result = SimpleNamespace(statuses={}, provider_models={})
+
+    translator_gui.TranslatorGUI._log_provider_model_catalog_feedback(
+        gui,
+        result,
+        total_model_count=0,
+        online_model_count=0,
+    )
+
+    assert "Not pollable by design: 4 routes" in logs[0]
+    assert "authgem-key" not in logs[0]
 
 
 def test_authgem_key_is_excluded_from_polling_and_legacy_cache(tmp_path, monkeypatch):
@@ -1551,7 +1569,13 @@ def test_model_manager_save_tracks_deletions_and_forces_completer_refresh():
         save_config=lambda show_message=False: None,
         append_log=lambda _message: None,
     )
-    dialog = SimpleNamespace(accept=lambda: None)
+    # The live preview has already changed _model_all_values; deletion
+    # tracking must still compare against the dialog's original baseline.
+    gui._model_all_values = ["provider/kept", "provider/readded"]
+    dialog = SimpleNamespace(
+        accept=lambda: None,
+        _model_manager_original_models=list(old_models),
+    )
 
     translator_gui.TranslatorGUI._save_model_order(
         gui,
@@ -1569,6 +1593,177 @@ def test_model_manager_save_tracks_deletions_and_forces_completer_refresh():
     ]
     assert refreshes == [(["provider/kept", "provider/readded"], True)]
     assert notifications == [True]
+    assert dialog._model_manager_saved is True
+    assert model_options.merge_saved_model_options(
+        gui.config["custom_model_list"],
+        ["provider/deleted", "provider/new-after-restart"],
+        gui.config["model_manager_removed_models"],
+    ) == [
+        "provider/kept",
+        "provider/readded",
+        "provider/new-after-restart",
+    ]
+
+
+def test_model_manager_failed_config_write_keeps_dialog_open_and_does_not_claim_save(
+    monkeypatch,
+):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    class FakeList:
+        def count(self):
+            return 1
+
+        def item(self, _index):
+            return SimpleNamespace(text=lambda: "provider/kept")
+
+    critical_messages = []
+    monkeypatch.setattr(
+        qt_widgets.QMessageBox,
+        "critical",
+        lambda _parent, title, message: critical_messages.append((title, message)),
+    )
+    accepted = []
+    logs = []
+    dialog = SimpleNamespace(
+        _model_manager_original_models=["provider/kept", "provider/deleted"],
+        _model_manager_saved=False,
+        accept=lambda: accepted.append(True),
+    )
+    gui = SimpleNamespace(
+        config={
+            "custom_model_list": ["provider/kept", "provider/deleted"],
+            "model_manager_removed_models": [],
+        },
+        _model_all_values=["provider/kept"],
+        model_combo=SimpleNamespace(count=lambda: 0, itemText=lambda _index: ""),
+        _refresh_model_combo_catalog=lambda _models, force=False: None,
+        _refresh_model_search_poll_state=lambda: None,
+        save_config=lambda show_message=False: False,
+        append_log=logs.append,
+    )
+
+    translator_gui.TranslatorGUI._save_model_order(gui, FakeList(), dialog)
+
+    assert gui.config["custom_model_list"] == [
+        "provider/kept",
+        "provider/deleted",
+    ]
+    assert gui.config["model_manager_removed_models"] == []
+    assert accepted == []
+    assert dialog._model_manager_saved is False
+    assert critical_messages and critical_messages[0][0] == "Model List Not Saved"
+    assert logs == ["❌ Model list was not saved; config.json write failed"]
+
+
+def test_model_manager_draft_updates_search_immediately_and_cancel_restores_it():
+    import translator_gui
+
+    class FakeList:
+        def __init__(self, values):
+            self.values = values
+
+        def count(self):
+            return len(self.values)
+
+        def item(self, index):
+            return SimpleNamespace(text=lambda: self.values[index])
+
+    refreshes = []
+    notifications = []
+    gui = SimpleNamespace(
+        _model_all_values=["provider/kept", "provider/deleted"],
+        _refresh_model_combo_catalog=lambda models, force=False: refreshes.append(
+            (list(models), force)
+        ),
+        _refresh_model_search_poll_state=lambda: notifications.append(True),
+    )
+    dialog = SimpleNamespace(
+        _model_manager_original_models=["provider/kept", "provider/deleted"],
+        _model_manager_saved=False,
+        _model_manager_draft_active=True,
+    )
+    gui._model_manager_dialog = dialog
+
+    translator_gui.TranslatorGUI._preview_model_manager_order(
+        gui,
+        FakeList(["provider/kept"]),
+        dialog,
+    )
+    assert refreshes == [(["provider/kept"], True)]
+    assert notifications == [True]
+
+    translator_gui.TranslatorGUI._finish_model_manager_dialog(gui, dialog)
+    assert refreshes == [
+        (["provider/kept"], True),
+        (["provider/kept", "provider/deleted"], True),
+    ]
+    assert notifications == [True, True]
+    assert dialog._model_manager_draft_active is False
+    assert gui._model_manager_dialog is None
+
+
+def test_background_catalog_poll_does_not_restore_models_deleted_in_open_draft():
+    import translator_gui
+
+    class FakeItem:
+        def __init__(self, text):
+            self._text = text
+
+        def text(self):
+            return self._text
+
+        def setIcon(self, _icon):
+            pass
+
+        def setHidden(self, _hidden):
+            pass
+
+        def setToolTip(self, _tooltip):
+            pass
+
+    class FakeList:
+        def __init__(self, values):
+            self.items = [FakeItem(value) for value in values]
+
+        def count(self):
+            return len(self.items)
+
+        def item(self, index):
+            return self.items[index]
+
+    draft_models = ["provider/kept"]
+    refreshed = []
+    manager = SimpleNamespace(
+        _model_manager_draft_active=True,
+        _model_list_widget=FakeList(draft_models),
+        _catalog_poll_pending=False,
+    )
+    displayed = ["provider/kept", "provider/deleted"]
+    gui = SimpleNamespace(
+        config={"custom_model_list": list(displayed)},
+        model_combo=SimpleNamespace(
+            count=lambda: len(displayed),
+            itemText=lambda index: displayed[index],
+        ),
+        _model_manager_dialog=manager,
+        _refresh_model_combo_catalog=lambda models: refreshed.append(list(models)),
+        _ensure_polled_model_marker_state=lambda: {},
+        _apply_polled_model_icons=lambda _manager, _models: None,
+        append_log=lambda _message: None,
+    )
+    result = SimpleNamespace(
+        models=[*displayed, "or/router/new"],
+        statuses={"openrouter": "online (1 models)"},
+        provider_models={"openrouter": ["or/router/new"]},
+        requested_provider=None,
+    )
+
+    translator_gui.TranslatorGUI._apply_provider_model_catalog_refresh(gui, result)
+
+    assert refreshed == [draft_models]
 
 
 def test_model_text_provider_refresh_is_debounced(monkeypatch):
@@ -1736,6 +1931,53 @@ def test_gui_auto_poll_log_counts_models_not_already_displayed(
     assert logs == [
         f"✅ Auto-poll complete: electronhub — 3 models · {expected_new_label}"
     ]
+
+
+@pytest.mark.parametrize(
+    ("active_model", "expected_provider"),
+    [
+        ("authnd/", "authnd"),
+        ("authnd4/z-ai/glm-5.2", "authnd:4"),
+    ],
+)
+def test_manage_models_poll_explicitly_polls_selected_authnd_before_full_refresh(
+    active_model,
+    expected_provider,
+):
+    import translator_gui
+
+    starts = []
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: active_model),
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _start_provider_model_catalog_refresh=lambda **kwargs: starts.append(kwargs) or True,
+    )
+
+    assert translator_gui.TranslatorGUI._start_selected_provider_then_full_catalog_refresh(
+        gui
+    )
+    assert gui._provider_model_catalog_full_refresh_pending is True
+    assert starts == [{"show_feedback": False, "only_provider": expected_provider}]
+
+
+def test_manage_models_poll_uses_one_full_refresh_for_non_authnd_selection():
+    import translator_gui
+
+    starts = []
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: "or/openai/gpt-5"),
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _start_provider_model_catalog_refresh=lambda **kwargs: starts.append(kwargs) or True,
+    )
+
+    assert translator_gui.TranslatorGUI._start_selected_provider_then_full_catalog_refresh(
+        gui,
+        show_feedback=True,
+    )
+    assert not hasattr(gui, '_provider_model_catalog_full_refresh_pending')
+    assert starts == [{"show_feedback": True}]
 
 
 def test_gui_static_fallback_models_do_not_keep_checkmarks_from_older_poll():

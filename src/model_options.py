@@ -593,7 +593,6 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
 
 
 STATIC_ONLY_PROVIDER_PREFIXES: Mapping[str, str] = {
-    "authgem-key/": "API-key routing uses explicitly configured model IDs",
     "authgem-vertex*/": "Vertex publisher inference resources do not expose a list operation",
     "vertex/": "Vertex catalogs are project and region specific",
     "search/": "Search route is a fixed service rather than a model catalog",
