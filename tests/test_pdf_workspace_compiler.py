@@ -5,6 +5,7 @@ from pathlib import Path
 import fitz
 from bs4 import BeautifulSoup
 
+from chapter_chunk_progress import wrap_chunk_html
 from output_workspace import write_workspace_source_reference
 from pdf_output_naming import safe_pdf_output_stem
 from pdf_workspace_compiler import (
@@ -14,11 +15,15 @@ from pdf_workspace_compiler import (
     _workspace_response_entries,
     build_balanced_bookmark_render_jobs,
     compile_pdf_workspace,
+    invalidate_compiled_pdf_api_chunks,
+    invalidate_compiled_pdf_source_output,
     normalize_fast_semantic_heading_alignment,
     normalize_fast_semantic_paragraph_alignment,
     normalize_pdf_workspace_translated_html,
+    remove_compiled_pdf_source_section,
     restore_pdf_source_paragraph_alignment,
     translate_pdf_workspace_artifacts,
+    wrap_compiled_pdf_source_section,
 )
 
 
@@ -198,6 +203,89 @@ def test_workspace_responses_prefer_translated_pdf_bookmark_titles(tmp_path):
     entries = _workspace_response_entries(str(workspace))
 
     assert entries[0][1] == "Translated Chapter Two"
+
+
+def test_compiled_pdf_source_markers_remove_only_selected_part():
+    first = wrap_compiled_pdf_source_section(
+        "response_pdf_section_002_part_1.html",
+        '<section class="compiled-pdf-section" data-section="2">One</section>',
+    )
+    second = wrap_compiled_pdf_source_section(
+        "response_pdf_section_002_100_part_2.html",
+        '<section class="compiled-pdf-section" data-section="3">Two</section>',
+    )
+
+    updated, removed, method = remove_compiled_pdf_source_section(
+        first + second,
+        "response_pdf_section_002_100_part_2.html",
+    )
+
+    assert removed is True
+    assert method == "marker"
+    assert "One" in updated
+    assert "Two" not in updated
+
+
+def test_invalidate_compiled_pdf_source_uses_legacy_ordinal_and_deletes_pdf(
+        tmp_path):
+    workspace = tmp_path / "legacy-pdf"
+    workspace.mkdir()
+    compiled_html = workspace / "Book_translated.html"
+    compiled_pdf = workspace / "Book_translated.pdf"
+    compiled_html.write_text(
+        "<html><body>"
+        '<section class="compiled-pdf-section" data-section="1">One</section>'
+        '<section class="compiled-pdf-section" data-section="2">Two</section>'
+        '<section class="compiled-pdf-section" data-section="3">Three</section>'
+        "</body></html>",
+        encoding="utf-8",
+    )
+    compiled_pdf.write_bytes(b"stale")
+    (workspace / "metadata.json").write_text(
+        json.dumps({
+            "compiled_html_file": compiled_html.name,
+            "compiled_pdf_file": compiled_pdf.name,
+        }),
+        encoding="utf-8",
+    )
+
+    result = invalidate_compiled_pdf_source_output(
+        str(workspace),
+        "response_pdf_section_002_100_part_2.html",
+        legacy_section_ordinal=2,
+    )
+
+    updated = compiled_html.read_text(encoding="utf-8")
+    assert result["sections_removed"] == 1
+    assert result["methods"] == ["legacy_ordinal"]
+    assert "One" in updated
+    assert "Two" not in updated
+    assert "Three" in updated
+    assert not compiled_pdf.exists()
+
+
+def test_invalidate_compiled_pdf_api_chunk_updates_compiled_html(tmp_path):
+    workspace = tmp_path / "api-chunk-pdf"
+    workspace.mkdir()
+    compiled_html = workspace / "Book_translated.html"
+    compiled_html.write_text(
+        "<html><body>"
+        + wrap_chunk_html("part-hash", 1, 2, "First API chunk")
+        + wrap_chunk_html("part-hash", 2, 2, "Second API chunk")
+        + "</body></html>",
+        encoding="utf-8",
+    )
+
+    result = invalidate_compiled_pdf_api_chunks(
+        str(workspace),
+        "part-hash",
+        [2],
+    )
+
+    updated = compiled_html.read_text(encoding="utf-8")
+    assert result["chunk_segments_removed"] == 1
+    assert "First API chunk" in updated
+    assert "Second API chunk" not in updated
 
 
 def test_workspace_section_names_do_not_embed_sidebar_titles(tmp_path):
@@ -646,6 +734,8 @@ def test_compile_pdf_workspace_has_one_bookmark_per_response(tmp_path, monkeypat
     assert ".compiled-pdf-section + .compiled-pdf-section {" in compiled_html
     assert "break-before: page;" in compiled_html
     assert "page-break-before: always;" in compiled_html
+    assert compiled_html.count("GLOSSARION_PDF_SOURCE_START") == 2
+    assert compiled_html.count("GLOSSARION_PDF_SOURCE_END") == 2
     compiled_soup = BeautifulSoup(compiled_html, "html.parser")
     assert compiled_soup.title.get_text(strip=True) == "[42] Translated Novel - Translated"
     first_body = compiled_soup.find("p", string="First body.")

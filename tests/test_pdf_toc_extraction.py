@@ -786,6 +786,7 @@ def test_progress_manager_labels_split_pdf_bookmark_parts_as_chunks(
     assert all("provider/model-a" in display for display in displays)
 
     assert mixin._expand_pdf_split_parent_rows([rows[0], rows[2]]) == rows[1:]
+    assert mixin._pdf_compiled_section_ordinal(data["prog"], rows[2]) == 2
 
 
 def test_pdf_split_parent_aggregates_child_status_and_model():

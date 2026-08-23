@@ -25795,6 +25795,9 @@ class RetranslationMixin:
             chunk_reset_count = 0
             full_chapter_chunk_reset_count = 0
             chunk_segment_deleted_count = 0
+            compiled_pdf_section_removed_count = 0
+            compiled_pdf_chunk_segment_removed_count = 0
+            compiled_pdf_deleted_count = 0
             progress_updated = False
             metadata_file_deleted = False
 
@@ -25828,6 +25831,44 @@ class RetranslationMixin:
                 output_file = ch_info['output_file']
                 actual_num = ch_info['num']
                 progress_key = ch_info.get('progress_key')
+
+                chapter_entry = (
+                    data['prog'].get("chapters", {}).get(progress_key)
+                    if progress_key
+                    else None
+                )
+                if not isinstance(chapter_entry, dict):
+                    chapter_entry = ch_info.get("info") or {}
+                if (
+                    not ch_info.get("is_chunk_progress")
+                    and isinstance(chapter_entry, dict)
+                    and chapter_entry.get("pdf_toc_section")
+                ):
+                    try:
+                        from pdf_workspace_compiler import (
+                            invalidate_compiled_pdf_source_output,
+                        )
+
+                        invalidated = invalidate_compiled_pdf_source_output(
+                            data['output_dir'],
+                            output_file,
+                            legacy_section_ordinal=(
+                                self._pdf_compiled_section_ordinal(
+                                    data['prog'], ch_info
+                                )
+                            ),
+                        )
+                        compiled_pdf_section_removed_count += int(
+                            invalidated.get("sections_removed") or 0
+                        )
+                        compiled_pdf_deleted_count += int(
+                            invalidated.get("pdf_files_deleted") or 0
+                        )
+                    except Exception as exc:
+                        print(
+                            "Failed to invalidate compiled PDF output for "
+                            f"{output_file}: {exc}"
+                        )
 
                 if ch_info.get("is_chunk_progress"):
                     chunk_key = str(ch_info.get("chunk_progress_key") or "")
@@ -25890,6 +25931,30 @@ class RetranslationMixin:
                             print(
                                 f"Failed to remove chapter {actual_num} chunk "
                                 f"{chunk_index} from {output_path}: {exc}"
+                            )
+
+                    if parent_entry.get("pdf_toc_section"):
+                        try:
+                            from pdf_workspace_compiler import (
+                                invalidate_compiled_pdf_api_chunks,
+                            )
+
+                            invalidated = invalidate_compiled_pdf_api_chunks(
+                                data['output_dir'],
+                                chunk_key,
+                                [chunk_index],
+                                entry=chunk_entry,
+                            )
+                            compiled_pdf_chunk_segment_removed_count += int(
+                                invalidated.get("chunk_segments_removed") or 0
+                            )
+                            compiled_pdf_deleted_count += int(
+                                invalidated.get("pdf_files_deleted") or 0
+                            )
+                        except Exception as exc:
+                            print(
+                                "Failed to remove PDF API chunk from compiled HTML: "
+                                f"{exc}"
                             )
 
                     reset = reset_chunks_for_retranslation(
@@ -26176,6 +26241,22 @@ class RetranslationMixin:
             if chunk_segment_deleted_count > 0:
                 success_parts.append(
                     f"removed {chunk_segment_deleted_count} selected chunk segment(s) from HTML"
+                )
+            if compiled_pdf_section_removed_count > 0:
+                success_parts.append(
+                    "removed "
+                    f"{compiled_pdf_section_removed_count} selected PDF section chunk(s) "
+                    "from compiled HTML"
+                )
+            if compiled_pdf_chunk_segment_removed_count > 0:
+                success_parts.append(
+                    "removed "
+                    f"{compiled_pdf_chunk_segment_removed_count} selected API chunk "
+                    "segment(s) from compiled PDF HTML"
+                )
+            if compiled_pdf_deleted_count > 0:
+                success_parts.append(
+                    f"deleted {compiled_pdf_deleted_count} stale compiled PDF file(s)"
                 )
             if chunk_reset_count > 0:
                 success_parts.append(
@@ -28926,6 +29007,46 @@ class RetranslationMixin:
                 seen.add(identity)
                 expanded.append(candidate)
         return expanded
+
+    @staticmethod
+    def _pdf_compiled_section_ordinal(prog, target_info):
+        """Return the original compiled-section position for legacy PDF HTML."""
+        chapters = prog.get("chapters", {}) if isinstance(prog, dict) else {}
+        if not isinstance(chapters, dict):
+            return None
+
+        def _sort_key(item):
+            key, entry = item
+            try:
+                return (0, float(entry.get("actual_num")), str(key))
+            except (TypeError, ValueError):
+                return (1, 0, str(key))
+
+        entries = sorted(
+            (
+                (key, entry)
+                for key, entry in chapters.items()
+                if isinstance(entry, dict)
+                and entry.get("pdf_toc_section")
+                and str(entry.get("output_file") or "").lower().endswith(
+                    (".html", ".xhtml", ".htm")
+                )
+            ),
+            key=_sort_key,
+        )
+        target_key = str(target_info.get("progress_key") or "")
+        target_output = os.path.normcase(os.path.basename(str(
+            target_info.get("output_file") or ""
+        )))
+        for ordinal, (key, entry) in enumerate(entries, 1):
+            entry_output = os.path.normcase(os.path.basename(str(
+                entry.get("output_file") or ""
+            )))
+            if (target_key and str(key) == target_key) or (
+                target_output and entry_output == target_output
+            ):
+                return ordinal
+        return None
 
     def _annotate_pdf_split_chunk_display_info(self, chapter_display_info):
         """Group source-split PDF bookmark parts under a section parent row."""

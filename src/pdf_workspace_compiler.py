@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import re
@@ -23,6 +24,17 @@ LogCallback = Callable[[str], None]
 
 _SOURCE_ALIGNMENT_CORRECTION_CACHE: dict[tuple, dict[int, dict[int, str]]] = {}
 _SOURCE_ALIGNMENT_CORRECTION_LOCK = threading.Lock()
+_COMPILED_PDF_SOURCE_BLOCK_RE = re.compile(
+    r"<!--\s*GLOSSARION_PDF_SOURCE_START\s+key=(?P<key>[0-9a-f]+)\s*-->"
+    r"(?P<content>.*?)"
+    r"<!--\s*GLOSSARION_PDF_SOURCE_END\s+key=(?P=key)\s*-->",
+    re.IGNORECASE | re.DOTALL,
+)
+_COMPILED_PDF_SECTION_START_RE = re.compile(
+    r"<section\b(?=[^>]*\bclass=[\"'][^\"']*\bcompiled-pdf-section\b[^\"']*[\"'])"
+    r"[^>]*>",
+    re.IGNORECASE,
+)
 
 
 class PDFCompilationCancelled(RuntimeError):
@@ -37,6 +49,210 @@ def _log(callback: LogCallback | None, message: str) -> None:
             print(message)
         except UnicodeEncodeError:
             print(message.encode("ascii", errors="backslashreplace").decode("ascii"))
+
+
+def compiled_pdf_source_marker_key(output_file: str) -> str:
+    """Return the stable marker identity for one PDF response HTML file."""
+    normalized = os.path.basename(str(output_file or "").replace("\\", "/"))
+    normalized = normalized.casefold().strip()
+    return hashlib.sha256(f"pdf-source:{normalized}".encode("utf-8")).hexdigest()
+
+
+def compiled_pdf_source_markers(output_file: str) -> tuple[str, str]:
+    marker_key = compiled_pdf_source_marker_key(output_file)
+    return (
+        f"<!-- GLOSSARION_PDF_SOURCE_START key={marker_key} -->",
+        f"<!-- GLOSSARION_PDF_SOURCE_END key={marker_key} -->",
+    )
+
+
+def wrap_compiled_pdf_source_section(output_file: str, content: str) -> str:
+    """Wrap one compiled PDF source part for targeted invalidation."""
+    start, end = compiled_pdf_source_markers(output_file)
+    return f"{start}\n{str(content or '')}\n{end}"
+
+
+def remove_compiled_pdf_source_section(
+    html_text: str,
+    output_file: str,
+    *,
+    legacy_section_ordinal: int | None = None,
+) -> tuple[str, bool, str | None]:
+    """Remove one PDF source part by marker, with a pre-marker fallback."""
+    text = str(html_text or "")
+    marker_key = compiled_pdf_source_marker_key(output_file)
+    for match in _COMPILED_PDF_SOURCE_BLOCK_RE.finditer(text):
+        if match.group("key").casefold() != marker_key.casefold():
+            continue
+        return text[:match.start()] + text[match.end():], True, "marker"
+
+    try:
+        wanted_ordinal = int(legacy_section_ordinal or 0)
+    except (TypeError, ValueError):
+        wanted_ordinal = 0
+    if wanted_ordinal <= 0:
+        return text, False, None
+
+    starts = list(_COMPILED_PDF_SECTION_START_RE.finditer(text))
+    target_position = None
+    for position, match in enumerate(starts):
+        ordinal_match = re.search(
+            r"\bdata-section=[\"'](?P<ordinal>\d+)[\"']",
+            match.group(0),
+            flags=re.IGNORECASE,
+        )
+        if ordinal_match and int(ordinal_match.group("ordinal")) == wanted_ordinal:
+            target_position = position
+            break
+    if target_position is None:
+        return text, False, None
+
+    start = starts[target_position].start()
+    if target_position + 1 < len(starts):
+        end = starts[target_position + 1].start()
+    else:
+        body_end = re.search(r"</body\s*>", text[start:], flags=re.IGNORECASE)
+        end = start + body_end.start() if body_end else len(text)
+    return text[:start] + text[end:], True, "legacy_ordinal"
+
+
+def _compiled_workspace_artifact_candidates(folder: str, extension: str) -> list[str]:
+    candidates = []
+    metadata_path = os.path.join(folder, "metadata.json")
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as handle:
+            metadata = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        metadata = {}
+    metadata_key = "compiled_html_file" if extension == ".html" else "compiled_pdf_file"
+    stored_name = os.path.basename(str(metadata.get(metadata_key) or ""))
+    if stored_name.casefold().endswith(extension):
+        candidates.append(os.path.join(folder, stored_name))
+    try:
+        for entry in os.scandir(folder):
+            if (
+                entry.is_file(follow_symlinks=False)
+                and entry.name.casefold().endswith(f"_translated{extension}")
+            ):
+                candidates.append(entry.path)
+    except (OSError, PermissionError):
+        pass
+    unique = []
+    seen = set()
+    for path in candidates:
+        normalized = os.path.normcase(os.path.abspath(path))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(path)
+    return unique
+
+
+def invalidate_compiled_pdf_source_output(
+    folder: str,
+    output_file: str,
+    *,
+    legacy_section_ordinal: int | None = None,
+) -> dict:
+    """Remove a source part from compiled HTML and retire stale compiled PDFs."""
+    result = {
+        "html_files_updated": 0,
+        "sections_removed": 0,
+        "pdf_files_deleted": 0,
+        "methods": [],
+    }
+    for html_path in _compiled_workspace_artifact_candidates(folder, ".html"):
+        try:
+            with open(html_path, "r", encoding="utf-8", errors="replace") as handle:
+                original = handle.read()
+            updated, removed, method = remove_compiled_pdf_source_section(
+                original,
+                output_file,
+                legacy_section_ordinal=legacy_section_ordinal,
+            )
+            if not removed:
+                continue
+            temporary = (
+                f"{html_path}.{os.getpid()}.{threading.get_ident()}."
+                "pdf-section-reset.tmp"
+            )
+            try:
+                with open(temporary, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(updated)
+                os.replace(temporary, html_path)
+            finally:
+                if os.path.isfile(temporary):
+                    os.remove(temporary)
+            result["html_files_updated"] += 1
+            result["sections_removed"] += 1
+            if method:
+                result["methods"].append(method)
+        except OSError:
+            continue
+
+    if result["sections_removed"]:
+        for pdf_path in _compiled_workspace_artifact_candidates(folder, ".pdf"):
+            try:
+                if os.path.isfile(pdf_path):
+                    os.remove(pdf_path)
+                    result["pdf_files_deleted"] += 1
+            except OSError:
+                continue
+    return result
+
+
+def invalidate_compiled_pdf_api_chunks(
+    folder: str,
+    chapter_key: str,
+    chunk_indices,
+    *,
+    entry=None,
+) -> dict:
+    """Remove marker-delimited API chunks from compiled PDF HTML copies."""
+    from chapter_chunk_progress import remove_chunk_segments
+
+    result = {
+        "html_files_updated": 0,
+        "chunk_segments_removed": 0,
+        "pdf_files_deleted": 0,
+    }
+    for html_path in _compiled_workspace_artifact_candidates(folder, ".html"):
+        try:
+            with open(html_path, "r", encoding="utf-8", errors="replace") as handle:
+                original = handle.read()
+            updated, removed = remove_chunk_segments(
+                original,
+                chapter_key,
+                chunk_indices,
+                entry,
+            )
+            if not removed:
+                continue
+            temporary = (
+                f"{html_path}.{os.getpid()}.{threading.get_ident()}."
+                "pdf-api-chunk-reset.tmp"
+            )
+            try:
+                with open(temporary, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(updated)
+                os.replace(temporary, html_path)
+            finally:
+                if os.path.isfile(temporary):
+                    os.remove(temporary)
+            result["html_files_updated"] += 1
+            result["chunk_segments_removed"] += len(removed)
+        except OSError:
+            continue
+
+    if result["chunk_segments_removed"]:
+        for pdf_path in _compiled_workspace_artifact_candidates(folder, ".pdf"):
+            try:
+                if os.path.isfile(pdf_path):
+                    os.remove(pdf_path)
+                    result["pdf_files_deleted"] += 1
+            except OSError:
+                continue
+    return result
 
 
 def _rapid_render_worker_count(job_count: int, requested: int | None = None) -> int:
@@ -1942,13 +2158,19 @@ def compile_pdf_workspace(
     assembly_started = time.perf_counter()
     _log(log_callback, "🧩 Phase 4/6: assembling bookmark-delimited PDF document")
     sections = []
-    for index, (content, title) in enumerate(zip(source_contents, titles), 1):
-        sections.append(
+    for index, ((source_path, _source_title), content, title) in enumerate(
+        zip(entries, source_contents, titles), 1
+    ):
+        section_html = (
             f'<section class="{section_class}" data-section="{index}"'
+            f' data-source-key="{compiled_pdf_source_marker_key(source_path)}"'
             f'{section_attributes}>'
             f'<div id="pdf-section-{index}" class="pdf-bookmark-anchor">'
             f"{html.escape(title)}</div>"
             f"{_fragment_body(content)}</section>"
+        )
+        sections.append(
+            wrap_compiled_pdf_source_section(source_path, section_html)
         )
 
     book_title, stem, book_metadata = _compiled_book_identity(folder)
