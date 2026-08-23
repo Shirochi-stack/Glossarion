@@ -1431,6 +1431,49 @@ def test_epub_html_discovery_never_uses_unrefined_backup(tmp_path):
     )
 
 
+def test_partial_opf_numerically_inserts_unmapped_chapters(tmp_path):
+    (tmp_path / "content.opf").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="cover" href="Text/cover.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c3000" href="Text/chapter3000.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c3107" href="Text/chapter3107.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="cover"/>
+    <itemref idref="c3000"/>
+    <itemref idref="c3107"/>
+  </spine>
+</package>
+""",
+        encoding="utf-8",
+    )
+    for name in (
+        "response_cover.html",
+        "chapter3000.xhtml",
+        "chapter3107.xhtml",
+        "response_chapter0001.html",
+        "response_chapter2999.html",
+        "bonus.xhtml",
+    ):
+        (tmp_path / name).write_text(
+            f"<html><body><p>{name}</p></body></html>",
+            encoding="utf-8",
+        )
+
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _msg: None)
+
+    assert compiler._find_html_files() == [
+        "response_cover.html",
+        "response_chapter0001.html",
+        "response_chapter2999.html",
+        "chapter3000.xhtml",
+        "chapter3107.xhtml",
+        "bonus.xhtml",
+    ]
+
+
 @pytest.mark.parametrize(
     ("first_html_has_image", "expected_html"),
     [

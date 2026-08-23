@@ -4194,10 +4194,57 @@ class EPUBCompiler:
                 ordered_files.sort(key=lambda x: x[0])
                 final_order = [f for _, f in ordered_files]
                 
-                # Append any unmapped files at the end
+                # Numerically merge unmapped chapter files with the partial
+                # OPF order, then leave files without a usable number at the end.
                 if unmapped_files:
-                    self.log(f"⚠️ Adding {len(unmapped_files)} unmapped files at the end")
-                    final_order.extend(sorted(unmapped_files))
+                    numeric_order_cache = {}
+
+                    def numeric_order(filename):
+                        if filename in numeric_order_cache:
+                            return numeric_order_cache[filename]
+                        number = self._extract_chapter_number(filename, -2)
+                        numeric_order_cache[filename] = (
+                            number if number >= 0 else None
+                        )
+                        return numeric_order_cache[filename]
+
+                    numbered_unmapped = sorted(
+                        (
+                            (numeric_order(filename), filename)
+                            for filename in unmapped_files
+                            if numeric_order(filename) is not None
+                        ),
+                        key=lambda item: (item[0], item[1].casefold()),
+                    )
+                    for number, filename in numbered_unmapped:
+                        insert_at = next(
+                            (
+                                idx for idx, existing in enumerate(final_order)
+                                if numeric_order(existing) is not None
+                                and numeric_order(existing) > number
+                            ),
+                            None,
+                        )
+                        if insert_at is None:
+                            numbered_indexes = [
+                                idx for idx, existing in enumerate(final_order)
+                                if numeric_order(existing) is not None
+                            ]
+                            insert_at = (
+                                numbered_indexes[-1] + 1
+                                if numbered_indexes else len(final_order)
+                            )
+                        final_order.insert(insert_at, filename)
+
+                    unnumbered_unmapped = [
+                        filename for filename in unmapped_files
+                        if numeric_order(filename) is None
+                    ]
+                    final_order.extend(sorted(unnumbered_unmapped))
+                    self.log(
+                        f"🔢 Numerically merged {len(numbered_unmapped)} "
+                        f"of {len(unmapped_files)} unmapped file(s) into OPF order"
+                    )
                     # Mark non-response unmapped files as auxiliary (omit from TOC)
                     aux = {f for f in unmapped_files if not f.startswith('response_')}
                     # If special files override is enabled, or passthrough mode,
