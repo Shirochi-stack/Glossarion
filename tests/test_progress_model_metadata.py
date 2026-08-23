@@ -739,6 +739,60 @@ def test_selecting_some_chunks_rewrites_instead_of_deleting_response_html(
     assert sorted(remaining) == [1, 3]
 
 
+def test_retranslating_epub_chunks_separately_deletes_file_after_last_chunk(
+        tmp_path):
+    output_path = tmp_path / "response_chapter_001.xhtml"
+    output_path.write_text(
+        "\n".join(
+            wrap_chunk_html(
+                "epub-chapter-hash",
+                index,
+                3,
+                f"<p>translated {index}</p>",
+            )
+            for index in (1, 2, 3)
+        ),
+        encoding="utf-8",
+    )
+    progress = ProgressManager(str(tmp_path))
+    budget = _epub_chunk_budget()
+    progress.prepare_chapter_chunk_progress(
+        "epub-chapter-hash", 3, budget, enabled=True
+    )
+    for index in (1, 2, 3):
+        progress.record_chapter_chunk(
+            "epub-chapter-hash",
+            index,
+            3,
+            f"<p>translated {index}</p>",
+            budget,
+        )
+
+    entry = progress.prog["chapter_chunks"]["epub-chapter-hash"]
+    for index in (1, 2):
+        removed, file_deleted = remove_chunk_segments_from_file(
+            str(output_path),
+            "epub-chapter-hash",
+            [index],
+            entry,
+        )
+        assert removed == [index]
+        assert file_deleted is False
+        assert output_path.exists()
+        progress.reset_chapter_chunks("epub-chapter-hash", [index])
+
+    removed, file_deleted = remove_chunk_segments_from_file(
+        str(output_path),
+        "epub-chapter-hash",
+        [3],
+        entry,
+    )
+
+    assert removed == [3]
+    assert file_deleted is True
+    assert not output_path.exists()
+
+
 def test_chunk_qa_state_excludes_only_failed_chunk_from_resume_cache(tmp_path):
     progress = ProgressManager(str(tmp_path))
     progress.prepare_chapter_chunk_progress(

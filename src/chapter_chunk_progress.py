@@ -556,6 +556,20 @@ def remove_chunk_segments_from_file(
     if not removed:
         return [], False
 
+    cached_indices = set()
+    if isinstance(entry, dict) and isinstance(entry.get("chunks"), dict):
+        cached_indices = {
+            _positive_int(index)
+            for index, result in entry["chunks"].items()
+            if isinstance(result, str)
+        }
+        cached_indices.discard(0)
+    remaining_cached = cached_indices.difference(removed)
+    remaining_marked = extract_marked_chunks(updated)
+    if not remaining_cached and not remaining_marked:
+        os.remove(path)
+        return removed, True
+
     temporary = f"{path}.{os.getpid()}.{time.time_ns()}.chunk-reset.tmp"
     try:
         with open(temporary, "w", encoding="utf-8", newline="") as target_file:
