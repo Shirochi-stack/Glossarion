@@ -1274,7 +1274,7 @@ def test_pdf_hash_change_discards_partially_completed_chunk_plan(tmp_path):
     assert old_hash not in manager.prog["chapter_chunks"]
 
 
-def test_pdf_reconcile_recovers_completed_ledger_after_false_invalidation(
+def test_pdf_reconcile_never_lets_orphan_complete_ledger_override_active_pending(
         tmp_path):
     payloads = tmp_path / "Payloads"
     payloads.mkdir()
@@ -1342,11 +1342,21 @@ def test_pdf_reconcile_recovers_completed_ledger_after_false_invalidation(
     }
 
     assert manager.reconcile_pdf_chapter_entries([current]) == 0
-    recovered = manager.prog["chapters"][progress_key]
-    assert recovered["status"] == "completed"
-    assert recovered["content_hash"] == complete_hash
-    assert invalid_hash not in manager.prog["chapter_chunks"]
+    active = manager.prog["chapters"][progress_key]
+    assert active["status"] == "pending"
+    assert active["content_hash"] == invalid_hash
+    assert invalid_hash in manager.prog["chapter_chunks"]
     assert complete_hash in manager.prog["chapter_chunks"]
+
+    should_translate, _message, existing_output = manager.check_chapter_status(
+        2,
+        3,
+        invalid_hash,
+        str(payloads),
+        chapter_obj=current,
+    )
+    assert should_translate is True
+    assert existing_output == output_file
 
 
 def test_workspace_reader_manifest_orders_pdf_entries_and_hides_sidecars(tmp_path):

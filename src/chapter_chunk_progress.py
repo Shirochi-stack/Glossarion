@@ -123,6 +123,8 @@ def ensure_chunk_entry_schema(entry, total_chunks=None):
     if not isinstance(entry, dict):
         return False
     changed = False
+    original_schema_version = _positive_int(entry.get("schema_version"))
+    legacy_schema = original_schema_version != CHUNK_PROGRESS_SCHEMA_VERSION
     total = _positive_int(total_chunks, _positive_int(entry.get("total")))
     chunks = entry.get("chunks")
     if not isinstance(chunks, dict):
@@ -168,7 +170,20 @@ def ensure_chunk_entry_schema(entry, total_chunks=None):
         record["index"] = index
         status = str(record.get("status") or "").strip().lower()
         if status not in {"completed", "pending", "in_progress", "qa_failed", "failed"}:
-            status = "completed" if index in completed and isinstance(result, str) else "pending"
+            # Version 1 had no mandatory child records, so its completed/result
+            # mirrors remain the migration source. In version 2, a missing
+            # child record is missing authoritative state and must stay
+            # pending; never reconstruct it as completed from stale mirrors.
+            can_infer_legacy_completion = legacy_schema or isinstance(
+                old_record, dict
+            )
+            status = (
+                "completed"
+                if can_infer_legacy_completion
+                and index in completed
+                and isinstance(result, str)
+                else "pending"
+            )
         if status == "completed" and not isinstance(result, str):
             status = "pending"
         record["status"] = status
@@ -256,7 +271,11 @@ def chunk_entry_is_fully_completed(entry) -> bool:
                 return False
             if record.get("qa_issues_found"):
                 return False
-        elif index not in completed:
+        elif (
+            _positive_int(entry.get("schema_version"))
+            == CHUNK_PROGRESS_SCHEMA_VERSION
+            or index not in completed
+        ):
             return False
     return True
 

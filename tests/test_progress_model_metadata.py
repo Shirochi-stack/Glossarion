@@ -17,10 +17,12 @@ from chapter_chunk_progress import (
     extract_marked_chunks,
     remove_chunk_segments,
     remove_chunk_segments_from_file,
+    reset_chunks_for_retranslation,
     wrap_chunk_html,
 )
 from Retranslation_GUI import (
     RetranslationMixin,
+    _merge_and_write_retranslation_progress,
     _clear_llm_token_qa_markers,
     _clear_missing_image_qa_markers,
     _clear_refinement_progress_fields,
@@ -1086,6 +1088,149 @@ def test_completed_chunk_progress_survives_budget_and_split_changes(tmp_path):
     assert entry["completed"] == [1, 2]
     assert set(entry["chunks"]) == {"1", "2"}
     assert entry["chapter_status"] == "completed"
+
+
+def test_v2_missing_chunk_record_stays_pending_instead_of_being_reconstructed(
+        tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    progress.prog["chapter_chunks"]["hash-1"] = {
+        "schema_version": 2,
+        "total": 2,
+        "completed": [1, 2],
+        "chunks": {
+            "1": "translated 1",
+            "2": "stale translated 2",
+        },
+        "chunk_metadata": {},
+        "entries": {
+            "1": {"index": 1, "status": "completed"},
+        },
+        "chapter_status": "completed",
+        **_epub_chunk_budget(),
+    }
+
+    entry, reason, changed = progress.prepare_chapter_chunk_progress(
+        "hash-1", 2, _epub_chunk_budget(), enabled=True
+    )
+
+    assert reason is None
+    assert changed is True
+    assert entry["entries"]["1"]["status"] == "completed"
+    assert entry["entries"]["2"]["status"] == "pending"
+    assert entry["completed"] == [1]
+    assert progress.get_reusable_chapter_chunks("hash-1") == {
+        "1": "translated 1"
+    }
+    assert chunk_entry_needs_translation(entry) is True
+
+
+def test_retranslate_selected_persistently_deletes_chunk_cache_despite_race(
+        tmp_path):
+    progress_path = tmp_path / "translation_progress.json"
+    budget = _epub_chunk_budget()
+    progress = ProgressManager(str(tmp_path))
+    progress.prog["chapters"]["pdf:section"] = {
+        "actual_num": 3,
+        "content_hash": "chunk-hash",
+        "output_file": "response_pdf_section_003.html",
+        "status": "completed",
+    }
+    for index in (1, 2):
+        progress.record_chapter_chunk(
+            "chunk-hash",
+            index,
+            2,
+            f"translated {index}",
+            budget,
+            model_name=f"model-{index}",
+        )
+    progress.mark_chapter_chunk_progress_status("chunk-hash", "completed")
+    baseline = json.loads(json.dumps(progress.prog))
+    changed = json.loads(json.dumps(baseline))
+    reset_chunks_for_retranslation(
+        changed["chapter_chunks"]["chunk-hash"],
+        [2],
+    )
+    changed["chapters"]["pdf:section"]["status"] = "pending"
+
+    # Simulate a concurrent translator save that rewrote chunk 2 after the
+    # Progress Manager took its baseline snapshot.
+    latest = json.loads(json.dumps(baseline))
+    latest_entry = latest["chapter_chunks"]["chunk-hash"]
+    latest_entry["chunks"]["2"] = "new concurrent result"
+    latest_entry["entries"]["2"]["result_sha256"] = "new-result"
+    latest_entry["entries"]["2"]["model_name"] = "new-model"
+    progress_path.write_text(json.dumps(latest), encoding="utf-8")
+
+    saved = _merge_and_write_retranslation_progress(
+        str(progress_path),
+        baseline,
+        changed,
+        authoritative_chunk_resets=[{
+            "chunk_key": "chunk-hash",
+            "parent_key": "pdf:section",
+            "indices": [2],
+        }],
+    )
+
+    chunk_entry = saved["chapter_chunks"]["chunk-hash"]
+    assert "2" not in chunk_entry["chunks"]
+    assert "2" not in chunk_entry["chunk_metadata"]
+    assert chunk_entry["completed"] == [1]
+    assert chunk_entry["entries"]["2"]["status"] == "pending"
+    assert "result_sha256" not in chunk_entry["entries"]["2"]
+    assert "model_name" not in chunk_entry["entries"]["2"]
+    assert saved["chapters"]["pdf:section"]["status"] == "pending"
+
+    persisted = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert persisted == saved
+
+
+def test_completed_parent_with_marked_output_and_missing_ledger_retranslates(
+        tmp_path):
+    output_name = "response_pdf_section_003.html"
+    missing_key = "missing-active-ledger"
+    (tmp_path / output_name).write_text(
+        "\n".join(
+            wrap_chunk_html(
+                missing_key,
+                index,
+                2,
+                f"<p>translated {index}</p>",
+            )
+            for index in (1, 2)
+        ),
+        encoding="utf-8",
+    )
+    progress = ProgressManager(str(tmp_path))
+    progress_key = "pdf:section"
+    progress.prog["chapters"][progress_key] = {
+        "actual_num": 3,
+        "content_hash": missing_key,
+        "output_file": output_name,
+        "status": "completed",
+        "pdf_toc_section": True,
+        "pdf_section_id": "section",
+        "pdf_progress_key": progress_key,
+    }
+
+    should_translate, _message, existing_output = progress.check_chapter_status(
+        2,
+        3,
+        missing_key,
+        str(tmp_path),
+        chapter_obj={
+            "num": 3,
+            "filename": "pdf_section_3.html",
+            "content_hash": missing_key,
+            "pdf_toc_section": True,
+            "pdf_section_id": "section",
+        },
+    )
+
+    assert should_translate is True
+    assert existing_output == output_name
+    assert progress.prog["chapters"][progress_key]["status"] == "pending"
 
 
 def test_disabled_chunk_progress_removes_incomplete_cache(tmp_path):

@@ -5839,6 +5839,34 @@ class ProgressManager:
             return chunk_entry_needs_translation(
                 _chunk_entry_for(entry, fallback_key)
             )
+
+        def _marked_multi_chunk_output(entry):
+            """Return an existing marked output when its active ledger is absent."""
+            entry = entry if isinstance(entry, dict) else {}
+            existing_output = _existing_output_match(
+                entry.get("output_file"),
+                entry,
+            )
+            if not existing_output:
+                return None
+            output_path = (
+                existing_output
+                if os.path.isabs(existing_output)
+                else os.path.join(output_dir, existing_output)
+            )
+            try:
+                with open(
+                    output_path,
+                    "r",
+                    encoding="utf-8",
+                    errors="replace",
+                ) as translated_file:
+                    marked = extract_marked_chunks(translated_file.read())
+            except OSError:
+                return None
+            if any(int(block.get("total") or 0) > 1 for block in marked.values()):
+                return existing_output
+            return None
         
         # Check if we have tracking for this chapter
         if chapter_key in self.prog["chapters"]:
@@ -5867,6 +5895,20 @@ class ProgressManager:
                     self.prog["chapters"][chapter_key] = chapter_info
                     self.save()
                 return True, None, chapter_info.get("output_file")
+            active_chunk_entry = _chunk_entry_for(chapter_info, chapter_key)
+            if not is_multi_chunk_entry(active_chunk_entry):
+                marked_output = _marked_multi_chunk_output(chapter_info)
+                if marked_output:
+                    # A marker-delimited multi-chunk response without its
+                    # active ledger is not proof of completion. Missing chunk
+                    # state must be rebuilt by translation, never inferred
+                    # from file existence or an orphan ledger.
+                    chapter_info["status"] = "pending"
+                    chapter_info.pop("auto_restored_from_output", None)
+                    chapter_info["last_updated"] = time.time()
+                    self.prog["chapters"][chapter_key] = chapter_info
+                    self.save()
+                    return True, None, marked_output
             if chapter_obj and chapter_obj.get("subtitle_batch"):
                 final_subtitle = str(
                     chapter_info.get("subtitle_output_file") or ""
@@ -6266,50 +6308,6 @@ class ProgressManager:
                 output_path = os.path.join(payloads_dir, output_path)
             return os.path.isfile(output_path)
 
-        def _completed_chunk_plan_for_output(entry):
-            """Find the unique complete ledger represented by this PDF HTML."""
-            stored_key = str(entry.get("content_hash") or "")
-            chapter_chunks = self.prog.get("chapter_chunks", {})
-            direct_entry = chapter_chunks.get(stored_key)
-            if chunk_entry_is_fully_completed(direct_entry):
-                return stored_key, direct_entry
-
-            output_file = entry.get("output_file")
-            if not output_file or not _pdf_output_exists(output_file):
-                return "", None
-            output_path = os.fspath(output_file)
-            if not os.path.isabs(output_path):
-                payloads_dir = getattr(self, "payloads_dir", "") or os.path.dirname(
-                    str(getattr(self, "PROGRESS_FILE", "") or "")
-                )
-                output_path = os.path.join(payloads_dir, output_path)
-            try:
-                with open(
-                    output_path,
-                    "r",
-                    encoding="utf-8",
-                    errors="replace",
-                ) as translated_file:
-                    translated_html = translated_file.read()
-            except OSError:
-                return "", None
-
-            matches = []
-            for candidate_key, candidate_entry in chapter_chunks.items():
-                candidate_key = str(candidate_key)
-                if candidate_key == stored_key or not chunk_entry_is_fully_completed(
-                    candidate_entry
-                ):
-                    continue
-                total = int(candidate_entry.get("total") or 0)
-                marked = extract_marked_chunks(
-                    translated_html,
-                    candidate_key,
-                )
-                if set(marked) == set(range(1, total + 1)):
-                    matches.append((candidate_key, candidate_entry))
-            return matches[0] if len(matches) == 1 else ("", None)
-
         def _progress_section_id(progress_key, entry, normalized_output=""):
             entry_section_id = str(
                 entry.get("pdf_section_id") or ""
@@ -6454,28 +6452,9 @@ class ProgressManager:
                 or not expected_hashes
                 or stored_hash in expected_hashes
             )
-            completed_chunk_key, completed_chunk_entry = (
-                _completed_chunk_plan_for_output(entry)
+            stored_chunk_entry = self.prog.get("chapter_chunks", {}).get(
+                stored_hash
             )
-            recovered_completed_chunk_plan = bool(
-                stable_section_matches
-                and completed_chunk_key
-                and completed_chunk_key != stored_hash
-            )
-            if recovered_completed_chunk_plan:
-                current_chunk_entry = self.prog.get("chapter_chunks", {}).get(
-                    stored_hash
-                )
-                if not chunk_entry_is_fully_completed(current_chunk_entry):
-                    self.prog.get("chapter_chunks", {}).pop(stored_hash, None)
-                entry["content_hash"] = completed_chunk_key
-                entry["status"] = "completed"
-                entry["last_updated"] = time.time()
-                entry.pop("failure_reason", None)
-                entry.pop("error_message", None)
-                entry.pop("auto_restored_from_output", None)
-                stored_hash = completed_chunk_key
-                hash_matches = True
             preserve_completed_chunk_plan = bool(
                 stable_section_matches
                 and not hash_matches
@@ -6484,7 +6463,7 @@ class ProgressManager:
                 }
                 and entry.get("output_file")
                 and _pdf_output_exists(entry["output_file"])
-                and chunk_entry_is_fully_completed(completed_chunk_entry)
+                and chunk_entry_is_fully_completed(stored_chunk_entry)
             )
             if preserve_completed_chunk_plan:
                 # Fast-PDF extraction/cache revisions can alter normalized

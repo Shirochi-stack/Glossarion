@@ -1261,7 +1261,13 @@ def _merge_retranslation_progress_changes(baseline, changed, latest):
     return copy.deepcopy(changed)
 
 
-def _merge_and_write_retranslation_progress(path, baseline, changed):
+def _merge_and_write_retranslation_progress(
+    path,
+    baseline,
+    changed,
+    *,
+    authoritative_chunk_resets=None,
+):
     """Merge one selection reset into the newest progress file atomically."""
     with _retranslation_progress_lock(path):
         latest = copy.deepcopy(baseline)
@@ -1275,6 +1281,31 @@ def _merge_and_write_retranslation_progress(path, baseline, changed):
             changed,
             latest,
         )
+        # Explicit Retranslate Selected chunk resets are authoritative. A
+        # translator save racing this dialog must not resurrect the selected
+        # result/metadata after the HTML segment has already been removed.
+        for reset_spec in authoritative_chunk_resets or []:
+            if not isinstance(reset_spec, dict):
+                continue
+            chunk_key = str(reset_spec.get("chunk_key") or "")
+            parent_key = reset_spec.get("parent_key")
+            indices = reset_spec.get("indices") or []
+            chunk_entry = merged.get("chapter_chunks", {}).get(chunk_key)
+            if not isinstance(chunk_entry, dict):
+                continue
+            reset_chunks_for_retranslation(chunk_entry, indices)
+            parent_entry = merged.get("chapters", {}).get(parent_key)
+            if isinstance(parent_entry, dict):
+                parent_entry["status"] = "pending"
+                parent_entry["failure_reason"] = ""
+                parent_entry["error_message"] = ""
+                parent_entry["last_updated"] = time.time()
+                _clear_refinement_progress_fields(parent_entry)
+                _sync_parent_chunk_qa_summary(
+                    merged,
+                    parent_key,
+                    chunk_key,
+                )
         _write_progress_snapshot_atomic(path, merged)
         return merged
 
@@ -25843,6 +25874,7 @@ class RetranslationMixin:
             machine_translation_deleted_count = 0
             machine_translation_failed_count = 0
             chunk_reset_count = 0
+            authoritative_chunk_resets = {}
             full_chapter_chunk_reset_count = 0
             chunk_segment_deleted_count = 0
             chunk_segment_removal_failures = []
@@ -26070,6 +26102,10 @@ class RetranslationMixin:
                         chunk_indices,
                     )
                     if reset:
+                        reset_key = (chunk_key, parent_key)
+                        authoritative_chunk_resets.setdefault(
+                            reset_key, set()
+                        ).update(int(index) for index in chunk_indices)
                         parent_entry["status"] = "pending"
                         parent_entry["failure_reason"] = ""
                         parent_entry["error_message"] = ""
@@ -26292,6 +26328,10 @@ class RetranslationMixin:
                             )
                             if reset:
                                 full_chapter_chunk_reset_count += 1
+                                reset_key = (parent_chunk_key, chapter_key)
+                                authoritative_chunk_resets.setdefault(
+                                    reset_key, set()
+                                ).update(int(index) for index in reset)
                             _sync_parent_chunk_qa_summary(
                                 data['prog'], chapter_key, parent_chunk_key
                             )
@@ -26323,6 +26363,15 @@ class RetranslationMixin:
                         data['progress_file'],
                         progress_baseline,
                         data['prog'],
+                        authoritative_chunk_resets=[
+                            {
+                                "chunk_key": chunk_key,
+                                "parent_key": parent_key,
+                                "indices": sorted(indices),
+                            }
+                            for (chunk_key, parent_key), indices
+                            in authoritative_chunk_resets.items()
+                        ],
                     )
                     data['prog'].clear()
                     data['prog'].update(merged_progress)
