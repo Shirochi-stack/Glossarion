@@ -4630,7 +4630,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(compression_desc)
 
     chunk_progress_cb = self._create_styled_checkbox(
-        "Resume incomplete EPUB chapters from saved chunks"
+        "Resume incomplete EPUB/PDF chapters from saved chunks"
     )
     chunk_progress_cb.setChecked(
         bool(
@@ -4642,7 +4642,7 @@ def _create_response_handling_section(self, parent):
         )
     )
     chunk_progress_cb.setToolTip(
-        "Stores successful EPUB chunks in translation_progress.json. Cached "
+        "Stores successful EPUB and PDF chunks in translation_progress.json. Cached "
         "chunks are discarded when the configured or discovered chunk budget changes."
     )
     self.enable_chunk_progress_checkbox = chunk_progress_cb
@@ -4655,7 +4655,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(chunk_progress_cb)
 
     chunk_progress_desc = QLabel(
-        "Enabled by default for EPUB resume. Completed chunks are reused only while both "
+        "Enabled by default for EPUB/PDF resume. Completed chunks are reused only while both "
         "the original and API-cached token budgets still match."
     )
     chunk_progress_desc.setWordWrap(True)

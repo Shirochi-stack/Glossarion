@@ -6196,6 +6196,7 @@ class ProgressManager:
         expected_hashes_by_output = {}
         expected_hashes_by_number = {}
         expected_pdf_sections = {}
+        expected_pdf_sections_by_id = {}
         expected_pdf_section_ids_by_number = {}
         for chapter in chapters or []:
             try:
@@ -6222,7 +6223,11 @@ class ProgressManager:
                 )
             section_id = str(chapter.get("pdf_section_id") or "").strip()
             if chapter.get("pdf_toc_section") and section_id:
-                expected_pdf_sections[section_id] = {
+                pdf_progress_key = f"pdf:{section_id}"
+                if chapter.get("is_chunk"):
+                    pdf_progress_key = f"{pdf_progress_key}:{actual_num}"
+                section_record = {
+                    "progress_key": pdf_progress_key,
                     "actual_num": actual_num,
                     "content_hash": str(chapter.get("content_hash") or ""),
                     "chapter": chapter,
@@ -6232,6 +6237,10 @@ class ProgressManager:
                     "pdf_end_page": chapter.get("pdf_end_page"),
                     "pdf_section_title": chapter.get("pdf_section_title") or chapter.get("title"),
                 }
+                expected_pdf_sections[pdf_progress_key] = section_record
+                expected_pdf_sections_by_id.setdefault(section_id, []).append(
+                    section_record
+                )
                 if actual_num is not None:
                     expected_pdf_section_ids_by_number.setdefault(
                         str(actual_num), set()
@@ -6239,7 +6248,7 @@ class ProgressManager:
 
         removed = 0
         renamed_outputs = 0
-        removed_number_keys = set()
+        removed_chunk_keys = set()
         progress_chapters = self.prog.setdefault("chapters", {})
 
         def _progress_section_id(progress_key, entry, normalized_output=""):
@@ -6261,7 +6270,7 @@ class ProgressManager:
                 entry_section_id = next(
                     (
                         section_id
-                        for section_id in expected_pdf_sections
+                        for section_id in expected_pdf_sections_by_id
                         if normalized_output == f"pdf_section_{section_id}"
                         or normalized_output.startswith(
                             f"pdf_section_{section_id}_"
@@ -6270,6 +6279,67 @@ class ProgressManager:
                     "",
                 )
             return entry_section_id
+
+        def _expected_pdf_progress_key(
+            progress_key, entry, normalized_output=""
+        ):
+            """Match one stored PDF row to one distinct bookmark part."""
+            stored_progress_key = str(
+                entry.get("pdf_progress_key") or progress_key or ""
+            )
+            if stored_progress_key in expected_pdf_sections:
+                return stored_progress_key
+
+            section_id = _progress_section_id(
+                progress_key, entry, normalized_output
+            )
+            candidates = expected_pdf_sections_by_id.get(section_id, [])
+            if not candidates:
+                return ""
+
+            stored_hash = str(entry.get("content_hash") or "")
+            if stored_hash:
+                hash_matches = [
+                    candidate
+                    for candidate in candidates
+                    if candidate.get("content_hash") == stored_hash
+                ]
+                if len(hash_matches) == 1:
+                    return hash_matches[0]["progress_key"]
+
+            if normalized_output:
+                output_matches = [
+                    candidate
+                    for candidate in candidates
+                    if _normalize_output_filename_stem(
+                        candidate.get("output_file")
+                    ) == normalized_output
+                ]
+                if len(output_matches) == 1:
+                    return output_matches[0]["progress_key"]
+
+            actual_num = entry.get("actual_num", entry.get("chapter_num"))
+            number_matches = [
+                candidate
+                for candidate in candidates
+                if str(candidate.get("actual_num")) == str(actual_num)
+            ]
+            if len(number_matches) == 1:
+                return number_matches[0]["progress_key"]
+            if len(candidates) == 1:
+                return candidates[0]["progress_key"]
+            return ""
+
+        def _remember_removed_chunk_keys(progress_key, entry, number_key=""):
+            for candidate in (
+                progress_key,
+                number_key,
+                entry.get("content_hash"),
+                entry.get("pdf_progress_key"),
+            ):
+                value = str(candidate or "").strip()
+                if value:
+                    removed_chunk_keys.add(value)
 
         tracked_pdf_section_ids = {
             section_id
@@ -6299,13 +6369,17 @@ class ProgressManager:
                 and expected_pdf_section_ids_by_number.get(number_key, set())
                 & tracked_pdf_section_ids
             ):
+                _remember_removed_chunk_keys(progress_key, entry, number_key)
                 progress_chapters.pop(progress_key, None)
                 removed += 1
                 continue
             entry_section_id = _progress_section_id(
                 progress_key, entry, normalized_output
             )
-            current_section = expected_pdf_sections.get(entry_section_id)
+            expected_progress_key = _expected_pdf_progress_key(
+                progress_key, entry, normalized_output
+            )
+            current_section = expected_pdf_sections.get(expected_progress_key)
             stable_section_matches = bool(current_section)
             expected_hashes = set()
             if number_matches:
@@ -6347,7 +6421,7 @@ class ProgressManager:
                 ):
                     if current_section.get(pdf_key) is not None:
                         entry[pdf_key] = current_section[pdf_key]
-                entry["pdf_progress_key"] = f"pdf:{entry_section_id}"
+                entry["pdf_progress_key"] = current_section["progress_key"]
                 current_chapter = current_section.get("chapter")
                 preferred_output = current_section.get("output_file")
                 current_output = entry.get("output_file")
@@ -6387,17 +6461,33 @@ class ProgressManager:
                     entry.pop("pdf_hash_migration_pending", None)
                 continue
             if (not number_matches and not output_matches and not stable_section_matches) or not hash_matches:
+                _remember_removed_chunk_keys(progress_key, entry, number_key)
                 progress_chapters.pop(progress_key, None)
                 removed += 1
-                if number_key:
-                    removed_number_keys.add(number_key)
 
         if removed:
-            valid_chunk_keys = set(expected_numbers)
+            valid_chunk_keys = {
+                str(chapter.get("content_hash") or "").strip()
+                for chapter in chapters or []
+                if isinstance(chapter, dict)
+                and str(chapter.get("content_hash") or "").strip()
+            }
+            for progress_key, entry in progress_chapters.items():
+                if not isinstance(entry, dict):
+                    continue
+                for candidate in (
+                    progress_key,
+                    entry.get("content_hash"),
+                    entry.get("pdf_progress_key"),
+                ):
+                    value = str(candidate or "").strip()
+                    if value:
+                        valid_chunk_keys.add(value)
             for chunk_key in list(self.prog.get("chapter_chunks", {})):
+                normalized_chunk_key = str(chunk_key)
                 if (
-                    str(chunk_key) not in valid_chunk_keys
-                    or str(chunk_key) in removed_number_keys
+                    normalized_chunk_key in removed_chunk_keys
+                    and normalized_chunk_key not in valid_chunk_keys
                 ):
                     self.prog["chapter_chunks"].pop(chunk_key, None)
             print(
@@ -8932,7 +9022,9 @@ class BatchTranslationProcessor:
         self.is_text_file = is_text_file
         self.chunk_progress_enabled = bool(
             getattr(config, "ENABLE_CHUNK_PROGRESS", True)
-            and str(getattr(config, "input_path", "")).lower().endswith(".epub")
+            and str(getattr(config, "input_path", "")).lower().endswith(
+                (".epub", ".pdf")
+            )
             and progress_manager is not None
         )
         # Optional shared HistoryManager for contextual translation across chapters
@@ -28209,7 +28301,7 @@ def main(log_callback=None, stop_callback=None):
             chapter_key_str = content_hash
             chunk_progress_enabled = bool(
                 getattr(config, "ENABLE_CHUNK_PROGRESS", True)
-                and str(input_path or "").lower().endswith(".epub")
+                and str(input_path or "").lower().endswith((".epub", ".pdf"))
             )
             (
                 cached_chunk_entry,

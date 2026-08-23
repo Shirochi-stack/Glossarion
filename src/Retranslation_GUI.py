@@ -28759,7 +28759,7 @@ class RetranslationMixin:
         data['chapter_display_info'] = chapter_display_info
 
     def _append_chunk_progress_display_info(self, data, chapter_display_info):
-        """Insert selectable per-chunk rows directly after their EPUB chapter."""
+        """Insert selectable per-chunk rows after their EPUB/PDF chapter."""
         prog = data.get("prog") if isinstance(data, dict) else None
         if not isinstance(prog, dict):
             return

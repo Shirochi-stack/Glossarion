@@ -795,9 +795,11 @@ def _run_batch_chapter_failure(
     return source, output_files[0].read_text(encoding="utf-8")
 
 
-def test_batch_epub_chunk_progress_submits_only_missing_chunks(
+@pytest.mark.parametrize("source_extension", [".epub", ".pdf"])
+def test_batch_document_chunk_progress_submits_only_missing_chunks(
     tmp_path,
     monkeypatch,
+    source_extension,
 ):
     chunk_budget = {
         "initial_output_token_limit": 12000,
@@ -811,7 +813,7 @@ def test_batch_epub_chunk_progress_submits_only_missing_chunks(
 
     class Config:
         MODEL = "model-a"
-        input_path = str(tmp_path / "book.epub")
+        input_path = str(tmp_path / f"book{source_extension}")
         ENABLE_CHUNK_PROGRESS = True
         BATCH_SIZE = 3
         CONTEXTUAL = False
