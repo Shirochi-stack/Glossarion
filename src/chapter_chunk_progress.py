@@ -421,7 +421,13 @@ def reset_chunks_for_retranslation(entry, chunk_indices: Iterable[int]):
 
 
 def remove_chunk_segments(html_text, chapter_key, chunk_indices, entry=None):
-    """Remove selected marker blocks, with an exact-result legacy fallback."""
+    """Remove selected marker blocks from one chapter output document.
+
+    The progress content hash can change independently of an already-written
+    marker key (for example after PDF source normalization). Because one
+    response HTML file represents exactly one chapter/section, an unambiguous
+    single marker plan in that file is a safe secondary identity.
+    """
     text = str(html_text or "")
     wanted = {_positive_int(index) for index in chunk_indices or []}
     wanted.discard(0)
@@ -437,13 +443,83 @@ def remove_chunk_segments(html_text, chapter_key, chunk_indices, entry=None):
         removed.append(index)
 
     remaining = wanted.difference(removed)
+    if remaining:
+        all_marked = []
+        for match in _CHUNK_BLOCK_RE.finditer(text):
+            all_marked.append({
+                "index": _positive_int(match.group("idx")),
+                "total": _positive_int(match.group("total")),
+                "marker_key": match.group("key"),
+                "start": match.start(),
+                "end": match.end(),
+            })
+        marker_keys = {
+            str(block.get("marker_key") or "").casefold()
+            for block in all_marked
+            if isinstance(block, dict) and block.get("marker_key")
+        }
+        entry_total = _positive_int(
+            entry.get("total") if isinstance(entry, dict) else 0
+        )
+        marker_totals = {
+            _positive_int(block.get("total"))
+            for block in all_marked
+            if isinstance(block, dict)
+        }
+        marker_totals.discard(0)
+        plan_is_unambiguous = bool(
+            len(marker_keys) == 1
+            and len(marker_totals) == 1
+            and (
+                not entry_total
+                or marker_totals == {entry_total}
+            )
+        )
+        if plan_is_unambiguous:
+            blocks_by_index = {
+                block["index"]: block
+                for block in all_marked
+                if block.get("index")
+            }
+            fallback_spans = []
+            for index in sorted(remaining):
+                block = blocks_by_index.get(index)
+                if block:
+                    fallback_spans.append(
+                        (block["start"], block["end"], index)
+                    )
+            for start, end, index in sorted(fallback_spans, reverse=True):
+                text = text[:start] + text[end:]
+                removed.append(index)
+
+    remaining = wanted.difference(removed)
     if remaining and isinstance(entry, dict):
         chunks = entry.get("chunks", {}) if isinstance(entry.get("chunks"), dict) else {}
         for index in sorted(remaining):
             result = chunks.get(str(index))
-            if isinstance(result, str) and result and result in text:
-                text = text.replace(result, "", 1)
-                removed.append(index)
+            if not isinstance(result, str) or not result:
+                continue
+            candidates = [result]
+            without_fence = re.sub(
+                r"\n?```\s*$",
+                "",
+                re.sub(
+                    r"^```(?:html)?\s*\n?",
+                    "",
+                    result,
+                    count=1,
+                    flags=re.MULTILINE | re.IGNORECASE,
+                ),
+                count=1,
+                flags=re.MULTILINE,
+            )
+            if without_fence != result:
+                candidates.append(without_fence)
+            for candidate in candidates:
+                if candidate and candidate in text:
+                    text = text.replace(candidate, "", 1)
+                    removed.append(index)
+                    break
     return text, sorted(removed)
 
 

@@ -25795,6 +25795,7 @@ class RetranslationMixin:
             chunk_reset_count = 0
             full_chapter_chunk_reset_count = 0
             chunk_segment_deleted_count = 0
+            chunk_segment_removal_failures = []
             compiled_pdf_section_removed_count = 0
             compiled_pdf_chunk_segment_removed_count = 0
             compiled_pdf_deleted_count = 0
@@ -25884,12 +25885,40 @@ class RetranslationMixin:
                         )
                         continue
 
-                    output_path = (
-                        output_file
-                        if os.path.isabs(str(output_file or ""))
-                        else os.path.join(data['output_dir'], str(output_file or ""))
+                    resolved_output_file, resolved_output_path = (
+                        self._resolve_existing_output_path(
+                            data['output_dir'],
+                            output_file,
+                            {
+                                "info": parent_entry,
+                                "progress_entry": parent_entry,
+                                "progress_key": parent_key,
+                                "num": actual_num,
+                                "output_file": output_file,
+                                "original_filename": ch_info.get(
+                                    "original_filename", ""
+                                ),
+                            },
+                            data['prog'],
+                        )
                     )
-                    if output_file and os.path.isfile(output_path):
+                    if resolved_output_path:
+                        output_file = resolved_output_file or output_file
+                        output_path = resolved_output_path
+                    else:
+                        output_path = (
+                            output_file
+                            if os.path.isabs(str(output_file or ""))
+                            else os.path.join(
+                                data['output_dir'], str(output_file or "")
+                            )
+                        )
+
+                    output_exists = bool(
+                        output_file and os.path.isfile(output_path)
+                    )
+                    response_segment_removed = not output_exists
+                    if output_exists:
                         try:
                             with open(
                                 output_path,
@@ -25922,11 +25951,36 @@ class RetranslationMixin:
                                     if os.path.isfile(temporary):
                                         os.remove(temporary)
                                 chunk_segment_deleted_count += len(removed)
+                                response_segment_removed = True
+                            else:
+                                chunk_segment_removal_failures.append(
+                                    (
+                                        actual_num,
+                                        chunk_index,
+                                        output_path,
+                                        "chunk boundary/result was not found",
+                                    )
+                                )
                         except Exception as exc:
+                            chunk_segment_removal_failures.append(
+                                (
+                                    actual_num,
+                                    chunk_index,
+                                    output_path,
+                                    str(exc),
+                                )
+                            )
                             print(
                                 f"Failed to remove chapter {actual_num} chunk "
                                 f"{chunk_index} from {output_path}: {exc}"
                             )
+
+                    if not response_segment_removed:
+                        print(
+                            "ERROR: Chunk progress was not reset because its "
+                            f"HTML segment remained in {output_path}"
+                        )
+                        continue
 
                     if parent_entry.get("pdf_toc_section"):
                         try:
@@ -26276,7 +26330,35 @@ class RetranslationMixin:
             if machine_translation_failed_count > 0:
                 success_parts.append(f"failed to delete {machine_translation_failed_count} Machine Translation preview file(s)")
             
-            if success_parts:
+            if chunk_segment_removal_failures:
+                failure_lines = [
+                    f"Section {chapter_num} chunk {chunk_index}: "
+                    f"{os.path.basename(path)} ({reason})"
+                    for chapter_num, chunk_index, path, reason
+                    in chunk_segment_removal_failures[:10]
+                ]
+                if len(chunk_segment_removal_failures) > 10:
+                    failure_lines.append(
+                        f"(+{len(chunk_segment_removal_failures) - 10} more)"
+                    )
+                warning_message = (
+                    "The following chunk(s) were not reset because their HTML "
+                    "segments could not be removed. Their progress entries were "
+                    "left unchanged:\n\n" + "\n".join(failure_lines)
+                )
+                if success_parts:
+                    warning_message += (
+                        "\n\nOther selected changes succeeded: "
+                        + ", ".join(success_parts)
+                        + "."
+                    )
+                self._styled_msgbox(
+                    QMessageBox.Warning,
+                    data.get('dialog', self),
+                    "Chunk HTML Not Updated",
+                    warning_message,
+                )
+            elif success_parts:
                 success_msg = "Successfully " + ", ".join(success_parts) + "."
                 if deleted_count > 0 or marked_count > 0 or merged_cleared_count > 0:
                     total_to_translate = len(selected_chapters) + merged_cleared_count

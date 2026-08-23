@@ -589,6 +589,79 @@ def test_selective_chunk_reset_removes_only_its_html_segment_and_cache(
     }
 
 
+def test_chunk_removal_accepts_one_unambiguous_stale_pdf_marker_plan():
+    entry = {
+        "schema_version": 2,
+        "total": 3,
+        "chunks": {
+            "1": "<p>translated 1</p>",
+            "2": "<p>translated 2</p>",
+            "3": "<p>translated 3</p>",
+        },
+    }
+    html = "\n".join(
+        wrap_chunk_html(
+            "marker-key-before-pdf-normalization",
+            index,
+            3,
+            f"<p>translated {index}</p>",
+        )
+        for index in (1, 2, 3)
+    )
+
+    updated_html, removed = remove_chunk_segments(
+        html,
+        "current-pdf-content-hash",
+        [2],
+        entry,
+    )
+
+    assert removed == [2]
+    remaining = extract_marked_chunks(updated_html)
+    assert sorted(remaining) == [1, 3]
+    assert "translated 2" not in updated_html
+
+
+def test_chunk_removal_strips_saved_code_fences_for_result_fallback():
+    entry = {
+        "schema_version": 2,
+        "total": 2,
+        "chunks": {
+            "2": "```html\n<p>translated 2</p>\n```",
+        },
+    }
+
+    updated_html, removed = remove_chunk_segments(
+        "<p>translated 1</p>\n<p>translated 2</p>",
+        "pdf-section-hash",
+        [2],
+        entry,
+    )
+
+    assert removed == [2]
+    assert "translated 1" in updated_html
+    assert "translated 2" not in updated_html
+
+
+def test_stale_marker_fallback_rejects_multi_chapter_compiled_html():
+    html = "\n".join((
+        wrap_chunk_html("chapter-one", 1, 2, "<p>one-a</p>"),
+        wrap_chunk_html("chapter-one", 2, 2, "<p>one-b</p>"),
+        wrap_chunk_html("chapter-two", 1, 2, "<p>two-a</p>"),
+        wrap_chunk_html("chapter-two", 2, 2, "<p>two-b</p>"),
+    ))
+
+    updated_html, removed = remove_chunk_segments(
+        html,
+        "unknown-chapter-key",
+        [2],
+        {"schema_version": 2, "total": 2, "chunks": {}},
+    )
+
+    assert removed == []
+    assert updated_html == html
+
+
 def test_chunk_qa_state_excludes_only_failed_chunk_from_resume_cache(tmp_path):
     progress = ProgressManager(str(tmp_path))
     progress.prepare_chapter_chunk_progress(
