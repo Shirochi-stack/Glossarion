@@ -2947,7 +2947,12 @@ class EPUBCompiler:
             )
 
             # Add images to book
-            self._add_images_to_book(book, processed_images, cover_file_for_generated_page)
+            self._add_images_to_book(
+                book,
+                processed_images,
+                cover_file_for_generated_page,
+                protected_cover_file=cover_file,
+            )
 
             # A reused page or disabled synthetic-page setting must not discard
             # the OPF cover-image metadata used by reader/library thumbnails.
@@ -4178,12 +4183,21 @@ class EPUBCompiler:
                         matched = True
                         break
                 if not matched:
-                    # Check if this is a known special file (nav, toc, title, etc.)
-                    # that is in the manifest but not the spine — silently skip it.
+                    # By default, retain every compiled HTML file even when it
+                    # is absent from the source spine. Some rolling EPUBs keep
+                    # translated notices / front matter outside that spine,
+                    # and silently dropping those pages loses user output.
+                    # Users who prefer the legacy behavior can opt back in.
                     _special_kw_str = os.environ.get('SPECIAL_FILE_KEYWORDS', 'title, toc, copyright, preface, nav, message, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography')
                     _special_keywords = [k.strip().lower() for k in _special_kw_str.split(',') if k.strip()]
                     _core_lower = core_name.lower()
-                    if any(kw in _core_lower for kw in _special_keywords):
+                    _skip_non_spine_special = (
+                        os.environ.get('SKIP_NON_SPINE_SPECIAL_FILES', '0') == '1'
+                    )
+                    if (
+                        _skip_non_spine_special
+                        and any(kw in _core_lower for kw in _special_keywords)
+                    ):
                         self.log(f"  ℹ️ Skipping non-spine special file: {output_file}")
                         continue
                     unmapped_files.append(output_file)
@@ -5709,11 +5723,20 @@ img {
         
         return processed_images, cover_file
 
-    def _add_images_to_book(self, book: epub.EpubBook, processed_images: Dict[str, str], 
-                           cover_file: Optional[str]):
+    def _add_images_to_book(
+        self,
+        book: epub.EpubBook,
+        processed_images: Dict[str, str],
+        cover_file: Optional[str],
+        protected_cover_file: Optional[str] = None,
+    ):
         """Add images to book using parallel processing for reading files"""
         
-        images_to_add = self._filter_embedded_images_for_ocr(processed_images, cover_file)
+        images_to_add = self._filter_embedded_images_for_ocr(
+            processed_images,
+            cover_file,
+            protected_images=(protected_cover_file,),
+        )
         
         if not images_to_add:
             self.log("No images to add (besides cover)")
@@ -6281,7 +6304,9 @@ img {
         return values
 
     def _compiled_html_image_reference_keys(self, rename_map: Dict[str, str]) -> set:
-        """Return normalized image filename keys still referenced by compiled HTML."""
+        """Return normalized image keys referenced by compiled HTML or CSS."""
+        from urllib.parse import unquote
+
         reference_keys = set()
         html_exts = (".html", ".htm", ".xhtml")
         try:
@@ -6301,12 +6326,45 @@ img {
                 continue
             try:
                 soup = BeautifulSoup(content, "html.parser")
-                srcs = [img.get("src", "") for img in soup.find_all("img")]
+                srcs = []
+                for tag in soup.find_all(("img", "image", "source", "object")):
+                    for attr in (
+                        "src",
+                        "data-src",
+                        "data-original",
+                        "href",
+                        "xlink:href",
+                        "data",
+                    ):
+                        value = tag.get(attr, "")
+                        if value:
+                            srcs.append(value)
+                    srcset = tag.get("srcset", "")
+                    if srcset:
+                        srcs.extend(
+                            candidate.strip().split()[0]
+                            for candidate in str(srcset).split(",")
+                            if candidate.strip()
+                        )
+                srcs.extend(
+                    match.strip().strip('"\'')
+                    for match in re.findall(
+                        r'url\(\s*([^\)]+?)\s*\)',
+                        content,
+                        flags=re.IGNORECASE,
+                    )
+                )
             except Exception:
-                srcs = re.findall(r'<img\b[^>]*\bsrc=["\']([^"\']+)["\']', content, flags=re.IGNORECASE)
+                srcs = re.findall(
+                    r'(?:src|href|xlink:href|data)=["\']([^"\']+)["\']',
+                    content,
+                    flags=re.IGNORECASE,
+                )
 
             for src in srcs:
-                basename = os.path.basename(str(src or "").split("?", 1)[0].split("#", 1)[0])
+                basename = os.path.basename(unquote(
+                    str(src or "").split("?", 1)[0].split("#", 1)[0]
+                ))
                 key = self._gallery_ocr_key(basename)
                 if key:
                     reference_keys.add(key)
@@ -6315,17 +6373,101 @@ img {
                 if renamed_key:
                     reference_keys.add(renamed_key)
 
+        # A background/list-style image can be referenced only by an external
+        # stylesheet. Treat those URLs as live references too, otherwise the
+        # optional filter would create a valid XHTML document with a missing
+        # CSS image resource.
+        css_dirs = {
+            os.path.join(self.output_dir, "css"),
+            getattr(self, "css_dir", ""),
+        }
+        for css_dir in css_dirs:
+            if not css_dir or not os.path.isdir(css_dir):
+                continue
+            try:
+                css_files = [
+                    os.path.join(css_dir, name)
+                    for name in os.listdir(css_dir)
+                    if name.lower().endswith(".css")
+                    and os.path.isfile(os.path.join(css_dir, name))
+                ]
+            except OSError:
+                continue
+            for css_path in css_files:
+                try:
+                    with open(css_path, "r", encoding="utf-8") as f:
+                        css_text = f.read()
+                except OSError:
+                    continue
+                for src in re.findall(
+                    r'url\(\s*([^\)]+?)\s*\)',
+                    css_text,
+                    flags=re.IGNORECASE,
+                ):
+                    basename = os.path.basename(unquote(
+                        src.strip().strip('"\'').split("?", 1)[0].split("#", 1)[0]
+                    ))
+                    key = self._gallery_ocr_key(basename)
+                    if key:
+                        reference_keys.add(key)
+                    renamed = rename_map.get(basename)
+                    renamed_key = (
+                        self._gallery_ocr_key(renamed) if renamed else ""
+                    )
+                    if renamed_key:
+                        reference_keys.add(renamed_key)
+
         return reference_keys
 
-    def _filter_embedded_images_for_ocr(self, processed_images: Dict[str, str], cover_file: Optional[str]) -> List[Tuple[str, str]]:
-        """Exclude OCR text-page images from the EPUB payload when no HTML uses them."""
+    def _filter_embedded_images_for_ocr(
+        self,
+        processed_images: Dict[str, str],
+        cover_file: Optional[str],
+        protected_images=(),
+    ) -> List[Tuple[str, str]]:
+        """Apply optional reference and OCR filters to EPUB payload images."""
         image_items = [(original, safe) for original, safe in processed_images.items() if safe != cover_file]
+        skip_unreferenced = (
+            os.environ.get('SKIP_UNREFERENCED_EPUB_IMAGES', '0') == '1'
+        )
         classifications = self._load_gallery_ocr_classifications()
-        if not classifications:
+        if not skip_unreferenced and not classifications:
             return image_items
 
         rename_map = self._load_gallery_image_rename_map()
         referenced_keys = self._compiled_html_image_reference_keys(rename_map)
+
+        if skip_unreferenced:
+            protected_keys = {
+                self._gallery_ocr_key(name)
+                for name in (protected_images or ())
+                if name
+            }
+            referenced_items: List[Tuple[str, str]] = []
+            skipped_unreferenced = 0
+            for original, safe in image_items:
+                image_keys = self._gallery_ocr_candidates_for_image(
+                    original,
+                    safe,
+                    rename_map,
+                )
+                if (
+                    any(key in referenced_keys for key in image_keys)
+                    or any(key in protected_keys for key in image_keys)
+                ):
+                    referenced_items.append((original, safe))
+                else:
+                    skipped_unreferenced += 1
+            image_items = referenced_items
+            self.log(
+                "Image reference filter: skipped "
+                f"{skipped_unreferenced} unreferenced image(s) from EPUB payload; "
+                f"kept {len(image_items)} referenced/protected image(s)"
+            )
+
+        if not classifications:
+            return image_items
+
         images_to_add: List[Tuple[str, str]] = []
         excluded_text = 0
         kept_referenced_text = 0
@@ -6363,11 +6505,31 @@ img {
     def _filter_gallery_images_for_ocr(self, processed_images: Dict[str, str], cover_file: Optional[str]) -> List[str]:
         """Exclude OCR text-page images from the optional EPUB image gallery."""
         gallery_items = [(original, safe) for original, safe in processed_images.items() if safe != cover_file]
+        skip_unreferenced = (
+            os.environ.get('SKIP_UNREFERENCED_EPUB_IMAGES', '0') == '1'
+        )
         classifications = self._load_gallery_ocr_classifications()
-        if not classifications:
+        if not skip_unreferenced and not classifications:
             return [safe for _original, safe in gallery_items]
 
         rename_map = self._load_gallery_image_rename_map()
+        if skip_unreferenced:
+            referenced_keys = self._compiled_html_image_reference_keys(rename_map)
+            gallery_items = [
+                (original, safe)
+                for original, safe in gallery_items
+                if any(
+                    key in referenced_keys
+                    for key in self._gallery_ocr_candidates_for_image(
+                        original,
+                        safe,
+                        rename_map,
+                    )
+                )
+            ]
+        if not classifications:
+            return [safe for _original, safe in gallery_items]
+
         gallery_images: List[str] = []
         excluded_text = 0
         kept_no = 0

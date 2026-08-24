@@ -3500,6 +3500,14 @@ class AsyncProcessingDialog:
         
         # EPUB specific settings
         env_vars['DISABLE_EPUB_GALLERY'] = "1" if _val(self.gui.disable_epub_gallery_var, False) else "0"
+        env_vars['SKIP_NON_SPINE_SPECIAL_FILES'] = "1" if _val(
+            getattr(self.gui, 'skip_non_spine_special_files_var', False),
+            False,
+        ) else "0"
+        env_vars['SKIP_UNREFERENCED_EPUB_IMAGES'] = "1" if _val(
+            getattr(self.gui, 'skip_unreferenced_epub_images_var', False),
+            False,
+        ) else "0"
         env_vars['FORCE_NCX_ONLY'] = '1' if _val(self.gui.force_ncx_only_var, False) else '0'
         
         # Special handling for Gemini safety filters

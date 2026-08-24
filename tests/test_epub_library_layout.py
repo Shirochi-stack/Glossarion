@@ -2614,6 +2614,81 @@ def test_output_card_uses_source_epub_when_only_artifact_progress_exists(
     assert rows[0]["total_chapters"] == 2
 
 
+def test_exact_named_partial_source_epub_remains_linked(
+    tmp_path, monkeypatch,
+):
+    """An exact Scan-for-Raw pairing may point at the latest EPUB batch."""
+    output_root = tmp_path / "Output"
+    workspace = output_root / "[344608] Rolling Story"
+    raw_root = tmp_path / "Raws"
+    library_raw = tmp_path / "Library" / "Raw"
+    workspace.mkdir(parents=True)
+    raw_root.mkdir()
+    library_raw.mkdir(parents=True)
+
+    source_epub = raw_root / "[344608] Rolling Story.epub"
+    with zipfile.ZipFile(source_epub, "w") as epub:
+        # The linked file is a later partial batch rather than the EPUB that
+        # supplied every historical row in translation_progress.json.
+        for chapter_number in range(432, 437):
+            epub.writestr(
+                f"OEBPS/Text/chapter{chapter_number:04d}.xhtml",
+                f"<p>{chapter_number}</p>",
+            )
+    mismatched_epub = raw_root / "Different Story.epub"
+    with zipfile.ZipFile(mismatched_epub, "w") as epub:
+        for chapter_number in range(432, 437):
+            epub.writestr(
+                f"OEBPS/Text/chapter{chapter_number:04d}.xhtml",
+                f"<p>{chapter_number}</p>",
+            )
+
+    (workspace / "source_epub.txt").write_text(
+        str(source_epub), encoding="utf-8",
+    )
+    chapters = {
+        str(chapter_number): {
+            "original_basename": f"chapter{chapter_number:04d}.xhtml",
+            "output_file": f"response_chapter{chapter_number:04d}.html",
+            "status": "completed",
+        }
+        for chapter_number in range(1, 41)
+    }
+    chapters.update({
+        str(chapter_number): {
+            "original_basename": f"chapter{chapter_number:04d}.xhtml",
+            "output_file": f"response_chapter{chapter_number:04d}.html",
+            "status": "completed",
+        }
+        for chapter_number in range(432, 437)
+    })
+    (workspace / "translation_progress.json").write_text(
+        json.dumps({"chapters": chapters}), encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        epub_library, "_resolve_output_roots", lambda _config=None: [str(output_root)],
+    )
+    monkeypatch.setattr(
+        epub_library, "_origins_raw_sources_for_stem", lambda _stem: [],
+    )
+    monkeypatch.setattr(epub_library, "load_library_raw_inputs", lambda: [])
+    monkeypatch.setattr(
+        epub_library, "get_library_raw_dir", lambda: str(library_raw),
+    )
+
+    assert epub_library._validate_source_epub_for_workspace(
+        str(workspace), str(source_epub),
+    )
+    assert not epub_library._validate_source_epub_for_workspace(
+        str(workspace), str(mismatched_epub),
+    )
+    rows = epub_library.scan_output_folders({})
+    assert len(rows) == 1
+    assert rows[0]["raw_source_path"] == str(source_epub)
+    assert rows[0]["missing_raw_file"] is False
+
+
 def test_details_tags_allow_manually_cleared_metadata_subjects():
     class DetailsStub:
         _details = {"subjects": ["판타지", "빙의"]}

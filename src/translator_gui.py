@@ -16062,6 +16062,8 @@ Recent translations to summarize:
             ('batch_translation_var', 'batch_translation', True),
             ('enable_chunk_progress_var', 'enable_chunk_progress', True),
             ('disable_epub_gallery_var', 'disable_epub_gallery', True),
+            ('skip_non_spine_special_files_var', 'skip_non_spine_special_files', False),
+            ('skip_unreferenced_epub_images_var', 'skip_unreferenced_epub_images', False),
             # NEW: Disable automatic cover creation (affects extraction and EPUB cover page)
             ('disable_automatic_cover_creation_var', 'disable_automatic_cover_creation', True),
             ('disable_zero_detection_var', 'disable_zero_detection', True),
@@ -34237,6 +34239,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'DISABLE_MERGE_FALLBACK': "1" if getattr(self, 'disable_merge_fallback_var', False) else "0",
             'SYNTHETIC_MERGE_HEADERS': "1" if getattr(self, 'synthetic_merge_headers_var', True) else "0",
             'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var else "0",
+            'SKIP_NON_SPINE_SPECIAL_FILES': "1" if getattr(self, 'skip_non_spine_special_files_var', False) else "0",
+            'SKIP_UNREFERENCED_EPUB_IMAGES': "1" if getattr(self, 'skip_unreferenced_epub_images_var', False) else "0",
             'DISABLE_AUTOMATIC_COVER_CREATION': "1" if getattr(self, 'disable_automatic_cover_creation_var', True) else "0",
             'TRANSLATE_SPECIAL_FILES': "1" if getattr(self, 'translate_special_files_var', False) else "0",
             'TRANSLATE_ALL_NUMBERED_HTML': "1" if getattr(self, 'translate_all_numbered_html_var', True) else "0",
@@ -36337,6 +36341,8 @@ Important rules:
             
             # Set environment variables for EPUB converter
             os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var else "0"
+            os.environ['SKIP_NON_SPINE_SPECIAL_FILES'] = "1" if getattr(self, 'skip_non_spine_special_files_var', False) else "0"
+            os.environ['SKIP_UNREFERENCED_EPUB_IMAGES'] = "1" if getattr(self, 'skip_unreferenced_epub_images_var', False) else "0"
             os.environ['DISABLE_AUTOMATIC_COVER_CREATION'] = "1" if getattr(self, 'disable_automatic_cover_creation_var', True) else "0"
             os.environ['TRANSLATE_SPECIAL_FILES'] = "1" if getattr(self, 'translate_special_files_var', False) else "0"
             os.environ['REMOVE_DUPLICATE_H1_P'] = "1" if getattr(
@@ -44956,6 +44962,8 @@ Important rules:
                 ('enable_thoughts', ['enable_thoughts_var'], True, bool),
                 ('translation_history_rolling', ['translation_history_rolling_var'], True, bool),
                 ('disable_epub_gallery', ['disable_epub_gallery_var'], True, bool),
+                ('skip_non_spine_special_files', ['skip_non_spine_special_files_var'], False, bool),
+                ('skip_unreferenced_epub_images', ['skip_unreferenced_epub_images_var'], False, bool),
                 ('disable_automatic_cover_creation', ['disable_automatic_cover_creation_var'], True, bool),
                 ('use_toc_ncx', ['use_toc_ncx_var'], True, bool),
                 ('translate_toc_ncx', ['translate_toc_ncx_var'], True, bool),
@@ -46437,6 +46445,8 @@ Important rules:
                 ('ENABLE_CHUNK_PROGRESS', '1' if _bool_value(getattr(self, 'enable_chunk_progress_var', self.config.get('enable_chunk_progress', True))) else '0'),
                 ('HIDE_IMAGE_TRANSLATION_LABEL', '1' if getattr(self, 'hide_image_translation_label_var', True) else '0'),
                 ('DISABLE_EPUB_GALLERY', '1' if getattr(self, 'disable_epub_gallery_var', True) else '0'),
+                ('SKIP_NON_SPINE_SPECIAL_FILES', '1' if getattr(self, 'skip_non_spine_special_files_var', False) else '0'),
+                ('SKIP_UNREFERENCED_EPUB_IMAGES', '1' if getattr(self, 'skip_unreferenced_epub_images_var', False) else '0'),
                 ('DISABLE_AUTOMATIC_COVER_CREATION', '1' if getattr(self, 'disable_automatic_cover_creation_var', True) else '0'),
                 # EPUB layout mode (auto / epub2 / epub3)
                 ('EPUB_LAYOUT_MODE', getattr(self, 'epub_layout_mode_var', self.config.get('epub_layout_mode', 'auto')) or 'auto'),

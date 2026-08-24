@@ -11085,7 +11085,7 @@ def _create_processing_options_section(self, parent):
     gallery_desc.setStyleSheet("color: gray; font-size: 10pt;")
     gallery_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(gallery_desc)
-    
+
     # Disable Automatic Cover Creation
     cover_cb = self._create_styled_checkbox("Disable Automatic Cover Creation")
     try:
@@ -11106,11 +11106,81 @@ def _create_processing_options_section(self, parent):
     cover_cb.toggled.connect(_on_cover_toggle)
     cover_cb.setContentsMargins(0, 2, 0, 0)
     section_v.addWidget(cover_cb)
-    
+
     cover_desc = QLabel("No auto-generated cover page is created.")
     cover_desc.setStyleSheet("color: gray; font-size: 10pt;")
     cover_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(cover_desc)
+
+    # Skip non-spine special HTML files (legacy compiler behavior)
+    skip_non_spine_cb = self._create_styled_checkbox(
+        "Skip Non-Spine Special Files in EPUB"
+    )
+    try:
+        skip_non_spine_cb.setChecked(bool(getattr(
+            self,
+            'skip_non_spine_special_files_var',
+            self.config.get('skip_non_spine_special_files', False),
+        )))
+    except Exception:
+        pass
+    def _on_skip_non_spine_toggle(checked):
+        try:
+            self.skip_non_spine_special_files_var = bool(checked)
+            self.config['skip_non_spine_special_files'] = bool(checked)
+            os.environ['SKIP_NON_SPINE_SPECIAL_FILES'] = (
+                '1' if checked else '0'
+            )
+        except Exception:
+            pass
+    skip_non_spine_cb.toggled.connect(_on_skip_non_spine_toggle)
+    skip_non_spine_cb.setContentsMargins(0, 2, 0, 0)
+    section_v.addWidget(skip_non_spine_cb)
+
+    skip_non_spine_desc = QLabel(
+        "Exclude special HTML files that are absent from the source EPUB "
+        "spine. Disabled by default."
+    )
+    skip_non_spine_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    skip_non_spine_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(skip_non_spine_desc)
+
+    # Skip images that no compiled HTML file references
+    skip_unreferenced_images_cb = self._create_styled_checkbox(
+        "Skip Unreferenced Images in EPUB"
+    )
+    try:
+        skip_unreferenced_images_cb.setChecked(bool(getattr(
+            self,
+            'skip_unreferenced_epub_images_var',
+            self.config.get('skip_unreferenced_epub_images', False),
+        )))
+    except Exception:
+        pass
+    def _on_skip_unreferenced_images_toggle(checked):
+        try:
+            self.skip_unreferenced_epub_images_var = bool(checked)
+            self.config['skip_unreferenced_epub_images'] = bool(checked)
+            os.environ['SKIP_UNREFERENCED_EPUB_IMAGES'] = (
+                '1' if checked else '0'
+            )
+        except Exception:
+            pass
+    skip_unreferenced_images_cb.toggled.connect(
+        _on_skip_unreferenced_images_toggle
+    )
+    skip_unreferenced_images_cb.setContentsMargins(0, 2, 0, 0)
+    section_v.addWidget(skip_unreferenced_images_cb)
+
+    skip_unreferenced_images_desc = QLabel(
+        "Exclude files in the images subfolder that no compiled HTML page "
+        "references. The selected cover is always kept. Disabled by default."
+    )
+    skip_unreferenced_images_desc.setStyleSheet(
+        "color: gray; font-size: 10pt;"
+    )
+    skip_unreferenced_images_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(skip_unreferenced_images_desc)
     
     # === PDF INPUT SETTINGS ===
     # Separator

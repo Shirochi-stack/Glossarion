@@ -1474,6 +1474,145 @@ def test_partial_opf_numerically_inserts_unmapped_chapters(tmp_path):
     ]
 
 
+def test_non_spine_special_html_is_included_by_default_and_optionally_skipped(
+    tmp_path,
+    monkeypatch,
+):
+    (tmp_path / "content.opf").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="c1" href="Text/chapter0001.xhtml"
+          media-type="application/xhtml+xml"/>
+    <item id="notice" href="Text/chapter_notice0003.xhtml"
+          media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>
+""",
+        encoding="utf-8",
+    )
+    for name in (
+        "response_chapter0001.html",
+        "response_chapter_notice0003.html",
+    ):
+        (tmp_path / name).write_text(
+            f"<html><body><p>{name}</p></body></html>",
+            encoding="utf-8",
+        )
+
+    logs = []
+    compiler = EPUBCompiler(str(tmp_path), log_callback=logs.append)
+    monkeypatch.setenv("SPECIAL_FILE_KEYWORDS", "notice")
+    monkeypatch.delenv("SKIP_NON_SPINE_SPECIAL_FILES", raising=False)
+
+    assert compiler._find_html_files() == [
+        "response_chapter0001.html",
+        "response_chapter_notice0003.html",
+    ]
+    assert not any("Skipping non-spine special file" in log for log in logs)
+
+    logs.clear()
+    monkeypatch.setenv("SKIP_NON_SPINE_SPECIAL_FILES", "1")
+    assert compiler._find_html_files() == ["response_chapter0001.html"]
+    assert any(
+        "Skipping non-spine special file: response_chapter_notice0003.html"
+        in log
+        for log in logs
+    )
+
+
+def test_unreferenced_epub_image_filter_is_opt_in_and_preserves_cover(
+    tmp_path,
+    monkeypatch,
+):
+    (tmp_path / "response_chapter0001.html").write_text(
+        '<html><body><img src="images/used.jpg"/></body></html>',
+        encoding="utf-8",
+    )
+    (tmp_path / "css").mkdir()
+    (tmp_path / "css" / "book.css").write_text(
+        ".ornament { background-image: url('../images/css-only.png'); }",
+        encoding="utf-8",
+    )
+    processed = {
+        "used.jpg": "used.jpg",
+        "css-only.png": "css-only.png",
+        "unused.jpg": "unused.jpg",
+        "cover.jpg": "cover.jpg",
+    }
+    logs = []
+    compiler = EPUBCompiler(str(tmp_path), log_callback=logs.append)
+    monkeypatch.delenv("SKIP_UNREFERENCED_EPUB_IMAGES", raising=False)
+
+    assert compiler._filter_embedded_images_for_ocr(
+        processed,
+        None,
+        protected_images=("cover.jpg",),
+    ) == list(processed.items())
+
+    monkeypatch.setenv("SKIP_UNREFERENCED_EPUB_IMAGES", "1")
+    assert compiler._filter_embedded_images_for_ocr(
+        processed,
+        None,
+        protected_images=("cover.jpg",),
+    ) == [
+        ("used.jpg", "used.jpg"),
+        ("css-only.png", "css-only.png"),
+        ("cover.jpg", "cover.jpg"),
+    ]
+    assert compiler._filter_gallery_images_for_ocr(
+        processed,
+        "cover.jpg",
+    ) == ["used.jpg", "css-only.png"]
+    assert any(
+        "skipped 1 unreferenced image(s)" in log
+        for log in logs
+    )
+
+
+def test_epub_optional_filter_settings_default_off_and_propagate():
+    root = Path(__file__).resolve().parents[1]
+    settings_source = (root / "src" / "other_settings.py").read_text(
+        encoding="utf-8",
+    )
+    gui_source = (root / "src" / "translator_gui.py").read_text(
+        encoding="utf-8",
+    )
+    async_source = (root / "src" / "async_api_processor.py").read_text(
+        encoding="utf-8",
+    )
+
+    assert '"Skip Non-Spine Special Files in EPUB"' in settings_source
+    assert (
+        "self.config.get('skip_non_spine_special_files', False)"
+        in settings_source
+    )
+    assert '"Skip Unreferenced Images in EPUB"' in settings_source
+    assert (
+        "self.config.get('skip_unreferenced_epub_images', False)"
+        in settings_source
+    )
+    assert (
+        "('skip_non_spine_special_files_var', "
+        "'skip_non_spine_special_files', False)"
+        in gui_source
+    )
+    assert (
+        "('skip_unreferenced_epub_images_var', "
+        "'skip_unreferenced_epub_images', False)"
+        in gui_source
+    )
+    assert "'SKIP_NON_SPINE_SPECIAL_FILES'" in async_source
+    assert "'SKIP_UNREFERENCED_EPUB_IMAGES'" in async_source
+    assert (
+        settings_source.index('"Disable Image Gallery in EPUB"')
+        < settings_source.index('"Disable Automatic Cover Creation"')
+        < settings_source.index('"Skip Non-Spine Special Files in EPUB"')
+        < settings_source.index('"Skip Unreferenced Images in EPUB"')
+    )
+
+
 @pytest.mark.parametrize(
     ("first_html_has_image", "expected_html"),
     [

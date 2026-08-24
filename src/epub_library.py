@@ -2880,11 +2880,18 @@ def _validate_source_epub_for_workspace(folder: str, source_path: str) -> bool:
     """Content check: does *source_path* look like the EPUB that actually
     fed this workspace?
 
-    Compares the workspace's ``translation_progress.json``
-    ``original_basename`` stems against the EPUB's internal file names.
-    A poisoned mapping (e.g. a ``source_epub.txt`` overwritten during a
-    multi-EPUB run) points at a different book whose internals barely
-    overlap, so it fails here and the caller can invalidate the link.
+    An exact normalized match between the workspace folder name and the
+    source filename is accepted first. This is the identity rule used by
+    Scan for Raw's Exact mode, and it matters for rolling / partial EPUBs:
+    a workspace can contain chapter history from several source batches
+    while ``source_epub.txt`` deliberately points at only the latest batch.
+
+    Otherwise, compares the workspace's ``translation_progress.json``
+    ``original_basename`` stems against the EPUB's internal file names. A
+    poisoned mapping (e.g. a ``source_epub.txt`` overwritten during a
+    multi-EPUB run) normally points at a differently named book whose
+    internals barely overlap, so it fails here and the caller can invalidate
+    the link.
 
     Returns True when there is no evidence either way (non-EPUB source,
     no progress file, unreadable data) — only a demonstrated mismatch
@@ -2895,6 +2902,12 @@ def _validate_source_epub_for_workspace(folder: str, source_path: str) -> bool:
             return True
         if not os.path.isfile(source_path):
             return False
+        folder_name = os.path.basename(os.path.normpath(folder))
+        source_stem = os.path.splitext(os.path.basename(source_path))[0]
+        folder_key = _norm_book_key(folder_name)
+        source_key = _norm_book_key(source_stem)
+        if folder_key and folder_key == source_key:
+            return True
         progress_file = os.path.join(folder, "translation_progress.json")
         if not os.path.isfile(progress_file):
             return True
