@@ -1613,6 +1613,39 @@ def test_epub_optional_filter_settings_default_off_and_propagate():
     )
 
 
+def test_other_settings_epub_and_resume_tooltips_are_bounded_rich_text():
+    source_path = Path(__file__).resolve().parents[1] / "src" / "other_settings.py"
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "def _wrapped_tooltip_html(text, width=430):" in source
+    assert "white-space: normal" in source
+    for checkbox_name in (
+        "chunk_progress_cb",
+        "numbered_html_cb",
+        "gallery_cb",
+        "cover_cb",
+        "skip_non_spine_cb",
+        "skip_unreferenced_images_cb",
+    ):
+        match = re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(checkbox_name)}\.setToolTip\(",
+            source,
+        )
+        assert match is not None
+        call_start = match.start()
+        assert "_wrapped_tooltip_html(" in source[call_start:call_start + 120]
+
+    for technical_marker in (
+        "API-cached input-token budget fingerprints",
+        "SPECIAL_FILE_EXACT",
+        "synthetic gallery XHTML item",
+        "heuristic cover selection",
+        "source OPF spine",
+        "stylesheets, and image rename mappings",
+    ):
+        assert technical_marker in source
+
+
 @pytest.mark.parametrize(
     ("first_html_has_image", "expected_html"),
     [

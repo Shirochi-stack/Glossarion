@@ -12,6 +12,7 @@ import sys
 import platform
 import tempfile
 import multiprocessing
+import html as _html
 
 # PySide6 imports (fully migrated from Tkinter)
 from PySide6.QtWidgets import (
@@ -45,6 +46,15 @@ from epub_package import find_epub_opf_member, find_opf_path
 
 
 DEEPSEEK_V4_EFFORT_OPTIONS = ("none", "low", "high", "max")
+
+
+def _wrapped_tooltip_html(text, width=430):
+    """Return escaped, width-bounded rich text for a wrapping Qt tooltip."""
+    safe_text = _html.escape(str(text or "")).replace("\n", "<br>")
+    return (
+        "<qt><p style='white-space: normal; margin: 0; "
+        f"width: {max(200, int(width))}px;'>{safe_text}</p></qt>"
+    )
 
 
 def _get_app_dir() -> str:
@@ -4642,8 +4652,15 @@ def _create_response_handling_section(self, parent):
         )
     )
     chunk_progress_cb.setToolTip(
-        "Stores successful EPUB and PDF chunks in translation_progress.json. Cached "
-        "chunks are discarded when the configured or discovered chunk budget changes."
+        _wrapped_tooltip_html(
+            "EPUB/PDF-only checkpointing for chapters split into multiple API chunks. "
+            "Each successful chunk is stored under a content-hash key in "
+            "translation_progress.json together with the split count and the initial "
+            "and API-cached input-token budget fingerprints. On retry, only matching "
+            "completed chunks are reused. Incomplete caches are invalidated when the "
+            "schema, chunk count, or either budget changes; disabling this option "
+            "removes the incomplete chunk cache and retranslates every chunk."
+        )
     )
     self.enable_chunk_progress_checkbox = chunk_progress_cb
 
@@ -11029,6 +11046,16 @@ def _create_processing_options_section(self, parent):
         self.translate_all_numbered_html_var = self.config.get('translate_all_numbered_html', True)
     
     numbered_html_cb = self._create_styled_checkbox("Translate All Numbered HTML Files")
+    numbered_html_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "Translation-stage special-file override. If an HTML/XHTML filename stem "
+            "contains at least one digit, it bypasses SPECIAL_FILE_KEYWORDS and "
+            "SPECIAL_FILE_EXACT and is submitted to the translation pipeline. The file "
+            "retains special-file/chapter-zero classification. This setting does not "
+            "change extraction membership, OPF spine order, TOC generation, or final "
+            "EPUB inclusion."
+        )
+    )
     try:
         numbered_html_cb.setChecked(bool(self.translate_all_numbered_html_var))
     except Exception:
@@ -11062,6 +11089,14 @@ def _create_processing_options_section(self, parent):
     # === EPUB OUTPUT OPTIONS ===
     # Disable Image Gallery
     gallery_cb = self._create_styled_checkbox("Disable Image Gallery in EPUB")
+    gallery_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "Controls generation of the synthetic gallery XHTML item during EPUB "
+            "compilation. When enabled, the compiler does not create or append the "
+            "gallery page to the EPUB spine and TOC. It does not remove image resources "
+            "or suppress images referenced by chapter XHTML."
+        )
+    )
     try:
         gallery_cb.setChecked(bool(getattr(
             self,
@@ -11088,6 +11123,14 @@ def _create_processing_options_section(self, parent):
 
     # Disable Automatic Cover Creation
     cover_cb = self._create_styled_checkbox("Disable Automatic Cover Creation")
+    cover_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "Disables heuristic cover selection and synthetic cover-page generation "
+            "during EPUB compilation. An OPF-designated cover image/page and reusable "
+            "image-bearing cover XHTML remain authoritative and are preserved. Source "
+            "cover resources are not deleted."
+        )
+    )
     try:
         cover_cb.setChecked(bool(getattr(
             self,
@@ -11115,6 +11158,15 @@ def _create_processing_options_section(self, parent):
     # Skip non-spine special HTML files (legacy compiler behavior)
     skip_non_spine_cb = self._create_styled_checkbox(
         "Skip Non-Spine Special Files in EPUB"
+    )
+    skip_non_spine_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "Restores the legacy compiler filter. When enabled, compiled HTML/XHTML "
+            "that cannot be mapped to the source OPF spine is omitted if its normalized "
+            "basename contains a configured SPECIAL_FILE_KEYWORDS token. This affects "
+            "final EPUB inclusion, including translated numbered notice/message files, "
+            "but does not delete workspace files. Disabled by default."
+        )
     )
     try:
         skip_non_spine_cb.setChecked(bool(getattr(
@@ -11148,6 +11200,16 @@ def _create_processing_options_section(self, parent):
     # Skip images that no compiled HTML file references
     skip_unreferenced_images_cb = self._create_styled_checkbox(
         "Skip Unreferenced Images in EPUB"
+    )
+    skip_unreferenced_images_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "Filters EPUB payload and gallery image candidates against references "
+            "discovered in compiled HTML/XHTML and CSS. The scan covers src/srcset, "
+            "lazy-load attributes, SVG image/object references, CSS url(), external "
+            "stylesheets, and image rename mappings. The selected cover and protected "
+            "images are retained, and filtered files remain on disk. Disabled by "
+            "default."
+        )
     )
     try:
         skip_unreferenced_images_cb.setChecked(bool(getattr(
