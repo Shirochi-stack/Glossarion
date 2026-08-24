@@ -9636,6 +9636,9 @@ def _create_processing_options_section(self, parent):
     think_slider.setSingleStep(1)
     think_slider.setPageStep(1)
     think_slider.setFixedWidth(180)
+    # Keep wheel scrolling available to the surrounding settings pane without
+    # letting an incidental pointer hover change the configured thinking level.
+    think_slider.wheelEvent = lambda event: event.ignore()
 
     gemini_levels = {1: 'Minimal', 2: 'Low', 3: 'Medium', 4: 'High', 5: 'High'}
     gpt_levels = {1: 'None', 2: 'Low', 3: 'Medium', 4: 'High', 5: 'xHigh'}

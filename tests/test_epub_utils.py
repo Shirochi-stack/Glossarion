@@ -1646,6 +1646,17 @@ def test_other_settings_epub_and_resume_tooltips_are_bounded_rich_text():
         assert technical_marker in source
 
 
+def test_lightweight_thinking_slider_ignores_mouse_wheel():
+    source_path = Path(__file__).resolve().parents[1] / "src" / "other_settings.py"
+    source = source_path.read_text(encoding="utf-8")
+
+    slider_start = source.index('think_slider = QSlider(Qt.Horizontal)')
+    slider_end = source.index("gemini_levels =", slider_start)
+    slider_setup = source[slider_start:slider_end]
+
+    assert "think_slider.wheelEvent = lambda event: event.ignore()" in slider_setup
+
+
 @pytest.mark.parametrize(
     ("first_html_has_image", "expected_html"),
     [
