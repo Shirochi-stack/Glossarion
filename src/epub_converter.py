@@ -4125,6 +4125,57 @@ class EPUBCompiler:
         """Compatibility boolean wrapper for the image-bearing HTML fallback."""
         return bool(self._first_opf_spine_html_with_image(html_files))
 
+    @staticmethod
+    def _special_html_stem(filename: str) -> str:
+        """Return a normalized HTML stem for configured special-file matching."""
+        stem = os.path.basename(str(filename or "")).casefold()
+        if stem.startswith("response_"):
+            stem = stem[len("response_"):]
+        while True:
+            base, extension = os.path.splitext(stem)
+            if extension.casefold() not in (".html", ".htm", ".xhtml", ".xml"):
+                break
+            stem = base
+        return stem
+
+    def _is_configured_special_html_file(self, filename: str) -> bool:
+        """Return whether an HTML filename matches the configured special lists."""
+        stem = self._special_html_stem(filename)
+        if not stem:
+            return False
+        keyword_text = os.environ.get(
+            "SPECIAL_FILE_KEYWORDS",
+            "title, toc, copyright, preface, nav, message, notice, colophon, "
+            "dedication, epigraph, foreword, acknowledgment, author, appendix, "
+            "bibliography",
+        )
+        exact_text = os.environ.get(
+            "SPECIAL_FILE_EXACT",
+            "index, glossary, glossary_extension",
+        )
+        keywords = [
+            token.strip().casefold()
+            for token in keyword_text.split(",")
+            if token.strip()
+        ]
+        exact_names = {
+            token.strip().casefold()
+            for token in exact_text.split(",")
+            if token.strip()
+        }
+        return stem in exact_names or any(keyword in stem for keyword in keywords)
+
+    def _unmapped_html_sort_key(self, filename: str):
+        """Group unmapped special HTML first, then sort numerically per group."""
+        number = self._extract_chapter_number(filename, -2)
+        has_number = number >= 0
+        return (
+            0 if self._is_configured_special_html_file(filename) else 1,
+            0 if has_number else 1,
+            number if has_number else 0,
+            str(filename).casefold(),
+        )
+
     def _find_html_files(self) -> List[str]:
         """Find HTML files using OPF-based ordering when available"""
         self.log(f"\n[DEBUG] Scanning directory: {self.output_dir}")
@@ -4222,10 +4273,37 @@ class EPUBCompiler:
                         )
                         return numeric_order_cache[filename]
 
+                    special_unmapped = sorted(
+                        (
+                            filename for filename in unmapped_files
+                            if self._is_configured_special_html_file(filename)
+                        ),
+                        key=self._unmapped_html_sort_key,
+                    )
+                    regular_unmapped = [
+                        filename for filename in unmapped_files
+                        if not self._is_configured_special_html_file(filename)
+                    ]
+
+                    # Keep mapped OPF entries in their authoritative relative
+                    # order. Insert the special-file block immediately before
+                    # the first numbered mapped chapter, leaving numberless
+                    # mapped front matter (cover/info) at the front.
+                    special_insert_at = next(
+                        (
+                            idx for idx, existing in enumerate(final_order)
+                            if numeric_order(existing) is not None
+                        ),
+                        len(final_order),
+                    )
+                    for offset, filename in enumerate(special_unmapped):
+                        final_order.insert(special_insert_at + offset, filename)
+
+                    regular_floor = special_insert_at + len(special_unmapped)
                     numbered_unmapped = sorted(
                         (
                             (numeric_order(filename), filename)
-                            for filename in unmapped_files
+                            for filename in regular_unmapped
                             if numeric_order(filename) is not None
                         ),
                         key=lambda item: (item[0], item[1].casefold()),
@@ -4234,6 +4312,7 @@ class EPUBCompiler:
                         insert_at = next(
                             (
                                 idx for idx, existing in enumerate(final_order)
+                                if idx >= regular_floor
                                 if numeric_order(existing) is not None
                                 and numeric_order(existing) > number
                             ),
@@ -4242,6 +4321,7 @@ class EPUBCompiler:
                         if insert_at is None:
                             numbered_indexes = [
                                 idx for idx, existing in enumerate(final_order)
+                                if idx >= regular_floor
                                 if numeric_order(existing) is not None
                             ]
                             insert_at = (
@@ -4251,13 +4331,14 @@ class EPUBCompiler:
                         final_order.insert(insert_at, filename)
 
                     unnumbered_unmapped = [
-                        filename for filename in unmapped_files
+                        filename for filename in regular_unmapped
                         if numeric_order(filename) is None
                     ]
                     final_order.extend(sorted(unnumbered_unmapped))
                     self.log(
-                        f"🔢 Numerically merged {len(numbered_unmapped)} "
-                        f"of {len(unmapped_files)} unmapped file(s) into OPF order"
+                        "🔢 Grouped unmapped HTML: "
+                        f"{len(special_unmapped)} special file(s) first; "
+                        f"{len(numbered_unmapped)} numbered regular file(s) after"
                     )
                     # Mark non-response unmapped files as auxiliary (omit from TOC)
                     aux = {f for f in unmapped_files if not f.startswith('response_')}
@@ -4287,26 +4368,7 @@ class EPUBCompiler:
             # Sort response_ files as primary chapters
             main_files = list(response_files)
             self.log(f"[DEBUG] Found {len(response_files)} response_ files")
-            
-            # Check if files have -h- pattern
-            if any('-h-' in f for f in response_files):
-                # Use special sorting for -h- pattern
-                def extract_h_number(filename):
-                    match = re.search(r'-h-(\d+)', filename)
-                    if match:
-                        return int(match.group(1))
-                    return 999999
-                
-                main_files.sort(key=extract_h_number)
-            else:
-                # Use numeric sorting for standard response_ files
-                def extract_number(filename):
-                    match = re.match(r'response_(\d+)_', filename)
-                    if match:
-                        return int(match.group(1))
-                    return 0
-                
-                main_files.sort(key=extract_number)
+            main_files.sort(key=self._unmapped_html_sort_key)
             
             # Append non-response files as auxiliary pages (not in TOC)
             aux_files = sorted([f for f in html_files if not f.startswith('response_')])
@@ -4327,7 +4389,7 @@ class EPUBCompiler:
             return main_files + aux_files
         else:
             # Progressive sorting for non-standard files
-            html_files.sort(key=self.get_robust_sort_key)
+            html_files.sort(key=self._unmapped_html_sort_key)
             # No response_ files -> treat none as auxiliary
             self.auxiliary_html_files = set()
         

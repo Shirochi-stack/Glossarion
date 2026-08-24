@@ -1474,6 +1474,79 @@ def test_partial_opf_numerically_inserts_unmapped_chapters(tmp_path):
     ]
 
 
+def test_unmapped_html_sort_groups_special_files_before_regular_files(
+    tmp_path,
+    monkeypatch,
+):
+    (tmp_path / "content.opf").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="cover" href="Text/cover.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c100" href="Text/chapter0100.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="cover"/>
+    <itemref idref="c100"/>
+  </spine>
+</package>
+""",
+        encoding="utf-8",
+    )
+    for name in (
+        "response_cover.html",
+        "chapter0100.xhtml",
+        "response_chapternotice_0009.html",
+        "response_chapternotice_0002.html",
+        "response_chapter0010.html",
+        "response_chapter0001.html",
+    ):
+        (tmp_path / name).write_text(
+            f"<html><body><p>{name}</p></body></html>",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setenv("SPECIAL_FILE_KEYWORDS", "notice")
+    monkeypatch.setenv("SPECIAL_FILE_EXACT", "index, glossary")
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _msg: None)
+
+    assert compiler._find_html_files() == [
+        "response_cover.html",
+        "response_chapternotice_0002.html",
+        "response_chapternotice_0009.html",
+        "response_chapter0001.html",
+        "response_chapter0010.html",
+        "chapter0100.xhtml",
+    ]
+
+
+def test_all_unmapped_html_uses_the_same_special_then_regular_groups(
+    tmp_path,
+    monkeypatch,
+):
+    names = (
+        "response_chapter0010.html",
+        "response_chapternotice_0009.html",
+        "response_chapter0001.html",
+        "response_chapternotice_0002.html",
+    )
+    for name in names:
+        (tmp_path / name).write_text(
+            f"<html><body><p>{name}</p></body></html>",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setenv("SPECIAL_FILE_KEYWORDS", "notice")
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _msg: None)
+
+    assert compiler._find_html_files() == [
+        "response_chapternotice_0002.html",
+        "response_chapternotice_0009.html",
+        "response_chapter0001.html",
+        "response_chapter0010.html",
+    ]
+
+
 def test_non_spine_special_html_is_included_by_default_and_optionally_skipped(
     tmp_path,
     monkeypatch,
@@ -1507,8 +1580,8 @@ def test_non_spine_special_html_is_included_by_default_and_optionally_skipped(
     monkeypatch.delenv("SKIP_NON_SPINE_SPECIAL_FILES", raising=False)
 
     assert compiler._find_html_files() == [
-        "response_chapter0001.html",
         "response_chapter_notice0003.html",
+        "response_chapter0001.html",
     ]
     assert not any("Skipping non-spine special file" in log for log in logs)
 
