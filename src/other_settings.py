@@ -11174,7 +11174,7 @@ def _create_processing_options_section(self, parent):
 
     skip_unreferenced_images_desc = QLabel(
         "Exclude files in the images subfolder that no compiled HTML page "
-        "references. The selected cover is always kept. Disabled by default."
+        "references.\nThe selected cover is always kept. Disabled by default."
     )
     skip_unreferenced_images_desc.setStyleSheet(
         "color: gray; font-size: 10pt;"
