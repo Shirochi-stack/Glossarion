@@ -3285,6 +3285,7 @@ class MetadataTranslator:
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    context=context,
                 )
             except Exception as exc:
                 if self._is_cancelled_error(exc):

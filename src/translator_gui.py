@@ -36392,7 +36392,16 @@ Important rules:
             model = self.model_var
             if model:
                 os.environ['MODEL'] = model
-            
+
+            # This path creates a fresh API client from environment variables,
+            # so refresh the metadata-key pool from the current GUI config.
+            os.environ['USE_METADATA_KEYS'] = (
+                '1' if self.config.get('use_metadata_keys', False) else '0'
+            )
+            os.environ['METADATA_API_KEYS'] = json.dumps(
+                self.config.get('metadata_keys', []) or []
+            )
+
             # Set translation parameters from GUI
             os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.text())
             os.environ['DISABLE_TEMPERATURE'] = '1' if self.disable_temperature_var else '0'
