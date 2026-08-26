@@ -526,7 +526,7 @@ try:
     # Importing splash_utils first warms QtCore/QtGui/QtWidgets in parallel.
     from splash_utils import SplashManager
     from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
-                                    QTextEdit, QVBoxLayout, QHBoxLayout, QBoxLayout, QGridLayout, QFrame,
+                                    QTextEdit, QPlainTextEdit, QVBoxLayout, QHBoxLayout, QBoxLayout, QGridLayout, QFrame,
                                     QMenuBar, QMenu, QMessageBox, QFileDialog, QDialog,
                                     QScrollArea, QTabWidget, QCheckBox, QComboBox, QSpinBox,
                                     QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton,
@@ -13244,17 +13244,17 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                 color: white;
                 background-color: transparent;
             }
-            QLineEdit, QTextEdit {
+            QLineEdit, QTextEdit, QPlainTextEdit {
                 background-color: #2d2d2d;
                 color: white;
                 border: 1px solid #4a5568;
                 border-radius: 3px;
                 padding: 4px;
             }
-            QLineEdit:focus, QTextEdit:focus {
+            QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
                 border-color: #5a9fd4;
             }
-            QLineEdit:disabled, QTextEdit:disabled {
+            QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {
                 background-color: #1a1a1a;
                 color: #666666;
                 border: 1px solid #3a3a3a;
@@ -27002,21 +27002,26 @@ Recent translations to summarize:
 
         self.frame.addWidget(self.api_watchdog_bar, 10, 0, 1, 5)
 
-        # Log Text Edit (row 11, spans all 5 columns)
-        self.log_text = QTextEdit()
+        # Log viewer (row 11, spans all 5 columns). QPlainTextEdit uses Qt's
+        # block-oriented plain-text layout, which is specifically optimized
+        # for large, continuously appended log documents. QTextEdit's rich-
+        # text layout can synchronously relayout hundreds of thousands of
+        # retained blocks when the oldest blocks are evicted.
+        self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)  # Make it read-only
-        # QTextEdit otherwise retains every block forever. Very verbose model
+        # Retain the requested live history without letting it grow forever.
+        # QPlainTextEdit applies the cap through the same QTextDocument while
+        # avoiding QTextEdit's expensive rich-text layout path.
+        # Very verbose model
         # streams can produce over a million lines and make the widget appear
         # frozen even though translation workers are still running.
-        self.log_text.document().setMaximumBlockCount(
-            _GUI_LOG_DOCUMENT_MAX_BLOCKS)
+        self.log_text.setMaximumBlockCount(_GUI_LOG_DOCUMENT_MAX_BLOCKS)
         # IMPORTANT: keep the log flexible so the bottom toolbar never overlaps it on small/HiDPI displays.
         # A large minimum height here can force Qt layouts to place toolbar children outside their parent.
         # Keep this low so the prompt can steal vertical space when the user drags the resize handle.
         self.log_text.setMinimumHeight(40)
         # Make sure it greedily expands vertically and horizontally but can also shrink.
         self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.log_text.setAcceptRichText(False)  # Plain text only
         self.frame.addWidget(self.log_text, 11, 0, 1, 5)  # row, col, rowspan, colspan
         
         # Setup context menu
@@ -38876,16 +38881,12 @@ Important rules:
             if not visible_messages:
                 return
 
-            cursor = self.log_text.textCursor()
-            cursor.movePosition(QTextCursor.End)
             text = "\n".join(visible_messages)
-            if not cursor.atStart():
-                text = "\n" + text
-            cursor.beginEditBlock()
-            try:
-                cursor.insertText(text)
-            finally:
-                cursor.endEditBlock()
+            # appendPlainText() is Qt's optimized log-viewer insertion path.
+            # It appends the whole flood batch as one document operation and
+            # enforces maximumBlockCount without the QTextEdit rich-text
+            # layout/formatting overhead.
+            self.log_text.appendPlainText(text)
             self._schedule_log_autoscroll()
         except Exception:
             # GUI logging must never interrupt translation workers.
@@ -39132,7 +39133,7 @@ Important rules:
                # foreground color.  A previous special case rendered memory
                # and rolling-summary messages as green italics, which also
                # caught ordinary key-pool status messages.
-               self.log_text.append(str(message))
+               self.log_text.appendPlainText(str(message))
                
                # Coalesce auto-scroll work so a log burst does not create one
                # Qt timer per line.
@@ -39198,14 +39199,14 @@ Important rules:
                    cursor.deletePreviousChar()  # Remove the newline
                    
                    if len(lines) > 1:
-                       self.log_text.append(status_msg)
+                       self.log_text.appendPlainText(status_msg)
                    else:
                        cursor.insertText(status_msg)
                else:
                    if content and not content.endswith('\n'):
-                       self.log_text.append(status_msg)
+                       self.log_text.appendPlainText(status_msg)
                    else:
-                       self.log_text.append(status_msg)
+                       self.log_text.appendPlainText(status_msg)
                
                # AGGRESSIVE: Scroll to bottom
                from PySide6.QtCore import QTimer

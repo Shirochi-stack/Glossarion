@@ -384,10 +384,10 @@ def test_translator_gui_init_uses_the_module_qtimer():
     assert "QTimer" not in translator_gui.TranslatorGUI.__init__.__code__.co_varnames
 
 
-def test_translator_gui_retains_800000_live_log_lines():
+def test_translator_gui_retains_300000_live_log_lines():
     import translator_gui
 
-    assert translator_gui._GUI_LOG_DOCUMENT_MAX_BLOCKS == 800_000
+    assert translator_gui._GUI_LOG_DOCUMENT_MAX_BLOCKS == 300_000
 
 
 def test_translator_worker_log_queue_coalesces_wakeups_without_dropping_lines():
