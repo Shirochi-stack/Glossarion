@@ -469,7 +469,7 @@ _GUI_LOG_BATCH_MAX_MESSAGES = 250
 _GUI_LOG_BATCH_MAX_CHARS = 256 * 1024
 # Keep the live widget and flood backlog bounded. Full diagnostic history is
 # retained in logs/run.log; the GUI should always favor recent output.
-_GUI_LOG_DOCUMENT_MAX_BLOCKS = 800_000
+_GUI_LOG_DOCUMENT_MAX_BLOCKS = 300_000
 _GUI_LOG_PENDING_MAX_MESSAGES = 50_000
 # Ordinary status bursts should remain live.  Only switch to the coalesced
 # flood queue after this many direct GUI log events are already outstanding.
