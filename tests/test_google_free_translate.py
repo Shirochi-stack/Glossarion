@@ -390,6 +390,15 @@ def test_translator_gui_retains_300000_live_log_lines():
     assert translator_gui._GUI_LOG_DOCUMENT_MAX_BLOCKS == 300_000
 
 
+def test_translator_gui_removes_plain_text_log_document_margin():
+    import inspect
+    import translator_gui
+
+    init_source = inspect.getsource(translator_gui.TranslatorGUI._create_log_section)
+
+    assert "self.log_text.document().setDocumentMargin(0)" in init_source
+
+
 def test_translator_worker_log_queue_coalesces_wakeups_without_dropping_lines():
     import translator_gui
 

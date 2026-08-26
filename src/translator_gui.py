@@ -27009,6 +27009,12 @@ Recent translations to summarize:
         # retained blocks when the oldest blocks are evicted.
         self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)  # Make it read-only
+        # QPlainTextEdit's default document margin can make its block-based
+        # bottom scroll position reserve roughly one extra line below the last
+        # log entry.  The widget stylesheet already supplies the visible inset,
+        # so remove the redundant document margin and keep the final line close
+        # to the bottom border like the previous QTextEdit viewer.
+        self.log_text.document().setDocumentMargin(0)
         # Retain the requested live history without letting it grow forever.
         # QPlainTextEdit applies the cap through the same QTextDocument while
         # avoiding QTextEdit's expensive rich-text layout path.
