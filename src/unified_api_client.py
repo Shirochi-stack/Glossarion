@@ -1264,13 +1264,16 @@ except ImportError:
     _ANTIGRAVITY_GEMINI_MAX_OUTPUT_TOKENS = 64000
     ANTIGRAVITY_AVAILABLE = False
 
-# AuthZA - Z.AI Coding Plan via the auto-managed local GLM proxy (optional)
+# AuthZA - Z.AI login-plan/general API via the auto-managed local GLM proxy (optional)
 try:
     from glm_proxy import send_chat_completion as _authza_send
     from glm_proxy import cancel_stream as _authza_cancel_stream
     from glm_proxy import reset_cancel as _authza_reset_cancel
     from glm_proxy import open_login as _authza_open_login
     from glm_proxy import uses_general_api as _authza_uses_general_api
+    from glm_proxy import ensure_proxy_running as _authza_ensure_running
+    from glm_proxy import get_local_chat_endpoint as _authza_get_local_chat_endpoint
+    from glm_proxy import get_upstream_chat_endpoint as _authza_get_upstream_chat_endpoint
     AUTHZA_AVAILABLE = True
 except ImportError:
     _authza_send = None
@@ -1278,6 +1281,9 @@ except ImportError:
     _authza_reset_cancel = None
     _authza_open_login = None
     _authza_uses_general_api = None
+    _authza_ensure_running = None
+    _authza_get_local_chat_endpoint = None
+    _authza_get_upstream_chat_endpoint = None
     AUTHZA_AVAILABLE = False
 
 # AuthND - NVIDIA Build browser-backed route (optional, no API key)
@@ -16315,6 +16321,7 @@ class UnifiedClient:
             _model_lower = getattr(self, 'model', '').lower()
             _is_authgem = _model_lower.startswith('authgem')
             _is_authnd = _model_lower.startswith('authnd')
+            _is_authza = _model_lower.startswith('authza')
             _is_vertex = (
                 _model_lower.startswith('vertex/') or
                 _model_lower.startswith('vertex_ai/')
@@ -16332,7 +16339,7 @@ class UnifiedClient:
                     _is_sdk_provider = True
             except Exception:
                 pass
-            _defer_progress_log = _is_authgem or _is_authnd or _is_vertex or _is_sdk_provider
+            _defer_progress_log = _is_authgem or _is_authnd or _is_authza or _is_vertex or _is_sdk_provider
             if not _defer_progress_log and self._should_show_api_lifecycle_logs() and os.environ.get('GRACEFUL_STOP') != '1':
                 try:
                     tls = self._get_thread_local_client()
@@ -16355,12 +16362,13 @@ class UnifiedClient:
             )
         
         # Log stagger status — shows queued+delay or immediate in-progress
-        # (Skip for authgem, native gemini, Antigravity, vertex/ providers,
+        # (Skip for authgem, AuthZA, native gemini, Antigravity, vertex/ providers,
         # and all SDK-routed providers — they emit this after their own setup
         # so the "API call in progress" line appears right before the POST.)
         _model_lower = getattr(self, 'model', '').lower()
         _is_authgem = _model_lower.startswith('authgem')
         _is_authnd = _model_lower.startswith('authnd')
+        _is_authza = _model_lower.startswith('authza')
         _is_search = _model_lower.startswith('search')
         _is_native_gemini = _model_lower.startswith('gemini')
         _is_antigravity = _model_lower.startswith('antigravity')
@@ -16386,6 +16394,7 @@ class UnifiedClient:
         if (
             not _is_authgem
             and not _is_authnd
+            and not _is_authza
             and not _is_search
             and not _is_native_gemini
             and not _is_antigravity
@@ -17934,17 +17943,22 @@ class UnifiedClient:
         except Exception:
             pass
 
-        # Mark queued watchdog entry as in-flight now that we're about to send
+        # Most providers are ready to send at this point. AuthZA still needs to
+        # install/start and health-check its local proxy, so its progress
+        # callback is deliberately consumed by _send_authza after readiness.
         try:
             tls = self._get_thread_local_client()
             self._remember_actual_request_model()
-            cb = getattr(tls, 'pre_api_call_callback', None)
-            if callable(cb):
-                tls.last_pre_api_call_callback = cb
-                tls.last_pre_api_call_callback_request_id = getattr(tls, 'current_request_id', None) or request_id
-                cb()
-            if hasattr(tls, 'pre_api_call_callback'):
-                tls.pre_api_call_callback = None
+            active_model_lower = str(self._get_active_request_model() or '').strip().lower()
+            defer_progress_callback = active_model_lower.startswith('authza')
+            if not defer_progress_callback:
+                cb = getattr(tls, 'pre_api_call_callback', None)
+                if callable(cb):
+                    tls.last_pre_api_call_callback = cb
+                    tls.last_pre_api_call_callback_request_id = getattr(tls, 'current_request_id', None) or request_id
+                    cb()
+                if hasattr(tls, 'pre_api_call_callback'):
+                    tls.pre_api_call_callback = None
         except Exception as cb_err:
             try:
                 print(f"⚠️ Pre-send progress callback failed: {cb_err}")
@@ -17961,12 +17975,13 @@ class UnifiedClient:
                 self.client_type = None
 
         try:
+            deferred_watchdog_providers = {'authnd', 'authza'}
             defer_watchdog_mark = (
-                str(getattr(self, 'client_type', '') or '').lower() == 'authnd'
-                or self._get_actual_provider() == 'authnd'
+                str(getattr(self, 'client_type', '') or '').lower() in deferred_watchdog_providers
+                or self._get_actual_provider() in deferred_watchdog_providers
             )
         except Exception:
-            defer_watchdog_mark = str(getattr(self, 'client_type', '') or '').lower() == 'authnd'
+            defer_watchdog_mark = str(getattr(self, 'client_type', '') or '').lower() in {'authnd', 'authza'}
         if not defer_watchdog_mark:
             try:
                 rid = request_id
@@ -27962,10 +27977,106 @@ class UnifiedClient:
         last_error = None
         label = f"AuthZA{acct_label}" if acct_label else "AuthZA"
         access_label = "general API" if general_api else "login plan"
+        local_endpoint = (
+            _authza_get_local_chat_endpoint(proxy_account_id)
+            if _authza_get_local_chat_endpoint is not None
+            else "local GLM proxy"
+        )
+        upstream_endpoint = (
+            _authza_get_upstream_chat_endpoint()
+            if _authza_get_upstream_chat_endpoint is not None
+            else "unknown"
+        )
         print(
             f"🔐 {label}: Sending through the local GLM proxy "
-            f"(mode={access_label}, model={actual_model})"
+            f"(mode={access_label}, endpoint={upstream_endpoint}, model={actual_model})"
         )
+
+        _thread_name = threading.current_thread().name
+        try:
+            _tls = self._get_thread_local_client()
+            _request_label = getattr(_tls, 'current_request_label', None) or 'request'
+            _request_context = getattr(_tls, 'current_request_context', None) or 'translation'
+            _request_id = getattr(_tls, 'current_request_id', None)
+        except Exception:
+            _tls = None
+            _request_label = 'request'
+            _request_context = 'translation'
+            _request_id = None
+        _show_lifecycle = (
+            self._should_show_api_lifecycle_logs()
+            and os.environ.get('GRACEFUL_STOP') != '1'
+        )
+        if _show_lifecycle:
+            self._debug_log(
+                f"🔌 [{_thread_name}] {_request_label} ({_request_context}) "
+                f"Connecting to AuthZA GLM proxy "
+                f"(local={local_endpoint}, upstream={upstream_endpoint})..."
+            )
+
+        if _authza_ensure_running is None:
+            raise UnifiedClientError(
+                "AuthZA proxy readiness helper is unavailable.",
+                error_type="config_error",
+            )
+        try:
+            proxy_status = _authza_ensure_running(
+                log_fn=print,
+                account_id=proxy_account_id,
+                auto_login=True,
+            )
+        except Exception as exc:
+            raise UnifiedClientError(
+                f"AuthZA GLM proxy could not be started: {exc}",
+                error_type="config_error",
+            ) from exc
+        if not proxy_status.get("running"):
+            error_msg = proxy_status.get("error", "Proxy is not running.")
+            raise UnifiedClientError(
+                f"AuthZA GLM proxy could not be started: {error_msg}",
+                error_type="config_error",
+            )
+        if self._is_stop_requested():
+            raise UnifiedClientError(
+                "AuthZA: Translation stopped by user",
+                error_type="cancelled",
+            )
+
+        if _show_lifecycle:
+            self._debug_log(
+                f"✅ [{_thread_name}] {_request_label} ({_request_context}) "
+                f"Connected to AuthZA GLM proxy "
+                f"(local={local_endpoint}, upstream={upstream_endpoint})"
+            )
+
+        # Start the visible progress state and watchdog only after the proxy is
+        # healthy. This keeps startup/login/install time out of API-call timing.
+        if _tls is not None:
+            try:
+                callback = getattr(_tls, 'pre_api_call_callback', None)
+                if callable(callback):
+                    _tls.last_pre_api_call_callback = callback
+                    _tls.last_pre_api_call_callback_request_id = _request_id
+                    callback()
+                if hasattr(_tls, 'pre_api_call_callback'):
+                    _tls.pre_api_call_callback = None
+            except Exception as cb_err:
+                print(f"⚠️ Pre-send AuthZA progress callback failed: {cb_err}")
+        try:
+            _api_watchdog_mark_in_flight(_request_id, request_model)
+        except Exception:
+            pass
+
+        if _show_lifecycle:
+            self._debug_log(
+                f"📤 [{_thread_name}] {_request_label} ({_request_context}) "
+                "— Sending API call now"
+            )
+            self._debug_log(
+                f"📤 [{_thread_name}] {_request_label} ({_request_context}) "
+                f"API call in progress{self._get_thinking_status_label()}"
+            )
+
         for attempt in range(max_retries):
             # Check stop flag before each attempt
             if self._is_stop_requested():
@@ -27998,7 +28109,7 @@ class UnifiedClient:
                     log_fn=print,
                     connect_timeout=_connect_timeout,
                     account_id=proxy_account_id,
-                    auto_login=True,
+                    auto_login=False,
                 )
 
                 content = result.get("content", "")

@@ -56,8 +56,12 @@ DEFAULT_PROXY_PORT = 18870
 CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
 MODELS_ENDPOINT = "/v1/models"
 HEALTH_ENDPOINT = "/health"
+LOGIN_PLAN_CHAT_ENDPOINT = (
+    "https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages"
+)
 LOGIN_PLAN_MODELS_ENDPOINT = "https://zcode.z.ai/api/v1/zcode-plan/billing/balance"
 GENERAL_API_BASE = "https://api.z.ai/api/paas/v4"
+GENERAL_API_CHAT_ENDPOINT = f"{GENERAL_API_BASE}/chat/completions"
 GENERAL_API_MODELS_ENDPOINT = f"{GENERAL_API_BASE}/models"
 GENERAL_API_MODE_ENV = "AUTHZA_USE_GENERAL_API"
 BUN_NPM_PACKAGE = os.environ.get("GLM_PROXY_BUN_PACKAGE", "bun@latest")
@@ -248,6 +252,13 @@ def set_general_api_mode(enabled: bool) -> bool:
     return current
 
 
+def get_upstream_chat_endpoint() -> str:
+    """Return the exact Z.AI endpoint selected for AuthZA chat requests."""
+    if uses_general_api():
+        return GENERAL_API_CHAT_ENDPOINT
+    return LOGIN_PLAN_CHAT_ENDPOINT
+
+
 def account_id_from_model(model: str) -> Optional[int]:
     """Return the isolated proxy account selected by an ``authza`` model.
 
@@ -326,6 +337,11 @@ def get_proxy_url(account_id: Optional[int] = None) -> str:
     if external:
         return external
     return f"http://{DEFAULT_PROXY_HOST}:{_get_proxy_port(account_id)}"
+
+
+def get_local_chat_endpoint(account_id: Optional[int] = None) -> str:
+    """Return the local OpenAI-compatible endpoint used by Glossarion."""
+    return f"{get_proxy_url(account_id)}{CHAT_COMPLETIONS_ENDPOINT}"
 
 
 def _github_headers() -> Dict[str, str]:

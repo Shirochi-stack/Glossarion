@@ -22,6 +22,11 @@ def _isolated_glm_proxy(tmp_path, monkeypatch):
     glm_proxy._proxy_processes.clear()
     glm_proxy.reset_cancel()
     glm_proxy.set_proxy_started_callback(None)
+    monkeypatch.setattr(
+        unified_api_client,
+        "_authza_ensure_running",
+        lambda **_kwargs: {"running": True},
+    )
     yield
     glm_proxy._proxy_processes.clear()
     glm_proxy.reset_cancel()
@@ -64,6 +69,14 @@ def test_account_paths_urls_and_ports_are_isolated(monkeypatch):
     monkeypatch.setenv("GLM_PROXY_PORT_3", "22003")
     assert glm_proxy._get_proxy_port(2) == 21002
     assert glm_proxy._get_proxy_port(3) == 22003
+
+
+def test_authza_chat_endpoint_helpers_report_selected_route(monkeypatch):
+    assert glm_proxy.get_local_chat_endpoint(3) == "http://127.0.0.1:18873/v1/chat/completions"
+    assert glm_proxy.get_upstream_chat_endpoint() == glm_proxy.LOGIN_PLAN_CHAT_ENDPOINT
+
+    monkeypatch.setenv("AUTHZA_USE_GENERAL_API", "1")
+    assert glm_proxy.get_upstream_chat_endpoint() == glm_proxy.GENERAL_API_CHAT_ENDPOINT
 
 
 def test_authza_models_are_available_in_the_main_dropdown():
@@ -583,7 +596,90 @@ def test_unified_authza_route_forwards_numbered_account(tmp_path, monkeypatch):
     assert result.content == "translated"
     assert observed["model"] == "glm-5.3"
     assert observed["account_id"] == 2
-    assert observed["auto_login"] is True
+    assert observed["auto_login"] is False
+
+
+def test_authza_connects_before_progress_watchdog_and_send(tmp_path, monkeypatch):
+    events = []
+    observed = {}
+    route_logs = []
+
+    def fake_ensure(**kwargs):
+        observed["ensure"] = kwargs
+        events.append("proxy-ready")
+        return {"running": True}
+
+    def fake_send(**kwargs):
+        observed["send"] = kwargs
+        events.append("http-send")
+        return {"content": "translated", "finish_reason": "stop", "usage": None}
+
+    def fake_watchdog(request_id, model):
+        events.append(f"watchdog:{request_id}:{model}")
+
+    monkeypatch.setattr(unified_api_client, "_authza_ensure_running", fake_ensure)
+    monkeypatch.setattr(unified_api_client, "_authza_send", fake_send)
+    monkeypatch.setattr(unified_api_client, "_authza_uses_general_api", lambda: False)
+    monkeypatch.setattr(
+        unified_api_client,
+        "_authza_get_local_chat_endpoint",
+        lambda account_id: f"http://127.0.0.1:{18870 + account_id}/v1/chat/completions",
+    )
+    monkeypatch.setattr(
+        unified_api_client,
+        "_authza_get_upstream_chat_endpoint",
+        lambda: glm_proxy.LOGIN_PLAN_CHAT_ENDPOINT,
+    )
+    monkeypatch.setattr(unified_api_client, "_api_watchdog_mark_in_flight", fake_watchdog)
+    monkeypatch.setattr(unified_api_client, "AUTHZA_AVAILABLE", True)
+    monkeypatch.setattr(
+        unified_api_client,
+        "print",
+        lambda *parts, **_kwargs: route_logs.append(" ".join(str(part) for part in parts)),
+    )
+
+    client = UnifiedClient(
+        api_key="",
+        model="authza2/glm-5.3",
+        output_dir=str(tmp_path),
+    )
+    monkeypatch.setattr(client, "_get_max_retries", lambda: 1)
+    monkeypatch.setattr(client, "_should_show_api_lifecycle_logs", lambda: True)
+    monkeypatch.setattr(client, "_debug_log", events.append)
+    monkeypatch.setattr(client, "_apply_api_call_stagger", lambda: None)
+    tls = client._get_thread_local_client()
+    tls.current_request_id = "request-42"
+    tls.current_request_label = "Chapter 7"
+    tls.current_request_context = "glossary"
+    tls.pre_api_call_callback = lambda: events.append("progress-watch")
+
+    result = client._get_response(
+        [{"role": "user", "content": "translate"}],
+        temperature=0.2,
+        max_tokens=256,
+        max_completion_tokens=None,
+        response_name="translation",
+        request_id="request-42",
+    )
+
+    assert result.content == "translated"
+    connecting = next(i for i, event in enumerate(events) if "Connecting to AuthZA GLM proxy" in event)
+    ready = events.index("proxy-ready")
+    connected = next(i for i, event in enumerate(events) if "Connected to AuthZA GLM proxy" in event)
+    progress_watch = events.index("progress-watch")
+    watchdog = events.index("watchdog:request-42:authza2/glm-5.3")
+    sending = next(i for i, event in enumerate(events) if "Sending API call now" in event)
+    in_progress = next(i for i, event in enumerate(events) if "API call in progress" in event)
+    http_send = events.index("http-send")
+    assert connecting < ready < connected < progress_watch < watchdog < sending < in_progress < http_send
+    assert observed["ensure"]["account_id"] == 2
+    assert observed["ensure"]["auto_login"] is True
+    assert observed["send"]["auto_login"] is False
+
+    assert any(
+        f"endpoint={glm_proxy.LOGIN_PLAN_CHAT_ENDPOINT}" in message
+        for message in route_logs
+    )
 
 
 def test_authza_entitlement_error_is_not_retried_as_rate_limit(tmp_path, monkeypatch):
