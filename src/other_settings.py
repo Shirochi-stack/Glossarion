@@ -3224,12 +3224,12 @@ def _create_response_handling_section(self, parent):
     except Exception:
         pass
     self.allow_authgpt_batch_stream_logs_checkbox = self._create_styled_checkbox(
-        "Allow forced-stream batch log (AuthGPT / AuthGrok / AuthGem / AuthCD / Antigravity / OcAgy)"
+        "Allow forced-stream batch log (AuthGPT / AuthGrok / AuthGem / AuthCD / AuthZA / Antigravity / OcAgy)"
     )
     self.allow_authgpt_batch_stream_logs_checkbox.setToolTip(
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
         "AuthGPT (authgpt/), AuthGrok (authgrok/), AuthGem (authgem/), AuthCD (authcd/), "
-        "Antigravity (antigravity/), and OcAgy (ocagy/) always stream internally. "
+        "AuthZA (authza/), Antigravity (antigravity/), and OcAgy (ocagy/) always stream internally. "
         "During batch translation this can flood the log. Enable this to see streaming "
         "tokens and reasoning in the log during batch mode. Off by default.</p></qt>"
     )
@@ -13626,6 +13626,13 @@ def _create_custom_api_endpoints_section(self, parent_frame):
         if hasattr(self, 'append_log'):
             mode = "General API (API key / billable balance)" if enabled else "ZCode login plan"
             self.append_log(f"🔄 AuthZA access mode: {mode}")
+        # The AuthZA catalog cache is mode-aware. Scheduling the selected
+        # provider now makes a mode switch fetch the matching endpoint instead
+        # of reusing a fresh catalog from the other access mode.
+        try:
+            self._schedule_current_provider_catalog_refresh(0)
+        except Exception:
+            pass
 
     authza_general_cb.toggled.connect(_on_authza_general_api_toggled)
     _refresh_authza_mode_help(self.authza_use_general_api_var)

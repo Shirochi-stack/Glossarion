@@ -31,6 +31,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
+try:
+    import httpx
+except ImportError:  # pragma: no cover - requests remains the compatibility fallback
+    httpx = None
+
 from installer_utils import run_logged_subprocess
 
 
@@ -64,6 +69,7 @@ GENERAL_API_BASE = "https://api.z.ai/api/paas/v4"
 GENERAL_API_CHAT_ENDPOINT = f"{GENERAL_API_BASE}/chat/completions"
 GENERAL_API_MODELS_ENDPOINT = f"{GENERAL_API_BASE}/models"
 GENERAL_API_MODE_ENV = "AUTHZA_USE_GENERAL_API"
+GENERAL_API_CATALOG_MIN_TIMEOUT_SECONDS = 45
 BUN_NPM_PACKAGE = os.environ.get("GLM_PROXY_BUN_PACKAGE", "bun@latest")
 BUN_INSTALL_TIMEOUT_SECONDS = 300
 DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 600
@@ -183,6 +189,8 @@ process.stdout.write("GLOSSARION_MODELS=" + JSON.stringify(models));
 '''.strip()
 
 _cancel_event = threading.Event()
+_cancel_state_lock = threading.Lock()
+_cancel_generation = 0
 _active_response_lock = threading.Lock()
 _active_responses: Dict[int, Any] = {}
 _proxy_launch_lock = threading.Lock()
@@ -196,6 +204,15 @@ _cached_release: Optional[Dict[str, Any]] = None
 
 def _log_noop(_message: str) -> None:
     return None
+
+
+def _log_console(message: str) -> None:
+    """Best-effort console logging that also works on legacy Windows codepages."""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        text = str(message).encode("ascii", errors="backslashreplace").decode("ascii")
+        print(text)
 
 
 def set_proxy_started_callback(callback) -> None:
@@ -991,12 +1008,30 @@ def has_credentials(account_id: Optional[int] = None) -> bool:
         return False
 
 
+def can_auto_provision_general_api_key(account_id: Optional[int] = None) -> bool:
+    """Return whether polling may retrieve a General API key via Z.AI login."""
+    return uses_general_api() and _external_proxy_url(account_id) is None
+
+
 def _build_headers(account_id: Optional[int] = None) -> Dict[str, str]:
     api_key = _proxy_api_key(account_id)
     return {
         "Authorization": f"Bearer {api_key}",
         "x-api-key": api_key,
         "Content-Type": "application/json",
+    }
+
+
+def _build_stream_headers(account_id: Optional[int] = None) -> Dict[str, str]:
+    """Build headers that keep SSE uncompressed and flushable end to end."""
+    return {
+        **_build_headers(account_id),
+        "Accept": "text/event-stream",
+        # The managed Node proxy forwards the client's accepted encoding to
+        # Z.AI. Compressed SSE can sit in gzip/Brotli buffers until generation
+        # completes, which turns a nominal stream into one final burst.
+        "Accept-Encoding": "identity",
+        "Cache-Control": "no-cache",
     }
 
 
@@ -1063,6 +1098,37 @@ def _login(account_id: Optional[int] = None, log_fn=None) -> None:
             f"Z.AI login did not complete{suffix}. " + str(result.get("output") or "")
         )
     _log(f"✅ GLM proxy: Z.AI login saved for {label}.")
+
+
+def ensure_general_api_key(
+    account_id: Optional[int] = None,
+    *,
+    log_fn=None,
+    force: bool = False,
+) -> bool:
+    """Retrieve or refresh the selected account's provisioned General API key.
+
+    Returns ``True`` when the browser provisioning flow was run. The upstream
+    login command exchanges the Z.AI OAuth result through ``KeyResolver`` and
+    stores the resulting project API key in the isolated encrypted credential
+    file used by the model poller and proxy.
+    """
+    account = _normalize_account_id(account_id)
+    if not uses_general_api():
+        return False
+    if has_credentials(account) and not force:
+        return False
+    if not can_auto_provision_general_api_key(account):
+        raise RuntimeError("An external GLM proxy cannot auto-provision a Z.AI General API key")
+    _log = log_fn or _log_console
+    label = "default account" if account == 0 else f"account #{account}"
+    action = "refreshing" if force else "retrieving"
+    _log(f"🔑 AuthZA: {action} the Z.AI General API key for {label} before model polling…")
+    _login(account_id=account, log_fn=_log)
+    if not has_credentials(account):
+        raise RuntimeError(f"Z.AI General API key retrieval did not save a key for {label}")
+    _log(f"✅ AuthZA: General API key ready for {label}; polling models now.")
+    return True
 
 
 def open_login(log_fn=None, account_id: Optional[int] = None) -> str:
@@ -1167,7 +1233,11 @@ def shutdown_proxy(account_id: Optional[int] = None) -> None:
 
 
 def cancel_stream() -> None:
-    _cancel_event.set()
+    """Signal active streams without allowing a later reset to revive them."""
+    global _cancel_generation
+    with _cancel_state_lock:
+        _cancel_generation += 1
+        _cancel_event.set()
     with _active_response_lock:
         responses = list(_active_responses.values())
     for response in responses:
@@ -1178,11 +1248,30 @@ def cancel_stream() -> None:
 
 
 def reset_cancel() -> None:
-    _cancel_event.clear()
+    """Allow new streams while keeping prior cancelled generations invalid."""
+    with _cancel_state_lock:
+        _cancel_event.clear()
 
 
 def is_cancelled() -> bool:
     return _cancel_event.is_set()
+
+
+def capture_cancel_generation() -> int:
+    """Return the cancellation generation a new AuthZA operation belongs to."""
+    with _cancel_state_lock:
+        return _cancel_generation
+
+
+def is_cancel_generation_cancelled(cancel_generation: Optional[int]) -> bool:
+    """Return whether Stop invalidated a particular AuthZA operation."""
+    with _cancel_state_lock:
+        if _cancel_event.is_set():
+            return True
+        return (
+            cancel_generation is not None
+            and int(cancel_generation) != _cancel_generation
+        )
 
 
 def _register_response(response: Any) -> None:
@@ -1195,8 +1284,8 @@ def _unregister_response(response: Any) -> None:
         _active_responses.pop(id(response), None)
 
 
-def _raise_if_cancelled() -> None:
-    if _cancel_event.is_set():
+def _raise_if_cancelled(cancel_generation: Optional[int] = None) -> None:
+    if is_cancel_generation_cancelled(cancel_generation):
         raise RuntimeError("GLM proxy: stream cancelled by user")
 
 
@@ -1311,11 +1400,34 @@ def send_message(
 
 
 def _iter_sse_lines(response: Any) -> Iterable[str]:
-    for raw in response.iter_lines(decode_unicode=True, chunk_size=1):
+    try:
+        lines = response.iter_lines(decode_unicode=True, chunk_size=1)
+    except TypeError:
+        lines = response.iter_lines()
+    for raw in lines:
         if isinstance(raw, bytes):
             yield raw.decode("utf-8", errors="replace")
         else:
             yield str(raw or "")
+
+
+def _log_text_stream(text: str, log_buf: List[str], log_fn) -> None:
+    """Emit readable live text without creating one GUI row per SSE token."""
+    if not text:
+        return
+    combined = "".join(log_buf) + text
+    for tag in ("</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</p>"):
+        combined = combined.replace(tag, tag + "\n")
+    if "\n" in combined:
+        parts = combined.split("\n")
+        for part in parts[:-1]:
+            log_fn(part)
+        log_buf[:] = [parts[-1]]
+    else:
+        log_buf[:] = [combined]
+        if len(combined) > 150:
+            log_fn(combined)
+            log_buf.clear()
 
 
 def _stream_error(event: Dict[str, Any]) -> Optional[str]:
@@ -1323,6 +1435,17 @@ def _stream_error(event: Dict[str, Any]) -> Optional[str]:
     if isinstance(error, dict):
         return str(error.get("message") or error.get("code") or error)
     return str(error) if error else None
+
+
+def _close_stream_response(response: Any, stream_context: Any = None) -> None:
+    """Close either an httpx streaming context or a requests response."""
+    try:
+        if stream_context is not None:
+            stream_context.__exit__(None, None, None)
+        elif response is not None:
+            response.close()
+    except Exception:
+        pass
 
 
 def send_message_stream(
@@ -1336,41 +1459,91 @@ def send_message_stream(
     account_id: Optional[int] = None,
     auto_login: bool = True,
     connect_timeout: Optional[float] = None,
+    cancel_generation: Optional[int] = None,
 ) -> Dict[str, Any]:
+    """Send an always-streaming OpenAI-compatible request through AuthZA."""
+    _log = log_fn or _log_noop
+    request_cancel_generation = (
+        capture_cancel_generation()
+        if cancel_generation is None
+        else int(cancel_generation)
+    )
     account = _normalize_account_id(account_id)
-    _raise_if_cancelled()
+    _raise_if_cancelled(request_cancel_generation)
     _ensure_for_request(account, log_fn=log_fn, auto_login=auto_login)
+    _raise_if_cancelled(request_cancel_generation)
     payload = _payload(messages, model, temperature, max_tokens, stream=True)
+    proxy_url = get_proxy_url(account)
+    _log(f"🌊 AuthZA: streaming from {proxy_url} (model={payload['model']})")
+    url = f"{proxy_url}{CHAT_COMPLETIONS_ENDPOINT}"
+    headers = _build_stream_headers(account)
+    response = None
+    stream_context = None
     try:
-        response = requests.post(
-            f"{get_proxy_url(account)}{CHAT_COMPLETIONS_ENDPOINT}",
-            headers=_build_headers(account),
-            json=payload,
-            timeout=(connect_timeout or min(30, timeout), timeout),
-            stream=True,
-        )
+        if httpx is not None:
+            effective_connect_timeout = connect_timeout or min(30, timeout)
+            timeout_config = httpx.Timeout(timeout, connect=effective_connect_timeout)
+            stream_context = httpx.stream(
+                "POST",
+                url,
+                headers=headers,
+                json=payload,
+                timeout=timeout_config,
+            )
+            response = stream_context.__enter__()
+        else:
+            _log("AuthZA: httpx is unavailable; falling back to requests streaming.")
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=(connect_timeout or min(30, timeout), timeout),
+                stream=True,
+            )
     except requests.ConnectionError as exc:
         raise RuntimeError(f"GLM proxy connection failed: {exc}") from exc
     except requests.Timeout as exc:
         raise RuntimeError(f"GLM proxy request timed out after {timeout}s") from exc
+    except Exception as exc:
+        if httpx is not None and isinstance(exc, httpx.ConnectError):
+            raise RuntimeError(f"GLM proxy connection failed: {exc}") from exc
+        if httpx is not None and isinstance(exc, httpx.TimeoutException):
+            raise RuntimeError(f"GLM proxy request timed out after {timeout}s") from exc
+        raise
+    try:
+        _raise_if_cancelled(request_cancel_generation)
+    except RuntimeError:
+        _close_stream_response(response, stream_context)
+        raise
     if response.status_code != 200:
+        if stream_context is not None:
+            try:
+                response.read()
+            except Exception:
+                pass
         message = _extract_error(response)
-        response.close()
+        _close_stream_response(response, stream_context)
         raise RuntimeError(f"GLM proxy: HTTP {response.status_code} - {message}")
 
-    _log = log_fn or _log_noop
     content: List[str] = []
     finish_reason: Optional[str] = None
     usage = None
+    got_first_data = False
+    saw_done_marker = False
+    content_log_buf: List[str] = []
+    reasoning_log_buf: List[str] = []
+    reasoning_started = False
+    text_started = False
     started = time.monotonic()
     _register_response(response)
     try:
         for line in _iter_sse_lines(response):
-            _raise_if_cancelled()
+            _raise_if_cancelled(request_cancel_generation)
             if not line.startswith("data:"):
                 continue
             raw = line[5:].strip()
             if raw == "[DONE]":
+                saw_done_marker = True
                 break
             try:
                 event = json.loads(raw)
@@ -1379,6 +1552,9 @@ def send_message_stream(
             error = _stream_error(event)
             if error:
                 raise RuntimeError(f"GLM proxy stream error: {error}")
+            if not got_first_data:
+                got_first_data = True
+                _log(f"GLM proxy: first token in {time.monotonic() - started:.1f}s, streaming...")
             if event.get("usage") is not None:
                 usage = event.get("usage")
             choices = event.get("choices") or []
@@ -1388,22 +1564,62 @@ def send_message_stream(
             delta = choice.get("delta") or {}
             reasoning = _content_text(delta.get("reasoning_content"))
             if reasoning and log_stream:
-                _log(reasoning)
+                if not reasoning_started:
+                    reasoning_started = True
+                    _log("[authza] Thinking...")
+                _log_text_stream(reasoning, reasoning_log_buf, _log)
             text = _content_text(delta.get("content"))
             if text:
                 content.append(text)
                 if log_stream:
-                    _log(text)
+                    if not text_started:
+                        text_started = True
+                        if reasoning_started:
+                            remainder = "".join(reasoning_log_buf).strip()
+                            if remainder:
+                                _log(f"    {remainder}")
+                            reasoning_log_buf.clear()
+                            _log("🧠 [authza] Thinking complete")
+                            _log("─" * 50)
+                        _log("📡 AuthZA: text streaming...")
+                    _log_text_stream(text, content_log_buf, _log)
             if choice.get("finish_reason") is not None:
                 finish_reason = str(choice["finish_reason"])
+
+        if log_stream and reasoning_log_buf:
+            remainder = "".join(reasoning_log_buf).strip()
+            if remainder:
+                _log(f"    {remainder}")
+        if log_stream and content_log_buf:
+            remainder = "".join(content_log_buf).strip()
+            if remainder:
+                _log(remainder)
+        _raise_if_cancelled(request_cancel_generation)
     finally:
         _unregister_response(response)
-        response.close()
-    _raise_if_cancelled()
+        _close_stream_response(response, stream_context)
+    _raise_if_cancelled(request_cancel_generation)
+    if finish_reason is None:
+        _log("❌ GLM proxy: stream ended without an explicit finish_reason")
+        raise RuntimeError("GLM proxy: stream ended without an explicit finish_reason")
+    terminal_usage = {}
+    if isinstance(usage, dict):
+        terminal_usage = {
+            key: usage.get(key)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+            if key in usage
+        }
+    _log(
+        "📊 AuthZA: terminal metadata "
+        f"finish_reason={finish_reason!r}, max_tokens={max_tokens!r}, "
+        f"usage={terminal_usage!r}"
+    )
     _log(f"GLM proxy: stream finished in {time.monotonic() - started:.1f}s")
     return {
         "content": "".join(content),
-        "finish_reason": finish_reason or "stop",
+        "finish_reason": finish_reason,
+        "finish_reason_observed": True,
+        "stream_done_observed": saw_done_marker,
         "usage": usage,
         "raw_response": None,
     }
@@ -1420,6 +1636,8 @@ def send_chat_completion(
     connect_timeout: Optional[float] = None,
     account_id: Optional[int] = None,
     auto_login: bool = True,
+    log_stream: bool = True,
+    cancel_generation: Optional[int] = None,
     **_ignored: Any,
 ) -> Dict[str, Any]:
     """Compatibility entrypoint used by ``UnifiedClient`` (streaming by default)."""
@@ -1430,27 +1648,43 @@ def send_chat_completion(
         max_tokens=max_tokens,
         timeout=timeout,
         log_fn=log_fn,
+        log_stream=log_stream,
         account_id=account_id,
         auto_login=auto_login,
         connect_timeout=connect_timeout,
+        cancel_generation=cancel_generation,
     )
 
 
 def fetch_available_models(
     account_id: Optional[int] = None,
     timeout: float = 10,
+    *,
+    auto_provision: bool = True,
+    log_fn=None,
 ) -> List[str]:
     """Return model IDs visible in the selected AuthZA access mode."""
     account = _normalize_account_id(account_id)
+    general_api = uses_general_api()
+    if general_api and auto_provision:
+        ensure_general_api_key(account, log_fn=log_fn)
     if not has_credentials(account):
         raise RuntimeError("GLM proxy has no saved Z.AI login for this account")
     runtime_dir, bun = _ensure_runtime_and_dependencies()
     env = _runtime_env(account)
-    general_api = uses_general_api()
+    effective_timeout = max(1.0, float(timeout))
+    if general_api:
+        # The global /models endpoint regularly takes longer than the generic
+        # eight-second provider poll budget. Keep it from failing before Z.AI
+        # has returned the catalog.
+        effective_timeout = max(
+            effective_timeout,
+            float(GENERAL_API_CATALOG_MIN_TIMEOUT_SECONDS),
+        )
     env.update(
         {
             "ZCODE_APP_VERSION": ZCODE_APP_VERSION,
-            "ZCODE_MODEL_CATALOG_TIMEOUT_MS": str(max(1000, int(float(timeout) * 1000))),
+            "ZCODE_MODEL_CATALOG_TIMEOUT_MS": str(max(1000, int(effective_timeout * 1000))),
         }
     )
     if general_api:
@@ -1459,15 +1693,51 @@ def fetch_available_models(
     else:
         env["ZCODE_LOGIN_PLAN_MODELS_ENDPOINT"] = LOGIN_PLAN_MODELS_ENDPOINT
         catalog_script = _LOGIN_PLAN_MODEL_CATALOG_SCRIPT
-    result = run_logged_subprocess(
-        [*bun, "-e", catalog_script],
-        log_fn=None,
-        timeout=max(2, float(timeout) + 2),
-        cwd=runtime_dir,
-        env=env,
+    _log = log_fn or _log_console
+    endpoint = GENERAL_API_MODELS_ENDPOINT if general_api else LOGIN_PLAN_MODELS_ENDPOINT
+    mode_label = "general API" if general_api else "login plan"
+    _log(
+        f"🌐 AuthZA: polling {mode_label} models from {endpoint} "
+        f"(timeout={effective_timeout:g}s)…"
     )
+
+    refreshed_key = False
+    while True:
+        result = run_logged_subprocess(
+            [*bun, "-e", catalog_script],
+            log_fn=None,
+            timeout=max(2, effective_timeout + 2),
+            cwd=runtime_dir,
+            env=env,
+        )
+        if result["returncode"] == 0:
+            break
+        error_output = str(result.get("output") or "")
+        auth_error = any(
+            marker in error_output.casefold()
+            for marker in (
+                "http 401",
+                "http 403",
+                "unauthorized",
+                "invalid api key",
+                "api key is unavailable",
+                "token expired",
+            )
+        )
+        if general_api and auto_provision and auth_error and not refreshed_key:
+            ensure_general_api_key(account, log_fn=_log, force=True)
+            env = _runtime_env(account)
+            env.update(
+                {
+                    "ZCODE_APP_VERSION": ZCODE_APP_VERSION,
+                    "ZCODE_MODEL_CATALOG_TIMEOUT_MS": str(int(effective_timeout * 1000)),
+                    "ZCODE_GENERAL_API_MODELS_ENDPOINT": GENERAL_API_MODELS_ENDPOINT,
+                }
+            )
+            refreshed_key = True
+            continue
+        break
     if result["returncode"] != 0:
-        mode_label = "general API" if general_api else "login plan"
         raise RuntimeError(
             str(result.get("output") or f"Z.AI {mode_label} model catalog request failed")
         )

@@ -771,6 +771,8 @@ def test_authza_models_are_in_the_static_dropdown_fallback():
     assert "authza/glm-5.3" in models
     assert "authza/glm-5.2" in models
     assert "authza/glm-4.5-air" in models
+    assert "authza/glm-4.7-flash" in models
+    assert "authza/glm-4.5-flash" in models
 
 
 def test_authza_account_auto_poll_is_credentialed_and_ttl_scoped(tmp_path, monkeypatch):
@@ -801,6 +803,77 @@ def test_authza_account_auto_poll_is_credentialed_and_ttl_scoped(tmp_path, monke
         "authza3/glm-5.2",
     ]
     assert model_options.due_provider_catalog_for_model("authza3/glm-5.3") is None
+
+
+def test_authza_catalog_cache_isolated_by_access_mode(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    state = {"general": False}
+    fetch_calls = []
+
+    def fetch_available_models(account_id, timeout):
+        variant = "general" if state["general"] else "login"
+        fetch_calls.append((variant, account_id, timeout))
+        return [f"glm-{variant}"]
+
+    fake_authza = types.SimpleNamespace(
+        has_credentials=lambda _account_id: True,
+        uses_general_api=lambda: state["general"],
+        fetch_available_models=fetch_available_models,
+    )
+    monkeypatch.setitem(sys.modules, "glm_proxy", fake_authza)
+
+    login_result = model_options.refresh_provider_model_catalogs(
+        active_model="authza/glm-login",
+        only_provider="authza",
+        timeout=0.1,
+    )
+    assert login_result.provider_models["authza"] == ["authza/glm-login"]
+    assert model_options.due_provider_catalog_for_model("authza/glm-login") is None
+
+    state["general"] = True
+    assert model_options.due_provider_catalog_for_model("authza/glm-general") == "authza"
+    assert "authza" not in model_options.get_current_polled_provider_models()
+    assert "authza" not in model_options.get_last_successful_provider_models()
+
+    general_result = model_options.refresh_provider_model_catalogs(
+        active_model="authza/glm-general",
+        only_provider="authza",
+        timeout=0.1,
+    )
+    assert general_result.provider_models["authza"] == ["authza/glm-general"]
+    assert "authza/glm-4.7-flash" in general_result.models
+    assert "authza/glm-4.7-flash" not in general_result.provider_models["authza"]
+    assert fetch_calls == [
+        ("login", 0, 1),
+        ("general", 0, 1),
+    ]
+    cache = model_options._load_model_catalog_cache(force_disk=True)
+    assert cache["providers"]["authza"]["variant"] == "general_api"
+    assert cache["attempt_variants"]["authza"] == "general_api"
+
+
+def test_authza_general_auto_poll_can_start_api_key_provisioning(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    fetch_calls = []
+    fake_authza = types.SimpleNamespace(
+        has_credentials=lambda _account_id: False,
+        can_auto_provision_general_api_key=lambda account_id: account_id == 2,
+        fetch_available_models=lambda account_id, timeout: (
+            fetch_calls.append((account_id, timeout)) or ["glm-5.3-flash"]
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "glm_proxy", fake_authza)
+
+    assert model_options.due_provider_catalog_for_model(
+        "authza2/glm-5.3-flash"
+    ) == "authza:2"
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authza2/glm-5.3-flash",
+        only_provider="authza:2",
+        timeout=0.1,
+    )
+    assert fetch_calls == [(2, 1)]
+    assert result.provider_models["authza:2"] == ["authza2/glm-5.3-flash"]
 
 
 def test_only_vertex_style_routes_remain_static_by_design():

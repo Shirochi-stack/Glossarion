@@ -453,6 +453,7 @@ def test_send_message_parses_openai_response(monkeypatch):
 
 def test_send_message_stream_collects_content_and_usage(monkeypatch):
     monkeypatch.setattr(glm_proxy, "_ensure_for_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(glm_proxy, "httpx", None)
     response = FakeStreamResponse(
         [
             'data: {"choices":[{"delta":{"reasoning_content":"think"}}]}',
@@ -473,8 +474,115 @@ def test_send_message_stream_collects_content_and_usage(monkeypatch):
     assert result["content"] == "hello"
     assert result["finish_reason"] == "stop"
     assert result["usage"] == {"total_tokens": 4}
+    assert result["stream_done_observed"] is True
     assert response.closed is True
-    assert "think" in logs
+    assert any("Thinking" in line for line in logs)
+    assert any("think" in line for line in logs)
+    assert any("hello" in line for line in logs)
+
+
+def test_send_chat_completion_forwards_forced_stream_controls(monkeypatch):
+    observed = {}
+
+    def fake_stream(**kwargs):
+        observed.update(kwargs)
+        return {"content": "ok", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setattr(glm_proxy, "send_message_stream", fake_stream)
+
+    result = glm_proxy.send_chat_completion(
+        messages=[{"role": "user", "content": "hi"}],
+        log_stream=False,
+        cancel_generation=17,
+    )
+
+    assert result["content"] == "ok"
+    assert observed["log_stream"] is False
+    assert observed["cancel_generation"] == 17
+
+
+def test_send_message_stream_rejects_missing_finish_reason(monkeypatch):
+    monkeypatch.setattr(glm_proxy, "_ensure_for_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(glm_proxy, "httpx", None)
+    response = FakeStreamResponse(
+        [
+            'data: {"choices":[{"delta":{"content":"partial"}}]}',
+            "data: [DONE]",
+        ]
+    )
+    monkeypatch.setattr(glm_proxy.requests, "post", lambda *args, **kwargs: response)
+
+    with pytest.raises(RuntimeError, match="explicit finish_reason"):
+        glm_proxy.send_message_stream(
+            [{"role": "user", "content": "hi"}],
+            log_stream=False,
+        )
+
+    assert response.closed is True
+
+
+def test_send_message_stream_prefers_uncompressed_httpx_sse(monkeypatch):
+    monkeypatch.setattr(glm_proxy, "_ensure_for_request", lambda *args, **kwargs: None)
+    logs = []
+    observed = {}
+
+    class InspectingResponse(FakeStreamResponse):
+        def iter_lines(self):
+            yield 'data: {"choices":[{"delta":{"reasoning_content":"think"}}]}'
+            assert any("Thinking..." in line for line in logs)
+            yield 'data: {"choices":[{"delta":{"content":"answer\\n"}}]}'
+            assert any("think" in line for line in logs)
+            assert any("Thinking complete" in line for line in logs)
+            assert any("answer" in line for line in logs)
+            yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+            yield "data: [DONE]"
+
+    response = InspectingResponse([])
+
+    class FakeStreamContext:
+        def __enter__(self):
+            return response
+
+        def __exit__(self, *_args):
+            response.close()
+
+    class FakeHttpx:
+        class ConnectError(Exception):
+            pass
+
+        class TimeoutException(Exception):
+            pass
+
+        @staticmethod
+        def Timeout(timeout, connect):
+            observed["timeout"] = timeout
+            observed["connect_timeout"] = connect
+            return (timeout, connect)
+
+        @staticmethod
+        def stream(method, url, **kwargs):
+            observed.update(method=method, url=url, **kwargs)
+            return FakeStreamContext()
+
+    monkeypatch.setattr(glm_proxy, "httpx", FakeHttpx)
+    monkeypatch.setattr(
+        glm_proxy.requests,
+        "post",
+        lambda *_args, **_kwargs: pytest.fail("requests fallback should not be used"),
+    )
+
+    result = glm_proxy.send_message_stream(
+        [{"role": "user", "content": "hi"}],
+        account_id=2,
+        log_fn=logs.append,
+    )
+
+    assert result["content"] == "answer\n"
+    assert observed["method"] == "POST"
+    assert observed["headers"]["Accept"] == "text/event-stream"
+    assert observed["headers"]["Accept-Encoding"] == "identity"
+    assert observed["json"]["stream"] is True
+    assert response.closed is True
 
 
 def test_fetch_available_models_deduplicates(monkeypatch):
@@ -533,6 +641,94 @@ def test_fetch_available_models_uses_general_api_catalog(monkeypatch):
     assert observed["env"]["ZCODE_PROXY_CREDENTIALS_PATH"].endswith(
         "credentials-general-api.json"
     )
+    assert observed["env"]["ZCODE_MODEL_CATALOG_TIMEOUT_MS"] == "45000"
+
+
+def test_general_catalog_auto_provisions_api_key_before_poll(monkeypatch):
+    monkeypatch.setenv("AUTHZA_USE_GENERAL_API", "1")
+    credential_state = {"ready": False}
+    login_calls = []
+    logs = []
+    observed = {}
+
+    monkeypatch.setattr(
+        glm_proxy,
+        "has_credentials",
+        lambda _account_id: credential_state["ready"],
+    )
+
+    def fake_login(account_id=None, log_fn=None):
+        login_calls.append(account_id)
+        credential_state["ready"] = True
+
+    monkeypatch.setattr(glm_proxy, "_login", fake_login)
+    monkeypatch.setattr(
+        glm_proxy,
+        "_ensure_runtime_and_dependencies",
+        lambda: ("C:/runtime", ["bun"]),
+    )
+
+    def fake_run(command, **kwargs):
+        observed.update(command=command, **kwargs)
+        return {
+            "returncode": 0,
+            "output": 'GLOSSARION_MODELS=["glm-5.3-flash"]',
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr(glm_proxy, "run_logged_subprocess", fake_run)
+
+    assert glm_proxy.fetch_available_models(4, timeout=8, log_fn=logs.append) == [
+        "glm-5.3-flash"
+    ]
+    assert login_calls == [4]
+    assert credential_state["ready"] is True
+    assert observed["env"]["ZCODE_PROXY_CREDENTIALS_PATH"].endswith(
+        "credentials-general-api.json"
+    )
+    assert any("retrieving the Z.AI General API key" in message for message in logs)
+    assert any("polling general API models" in message for message in logs)
+
+
+def test_general_catalog_refreshes_rejected_api_key_once(monkeypatch):
+    monkeypatch.setenv("AUTHZA_USE_GENERAL_API", "1")
+    provision_calls = []
+    run_calls = []
+    monkeypatch.setattr(glm_proxy, "has_credentials", lambda _account_id: True)
+    monkeypatch.setattr(
+        glm_proxy,
+        "ensure_general_api_key",
+        lambda account_id, **kwargs: provision_calls.append(
+            (account_id, kwargs.get("force", False))
+        ) or bool(kwargs.get("force", False)),
+    )
+    monkeypatch.setattr(
+        glm_proxy,
+        "_ensure_runtime_and_dependencies",
+        lambda: ("C:/runtime", ["bun"]),
+    )
+
+    def fake_run(_command, **_kwargs):
+        run_calls.append(True)
+        if len(run_calls) == 1:
+            return {
+                "returncode": 1,
+                "output": "Z.AI general model catalog HTTP 401: unauthorized",
+                "timed_out": False,
+            }
+        return {
+            "returncode": 0,
+            "output": 'GLOSSARION_MODELS=["glm-5.3-flash"]',
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr(glm_proxy, "run_logged_subprocess", fake_run)
+
+    assert glm_proxy.fetch_available_models(1, timeout=8, log_fn=lambda _message: None) == [
+        "glm-5.3-flash"
+    ]
+    assert provision_calls == [(1, False), (1, True)]
+    assert len(run_calls) == 2
 
 
 def test_switching_access_mode_stops_managed_proxies(monkeypatch):
@@ -557,6 +753,10 @@ def test_other_settings_exposes_billable_authza_general_api_toggle():
     assert "authza_use_general_api" in settings_source
     assert "('authza_use_general_api', ['authza_use_general_api_var']" in gui_source
     assert "'AUTHZA_USE_GENERAL_API'" in gui_source
+    assert "set_general_api_mode(self.authza_use_general_api_var)" in gui_source
+    assert "self._schedule_current_provider_catalog_refresh(0)" in settings_source
+    assert "AuthCD / AuthZA / Antigravity" in settings_source
+    assert "AuthZA (authza/)" in settings_source
 
 
 def test_cancel_stream_closes_active_response():
@@ -568,6 +768,16 @@ def test_cancel_stream_closes_active_response():
     assert glm_proxy.is_cancelled() is True
     assert response.closed is True
     glm_proxy._unregister_response(response)
+
+
+def test_cancelled_authza_generation_stays_cancelled_after_reset():
+    old_generation = glm_proxy.capture_cancel_generation()
+
+    glm_proxy.cancel_stream()
+    glm_proxy.reset_cancel()
+
+    assert glm_proxy.is_cancelled() is False
+    assert glm_proxy.is_cancel_generation_cancelled(old_generation) is True
 
 
 def test_unified_authza_route_forwards_numbered_account(tmp_path, monkeypatch):
@@ -597,6 +807,93 @@ def test_unified_authza_route_forwards_numbered_account(tmp_path, monkeypatch):
     assert observed["model"] == "glm-5.3"
     assert observed["account_id"] == 2
     assert observed["auto_login"] is False
+    assert observed["log_stream"] is True
+    assert isinstance(observed["cancel_generation"], int)
+
+
+def test_authza_forced_stream_logs_ignore_general_streaming_toggle(tmp_path, monkeypatch):
+    observed = {}
+
+    def fake_send(**kwargs):
+        observed.update(kwargs)
+        return {"content": "LIVE", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setenv("BATCH_TRANSLATION", "0")
+    monkeypatch.setenv("ENABLE_STREAMING", "0")
+    monkeypatch.setenv("LOG_STREAM_CHUNKS", "1")
+    monkeypatch.setattr(unified_api_client, "_authza_send", fake_send)
+    monkeypatch.setattr(unified_api_client, "AUTHZA_AVAILABLE", True)
+    client = UnifiedClient(
+        api_key="",
+        model="authza/glm-5.3",
+        output_dir=str(tmp_path),
+    )
+    monkeypatch.setattr(client, "_get_max_retries", lambda: 1)
+    monkeypatch.setattr(client, "_streaming_enabled", lambda: False)
+
+    result = client._send_authza(
+        [{"role": "user", "content": "translate"}],
+        temperature=0.2,
+        max_tokens=256,
+        response_name="translation",
+    )
+
+    assert result.content == "LIVE"
+    assert observed["log_stream"] is True
+
+
+@pytest.mark.parametrize(("toggle", "expected"), [("0", False), ("1", True)])
+def test_authza_batch_stream_logs_use_forced_stream_toggle(
+    tmp_path, monkeypatch, toggle, expected
+):
+    observed = {}
+
+    def fake_send(**kwargs):
+        observed.update(kwargs)
+        return {"content": "ok", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setenv("BATCH_TRANSLATION", "1")
+    monkeypatch.setenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", toggle)
+    monkeypatch.setenv("LOG_STREAM_CHUNKS", "1")
+    monkeypatch.setattr(unified_api_client, "_authza_send", fake_send)
+    monkeypatch.setattr(unified_api_client, "AUTHZA_AVAILABLE", True)
+    client = UnifiedClient(
+        api_key="",
+        model="authza/glm-5.3",
+        output_dir=str(tmp_path),
+    )
+    monkeypatch.setattr(client, "_get_max_retries", lambda: 1)
+
+    client._send_authza([], 0.2, 256, "translation")
+
+    assert observed["log_stream"] is expected
+
+
+def test_authza_cancelled_generation_cannot_retry_after_reset(tmp_path, monkeypatch):
+    send_generations = []
+
+    def interrupted_send(**kwargs):
+        send_generations.append(kwargs["cancel_generation"])
+        glm_proxy.cancel_stream()
+        glm_proxy.reset_cancel()
+        raise RuntimeError("socket interrupted")
+
+    monkeypatch.setattr(unified_api_client, "_authza_send", interrupted_send)
+    monkeypatch.setattr(unified_api_client, "AUTHZA_AVAILABLE", True)
+    client = UnifiedClient(
+        api_key="",
+        model="authza/glm-5.3",
+        output_dir=str(tmp_path),
+    )
+    monkeypatch.setattr(client, "_get_max_retries", lambda: 2)
+    monkeypatch.setattr(client, "_get_send_interval", lambda: 0)
+
+    with pytest.raises(unified_api_client.UnifiedClientError) as exc_info:
+        client._send_authza([], 0.2, 256, "translation")
+
+    assert exc_info.value.error_type == "cancelled"
+    assert len(send_generations) == 1
+    assert glm_proxy.is_cancel_generation_cancelled(send_generations[0]) is True
 
 
 def test_authza_connects_before_progress_watchdog_and_send(tmp_path, monkeypatch):

@@ -13933,6 +13933,16 @@ Text to analyze:
         self.authza_use_general_api_var = bool(
             self.config.get('authza_use_general_api', False)
         )
+        # Polling runs in this GUI process, not only in translation workers.
+        # Apply the persisted AuthZA mode immediately so login-plan and General
+        # API catalogs cannot be confused after an application restart.
+        try:
+            from glm_proxy import set_general_api_mode
+            set_general_api_mode(self.authza_use_general_api_var)
+        except Exception:
+            os.environ['AUTHZA_USE_GENERAL_API'] = (
+                '1' if self.authza_use_general_api_var else '0'
+            )
         self.custom_prefix_routes = self._normalize_custom_prefix_routes(
             self.config.get('custom_prefix_routes', [])
         )

@@ -1266,9 +1266,11 @@ except ImportError:
 
 # AuthZA - Z.AI login-plan/general API via the auto-managed local GLM proxy (optional)
 try:
-    from glm_proxy import send_chat_completion as _authza_send
+    from glm_proxy import send_message_stream as _authza_send
     from glm_proxy import cancel_stream as _authza_cancel_stream
     from glm_proxy import reset_cancel as _authza_reset_cancel
+    from glm_proxy import capture_cancel_generation as _authza_capture_cancel_generation
+    from glm_proxy import is_cancel_generation_cancelled as _authza_generation_cancelled
     from glm_proxy import open_login as _authza_open_login
     from glm_proxy import uses_general_api as _authza_uses_general_api
     from glm_proxy import ensure_proxy_running as _authza_ensure_running
@@ -1279,6 +1281,8 @@ except ImportError:
     _authza_send = None
     _authza_cancel_stream = None
     _authza_reset_cancel = None
+    _authza_capture_cancel_generation = None
+    _authza_generation_cancelled = None
     _authza_open_login = None
     _authza_uses_general_api = None
     _authza_ensure_running = None
@@ -27944,6 +27948,30 @@ class UnifiedClient:
         matching numbered login, proxy process, and localhost port.
         """
         del response_name
+        authza_cancel_generation = (
+            _authza_capture_cancel_generation()
+            if _authza_capture_cancel_generation is not None
+            else None
+        )
+
+        def authza_operation_cancelled() -> bool:
+            if self._should_abort_retry():
+                return True
+            try:
+                return bool(
+                    _authza_generation_cancelled is not None
+                    and _authza_generation_cancelled(authza_cancel_generation)
+                )
+            except Exception:
+                return False
+
+        if authza_operation_cancelled():
+            if _authza_cancel_stream is not None:
+                _authza_cancel_stream()
+            raise UnifiedClientError(
+                "AuthZA: Translation stopped by user",
+                error_type="cancelled",
+            )
         if not AUTHZA_AVAILABLE or _authza_send is None:
             raise UnifiedClientError(
                 "AuthZA is not available. Ensure 'glm_proxy.py' exists under src/.",
@@ -28036,7 +28064,9 @@ class UnifiedClient:
                 f"AuthZA GLM proxy could not be started: {error_msg}",
                 error_type="config_error",
             )
-        if self._is_stop_requested():
+        if authza_operation_cancelled():
+            if _authza_cancel_stream is not None:
+                _authza_cancel_stream()
             raise UnifiedClientError(
                 "AuthZA: Translation stopped by user",
                 error_type="cancelled",
@@ -28078,17 +28108,27 @@ class UnifiedClient:
             )
 
         for attempt in range(max_retries):
-            # Check stop flag before each attempt
-            if self._is_stop_requested():
+            # Retry attempts must stop for both immediate and graceful Stop.
+            if authza_operation_cancelled():
+                if _authza_cancel_stream is not None:
+                    _authza_cancel_stream()
                 raise UnifiedClientError(
                     "AuthZA: Translation stopped by user",
                     error_type="cancelled"
                 )
 
             try:
-                # Reset AuthZA cancel flag before each attempt
-                if _authza_reset_cancel is not None:
-                    _authza_reset_cancel()
+                # AuthZA, like Antigravity, is a forced-stream provider.
+                # ENABLE_STREAMING only controls optional-stream transports;
+                # batch visibility uses the shared forced-stream toggle.
+                if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                    log_stream = os.getenv(
+                        "ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0"
+                    ).strip().lower() not in ("", "0", "false", "no", "off")
+                else:
+                    log_stream = os.getenv(
+                        "LOG_STREAM_CHUNKS", "1"
+                    ).strip().lower() not in ("0", "false", "no", "off")
 
                 # Determine connect/read timeout
                 _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
@@ -28100,6 +28140,17 @@ class UnifiedClient:
                     except (ValueError, TypeError):
                         pass
 
+                # Never clear the process-wide cancel event in a worker. The
+                # captured generation prevents a later run reset from reviving
+                # this older stream or allowing it to retry.
+                if authza_operation_cancelled():
+                    if _authza_cancel_stream is not None:
+                        _authza_cancel_stream()
+                    raise UnifiedClientError(
+                        "AuthZA: Translation stopped by user",
+                        error_type="cancelled",
+                    )
+
                 result = _authza_send(
                     messages=messages,
                     model=actual_model,
@@ -28107,13 +28158,26 @@ class UnifiedClient:
                     max_tokens=max_tokens,
                     timeout=_read_timeout,
                     log_fn=print,
+                    log_stream=log_stream,
                     connect_timeout=_connect_timeout,
                     account_id=proxy_account_id,
                     auto_login=False,
+                    cancel_generation=authza_cancel_generation,
                 )
 
                 content = result.get("content", "")
-                finish_reason = result.get("finish_reason", "stop")
+                provider_finish_reason = result.get("finish_reason")
+                finish_reason = self._normalize_finish_reason(provider_finish_reason)
+                if finish_reason is None:
+                    raise RuntimeError(
+                        "AuthZA: response ended without an explicit finish_reason"
+                    )
+                if finish_reason == "stop" and not str(content or "").strip():
+                    result["original_finish_reason"] = finish_reason
+                    result["finish_reason"] = "prohibited_content"
+                    result["finish_reason_fallback"] = "authza_empty_stop_response"
+                    finish_reason = "prohibited_content"
+                    print("AuthZA: empty stop response treated as prohibited_content")
                 usage = result.get("usage")
 
                 return UnifiedResponse(
@@ -28199,7 +28263,7 @@ class UnifiedClient:
                     )
 
                 # Bail out on stop request
-                if self._should_abort_retry():
+                if authza_operation_cancelled():
                     raise UnifiedClientError(
                         "AuthZA: Translation stopped by user",
                         error_type="cancelled"
@@ -28220,7 +28284,7 @@ class UnifiedClient:
 
             except Exception as exc:
                 error_str = str(exc)
-                if self._should_abort_retry():
+                if authza_operation_cancelled():
                     raise UnifiedClientError(
                         "AuthZA: Translation stopped by user",
                         error_type="cancelled"

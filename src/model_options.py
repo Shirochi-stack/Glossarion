@@ -178,10 +178,11 @@ def _get_static_model_options() -> List[str]:
         "za/glm-4", "za/glm-3-turbo", 
 
         # Z.AI Coding Plan via the auto-managed GLM login proxy
-        "authza/glm-5.3", "authza/glm-5.2", "authza/glm-5.1",
+        "authza/glm-5.3", "authza/glm-5.3-flash", "authza/glm-5.2", "authza/glm-5.1",
         "authza/glm-5", "authza/glm-5-turbo", "authza/glm-5v-turbo",
-        "authza/glm-4.7", "authza/glm-4.6v", "authza/glm-4.6",
-        "authza/glm-4.5-air",
+        "authza/glm-4.7", "authza/glm-4.7-flash", "authza/glm-4.7-flashx",
+        "authza/glm-4.6v", "authza/glm-4.6", "authza/glm-4.5",
+        "authza/glm-4.5-air", "authza/glm-4.5-flash",
         
         # Other Models
         "falcon-40b-instruct", "falcon-7b-instruct",
@@ -800,6 +801,7 @@ def _empty_model_catalog_cache() -> dict:
         "providers": {},
         "last_successful": {},
         "attempts": {},
+        "attempt_variants": {},
     }
 
 
@@ -826,6 +828,8 @@ def _load_model_catalog_cache(*, force_disk: bool = False) -> dict:
                     loaded["last_successful"].setdefault(name, record)
             if not isinstance(loaded.get("attempts"), dict):
                 loaded["attempts"] = {}
+            if not isinstance(loaded.get("attempt_variants"), dict):
+                loaded["attempt_variants"] = {}
         except (OSError, ValueError, TypeError):
             loaded = _empty_model_catalog_cache()
         _MODEL_CATALOG_MEMORY_CACHE = loaded
@@ -854,6 +858,28 @@ def _write_model_catalog_cache(cache: dict) -> None:
         _MODEL_CATALOG_MEMORY_CACHE = json.loads(json.dumps(cache))
 
 
+def _provider_catalog_variant(provider: str) -> Optional[str]:
+    """Return the endpoint/credential variant that owns a provider cache."""
+    if str(provider or "").split(":", 1)[0] != "authza":
+        return None
+    try:
+        import glm_proxy
+
+        uses_general_api = getattr(glm_proxy, "uses_general_api", None)
+        if callable(uses_general_api) and uses_general_api():
+            return "general_api"
+    except Exception:
+        pass
+    return "login_plan"
+
+
+def _catalog_record_matches_variant(provider: str, record: object) -> bool:
+    expected = _provider_catalog_variant(provider)
+    if expected is None:
+        return True
+    return isinstance(record, dict) and record.get("variant") == expected
+
+
 def _cached_provider_models(*, max_age: int = _MODEL_CATALOG_CACHE_TTL_SECONDS) -> Dict[str, List[str]]:
     now = time.time()
     providers = _load_model_catalog_cache().get("providers", {})
@@ -864,6 +890,8 @@ def _cached_provider_models(*, max_age: int = _MODEL_CATALOG_CACHE_TTL_SECONDS) 
         if str(name) == "authgem_key":
             continue
         if not isinstance(record, dict):
+            continue
+        if not _catalog_record_matches_variant(str(name), record):
             continue
         try:
             age = now - float(record.get("fetched_at", 0))
@@ -885,6 +913,8 @@ def get_last_successful_provider_models() -> Dict[str, List[str]]:
         if str(name) == "authgem_key":
             continue
         if not isinstance(record, dict):
+            continue
+        if not _catalog_record_matches_variant(str(name), record):
             continue
         models = record.get("models")
         if not isinstance(models, list):
@@ -924,6 +954,13 @@ _PROVIDER_CATALOG_COMPATIBILITY_ALIASES: Dict[str, Tuple[str, ...]] = {
         "antigravity/gemini-3.5-flash-medium",
         "antigravity/gemini-3.5-flash-high",
         "antigravity/gemini-3.1-pro-high",
+    ),
+    # Z.AI documents these free General API models, but its account-scoped
+    # /models response currently omits them. Keep them as unconfirmed manual
+    # choices; they intentionally do not receive the live-poll check marker.
+    "authza": (
+        "authza/glm-4.7-flash",
+        "authza/glm-4.5-flash",
     ),
 }
 
@@ -1196,7 +1233,10 @@ def _authenticated_catalog_has_session(active_model: str) -> bool:
     }[route]
     module = __import__(module_name)
     if route == "authza":
-        return bool(module.has_credentials(account_id))
+        if module.has_credentials(account_id):
+            return True
+        can_provision = getattr(module, "can_auto_provision_general_api_key", None)
+        return bool(callable(can_provision) and can_provision(account_id))
     store = module.get_store(account_id)
     has_tokens = getattr(store, "has_tokens", False)
     return bool(has_tokens() if callable(has_tokens) else has_tokens)
@@ -1358,23 +1398,28 @@ def provider_model_catalog_refresh_due(
         return False
     cache = _load_model_catalog_cache()
     attempts = cache.get("attempts", {})
+    attempt_variants = cache.get("attempt_variants", {})
     providers = cache.get("providers", {})
     last_successful = cache.get("last_successful", {})
+    expected_variant = _provider_catalog_variant(provider)
     timestamps: List[float] = []
     if not successful_only:
         try:
-            timestamps.append(float(attempts.get(provider, 0) or 0))
+            if expected_variant is None or attempt_variants.get(provider) == expected_variant:
+                timestamps.append(float(attempts.get(provider, 0) or 0))
         except (AttributeError, TypeError, ValueError):
             pass
     try:
-        timestamps.append(float((providers.get(provider, {}) or {}).get("fetched_at", 0) or 0))
+        provider_record = providers.get(provider, {}) or {}
+        if _catalog_record_matches_variant(provider, provider_record):
+            timestamps.append(float(provider_record.get("fetched_at", 0) or 0))
     except (AttributeError, TypeError, ValueError):
         pass
     if successful_only:
         try:
-            timestamps.append(
-                float((last_successful.get(provider, {}) or {}).get("fetched_at", 0) or 0)
-            )
+            successful_record = last_successful.get(provider, {}) or {}
+            if _catalog_record_matches_variant(provider, successful_record):
+                timestamps.append(float(successful_record.get("fetched_at", 0) or 0))
         except (AttributeError, TypeError, ValueError):
             pass
     last_attempt = max(timestamps or [0.0])
@@ -1552,6 +1597,7 @@ def refresh_provider_model_catalogs(
         providers = cache.setdefault("providers", {})
         last_successful = cache.setdefault("last_successful", {})
         attempts = cache.setdefault("attempts", {})
+        attempt_variants = cache.setdefault("attempt_variants", {})
         now = time.time()
         built_in_names = {spec.name for spec in PROVIDER_CATALOG_SPECS}
         built_in_names.add("ocagy")
@@ -1572,10 +1618,16 @@ def refresh_provider_model_catalogs(
         for name, models in successful.items():
             if name in built_in_names:
                 record = {"fetched_at": now, "models": models}
+                variant = _provider_catalog_variant(name)
+                if variant is not None:
+                    record["variant"] = variant
                 providers[name] = record
                 last_successful[name] = record
         for name in attempted:
             attempts[name] = now
+            variant = _provider_catalog_variant(name)
+            if variant is not None:
+                attempt_variants[name] = variant
         cache["version"] = _MODEL_CATALOG_CACHE_VERSION
         cache["updated_at"] = now
         _write_model_catalog_cache(cache)
