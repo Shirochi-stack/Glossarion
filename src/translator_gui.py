@@ -19816,7 +19816,8 @@ Recent translations to summarize:
         self.authza_login_btn.setToolTip(
             "<qt><p style='white-space: normal; max-width: 40em; margin: 0;'>"
             f"{action} for AuthZA account <b>{account_label}</b>.<br>"
-            f"Glossarion installs/updates the local proxy runtime automatically at {proxy_url}."
+            f"Glossarion installs/updates the local proxy runtime automatically at {proxy_url}.<br>"
+            "Numbered authzaN/ routes automatically open Z.AI's switch-account login."
             "</p></qt>"
         )
         self.authza_login_btn.setStyleSheet(

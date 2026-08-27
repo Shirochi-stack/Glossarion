@@ -121,6 +121,27 @@ def test_runtime_patch_redirects_current_upstream_store(tmp_path):
     assert 'join(STORE_DIR, "credentials.json")' in patched
 
 
+def test_runtime_patch_forces_numbered_login_through_zai_account_switch(tmp_path):
+    index = tmp_path / "src" / "index.ts"
+    index.parent.mkdir(parents=True)
+    index.write_text(
+        "function openBrowser(url: string): void {\n"
+        "  console.log(url);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    glm_proxy._patch_numbered_account_switch(str(tmp_path))
+    glm_proxy._patch_numbered_account_switch(str(tmp_path))
+    patched = index.read_text(encoding="utf-8")
+
+    assert patched.count("GLOSSARION_AUTHZA_ACCOUNT_SWITCH") == 1
+    assert 'ZCODE_OAUTH_FORCE_ACCOUNT_SELECTION === "1"' in patched
+    assert "https://chat.z.ai/auth?redirect=" in patched
+    assert "&switch_account=true" in patched
+    assert 'authorizeTarget.hostname === "chat.z.ai"' in patched
+
+
 def test_dependencies_are_installed_with_frozen_lockfile(tmp_path, monkeypatch):
     (tmp_path / "bun.lock").write_text("", encoding="utf-8")
     calls = []
@@ -197,6 +218,31 @@ def test_login_uses_isolated_credentials_and_upstream_cli(tmp_path, monkeypatch)
     assert observed["command"] == ["bun", "run", str(entry), "auth", "login", "zai"]
     assert observed["env"]["ZCODE_PROXY_CREDENTIALS_PATH"] == glm_proxy._credentials_path(4)
     assert observed["env"]["ZCODE_PROXY_CONFIG"] == glm_proxy._config_path(4)
+    assert observed["env"]["ZCODE_OAUTH_FORCE_ACCOUNT_SELECTION"] == "1"
+
+
+def test_default_authza_login_does_not_force_account_switch(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    entry = runtime / "src" / "index.ts"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("", encoding="utf-8")
+    observed = {}
+
+    monkeypatch.setattr(
+        glm_proxy,
+        "_ensure_runtime_and_dependencies",
+        lambda log_fn=None: (str(runtime), ["bun"]),
+    )
+    monkeypatch.setattr(glm_proxy, "has_credentials", lambda account_id: True)
+
+    def fake_run(command, **kwargs):
+        observed.update(command=command, **kwargs)
+        return {"returncode": 0, "output": "logged in", "timed_out": False}
+
+    monkeypatch.setattr(glm_proxy, "run_logged_subprocess", fake_run)
+    glm_proxy._login(0)
+
+    assert observed["env"]["ZCODE_OAUTH_FORCE_ACCOUNT_SELECTION"] == "0"
 
 
 def test_ensure_proxy_running_launches_account_runtime(tmp_path, monkeypatch):

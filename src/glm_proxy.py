@@ -48,7 +48,7 @@ PROXY_DEFAULT_REVISION = "9cec45e7268190050b4af6074ea4d852f8241b8a"
 PROXY_DEFAULT_VERSION = "2.6.0"
 PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
 PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS = 90
-RUNTIME_PATCH_VERSION = "2026-08-27-isolated-credentials-v1"
+RUNTIME_PATCH_VERSION = "2026-08-27-isolated-credentials-account-switch-v2"
 
 DEFAULT_PROXY_HOST = "127.0.0.1"
 DEFAULT_PROXY_PORT = 18870
@@ -488,6 +488,42 @@ def _patch_credentials_store(runtime_dir: str) -> None:
     Path(store_path).write_text(patched, encoding="utf-8")
 
 
+def _patch_numbered_account_switch(runtime_dir: str) -> None:
+    """Route numbered logins through Z.AI's own switch-account screen."""
+    index_path = os.path.join(runtime_dir, "src", "index.ts")
+    try:
+        source = Path(index_path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Downloaded zcode-api has no CLI entrypoint: {exc}") from exc
+    marker = "GLOSSARION_AUTHZA_ACCOUNT_SWITCH"
+    if marker in source:
+        return
+
+    insertion = f'''// {marker}
+  // Z.AI's consent page otherwise reuses the browser's current account. Its
+  // own "Switch account" control routes through this login URL while keeping
+  // the original authorize target as the post-login redirect.
+  if (process.env.ZCODE_OAUTH_FORCE_ACCOUNT_SELECTION === "1") {{
+    try {{
+      const authorizeTarget = new URL(url);
+      if (authorizeTarget.protocol === "https:" && authorizeTarget.hostname === "chat.z.ai") {{
+        const redirect = `${{authorizeTarget.pathname}}${{authorizeTarget.search}}`;
+        url = `https://chat.z.ai/auth?redirect=${{encodeURIComponent(redirect)}}&switch_account=true`;
+      }}
+    }} catch {{ /* retain the original authorize URL */ }}
+  }}
+'''
+    patched, count = re.subn(
+        r"(function\s+openBrowser\(url:\s*string\):\s*void\s*\{\s*)",
+        lambda match: match.group(1) + insertion,
+        source,
+        count=1,
+    )
+    if not count:
+        raise RuntimeError("Could not patch zcode-api for numbered account switching")
+    Path(index_path).write_text(patched, encoding="utf-8")
+
+
 def _write_runtime_metadata(runtime_dir: str, release: Dict[str, Any]) -> None:
     with open(_runtime_metadata_path(runtime_dir), "w", encoding="utf-8") as handle:
         json.dump(
@@ -518,6 +554,7 @@ def _download_proxy_runtime(release: Dict[str, Any], runtime_dir: str, log_fn=No
             archive.extractall(extract_dir)
         archive_root = _find_archive_root(extract_dir)
         _patch_credentials_store(archive_root)
+        _patch_numbered_account_switch(archive_root)
         _write_runtime_metadata(archive_root, release)
         if os.path.exists(runtime_dir):
             shutil.rmtree(runtime_dir)
@@ -732,13 +769,19 @@ def _login(account_id: Optional[int] = None, log_fn=None) -> None:
     _ensure_account_config(account)
     _log = log_fn or _log_noop
     label = "default account" if account == 0 else f"account #{account}"
+    login_env = _runtime_env(account)
+    # A numbered route represents a different account slot, so take the same
+    # account-selection path as Z.AI's visible "Switch account" control.
+    login_env["ZCODE_OAUTH_FORCE_ACCOUNT_SELECTION"] = "1" if account > 0 else "0"
     _log(f"🔐 GLM proxy: opening Z.AI login for {label}...")
+    if account > 0:
+        _log(f"🔁 GLM proxy: forcing Z.AI account selection for account #{account}...")
     result = run_logged_subprocess(
         [*bun, "run", _runtime_entrypoint(runtime_dir), "auth", "login", "zai"],
         log_fn=_log,
         timeout=LOGIN_TIMEOUT_SECONDS,
         cwd=_account_dir(account),
-        env=_runtime_env(account),
+        env=login_env,
     )
     if result["returncode"] != 0 or not has_credentials(account):
         suffix = " (login timed out)" if result.get("timed_out") else ""

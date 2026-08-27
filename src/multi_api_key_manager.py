@@ -7993,7 +7993,8 @@ class MultiAPIKeyDialog(QDialog):
             state = "Logged in; click to replace this login" if logged_in else "Click to log in"
             button.setToolTip(
                 f"{state} for Z.AI AuthZA account {account_label}. "
-                "The local GLM proxy and its packages are managed automatically."
+                "The local GLM proxy and its packages are managed automatically. "
+                "Numbered routes force Z.AI account selection."
             )
             button.show()
             button.raise_()
