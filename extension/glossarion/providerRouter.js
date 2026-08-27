@@ -172,7 +172,7 @@ const PROVIDER_DEFINITIONS = {
   authgem: { endpointType: "authgem", baseUrl: "https://generativelanguage.googleapis.com", apiKey: false },
   authgem_key: { endpointType: "authgem_key", baseUrl: "https://generativelanguage.googleapis.com", apiKey: true },
   authgem_vertex: { endpointType: "authgem_vertex", baseUrl: "https://cloud.google.com/vertex-ai", apiKey: false },
-  authza: { endpointType: "authza", baseUrl: "https://chat.z.ai", apiKey: false },
+  authza: { endpointType: "authza", baseUrl: "http://127.0.0.1:18870", apiKey: false },
   antigravity: { endpointType: "antigravity", baseUrl: "http://localhost:3000", apiKey: false },
   azure: { endpointType: "azure_openai", baseUrl: "", apiKey: true },
   vertex_model_garden: { endpointType: "vertex_model_garden", baseUrl: "https://aiplatform.googleapis.com", apiKey: false },

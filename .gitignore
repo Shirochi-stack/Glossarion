@@ -95,6 +95,7 @@ src/wait_and_open.ps1
 tests/
 !tests/
 tests/**
+!tests/test_glm_proxy.py
 !tests/test_sdlxliff_support.py
 !tests/test_sdlxliff_json_batch.py
 !tests/test_subtitle_processor.py

@@ -226,7 +226,7 @@ app_files = [
 	('authgrok_auth.py', '.'),  # xAI Grok subscription OAuth
 	('authgem_auth.py', '.'),
 	('authcd_auth.py', '.'),  # Claude subscription OAuth
-	('authza_auth.py', '.'),
+	('glm_proxy.py', '.'),
 	('gemini_free.py', '.'),  # Google Search/Gemini browser-backed route
 	('token_encryption.py', '.'),
 
@@ -345,7 +345,7 @@ app_modules = [
 	'authgrok_auth',  # xAI Grok subscription OAuth
 	'authgem_auth',  # Gemini subscription OAuth
 	'authcd_auth',  # Claude subscription OAuth
-	'authza_auth',  # Azure/Additional auth
+	'glm_proxy',  # Z.AI Coding Plan login proxy
 	'gemini_free',  # Google Search/Gemini browser-backed route
 	'token_encryption',  # Encrypted token storage
 	'ocagy_cli',  # OpenCode + opencode-antigravity-auth

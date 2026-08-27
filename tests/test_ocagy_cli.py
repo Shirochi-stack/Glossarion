@@ -1372,6 +1372,13 @@ def test_translation_environment_exports_disable_empty_safety_toggle():
 
     assert "'DISABLE_EMPTY_SAFETY_HEURISTIC':" in environment_builder
 
+    glossary_environment_builder = gui_source.split(
+        "    def _extract_glossary_from_text_file(self, file_path, force_balanced_request_merging=False):",
+        1,
+    )[1].split("\n    def ", 1)[0]
+
+    assert "'DISABLE_EMPTY_SAFETY_HEURISTIC':" in glossary_environment_builder
+
 
 @pytest.mark.parametrize("explicit_finish_reason", ("stop", "unknown"))
 def test_authnd_explicit_empty_finish_is_not_prohibited_when_empty_safety_disabled(
@@ -1390,7 +1397,16 @@ def test_authnd_explicit_empty_finish_is_not_prohibited_when_empty_safety_disabl
             "finish_reason_explicit": True,
             "finish_reason_inference": "provider",
             "usage": None,
-            "raw_response": {"finish_reason": explicit_finish_reason},
+            "reasoning_content": "Enkidu blocked Sieg's hand-blade.",
+            "raw_response": {
+                "choices": [{
+                    "delta": {
+                        "reasoning_content": "Enkidu blocked Sieg's hand-blade.",
+                        "content": "",
+                    },
+                    "finish_reason": explicit_finish_reason,
+                }],
+            },
         }
 
     monkeypatch.setattr(unified, "_authnd_send", fake_authnd_send)

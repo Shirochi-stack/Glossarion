@@ -744,16 +744,13 @@ def test_authza_poll_reads_existing_selector_without_login(tmp_path, monkeypatch
     _isolated_cache(tmp_path, monkeypatch)
     fetch_calls = []
 
-    class FakeStore:
-        has_tokens = True
-
     fake_authza = types.SimpleNamespace(
-        get_store=lambda account_id: FakeStore(),
+        has_credentials=lambda account_id: True,
         fetch_available_models=lambda account_id, timeout: (
             fetch_calls.append((account_id, timeout)) or ["GLM-5", "GLM-4.7"]
         ),
     )
-    monkeypatch.setitem(sys.modules, "authza_auth", fake_authza)
+    monkeypatch.setitem(sys.modules, "glm_proxy", fake_authza)
 
     result = model_options.refresh_provider_model_catalogs(
         active_model="authza3/GLM-4.7",
@@ -761,7 +758,7 @@ def test_authza_poll_reads_existing_selector_without_login(tmp_path, monkeypatch
         timeout=0.1,
     )
 
-    assert fetch_calls == [(3, 60)]
+    assert fetch_calls == [(3, 1)]
     assert result.provider_models["authza:3"] == [
         "authza3/GLM-5",
         "authza3/GLM-4.7",

@@ -70,7 +70,7 @@
     "authgpt_auth.py",
     "authgem_auth.py",
     "authcd_auth.py",
-    "authza_auth.py",
+    "glm_proxy.py",
     "authnd_auth.py",
     "token_encryption.py",
     "antigravity_proxy.py",

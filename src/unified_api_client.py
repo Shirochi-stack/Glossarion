@@ -53,7 +53,7 @@ Supported models and their prefixes (Updated July 2025):
 - AuthGem-Key: authgem-key/* (e.g., authgem-key/gemini-2.5-flash) – Gemini via AI Studio API key
 - AuthGem-Vertex: authgem-vertex/* (e.g., authgem-vertex/gemini-2.5-flash) – Gemini via Google OAuth + Vertex AI
 - Z.AI: za/* (e.g., za/glm-4-plus) – Zhipu AI via API key
-- AuthZA: authza/* (e.g., authza/glm-4-plus) – Zhipu AI via pseudo-OAuth key capture
+- AuthZA: authza/* (e.g., authza/glm-5.3) – Z.AI Coding Plan via local login proxy
 - NanoGPT: nan/* (e.g., nan/gpt-5.2, nan/veo2-video) – nano-gpt.com API
   Routes to chat/image/video endpoint based on ENABLE_IMAGE_OUTPUT_MODE / ENABLE_VIDEO_OUTPUT_MODE
 - SambaNova: sam/* (e.g., sam/Meta-Llama-3.1-8B-Instruct) – SambaNova Cloud API
@@ -1264,20 +1264,18 @@ except ImportError:
     _ANTIGRAVITY_GEMINI_MAX_OUTPUT_TOKENS = 64000
     ANTIGRAVITY_AVAILABLE = False
 
-# AuthZA - Z.AI (Zhipu AI) via pseudo-OAuth key capture (optional)
+# AuthZA - Z.AI Coding Plan via the auto-managed local GLM proxy (optional)
 try:
-    from authza_auth import get_default_store as _authza_get_store
-    from authza_auth import get_store as _authza_get_store_by_id
-    from authza_auth import send_chat_completion as _authza_send
-    from authza_auth import cancel_stream as _authza_cancel_stream
-    from authza_auth import reset_cancel as _authza_reset_cancel
+    from glm_proxy import send_chat_completion as _authza_send
+    from glm_proxy import cancel_stream as _authza_cancel_stream
+    from glm_proxy import reset_cancel as _authza_reset_cancel
+    from glm_proxy import open_login as _authza_open_login
     AUTHZA_AVAILABLE = True
 except ImportError:
-    _authza_get_store = None
-    _authza_get_store_by_id = None
     _authza_send = None
     _authza_cancel_stream = None
     _authza_reset_cancel = None
+    _authza_open_login = None
     AUTHZA_AVAILABLE = False
 
 # AuthND - NVIDIA Build browser-backed route (optional, no API key)
@@ -1750,15 +1748,54 @@ class UnifiedClient:
             provider_error_str = str(response.error_details)
         if re.search(r'\bSAFETY_CHECK_TYPE_[A-Z0-9_]+\b', provider_error_str, re.IGNORECASE):
             return True
-        # 2) Safety indicators in raw response/error details
-        response_str = ""
+        # 2) Safety indicators in provider metadata/error details. Raw provider
+        # responses can also contain generated text and hidden reasoning. Do not
+        # scan those fields: ordinary narrative sentences such as "Enkidu blocked
+        # Sieg's hand-blade" are not provider safety metadata.
+        generated_text_fields = {
+            'analysis',
+            'completion',
+            'content',
+            'generated_text',
+            'input',
+            'input_text',
+            'messages',
+            'output_text',
+            'prompt',
+            'reasoning',
+            'reasoning_content',
+            'text',
+            'thinking',
+        }
+
+        def _without_generated_text(value):
+            if isinstance(value, dict):
+                return {
+                    key: _without_generated_text(item)
+                    for key, item in value.items()
+                    if str(key).strip().lower() not in generated_text_fields
+                }
+            if isinstance(value, (list, tuple)):
+                return [_without_generated_text(item) for item in value]
+            return value
+
+        response_parts = []
         if response is not None:
-            if hasattr(response, 'raw_response') and response.raw_response is not None:
-                response_str = str(response.raw_response).lower()
-            elif hasattr(response, 'error_details') and response.error_details is not None:
-                response_str = str(response.error_details).lower()
+            if response_is_exception:
+                response_parts.append(str(response))
             else:
-                response_str = str(response).lower()
+                error_details = getattr(response, 'error_details', None)
+                if error_details is not None:
+                    response_parts.append(str(error_details))
+                raw_response = getattr(response, 'raw_response', None)
+                if raw_response is not None:
+                    try:
+                        response_parts.append(str(_without_generated_text(raw_response)))
+                    except Exception:
+                        response_parts.append(str(raw_response))
+                elif not response_parts:
+                    response_parts.append(str(response))
+        response_str = " ".join(response_parts).lower()
         safety_indicators = [
             'safety', 'blocked', 'prohibited', 'harmful', 'inappropriate',
             'refused', 'content_filter', 'content policy', 'violation',
@@ -3769,6 +3806,13 @@ class UnifiedClient:
         try:
             if _authcd_cancel_stream is not None:
                 _authcd_cancel_stream()
+        except Exception:
+            pass
+
+        # Cancel any in-flight local GLM proxy streams.
+        try:
+            if _authza_cancel_stream is not None:
+                _authza_cancel_stream()
         except Exception:
             pass
 
@@ -8467,14 +8511,14 @@ class UnifiedClient:
             logger.info("🪐 OcAgy will use OpenCode with opencode-antigravity-auth")
 
         elif self.client_type == 'authza':
-            # AuthZA uses Z.AI API via pseudo-OAuth key capture – no persistent SDK client
+            # AuthZA uses the auto-managed local GLM login proxy.
             if not AUTHZA_AVAILABLE:
                 raise ImportError(
-                    "AuthZA package not found. Make sure 'authza_auth.py' exists under src/."
+                    "GLM proxy module not found. Make sure 'glm_proxy.py' exists under src/."
                 )
             account_id = getattr(self, '_authza_account_id', None)
             if account_id:
-                print(f"🔐 AuthZA: Using account slot #{account_id}")
+                print(f"🔐 GLM proxy: Using Z.AI account slot #{account_id}")
 
         elif self.client_type == 'authnd':
             # AuthND uses NVIDIA Build in a browser for captcha, then direct HTTP.
@@ -18052,7 +18096,7 @@ class UnifiedClient:
             'ocagy': self._send_ocagy,  # OpenCode + opencode-antigravity-auth
             'antigravity': self._send_antigravity,  # Antigravity Cloud Code proxy
             'za': self._send_openai_provider_router,  # Z.AI via API key
-            'authza': self._send_authza,  # Z.AI via pseudo-OAuth key capture
+            'authza': self._send_authza,  # Z.AI Coding Plan via local login proxy
             'authnd': self._send_authnd,  # NVIDIA Build browser-backed route
             'search': self._send_search_gemini,  # Google Search/Gemini browser-backed route
             'nanogpt': self._send_nanogpt,  # NanoGPT (nano-gpt.com) – chat/image/video
@@ -27877,18 +27921,15 @@ class UnifiedClient:
         )
 
     def _send_authza(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request via Z.AI subscription using Google OAuth JWT.
+        """Send through the auto-managed Z.AI Coding Plan login proxy.
 
-        Authenticates via Google OAuth on chat.z.ai (Open WebUI backend).
-        The JWT is captured from the browser and used as a Bearer token
-        against chat.z.ai/api/v1/chat/completions.
-
-        Model names should be prefixed with 'authza/' or 'authzaN/'
-        (e.g. authza/GLM-4.7-Flash, authza2/GLM-4-Plus).
+        ``authza/`` uses the default isolated login and ``authzaN/`` uses the
+        matching numbered login, proxy process, and localhost port.
         """
-        if not AUTHZA_AVAILABLE or _authza_get_store is None or _authza_send is None:
+        del response_name
+        if not AUTHZA_AVAILABLE or _authza_send is None:
             raise UnifiedClientError(
-                "AuthZA is not available. Ensure 'authza_auth.py' exists under src/.",
+                "AuthZA is not available. Ensure 'glm_proxy.py' exists under src/.",
                 error_type="config_error"
             )
 
@@ -27902,33 +27943,20 @@ class UnifiedClient:
         elif actual_model.startswith('authza'):
             actual_model = actual_model[len('authza'):].lstrip('/')
         if not actual_model:
-            actual_model = 'glm-4-plus'  # sensible default
+            actual_model = 'glm-5.3'
 
         # Extract account ID from prefix
         account_id = self._extract_authza_account_id(request_model)
         if account_id is None:
             account_id = getattr(self, '_authza_account_id', None)
+        proxy_account_id = account_id or 0
         acct_label = f" (Account #{account_id})" if account_id else ""
 
-        # Obtain a valid JWT (auto-triggers browser login if needed)
-        try:
-            if _authza_get_store_by_id is not None and account_id:
-                store = _authza_get_store_by_id(account_id)
-            else:
-                store = _authza_get_store()
-            jwt_token = store.get_valid_access_token(auto_login=True)
-        except Exception as exc:
-            raise UnifiedClientError(
-                f"AuthZA{acct_label} authentication failed: {exc}\n"
-                "Make sure you log in with Google at chat.z.ai and try again.",
-                error_type="auth_error"
-            )
-
-        # Send the request through Z.AI's Open WebUI backend
+        # Send the request through the account's local OpenAI-compatible proxy.
         max_retries = self._get_max_retries()
         last_error = None
         label = f"AuthZA{acct_label}" if acct_label else "AuthZA"
-        print(f"🔐 {label}: Sending request via Z.AI subscription (model={actual_model})")
+        print(f"🔐 {label}: Sending through the local GLM proxy (model={actual_model})")
         for attempt in range(max_retries):
             # Check stop flag before each attempt
             if self._is_stop_requested():
@@ -27953,7 +27981,6 @@ class UnifiedClient:
                         pass
 
                 result = _authza_send(
-                    access_token=jwt_token,
                     messages=messages,
                     model=actual_model,
                     temperature=temperature,
@@ -27961,7 +27988,8 @@ class UnifiedClient:
                     timeout=_read_timeout,
                     log_fn=print,
                     connect_timeout=_connect_timeout,
-                    account_id=account_id or 0,
+                    account_id=proxy_account_id,
+                    auto_login=True,
                 )
 
                 content = result.get("content", "")
@@ -27986,17 +28014,18 @@ class UnifiedClient:
                         error_type="cancelled"
                     )
 
-                # 401/403 — JWT expired or invalid → clear token, re-login
-                if "401" in error_str or "403" in error_str or "jwt expired" in error_str.lower():
-                    print(f"🔄 {label}: JWT expired or invalid — clearing token and re-launching login…")
+                # The upstream Coding Plan credential can expire or be revoked.
+                if "401" in error_str or "403" in error_str or "expired" in error_str.lower():
+                    print(f"🔄 {label}: Z.AI login expired — re-opening browser login…")
                     try:
-                        store.clear_tokens()
-                        jwt_token = store.get_valid_access_token(auto_login=True)
+                        if _authza_open_login is None:
+                            raise RuntimeError("GLM proxy login helper is unavailable")
+                        _authza_open_login(log_fn=print, account_id=proxy_account_id)
                         print(f"✅ {label}: Re-login successful, retrying request…")
-                        continue  # retry with fresh JWT
+                        continue
                     except Exception as relogin_exc:
                         raise UnifiedClientError(
-                            f"AuthZA{acct_label}: JWT expired and re-login failed: {relogin_exc}",
+                            f"AuthZA{acct_label}: Z.AI login expired and re-login failed: {relogin_exc}",
                             error_type="auth_error"
                         )
 
@@ -28030,7 +28059,8 @@ class UnifiedClient:
 
                 last_error = exc
                 if attempt < max_retries - 1:
-                    time.sleep(self._get_send_interval())
+                    if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
+                        raise UnifiedClientError("AuthZA: Translation stopped by user", error_type="cancelled")
                     continue
 
             except Exception as exc:
@@ -28043,7 +28073,8 @@ class UnifiedClient:
                 last_error = exc
                 if attempt < max_retries - 1:
                     print(f"⚠️ AuthZA error (attempt {attempt+1}/{max_retries}): {error_str}")
-                    time.sleep(self._get_send_interval())
+                    if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
+                        raise UnifiedClientError("AuthZA: Translation stopped by user", error_type="cancelled")
                     continue
 
         raise UnifiedClientError(
@@ -30875,6 +30906,16 @@ def set_stop_flag(value: bool = True):
             _antigravity_reset_cancel()
         except Exception:
             pass
+    if value and _authza_cancel_stream is not None:
+        try:
+            _authza_cancel_stream()
+        except Exception:
+            pass
+    elif not value and _authza_reset_cancel is not None:
+        try:
+            _authza_reset_cancel()
+        except Exception:
+            pass
     if value and _authnd_cancel_stream is not None:
         try:
             _authnd_cancel_stream()
@@ -30918,6 +30959,11 @@ def hard_cancel_all():
     if _antigravity_cancel_stream is not None:
         try:
             _antigravity_cancel_stream()
+        except Exception:
+            pass
+    if _authza_cancel_stream is not None:
+        try:
+            _authza_cancel_stream()
         except Exception:
             pass
     if _authnd_cancel_stream is not None:

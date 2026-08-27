@@ -233,7 +233,7 @@ app_files = [
 	('authgrok_auth.py', '.'),  # xAI Grok subscription OAuth
 	('authgem_auth.py', '.'),
 	('authcd_auth.py', '.'),  # Claude subscription OAuth
-	('authza_auth.py', '.'),
+	('glm_proxy.py', '.'),
 	('authnd_auth.py', '.'),  # NVIDIA Build browser-backed auth
 	('gemini_free.py', '.'),  # Google Search/Gemini browser-backed route
 	('token_encryption.py', '.'),
@@ -353,7 +353,7 @@ app_modules = [
 	'authgrok_auth',  # xAI Grok subscription OAuth
 	'authgem_auth',  # Gemini subscription OAuth
 	'authcd_auth',  # Claude subscription OAuth
-	'authza_auth',  # Azure/Additional auth
+	'glm_proxy',  # Z.AI Coding Plan login proxy
 	'authnd_auth',  # NVIDIA Build browser-backed auth
 	'gemini_free',  # Google Search/Gemini browser-backed route
 	'token_encryption',  # Encrypted token storage
@@ -1193,7 +1193,7 @@ excludes = [
 
     # ============================================================================
     # PLAYWRIGHT - 98 MB uncompressed bundled Node.js runtime
-    # authza_auth.py uses playwright for Z.AI OAuth browser automation.
+    # glm_proxy.py manages the local zcode-api runtime and browser login.
     # It is safely optional (PLAYWRIGHT_AVAILABLE flag handles absence).
     # ============================================================================
     'playwright', 'playwright.*',

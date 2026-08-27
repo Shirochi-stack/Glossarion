@@ -176,6 +176,12 @@ def _get_static_model_options() -> List[str]:
         # Specialized Variants (za prefix)
         "za/GLM-4.1V-Thinking", "za/GLM-4-Voice", "za/GLM-4-Plus",
         "za/glm-4", "za/glm-3-turbo", 
+
+        # Z.AI Coding Plan via the auto-managed GLM login proxy
+        "authza/glm-5.3", "authza/glm-5.2", "authza/glm-5.1",
+        "authza/glm-5", "authza/glm-5-turbo", "authza/glm-5v-turbo",
+        "authza/glm-4.7", "authza/glm-4.6v", "authza/glm-4.6",
+        "authza/glm-4.5-air",
         
         # Other Models
         "falcon-40b-instruct", "falcon-7b-instruct",
@@ -1186,9 +1192,11 @@ def _authenticated_catalog_has_session(active_model: str) -> bool:
         "authgpt": "authgpt_auth",
         "authcd": "authcd_auth",
         "authgem": "authgem_auth",
-        "authza": "authza_auth",
+        "authza": "glm_proxy",
     }[route]
     module = __import__(module_name)
+    if route == "authza":
+        return bool(module.has_credentials(account_id))
     store = module.get_store(account_id)
     has_tokens = getattr(store, "has_tokens", False)
     return bool(has_tokens() if callable(has_tokens) else has_tokens)
@@ -1215,13 +1223,11 @@ def _fetch_authenticated_catalog(
             timeout=max(1, int(round(timeout)))
         )
     elif route == "authza":
-        import authza_auth
+        import glm_proxy
 
-        raw_models = authza_auth.fetch_available_models(
+        raw_models = glm_proxy.fetch_available_models(
             account_id=account_id,
-            # Restoring the persistent browser can include a 30s navigation
-            # plus its bounded network-idle wait.
-            timeout=max(60, int(round(timeout))),
+            timeout=max(1, int(round(timeout))),
         )
     else:
         module_name = {

@@ -1743,7 +1743,7 @@ class _InputOutputDialog(QDialog):
         'ENABLE_STREAMING',
         'ALLOW_BATCH_STREAM_LOGS',
         'ALLOW_AUTHGPT_BATCH_STREAM_LOGS',
-        'ALLOW_AUTHZA_BATCH_STREAM_LOGS',
+        'ALLOW_GLM_PROXY_BATCH_STREAM_LOGS',
         'STREAM_THINKING_LOGS',
         'LOG_STREAM_CHUNKS',
         'RESPONSE_STREAMING',
@@ -21317,7 +21317,7 @@ Recent translations to summarize:
             )
         lines.append(
             "   🔑 Signed-in route polling: authgpt*/, authcd*/, authgem*/, authnd*/, "
-            "and authza*/ are polled when that route/account is selected; login is never opened"
+            "and authza*/ are polled when that route/account is selected; interactive login is never opened"
         )
         self.append_log('\n'.join(lines))
 
@@ -35902,6 +35902,9 @@ Important rules:
                     'USE_MAIN_KEY_FALLBACK': '1' if self.config.get('use_main_key_fallback', True) else '0',
                     'USE_FALLBACK_KEYS': '1' if getattr(self, 'use_fallback_keys_var', False) else '0',
                     'FALLBACK_KEY_SHUFFLE': '1' if self.config.get('fallback_key_shuffle', False) else '0',
+                    'DISABLE_EMPTY_SAFETY_HEURISTIC': '1' if getattr(self, 'disable_empty_safety_heuristic_var', True) else '0',
+                    'MISSING_FINISH_AS_PROHIBITED': '1' if getattr(self, 'unknown_finish_as_prohibited_var', False) else '0',
+                    'UNKNOWN_FINISH_AS_PROHIBITED': '1' if getattr(self, 'unknown_finish_as_prohibited_var', False) else '0',
                     # Ensure fallback key pool is available to UnifiedClient (parity with translation path)
                     'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
                     'USE_GLOSSARY_KEYS': '1' if getattr(self, 'use_glossary_keys_var', False) else '0',
