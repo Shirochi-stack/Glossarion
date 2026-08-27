@@ -78,6 +78,8 @@ _active_response_lock = threading.Lock()
 _active_responses: Dict[int, Any] = {}
 _proxy_launch_lock = threading.Lock()
 _proxy_processes: Dict[int, subprocess.Popen] = {}
+_proxy_started_callback = None
+_proxy_started_callback_lock = threading.Lock()
 _update_lock = threading.Lock()
 _last_release_check_at = 0.0
 _cached_release: Optional[Dict[str, Any]] = None
@@ -85,6 +87,24 @@ _cached_release: Optional[Dict[str, Any]] = None
 
 def _log_noop(_message: str) -> None:
     return None
+
+
+def set_proxy_started_callback(callback) -> None:
+    """Register a UI callback invoked with the ready account id."""
+    global _proxy_started_callback
+    with _proxy_started_callback_lock:
+        _proxy_started_callback = callback
+
+
+def _notify_proxy_started(account_id: int) -> None:
+    with _proxy_started_callback_lock:
+        callback = _proxy_started_callback
+    if callback is None:
+        return
+    try:
+        callback(int(account_id))
+    except Exception as exc:
+        logger.debug("GLM proxy-start callback failed: %s", exc)
 
 
 def _normalize_account_id(account_id: Optional[int]) -> int:
@@ -95,6 +115,18 @@ def _normalize_account_id(account_id: Optional[int]) -> int:
     if value < 0 or value > 9999:
         raise ValueError("GLM proxy account id must be between 0 and 9999")
     return value
+
+
+def account_id_from_model(model: str) -> Optional[int]:
+    """Return the isolated proxy account selected by an ``authza`` model.
+
+    The unnumbered ``authza/`` route is account 0.  A non-AuthZA model returns
+    ``None`` so GUI callers can distinguish it from that default account.
+    """
+    match = re.match(r"^authza(\d{0,4})(?:/|$)", str(model or "").strip(), re.IGNORECASE)
+    if not match:
+        return None
+    return int(match.group(1) or 0)
 
 
 def _get_proxy_data_dir() -> str:
@@ -729,7 +761,6 @@ def ensure_proxy_running(
     auto_login: bool = True,
     notify_started: bool = True,
 ) -> Dict[str, Any]:
-    del notify_started  # Kept for parity with antigravity_proxy's public API.
     account = _normalize_account_id(account_id)
     health = check_proxy_health(account)
     if health.get("healthy"):
@@ -754,6 +785,7 @@ def ensure_proxy_running(
         previous = _proxy_processes.get(account)
         if previous is not None and previous.poll() is not None:
             _proxy_processes.pop(account, None)
+        launched = False
         if account not in _proxy_processes:
             command = [*bun, "run", _runtime_entrypoint(runtime_dir), "serve", config_path]
             process = subprocess.Popen(
@@ -763,6 +795,7 @@ def ensure_proxy_running(
                 **_hidden_process_kwargs(),
             )
             _proxy_processes[account] = process
+            launched = True
             (log_fn or _log_noop)(
                 f"🟢 GLM proxy: started account {account or 'default'} on {get_proxy_url(account)} "
                 f"(PID {process.pid})."
@@ -778,6 +811,8 @@ def ensure_proxy_running(
             time.sleep(0.25)
             last_health = check_proxy_health(account)
             if last_health.get("healthy"):
+                if launched and notify_started:
+                    _notify_proxy_started(account)
                 return {"running": True, **last_health}
         return {
             "running": False,

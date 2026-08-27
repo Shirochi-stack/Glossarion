@@ -20,9 +20,11 @@ def _isolated_glm_proxy(tmp_path, monkeypatch):
             monkeypatch.delenv(name, raising=False)
     glm_proxy._proxy_processes.clear()
     glm_proxy.reset_cancel()
+    glm_proxy.set_proxy_started_callback(None)
     yield
     glm_proxy._proxy_processes.clear()
     glm_proxy.reset_cancel()
+    glm_proxy.set_proxy_started_callback(None)
 
 
 class FakeResponse:
@@ -63,6 +65,21 @@ def test_authza_models_are_available_in_the_main_dropdown():
     models = get_model_options()
     assert "authza/glm-5.3" in models
     assert "authza/glm-4.5-air" in models
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("authza/", 0),
+        (" AUTHZA/glm-5.3 ", 0),
+        ("authza2/glm-5.3", 2),
+        ("authza9999/glm-5", 9999),
+        ("authza10000/glm-5", None),
+        ("openai/gpt-5", None),
+    ],
+)
+def test_authza_model_account_parser(model, expected):
+    assert glm_proxy.account_id_from_model(model) == expected
 
 
 def test_account_config_uses_oauth_and_local_auth():
@@ -189,6 +206,7 @@ def test_ensure_proxy_running_launches_account_runtime(tmp_path, monkeypatch):
     entry.write_text("", encoding="utf-8")
     health = iter(({"healthy": False}, {"healthy": False}, {"healthy": True}))
     observed = {}
+    started_accounts = []
 
     class FakeProcess:
         pid = 4242
@@ -212,6 +230,7 @@ def test_ensure_proxy_running_launches_account_runtime(tmp_path, monkeypatch):
         return FakeProcess()
 
     monkeypatch.setattr(glm_proxy.subprocess, "Popen", fake_popen)
+    glm_proxy.set_proxy_started_callback(started_accounts.append)
     status = glm_proxy.ensure_proxy_running(account_id=2)
 
     assert status["running"] is True
@@ -223,6 +242,7 @@ def test_ensure_proxy_running_launches_account_runtime(tmp_path, monkeypatch):
         glm_proxy._config_path(2),
     ]
     assert observed["env"]["ZCODE_PROXY_CREDENTIALS_PATH"] == glm_proxy._credentials_path(2)
+    assert started_accounts == [2]
 
 
 def test_health_check_authenticates_probe(monkeypatch):

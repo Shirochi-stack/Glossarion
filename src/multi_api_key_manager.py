@@ -23,7 +23,7 @@ try:
         QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox, QDoubleSpinBox,
         QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
         QCompleter, QDialogButtonBox, QInputDialog, QAbstractSpinBox,
-        QStyledItemDelegate, QStyleOptionViewItem, QStyle
+        QStyledItemDelegate, QStyleOptionViewItem, QStyle, QToolButton
     )
     from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot, QSize, QRect
     from PySide6.QtGui import QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform
@@ -64,6 +64,7 @@ except ImportError:
     QDialogButtonBox = object
     QStyleOptionViewItem = object
     QStyle = object
+    QToolButton = object
     QIcon = object
     QFont = object
     QPixmap = object
@@ -2507,6 +2508,7 @@ class MultiAPIKeyDialog(QDialog):
             or model.startswith('authgrok')
             or model.startswith('authcd')
             or model.startswith('authgem')
+            or model.startswith('authza')
         )
 
     def _has_pending_google_creds_model(self):
@@ -7950,6 +7952,200 @@ class MultiAPIKeyDialog(QDialog):
         self._model_search_combos = live_combos
         MultiAPIKeyDialog._refresh_model_poll_markers(self)
 
+    @staticmethod
+    def _set_authza_editor_button_margin(combo, visible):
+        editor = combo.lineEdit() if combo.isEditable() else None
+        if editor is None:
+            return
+        margins = editor.textMargins()
+        original_right = int(getattr(combo, '_authza_original_right_margin', 0) or 0)
+        editor.setTextMargins(
+            margins.left(),
+            margins.top(),
+            max(original_right, 28) if visible else original_right,
+            margins.bottom(),
+        )
+
+    def _refresh_authza_login_button(self, combo):
+        """Show an account-aware login affordance inside one model editor."""
+        button = getattr(combo, '_authza_login_button', None)
+        if button is None:
+            return
+        try:
+            from glm_proxy import account_id_from_model, has_credentials
+
+            account_id = account_id_from_model(combo.currentText())
+            if account_id is None:
+                MultiAPIKeyDialog._set_authza_editor_button_margin(combo, False)
+                button.hide()
+                return
+            MultiAPIKeyDialog._set_authza_editor_button_margin(combo, True)
+            button.setProperty('authzaAccountId', account_id)
+            logged_in = has_credentials(account_id)
+            busy = bool(getattr(self, '_authza_login_busy', False))
+            active_combo = getattr(self, '_authza_login_combo', None)
+            button.setEnabled(not busy)
+            if busy and active_combo is combo:
+                button.setText("⏳")
+            else:
+                button.setText("✅" if logged_in else "🔐")
+            account_label = "default" if account_id == 0 else f"#{account_id}"
+            state = "Logged in; click to replace this login" if logged_in else "Click to log in"
+            button.setToolTip(
+                f"{state} for Z.AI AuthZA account {account_label}. "
+                "The local GLM proxy and its packages are managed automatically."
+            )
+            button.show()
+            button.raise_()
+        except (ImportError, RuntimeError):
+            try:
+                MultiAPIKeyDialog._set_authza_editor_button_margin(combo, False)
+            except RuntimeError:
+                pass
+            button.hide()
+
+    def _install_authza_login_button(self, combo):
+        """Install the AuthZA login control on a dynamically created model combo."""
+        if getattr(combo, '_authza_login_button', None) is not None:
+            MultiAPIKeyDialog._refresh_authza_login_button(self, combo)
+            return
+        editor = combo.lineEdit() if combo.isEditable() else None
+        if editor is None:
+            return
+
+        button = QToolButton(editor)
+        button.setFixedSize(24, 22)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setStyleSheet(
+            "QToolButton { background-color: #4c1d95; color: white; "
+            "border: 1px solid #8b5cf6; border-radius: 4px; padding: 0; } "
+            "QToolButton:hover { background-color: #6d28d9; } "
+            "QToolButton:disabled { background-color: #374151; color: #d1d5db; }"
+        )
+        button.setAccessibleName("Z.AI AuthZA login")
+        button.hide()
+        combo._authza_login_button = button
+
+        margins = editor.textMargins()
+        combo._authza_original_right_margin = margins.right()
+
+        def _position_button():
+            try:
+                button.move(
+                    max(0, editor.width() - button.width() - 2),
+                    max(0, (editor.height() - button.height()) // 2),
+                )
+                button.raise_()
+            except RuntimeError:
+                pass
+
+        original_resize = editor.resizeEvent
+
+        def _resize_with_authza_button(event):
+            original_resize(event)
+            _position_button()
+
+        editor.resizeEvent = _resize_with_authza_button
+        button.clicked.connect(
+            lambda _checked=False, target=combo: MultiAPIKeyDialog._authza_login_for_combo(
+                self, target
+            )
+        )
+        combo.currentTextChanged.connect(
+            lambda _text, target=combo: MultiAPIKeyDialog._refresh_authza_login_button(
+                self, target
+            )
+        )
+        combo.editTextChanged.connect(
+            lambda _text, target=combo: MultiAPIKeyDialog._refresh_authza_login_button(
+                self, target
+            )
+        )
+        QTimer.singleShot(0, _position_button)
+        MultiAPIKeyDialog._refresh_authza_login_button(self, combo)
+
+    def _refresh_all_authza_login_buttons(self):
+        for combo in list(getattr(self, '_model_search_combos', []) or []):
+            try:
+                MultiAPIKeyDialog._refresh_authza_login_button(self, combo)
+            except RuntimeError:
+                continue
+
+    def _authza_login_for_combo(self, combo):
+        """Log into the numbered AuthZA account typed in a key-pool field."""
+        if getattr(self, '_authza_login_busy', False):
+            return
+        from glm_proxy import account_id_from_model
+
+        account_id = account_id_from_model(combo.currentText())
+        if account_id is None:
+            return
+        self._authza_login_busy = True
+        self._authza_login_combo = combo
+        self._authza_login_account_id = account_id
+        MultiAPIKeyDialog._refresh_all_authza_login_buttons(self)
+        account_label = "default account" if account_id == 0 else f"account #{account_id}"
+        log_fn = getattr(self.translator_gui, 'append_log', logger.info)
+        log_fn(
+            f"🔐 AuthZA: preparing the local GLM proxy and opening Z.AI login for {account_label}…"
+        )
+
+        def _worker():
+            try:
+                from glm_proxy import open_login
+
+                self._authza_login_url = open_login(
+                    log_fn=log_fn,
+                    account_id=account_id,
+                )
+                QMetaObject.invokeMethod(
+                    self, "_authza_manager_login_finished", Qt.QueuedConnection
+                )
+            except Exception as exc:
+                self._authza_login_error = str(exc)
+                QMetaObject.invokeMethod(
+                    self, "_authza_manager_login_failed", Qt.QueuedConnection
+                )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @Slot()
+    def _authza_manager_login_finished(self):
+        account_id = int(getattr(self, '_authza_login_account_id', 0) or 0)
+        self._authza_login_busy = False
+        self._authza_login_combo = None
+        MultiAPIKeyDialog._refresh_all_authza_login_buttons(self)
+        account_label = "default account" if account_id == 0 else f"account #{account_id}"
+        log_fn = getattr(self.translator_gui, 'append_log', logger.info)
+        log_fn(
+            f"✅ AuthZA: Z.AI login completed for {account_label}; proxy ready at "
+            f"{getattr(self, '_authza_login_url', '')}."
+        )
+
+        # An explicit login is also an explicit request to populate that
+        # account's live model catalog, even when the main translator field is
+        # currently using a different provider.
+        refresh = getattr(
+            self.translator_gui, '_start_provider_model_catalog_refresh', None
+        )
+        if callable(refresh):
+            provider = 'authza' if account_id == 0 else f'authza:{account_id}'
+            try:
+                refresh(only_provider=provider, automatic=True)
+            except Exception as exc:
+                log_fn(f"⚠️ AuthZA model auto-poll could not start: {exc}")
+        self._refresh_parent_model_requirements(save_config=False)
+
+    @Slot()
+    def _authza_manager_login_failed(self):
+        self._authza_login_busy = False
+        self._authza_login_combo = None
+        MultiAPIKeyDialog._refresh_all_authza_login_buttons(self)
+        err = getattr(self, '_authza_login_error', 'Unknown error')
+        log_fn = getattr(self.translator_gui, 'append_log', logger.info)
+        log_fn(f"❌ AuthZA login failed: {err}")
+        QMessageBox.warning(self, "Z.AI Login Failed", f"Z.AI login failed:\n{err}")
+
     def _attach_model_autofill(self, combo: QComboBox, on_change=None, model_values=None):
         """Attach the same prefix-priority contains completer used by translator_gui."""
         from PySide6.QtCore import QStringListModel
@@ -8124,6 +8320,7 @@ class MultiAPIKeyDialog(QDialog):
         if combo not in registered_combos:
             registered_combos.append(combo)
         self._model_search_combos = registered_combos
+        MultiAPIKeyDialog._install_authza_login_button(self, combo)
 
     def _notify_authgpt_visibility(self):
         """Notify the translator GUI to re-evaluate AuthGPT/AuthGem login button visibility."""

@@ -765,6 +765,44 @@ def test_authza_poll_reads_existing_selector_without_login(tmp_path, monkeypatch
     ]
 
 
+def test_authza_models_are_in_the_static_dropdown_fallback():
+    models = model_options.get_model_options()
+
+    assert "authza/glm-5.3" in models
+    assert "authza/glm-5.2" in models
+    assert "authza/glm-4.5-air" in models
+
+
+def test_authza_account_auto_poll_is_credentialed_and_ttl_scoped(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    now = 1_800_000_000.0
+    monkeypatch.setattr(model_options.time, "time", lambda: now)
+    fetch_calls = []
+    fake_authza = types.SimpleNamespace(
+        has_credentials=lambda account_id: account_id == 3,
+        fetch_available_models=lambda account_id, timeout: (
+            fetch_calls.append((account_id, timeout)) or ["glm-5.3", "glm-5.2"]
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "glm_proxy", fake_authza)
+
+    assert model_options.due_provider_catalog_for_model("authza3/glm-5.3") == "authza:3"
+    assert model_options.due_provider_catalog_for_model("authza4/glm-5.3") is None
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authza3/glm-5.3",
+        only_provider="authza:3",
+        timeout=0.1,
+    )
+
+    assert fetch_calls == [(3, 1)]
+    assert result.provider_models["authza:3"] == [
+        "authza3/glm-5.3",
+        "authza3/glm-5.2",
+    ]
+    assert model_options.due_provider_catalog_for_model("authza3/glm-5.3") is None
+
+
 def test_only_vertex_style_routes_remain_static_by_design():
     static_routes = model_options.STATIC_ONLY_PROVIDER_PREFIXES
 
@@ -1558,6 +1596,7 @@ def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeyp
         "ocagy/gemini-3.1-pro-high",
         "authgrok/grok-4.6",
         "authgpt/gpt-5.6",
+        "authza/glm-5.3",
         "unrelated-model",
     ]
     combo.addItems(models)
@@ -1594,6 +1633,7 @@ def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeyp
         "ocagy1": "ocagy1/gemini-3.1-pro-high",
         "authgrok1": "authgrok1/grok-4.6",
         "authgpt1": "authgpt1/gpt-5.6",
+        "authza2": "authza2/glm-5.3",
     }
     for typed, expected in numbered_aliases.items():
         editor = combo.lineEdit()
@@ -1605,6 +1645,23 @@ def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeyp
             value.startswith(typed + "/")
             for value in completion_model.stringList()
         )
+
+    editor = combo.lineEdit()
+    editor.selectAll()
+    qt_test.QTest.keyClicks(editor, "authza2/glm-5.3")
+    app.processEvents()
+    login_button = combo._authza_login_button
+    assert not login_button.isHidden()
+    assert login_button.property("authzaAccountId") == 2
+    assert login_button.text() in {"🔐", "✅"}
+    assert editor.textMargins().right() == 28
+
+    editor.selectAll()
+    qt_test.QTest.keyClicks(editor, "openai/gpt-5")
+    app.processEvents()
+    assert login_button.isHidden()
+    assert editor.textMargins().right() == 0
+
 
     completion_model.set_search_text("authgpt1")
     marked_index = completion_model.stringList().index("authgpt1/gpt-5.6")
@@ -1665,6 +1722,76 @@ def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeyp
     assert completion_model.stringList() == []
     assert combo.currentText() == "alpha-model"
     app.processEvents()
+
+
+def test_translator_authza_pool_and_account_helpers():
+    import translator_gui
+
+    class FakeButton:
+        def __init__(self):
+            self.visible = False
+
+        def show(self):
+            self.visible = True
+
+        def hide(self):
+            self.visible = False
+
+    models = [
+        ("multi_api_keys", "use_multi_api_keys", "openai/gpt-5"),
+        ("fallback_keys", "use_fallback_keys", "authza7/glm-5.3"),
+    ]
+    gui = SimpleNamespace(
+        model_combo=SimpleNamespace(currentText=lambda: "openai/gpt-5"),
+        _iter_enabled_key_pool_models=lambda: iter(models),
+        authza_login_btn=FakeButton(),
+        _has_authza_in_key_pools=lambda: True,
+        _update_authza_login_status=lambda: None,
+    )
+
+    assert translator_gui.TranslatorGUI._has_authza_in_key_pools(gui) is True
+    assert translator_gui.TranslatorGUI._selected_authza_account_id(gui) == 7
+
+    gui.model_combo = SimpleNamespace(currentText=lambda: "authza3/glm-5.2")
+    assert translator_gui.TranslatorGUI._selected_authza_account_id(gui) == 3
+    assert translator_gui.TranslatorGUI._refresh_authza_login_visibility(
+        gui, "authza3/glm-5.2"
+    ) is True
+    assert gui.authza_login_btn.visible is True
+
+    gui._has_authza_in_key_pools = lambda: False
+    assert translator_gui.TranslatorGUI._refresh_authza_login_visibility(
+        gui, "openai/gpt-5"
+    ) is False
+    assert gui.authza_login_btn.visible is False
+
+
+def test_multi_key_authza_login_completion_polls_the_logged_in_account():
+    import multi_api_key_manager
+
+    starts = []
+    logs = []
+    parent_refreshes = []
+    owner = SimpleNamespace(
+        _authza_login_account_id=4,
+        _authza_login_url="http://127.0.0.1:18874",
+        _model_search_combos=[],
+        translator_gui=SimpleNamespace(
+            append_log=logs.append,
+            _start_provider_model_catalog_refresh=(
+                lambda **kwargs: starts.append(kwargs) or True
+            ),
+        ),
+        _refresh_parent_model_requirements=(
+            lambda save_config=False: parent_refreshes.append(save_config)
+        ),
+    )
+
+    multi_api_key_manager.MultiAPIKeyDialog._authza_manager_login_finished(owner)
+
+    assert starts == [{"only_provider": "authza:4", "automatic": True}]
+    assert parent_refreshes == [False]
+    assert "account #4" in logs[-1]
 
 
 def test_model_manager_save_tracks_deletions_and_forces_completer_refresh():
@@ -1971,6 +2098,7 @@ def test_model_text_provider_refresh_is_debounced(monkeypatch):
         ("or/openrouter/free", "", True),
         ("or/openrouter/free", "openrouter-key", True),
         ("authnd/nvidia/model", "", True),
+        ("authza/glm-5.3", "", True),
     ],
 )
 def test_gui_auto_poll_respects_unified_client_optional_key_models(
@@ -2066,6 +2194,57 @@ def test_gui_auto_poll_log_counts_models_not_already_displayed(
     ]
 
 
+def test_glm_proxy_ready_auto_polls_the_selected_numbered_account(monkeypatch):
+    import translator_gui
+
+    due_calls = []
+    starts = []
+    monkeypatch.setattr(
+        translator_gui,
+        "provider_model_catalog_refresh_due",
+        lambda provider, **kwargs: due_calls.append((provider, kwargs)) or True,
+    )
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: "authza3/glm-5.3"),
+        custom_prefix_routes=[],
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _glm_proxy_post_start_poll_account_id=3,
+        _glm_proxy_post_start_poll_pending=True,
+        _start_provider_model_catalog_refresh=(
+            lambda **kwargs: starts.append(kwargs) or True
+        ),
+    )
+
+    translator_gui.TranslatorGUI._poll_glm_catalog_after_proxy_start(gui)
+
+    assert due_calls == [("authza:3", {"successful_only": True})]
+    assert starts == [{"only_provider": "authza:3", "automatic": True}]
+    assert gui._glm_proxy_post_start_poll_pending is False
+
+
+def test_glm_proxy_ready_does_not_poll_a_different_selected_account(monkeypatch):
+    import translator_gui
+
+    starts = []
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: "authza2/glm-5.3"),
+        custom_prefix_routes=[],
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _glm_proxy_post_start_poll_account_id=3,
+        _glm_proxy_post_start_poll_pending=True,
+        _start_provider_model_catalog_refresh=(
+            lambda **kwargs: starts.append(kwargs) or True
+        ),
+    )
+
+    translator_gui.TranslatorGUI._poll_glm_catalog_after_proxy_start(gui)
+
+    assert starts == []
+    assert gui._glm_proxy_post_start_poll_pending is False
+
+
 @pytest.mark.parametrize(
     ("active_model", "expected_provider"),
     [
@@ -2094,13 +2273,17 @@ def test_manage_models_poll_explicitly_polls_selected_authnd_before_full_refresh
     assert starts == [{"show_feedback": False, "only_provider": expected_provider}]
 
 
-def test_manage_models_poll_uses_one_full_refresh_for_non_authnd_selection():
+@pytest.mark.parametrize(
+    "active_model",
+    ("or/openai/gpt-5", "authza/glm-5.3", "authza4/glm-5.2"),
+)
+def test_manage_models_poll_uses_one_full_refresh_for_non_authnd_selection(active_model):
     import translator_gui
 
     starts = []
     gui = SimpleNamespace(
         config={},
-        model_combo=SimpleNamespace(currentText=lambda: "or/openai/gpt-5"),
+        model_combo=SimpleNamespace(currentText=lambda: active_model),
         _normalize_custom_prefix_routes=lambda _routes: [],
         _start_provider_model_catalog_refresh=lambda **kwargs: starts.append(kwargs) or True,
     )

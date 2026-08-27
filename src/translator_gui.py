@@ -12894,6 +12894,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
     model_catalog_updated_signal = Signal(object)
     # The proxy may be auto-launched by an API worker rather than a GUI button.
     antigravity_proxy_started_signal = Signal()
+    # Account id whose local Z.AI GLM proxy became ready after login/startup.
+    glm_proxy_started_signal = Signal(int)
     # Worker-to-GUI bridge used to pause a Direct Text run after automatic
     # glossary generation without opening Qt dialogs from the worker thread.
     direct_text_glossary_approval_signal = Signal(str, object)
@@ -13221,9 +13223,15 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.antigravity_proxy_started_signal.connect(
             self._antigravity_proxy_started
         )
+        self.glm_proxy_started_signal.connect(self._glm_proxy_started)
         try:
             from antigravity_proxy import set_proxy_started_callback
             set_proxy_started_callback(self.antigravity_proxy_started_signal.emit)
+        except Exception:
+            pass
+        try:
+            from glm_proxy import set_proxy_started_callback as set_glm_proxy_started_callback
+            set_glm_proxy_started_callback(self.glm_proxy_started_signal.emit)
         except Exception:
             pass
         
@@ -14619,6 +14627,11 @@ Text to analyze:
             try:
                 from antigravity_proxy import set_proxy_started_callback
                 set_proxy_started_callback(None)
+            except Exception:
+                pass
+            try:
+                from glm_proxy import set_proxy_started_callback as set_glm_proxy_started_callback
+                set_glm_proxy_started_callback(None)
             except Exception:
                 pass
 
@@ -17891,6 +17904,10 @@ Recent translations to summarize:
                 if hasattr(self, 'ocagy_status_btn'):
                     self.ocagy_status_btn.hide()
 
+        # Show/hide the local Z.AI Coding Plan login control. Enabled key-pool
+        # routes count too, matching the other login-backed providers.
+        self._refresh_authza_login_visibility(model)
+
         # Show/hide Antigravity proxy controls
         if hasattr(self, 'antigravity_login_btn'):
             needs_antigravity = (model or '').strip().lower().startswith('antigravity')
@@ -18110,6 +18127,30 @@ Recent translations to summarize:
         except Exception:
             pass
         return False
+
+    def _has_authza_in_key_pools(self):
+        """Check if any enabled key pool contains an AuthZA model."""
+        try:
+            for _pool_key, _toggle_key, model in self._iter_enabled_key_pool_models():
+                if str(model or '').strip().lower().startswith('authza'):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _refresh_authza_login_visibility(self, model):
+        """Keep the main AuthZA login button in sync with typed/pool routes."""
+        if not hasattr(self, 'authza_login_btn'):
+            return False
+        needs_authza = str(model or '').strip().lower().startswith('authza')
+        if not needs_authza:
+            needs_authza = self._has_authza_in_key_pools()
+        if needs_authza:
+            self.authza_login_btn.show()
+            self._update_authza_login_status()
+        else:
+            self.authza_login_btn.hide()
+        return needs_authza
 
 
     def _has_authcd_in_key_pools(self):
@@ -19727,6 +19768,107 @@ Recent translations to summarize:
     # Antigravity proxy account controls
     # ==================================================================
 
+    def _selected_authza_account_id(self):
+        """Return the AuthZA account selected in the main field or key pools."""
+        from glm_proxy import account_id_from_model
+
+        try:
+            account_id = account_id_from_model(self.model_combo.currentText())
+            if account_id is not None:
+                return account_id
+        except Exception:
+            pass
+        try:
+            for _pool_key, _toggle_key, model in self._iter_enabled_key_pool_models():
+                account_id = account_id_from_model(model)
+                if account_id is not None:
+                    return account_id
+        except Exception:
+            pass
+        return 0
+
+    def _update_authza_login_status(self):
+        """Render local Z.AI login state without starting the proxy or networking."""
+        if not hasattr(self, 'authza_login_btn'):
+            return
+        account_id = self._selected_authza_account_id()
+        self._authza_login_account_id = account_id
+        try:
+            from glm_proxy import get_proxy_url, has_credentials
+
+            logged_in = has_credentials(account_id)
+            proxy_url = get_proxy_url(account_id)
+        except Exception:
+            logged_in = False
+            proxy_url = "local proxy"
+
+        account_label = "default" if account_id == 0 else f"#{account_id}"
+        if logged_in:
+            self.authza_login_btn.setText(f"✅ Z.AI {account_label}")
+            action = "Log in again to replace the saved session"
+            color = "#166534"
+        else:
+            self.authza_login_btn.setText(
+                "🔐 Z.AI Login" if account_id == 0 else f"🔐 Z.AI #{account_id} Login"
+            )
+            action = "Log in with your Z.AI Coding Plan"
+            color = "#6d28d9"
+        self.authza_login_btn.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 40em; margin: 0;'>"
+            f"{action} for AuthZA account <b>{account_label}</b>.<br>"
+            f"Glossarion installs/updates the local proxy runtime automatically at {proxy_url}."
+            "</p></qt>"
+        )
+        self.authza_login_btn.setStyleSheet(
+            f"background-color: {color}; color: white; font-weight: bold; "
+            "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
+        )
+
+    def _authza_login_clicked(self):
+        """Run the selected AuthZA account's browser login off the GUI thread."""
+        account_id = self._selected_authza_account_id()
+        self._authza_login_account_id = account_id
+        self.authza_login_btn.setEnabled(False)
+        self.authza_login_btn.setText("⏳ Z.AI Login…")
+        account_label = "default account" if account_id == 0 else f"account #{account_id}"
+        self.append_log(
+            f"🔐 AuthZA: preparing the local GLM proxy and opening Z.AI login for {account_label}…"
+        )
+
+        def _worker():
+            try:
+                from glm_proxy import open_login
+
+                self._authza_login_url = open_login(
+                    log_fn=self.append_log,
+                    account_id=account_id,
+                )
+                QMetaObject.invokeMethod(self, "_authza_login_finished", Qt.QueuedConnection)
+            except Exception as exc:
+                self._authza_login_error = str(exc)
+                QMetaObject.invokeMethod(self, "_authza_login_failed", Qt.QueuedConnection)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @Slot()
+    def _authza_login_finished(self):
+        self.authza_login_btn.setEnabled(True)
+        self._update_authza_login_status()
+        account_id = int(getattr(self, '_authza_login_account_id', 0) or 0)
+        account_label = "default account" if account_id == 0 else f"account #{account_id}"
+        self.append_log(
+            f"✅ AuthZA: Z.AI login completed for {account_label}; proxy ready at "
+            f"{getattr(self, '_authza_login_url', '')}."
+        )
+
+    @Slot()
+    def _authza_login_failed(self):
+        self.authza_login_btn.setEnabled(True)
+        self._update_authza_login_status()
+        err = getattr(self, '_authza_login_error', 'Unknown error')
+        self.append_log(f"❌ AuthZA login failed: {err}")
+        QMessageBox.warning(self, "Z.AI Login Failed", f"Z.AI login failed:\n{err}")
+
     def _update_antigravity_login_status(self):
         """Update Antigravity button text from cached status only.
 
@@ -20496,6 +20638,58 @@ Recent translations to summarize:
         # Another catalog refresh is finishing. Retry on the GUI thread; the
         # successful-only TTL check above prevents a duplicate network poll.
         QTimer.singleShot(1500, self._poll_antigravity_catalog_after_proxy_start)
+
+    @Slot(int)
+    def _glm_proxy_started(self, account_id=0):
+        """Poll the selected AuthZA account after its login proxy is ready."""
+        self._glm_proxy_post_start_poll_account_id = max(0, int(account_id or 0))
+        if getattr(self, '_glm_proxy_post_start_poll_pending', False):
+            return
+        self._glm_proxy_post_start_poll_pending = True
+        QTimer.singleShot(0, self._poll_glm_catalog_after_proxy_start)
+
+    def _poll_glm_catalog_after_proxy_start(self):
+        """Refresh a newly ready GLM account without repeating a fresh success."""
+        account_id = max(
+            0,
+            int(getattr(self, '_glm_proxy_post_start_poll_account_id', 0) or 0),
+        )
+        try:
+            active_model = self.model_combo.currentText().strip()
+            custom_routes = self._normalize_custom_prefix_routes(
+                getattr(
+                    self,
+                    'custom_prefix_routes',
+                    self.config.get('custom_prefix_routes', []),
+                )
+            )
+        except Exception:
+            self._glm_proxy_post_start_poll_pending = False
+            return
+
+        provider = catalog_provider_for_model(active_model, custom_routes)
+        expected_provider = 'authza' if account_id == 0 else f'authza:{account_id}'
+        if provider != expected_provider:
+            self._glm_proxy_post_start_poll_pending = False
+            return
+        if not provider_model_catalog_refresh_due(
+            provider,
+            successful_only=True,
+        ):
+            self._glm_proxy_post_start_poll_pending = False
+            return
+
+        started = self._start_provider_model_catalog_refresh(
+            only_provider=provider,
+            automatic=True,
+        )
+        if started:
+            self._glm_proxy_post_start_poll_pending = False
+            return
+
+        # A request-triggered or manual catalog refresh may still be finishing.
+        # Retry after it persists its success rather than launching a duplicate.
+        QTimer.singleShot(1500, self._poll_glm_catalog_after_proxy_start)
 
     def _start_provider_catalog_refresh_with_antigravity(self, show_feedback=False):
         """Start Antigravity first, then perform the requested full catalog poll."""
@@ -21802,6 +21996,21 @@ Recent translations to summarize:
         self.ocagy_status_btn.hide()
         model_btn_layout.addWidget(self.ocagy_status_btn)
 
+        # Z.AI Coding Plan login (visible for authza/ and authzaN/ routes).
+        self.authza_login_btn = QPushButton("🔐 Z.AI Login")
+        self.authza_login_btn.setStyleSheet(
+            "background-color: #6d28d9; color: white; font-weight: bold; "
+            "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
+        )
+        self.authza_login_btn.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 40em; margin: 0;'>"
+            "Log in with a Z.AI Coding Plan account via the automatically managed local GLM proxy.<br>"
+            "Numbered authzaN/ routes use isolated account N credentials and ports.</p></qt>"
+        )
+        self.authza_login_btn.clicked.connect(self._authza_login_clicked)
+        self.authza_login_btn.hide()
+        model_btn_layout.addWidget(self.authza_login_btn)
+
         # Antigravity proxy controls (visible only for antigravity* models)
         self.antigravity_login_btn = QPushButton("🔐 Antigravity Login")
         self.antigravity_login_btn.setStyleSheet(
@@ -23000,6 +23209,10 @@ Recent translations to summarize:
             if active_model.startswith('authnd'):
                 poll_status.setText(
                     "Polling selected AuthND catalog, then remaining providers…"
+                )
+            elif active_model.startswith('authza'):
+                poll_status.setText(
+                    "Polling selected AuthZA GLM proxy catalog and remaining providers…"
                 )
             else:
                 poll_status.setText("Contacting provider catalogs in the background…")
