@@ -13930,6 +13930,9 @@ Text to analyze:
         self.groq_base_url_var = self.config.get('groq_base_url', '')
         self.fireworks_base_url_var = self.config.get('fireworks_base_url', '')
         self.use_custom_openai_endpoint_var = self.config.get('use_custom_openai_endpoint', False)
+        self.authza_use_general_api_var = bool(
+            self.config.get('authza_use_general_api', False)
+        )
         self.custom_prefix_routes = self._normalize_custom_prefix_routes(
             self.config.get('custom_prefix_routes', [])
         )
@@ -19794,28 +19797,38 @@ Recent translations to summarize:
         account_id = self._selected_authza_account_id()
         self._authza_login_account_id = account_id
         try:
-            from glm_proxy import get_proxy_url, has_credentials
+            from glm_proxy import get_proxy_url, has_credentials, uses_general_api
 
             logged_in = has_credentials(account_id)
             proxy_url = get_proxy_url(account_id)
+            general_api = uses_general_api()
         except Exception:
             logged_in = False
             proxy_url = "local proxy"
+            general_api = bool(
+                getattr(
+                    self,
+                    'authza_use_general_api_var',
+                    self.config.get('authza_use_general_api', False),
+                )
+            )
 
         account_label = "default" if account_id == 0 else f"#{account_id}"
+        mode_label = "General API key" if general_api else "ZCode login plan"
         if logged_in:
             self.authza_login_btn.setText(f"✅ Z.AI {account_label}")
-            action = "Log in again to replace the saved session"
+            action = f"Log in again to replace the saved {mode_label} credential"
             color = "#166534"
         else:
             self.authza_login_btn.setText(
                 "🔐 Z.AI Login" if account_id == 0 else f"🔐 Z.AI #{account_id} Login"
             )
-            action = "Log in with your Z.AI Coding Plan"
+            action = f"Log in to configure {mode_label} access"
             color = "#6d28d9"
         self.authza_login_btn.setToolTip(
             "<qt><p style='white-space: normal; max-width: 40em; margin: 0;'>"
             f"{action} for AuthZA account <b>{account_label}</b>.<br>"
+            f"Selected mode: <b>{mode_label}</b>.<br>"
             f"Glossarion installs/updates the local proxy runtime automatically at {proxy_url}.<br>"
             "Numbered authzaN/ routes automatically open Z.AI's switch-account login."
             "</p></qt>"
@@ -19832,8 +19845,17 @@ Recent translations to summarize:
         self.authza_login_btn.setEnabled(False)
         self.authza_login_btn.setText("⏳ Z.AI Login…")
         account_label = "default account" if account_id == 0 else f"account #{account_id}"
+        general_api = bool(
+            getattr(
+                self,
+                'authza_use_general_api_var',
+                self.config.get('authza_use_general_api', False),
+            )
+        )
+        mode_label = "General API key" if general_api else "ZCode login plan"
         self.append_log(
-            f"🔐 AuthZA: preparing the local GLM proxy and opening Z.AI login for {account_label}…"
+            f"🔐 AuthZA: preparing the local GLM proxy and opening Z.AI login for "
+            f"{account_label} ({mode_label})…"
         )
 
         def _worker():
@@ -21997,7 +22019,7 @@ Recent translations to summarize:
         self.ocagy_status_btn.hide()
         model_btn_layout.addWidget(self.ocagy_status_btn)
 
-        # Z.AI Coding Plan login (visible for authza/ and authzaN/ routes).
+        # Z.AI login (visible for authza/ and authzaN/ routes).
         self.authza_login_btn = QPushButton("🔐 Z.AI Login")
         self.authza_login_btn.setStyleSheet(
             "background-color: #6d28d9; color: white; font-weight: bold; "
@@ -22005,7 +22027,7 @@ Recent translations to summarize:
         )
         self.authza_login_btn.setToolTip(
             "<qt><p style='white-space: normal; max-width: 40em; margin: 0;'>"
-            "Log in with a Z.AI Coding Plan account via the automatically managed local GLM proxy.<br>"
+            "Log in to the selected AuthZA access mode via the automatically managed local GLM proxy.<br>"
             "Numbered authzaN/ routes use isolated account N credentials and ports.</p></qt>"
         )
         self.authza_login_btn.clicked.connect(self._authza_login_clicked)
@@ -34321,6 +34343,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ALLOW_BATCH_STREAM_LOGS': '1' if bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False))) else '0',
             'ALLOW_AUTHGPT_BATCH_STREAM_LOGS': '1' if bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False))) else '0',
             'STREAM_THINKING_LOGS': '1' if bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False))) else '0',
+            'AUTHZA_USE_GENERAL_API': '1' if bool(getattr(self, 'authza_use_general_api_var', self.config.get('authza_use_general_api', False))) else '0',
             'AUTHND_TOKEN_CONCURRENCY_AUTO': authnd_auto_flag,
             'AUTHND_TOKEN_CONCURRENCY': authnd_token_limit,
             'AUTHND_TOKEN_SUBPROCESS_CONCURRENCY': authnd_subprocess_limit,
@@ -36157,6 +36180,7 @@ Important rules:
                     'CUSTOM_IMAGE_EDIT_BASE_URL': (getattr(self, 'custom_image_edit_endpoint_var', '') or '') if getattr(self, 'use_custom_image_edit_endpoint_var', False) else '',
                     'OPENAI_IMAGE_EDIT_BASE_URL': (getattr(self, 'custom_image_edit_endpoint_var', '') or '') if getattr(self, 'use_custom_image_edit_endpoint_var', False) else '',
                     'CUSTOM_OPENAI_PREFIX_ROUTES': self._custom_prefix_routes_env_json(),
+                    'AUTHZA_USE_GENERAL_API': '1' if bool(getattr(self, 'authza_use_general_api_var', self.config.get('authza_use_general_api', False))) else '0',
                     'OPENAI_TTS_ENDPOINT': getattr(self, 'openai_tts_endpoint_var', '') or (getattr(self, 'openai_base_url_var', '') if str(getattr(self, 'openai_base_url_var', '')).rstrip('/').endswith('/audio/speech') else ''),
                     'GROQ_API_URL': getattr(self, 'groq_base_url_var', '') or '',
                     'FIREWORKS_API_URL': getattr(self, 'fireworks_base_url_var', '') or '',
@@ -45224,6 +45248,7 @@ Important rules:
                 ('vision_ocr_keep_images', ['vision_ocr_keep_images_var'], False, bool),
                 ('vision_ocr_source_prepass', ['vision_ocr_source_prepass_var'], 'auto', str),
                 ('use_custom_openai_endpoint', ['use_custom_openai_endpoint_var'], False, bool),
+                ('authza_use_general_api', ['authza_use_general_api_var'], False, bool),
                 ('use_custom_image_edit_endpoint', ['use_custom_image_edit_endpoint_var'], False, bool),
                 ('custom_image_edit_full_page_output', ['custom_image_edit_full_page_output_var'], 10, lambda v: max(0, min(100, safe_int(v, 10)))),
                 ('manga_disable_inpaint_performance_mode', ['manga_disable_inpaint_performance_mode_var'], False, bool),
@@ -46399,6 +46424,7 @@ Important rules:
                 ('ALLOW_AUTHGPT_BATCH_STREAM_LOGS', '1' if bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False))) else '0'),
                 ('ENABLE_THOUGHTS', '1' if self.config.get('enable_thoughts', True) else '0'),
                 ('STREAM_THINKING_LOGS', '1' if bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False))) else '0'),
+                ('AUTHZA_USE_GENERAL_API', '1' if _bool_config('authza_use_general_api', False) else '0'),
                 ('HTML2TEXT_ESCAPE_SNOB', '1' if self.config.get('html2text_escape_snob', False) else '0'),
                 ('CONVERT_BR_TO_PARAGRAPHS', '1' if self.config.get('convert_br_to_paragraphs', True) else '0'),
                 ('PRESERVE_ASTERISK_SEPARATOR_LINES', '1' if self.config.get('preserve_asterisk_separator_lines', True) else '0'),

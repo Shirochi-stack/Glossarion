@@ -1,4 +1,4 @@
-"""Local Z.AI Coding Plan proxy used by Glossarion's ``authza/`` routes.
+"""Local Z.AI login proxy used by Glossarion's ``authza/`` routes.
 
 This adapter manages the unofficial TriDefender/zcode-api runtime, including
 downloading a pinned/current source archive, installing Bun and package
@@ -48,13 +48,18 @@ PROXY_DEFAULT_REVISION = "9cec45e7268190050b4af6074ea4d852f8241b8a"
 PROXY_DEFAULT_VERSION = "2.6.0"
 PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
 PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS = 90
-RUNTIME_PATCH_VERSION = "2026-08-27-isolated-credentials-account-switch-v2"
+RUNTIME_PATCH_VERSION = "2026-08-27-zcode-dual-access-v6"
+ZCODE_APP_VERSION = "3.9.2"
 
 DEFAULT_PROXY_HOST = "127.0.0.1"
 DEFAULT_PROXY_PORT = 18870
 CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
 MODELS_ENDPOINT = "/v1/models"
 HEALTH_ENDPOINT = "/health"
+LOGIN_PLAN_MODELS_ENDPOINT = "https://zcode.z.ai/api/v1/zcode-plan/billing/balance"
+GENERAL_API_BASE = "https://api.z.ai/api/paas/v4"
+GENERAL_API_MODELS_ENDPOINT = f"{GENERAL_API_BASE}/models"
+GENERAL_API_MODE_ENV = "AUTHZA_USE_GENERAL_API"
 BUN_NPM_PACKAGE = os.environ.get("GLM_PROXY_BUN_PACKAGE", "bun@latest")
 BUN_INSTALL_TIMEOUT_SECONDS = 300
 DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 600
@@ -72,6 +77,106 @@ DEFAULT_MODELS = (
     "glm-5.2",
     "glm-5.3",
 )
+
+# Keep the login JWT inside the JavaScript credential store. This probe mirrors
+# current ZCode desktop's account-specific model discovery from
+# data.balances[].capabilities entries named "model:*".
+_LOGIN_PLAN_MODEL_CATALOG_SCRIPT = r'''
+import { loadCredential } from "./src/auth/store.ts";
+
+const credential = await loadCredential();
+if (!credential?.jwt) throw new Error("Z.AI login JWT is unavailable; sign in again");
+const appVersion = process.env.ZCODE_APP_VERSION || "3.9.2";
+const endpoint = new URL(process.env.ZCODE_LOGIN_PLAN_MODELS_ENDPOINT);
+endpoint.searchParams.set("app_version", appVersion);
+const timeoutMs = Number(process.env.ZCODE_MODEL_CATALOG_TIMEOUT_MS || "10000");
+const response = await fetch(endpoint, {
+  headers: {
+    "Authorization": `Bearer ${credential.jwt}`,
+    "HTTP-Referer": "https://zcode.z.ai",
+    "User-Agent": `ZCode/${appVersion}`,
+    "X-Title": "Z Code@glossarion",
+    "X-ZCode-Agent": "glm",
+    "X-ZCode-App-Version": appVersion,
+  },
+  signal: AbortSignal.timeout(Math.max(1000, timeoutMs)),
+});
+const text = await response.text();
+let payload = {};
+try { payload = JSON.parse(text); } catch {}
+if (!response.ok || (payload.code !== undefined && ![0, 200].includes(payload.code))) {
+  const detail = payload.msg || payload.message || text.slice(0, 300) || "unknown error";
+  throw new Error(`Z.AI model catalog HTTP ${response.status}: ${detail}`);
+}
+const models = [];
+const seen = new Set();
+for (const balance of payload?.data?.balances || []) {
+  const capabilities = Array.isArray(balance?.capabilities) ? balance.capabilities : [];
+  const capabilityModels = capabilities
+    .filter((item) => typeof item === "string" && item.toLowerCase().startsWith("model:"))
+    .map((item) => item.slice(6).trim())
+    .filter(Boolean);
+  const candidates = capabilityModels.length
+    ? capabilityModels
+    : [String(balance?.show_name || "").trim()];
+  for (const model of candidates) {
+    const key = model.toLowerCase();
+    if (model && !seen.has(key)) {
+      seen.add(key);
+      models.push(model);
+    }
+  }
+}
+process.stdout.write("GLOSSARION_MODELS=" + JSON.stringify(models));
+'''.strip()
+
+# General API credentials are still encrypted by zcode-api's credential store.
+# Keep the provisioned API key inside Bun while querying the OpenAI-compatible
+# model catalog, just as the login-plan probe keeps the JWT outside Python.
+_GENERAL_API_MODEL_CATALOG_SCRIPT = r'''
+import { loadCredential } from "./src/auth/store.ts";
+import { credentialString } from "./src/auth/types.ts";
+
+const credential = await loadCredential();
+if (!credential?.apiKey || credential.apiKey === "zcode-login") {
+  throw new Error("Z.AI general API key is unavailable; sign in again in general API mode");
+}
+const endpoint = process.env.ZCODE_GENERAL_API_MODELS_ENDPOINT;
+const timeoutMs = Number(process.env.ZCODE_MODEL_CATALOG_TIMEOUT_MS || "10000");
+const response = await fetch(endpoint, {
+  headers: {
+    "Authorization": `Bearer ${credentialString(credential)}`,
+    "Accept-Language": "en-US,en",
+    "User-Agent": `Glossarion/${process.env.ZCODE_APP_VERSION || "3.9.2"}`,
+  },
+  signal: AbortSignal.timeout(Math.max(1000, timeoutMs)),
+});
+const text = await response.text();
+let payload = {};
+try { payload = JSON.parse(text); } catch {}
+if (!response.ok || payload?.error) {
+  const detail = payload?.error?.message || payload?.msg || payload?.message || text.slice(0, 300) || "unknown error";
+  throw new Error(`Z.AI general model catalog HTTP ${response.status}: ${detail}`);
+}
+const entries = Array.isArray(payload?.data)
+  ? payload.data
+  : Array.isArray(payload?.data?.models)
+    ? payload.data.models
+    : Array.isArray(payload?.models)
+      ? payload.models
+      : [];
+const models = [];
+const seen = new Set();
+for (const entry of entries) {
+  const model = String(typeof entry === "string" ? entry : entry?.id || entry?.model || entry?.name || "").trim();
+  const key = model.toLowerCase();
+  if (model && !seen.has(key)) {
+    seen.add(key);
+    models.push(model);
+  }
+}
+process.stdout.write("GLOSSARION_MODELS=" + JSON.stringify(models));
+'''.strip()
 
 _cancel_event = threading.Event()
 _active_response_lock = threading.Lock()
@@ -117,6 +222,32 @@ def _normalize_account_id(account_id: Optional[int]) -> int:
     return value
 
 
+def uses_general_api() -> bool:
+    """Return whether AuthZA should use the billable general API endpoint."""
+    return os.environ.get(GENERAL_API_MODE_ENV, "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def set_general_api_mode(enabled: bool) -> bool:
+    """Apply the AuthZA access mode and stop stale managed proxy processes.
+
+    Login-plan and general-API credentials are stored separately, so changing
+    this setting never overwrites the other login. The next request/login will
+    rebuild the account config and start a proxy in the selected mode.
+    """
+    previous = uses_general_api()
+    current = bool(enabled)
+    os.environ[GENERAL_API_MODE_ENV] = "1" if current else "0"
+    if previous != current:
+        for account in list(_proxy_processes):
+            shutdown_proxy(account)
+    return current
+
+
 def account_id_from_model(model: str) -> Optional[int]:
     """Return the isolated proxy account selected by an ``authza`` model.
 
@@ -142,8 +273,14 @@ def _account_dir(account_id: Optional[int] = None) -> str:
     return os.path.join(_get_proxy_data_dir(), "accounts", name)
 
 
-def _credentials_path(account_id: Optional[int] = None) -> str:
-    return os.path.join(_account_dir(account_id), "credentials.json")
+def _credentials_path(
+    account_id: Optional[int] = None,
+    *,
+    general_api: Optional[bool] = None,
+) -> str:
+    use_general = uses_general_api() if general_api is None else bool(general_api)
+    filename = "credentials-general-api.json" if use_general else "credentials.json"
+    return os.path.join(_account_dir(account_id), filename)
 
 
 def _config_path(account_id: Optional[int] = None) -> str:
@@ -524,6 +661,116 @@ def _patch_numbered_account_switch(runtime_dir: str) -> None:
     Path(index_path).write_text(patched, encoding="utf-8")
 
 
+def _patch_login_plan_only_auth(runtime_dir: str) -> None:
+    """Support JWT-only login while retaining opt-in API-key provisioning."""
+    index_path = os.path.join(runtime_dir, "src", "index.ts")
+    try:
+        source = Path(index_path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Downloaded zcode-api has no CLI entrypoint: {exc}") from exc
+    marker = "GLOSSARION_ZCODE_LOGIN_PLAN_JWT_ONLY"
+    if marker in source:
+        return
+
+    old_login = '''    const { accessToken, userId, jwt } = await runOAuth(provider);
+    console.log("\\nResolving API key...");
+    const resolver = new KeyResolver();
+    cred = await resolver.resolveCodingPlanCredential(accessToken, provider, userId);
+    if (jwt) cred.jwt = jwt;'''
+    new_login = f'''    const {{ accessToken, userId, jwt }} = await runOAuth(provider);
+    // {marker}
+    if (process.env.GLOSSARION_ZCODE_LOGIN_PLAN_ONLY === "1" && provider === "zai") {{
+      if (!jwt) throw new Error("ZCode login did not return a login-plan JWT");
+      cred = {{ apiKey: "zcode-login", provider: "zai", userId, jwt }};
+      console.log("\\nUsing ZCode login-plan credential (no API key provisioned).");
+    }} else {{
+      console.log("\\nResolving API key...");
+      const resolver = new KeyResolver();
+      cred = await resolver.resolveCodingPlanCredential(accessToken, provider, userId);
+      if (jwt) cred.jwt = jwt;
+    }}'''
+    if old_login not in source:
+        raise RuntimeError("Could not patch zcode-api's API-key-provisioning login path")
+    patched = source.replace(old_login, new_login, 1)
+
+    api_key_log = '  console.log(`  API Key: ${cred.apiKey.substring(0, 12)}...`);'
+    credential_log = (
+        '  if (cred.apiKey === "zcode-login" && cred.jwt) '
+        'console.log("  Login credential: ZCode JWT");\n'
+        '  else console.log("  API Key: stored securely");'
+    )
+    patched, log_count = re.subn(
+        re.escape(api_key_log),
+        lambda _match: credential_log,
+        patched,
+    )
+    if log_count < 2:
+        raise RuntimeError("Could not patch zcode-api's API-key login/status output")
+    Path(index_path).write_text(patched, encoding="utf-8")
+
+
+def _patch_zcode_login_plan_endpoint(runtime_dir: str) -> None:
+    """Support current login-plan and general-API upstream wire formats.
+
+    zcode-api 2.6.0 still points ``start-plan`` at the retired OpenAI-style
+    ``/api/v1/zcode-plan/chat/completions`` route.  Current ZCode desktop uses
+    the login JWT with ``/api/v1/zcode-plan/anthropic/v1/messages`` instead.
+    General-API mode instead uses the provisioned project key with Z.AI's
+    OpenAI-compatible ``/api/paas/v4`` endpoint. Keep one OpenAI-compatible
+    local surface and select the upstream format from the managed config.
+    """
+    upstream_path = os.path.join(runtime_dir, "src", "proxy", "upstream.ts")
+    handler_path = os.path.join(runtime_dir, "src", "proxy", "handler.ts")
+    try:
+        upstream = Path(upstream_path).read_text(encoding="utf-8")
+        handler = Path(handler_path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Downloaded zcode-api has no proxy routing sources: {exc}") from exc
+
+    upstream_marker = "GLOSSARION_ZCODE_LOGIN_PLAN_ANTHROPIC"
+    if upstream_marker not in upstream:
+        upstream, base_count = re.subn(
+            r'const\s+STARTPLAN_OPENAI_BASE\s*=\s*["\'][^"\']+["\']\s*;',
+            f'// {upstream_marker}\nconst STARTPLAN_ANTHROPIC_BASE = '
+            '"https://zcode.z.ai/api/v1/zcode-plan/anthropic";',
+            upstream,
+            count=1,
+        )
+        upstream, route_count = re.subn(
+            r'return\s+`\$\{STARTPLAN_OPENAI_BASE\}/chat/completions`\s*;',
+            'return `${STARTPLAN_ANTHROPIC_BASE}/v1/messages`;',
+            upstream,
+            count=1,
+        )
+        if not base_count or not route_count:
+            raise RuntimeError("Could not patch zcode-api's obsolete login-plan endpoint")
+
+    handler_marker = "GLOSSARION_ZCODE_DUAL_ACCESS_ROUTING"
+    if handler_marker not in handler:
+        routing_pattern = re.compile(
+            r'const\s+startPlan\s*=\s*config\.plan\s*===\s*["\']start-plan["\']\s*;\s*'
+            r'const\s+translateAnthropicToOpenAI\s*=\s*format\s*===\s*["\']anthropic["\']\s*&&\s*startPlan\s*;\s*'
+            r'const\s+translateOpenAIToAnthropic\s*=\s*format\s*===\s*["\']openai["\']\s*&&\s*!startPlan\s*;\s*'
+            r'const\s+upstreamFormat:\s*Format\s*=\s*startPlan\s*\?\s*["\']openai["\']\s*:\s*["\']anthropic["\']\s*;',
+            re.MULTILINE,
+        )
+        replacement = (
+            f'// {handler_marker}\n'
+            '  const startPlan = config.plan === "start-plan";\n'
+            '  const generalApi = !startPlan && '
+            'config.providers[config.provider].openaiBase.includes("/api/paas/v4");\n'
+            '  const translateAnthropicToOpenAI = generalApi && format === "anthropic";\n'
+            '  const translateOpenAIToAnthropic = !generalApi && format === "openai";\n'
+            '  const upstreamFormat: Format = generalApi ? "openai" : "anthropic";'
+        )
+        handler, routing_count = routing_pattern.subn(replacement, handler, count=1)
+        if not routing_count:
+            raise RuntimeError("Could not patch zcode-api's login-plan wire format")
+
+    Path(upstream_path).write_text(upstream, encoding="utf-8")
+    Path(handler_path).write_text(handler, encoding="utf-8")
+
+
 def _write_runtime_metadata(runtime_dir: str, release: Dict[str, Any]) -> None:
     with open(_runtime_metadata_path(runtime_dir), "w", encoding="utf-8") as handle:
         json.dump(
@@ -555,6 +802,8 @@ def _download_proxy_runtime(release: Dict[str, Any], runtime_dir: str, log_fn=No
         archive_root = _find_archive_root(extract_dir)
         _patch_credentials_store(archive_root)
         _patch_numbered_account_switch(archive_root)
+        _patch_login_plan_only_auth(archive_root)
+        _patch_zcode_login_plan_endpoint(archive_root)
         _write_runtime_metadata(archive_root, release)
         if os.path.exists(runtime_dir):
             shutil.rmtree(runtime_dir)
@@ -659,6 +908,9 @@ def _ensure_account_config(account_id: Optional[int] = None) -> str:
     os.makedirs(account_dir, exist_ok=True)
     secrets_data = _read_or_create_secrets(account)
     models_yaml = "\n".join(f'    - "{model}"' for model in DEFAULT_MODELS)
+    general_api = uses_general_api()
+    plan = "coding-plan" if general_api else "start-plan"
+    enabled_flag = "false" if general_api else "true"
     config = f'''server:
   host: "{DEFAULT_PROXY_HOST}"
   port: {_get_proxy_port(account)}
@@ -667,18 +919,23 @@ auth:
   proxyApiKey: {json.dumps(secrets_data["proxy_api_key"])}
   oauthCredentialsPath: {json.dumps(_credentials_path(account))}
 provider: "zai"
-plan: "coding-plan"
+plan: "{plan}"
+providers:
+  zai:
+    anthropicBase: "https://api.z.ai/api/anthropic"
+    openaiBase: {json.dumps(GENERAL_API_BASE if general_api else "https://api.z.ai/api/coding/paas/v4")}
 models:
 {models_yaml}
 responses:
   enabled: true
 identity:
+  appVersion: {json.dumps(ZCODE_APP_VERSION)}
   deviceMid: {json.dumps(secrets_data["device_mid"])}
   sourceTitle: "glossarion"
 endpointRouting:
-  enabled: true
+  enabled: {enabled_flag}
 clientSigning:
-  enabled: true
+  enabled: {enabled_flag}
 mcp:
   enabled: false
 '''
@@ -702,6 +959,7 @@ def _runtime_env(account_id: Optional[int] = None) -> Dict[str, str]:
             "ZCODE_PROXY_CONFIG": _config_path(account),
             "ZCODE_PROXY_CREDENTIALS_PATH": _credentials_path(account),
             "ZCODE_PROXY_CREDENTIAL_SECRET": secrets_data["credential_secret"],
+            "GLOSSARION_ZCODE_LOGIN_PLAN_ONLY": "0" if uses_general_api() else "1",
         }
     )
     return values
@@ -1166,22 +1424,55 @@ def fetch_available_models(
     account_id: Optional[int] = None,
     timeout: float = 10,
 ) -> List[str]:
+    """Return model IDs visible in the selected AuthZA access mode."""
     account = _normalize_account_id(account_id)
-    _ensure_for_request(account, auto_login=False)
-    response = requests.get(
-        f"{get_proxy_url(account)}{MODELS_ENDPOINT}",
-        headers=_build_headers(account),
-        timeout=max(1, timeout),
+    if not has_credentials(account):
+        raise RuntimeError("GLM proxy has no saved Z.AI login for this account")
+    runtime_dir, bun = _ensure_runtime_and_dependencies()
+    env = _runtime_env(account)
+    general_api = uses_general_api()
+    env.update(
+        {
+            "ZCODE_APP_VERSION": ZCODE_APP_VERSION,
+            "ZCODE_MODEL_CATALOG_TIMEOUT_MS": str(max(1000, int(float(timeout) * 1000))),
+        }
     )
-    if response.status_code != 200:
-        raise RuntimeError(f"GLM proxy: HTTP {response.status_code} - {_extract_error(response)}")
-    payload = response.json()
-    data = payload.get("data") if isinstance(payload, dict) else None
+    if general_api:
+        env["ZCODE_GENERAL_API_MODELS_ENDPOINT"] = GENERAL_API_MODELS_ENDPOINT
+        catalog_script = _GENERAL_API_MODEL_CATALOG_SCRIPT
+    else:
+        env["ZCODE_LOGIN_PLAN_MODELS_ENDPOINT"] = LOGIN_PLAN_MODELS_ENDPOINT
+        catalog_script = _LOGIN_PLAN_MODEL_CATALOG_SCRIPT
+    result = run_logged_subprocess(
+        [*bun, "-e", catalog_script],
+        log_fn=None,
+        timeout=max(2, float(timeout) + 2),
+        cwd=runtime_dir,
+        env=env,
+    )
+    if result["returncode"] != 0:
+        mode_label = "general API" if general_api else "login plan"
+        raise RuntimeError(
+            str(result.get("output") or f"Z.AI {mode_label} model catalog request failed")
+        )
+    try:
+        output = str(result.get("output") or "")
+        marker_line = next(
+            (line for line in reversed(output.splitlines()) if line.startswith("GLOSSARION_MODELS=")),
+            "",
+        )
+        payload = json.loads(marker_line.partition("=")[2])
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Z.AI model catalog returned invalid JSON") from exc
     models = []
-    for item in data or []:
-        model_id = item.get("id") if isinstance(item, dict) else item
-        if model_id and str(model_id) not in models:
-            models.append(str(model_id))
+    seen = set()
+    for model_id in payload if isinstance(payload, list) else []:
+        value = str(model_id or "").strip()
+        key = value.casefold()
+        if value and key not in seen:
+            seen.add(key)
+            models.append(value)
     if not models:
-        raise RuntimeError("GLM proxy returned no model IDs")
+        mode_label = "general API" if general_api else "login plan"
+        raise RuntimeError(f"Z.AI {mode_label} returned no model IDs")
     return models

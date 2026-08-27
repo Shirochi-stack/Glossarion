@@ -53,7 +53,7 @@ Supported models and their prefixes (Updated July 2025):
 - AuthGem-Key: authgem-key/* (e.g., authgem-key/gemini-2.5-flash) – Gemini via AI Studio API key
 - AuthGem-Vertex: authgem-vertex/* (e.g., authgem-vertex/gemini-2.5-flash) – Gemini via Google OAuth + Vertex AI
 - Z.AI: za/* (e.g., za/glm-4-plus) – Zhipu AI via API key
-- AuthZA: authza/* (e.g., authza/glm-5.3) – Z.AI Coding Plan via local login proxy
+- AuthZA: authza/* (e.g., authza/glm-5.3) – Z.AI login-plan or general API via local proxy
 - NanoGPT: nan/* (e.g., nan/gpt-5.2, nan/veo2-video) – nano-gpt.com API
   Routes to chat/image/video endpoint based on ENABLE_IMAGE_OUTPUT_MODE / ENABLE_VIDEO_OUTPUT_MODE
 - SambaNova: sam/* (e.g., sam/Meta-Llama-3.1-8B-Instruct) – SambaNova Cloud API
@@ -1270,12 +1270,14 @@ try:
     from glm_proxy import cancel_stream as _authza_cancel_stream
     from glm_proxy import reset_cancel as _authza_reset_cancel
     from glm_proxy import open_login as _authza_open_login
+    from glm_proxy import uses_general_api as _authza_uses_general_api
     AUTHZA_AVAILABLE = True
 except ImportError:
     _authza_send = None
     _authza_cancel_stream = None
     _authza_reset_cancel = None
     _authza_open_login = None
+    _authza_uses_general_api = None
     AUTHZA_AVAILABLE = False
 
 # AuthND - NVIDIA Build browser-backed route (optional, no API key)
@@ -18096,7 +18098,7 @@ class UnifiedClient:
             'ocagy': self._send_ocagy,  # OpenCode + opencode-antigravity-auth
             'antigravity': self._send_antigravity,  # Antigravity Cloud Code proxy
             'za': self._send_openai_provider_router,  # Z.AI via API key
-            'authza': self._send_authza,  # Z.AI Coding Plan via local login proxy
+            'authza': self._send_authza,  # Z.AI login-plan/general API via local proxy
             'authnd': self._send_authnd,  # NVIDIA Build browser-backed route
             'search': self._send_search_gemini,  # Google Search/Gemini browser-backed route
             'nanogpt': self._send_nanogpt,  # NanoGPT (nano-gpt.com) – chat/image/video
@@ -27921,7 +27923,7 @@ class UnifiedClient:
         )
 
     def _send_authza(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send through the auto-managed Z.AI Coding Plan login proxy.
+        """Send through the auto-managed Z.AI login proxy.
 
         ``authza/`` uses the default isolated login and ``authzaN/`` uses the
         matching numbered login, proxy process, and localhost port.
@@ -27951,12 +27953,19 @@ class UnifiedClient:
             account_id = getattr(self, '_authza_account_id', None)
         proxy_account_id = account_id or 0
         acct_label = f" (Account #{account_id})" if account_id else ""
+        general_api = bool(
+            _authza_uses_general_api is not None and _authza_uses_general_api()
+        )
 
         # Send the request through the account's local OpenAI-compatible proxy.
         max_retries = self._get_max_retries()
         last_error = None
         label = f"AuthZA{acct_label}" if acct_label else "AuthZA"
-        print(f"🔐 {label}: Sending through the local GLM proxy (model={actual_model})")
+        access_label = "general API" if general_api else "login plan"
+        print(
+            f"🔐 {label}: Sending through the local GLM proxy "
+            f"(mode={access_label}, model={actual_model})"
+        )
         for attempt in range(max_retries):
             # Check stop flag before each attempt
             if self._is_stop_requested():
@@ -28005,18 +28014,53 @@ class UnifiedClient:
 
             except RuntimeError as exc:
                 error_str = str(exc)
+                error_lower = error_str.lower()
 
                 # Stream cancelled by force-stop
-                if "stream cancelled" in error_str.lower():
+                if "stream cancelled" in error_lower:
                     self._log_once("⏹️ AuthZA: Stream cancelled by user")
                     raise UnifiedClientError(
                         "AuthZA: Translation stopped by user",
                         error_type="cancelled"
                     )
 
-                # The upstream Coding Plan credential can expire or be revoked.
-                if "401" in error_str or "403" in error_str or "expired" in error_str.lower():
-                    print(f"🔄 {label}: Z.AI login expired — re-opening browser login…")
+                # Z.AI wraps plan-entitlement error 1113 in HTTP 429. It is not
+                # a transient rate limit: retrying only stalls the translation.
+                entitlement_markers = (
+                    '"code":"1113"',
+                    '"code": "1113"',
+                    "'code': '1113'",
+                    "[1113]",
+                    "insufficient balance",
+                    "no resource package",
+                )
+                if any(marker in error_lower for marker in entitlement_markers):
+                    if general_api:
+                        entitlement_help = (
+                            "its General API key has no spendable balance, promotional credits, "
+                            "or resource package. Add API balance/resources to that Z.AI account."
+                        )
+                    else:
+                        entitlement_help = (
+                            "it has no active Coding Plan resource package. Sign in with the "
+                            "Z.AI account that owns the plan, or use its authzaN/ slot."
+                        )
+                    raise UnifiedClientError(
+                        f"AuthZA{acct_label}: Z.AI rejected this login because "
+                        f"{entitlement_help} (error 1113)",
+                        error_type="entitlement_error"
+                    )
+
+                if "3006" in error_str or "model not allowed" in error_lower:
+                    raise UnifiedClientError(
+                        f"AuthZA{acct_label}: model '{actual_model}' is not granted to this "
+                        f"Z.AI {access_label}. Use Poll Providers to load the account's allowed models.",
+                        error_type="validation"
+                    )
+
+                # The selected upstream credential can expire or be revoked.
+                if "401" in error_str or "403" in error_str or "expired" in error_lower:
+                    print(f"🔄 {label}: Z.AI credential rejected — re-opening browser login…")
                     try:
                         if _authza_open_login is None:
                             raise RuntimeError("GLM proxy login helper is unavailable")
@@ -28025,12 +28069,12 @@ class UnifiedClient:
                         continue
                     except Exception as relogin_exc:
                         raise UnifiedClientError(
-                            f"AuthZA{acct_label}: Z.AI login expired and re-login failed: {relogin_exc}",
+                            f"AuthZA{acct_label}: Z.AI credential was rejected and re-login failed: {relogin_exc}",
                             error_type="auth_error"
                         )
 
                 # 400 Bad Request: retry with staggered delay
-                if "400" in error_str or "bad request" in error_str.lower():
+                if "400" in error_str or "bad request" in error_lower:
                     if attempt < max_retries - 1:
                         interval = self._get_send_interval()
                         delay = random.uniform(max(0.0, interval / 2), max(interval, 0.0))

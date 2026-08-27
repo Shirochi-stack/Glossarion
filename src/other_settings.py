@@ -13564,6 +13564,72 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     section_v = QVBoxLayout(section_box)
     section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
     section_v.setSpacing(4)  # Compact spacing between widgets
+
+    # AuthZA can either use the ZCode login-plan JWT or provision/reuse a
+    # project API key and call Z.AI's supported general-purpose endpoint.
+    authza_mode_box = QGroupBox("AuthZA / GLM Access Mode")
+    authza_mode_v = QVBoxLayout(authza_mode_box)
+    authza_mode_v.setContentsMargins(8, 8, 8, 8)
+    authza_mode_v.setSpacing(4)
+
+    self.authza_use_general_api_var = bool(
+        self.config.get('authza_use_general_api', False)
+    )
+    authza_general_cb = self._create_styled_checkbox(
+        "Use auto-provisioned API key with Z.AI General API"
+    )
+    self.authza_general_api_checkbox = authza_general_cb
+    authza_general_cb.setChecked(self.authza_use_general_api_var)
+    authza_general_cb.setToolTip(_wrapped_tooltip_html(
+        "OFF uses the ZCode login-plan JWT and subscription quota. ON uses browser login "
+        "to provision or reuse a project API key, then sends authza/ requests to "
+        "https://api.z.ai/api/paas/v4. General API requests consume promotional credits, "
+        "resource packages, or prepaid balance and may incur charges. Each mode keeps a "
+        "separate encrypted credential file."
+    ))
+    authza_mode_v.addWidget(authza_general_cb)
+
+    authza_mode_help = QLabel()
+    authza_mode_help.setWordWrap(True)
+    authza_mode_help.setStyleSheet("color: #b8b8b8; font-size: 8pt;")
+    authza_mode_v.addWidget(authza_mode_help)
+
+    def _refresh_authza_mode_help(enabled):
+        if enabled:
+            authza_mode_help.setText(
+                "General API enabled: authza/ uses https://api.z.ai/api/paas/v4 with the "
+                "project key created/reused during Z.AI Login. This is pay-as-you-go access."
+            )
+            authza_mode_help.setStyleSheet("color: #ffc107; font-size: 8pt;")
+        else:
+            authza_mode_help.setText(
+                "Login-plan enabled: authza/ uses the account-authorized ZCode plan route."
+            )
+            authza_mode_help.setStyleSheet("color: #b8b8b8; font-size: 8pt;")
+
+    def _on_authza_general_api_toggled(checked):
+        enabled = bool(checked)
+        self.authza_use_general_api_var = enabled
+        self.config['authza_use_general_api'] = enabled
+        try:
+            from glm_proxy import set_general_api_mode
+            set_general_api_mode(enabled)
+        except Exception as exc:
+            os.environ['AUTHZA_USE_GENERAL_API'] = '1' if enabled else '0'
+            if hasattr(self, 'append_log'):
+                self.append_log(f"⚠️ AuthZA mode switch could not stop the old proxy: {exc}")
+        _refresh_authza_mode_help(enabled)
+        try:
+            self._update_authza_login_status()
+        except Exception:
+            pass
+        if hasattr(self, 'append_log'):
+            mode = "General API (API key / billable balance)" if enabled else "ZCode login plan"
+            self.append_log(f"🔄 AuthZA access mode: {mode}")
+
+    authza_general_cb.toggled.connect(_on_authza_general_api_toggled)
+    _refresh_authza_mode_help(self.authza_use_general_api_var)
+    section_v.addWidget(authza_mode_box)
     
     # Checkbox to enable/disable custom endpoint
     enable_cb = self._create_styled_checkbox("Enable Custom OpenAI Endpoint")
