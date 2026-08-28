@@ -391,6 +391,13 @@ def test_qt_captcha_reinjects_after_same_url_document_replacement(
     assert pages[0].markers[0].endswith(":1:2")
     assert pages[0].markers[1].endswith(":2:3")
     assert all("render=explicit&onload=" in script for script in pages[0].injection_scripts)
+    wait_match = re.search(
+        r"const captchaWaitTimeoutMs = (\d+);",
+        pages[0].injection_scripts[0],
+    )
+    assert wait_match
+    assert 20_000 < int(wait_match.group(1)) <= 30_000
+    assert "timeoutMs = captchaWaitTimeoutMs" in pages[0].injection_scripts[0]
 
     diagnostics = capsys.readouterr().err
     assert "injection invalidated by navigation" in diagnostics
@@ -414,3 +421,48 @@ def test_qt_captcha_caps_destroyed_document_reinjection(monkeypatch, tmp_path):
 
     assert len(pages) == 1
     assert len(pages[0].markers) == 3
+
+
+def test_send_chat_completion_retries_token_helper_failure(monkeypatch):
+    authnd._cancel_event.clear()
+    token_calls = []
+    logs = []
+
+    def fake_get_token(page_url, timeout, log_fn=None):
+        token_calls.append((page_url, timeout, log_fn))
+        if len(token_calls) == 1:
+            raise RuntimeError("AuthND hCaptcha failed: timeout waiting for hcaptcha")
+        return "fresh-token"
+
+    def fake_post_prediction(**kwargs):
+        assert kwargs["captcha_token"] == "fresh-token"
+        return {"content": "ok", "finish_reason": "stop"}
+
+    monkeypatch.setattr(authnd, "_get_captcha_token_for_request", fake_get_token)
+    monkeypatch.setattr(authnd, "_post_prediction", fake_post_prediction)
+    monkeypatch.setenv("AUTHND_TOKEN_TIMEOUT", "75")
+
+    result = authnd.send_chat_completion(
+        messages=[{"role": "user", "content": "test"}],
+        model="z-ai/glm-5.1",
+        stream=False,
+        log_fn=logs.append,
+    )
+
+    assert result["content"] == "ok"
+    assert len(token_calls) == 2
+    assert all(call[1] == 75 for call in token_calls)
+    assert any("captcha token flow failed (attempt 1/2)" in message for message in logs)
+    assert any("fresh browser helper" in message for message in logs)
+
+
+def test_hcaptcha_timeout_hint_is_actionable(monkeypatch):
+    monkeypatch.setenv("AUTHND_TOKEN_CONCURRENCY", "3")
+
+    hint = authnd._captcha_token_failure_hint(
+        RuntimeError("AuthND hCaptcha failed: timeout waiting for hcaptcha")
+    )
+
+    assert "js.hcaptcha.com" in hint
+    assert "AUTHND_TOKEN_TIMEOUT" in hint
+    assert "currently 3; try 1" in hint

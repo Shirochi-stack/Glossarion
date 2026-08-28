@@ -354,6 +354,15 @@ def _env_bool(name: str, default: bool) -> bool:
 
 def _captcha_token_failure_hint(error: Any) -> str:
     text = str(error or "").lower()
+    if "timeout waiting for hcaptcha" in text or "hcaptcha timed out" in text:
+        token_limit = _effective_token_limit(TOKEN_CONCURRENCY_ENV, DEFAULT_TOKEN_CONCURRENCY_LIMIT)
+        return (
+            " The hCaptcha SDK did not initialize. Check that js.hcaptcha.com is not "
+            "blocked by DNS, a firewall, proxy, or ad blocker; then retry. On slow or "
+            "busy systems, increase AUTHND_TOKEN_TIMEOUT and reduce Other Settings > "
+            "NIM/AuthND Token Helpers > Token concurrency "
+            f"(currently {token_limit}; try 1)."
+        )
     if not any(marker in text for marker in ("rate-limited", "rate limited", "rate_limit", "too many", "429")):
         return ""
     token_limit = _effective_token_limit(TOKEN_CONCURRENCY_ENV, DEFAULT_TOKEN_CONCURRENCY_LIMIT)
@@ -1296,13 +1305,17 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
         except Exception:
             pass
 
-        initial_load_deadline = time.monotonic() + min(max(timeout, 15), 60)
+        # Treat AUTHND_TOKEN_TIMEOUT as one end-to-end browser-token deadline.
+        # Previously page loading and captcha initialization each received a
+        # fresh timeout, while the JavaScript SDK wait ignored the setting and
+        # always failed after 20 seconds.
+        deadline = time.monotonic() + max(timeout, 30)
+        initial_load_deadline = min(deadline, time.monotonic() + 60)
         page.load(QUrl(page_url))
         stable_generation = _wait_for_stable_document(initial_load_deadline)
 
         sitekey = os.getenv("AUTHND_HCAPTCHA_SITEKEY", DEFAULT_HCAPTCHA_SITEKEY)
         injection_id = uuid.uuid4().hex
-        deadline = time.monotonic() + max(timeout, 30)
         last_summary: Dict[str, Any] = {}
         invalidation_detail = ""
 
@@ -1312,17 +1325,22 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
 
             marker = f"{injection_id}:{injection_attempt}:{stable_generation}"
             onload_name = f"__authndHcaptchaOnload_{injection_id}_{injection_attempt}"
+            captcha_wait_timeout_ms = max(
+                1000,
+                int(max(0.0, deadline - time.monotonic()) * 1000),
+            )
             script = f"""
 (() => {{
   const marker = {json.dumps(marker)};
   const sitekey = {json.dumps(sitekey)};
   const onloadName = {json.dumps(onload_name)};
+  const captchaWaitTimeoutMs = {captcha_wait_timeout_ms};
   window.__authndInjectionMarker = marker;
   window.__authndResult = {{marker, pending: true, step: "starting"}};
   const isReady = () => Boolean(
     window.hcaptcha && window.hcaptcha.render && window.hcaptcha.execute
   );
-  const waitFor = (fn, timeoutMs = 20000) => new Promise((resolve, reject) => {{
+  const waitFor = (fn, timeoutMs = captchaWaitTimeoutMs) => new Promise((resolve, reject) => {{
     const start = Date.now();
     const tick = () => {{
       try {{
@@ -2272,6 +2290,9 @@ def send_chat_completion(
                 f"⚠️ AuthND captcha token flow failed (attempt {attempt + 1}/2): "
                 f"{error_detail}{_captcha_token_failure_hint(exc)}",
             )
+            if attempt == 0:
+                _log(log_fn, "🔁 AuthND: retrying captcha token flow with a fresh browser helper")
+                continue
             raise
         if _is_cancelled():
             raise RuntimeError("stream cancelled")

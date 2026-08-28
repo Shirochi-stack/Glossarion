@@ -173,3 +173,9 @@ AuthND: Stream finished ...
 
 If it pauses before `captcha token acquired`, the browser token flow is waiting.
 If it pauses after `Stream opened`, the model or NVIDIA queue is the wait point.
+
+`timeout waiting for hcaptcha` means the NVIDIA page loaded but the hCaptcha
+JavaScript SDK did not become ready before `AUTHND_TOKEN_TIMEOUT`. Confirm that
+`https://js.hcaptcha.com` is not blocked by DNS, a firewall, proxy, or ad blocker.
+For slow or busy systems, raise `AUTHND_TOKEN_TIMEOUT` and set token concurrency
+to `1` before retrying.
