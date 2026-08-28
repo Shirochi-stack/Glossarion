@@ -3889,7 +3889,14 @@ def _create_response_handling_section(self, parent):
         14,
         "Maximum helper child processes AuthND may launch for token minting.",
     ))
-    authnd_limits_h.addWidget(_make_authnd_spin_control(
+    authnd_limits_h.addStretch()
+    section_v.addWidget(authnd_limits_row)
+
+    authnd_timeout_row = QWidget()
+    authnd_timeout_h = QHBoxLayout(authnd_timeout_row)
+    authnd_timeout_h.setContentsMargins(16, 0, 0, 8)
+    authnd_timeout_h.setSpacing(8)
+    authnd_timeout_h.addWidget(_make_authnd_spin_control(
         "AuthND token timeout (s):",
         "authnd_token_timeout_var",
         "authnd_token_timeout_spin",
@@ -3902,8 +3909,8 @@ def _create_response_handling_section(self, parent):
         "Maximum seconds for one AuthND browser helper to load the NVIDIA page and acquire an hCaptcha token.",
         minimum=30,
     ))
-    authnd_limits_h.addStretch()
-    section_v.addWidget(authnd_limits_row)
+    authnd_timeout_h.addStretch()
+    section_v.addWidget(authnd_timeout_row)
 
     def _apply_authnd_auto_state(enabled=None):
         try:
