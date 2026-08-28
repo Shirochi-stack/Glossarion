@@ -1,9 +1,15 @@
+import inspect
 import threading
 import time
+from pathlib import Path
 
 from TransateKRtoEN import (
+    _multipass_graceful_stop_requested,
+    _multipass_hard_stop_requested,
+    _multipass_stop_requested,
     _partial_b2_batch_worker_count,
     _partial_b2_entries_per_request,
+    _process_refinement_or_tts_mode,
     _run_partial_b2_request_batches,
 )
 
@@ -88,3 +94,124 @@ def test_partial_b2_remains_sequential_when_batch_mode_is_disabled():
 
     assert results == [1, 2, 3]
     assert max_active == 1
+
+
+def test_multipass_stop_state_distinguishes_graceful_from_force(monkeypatch):
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    # A stale cancellation flag or the shared GUI callback must not turn the
+    # first graceful click into a hard stop.
+    monkeypatch.setenv("TRANSLATION_CANCELLED", "1")
+
+    assert _multipass_graceful_stop_requested() is True
+    assert _multipass_stop_requested(lambda: True) is True
+    assert _multipass_hard_stop_requested(lambda: True) is False
+
+    # The second click clears graceful mode before latching hard cancellation.
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    assert _multipass_hard_stop_requested(lambda: False) is True
+
+
+def test_partial_b2_graceful_stop_drains_running_and_cancels_queued_batches():
+    request_batches = [[index] for index in range(1, 7)]
+    state = {"stop": False, "hard": False}
+    started = []
+    started_lock = threading.Lock()
+    two_started = threading.Event()
+    release_running = threading.Event()
+    result_box = {}
+
+    def send_batch(batch_index, _batch_requests):
+        with started_lock:
+            started.append(batch_index)
+            if len(started) >= 2:
+                two_started.set()
+        assert release_running.wait(2.0)
+        return batch_index
+
+    def run_batches():
+        result_box["results"] = _run_partial_b2_request_batches(
+            request_batches,
+            use_batch=True,
+            batch_size=2,
+            stop_requested=lambda: state["stop"],
+            hard_stop_requested=lambda: state["hard"],
+            send_batch=send_batch,
+        )
+
+    runner = threading.Thread(target=run_batches)
+    runner.start()
+    assert two_started.wait(2.0)
+    state["stop"] = True
+    # Give the 50 ms polling loop time to cancel futures that have not started,
+    # while the two active calls remain blocked as real HTTP calls would be.
+    time.sleep(0.15)
+    release_running.set()
+    runner.join(2.0)
+
+    assert not runner.is_alive()
+    assert started == [1, 2]
+    assert result_box["results"] == [1, 2]
+
+
+def test_partial_b2_force_stop_abandons_the_running_wait_immediately():
+    state = {"stop": False, "hard": False}
+    started = threading.Event()
+    release_running = threading.Event()
+    result_box = {}
+
+    def send_batch(_batch_index, _batch_requests):
+        started.set()
+        assert release_running.wait(2.0)
+        return "late result"
+
+    def run_batches():
+        try:
+            _run_partial_b2_request_batches(
+                [[1], [2]],
+                use_batch=True,
+                batch_size=2,
+                stop_requested=lambda: state["stop"],
+                hard_stop_requested=lambda: state["hard"],
+                send_batch=send_batch,
+            )
+        except Exception as exc:
+            result_box["error"] = exc
+
+    runner = threading.Thread(target=run_batches)
+    runner.start()
+    assert started.wait(2.0)
+    state.update(stop=True, hard=True)
+    runner.join(0.5)
+
+    try:
+        assert not runner.is_alive()
+        assert "force-stopped" in str(result_box["error"])
+    finally:
+        # Let the abandoned fake transport worker unwind before the test exits.
+        release_running.set()
+
+
+def test_all_multipass_refinement_sends_preserve_in_flight_graceful_calls():
+    source = inspect.getsource(_process_refinement_or_tts_mode)
+
+    # send_with_interrupt protects an in-flight request during GRACEFUL_STOP by
+    # default.  The old override converted the first click into cancellation in
+    # full/failed, partial, partial.b, and partial.b2 alike.
+    assert "bypass_graceful_stop=True" not in source
+
+
+def test_gui_publishes_stop_mode_before_shared_stop_callback_latch():
+    gui_source = (
+        Path(__file__).resolve().parents[1] / "src" / "translator_gui.py"
+    ).read_text(encoding="utf-8")
+    stop_method = gui_source.split("    def stop_translation(self):", 1)[1].split(
+        "    def preserve_file_path", 1
+    )[0]
+
+    mode_publish = stop_method.index(
+        "os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'"
+    )
+    callback_latch = stop_method.index("self.stop_requested = True")
+    assert mode_publish < callback_latch

@@ -37490,7 +37490,6 @@ Important rules:
     def stop_translation(self):
         """Stop translation while preserving loaded file"""
         current_file = self.entry_epub.text() if hasattr(self, 'entry_epub') else None
-        self.stop_requested = True
         if getattr(self, '_zip_conversion_active', False):
             self.append_log("⏹️ Stop requested — cancelling ZIP preparation...")
         
@@ -37609,7 +37608,10 @@ Important rules:
         # Debug: Log the stop settings being applied
         print(f"🔧 Stop triggered: graceful_stop={graceful_stop}, wait_for_chunks_var={getattr(self, 'wait_for_chunks_var', False)}, WAIT_FOR_CHUNKS={os.environ.get('WAIT_FOR_CHUNKS')}")
         
-        # Track graceful stop state - when True, stop_callback returns False to allow in-flight calls to complete
+        # Publish the environment mode before the shared callback latch. Workers
+        # poll both; setting stop_requested first creates a race where a graceful
+        # first click can be mistaken for an immediate/force stop.
+        # Track graceful stop state - when True, in-flight calls may complete.
         self.graceful_stop_active = graceful_stop
         
         # Record stop timestamp so run_translation_thread can detect a rapid re-click

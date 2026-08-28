@@ -1599,6 +1599,61 @@ class _BufferedQAScanLog:
         return bool(lines)
 
 
+def _multipass_graceful_stop_requested() -> bool:
+    """Return whether the first-click graceful-stop latch is active."""
+    return (
+        os.environ.get("GRACEFUL_STOP") == "1"
+        or os.environ.get("GRACEFUL_STOP_COMPLETED") == "1"
+    )
+
+
+def _multipass_hard_stop_requested(stop_flag=None) -> bool:
+    """Distinguish immediate/double-click Stop from a graceful drain.
+
+    The GUI callback is true for both stop modes.  GRACEFUL_STOP is therefore
+    authoritative until the second click clears it and raises the hard-cancel
+    flags.
+    """
+    if _multipass_graceful_stop_requested():
+        return False
+    if os.environ.get("TRANSLATION_CANCELLED") == "1":
+        return True
+    try:
+        if callable(stop_flag) and stop_flag():
+            return True
+    except Exception:
+        return False
+    try:
+        return bool(is_stop_requested())
+    except Exception:
+        return False
+
+
+def _multipass_stop_requested(stop_flag=None) -> bool:
+    """Return whether multipass should stop scheduling new work."""
+    return (
+        _multipass_graceful_stop_requested()
+        or _multipass_hard_stop_requested(stop_flag)
+    )
+
+
+def _multipass_graceful_skip_error(exc) -> bool:
+    """Recognize work that was prevented from starting by graceful Stop."""
+    if not _multipass_graceful_stop_requested():
+        return False
+    if str(getattr(exc, "error_type", "") or "").strip().lower() == "cancelled":
+        return True
+    text = str(exc or "").strip().lower()
+    return any(
+        marker in text
+        for marker in (
+            "graceful stop",
+            "skipped before api call",
+            "stopped by user during threading delay",
+        )
+    )
+
+
 def _run_multipass_refinement_qa_scan(
     folder_path,
     *,
@@ -1629,17 +1684,22 @@ def _run_multipass_refinement_qa_scan(
         )
 
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="MultipassQAScan")
+    hard_stopped = False
+    graceful_announced = False
     try:
         future = executor.submit(_scan)
         while not future.done():
             qa_log.flush()
-            # Stay responsive to Stop during the pre-refinement QA scan. The scan
-            # itself receives stop_flag and will unwind; we must not block the
-            # multipass phase here waiting for it, otherwise Stop appears dead
-            # while "something" (the scan) keeps running.
-            if callable(stop_flag) and stop_flag():
-                print("⏹️ Stop requested during multipass QA scan; abandoning scan wait.")
+            # A hard stop returns immediately.  Graceful stop keeps the owner
+            # worker alive until the scan has unwound so the GUI cannot clear
+            # shared stop flags underneath a still-running multipass phase.
+            if _multipass_hard_stop_requested(stop_flag):
+                hard_stopped = True
+                print("⏹️ Force stop requested during multipass QA scan; abandoning scan wait.")
                 break
+            if _multipass_graceful_stop_requested() and not graceful_announced:
+                graceful_announced = True
+                print("⏳ Graceful stop requested during multipass QA scan; waiting for active scan work to finish...")
             time.sleep(0.05)
         while qa_log.flush(force=True):
             time.sleep(0.01)
@@ -1647,9 +1707,7 @@ def _run_multipass_refinement_qa_scan(
             return future.result()
         return None
     finally:
-        # Do not block on a still-running scan when stopping; let it exit via its
-        # own stop_flag instead of joining here.
-        executor.shutdown(wait=False, cancel_futures=True)
+        executor.shutdown(wait=not hard_stopped, cancel_futures=True)
 
 
 class TranslationConfig:
@@ -18805,12 +18863,23 @@ def _run_partial_b2_request_batches(
     use_batch,
     batch_size,
     stop_requested,
+    hard_stop_requested=None,
     send_batch,
 ):
-    """Send Partial.b2 JSON batches concurrently and return results in input order."""
+    """Send Partial.b2 JSON batches and drain already-running calls on Stop.
+
+    A graceful stop cancels batches that have not started, waits for running
+    batches, and returns their results in input order.  A hard/double-click stop
+    abandons the wait immediately.
+    """
     batches = list(request_batches or [])
     if not batches:
         return []
+
+    def _hard_stop():
+        if callable(hard_stop_requested):
+            return bool(hard_stop_requested())
+        return bool(stop_requested())
 
     worker_count = _partial_b2_batch_worker_count(
         use_batch,
@@ -18821,10 +18890,17 @@ def _run_partial_b2_request_batches(
         ordered_results = []
         for batch_index, batch_requests in enumerate(batches, start=1):
             if stop_requested():
-                raise RuntimeError(
-                    "Partial.b2 refinement stopped before all JSON batches completed"
-                )
-            ordered_results.append(send_batch(batch_index, batch_requests))
+                if _hard_stop():
+                    raise RuntimeError(
+                        "Partial.b2 refinement force-stopped before all JSON batches completed"
+                    )
+                break
+            try:
+                ordered_results.append(send_batch(batch_index, batch_requests))
+            except Exception:
+                if stop_requested() and not _hard_stop():
+                    break
+                raise
         return ordered_results
 
     executor = ThreadPoolExecutor(
@@ -18837,20 +18913,34 @@ def _run_partial_b2_request_batches(
     }
     pending = set(futures)
     results_by_index = {}
-    stopped = False
+    hard_stopped = False
+    graceful_draining = False
     try:
         while pending:
-            if stop_requested():
-                stopped = True
+            if _hard_stop():
+                hard_stopped = True
                 for future in pending:
                     future.cancel()
                 raise RuntimeError(
-                    "Partial.b2 refinement stopped before all JSON batches completed"
+                    "Partial.b2 refinement force-stopped before all JSON batches completed"
                 )
+
+            if stop_requested() and not graceful_draining:
+                graceful_draining = True
+                for future in pending:
+                    future.cancel()
+                pending = {future for future in pending if not future.cancelled()}
+                if pending:
+                    print(
+                        "⏳ Graceful stop: waiting for active Partial.b2 JSON "
+                        "request(s) to finish..."
+                    )
+                if not pending:
+                    break
 
             done, pending = wait(
                 pending,
-                timeout=0.25,
+                timeout=0.05,
                 return_when=FIRST_COMPLETED,
             )
             if not done:
@@ -18860,18 +18950,21 @@ def _run_partial_b2_request_batches(
                 try:
                     results_by_index[batch_index] = future.result()
                 except Exception:
+                    if stop_requested() and not _hard_stop():
+                        continue
                     for pending_future in pending:
                         pending_future.cancel()
                     raise
     finally:
         executor.shutdown(
-            wait=not stopped,
-            cancel_futures=stopped,
+            wait=not hard_stopped,
+            cancel_futures=True,
         )
 
     return [
         results_by_index[batch_index]
         for batch_index in range(1, len(batches) + 1)
+        if batch_index in results_by_index
     ]
 
 
@@ -19266,13 +19359,14 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
     if partial_refinement_mode not in ("partial", "partial.b", "partial.b2"):
         partial_refinement_mode = "partial"
 
-    def _force_stop_requested():
-        return (
-            os.environ.get("TRANSLATION_CANCELLED") == "1"
-            or os.environ.get("GRACEFUL_STOP") == "1"
-            or os.environ.get("GRACEFUL_STOP_COMPLETED") == "1"
-            or check_stop()
-        )
+    def _graceful_stop_requested():
+        return _multipass_graceful_stop_requested()
+
+    def _hard_stop_requested():
+        return _multipass_hard_stop_requested(check_stop)
+
+    def _stop_new_work_requested():
+        return _multipass_stop_requested(check_stop)
 
     def _format_refinement_prompt(prompt, html_content=None, qa_issues_text=""):
         text = str(prompt or "")
@@ -19552,7 +19646,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         return None, None
 
     def _process_one(idx, chapter):
-        if _force_stop_requested():
+        if _stop_new_work_requested():
             return "skipped", f"⏹️ Post-processing stopped before item {idx + 1}"
 
         actual_num = chapter.get("actual_chapter_num", chapter.get("num"))
@@ -19629,6 +19723,33 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             or preserve_full_mode_qa_status
             or preserve_partial_mode_qa_status
         )
+
+        def _restore_graceful_in_progress_entry():
+            """Put a pre-send graceful skip back into its retryable state."""
+            with progress_lock:
+                current_key, current_entry = _find_progress_entry_for_output(
+                    output_file, actual_num
+                )
+                if (
+                    current_key is None
+                    or str(current_entry.get("status", "")).lower() != "in_progress"
+                ):
+                    return
+                restored = progress_manager.restore_in_progress_entry(current_entry)
+                if restored is None:
+                    restored = dict(
+                        pre_existing_qa_source_entry
+                        or pre_existing_entry
+                        or current_entry
+                    )
+                    restored["status"] = (
+                        "qa_failed" if preserve_multipass_qa_status else "failed"
+                    )
+                    restored.pop("previous_status", None)
+                    restored.pop("previous_progress_entry", None)
+                    restored.pop("previous_status_unknown", None)
+                progress_manager.prog["chapters"][current_key] = restored
+                progress_manager.save()
 
         if mode == "refinement":
             if (
@@ -19758,6 +19879,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter)
                         progress_manager.save()
 
+                partial_graceful_incomplete = False
                 if multipass_partial_mode:
                     total_targets = _partial_refinement_target_count(partial_targets)
                     partial_requests = []
@@ -19769,7 +19891,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     # and burning CPU for messages that were thrown away.
                     _partial_b_batch_mode = (partial_refinement_mode == "partial.b")
                     for target_index, target in enumerate(partial_targets, start=1):
-                        if _force_stop_requested():
+                        if _stop_new_work_requested():
                             return "skipped", f"⏹️ Refinement stopped before Chapter {actual_num} fragment {target_index}/{len(partial_targets)}"
                         if _partial_b_batch_mode:
                             partial_requests.append((target_index, target, None))
@@ -19838,7 +19960,6 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                             chunk_timeout=None,
                             context="refinement",
                             chapter_context={"chapter": actual_num, "chunk": 1, "total_chunks": 1},
-                            bypass_graceful_stop=True,
                             before_send_callback=_mark_refinement_progress_on_send,
                         )
                         if (
@@ -19855,8 +19976,11 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                             [request["request_id"] for request in batch_requests],
                         )
                         for request in batch_requests:
-                            if _force_stop_requested():
-                                return "skipped", f"⏹️ Refinement stopped before applying Chapter {actual_num} partial batch"
+                            if _hard_stop_requested():
+                                raise RuntimeError(
+                                    f"Refinement force-stopped before applying "
+                                    f"Chapter {actual_num} partial batch"
+                                )
                             _apply_partial_refinement_response(
                                 partial_document,
                                 request["target"],
@@ -19879,7 +20003,6 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                                 "chunk": target_index,
                                 "total_chunks": len(partial_targets),
                             },
-                            bypass_graceful_stop=True,
                             before_send_callback=_mark_refinement_progress_on_send,
                         )
                         return target_index, target, refined_fragment, finish_reason
@@ -19906,8 +20029,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         }
                         pending = set(futures.keys())
                         try:
+                            graceful_draining = False
                             while pending:
-                                if _force_stop_requested():
+                                if _hard_stop_requested():
                                     for future in pending:
                                         future.cancel()
                                     partial_stop_message = (
@@ -19917,34 +20041,68 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                                     print("⏹️ Force stop requested; cancelling queued partial refinement fragments...")
                                     break
 
-                                done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                                if _graceful_stop_requested() and not graceful_draining:
+                                    graceful_draining = True
+                                    for future in pending:
+                                        future.cancel()
+                                    pending = {
+                                        future for future in pending
+                                        if not future.cancelled()
+                                    }
+                                    if pending:
+                                        print(
+                                            f"⏳ Graceful stop: waiting for active Chapter "
+                                            f"{actual_num} refinement fragment(s) to finish..."
+                                        )
+                                    if not pending:
+                                        break
+
+                                done, pending = wait(pending, timeout=0.05, return_when=FIRST_COMPLETED)
                                 if not done:
                                     continue
                                 for future in done:
                                     try:
                                         result = future.result()
-                                    except Exception:
+                                    except Exception as exc:
+                                        if _multipass_graceful_skip_error(exc):
+                                            continue
                                         for pending_future in pending:
                                             pending_future.cancel()
                                         raise
                                     partial_results[result[0]] = result
                         finally:
-                            executor.shutdown(wait=not _force_stop_requested(), cancel_futures=True)
+                            executor.shutdown(
+                                wait=not _hard_stop_requested(),
+                                cancel_futures=True,
+                            )
                     else:
                         for target_index, target, messages in partial_requests:
-                            if _force_stop_requested():
-                                return "skipped", f"⏹️ Refinement stopped before Chapter {actual_num} fragment {target_index}/{len(partial_targets)}"
-                            result = _send_partial_refinement_fragment(target_index, target, messages)
+                            if _stop_new_work_requested():
+                                if _hard_stop_requested():
+                                    return "skipped", f"⏹️ Refinement stopped before Chapter {actual_num} fragment {target_index}/{len(partial_targets)}"
+                                break
+                            try:
+                                result = _send_partial_refinement_fragment(target_index, target, messages)
+                            except Exception as exc:
+                                if _multipass_graceful_skip_error(exc):
+                                    break
+                                raise
                             partial_results[result[0]] = result
 
                     if partial_stop_message:
                         return "skipped", partial_stop_message
 
                     for target_index, target, _messages in partial_requests:
+                        if _hard_stop_requested():
+                            raise RuntimeError(
+                                f"Refinement force-stopped before applying Chapter "
+                                f"{actual_num} fragment {target_index}/"
+                                f"{len(partial_targets)}"
+                            )
                         result = partial_results.get(target_index)
                         if result is None:
-                            if _force_stop_requested():
-                                return "skipped", f"⏹️ Refinement stopped before applying Chapter {actual_num} fragment {target_index}/{len(partial_targets)}"
+                            if _stop_new_work_requested():
+                                continue
                             raise RuntimeError(
                                 f"Partial refinement did not return a response for fragment {target_index}/{len(partial_targets)}"
                             )
@@ -19959,6 +20117,12 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                                 f"(finish_reason={finish_reason})"
                             )
                         _apply_partial_refinement_response(partial_document, result_target, refined_fragment)
+                    if not partial_results and _stop_new_work_requested():
+                        return "skipped", f"⏹️ Refinement stopped before Chapter {actual_num} produced a response"
+                    partial_graceful_incomplete = (
+                        _graceful_stop_requested()
+                        and len(partial_results) < len(partial_requests)
+                    )
                     refined = _render_partial_refinement_document(partial_document)
                 else:
                     refinement_input = html_content
@@ -20008,9 +20172,12 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         chunk_timeout=None,
                         context="refinement",
                         chapter_context={"chapter": actual_num},
-                        bypass_graceful_stop=True,
                         before_send_callback=_mark_refinement_progress_on_send,
                     )
+                    if _hard_stop_requested():
+                        raise RuntimeError(
+                            f"Refinement force-stopped before saving Chapter {actual_num}"
+                        )
                     if (
                         not refined
                         or not str(refined).strip()
@@ -20026,6 +20193,10 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                                 refined = ContentProcessor.emergency_restore_images(refined, html_content)
                         except Exception:
                             pass
+                if _hard_stop_requested():
+                    raise RuntimeError(
+                        f"Refinement force-stopped before saving Chapter {actual_num}"
+                    )
                 backup_path = _backup_unrefined_file(output_path, backup_dir)
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write(refined)
@@ -20035,20 +20206,54 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     )
                 new_hash = ContentProcessor.get_content_hash(refined)
                 with progress_lock:
-                    progress_manager.update(idx, actual_num, new_hash, output_file, status="completed", chapter_obj=chapter)
-                    refinement_key = progress_manager.update_refinement_status(
-                        idx,
-                        actual_num,
-                        new_hash,
-                        output_file,
-                        "refined",
-                        chapter_obj=chapter,
-                    )
+                    if partial_graceful_incomplete:
+                        preserved_qa_issues = (
+                            pre_existing_qa_source_entry or pre_existing_entry
+                        ).get("qa_issues_found", [])
+                        progress_manager.update(
+                            idx,
+                            actual_num,
+                            new_hash,
+                            output_file,
+                            status="qa_failed",
+                            chapter_obj=chapter,
+                            qa_issues_found=(
+                                preserved_qa_issues
+                                if isinstance(preserved_qa_issues, list)
+                                else [preserved_qa_issues]
+                            ),
+                        )
+                        refinement_key = progress_manager.update_refinement_status(
+                            idx,
+                            actual_num,
+                            new_hash,
+                            output_file,
+                            "failed",
+                            chapter_obj=chapter,
+                            error="Graceful stop saved only completed refinement fragments",
+                        )
+                    else:
+                        progress_manager.update(idx, actual_num, new_hash, output_file, status="completed", chapter_obj=chapter)
+                        refinement_key = progress_manager.update_refinement_status(
+                            idx,
+                            actual_num,
+                            new_hash,
+                            output_file,
+                            "refined",
+                            chapter_obj=chapter,
+                        )
                     progress_manager.prog["chapters"][refinement_key]["unrefined_backup_file"] = os.path.relpath(backup_path, out).replace("\\", "/")
-                    _finalize_translation_artifact_progress(
-                        chapter, new_hash, backup_path
-                    )
+                    if not partial_graceful_incomplete:
+                        _finalize_translation_artifact_progress(
+                            chapter, new_hash, backup_path
+                        )
                     progress_manager.save()
+                if partial_graceful_incomplete:
+                    return "skipped", (
+                        f"⏹️ Graceful stop saved {len(partial_results)}/"
+                        f"{len(partial_requests)} completed refinement fragment(s) "
+                        f"for Chapter {actual_num}; remaining QA work stays retryable"
+                    )
                 if multipass_partial_mode:
                     return "processed", (
                         f"Partial refined Chapter {actual_num}: {output_file} "
@@ -20056,6 +20261,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     )
                 return "processed", f"✨ Refined Chapter {actual_num}: {output_file}"
             except Exception as exc:
+                if _multipass_graceful_skip_error(exc):
+                    _restore_graceful_in_progress_entry()
+                    return "skipped", f"⏹️ Graceful stop skipped queued refinement for Chapter {actual_num}"
                 with progress_lock:
                     if preserve_multipass_qa_status:
                         preserved_qa_issues = (pre_existing_qa_source_entry or pre_existing_entry).get("qa_issues_found", [])
@@ -20180,7 +20388,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         all_requests = []
 
         def _collect_chapter(idx, chapter):
-            if _force_stop_requested():
+            if _stop_new_work_requested():
                 return "skipped", f"Post-processing stopped before item {idx + 1}"
 
             actual_num = chapter.get("actual_chapter_num", chapter.get("num"))
@@ -20306,6 +20514,11 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
 
             item_requests = []
             for target_index, target in enumerate(partial_targets, start=1):
+                if _stop_new_work_requested():
+                    return "skipped", (
+                        f"Post-processing stopped while collecting Chapter "
+                        f"{actual_num} targets"
+                    )
                 fragment_html = _partial_refinement_target_fragment(target, partial_document)
                 fragment_qa_entry = _partial_refinement_qa_entry_for_fragment(
                     pre_existing_qa_source_entry or pre_existing_entry,
@@ -20343,8 +20556,8 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             }
 
         for idx, chapter in enumerate(chapters):
-            if _force_stop_requested():
-                print("Force stop requested; stopping Partial.b2 collection.")
+            if _stop_new_work_requested():
+                print("Stop requested; stopping Partial.b2 collection.")
                 break
             result = _collect_chapter(idx, chapter)
             if result[0] == "collected":
@@ -20353,6 +20566,12 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 all_requests.extend(item["requests"])
             else:
                 _record_result(result)
+
+        # Collection has no in-flight API work to preserve.  Never dispatch the
+        # already-collected prefix after Stop was pressed midway through it.
+        if _stop_new_work_requested():
+            print("⏹️ Stop requested before Partial.b2 dispatch; no new JSON calls will start.")
+            return
 
         if not all_requests:
             # DIAGNOSTIC: partial.b2 collected zero refinement targets, so the run
@@ -20459,7 +20678,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 )
 
             def _send_partial_b2_batch(batch_index, batch_requests):
-                if _force_stop_requested():
+                if _stop_new_work_requested():
                     raise RuntimeError("Partial.b2 refinement stopped before all JSON batches completed")
                 messages = _build_refinement_messages(
                     _partial_b2_payload(batch_requests),
@@ -20477,7 +20696,6 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     chunk_timeout=None,
                     context="refinement",
                     chapter_context={"chapter": "all", "chunk": batch_index, "total_chunks": len(request_batches)},
-                    bypass_graceful_stop=True,
                     before_send_callback=_mark_partial_b2_progress_on_send,
                 )
                 if (
@@ -20499,21 +20717,96 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 request_batches,
                 use_batch=use_batch,
                 batch_size=batch_size,
-                stop_requested=_force_stop_requested,
+                stop_requested=_stop_new_work_requested,
+                hard_stop_requested=_hard_stop_requested,
                 send_batch=_send_partial_b2_batch,
             )
             for refined_batch_map in batch_results:
                 refined_by_id.update(refined_batch_map)
 
             missing_refined_ids = [request_id for request_id in request_ids if request_id not in refined_by_id]
-            if missing_refined_ids:
+            if missing_refined_ids and not _stop_new_work_requested():
                 raise RuntimeError(
                     "Partial.b2 refinement missing parsed request id(s): "
                     + ", ".join(missing_refined_ids)
                 )
             for item in collected:
-                if _force_stop_requested():
+                if _hard_stop_requested():
+                    preserved_qa_issues = (
+                        item["pre_existing_qa_source_entry"]
+                        or item["pre_existing_entry"]
+                    ).get("qa_issues_found", [])
+                    with progress_lock:
+                        progress_manager.update(
+                            item["idx"],
+                            item["actual_num"],
+                            item["content_hash"],
+                            item["output_file"],
+                            status="qa_failed",
+                            chapter_obj=item["chapter"],
+                            qa_issues_found=(
+                                preserved_qa_issues
+                                if isinstance(preserved_qa_issues, list)
+                                else [preserved_qa_issues]
+                            ),
+                        )
+                        progress_manager.update_refinement_status(
+                            item["idx"],
+                            item["actual_num"],
+                            item["content_hash"],
+                            item["output_file"],
+                            "failed",
+                            chapter_obj=item["chapter"],
+                            error="Partial.b2 force-stopped before applying response",
+                        )
+                        progress_manager.save()
                     _record_result(("skipped", f"Refinement stopped before applying Partial.b2 Chapter {item['actual_num']}"))
+                    continue
+                item_request_ids = [
+                    request["request_id"] for request in item["requests"]
+                ]
+                missing_item_ids = [
+                    request_id for request_id in item_request_ids
+                    if request_id not in refined_by_id
+                ]
+                if missing_item_ids:
+                    preserved_qa_issues = (
+                        item["pre_existing_qa_source_entry"]
+                        or item["pre_existing_entry"]
+                    ).get("qa_issues_found", [])
+                    with progress_lock:
+                        progress_manager.update(
+                            item["idx"],
+                            item["actual_num"],
+                            item["content_hash"],
+                            item["output_file"],
+                            status="qa_failed",
+                            chapter_obj=item["chapter"],
+                            qa_issues_found=(
+                                preserved_qa_issues
+                                if isinstance(preserved_qa_issues, list)
+                                else [preserved_qa_issues]
+                            ),
+                        )
+                        progress_manager.update_refinement_status(
+                            item["idx"],
+                            item["actual_num"],
+                            item["content_hash"],
+                            item["output_file"],
+                            "failed",
+                            chapter_obj=item["chapter"],
+                            error=(
+                                "Graceful stop left one or more Partial.b2 "
+                                "responses unsent"
+                            ),
+                        )
+                        progress_manager.save()
+                    _record_result((
+                        "skipped",
+                        f"⏹️ Graceful stop left Chapter {item['actual_num']} "
+                        f"retryable ({len(missing_item_ids)}/"
+                        f"{len(item_request_ids)} Partial.b2 response(s) not sent)",
+                    ))
                     continue
                 for request in item["requests"]:
                     _apply_partial_refinement_response(
@@ -20606,15 +20899,32 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 for idx, chapter in enumerate(chapters)
             }
             pending = set(futures.keys())
+            graceful_draining = False
             try:
                 while pending:
-                    if _force_stop_requested():
+                    if _hard_stop_requested():
                         for future in pending:
                             future.cancel()
                         print("⏹️ Force stop requested; cancelling queued post-processing items...")
                         break
 
-                    done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                    if _graceful_stop_requested() and not graceful_draining:
+                        graceful_draining = True
+                        for future in pending:
+                            future.cancel()
+                        pending = {
+                            future for future in pending
+                            if not future.cancelled()
+                        }
+                        if pending:
+                            print(
+                                "⏳ Graceful stop: waiting for active multipass "
+                                "refinement request(s) to finish..."
+                            )
+                        if not pending:
+                            break
+
+                    done, pending = wait(pending, timeout=0.05, return_when=FIRST_COMPLETED)
                     if not done:
                         continue
                     for future in done:
@@ -20632,12 +20942,12 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                             actual_num = chapter.get("actual_chapter_num", chapter.get("num", idx + 1))
                             print(f"❌ {mode.title()} failed for Chapter {actual_num}: {exc}")
             finally:
-                force_stop = _force_stop_requested()
+                force_stop = _hard_stop_requested()
                 executor.shutdown(wait=not force_stop, cancel_futures=force_stop)
         else:
             for idx, chapter in enumerate(chapters):
-                if _force_stop_requested():
-                    print("⏹️ Force stop requested; stopping post-processing.")
+                if _stop_new_work_requested():
+                    print("⏹️ Stop requested; stopping post-processing.")
                     break
                 _record_result(_process_one(idx, chapter))
     finally:
