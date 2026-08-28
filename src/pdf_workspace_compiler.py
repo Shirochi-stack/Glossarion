@@ -579,6 +579,7 @@ def load_pdf_workspace_artifact_chapters(output_dir: str) -> list[dict]:
             raw_body = ""
         chapters.append({
             "num": number,
+            "pdf_section_num": entry.get("pdf_section_num", number),
             "title": entry.get("pdf_toc_title") or entry.get("title"),
             "body": raw_body,
             "pdf_toc_section": True,
@@ -775,8 +776,23 @@ def _translate_pdf_artifact_workload(
         for index, record in enumerate(records, 1)
     }
     if save_cache:
+        # A chapter-range run intentionally provides only the selected PDF
+        # sections. Keep translations cached by earlier ranges instead of
+        # replacing the artifact file with this run's subset.
+        saved_originals = dict(originals)
+        saved_translated = dict(translated)
+        saved_titles = dict(current_titles)
+        current_sources = set(originals.values())
+        next_number = max(saved_originals, default=0) + 1
+        for source, cached_translation in own_cache.items():
+            if source in current_sources or not cached_translation:
+                continue
+            saved_originals[next_number] = source
+            saved_translated[next_number] = cached_translation
+            saved_titles[next_number] = {"filename": ""}
+            next_number += 1
         translator._save_translations_to_file(
-            originals, translated, cache_path, current_titles
+            saved_originals, saved_translated, cache_path, saved_titles
         )
     try:
         from translation_artifacts import update_translation_artifact_progress

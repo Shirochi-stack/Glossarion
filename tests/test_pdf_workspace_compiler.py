@@ -9,6 +9,7 @@ from chapter_chunk_progress import wrap_chunk_html
 from output_workspace import write_workspace_source_reference
 from pdf_output_naming import safe_pdf_output_stem
 from pdf_workspace_compiler import (
+    _load_translation_cache_by_source,
     _rapid_render_worker_count,
     _normalize_workspace_pdf_section_filenames,
     _workspace_source_heading_alignments,
@@ -671,6 +672,22 @@ def test_pdf_bookmarks_and_html_headers_use_shared_batch_translation(
     assert BeautifulSoup(
         response_new.read_text(encoding="utf-8"), "html.parser"
     ).h1.get_text(strip=True) == "EN:새 장"
+
+    # A later chapter-range run supplies only its selected bookmark. It must
+    # not erase cached bookmark/header translations from previous ranges.
+    calls.clear()
+    range_result = translate_pdf_workspace_artifacts(
+        [chapters[1]],
+        str(workspace),
+        FakeClient(),
+    )
+
+    assert range_result == {"toc": 1, "headers": 2}
+    assert calls == []
+    toc_cache = _load_translation_cache_by_source(str(workspace / "TOC.txt"))
+    assert toc_cache["첫 장"] == "EN:첫 장"
+    assert toc_cache["둘째 장"] == "EN:둘째 장"
+    assert toc_cache["새 장"] == "EN:새 장"
 
 
 def test_compile_pdf_workspace_has_one_bookmark_per_response(tmp_path, monkeypatch):

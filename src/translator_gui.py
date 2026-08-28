@@ -26248,7 +26248,8 @@ Recent translations to summarize:
                     issues = []
 
                 chapter_num = (
-                    chapter_info.get("actual_num")
+                    chapter_info.get("pdf_section_num")
+                    or chapter_info.get("actual_num")
                     or chapter_info.get("chapter_num")
                     or chapter_info.get("raw_chapter_num")
                     or chapter_key
@@ -26264,6 +26265,7 @@ Recent translations to summarize:
                     "progress_path": os.path.abspath(progress_path),
                     "progress_key": str(chapter_key),
                     "chapter": chapter_num,
+                    "pdf_section_num": chapter_info.get("pdf_section_num"),
                     "output_file": output_file,
                     "original_basename": chapter_info.get("original_basename") or "",
                     "issues": [str(issue).strip() for issue in issues if str(issue).strip()] or ["UNKNOWN"],
@@ -26331,7 +26333,10 @@ Recent translations to summarize:
                     continue
 
             try:
-                chapter_num = float(failure.get('chapter'))
+                chapter_num = float(
+                    failure.get('pdf_section_num')
+                    or failure.get('chapter')
+                )
             except (TypeError, ValueError):
                 continue
             if start <= chapter_num <= end:
@@ -29929,19 +29934,43 @@ If you see multiple p-b cookies, use the one with the longest value."""
             input_path = self.entry_epub.text().strip()
 
         if not input_path or not os.path.isfile(input_path):
-            QMessageBox.information(self, "Preview", "Please select an EPUB file first.")
+            QMessageBox.information(self, "Preview", "Please select an EPUB or PDF file first.")
             return
 
-        if not input_path.lower().endswith('.epub'):
-            QMessageBox.information(self, "Preview", "File preview is only available for EPUB files.")
+        input_lower = input_path.lower()
+        is_pdf = input_lower.endswith('.pdf')
+        if not (input_lower.endswith('.epub') or is_pdf):
+            QMessageBox.information(
+                self,
+                "Preview",
+                "File preview is only available for EPUB and PDF files.",
+            )
             return
 
         # Check translate_special_files setting
         translate_special = getattr(self, 'translate_special_files_var', False)
 
-        filenames = self._get_spine_filenames_for_preview(input_path, start, end, spine_mode, translate_special)
+        pdf_scope = None
+        pdf_total = 0
+        if is_pdf:
+            filenames, pdf_scope, pdf_total = self._get_pdf_range_entries_for_preview(
+                input_path, start, end
+            )
+        else:
+            filenames = self._get_spine_filenames_for_preview(
+                input_path, start, end, spine_mode, translate_special
+            )
 
         if not filenames:
+            if is_pdf:
+                scope_name = "bookmark sections" if pdf_scope == "bookmark" else "pages"
+                QMessageBox.information(
+                    self,
+                    "Preview",
+                    f"No PDF {scope_name} found in range {start}-{end}. "
+                    f"The source contains {pdf_total} {scope_name}.",
+                )
+                return
             QMessageBox.information(self, "Preview",
                 f"No files found in range {start}-{end}" +
                 (" (spine order)" if spine_mode else "") + ".")
@@ -29953,8 +29982,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
         # Build non-modal, stay-on-top preview dialog
         dlg = QDialog(self, Qt.WindowStaysOnTopHint)
-        dlg.setWindowTitle(f"Chapter Range Preview ({start}-{end})" +
-                          (" — Spine Order" if spine_mode else ""))
+        if is_pdf:
+            pdf_title_scope = "Bookmarks" if pdf_scope == "bookmark" else "Pages"
+            dlg.setWindowTitle(
+                f"PDF {pdf_title_scope} Range Preview ({start}-{end})"
+            )
+        else:
+            dlg.setWindowTitle(f"Chapter Range Preview ({start}-{end})" +
+                              (" — Spine Order" if spine_mode else ""))
         # Use ratio-based sizing (20% width, 35% height of screen)
         try:
             screen = QApplication.primaryScreen()
@@ -29971,14 +30006,47 @@ If you see multiple p-b cookies, use the one with the longest value."""
         dlg.setStyleSheet("background-color: #1e1e1e; color: white;")
         layout = QVBoxLayout(dlg)
 
-        header_text = (f"{'Spine' if spine_mode else 'Chapter'} range {start}–{end}: "
-                       f"{len(translatable)} file(s) will be translated")
+        if is_pdf:
+            pdf_scope_label = "Bookmark section" if pdf_scope == "bookmark" else "PDF page"
+            pdf_scope_unit = "section(s)" if pdf_scope == "bookmark" else "page(s)"
+            header_text = (
+                f"{pdf_scope_label} range {start}–{end}: "
+                f"{len(translatable)} {pdf_scope_unit} will be translated"
+            )
+        else:
+            header_text = (f"{'Spine' if spine_mode else 'Chapter'} range {start}–{end}: "
+                           f"{len(translatable)} file(s) will be translated")
         if skipped:
             header_text += f"  •  {len(skipped)} special file(s) skipped"
         header = QLabel(header_text)
         header.setStyleSheet("color: #5a9fd4; font-weight: bold; font-size: 10pt;")
         header.setWordWrap(True)
         layout.addWidget(header)
+
+        if is_pdf:
+            if pdf_scope == "bookmark":
+                note_text = (
+                    "ℹ️ PDF ranges follow the 1-based bookmark section order. "
+                    "The Spine Only toggle uses this same order for PDFs."
+                )
+            else:
+                use_toc = bool(getattr(self, 'pdf_use_toc_sections_var', True))
+                render_mode = str(
+                    getattr(self, 'pdf_render_mode_var', 'fast_semantic') or ''
+                ).strip().lower()
+                if not use_toc:
+                    reason = "bookmark-section extraction is disabled"
+                elif render_mode == 'image':
+                    reason = "PDF image render mode is page-by-page"
+                else:
+                    reason = "the PDF has no usable bookmarks"
+                note_text = f"ℹ️ Showing pages because {reason}."
+            pdf_note = QLabel(note_text)
+            pdf_note.setStyleSheet(
+                "color: #a7b7c7; font-size: 9pt; font-style: italic;"
+            )
+            pdf_note.setWordWrap(True)
+            layout.addWidget(pdf_note)
 
         from PySide6.QtWidgets import QListWidget, QListWidgetItem
         file_list = QListWidget()
@@ -30151,6 +30219,64 @@ If you see multiple p-b cookies, use the one with the longest value."""
             print(f"⚠️ Could not preview chapter range: {e}")
 
         return results
+
+    def _get_pdf_range_entries_for_preview(self, pdf_path, start, end):
+        """Return the exact bookmark sections (or page fallback) for a PDF range."""
+        results = []
+        use_toc = bool(getattr(self, 'pdf_use_toc_sections_var', True))
+        render_mode = str(
+            getattr(self, 'pdf_render_mode_var', 'fast_semantic') or ''
+        ).strip().lower()
+        plan = []
+
+        if use_toc and render_mode != 'image':
+            try:
+                from pdf_extractor import extract_pdf_toc_section_plan
+
+                plan = extract_pdf_toc_section_plan(pdf_path)
+            except Exception as exc:
+                print(f"⚠️ Could not preview PDF bookmark range: {exc}")
+
+        if plan:
+            for section in plan:
+                try:
+                    section_num = int(section.get('num'))
+                    start_page = int(section.get('start_page'))
+                    end_page = int(section.get('end_page'))
+                except (TypeError, ValueError):
+                    continue
+                if not (start <= section_num <= end):
+                    continue
+                title = " ".join(
+                    str(section.get('title') or f"Section {section_num}").split()
+                )
+                page_label = (
+                    f"Page {start_page}"
+                    if start_page == end_page
+                    else f"Pages {start_page}–{end_page}"
+                )
+                results.append((
+                    f"[{section_num:03d}]",
+                    f"{title}  •  {page_label}",
+                    False,
+                ))
+            return results, 'bookmark', len(plan)
+
+        page_count = 0
+        try:
+            import fitz
+
+            with fitz.open(pdf_path) as document:
+                page_count = len(document)
+        except Exception as exc:
+            print(f"⚠️ Could not preview PDF page range: {exc}")
+            return results, 'page', page_count
+
+        first_page = max(1, int(start))
+        last_page = min(int(end), page_count)
+        for page_num in range(first_page, last_page + 1):
+            results.append((f"[{page_num:03d}]", f"Page {page_num}", False))
+        return results, 'page', page_count
 
     def _get_opf_file_order(self, file_list):
         """

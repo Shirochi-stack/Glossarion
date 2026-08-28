@@ -193,6 +193,7 @@ class TextFileProcessor:
                     'has_images': True if render_mode == 'image' else False,
                     'image_count': 1 if render_mode == 'image' else 0,
                     'pdf_toc_section': is_toc_section,
+                    'pdf_section_num': section.get('num') if is_toc_section else None,
                     'pdf_toc_level': section.get('level'),
                     'pdf_start_page': section.get('start_page'),
                     'pdf_end_page': section.get('end_page'),
@@ -404,7 +405,7 @@ class TextFileProcessor:
                         }
                     }
                     for key in (
-                        'pdf_toc_section', 'pdf_toc_level',
+                        'pdf_toc_section', 'pdf_section_num', 'pdf_toc_level',
                         'pdf_start_page', 'pdf_end_page',
                         'pdf_section_id', 'pdf_section_title',
                     ):
@@ -464,7 +465,7 @@ class TextFileProcessor:
                     'is_chunk': False
                 }
                 for key in (
-                    'pdf_toc_section', 'pdf_toc_level',
+                    'pdf_toc_section', 'pdf_section_num', 'pdf_toc_level',
                     'pdf_start_page', 'pdf_end_page',
                     'pdf_section_id', 'pdf_section_title',
                 ):
@@ -610,7 +611,7 @@ class TextFileProcessor:
                 if ch.get('chunk_info'):
                     meta['chunk_info'] = ch['chunk_info']
                 for key in (
-                    'pdf_toc_section', 'pdf_toc_level',
+                    'pdf_toc_section', 'pdf_section_num', 'pdf_toc_level',
                     'pdf_start_page', 'pdf_end_page',
                     'pdf_section_id', 'pdf_section_title',
                 ):

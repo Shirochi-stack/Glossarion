@@ -301,6 +301,130 @@ def test_real_pymupdf_outline_is_read_as_section_ranges(tmp_path):
     ]
 
 
+def test_pdf_range_preview_uses_bookmark_order_and_page_ranges(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    from translator_gui import TranslatorGUI
+
+    pdf_path = tmp_path / "outlined-preview.pdf"
+    document = fitz.open()
+    for page_num in range(1, 7):
+        page = document.new_page()
+        page.insert_text((72, 72), f"Page {page_num}")
+    document.set_toc([
+        [1, "Opening", 1],
+        [1, "Middle", 3],
+        [1, "Ending", 5],
+    ])
+    document.save(pdf_path)
+    document.close()
+
+    class Dummy:
+        pdf_use_toc_sections_var = True
+        pdf_render_mode_var = "fast_semantic"
+
+    rows, scope, total = TranslatorGUI._get_pdf_range_entries_for_preview(
+        Dummy(), str(pdf_path), 2, 3
+    )
+
+    assert scope == "bookmark"
+    assert total == 3
+    assert rows == [
+        ("[002]", "Middle  •  Pages 3–4", False),
+        ("[003]", "Ending  •  Pages 5–6", False),
+    ]
+
+    Dummy.pdf_use_toc_sections_var = False
+    rows, scope, total = TranslatorGUI._get_pdf_range_entries_for_preview(
+        Dummy(), str(pdf_path), 2, 3
+    )
+    assert scope == "page"
+    assert total == 6
+    assert rows == [
+        ("[002]", "Page 2", False),
+        ("[003]", "Page 3", False),
+    ]
+
+
+def test_pdf_bookmark_range_ignores_epub_spine_toggle(monkeypatch):
+    from TransateKRtoEN import (
+        _chapter_allowed_by_multipass_range,
+        _pdf_bookmark_section_number,
+        _vision_chapter_allowed_by_current_range,
+    )
+
+    selected = {
+        "num": 99,
+        "actual_chapter_num": 99,
+        "pdf_toc_section": True,
+        "pdf_section_num": 4,
+    }
+    excluded = {**selected, "pdf_section_num": 8}
+    selected_page = {
+        "num": 4,
+        "actual_chapter_num": 4,
+        "source_file": "book.pdf",
+    }
+    excluded_page = {**selected_page, "num": 8, "actual_chapter_num": 8}
+    monkeypatch.setenv("CHAPTER_RANGE", "3-5")
+    monkeypatch.setenv("USE_SPINE_ORDER", "1")
+
+    assert _pdf_bookmark_section_number(selected) == 4
+    assert _chapter_allowed_by_multipass_range(selected) is True
+    assert _chapter_allowed_by_multipass_range(excluded) is False
+    assert _chapter_allowed_by_multipass_range(selected_page) is True
+    assert _chapter_allowed_by_multipass_range(excluded_page) is False
+    assert _vision_chapter_allowed_by_current_range(selected, 0) is True
+    assert _vision_chapter_allowed_by_current_range(excluded, 1) is False
+    assert _vision_chapter_allowed_by_current_range(selected_page, 2) is True
+    assert _vision_chapter_allowed_by_current_range(excluded_page, 3) is False
+
+
+def test_pdf_failed_multipass_targets_follow_bookmark_preview_with_spine_toggle(
+    tmp_path,
+):
+    from translator_gui import TranslatorGUI
+
+    pdf_path = tmp_path / "book.pdf"
+    pdf_path.write_bytes(b"progress filtering does not open the source")
+
+    class RangeEntry:
+        @staticmethod
+        def text():
+            return "2-3"
+
+    class Checked:
+        @staticmethod
+        def isChecked():
+            return True
+
+    class Dummy:
+        config = {"chapter_range": "", "use_spine_order": False}
+        chapter_range_entry = RangeEntry()
+        use_spine_order_checkbox = Checked()
+        translate_special_files_var = False
+
+    failures = [
+        {
+            "source_path": str(pdf_path),
+            "chapter": 99,
+            "pdf_section_num": 2,
+            "progress_key": "pdf:selected",
+        },
+        {
+            "source_path": str(pdf_path),
+            "chapter": 3,
+            "pdf_section_num": 5,
+            "progress_key": "pdf:outside",
+        },
+    ]
+
+    scoped = TranslatorGUI._filter_translation_qa_failures_to_current_range(
+        Dummy(), failures
+    )
+
+    assert [failure["progress_key"] for failure in scoped] == ["pdf:selected"]
+
+
 def test_toc_sections_preserve_source_markers_without_hard_page_breaks():
     pages = [
         (
@@ -472,6 +596,7 @@ def test_toc_section_stays_whole_for_shared_chunk_progress(tmp_path, monkeypatch
         "content": "<html><body><p>long</p></body></html>",
         "is_html": True,
         "pdf_toc_section": True,
+        "pdf_section_num": 1,
         "allow_token_splitting": True,
         "pdf_start_page": 1,
         "pdf_end_page": 20,
@@ -480,6 +605,7 @@ def test_toc_section_stays_whole_for_shared_chunk_progress(tmp_path, monkeypatch
     assert len(chapters) == 1
     assert chapters[0]["filename"] == "pdf_section_1.html"
     assert chapters[0]["pdf_toc_section"] is True
+    assert chapters[0]["pdf_section_num"] == 1
     assert chapters[0]["is_chunk"] is False
     assert chapters[0]["body"] == "<html><body><p>long</p></body></html>"
 

@@ -5270,7 +5270,7 @@ class ProgressManager:
                 )
                 chapter_info['title'] = chapter_info['pdf_toc_title']
                 for pdf_key in (
-                    'pdf_toc_level', 'pdf_start_page', 'pdf_end_page',
+                    'pdf_section_num', 'pdf_toc_level', 'pdf_start_page', 'pdf_end_page',
                     'pdf_section_id', 'pdf_section_title',
                 ):
                     if chapter_obj.get(pdf_key) is not None:
@@ -5798,7 +5798,7 @@ class ProgressManager:
             )
             merged_info['title'] = merged_info['pdf_toc_title']
             for pdf_key in (
-                'pdf_toc_level', 'pdf_start_page', 'pdf_end_page',
+                'pdf_section_num', 'pdf_toc_level', 'pdf_start_page', 'pdf_end_page',
                 'pdf_section_id', 'pdf_section_title',
             ):
                 if chapter_obj.get(pdf_key) is not None:
@@ -6126,7 +6126,7 @@ class ProgressManager:
                     )
                     discovered_info["title"] = discovered_info["pdf_toc_title"]
                     for pdf_key in (
-                        "pdf_toc_level", "pdf_start_page", "pdf_end_page",
+                        "pdf_section_num", "pdf_toc_level", "pdf_start_page", "pdf_end_page",
                         "pdf_section_id", "pdf_section_title",
                     ):
                         if chapter_obj.get(pdf_key) is not None:
@@ -6337,6 +6337,7 @@ class ProgressManager:
                     "content_hash": str(chapter.get("content_hash") or ""),
                     "chapter": chapter,
                     "output_file": output_file,
+                    "pdf_section_num": chapter.get("pdf_section_num"),
                     "pdf_toc_level": chapter.get("pdf_toc_level"),
                     "pdf_start_page": chapter.get("pdf_start_page"),
                     "pdf_end_page": chapter.get("pdf_end_page"),
@@ -6552,7 +6553,7 @@ class ProgressManager:
                 entry["pdf_toc_section"] = True
                 entry["pdf_section_id"] = entry_section_id
                 for pdf_key in (
-                    "pdf_toc_level", "pdf_start_page", "pdf_end_page",
+                    "pdf_section_num", "pdf_toc_level", "pdf_start_page", "pdf_end_page",
                     "pdf_section_title",
                 ):
                     if current_section.get(pdf_key) is not None:
@@ -15762,6 +15763,33 @@ def parse_chapter_range(value):
     return None
 
 
+def _pdf_bookmark_section_number(chapter):
+    """Return the stable 1-based bookmark-section number for a PDF chapter."""
+    if not isinstance(chapter, dict) or not chapter.get("pdf_toc_section"):
+        return None
+    for key in ("pdf_section_num", "pdf_toc_section_num", "num"):
+        value = chapter.get(key)
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number >= 1:
+            return int(number)
+    return None
+
+
+def _is_pdf_source_chapter(chapter):
+    """Return whether a chapter belongs to a PDF source."""
+    if not isinstance(chapter, dict):
+        return False
+    if chapter.get("pdf_toc_section"):
+        return True
+    for key in ("source_file", "source_path", "input_path"):
+        if str(chapter.get(key) or "").strip().lower().endswith(".pdf"):
+            return True
+    return False
+
+
 def _chapter_allowed_by_multipass_range(chapter):
     """Return whether a multipass phase may touch this chapter."""
     parsed_range = parse_chapter_range(os.getenv("CHAPTER_RANGE", ""))
@@ -15777,6 +15805,17 @@ def _chapter_allowed_by_multipass_range(chapter):
         return bool(chapter.get("_range_allowed_for_translation"))
 
     start, end = parsed_range
+    pdf_section_num = _pdf_bookmark_section_number(chapter)
+    if pdf_section_num is not None:
+        # For PDFs, both chapter-number and spine-order scopes refer to the
+        # normalized bookmark reading order shown in the range preview.
+        return start <= pdf_section_num <= end
+    if _is_pdf_source_chapter(chapter):
+        page_num = chapter.get("actual_chapter_num", chapter.get("num"))
+        try:
+            return start <= float(page_num) <= end
+        except (TypeError, ValueError):
+            return False
     if os.getenv("USE_SPINE_ORDER", "0") == "1":
         spine_position = chapter.get("_range_spine_position")
         if spine_position is None:
@@ -15814,6 +15853,17 @@ def _vision_chapter_allowed_by_current_range(chapter, idx):
     if not parsed_range:
         return True
     start_num, end_num = parsed_range
+    pdf_section_num = _pdf_bookmark_section_number(chapter)
+    if pdf_section_num is not None:
+        return start_num <= pdf_section_num <= end_num
+    if _is_pdf_source_chapter(chapter):
+        try:
+            page_num = chapter.get(
+                "actual_chapter_num", chapter.get("num", idx + 1)
+            )
+            return start_num <= float(page_num) <= end_num
+        except (TypeError, ValueError):
+            return False
     if os.getenv("USE_SPINE_ORDER", "0") == "1" and isinstance(chapter, dict):
         spine_pos = chapter.get("spine_order")
         if spine_pos is None:
@@ -23817,6 +23867,7 @@ def main(log_callback=None, stop_callback=None):
                                 'has_images': True if render_mode == 'image' else False,
                                 'image_count': 1 if render_mode == 'image' else 0,
                                 'pdf_toc_section': is_toc_section,
+                                'pdf_section_num': section.get('num') if is_toc_section else None,
                                 'pdf_toc_level': section.get('level'),
                                 'pdf_start_page': section.get('start_page'),
                                 'pdf_end_page': section.get('end_page'),
@@ -25810,11 +25861,29 @@ def main(log_callback=None, stop_callback=None):
     start = None
     end = None
     use_spine_order = os.getenv("USE_SPINE_ORDER", "0") == "1"
+    pdf_bookmark_range = bool(
+        is_pdf_file
+        and any(
+            _pdf_bookmark_section_number(chapter) is not None
+            for chapter in chapters
+            if isinstance(chapter, dict)
+        )
+    )
     parsed_range = parse_chapter_range(rng)
     if parsed_range:
             start, end = parsed_range
             
-            if use_spine_order:
+            if pdf_bookmark_range:
+                print(
+                    f"📊 Using PDF BOOKMARK ORDER for chapter range: "
+                    f"sections {start}-{end}"
+                )
+            elif is_pdf_file:
+                print(
+                    f"📊 Using PDF PAGE ORDER for chapter range: "
+                    f"pages {start}-{end}"
+                )
+            elif use_spine_order:
                 print(f"📊 Using SPINE ORDER for chapter range: positions {start}-{end}")
             elif config.DISABLE_ZERO_DETECTION:
                 print(f"📊 0-based detection disabled - using range as specified: {start}-{end}")
@@ -25890,6 +25959,14 @@ def main(log_callback=None, stop_callback=None):
     def _range_allows_chapter(chapter, actual_num, chapter_idx=None):
         if start is None:
             return True
+        pdf_section_num = _pdf_bookmark_section_number(chapter)
+        if pdf_section_num is not None:
+            return start <= pdf_section_num <= end
+        if is_pdf_file:
+            try:
+                return start <= float(actual_num) <= end
+            except (TypeError, ValueError):
+                return False
         if use_spine_order:
             spine_positions = (
                 _spine_positions_by_idx.get(chapter_idx, [])
@@ -25909,6 +25986,11 @@ def main(log_callback=None, stop_callback=None):
 
     def _range_display_value(chapter, actual_num, chapter_idx=None):
         """Return the value users typed ranges against for summaries/errors."""
+        pdf_section_num = _pdf_bookmark_section_number(chapter)
+        if pdf_section_num is not None:
+            return pdf_section_num
+        if is_pdf_file:
+            return actual_num
         if use_spine_order:
             positions = (
                 _spine_positions_by_idx.get(chapter_idx, [])
@@ -26072,12 +26154,18 @@ def main(log_callback=None, stop_callback=None):
         actual_num = c['actual_chapter_num']
         range_display_value = _range_display_value(c, actual_num, idx)
         c['_range_spine_position'] = (
-            range_display_value if use_spine_order
+            range_display_value
+            if (use_spine_order or is_pdf_file)
             else _spine_pos_by_idx.get(idx)
         )
         c['_range_preview_chapter_num'] = (
             _preview_chapter_number_for_range(c, actual_num)
-            if input_path.lower().endswith('.epub') else actual_num
+            if input_path.lower().endswith('.epub')
+            else (
+                _pdf_bookmark_section_number(c)
+                if _pdf_bookmark_section_number(c) is not None
+                else actual_num
+            )
         )
         c['_range_allowed_for_translation'] = _range_allows_chapter(c, actual_num, idx)
         if start is not None and c['_range_allowed_for_translation']:
@@ -30824,8 +30912,15 @@ def main(log_callback=None, stop_callback=None):
                 'temperature': config.TEMP,
                 'max_tokens': config.MAX_OUTPUT_TOKENS,
             }
+            artifact_chapters = chapters
+            if start is not None:
+                artifact_chapters = [
+                    chapter for chapter in chapters
+                    if not isinstance(chapter, dict)
+                    or chapter.get('_range_allowed_for_translation', True)
+                ]
             artifact_result = translate_pdf_workspace_artifacts(
-                chapters,
+                artifact_chapters,
                 out,
                 client,
                 progress_manager=progress_manager,
