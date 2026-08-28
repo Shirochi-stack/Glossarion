@@ -3725,10 +3725,10 @@ def _create_response_handling_section(self, parent):
     authnd_desc.setContentsMargins(12, 0, 0, 4)
     section_v.addWidget(authnd_desc)
 
-    def _authnd_int_setting(config_key, env_key, default):
+    def _authnd_int_setting(config_key, env_key, default, minimum=1):
         try:
             value = self.config.get(config_key, os.environ.get(env_key, default))
-            return max(1, int(value))
+            return max(int(minimum), int(value))
         except (TypeError, ValueError):
             return default
 
@@ -3742,8 +3742,8 @@ def _create_response_handling_section(self, parent):
         subprocess_limit = min(8, max(token_limit, cores))
         return token_limit, subprocess_limit, cores
 
-    def _make_authnd_spin_control(label_text, attr_name, spin_attr, config_key, env_key, default, maximum, caution_threshold, warning_threshold, tooltip):
-        current_value = _authnd_int_setting(config_key, env_key, default)
+    def _make_authnd_spin_control(label_text, attr_name, spin_attr, config_key, env_key, default, maximum, caution_threshold, warning_threshold, tooltip, minimum=1):
+        current_value = _authnd_int_setting(config_key, env_key, default, minimum)
         setattr(self, attr_name, current_value)
         self.config[config_key] = current_value
         os.environ[env_key] = str(current_value)
@@ -3759,7 +3759,7 @@ def _create_response_handling_section(self, parent):
 
         spin = QDoubleSpinBox()
         spin.setObjectName(spin_attr)
-        spin.setRange(1, maximum)
+        spin.setRange(minimum, maximum)
         spin.setSingleStep(1)
         spin.setDecimals(0)
         spin.setValue(current_value)
@@ -3819,7 +3819,7 @@ def _create_response_handling_section(self, parent):
 
         def _on_authnd_spin_changed(value):
             try:
-                value = max(1, int(value))
+                value = max(int(minimum), int(value))
                 setattr(self, attr_name, value)
                 self.config[config_key] = value
                 os.environ[env_key] = str(value)
@@ -3888,6 +3888,19 @@ def _create_response_handling_section(self, parent):
         8,
         14,
         "Maximum helper child processes AuthND may launch for token minting.",
+    ))
+    authnd_limits_h.addWidget(_make_authnd_spin_control(
+        "AuthND token timeout (s):",
+        "authnd_token_timeout_var",
+        "authnd_token_timeout_spin",
+        "authnd_token_timeout",
+        "AUTHND_TOKEN_TIMEOUT",
+        180,
+        600,
+        600,
+        600,
+        "Maximum seconds for one AuthND browser helper to load the NVIDIA page and acquire an hCaptcha token.",
+        minimum=30,
     ))
     authnd_limits_h.addStretch()
     section_v.addWidget(authnd_limits_row)

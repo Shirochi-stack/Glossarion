@@ -129,7 +129,7 @@ python src/authnd_auth.py --model deepseek-ai/deepseek-v4-flash --prompt-file pr
 - `AUTHND_DEBUG=1`: print sanitized request metadata, parameter summaries, and response status.
 - `AUTHND_STREAM=0`: default standalone and app calls to non-streaming mode.
 - `AUTHND_LOG_STREAM_CHUNKS=0`: keep streaming transport but hide streamed text logs.
-- `AUTHND_TOKEN_TIMEOUT=120`: browser captcha token timeout in seconds.
+- `AUTHND_TOKEN_TIMEOUT=180`: browser captcha token timeout in seconds.
 - `AUTHND_TIMEOUT=180`: request read timeout in seconds.
 - `AUTHND_TOKEN_MODE=inline`: run the Qt token helper inline instead of subprocess.
 - `AUTHND_TOKEN_CONCURRENCY=4`: maximum simultaneous browser token flows.
@@ -151,6 +151,10 @@ concurrency setting.
 
 In the desktop app, change these under **Other Setting > Response Handling &
 Retry Logic > NIM / AuthND Token Helpers**.
+
+That section also exposes **AuthND token timeout (s)**. Its default is `180`
+seconds and its supported range is 30–600 seconds. Automatic helper limits only
+control concurrency; they do not disable or change the timeout field.
 
 ## Debugging
 
