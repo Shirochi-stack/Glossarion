@@ -4974,30 +4974,6 @@ def generate_html_report(results, output_path, duplicate_confidence):
     with open(os.path.join(output_path, "validation_results.html"), "w", encoding="utf-8") as html_file:
         html_file.write(html)
 
-def _clear_refinement_progress_fields(entry):
-    """Remove refinement state that is no longer valid after QA failure."""
-    if not isinstance(entry, dict):
-        return False
-    changed = False
-    fields = (
-        "refinement_status",
-        "refined_at",
-        "refinement_error",
-        "unrefined_backup_file",
-    )
-    for field in fields:
-        if field in entry:
-            entry.pop(field, None)
-            changed = True
-    previous_entry = entry.get("previous_progress_entry")
-    if isinstance(previous_entry, dict):
-        for field in fields:
-            if field in previous_entry:
-                previous_entry.pop(field, None)
-                changed = True
-    return changed
-
-
 def _count_unwrapped_text_chars(html_content):
     """Count visible text nodes that are direct children of an HTML container."""
     try:
@@ -5357,8 +5333,10 @@ def _apply_chunk_scan_to_progress(
         chapter_info["qa_issues_found"] = []
         chapter_info["qa_issue_previews"] = {}
         chapter_info["qa_timestamp"] = time.time()
-    if failed_indices:
-        _clear_refinement_progress_fields(chapter_info)
+    # Keep refinement history even when a later QA scan fails. The chapter's
+    # qa_failed/chunk state already makes it eligible for multipass again, and
+    # deleting refinement/model-era metadata before a new request succeeds
+    # makes a stopped run erase valid history from the previous session.
     log(
         f"   └─ Updated chunks for chapter {chapter_info.get('actual_num')}: "
         f"{summary['failed']} QA failed, {summary['completed']} completed"
@@ -5967,23 +5945,9 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
     if skipped_count:
         log(f"⚠️ Kept qa_failed status for {skipped_count} chapter(s) with protected issues")
 
-    # QA failure invalidates the claim that the current output is refined.
-    # Enforce that invariant across the snapshot, including entries which
-    # were already qa_failed before this scan (for example protected issues
-    # that the resolved-row branch deliberately leaves failed).
-    refinement_reset_count = 0
-    for chapter_info in prog.get("chapters", {}).values():
-        if not isinstance(chapter_info, dict):
-            continue
-        if str(chapter_info.get("status") or "").lower() != "qa_failed":
-            continue
-        if _clear_refinement_progress_fields(chapter_info):
-            refinement_reset_count += 1
-    if refinement_reset_count:
-        log(
-            f"Removed stale refinement status from "
-            f"{refinement_reset_count} QA-failed chapter(s)"
-        )
+    # Preserve refinement history on QA failure. A qa_failed status takes
+    # precedence when choosing multipass candidates, so refinement_status does
+    # not need to be destroyed merely to make the chapter retryable.
 
     return updated_nums_for_log, resolved_nums_for_log
 

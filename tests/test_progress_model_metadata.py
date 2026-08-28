@@ -53,6 +53,7 @@ from TransateKRtoEN import (
     _vision_ocr_header_markdown,
 )
 from image_translator import ImageTranslator
+from scan_html_folder import update_progress_file
 from unified_api_client import UnifiedClient, set_current_thread_actual_request_model
 from extract_glossary_from_epub import (
     _confirmed_merged_child_indices,
@@ -2022,6 +2023,137 @@ def test_refinement_completion_preserves_refined_status_and_model(tmp_path):
     assert "refined_at" in entry
 
 
+def test_interrupted_pdf_update_recovers_model_and_refinement_snapshot(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("MODEL", raising=False)
+    progress = ProgressManager(str(tmp_path))
+    previous = {
+        "actual_num": 8,
+        "content_hash": "old-hash",
+        "output_file": "response_pdf_section_008.html",
+        "status": "completed",
+        "model_name": "authnd/deepseek-ai/deepseek-v4-pro-0813",
+        "refinement_status": "refined",
+        "refined_at": 123.0,
+        "unrefined_backup_file": "_unrefined/response_pdf_section_008.html",
+        "pdf_toc_section": True,
+        "pdf_section_id": "section-eight",
+    }
+    progress.prog["chapters"] = {
+        "pdf:section-eight": {
+            "actual_num": 8,
+            "content_hash": "old-hash",
+            "output_file": "response_pdf_section_008.html",
+            "status": "in_progress",
+            "previous_status": "completed",
+            "previous_progress_entry": previous,
+            "pdf_toc_section": True,
+            "pdf_section_id": "section-eight",
+        }
+    }
+
+    progress.update(
+        7,
+        8,
+        "new-hash",
+        "response_pdf_section_008.html",
+        status="qa_failed",
+        chapter_obj={
+            "num": 8,
+            "pdf_toc_section": True,
+            "pdf_section_id": "section-eight",
+        },
+        qa_issues_found=["Chinese_text_found_1_chars_[神]"],
+    )
+
+    entry = progress.prog["chapters"]["pdf:section-eight"]
+    assert entry["model_name"] == previous["model_name"]
+    assert entry["refinement_status"] == "refined"
+    assert entry["refined_at"] == 123.0
+    assert entry["unrefined_backup_file"] == previous["unrefined_backup_file"]
+
+
+def test_pdf_qa_scan_preserves_prior_refinement_and_model(tmp_path):
+    progress_path = tmp_path / "translation_progress.json"
+    output_file = "response_pdf_section_008.html"
+    (tmp_path / output_file).write_text("<p>神</p>", encoding="utf-8")
+    progress_path.write_text(
+        json.dumps({
+            "version": "2.1",
+            "chapters": {
+                "pdf:section-eight": {
+                    "actual_num": 8,
+                    "content_hash": "hash-eight",
+                    "output_file": output_file,
+                    "status": "completed",
+                    "model_name": "authnd/deepseek-ai/deepseek-v4-pro-0813",
+                    "refinement_status": "refined",
+                    "refined_at": 123.0,
+                    "pdf_toc_section": True,
+                    "pdf_section_id": "section-eight",
+                }
+            },
+            "chapter_chunks": {},
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logs = []
+
+    update_progress_file(
+        str(tmp_path),
+        [{
+            "filename": output_file,
+            "filepath": str(tmp_path / output_file),
+            "file_index": 7,
+            "chapter_num": 8,
+            "issues": ["Chinese_text_found_1_chars_[神]"],
+            "qa_issue_previews": {},
+            "duplicate_confidence": 0,
+            "score": 1,
+        }],
+        logs.append,
+        progress_path=str(progress_path),
+    )
+
+    saved = json.loads(progress_path.read_text(encoding="utf-8"))
+    entry = saved["chapters"]["pdf:section-eight"]
+    assert entry["status"] == "qa_failed"
+    assert entry["model_name"] == "authnd/deepseek-ai/deepseek-v4-pro-0813"
+    assert entry["refinement_status"] == "refined"
+    assert entry["refined_at"] == 123.0
+
+
+def test_progress_load_promotes_nested_model_and_refinement_metadata(tmp_path):
+    previous = {
+        "status": "completed",
+        "model_name": "provider/previous-model",
+        "refinement_status": "refined",
+        "refined_at": 77.0,
+    }
+    (tmp_path / "translation_progress.json").write_text(
+        json.dumps({
+            "version": "2.1",
+            "chapters": {
+                "pdf:nested": {
+                    "actual_num": 11,
+                    "output_file": "response_pdf_section_011.html",
+                    "status": "completed",
+                    "previous_progress_entry": previous,
+                }
+            },
+            "chapter_chunks": {},
+        }),
+        encoding="utf-8",
+    )
+
+    progress = ProgressManager(str(tmp_path))
+    entry = progress.prog["chapters"]["pdf:nested"]
+    assert entry["model_name"] == "provider/previous-model"
+    assert entry["refinement_status"] == "refined"
+    assert entry["refined_at"] == 77.0
+
+
 def test_refinement_status_returns_existing_chapter_zero_output_key(tmp_path):
     progress = ProgressManager(str(tmp_path))
     progress.prog["chapters"] = {
@@ -2130,6 +2262,16 @@ def test_progress_display_selector_prefers_active_and_refined_entries():
     )
     assert selected is refined_completed
     assert _progress_entry_refined_for_display(selected)
+
+    nested_history = {
+        "status": "completed",
+        "previous_progress_entry": {
+            "status": "in_progress",
+            "previous_progress_entry": refined_completed,
+        },
+    }
+    assert _progress_entry_model_for_display(nested_history) == "deepseek-v4"
+    assert _progress_entry_refined_for_display(nested_history)
 
 
 def test_glossary_progress_legend_includes_refinement_rows():

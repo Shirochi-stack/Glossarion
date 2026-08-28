@@ -315,6 +315,9 @@ def test_login_uses_isolated_credentials_and_upstream_cli(tmp_path, monkeypatch)
     assert observed["env"]["ZCODE_PROXY_CREDENTIALS_PATH"] == glm_proxy._credentials_path(4)
     assert observed["env"]["ZCODE_PROXY_CONFIG"] == glm_proxy._config_path(4)
     assert observed["env"]["ZCODE_OAUTH_FORCE_ACCOUNT_SELECTION"] == "1"
+    assert "popen_kwargs" in observed
+    if glm_proxy.sys.platform == "win32":
+        assert observed["popen_kwargs"]["creationflags"] & 0x08000000
 
 
 def test_default_authza_login_does_not_force_account_switch(tmp_path, monkeypatch):
@@ -412,6 +415,53 @@ def test_ensure_proxy_running_launches_account_runtime(tmp_path, monkeypatch):
     ]
     assert observed["env"]["ZCODE_PROXY_CREDENTIALS_PATH"] == glm_proxy._credentials_path(2)
     assert started_accounts == [2]
+
+
+def test_general_api_proxy_readiness_provisions_key_inside_startup_gate(
+    tmp_path, monkeypatch
+):
+    runtime = tmp_path / "runtime"
+    entry = runtime / "src" / "index.ts"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("", encoding="utf-8")
+    credential_state = {"ready": False}
+    provision_calls = []
+    health = iter(({"healthy": False}, {"healthy": False}, {"healthy": True}))
+
+    class FakeProcess:
+        pid = 5151
+        returncode = None
+
+        @staticmethod
+        def poll():
+            return None
+
+    monkeypatch.setenv("AUTHZA_USE_GENERAL_API", "1")
+    monkeypatch.setattr(glm_proxy, "check_proxy_health", lambda _account=None: next(health))
+    monkeypatch.setattr(
+        glm_proxy,
+        "has_credentials",
+        lambda _account=None: credential_state["ready"],
+    )
+
+    def fake_provision(account_id=None, **_kwargs):
+        provision_calls.append(account_id)
+        credential_state["ready"] = True
+        return True
+
+    monkeypatch.setattr(glm_proxy, "ensure_general_api_key", fake_provision)
+    monkeypatch.setattr(
+        glm_proxy,
+        "_ensure_runtime_and_dependencies",
+        lambda log_fn=None: (str(runtime), ["bun"]),
+    )
+    monkeypatch.setattr(glm_proxy.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(glm_proxy.time, "sleep", lambda _seconds: None)
+
+    status = glm_proxy.ensure_proxy_running(account_id=3, auto_login=True)
+
+    assert status["running"] is True
+    assert provision_calls == [3]
 
 
 def test_health_check_authenticates_probe(monkeypatch):
@@ -589,6 +639,11 @@ def test_fetch_available_models_deduplicates(monkeypatch):
     monkeypatch.setattr(glm_proxy, "has_credentials", lambda account_id: account_id == 2)
     monkeypatch.setattr(
         glm_proxy,
+        "ensure_proxy_running",
+        lambda **_kwargs: {"running": True},
+    )
+    monkeypatch.setattr(
+        glm_proxy,
         "_ensure_runtime_and_dependencies",
         lambda: ("C:/runtime", ["bun"]),
     )
@@ -609,11 +664,51 @@ def test_fetch_available_models_deduplicates(monkeypatch):
     assert observed["cwd"] == "C:/runtime"
     assert observed["env"]["ZCODE_PROXY_CREDENTIALS_PATH"] == glm_proxy._credentials_path(2)
     assert observed["env"]["ZCODE_APP_VERSION"] == glm_proxy.ZCODE_APP_VERSION
+    assert "popen_kwargs" in observed
+    if glm_proxy.sys.platform == "win32":
+        assert observed["popen_kwargs"]["creationflags"] & 0x08000000
+
+
+def test_fetch_available_models_requires_proxy_readiness(monkeypatch):
+    monkeypatch.setattr(glm_proxy, "has_credentials", lambda _account_id: True)
+    monkeypatch.setattr(
+        glm_proxy,
+        "ensure_proxy_running",
+        lambda **_kwargs: {
+            "running": False,
+            "error": "GLM proxy did not become healthy within 120s",
+        },
+    )
+    monkeypatch.setattr(
+        glm_proxy,
+        "_ensure_runtime_and_dependencies",
+        lambda: pytest.fail("catalog runtime started before proxy readiness"),
+    )
+
+    with pytest.raises(RuntimeError, match="not ready.*120s"):
+        glm_proxy.fetch_available_models(2, log_fn=lambda _message: None)
+
+
+def test_catalog_error_prefers_bun_exception_over_source_excerpt():
+    output = """20 | const text = await response.text();
+21 | let payload = {};
+23 | if (!response.ok) throw new Error(`bad`);
+error: TimeoutError: The operation timed out.
+"""
+
+    assert glm_proxy._catalog_subprocess_error_detail(output, "fallback") == (
+        "TimeoutError: The operation timed out."
+    )
 
 
 def test_fetch_available_models_uses_general_api_catalog(monkeypatch):
     monkeypatch.setenv("AUTHZA_USE_GENERAL_API", "1")
     monkeypatch.setattr(glm_proxy, "has_credentials", lambda account_id: True)
+    monkeypatch.setattr(
+        glm_proxy,
+        "ensure_proxy_running",
+        lambda **_kwargs: {"running": True},
+    )
     monkeypatch.setattr(
         glm_proxy,
         "_ensure_runtime_and_dependencies",
@@ -662,6 +757,16 @@ def test_general_catalog_auto_provisions_api_key_before_poll(monkeypatch):
         credential_state["ready"] = True
 
     monkeypatch.setattr(glm_proxy, "_login", fake_login)
+
+    def fake_ensure_proxy_running(**kwargs):
+        if not credential_state["ready"] and kwargs.get("auto_login"):
+            glm_proxy.ensure_general_api_key(
+                kwargs.get("account_id"),
+                log_fn=kwargs.get("log_fn"),
+            )
+        return {"running": credential_state["ready"]}
+
+    monkeypatch.setattr(glm_proxy, "ensure_proxy_running", fake_ensure_proxy_running)
     monkeypatch.setattr(
         glm_proxy,
         "_ensure_runtime_and_dependencies",
@@ -697,6 +802,11 @@ def test_general_catalog_refreshes_rejected_api_key_once(monkeypatch):
     monkeypatch.setattr(glm_proxy, "has_credentials", lambda _account_id: True)
     monkeypatch.setattr(
         glm_proxy,
+        "ensure_proxy_running",
+        lambda **_kwargs: {"running": True},
+    )
+    monkeypatch.setattr(
+        glm_proxy,
         "ensure_general_api_key",
         lambda account_id, **kwargs: provision_calls.append(
             (account_id, kwargs.get("force", False))
@@ -727,7 +837,7 @@ def test_general_catalog_refreshes_rejected_api_key_once(monkeypatch):
     assert glm_proxy.fetch_available_models(1, timeout=8, log_fn=lambda _message: None) == [
         "glm-5.3-flash"
     ]
-    assert provision_calls == [(1, False), (1, True)]
+    assert provision_calls == [(1, True)]
     assert len(run_calls) == 2
 
 

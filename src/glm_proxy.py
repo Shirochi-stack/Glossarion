@@ -74,6 +74,7 @@ BUN_NPM_PACKAGE = os.environ.get("GLM_PROXY_BUN_PACKAGE", "bun@latest")
 BUN_INSTALL_TIMEOUT_SECONDS = 300
 DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 600
 LOGIN_TIMEOUT_SECONDS = 360
+PROXY_STARTUP_TIMEOUT_SECONDS = 120
 
 DEFAULT_MODELS = (
     "glm-4.5-air",
@@ -193,7 +194,10 @@ _cancel_state_lock = threading.Lock()
 _cancel_generation = 0
 _active_response_lock = threading.Lock()
 _active_responses: Dict[int, Any] = {}
-_proxy_launch_lock = threading.Lock()
+# Login, runtime preparation, process launch, and catalog preflight all share
+# this gate. It is re-entrant because ensure_proxy_running may provision a key,
+# which deliberately enters the same protected login path.
+_proxy_launch_lock = threading.RLock()
 _proxy_processes: Dict[int, subprocess.Popen] = {}
 _proxy_started_callback = None
 _proxy_started_callback_lock = threading.Lock()
@@ -544,19 +548,11 @@ def _install_bun_automatically(log_fn=None) -> List[str]:
         )
     _log = log_fn or _log_noop
     _log("📦 GLM proxy: installing the Bun JavaScript runtime...")
-    kwargs: Dict[str, Any] = {}
-    if sys.platform == "win32":
-        try:
-            from shutdown_utils import subprocess_no_window_kwargs
-
-            kwargs.update(subprocess_no_window_kwargs())
-        except Exception:
-            pass
     result = run_logged_subprocess(
         command,
         log_fn=_log,
         timeout=BUN_INSTALL_TIMEOUT_SECONDS,
-        popen_kwargs=kwargs,
+        popen_kwargs=_no_window_process_kwargs(),
     )
     bun = _bun_command()
     if result["returncode"] != 0 or not bun:
@@ -588,6 +584,7 @@ def _download_archive(url: str) -> bytes:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS + 10,
+                **_no_window_process_kwargs(),
             )
             data = bytes(result.stdout or b"")
             if result.returncode == 0 and data.startswith(b"PK"):
@@ -881,6 +878,7 @@ def _ensure_dependencies(runtime_dir: str, bun: List[str], log_fn=None) -> None:
         log_fn=_log,
         timeout=DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
         cwd=runtime_dir,
+        popen_kwargs=_no_window_process_kwargs(),
     )
     if result["returncode"] != 0:
         raise RuntimeError("GLM proxy package installation failed. " + result["output"])
@@ -1052,6 +1050,20 @@ def check_proxy_health(account_id: Optional[int] = None) -> Dict[str, Any]:
         return {"healthy": False, "error": str(exc)}
 
 
+def _no_window_process_kwargs() -> Dict[str, Any]:
+    """Suppress transient child consoles while retaining captured output."""
+    if sys.platform != "win32":
+        return {}
+    try:
+        from shutdown_utils import subprocess_no_window_kwargs
+
+        return subprocess_no_window_kwargs()
+    except Exception:
+        # PyInstaller GUI builds have no parent console. CREATE_NO_WINDOW keeps
+        # Bun, npx, PowerShell, and curl from briefly creating one of their own.
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+
+
 def _hidden_process_kwargs() -> Dict[str, Any]:
     kwargs: Dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
@@ -1059,45 +1071,42 @@ def _hidden_process_kwargs() -> Dict[str, Any]:
         "stderr": subprocess.DEVNULL,
     }
     if sys.platform == "win32":
-        try:
-            from shutdown_utils import subprocess_no_window_kwargs
-
-            kwargs.update(subprocess_no_window_kwargs())
-        except Exception:
-            pass
+        kwargs.update(_no_window_process_kwargs())
     else:
         kwargs["start_new_session"] = True
     return kwargs
 
 
 def _login(account_id: Optional[int] = None, log_fn=None) -> None:
-    account = _normalize_account_id(account_id)
-    if _external_proxy_url(account):
-        raise RuntimeError("A remote GLM_PROXY_URL cannot perform local browser login")
-    runtime_dir, bun = _ensure_runtime_and_dependencies(log_fn=log_fn)
-    _ensure_account_config(account)
-    _log = log_fn or _log_noop
-    label = "default account" if account == 0 else f"account #{account}"
-    login_env = _runtime_env(account)
-    # A numbered route represents a different account slot, so take the same
-    # account-selection path as Z.AI's visible "Switch account" control.
-    login_env["ZCODE_OAUTH_FORCE_ACCOUNT_SELECTION"] = "1" if account > 0 else "0"
-    _log(f"🔐 GLM proxy: opening Z.AI login for {label}...")
-    if account > 0:
-        _log(f"🔁 GLM proxy: forcing Z.AI account selection for account #{account}...")
-    result = run_logged_subprocess(
-        [*bun, "run", _runtime_entrypoint(runtime_dir), "auth", "login", "zai"],
-        log_fn=_log,
-        timeout=LOGIN_TIMEOUT_SECONDS,
-        cwd=_account_dir(account),
-        env=login_env,
-    )
-    if result["returncode"] != 0 or not has_credentials(account):
-        suffix = " (login timed out)" if result.get("timed_out") else ""
-        raise RuntimeError(
-            f"Z.AI login did not complete{suffix}. " + str(result.get("output") or "")
+    with _proxy_launch_lock:
+        account = _normalize_account_id(account_id)
+        if _external_proxy_url(account):
+            raise RuntimeError("A remote GLM_PROXY_URL cannot perform local browser login")
+        runtime_dir, bun = _ensure_runtime_and_dependencies(log_fn=log_fn)
+        _ensure_account_config(account)
+        _log = log_fn or _log_noop
+        label = "default account" if account == 0 else f"account #{account}"
+        login_env = _runtime_env(account)
+        # A numbered route represents a different account slot, so take the same
+        # account-selection path as Z.AI's visible "Switch account" control.
+        login_env["ZCODE_OAUTH_FORCE_ACCOUNT_SELECTION"] = "1" if account > 0 else "0"
+        _log(f"🔐 GLM proxy: opening Z.AI login for {label}...")
+        if account > 0:
+            _log(f"🔁 GLM proxy: forcing Z.AI account selection for account #{account}...")
+        result = run_logged_subprocess(
+            [*bun, "run", _runtime_entrypoint(runtime_dir), "auth", "login", "zai"],
+            log_fn=_log,
+            timeout=LOGIN_TIMEOUT_SECONDS,
+            cwd=_account_dir(account),
+            env=login_env,
+            popen_kwargs=_no_window_process_kwargs(),
         )
-    _log(f"✅ GLM proxy: Z.AI login saved for {label}.")
+        if result["returncode"] != 0 or not has_credentials(account):
+            suffix = " (login timed out)" if result.get("timed_out") else ""
+            raise RuntimeError(
+                f"Z.AI login did not complete{suffix}. " + str(result.get("output") or "")
+            )
+        _log(f"✅ GLM proxy: Z.AI login saved for {label}.")
 
 
 def ensure_general_api_key(
@@ -1143,7 +1152,14 @@ def ensure_proxy_running(
     account_id: Optional[int] = None,
     auto_login: bool = True,
     notify_started: bool = True,
+    startup_timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
+    """Ensure the selected account proxy is healthy before returning.
+
+    Runtime download, package installation, and login have their own longer
+    timeouts. ``startup_timeout`` applies only after the server process has
+    launched, so a short model-catalog HTTP timeout cannot cut startup short.
+    """
     account = _normalize_account_id(account_id)
     health = check_proxy_health(account)
     if health.get("healthy"):
@@ -1161,7 +1177,10 @@ def ensure_proxy_running(
         if not has_credentials(account):
             if not auto_login:
                 return {"running": False, "needs_login": True, "error": "Z.AI login required"}
-            _login(account, log_fn=log_fn)
+            if uses_general_api():
+                ensure_general_api_key(account, log_fn=log_fn)
+            else:
+                _login(account, log_fn=log_fn)
 
         runtime_dir, bun = _ensure_runtime_and_dependencies(log_fn=log_fn)
         config_path = _ensure_account_config(account)
@@ -1184,7 +1203,15 @@ def ensure_proxy_running(
                 f"(PID {process.pid})."
             )
 
-        deadline = time.monotonic() + 30
+        readiness_timeout = max(
+            1.0,
+            float(
+                PROXY_STARTUP_TIMEOUT_SECONDS
+                if startup_timeout is None
+                else startup_timeout
+            ),
+        )
+        deadline = time.monotonic() + readiness_timeout
         last_health = health
         while time.monotonic() < deadline:
             process = _proxy_processes.get(account)
@@ -1199,7 +1226,10 @@ def ensure_proxy_running(
                 return {"running": True, **last_health}
         return {
             "running": False,
-            "error": f"GLM proxy did not become healthy: {last_health.get('error', 'timeout')}",
+            "error": (
+                f"GLM proxy did not become healthy within {readiness_timeout:g}s: "
+                f"{last_health.get('error', 'timeout')}"
+            ),
         }
 
 
@@ -1656,6 +1686,26 @@ def send_chat_completion(
     )
 
 
+def _catalog_subprocess_error_detail(output: object, fallback: str) -> str:
+    """Extract Bun's actual exception instead of its source-code excerpt."""
+    lines = [line.strip() for line in str(output or "").splitlines() if line.strip()]
+    for line in reversed(lines):
+        if re.match(
+            r"^(?:error|TimeoutError|TypeError|RangeError|DOMException)\s*:",
+            line,
+            flags=re.IGNORECASE,
+        ):
+            return re.sub(r"^error\s*:\s*", "", line, flags=re.IGNORECASE)[:500]
+    for line in reversed(lines):
+        if (
+            "Z.AI" in line
+            and "throw new Error" not in line
+            and not re.match(r"^\d+\s*\|", line)
+        ):
+            return line[:500]
+    return fallback
+
+
 def fetch_available_models(
     account_id: Optional[int] = None,
     timeout: float = 10,
@@ -1663,11 +1713,27 @@ def fetch_available_models(
     auto_provision: bool = True,
     log_fn=None,
 ) -> List[str]:
-    """Return model IDs visible in the selected AuthZA access mode."""
+    """Return model IDs visible after the selected AuthZA proxy is ready."""
     account = _normalize_account_id(account_id)
     general_api = uses_general_api()
-    if general_api and auto_provision:
-        ensure_general_api_key(account, log_fn=log_fn)
+    _log = log_fn or _log_console
+    account_label = "default account" if account == 0 else f"account #{account}"
+    _log(
+        f"⏳ AuthZA: preparing the local GLM proxy for {account_label} "
+        "before model polling…"
+    )
+    status = ensure_proxy_running(
+        account_id=account,
+        log_fn=_log,
+        # General-API polling deliberately provisions its key as part of this
+        # readiness gate. Login-plan polling still requires an existing login.
+        auto_login=bool(general_api and auto_provision),
+        notify_started=False,
+    )
+    if not status.get("running"):
+        detail = str(status.get("error") or "proxy startup failed")
+        raise RuntimeError(f"GLM proxy was not ready for model polling: {detail}")
+    _log(f"✅ AuthZA: local GLM proxy ready for {account_label}; contacting Z.AI…")
     if not has_credentials(account):
         raise RuntimeError("GLM proxy has no saved Z.AI login for this account")
     runtime_dir, bun = _ensure_runtime_and_dependencies()
@@ -1693,7 +1759,6 @@ def fetch_available_models(
     else:
         env["ZCODE_LOGIN_PLAN_MODELS_ENDPOINT"] = LOGIN_PLAN_MODELS_ENDPOINT
         catalog_script = _LOGIN_PLAN_MODEL_CATALOG_SCRIPT
-    _log = log_fn or _log_console
     endpoint = GENERAL_API_MODELS_ENDPOINT if general_api else LOGIN_PLAN_MODELS_ENDPOINT
     mode_label = "general API" if general_api else "login plan"
     _log(
@@ -1709,6 +1774,7 @@ def fetch_available_models(
             timeout=max(2, effective_timeout + 2),
             cwd=runtime_dir,
             env=env,
+            popen_kwargs=_no_window_process_kwargs(),
         )
         if result["returncode"] == 0:
             break
@@ -1738,9 +1804,10 @@ def fetch_available_models(
             continue
         break
     if result["returncode"] != 0:
-        raise RuntimeError(
-            str(result.get("output") or f"Z.AI {mode_label} model catalog request failed")
-        )
+        fallback = f"Z.AI {mode_label} model catalog request failed"
+        if result.get("timed_out"):
+            fallback += f" after {effective_timeout:g}s"
+        raise RuntimeError(_catalog_subprocess_error_detail(result.get("output"), fallback))
     try:
         output = str(result.get("output") or "")
         marker_line = next(

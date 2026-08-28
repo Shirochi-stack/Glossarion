@@ -10,6 +10,7 @@ from TransateKRtoEN import (
     _partial_b2_batch_worker_count,
     _partial_b2_entries_per_request,
     _process_refinement_or_tts_mode,
+    _restore_interrupted_refinement_snapshot,
     _run_partial_b2_request_batches,
 )
 
@@ -113,6 +114,39 @@ def test_multipass_stop_state_distinguishes_graceful_from_force(monkeypatch):
     assert _multipass_hard_stop_requested(lambda: False) is True
 
 
+def test_interrupted_refinement_restores_prior_model_and_refined_state(tmp_path):
+    from TransateKRtoEN import ProgressManager
+
+    progress = ProgressManager(str(tmp_path))
+    snapshot = {
+        "actual_num": 8,
+        "output_file": "response_pdf_section_008.html",
+        "status": "completed",
+        "model_name": "authnd/deepseek-ai/deepseek-v4-pro-0813",
+        "refinement_status": "refined",
+        "refined_at": 123.0,
+    }
+    current = {
+        "actual_num": 8,
+        "output_file": "response_pdf_section_008.html",
+        "status": "in_progress",
+        "refinement_status": "in_progress",
+        "previous_status": "completed",
+        "previous_progress_entry": snapshot,
+    }
+    progress.prog["chapters"] = {"pdf:section-eight": current}
+
+    restored = _restore_interrupted_refinement_snapshot(
+        progress,
+        "pdf:section-eight",
+        current,
+        snapshot=snapshot,
+    )
+
+    assert restored == snapshot
+    assert progress.prog["chapters"]["pdf:section-eight"] == snapshot
+
+
 def test_partial_b2_graceful_stop_drains_running_and_cancels_queued_batches():
     request_batches = [[index] for index in range(1, 7)]
     state = {"stop": False, "hard": False}
@@ -200,6 +234,52 @@ def test_all_multipass_refinement_sends_preserve_in_flight_graceful_calls():
     # default.  The old override converted the first click into cancellation in
     # full/failed, partial, partial.b, and partial.b2 alike.
     assert "bypass_graceful_stop=True" not in source
+
+
+def test_graceful_stop_groups_queued_refinement_chapter_logs(
+    monkeypatch, capsys
+):
+    class Config:
+        OUTPUT_MODE = "refinement"
+        MULTIPASS_MODE = True
+        MULTIPASS_REFINEMENT_MODE = "failed"
+        BATCH_TRANSLATION = True
+        BATCH_SIZE = 1
+
+    class ProgressStub:
+        def __init__(self):
+            self.prog = {}
+
+        def save(self):
+            return None
+
+    monkeypatch.setenv("BATCH_TRANSLATION", "1")
+    monkeypatch.setenv("BATCH_SIZE", "1")
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+
+    _process_refinement_or_tts_mode(
+        Config(),
+        object(),
+        [
+            {"actual_chapter_num": chapter}
+            for chapter in (9, 17, 2, 16, 3, 14)
+        ],
+        str(Path.cwd()),
+        ProgressStub(),
+        lambda: False,
+        multipass_failed_mode=True,
+    )
+
+    output = capsys.readouterr().out
+    summary = (
+        "⏹️ Graceful stop skipped queued refinement for 6 chapters: "
+        "2, 3, 9, 14, 16, 17"
+    )
+    assert output.count(summary) == 1
+    assert "for Chapter 9" not in output
+    assert "for Chapter 17" not in output
 
 
 def test_gui_publishes_stop_mode_before_shared_stop_callback_latch():

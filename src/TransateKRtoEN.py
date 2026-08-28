@@ -1637,6 +1637,39 @@ def _multipass_stop_requested(stop_flag=None) -> bool:
     )
 
 
+def _restore_interrupted_refinement_snapshot(
+    progress_manager,
+    current_key,
+    current_entry,
+    snapshot=None,
+    fallback=None,
+):
+    """Restore durable progress metadata after an interrupted refinement call."""
+    if current_key is None:
+        return None
+    restored = copy.deepcopy(snapshot or {})
+    if str(restored.get("status", "")).lower() == "in_progress":
+        restored = (
+            progress_manager.restore_in_progress_entry(restored)
+            or restored
+        )
+    if not restored:
+        restored = (
+            progress_manager.restore_in_progress_entry(current_entry)
+            or copy.deepcopy(fallback or current_entry or {})
+        )
+    if not progress_manager._clean_model_name(
+        restored.get("model_name") or restored.get("model")
+    ):
+        prior_model = progress_manager._progress_history_value(
+            current_entry, "model_name", "model"
+        )
+        if prior_model:
+            restored["model_name"] = prior_model
+    progress_manager.prog.setdefault("chapters", {})[current_key] = restored
+    return restored
+
+
 def _multipass_graceful_skip_error(exc) -> bool:
     """Recognize work that was prevented from starting by graceful Stop."""
     if not _multipass_graceful_stop_requested():
@@ -3736,6 +3769,44 @@ class ProgressManager:
                 f"{'y' if preserved == 1 else 'ies'} from the output mirror"
             )
         return mirror_progress
+
+    def _repair_missing_progress_history_metadata(self, progress):
+        """Promote durable metadata left only in interrupted-row snapshots."""
+        chapters = progress.get("chapters", {}) if isinstance(progress, dict) else {}
+        if not isinstance(chapters, dict):
+            return 0
+        repaired = 0
+        for entry in chapters.values():
+            if not isinstance(entry, dict):
+                continue
+            if not self._clean_model_name(
+                entry.get("model_name") or entry.get("model")
+            ):
+                model_name = self._progress_history_value(
+                    entry, "model_name", "model"
+                )
+                if model_name:
+                    entry["model_name"] = model_name
+                    repaired += 1
+            if not self._clean_key_identifier(entry.get("key_identifier")):
+                key_identifier = self._progress_history_value(
+                    entry, "key_identifier"
+                )
+                if key_identifier:
+                    entry["key_identifier"] = key_identifier
+                    repaired += 1
+            for field in (
+                "refinement_status",
+                "refined_at",
+                "unrefined_backup_file",
+            ):
+                if entry.get(field) is not None:
+                    continue
+                value = self._progress_history_value(entry, field)
+                if value is not None:
+                    entry[field] = value
+                    repaired += 1
+        return repaired
         
     def _init_or_load(self):
         """Initialize or load progress tracking with improved structure"""
@@ -3810,6 +3881,8 @@ class ProgressManager:
             prog["output_mode"] = _env_output_mode
         else:
             prog.setdefault("output_mode", "text")
+
+        self._repair_missing_progress_history_metadata(prog)
         
         return prog
 
@@ -4120,10 +4193,30 @@ class ProgressManager:
         key_identifier = str(value or "").strip()
         return key_identifier or None
 
+    @staticmethod
+    def _progress_history_value(info, *keys):
+        """Return the first non-empty field from an entry or its saved snapshot."""
+        current = info if isinstance(info, dict) else None
+        seen = set()
+        while isinstance(current, dict) and id(current) not in seen:
+            seen.add(id(current))
+            for key in keys:
+                value = current.get(key)
+                if value is not None and value != "":
+                    return value
+            current = current.get("previous_progress_entry")
+        return None
+
     def _current_request_metadata(self, existing_info=None, *, prefer_thread=False):
         if isinstance(existing_info, dict):
-            existing_model = self._clean_model_name(existing_info.get("model_name") or existing_info.get("model"))
-            existing_key = self._clean_key_identifier(existing_info.get("key_identifier"))
+            existing_model = self._clean_model_name(
+                self._progress_history_value(
+                    existing_info, "model_name", "model"
+                )
+            )
+            existing_key = self._clean_key_identifier(
+                self._progress_history_value(existing_info, "key_identifier")
+            )
         else:
             existing_model = None
             existing_key = None
@@ -5211,15 +5304,31 @@ class ProgressManager:
         if isinstance(existing_info, dict) and isinstance(existing_info.get("ocr_progress"), dict):
             chapter_info["ocr_progress"] = existing_info["ocr_progress"]
 
-        # Preserve post-processing checks when the base translation status changes.
-        chapter_info["refinement_status"] = existing_info.get("refinement_status", "not_refined")
-        chapter_info["tts_status"] = existing_info.get("tts_status", "no_tts")
-        if existing_info.get("refined_at") is not None:
-            chapter_info["refined_at"] = existing_info.get("refined_at")
-        if existing_info.get("tts_file"):
-            chapter_info["tts_file"] = existing_info.get("tts_file")
-        if existing_info.get("tts_at") is not None:
-            chapter_info["tts_at"] = existing_info.get("tts_at")
+        # Preserve post-processing checks when the base translation status
+        # changes. Interrupted multipass rows can have this data only in their
+        # previous snapshot, so search that history before using defaults.
+        refinement_status = self._progress_history_value(
+            existing_info, "refinement_status"
+        )
+        chapter_info["refinement_status"] = (
+            refinement_status if refinement_status is not None else "not_refined"
+        )
+        tts_status = self._progress_history_value(existing_info, "tts_status")
+        chapter_info["tts_status"] = (
+            tts_status if tts_status is not None else "no_tts"
+        )
+        for lifecycle_key in (
+            "refined_at",
+            "refinement_error",
+            "unrefined_backup_file",
+            "tts_file",
+            "tts_at",
+        ):
+            lifecycle_value = self._progress_history_value(
+                existing_info, lifecycle_key
+            )
+            if lifecycle_value is not None:
+                chapter_info[lifecycle_key] = lifecycle_value
 
         if status == "in_progress":
             previous_status = "not_translated"
@@ -19696,12 +19805,21 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         return None, None
 
     def _process_one(idx, chapter):
-        if _stop_new_work_requested():
-            return "skipped", f"⏹️ Post-processing stopped before item {idx + 1}"
-
         actual_num = chapter.get("actual_chapter_num", chapter.get("num"))
         if actual_num is None:
             actual_num = FileUtilities.extract_actual_chapter_number(chapter, patterns=None, config=config) or idx + 1
+
+        if _stop_new_work_requested():
+            if (
+                mode == "refinement"
+                and _graceful_stop_requested()
+                and not _hard_stop_requested()
+            ):
+                return "skipped", None, {
+                    "kind": "graceful_stop_queued_refinement",
+                    "chapter": actual_num,
+                }
+            return "skipped", f"⏹️ Post-processing stopped before item {idx + 1}"
 
         with progress_lock:
             output_file, output_path = _find_existing_translated_output(out, chapter, actual_num, progress_manager)
@@ -19774,31 +19892,21 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             or preserve_partial_mode_qa_status
         )
 
-        def _restore_graceful_in_progress_entry():
-            """Put a pre-send graceful skip back into its retryable state."""
+        def _restore_interrupted_refinement_entry():
+            """Restore the exact row that existed before this refinement attempt."""
             with progress_lock:
                 current_key, current_entry = _find_progress_entry_for_output(
                     output_file, actual_num
                 )
-                if (
-                    current_key is None
-                    or str(current_entry.get("status", "")).lower() != "in_progress"
-                ):
+                if current_key is None:
                     return
-                restored = progress_manager.restore_in_progress_entry(current_entry)
-                if restored is None:
-                    restored = dict(
-                        pre_existing_qa_source_entry
-                        or pre_existing_entry
-                        or current_entry
-                    )
-                    restored["status"] = (
-                        "qa_failed" if preserve_multipass_qa_status else "failed"
-                    )
-                    restored.pop("previous_status", None)
-                    restored.pop("previous_progress_entry", None)
-                    restored.pop("previous_status_unknown", None)
-                progress_manager.prog["chapters"][current_key] = restored
+                _restore_interrupted_refinement_snapshot(
+                    progress_manager,
+                    current_key,
+                    current_entry,
+                    snapshot=pre_existing_entry,
+                    fallback=pre_existing_qa_source_entry,
+                )
                 progress_manager.save()
 
         if mode == "refinement":
@@ -19903,11 +20011,12 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 refinement_entry = pre_existing_entry
             refinement_state = str(refinement_entry.get("refinement_status", "") or "").strip().lower()
             refinement_entry_num = refinement_entry.get("actual_num", refinement_entry.get("chapter_num"))
+            refinement_retry_required = pre_existing_qa_source_entry is not None
             if (
                 str(refinement_entry_num) == "0"
                 and refinement_entry.get("output_file") == output_file
                 and refinement_state in ("refined", "completed")
-                and not preserve_multipass_qa_status
+                and not refinement_retry_required
             ):
                 # Skip a clean refined special file; an active multipass QA
                 # failure remains eligible even if this flag is stale.
@@ -19916,7 +20025,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     "chapter": actual_num,
                     "reason": "special file already refined",
                 }
-            if refinement_state == "refined" and not preserve_multipass_qa_status:
+            if refinement_state == "refined" and not refinement_retry_required:
                 return "skipped", None, {
                     "kind": "already_refined",
                     "chapter": actual_num,
@@ -20311,9 +20420,32 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     )
                 return "processed", f"✨ Refined Chapter {actual_num}: {output_file}"
             except Exception as exc:
-                if _multipass_graceful_skip_error(exc):
-                    _restore_graceful_in_progress_entry()
-                    return "skipped", f"⏹️ Graceful stop skipped queued refinement for Chapter {actual_num}"
+                interrupted = bool(
+                    _multipass_graceful_skip_error(exc)
+                    or _hard_stop_requested()
+                    or getattr(exc, "error_type", None) == "cancelled"
+                    or "stopped by user" in str(exc).lower()
+                    or "force-stopped" in str(exc).lower()
+                )
+                if interrupted:
+                    _restore_interrupted_refinement_entry()
+                    if (
+                        _graceful_stop_requested()
+                        and not _hard_stop_requested()
+                    ):
+                        return "skipped", None, {
+                            "kind": "graceful_stop_queued_refinement",
+                            "chapter": actual_num,
+                        }
+                    stop_kind = (
+                        "Graceful stop"
+                        if _graceful_stop_requested()
+                        else "Force stop"
+                    )
+                    return "skipped", (
+                        f"⏹️ {stop_kind} restored the previous refinement "
+                        f"state for Chapter {actual_num}"
+                    )
                 with progress_lock:
                     if preserve_multipass_qa_status:
                         preserved_qa_issues = (pre_existing_qa_source_entry or pre_existing_entry).get("qa_issues_found", [])
@@ -20384,6 +20516,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
     grouped_not_targeted = []
     grouped_already_refined = []
     grouped_refinement_skips = {}
+    grouped_graceful_stop_queued_refinement = []
 
     def _format_chapter_values(values, limit=40):
         def _sort_key(value):
@@ -20430,12 +20563,30 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             if kind == "refinement_skip":
                 grouped_refinement_skips.setdefault(reason, []).append(chapter)
                 return
+            if kind == "graceful_stop_queued_refinement":
+                grouped_graceful_stop_queued_refinement.append(chapter)
+                return
         if message:
             print(message)
 
     def _process_partial_b2_all_chapters():
         collected = []
         all_requests = []
+
+        def _restore_partial_b2_item(item):
+            """Restore one item to its exact pre-Partial.b2 progress row."""
+            current_key, current_entry = _find_progress_entry_for_output(
+                item["output_file"], item["actual_num"]
+            )
+            if current_key is None:
+                return False
+            return bool(_restore_interrupted_refinement_snapshot(
+                progress_manager,
+                current_key,
+                current_entry,
+                snapshot=item.get("pre_existing_entry"),
+                fallback=item.get("pre_existing_qa_source_entry"),
+            ))
 
         def _collect_chapter(idx, chapter):
             if _stop_new_work_requested():
@@ -20782,33 +20933,8 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 )
             for item in collected:
                 if _hard_stop_requested():
-                    preserved_qa_issues = (
-                        item["pre_existing_qa_source_entry"]
-                        or item["pre_existing_entry"]
-                    ).get("qa_issues_found", [])
                     with progress_lock:
-                        progress_manager.update(
-                            item["idx"],
-                            item["actual_num"],
-                            item["content_hash"],
-                            item["output_file"],
-                            status="qa_failed",
-                            chapter_obj=item["chapter"],
-                            qa_issues_found=(
-                                preserved_qa_issues
-                                if isinstance(preserved_qa_issues, list)
-                                else [preserved_qa_issues]
-                            ),
-                        )
-                        progress_manager.update_refinement_status(
-                            item["idx"],
-                            item["actual_num"],
-                            item["content_hash"],
-                            item["output_file"],
-                            "failed",
-                            chapter_obj=item["chapter"],
-                            error="Partial.b2 force-stopped before applying response",
-                        )
+                        _restore_partial_b2_item(item)
                         progress_manager.save()
                     _record_result(("skipped", f"Refinement stopped before applying Partial.b2 Chapter {item['actual_num']}"))
                     continue
@@ -20820,42 +20946,16 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     if request_id not in refined_by_id
                 ]
                 if missing_item_ids:
-                    preserved_qa_issues = (
-                        item["pre_existing_qa_source_entry"]
-                        or item["pre_existing_entry"]
-                    ).get("qa_issues_found", [])
                     with progress_lock:
-                        progress_manager.update(
-                            item["idx"],
-                            item["actual_num"],
-                            item["content_hash"],
-                            item["output_file"],
-                            status="qa_failed",
-                            chapter_obj=item["chapter"],
-                            qa_issues_found=(
-                                preserved_qa_issues
-                                if isinstance(preserved_qa_issues, list)
-                                else [preserved_qa_issues]
-                            ),
-                        )
-                        progress_manager.update_refinement_status(
-                            item["idx"],
-                            item["actual_num"],
-                            item["content_hash"],
-                            item["output_file"],
-                            "failed",
-                            chapter_obj=item["chapter"],
-                            error=(
-                                "Graceful stop left one or more Partial.b2 "
-                                "responses unsent"
-                            ),
-                        )
+                        _restore_partial_b2_item(item)
                         progress_manager.save()
                     _record_result((
                         "skipped",
-                        f"⏹️ Graceful stop left Chapter {item['actual_num']} "
-                        f"retryable ({len(missing_item_ids)}/"
-                        f"{len(item_request_ids)} Partial.b2 response(s) not sent)",
+                        None,
+                        {
+                            "kind": "graceful_stop_queued_refinement",
+                            "chapter": item["actual_num"],
+                        },
                     ))
                     continue
                 for request in item["requests"]:
@@ -20904,29 +21004,64 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     f"({len(request_batches)} shared JSON request(s), {len(item['requests'])} target(s))",
                 ))
         except Exception as exc:
+            interrupted = bool(
+                _stop_new_work_requested()
+                or getattr(exc, "error_type", None) == "cancelled"
+                or "stopped" in str(exc).lower()
+            )
             for item in collected:
-                preserved_qa_issues = (item["pre_existing_qa_source_entry"] or item["pre_existing_entry"]).get("qa_issues_found", [])
                 with progress_lock:
-                    progress_manager.update(
-                        item["idx"],
-                        item["actual_num"],
-                        item["content_hash"],
-                        item["output_file"],
-                        status="qa_failed",
-                        chapter_obj=item["chapter"],
-                        qa_issues_found=preserved_qa_issues if isinstance(preserved_qa_issues, list) else [preserved_qa_issues],
-                    )
-                    progress_manager.update_refinement_status(
-                        item["idx"],
-                        item["actual_num"],
-                        item["content_hash"],
-                        item["output_file"],
-                        "failed",
-                        chapter_obj=item["chapter"],
-                        error=exc,
-                    )
+                    if interrupted:
+                        _restore_partial_b2_item(item)
+                    else:
+                        preserved_qa_issues = (
+                            item["pre_existing_qa_source_entry"]
+                            or item["pre_existing_entry"]
+                        ).get("qa_issues_found", [])
+                        progress_manager.update(
+                            item["idx"],
+                            item["actual_num"],
+                            item["content_hash"],
+                            item["output_file"],
+                            status="qa_failed",
+                            chapter_obj=item["chapter"],
+                            qa_issues_found=(
+                                preserved_qa_issues
+                                if isinstance(preserved_qa_issues, list)
+                                else [preserved_qa_issues]
+                            ),
+                        )
+                        progress_manager.update_refinement_status(
+                            item["idx"],
+                            item["actual_num"],
+                            item["content_hash"],
+                            item["output_file"],
+                            "failed",
+                            chapter_obj=item["chapter"],
+                            error=exc,
+                        )
                     progress_manager.save()
-                _record_result(("failed", f"Partial.b2 refinement failed for Chapter {item['actual_num']}: {exc}"))
+                result_status = "skipped" if interrupted else "failed"
+                if (
+                    interrupted
+                    and _graceful_stop_requested()
+                    and not _hard_stop_requested()
+                ):
+                    _record_result((
+                        result_status,
+                        None,
+                        {
+                            "kind": "graceful_stop_queued_refinement",
+                            "chapter": item["actual_num"],
+                        },
+                    ))
+                else:
+                    _record_result((
+                        result_status,
+                        f"Partial.b2 refinement "
+                        f"{'stopped' if interrupted else 'failed'} for "
+                        f"Chapter {item['actual_num']}: {exc}",
+                    ))
 
     previous_batch_env = os.environ.get("BATCH_TRANSLATION")
     previous_batch_size_env = os.environ.get("BATCH_SIZE")
@@ -20960,12 +21095,24 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
 
                     if _graceful_stop_requested() and not graceful_draining:
                         graceful_draining = True
-                        for future in pending:
-                            future.cancel()
-                        pending = {
-                            future for future in pending
-                            if not future.cancelled()
+                        cancelled = {
+                            future for future in pending if future.cancel()
                         }
+                        for future in cancelled:
+                            idx, chapter = futures[future]
+                            actual_num = chapter.get(
+                                "actual_chapter_num",
+                                chapter.get("num", idx + 1),
+                            )
+                            _record_result((
+                                "skipped",
+                                None,
+                                {
+                                    "kind": "graceful_stop_queued_refinement",
+                                    "chapter": actual_num,
+                                },
+                            ))
+                        pending -= cancelled
                         if pending:
                             print(
                                 "⏳ Graceful stop: waiting for active multipass "
@@ -21030,6 +21177,16 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         print(
             f"⏭️ Refinement skipped {len(chapters_for_reason)} chapter(s) "
             f"({reason}): {_format_chapter_values(chapters_for_reason)}"
+        )
+    if grouped_graceful_stop_queued_refinement:
+        stopped_chapters = list(dict.fromkeys(
+            grouped_graceful_stop_queued_refinement
+        ))
+        chapter_label = "chapter" if len(stopped_chapters) == 1 else "chapters"
+        print(
+            f"⏹️ Graceful stop skipped queued refinement for "
+            f"{len(stopped_chapters)} {chapter_label}: "
+            f"{_format_chapter_values(stopped_chapters)}"
         )
 
     if excluded:

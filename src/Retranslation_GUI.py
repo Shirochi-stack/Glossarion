@@ -1449,15 +1449,27 @@ def _clear_refinement_progress_fields(entry):
 
 
 def _progress_entry_refined_for_display(entry):
-    if not isinstance(entry, dict):
-        return False
-    return str(entry.get('refinement_status') or '').lower().strip() in ('refined', 'completed')
+    current = entry if isinstance(entry, dict) else None
+    seen = set()
+    while isinstance(current, dict) and id(current) not in seen:
+        seen.add(id(current))
+        status = str(current.get('refinement_status') or '').lower().strip()
+        if status:
+            return status in ('refined', 'completed')
+        current = current.get('previous_progress_entry')
+    return False
 
 
 def _progress_entry_refinement_failed_for_display(entry):
-    if not isinstance(entry, dict):
-        return False
-    return str(entry.get('refinement_status') or '').lower().strip() in ('failed', 'error')
+    current = entry if isinstance(entry, dict) else None
+    seen = set()
+    while isinstance(current, dict) and id(current) not in seen:
+        seen.add(id(current))
+        status = str(current.get('refinement_status') or '').lower().strip()
+        if status:
+            return status in ('failed', 'error')
+        current = current.get('previous_progress_entry')
+    return False
 
 
 def _combine_glossary_progress_legend_stats(
@@ -1516,14 +1528,16 @@ def _combine_glossary_progress_legend_stats(
 
 
 def _progress_entry_model_for_display(entry):
-    if not isinstance(entry, dict):
-        return ''
-    model_name = str(entry.get('model_name') or entry.get('model') or '').strip()
-    if model_name:
-        return model_name
-    previous = entry.get('previous_progress_entry')
-    if isinstance(previous, dict):
-        return str(previous.get('model_name') or previous.get('model') or '').strip()
+    current = entry if isinstance(entry, dict) else None
+    seen = set()
+    while isinstance(current, dict) and id(current) not in seen:
+        seen.add(id(current))
+        model_name = str(
+            current.get('model_name') or current.get('model') or ''
+        ).strip()
+        if model_name:
+            return model_name
+        current = current.get('previous_progress_entry')
     return ''
 
 
@@ -29804,16 +29818,12 @@ class RetranslationMixin:
     def _progress_entry_model_name(self, info, data=None):
         """Return the model name attached to a progress row, with old-file fallbacks."""
         candidates = []
-        previous_candidates = []
         if isinstance(info, dict):
             candidates.append(info)
             for key in ('info', 'progress_entry'):
                 value = info.get(key)
                 if isinstance(value, dict):
                     candidates.append(value)
-                    previous = value.get('previous_progress_entry')
-                    if isinstance(previous, dict):
-                        previous_candidates.append(previous)
         if isinstance(data, dict):
             prog = data.get('prog')
             if isinstance(prog, dict):
@@ -29821,21 +29831,23 @@ class RetranslationMixin:
                 chapters = prog.get('chapters', {})
                 if progress_key and isinstance(chapters, dict) and isinstance(chapters.get(progress_key), dict):
                     candidates.append(chapters[progress_key])
-                    previous = chapters[progress_key].get('previous_progress_entry')
-                    if isinstance(previous, dict):
-                        previous_candidates.append(previous)
 
-        candidates.extend(previous_candidates)
-
-        for candidate in candidates:
-            model_name = str(candidate.get('model_name') or candidate.get('model') or '').strip()
-            if (
-                candidate.get('subtitle_no_translatable_text')
-                and model_name.lower() == 'no api needed'
-            ):
-                continue
-            if model_name:
-                return model_name
+        seen = set()
+        for root in candidates:
+            candidate = root
+            while isinstance(candidate, dict) and id(candidate) not in seen:
+                seen.add(id(candidate))
+                model_name = str(
+                    candidate.get('model_name')
+                    or candidate.get('model')
+                    or ''
+                ).strip()
+                if not (
+                    candidate.get('subtitle_no_translatable_text')
+                    and model_name.lower() == 'no api needed'
+                ) and model_name:
+                    return model_name
+                candidate = candidate.get('previous_progress_entry')
         return "(model unknown)"
 
     def _progress_model_column_text(self, info, data, fallback_output):
