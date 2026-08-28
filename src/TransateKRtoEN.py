@@ -1608,6 +1608,7 @@ def _run_multipass_refinement_qa_scan(
     epub_path,
     progress_path,
     config,
+    selected_files=None,
 ):
     from qa_scan_runtime import run_qa_scan_path
 
@@ -1621,7 +1622,7 @@ def _run_multipass_refinement_qa_scan(
             mode=mode,
             qa_settings=qa_settings,
             epub_path=epub_path,
-            selected_files=None,
+            selected_files=selected_files,
             text_file_mode=None,
             progress_path=progress_path,
             config=config,
@@ -15703,6 +15704,50 @@ def parse_chapter_range(value):
     return None
 
 
+def _chapter_allowed_by_multipass_range(chapter):
+    """Return whether a multipass phase may touch this chapter."""
+    parsed_range = parse_chapter_range(os.getenv("CHAPTER_RANGE", ""))
+    if not parsed_range:
+        return True
+    if not isinstance(chapter, dict):
+        return False
+
+    # The main chapter-selection pass records the authoritative decision after
+    # applying filename numbering, zero detection, offsets, and exact raw OPF
+    # spine mapping. Reuse it so refinement cannot drift from translation.
+    if "_range_allowed_for_translation" in chapter:
+        return bool(chapter.get("_range_allowed_for_translation"))
+
+    start, end = parsed_range
+    if os.getenv("USE_SPINE_ORDER", "0") == "1":
+        spine_position = chapter.get("_range_spine_position")
+        if spine_position is None:
+            spine_position = chapter.get("spine_order")
+        if spine_position is None:
+            spine_position = chapter.get("opf_spine_position")
+        try:
+            return spine_position is not None and start <= int(spine_position) <= end
+        except (TypeError, ValueError):
+            return False
+
+    actual_num = chapter.get("actual_chapter_num", chapter.get("num"))
+    try:
+        return start <= float(actual_num) <= end
+    except (TypeError, ValueError):
+        return False
+
+
+def _filter_multipass_chapters_to_current_range(chapters):
+    """Apply the live chapter/spine scope to any multipass candidate list."""
+    candidates = list(chapters or [])
+    if not parse_chapter_range(os.getenv("CHAPTER_RANGE", "")):
+        return candidates
+    return [
+        chapter for chapter in candidates
+        if _chapter_allowed_by_multipass_range(chapter)
+    ]
+
+
 def _vision_chapter_allowed_by_current_range(chapter, idx):
     if isinstance(chapter, dict) and chapter.get("_range_allowed_for_translation") is False:
         return False
@@ -19043,6 +19088,12 @@ def _append_partial_b_translation_artifact_chapters(
     ).strip().lower()
     result = list(chapters or [])
     if mode not in ("partial.b", "partial.b2"):
+        return result
+    if parse_chapter_range(os.getenv("CHAPTER_RANGE", "")):
+        # Metadata/TOC/header compilation artifacts are not separate entries in
+        # the chapter-range preview. Do not append whole-book targets to a
+        # range-limited Partial.b/b2 run; any in-range spine HTML already in
+        # ``chapters`` remains eligible normally.
         return result
 
     existing_names = {
@@ -25514,12 +25565,34 @@ def main(log_callback=None, stop_callback=None):
             return False
         return not bool(re.search(r'\d', os.path.splitext(os.path.basename(str(name)))[0]))
 
+    def _preview_chapter_number_for_range(chapter, actual_num):
+        """Mirror TranslatorGUI's non-spine chapter preview numbering."""
+        if not input_path.lower().endswith('.epub'):
+            return actual_num
+        name = chapter.get('original_basename') or os.path.basename(
+            chapter.get('filename', '')
+        )
+        if _is_configured_special_file(name):
+            return 0
+        matches = re.findall(r'(\d+)', str(name or ''))
+        return int(matches[-1]) if matches else 0
+
     def _range_allows_chapter(chapter, actual_num, chapter_idx=None):
         if start is None:
             return True
         if use_spine_order:
-            spine_pos_1based = _spine_pos_by_idx.get(chapter_idx) if chapter_idx is not None else None
-            return spine_pos_1based is not None and start <= spine_pos_1based <= end
+            spine_positions = (
+                _spine_positions_by_idx.get(chapter_idx, [])
+                if chapter_idx is not None else []
+            )
+            return any(start <= position <= end for position in spine_positions)
+        if input_path.lower().endswith('.epub'):
+            # The preview is OPF-spine based even when its labels come from
+            # filename chapter numbers, so unreferenced HTML must not leak in.
+            if chapter_idx is None or chapter_idx not in _spine_positions_by_idx:
+                return False
+            preview_num = _preview_chapter_number_for_range(chapter, actual_num)
+            return start <= preview_num <= end
         if _is_non_special_zero_number_file(chapter, actual_num) and start <= 1:
             return True
         return start <= actual_num <= end
@@ -25527,8 +25600,16 @@ def main(log_callback=None, stop_callback=None):
     def _range_display_value(chapter, actual_num, chapter_idx=None):
         """Return the value users typed ranges against for summaries/errors."""
         if use_spine_order:
-            spine_pos_1based = _spine_pos_by_idx.get(chapter_idx) if chapter_idx is not None else None
-            return spine_pos_1based
+            positions = (
+                _spine_positions_by_idx.get(chapter_idx, [])
+                if chapter_idx is not None else []
+            )
+            return next(
+                (position for position in positions if start <= position <= end),
+                positions[0] if positions else None,
+            )
+        if input_path.lower().endswith('.epub'):
+            return _preview_chapter_number_for_range(chapter, actual_num)
         return actual_num
 
     range_matched_chapters = []
@@ -25539,12 +25620,14 @@ def main(log_callback=None, stop_callback=None):
     if hasattr(config, '_skipped_special_files'):
         config._skipped_special_files = []
 
-    # When USE_SPINE_ORDER is active, build a mapping from each extracted
-    # chapter's list index to its raw OPF spine position. This matches the
-    # Progress Manager display.
+    # Build a mapping from each extracted chapter to every raw OPF spine
+    # position that references it. Both preview modes enumerate the OPF spine;
+    # spine-order uses these positions directly while chapter-number mode uses
+    # them to exclude non-spine HTML.
     # Special-file skipping is applied separately after range matching.
     _spine_pos_by_idx = {}  # chapter list index -> 1-based OPF spine position
-    if use_spine_order and start is not None:
+    _spine_positions_by_idx = {}  # chapter list index -> all 1-based positions
+    if start is not None and input_path.lower().endswith('.epub'):
         opf_path = find_opf_path(out)
         if opf_path:
             try:
@@ -25576,30 +25659,37 @@ def main(log_callback=None, stop_callback=None):
                         if _idref and _idref in _manifest:
                             _all_spine_basenames.append(_manifest[_idref])
 
-                _opf_pos_by_basename = {}   # basename -> raw OPF pos (1-based)
+                _opf_positions_by_basename = {}  # basename -> raw OPF positions
                 for _raw_idx, _sb in enumerate(_all_spine_basenames, 1):
-                    _opf_pos_by_basename[_sb] = _raw_idx
-                    _opf_pos_by_basename[os.path.splitext(_sb)[0]] = _raw_idx
+                    for _key in (_sb, os.path.splitext(_sb)[0]):
+                        _opf_positions_by_basename.setdefault(_key, []).append(
+                            _raw_idx
+                        )
 
-                # Map each extracted chapter to its OPF position
+                # Map each extracted chapter to all matching OPF positions.
                 for _ci, _ch in enumerate(chapters):
                     _bn = _ch.get('original_basename') or os.path.basename(_ch.get('filename', ''))
                     _bn_noext = os.path.splitext(_bn)[0] if _bn else ''
-                    _pos = _opf_pos_by_basename.get(_bn) or _opf_pos_by_basename.get(_bn_noext)
-                    if _pos is not None:
-                        _spine_pos_by_idx[_ci] = _pos
+                    _positions = (
+                        _opf_positions_by_basename.get(_bn)
+                        or _opf_positions_by_basename.get(_bn_noext)
+                        or []
+                    )
+                    if _positions:
+                        _spine_positions_by_idx[_ci] = list(_positions)
+                        _spine_pos_by_idx[_ci] = _positions[0]
 
                 if _spine_pos_by_idx:
                     _mapped = len(_spine_pos_by_idx)
                     _total_spine = len(_all_spine_basenames)
-                    print(f"📊 Spine order: mapped {_mapped}/{len(chapters)} chapters "
+                    print(f"📊 OPF range map: mapped {_mapped}/{len(chapters)} chapters "
                           f"(OPF has {_total_spine} items)")
                 else:
-                    print("⚠️ Spine order: could not map chapters to OPF positions")
+                    print("⚠️ OPF range map: could not map chapters to spine positions")
             except Exception as _e:
-                print(f"⚠️ Spine order: failed to read content.opf: {_e}")
+                print(f"⚠️ OPF range map: failed to read content.opf: {_e}")
         else:
-            print("⚠️ Spine order: no OPF package found in output directory")
+            print("⚠️ OPF range map: no OPF package found in output directory")
 
     # Helper: sequential numbering with zero-phase.
     # Start at 0; only start incrementing once a digit >0 is seen in the filename.
@@ -25671,6 +25761,14 @@ def main(log_callback=None, stop_callback=None):
         # Now we can safely use actual_num
         actual_num = c['actual_chapter_num']
         range_display_value = _range_display_value(c, actual_num, idx)
+        c['_range_spine_position'] = (
+            range_display_value if use_spine_order
+            else _spine_pos_by_idx.get(idx)
+        )
+        c['_range_preview_chapter_num'] = (
+            _preview_chapter_number_for_range(c, actual_num)
+            if input_path.lower().endswith('.epub') else actual_num
+        )
         c['_range_allowed_for_translation'] = _range_allows_chapter(c, actual_num, idx)
         if start is not None and c['_range_allowed_for_translation']:
             range_matched_chapters.append(range_display_value if range_display_value is not None else actual_num)
@@ -25830,16 +25928,9 @@ def main(log_callback=None, stop_callback=None):
             and direct_multipass_mode in ("failed", "partial", "partial.b", "partial.b2")
         )
         post_mode_chapters = []
-        for _idx, _chapter in enumerate(chapters):
-            _actual = _chapter.get('actual_chapter_num', _chapter.get('num'))
-            if start is not None:
-                if use_spine_order:
-                    _spine_1based = _spine_pos_by_idx.get(_idx)
-                    if _spine_1based is None or not (start <= _spine_1based <= end):
-                        continue
-                elif not (start <= _actual <= end):
-                    continue
-            _raw_num = _chapter.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(_chapter, patterns=None, config=config))
+        for _chapter in chapters:
+            if not _chapter_allowed_by_multipass_range(_chapter):
+                continue
             if not translate_special and not is_text_file:
                 _name = _chapter.get('original_basename') or os.path.basename(_chapter.get('filename', ''))
                 if config.OUTPUT_MODE == "refinement":
@@ -30274,45 +30365,20 @@ def main(log_callback=None, stop_callback=None):
             multipass_refinement_mode = "full"
         multipass_mode_label = "Full + raw" if multipass_refinement_mode == "full_with_raw" else multipass_refinement_mode
         print(f"Running a refinement pass over translated HTML output (mode: {multipass_mode_label}).")
-        if multipass_refinement_mode in ("failed", "partial", "partial.b", "partial.b2"):
-            qa_scan_mode = str(getattr(config, "SCAN_PHASE_MODE", "quick-scan") or "quick-scan").strip().lower()
-            if qa_scan_mode not in ("quick-scan", "aggressive", "ai-hunter", "custom"):
-                qa_scan_mode = "quick-scan"
-            qa_settings = getattr(config, "QA_SCANNER_SETTINGS", None)
-            if not isinstance(qa_settings, dict):
-                qa_settings = _load_qa_scanner_settings_from_env()
-            mode_label = "Partial" if multipass_refinement_mode.startswith("partial") else "Failed"
-            print(f"{mode_label} multipass mode: running QA Scanner in {qa_scan_mode} mode before refinement.")
-            try:
-                try:
-                    progress_manager.save()
-                    print(f"Saved current translation progress before {mode_label}-mode QA scan: {progress_manager.PROGRESS_FILE}")
-                except Exception as save_exc:
-                    print(f"⚠️ Failed to save progress before QA scan: {save_exc}")
-                qa_source_path = os.getenv("EPUB_PATH", "").strip() or input_path or getattr(config, "input_path", "")
-                _run_multipass_refinement_qa_scan(
-                    out,
-                    stop_flag=check_stop,
-                    mode=qa_scan_mode,
-                    qa_settings=qa_settings,
-                    epub_path=qa_source_path,
-                    progress_path=progress_manager.PROGRESS_FILE,
-                    config=config,
-                )
-                try:
-                    progress_manager.prog = progress_manager._init_or_load()
-                    print(f"Reloaded translation progress after QA scan: {progress_manager.PROGRESS_FILE}")
-                except Exception as reload_exc:
-                    print(f"⚠️ Failed to reload progress after QA scan: {reload_exc}")
-            except Exception as scan_exc:
-                print(f"⚠️ QA scan before {mode_label.lower()} multipass failed: {scan_exc}")
         original_output_mode = config.OUTPUT_MODE
         try:
             config.OUTPUT_MODE = "refinement"
             multipass_chapters = []
             skipped_special_refinement = 0
             skipped_image_only_refinement = 0
-            for _chapter in chapters:
+            range_scoped_chapters = _filter_multipass_chapters_to_current_range(chapters)
+            if start is not None:
+                print(
+                    f"📊 Multipass range scope: {len(range_scoped_chapters)}/"
+                    f"{len(chapters)} extracted file(s) match "
+                    f"{'spine positions' if use_spine_order else 'chapters'} {start}-{end}"
+                )
+            for _chapter in range_scoped_chapters:
                 if not translate_special and not is_text_file:
                     _name = _chapter.get('original_basename') or os.path.basename(_chapter.get('filename', ''))
                     if _should_skip_configured_special_file_for_translation(_name):
@@ -30330,6 +30396,69 @@ def main(log_callback=None, stop_callback=None):
                 print(f"⏭️ Skipping {skipped_special_refinement} copied-as-is special file(s) during multipass refinement")
             if skipped_image_only_refinement:
                 print(f"⏭️ Skipping {skipped_image_only_refinement} copied-as-is image-only chapter(s) during multipass refinement")
+
+            if multipass_refinement_mode in ("failed", "partial", "partial.b", "partial.b2"):
+                qa_scan_mode = str(getattr(config, "SCAN_PHASE_MODE", "quick-scan") or "quick-scan").strip().lower()
+                if qa_scan_mode not in ("quick-scan", "aggressive", "ai-hunter", "custom"):
+                    qa_scan_mode = "quick-scan"
+                qa_settings = getattr(config, "QA_SCANNER_SETTINGS", None)
+                if not isinstance(qa_settings, dict):
+                    qa_settings = _load_qa_scanner_settings_from_env()
+                mode_label = "Partial" if multipass_refinement_mode.startswith("partial") else "Failed"
+                qa_selected_files = None
+                if start is not None:
+                    qa_selected_files = []
+                    seen_qa_outputs = set()
+                    for qa_idx, qa_chapter in enumerate(multipass_chapters):
+                        qa_actual_num = qa_chapter.get(
+                            'actual_chapter_num', qa_chapter.get('num', qa_idx + 1)
+                        )
+                        _qa_output_file, qa_output_path = _find_existing_translated_output(
+                            out,
+                            qa_chapter,
+                            qa_actual_num,
+                            progress_manager,
+                        )
+                        if not qa_output_path:
+                            continue
+                        qa_output_key = os.path.normcase(os.path.abspath(qa_output_path))
+                        if qa_output_key in seen_qa_outputs:
+                            continue
+                        seen_qa_outputs.add(qa_output_key)
+                        qa_selected_files.append(qa_output_path)
+
+                if qa_selected_files == []:
+                    print(
+                        f"{mode_label} multipass: no translated outputs in the "
+                        "selected chapter range; skipping the QA scan."
+                    )
+                else:
+                    print(f"{mode_label} multipass mode: running QA Scanner in {qa_scan_mode} mode before refinement.")
+                    try:
+                        try:
+                            progress_manager.save()
+                            print(f"Saved current translation progress before {mode_label}-mode QA scan: {progress_manager.PROGRESS_FILE}")
+                        except Exception as save_exc:
+                            print(f"⚠️ Failed to save progress before QA scan: {save_exc}")
+                        qa_source_path = os.getenv("EPUB_PATH", "").strip() or input_path or getattr(config, "input_path", "")
+                        _run_multipass_refinement_qa_scan(
+                            out,
+                            stop_flag=check_stop,
+                            mode=qa_scan_mode,
+                            qa_settings=qa_settings,
+                            epub_path=qa_source_path,
+                            progress_path=progress_manager.PROGRESS_FILE,
+                            config=config,
+                            selected_files=qa_selected_files,
+                        )
+                        try:
+                            progress_manager.prog = progress_manager._init_or_load()
+                            print(f"Reloaded translation progress after QA scan: {progress_manager.PROGRESS_FILE}")
+                        except Exception as reload_exc:
+                            print(f"⚠️ Failed to reload progress after QA scan: {reload_exc}")
+                    except Exception as scan_exc:
+                        print(f"⚠️ QA scan before {mode_label.lower()} multipass failed: {scan_exc}")
+
             multipass_chapters = _append_partial_b_translation_artifact_chapters(
                 multipass_chapters,
                 out,

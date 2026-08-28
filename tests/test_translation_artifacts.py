@@ -23,6 +23,7 @@ from TransateKRtoEN import (
     _append_partial_b_translation_artifact_chapters,
     _escape_invalid_html_tags,
     _failure_output_for_save,
+    _filter_multipass_chapters_to_current_range,
     _partial_b_target_request_matches,
     _partial_refinement_target_fragment,
     _should_save_failure_response,
@@ -2799,6 +2800,92 @@ def test_partial_b_adds_only_enabled_foreign_qa_artifacts(tmp_path, monkeypatch)
     assert all(chapter["is_special"] for chapter in chapters)
 
 
+@pytest.mark.parametrize(
+    "multipass_mode",
+    ["full", "full_with_raw", "failed", "partial", "partial.b", "partial.b2"],
+)
+def test_every_multipass_mode_uses_authoritative_chapter_range_marker(
+    multipass_mode, monkeypatch
+):
+    monkeypatch.setenv("CHAPTER_RANGE", "2-3")
+    monkeypatch.setenv("USE_SPINE_ORDER", "0")
+    chapters = [
+        {
+            "actual_chapter_num": 1,
+            "_range_allowed_for_translation": False,
+            "original_basename": "chapter0001.xhtml",
+        },
+        {
+            "actual_chapter_num": 2,
+            "_range_allowed_for_translation": True,
+            "original_basename": "chapter0002.xhtml",
+        },
+        {
+            "actual_chapter_num": 3,
+            "_range_allowed_for_translation": True,
+            "original_basename": "chapter0003.xhtml",
+        },
+        {
+            "actual_chapter_num": 4,
+            "_range_allowed_for_translation": False,
+            "original_basename": "chapter0004.xhtml",
+        },
+    ]
+
+    # The candidate helper is shared by every mode in the multipass block.
+    selected = _filter_multipass_chapters_to_current_range(chapters)
+
+    assert multipass_mode in translation_module.MULTIPASS_REFINEMENT_MODES
+    assert [chapter["actual_chapter_num"] for chapter in selected] == [2, 3]
+
+
+def test_multipass_range_filter_honors_spine_marker_over_chapter_number(monkeypatch):
+    monkeypatch.setenv("CHAPTER_RANGE", "5-6")
+    monkeypatch.setenv("USE_SPINE_ORDER", "1")
+    chapters = [
+        {
+            "actual_chapter_num": 99,
+            "_range_spine_position": 5,
+            "_range_allowed_for_translation": True,
+        },
+        {
+            "actual_chapter_num": 5,
+            "_range_spine_position": 9,
+            "_range_allowed_for_translation": False,
+        },
+    ]
+
+    selected = _filter_multipass_chapters_to_current_range(chapters)
+
+    assert selected == [chapters[0]]
+
+
+def test_partial_b_does_not_append_whole_book_artifacts_to_range(tmp_path, monkeypatch):
+    (tmp_path / "metadata.json").write_text("payload", encoding="utf-8")
+    progress = ProgressManager(str(tmp_path))
+    progress.prog["chapters"] = {
+        "__metadata__": {
+            "actual_num": -1,
+            "output_file": "metadata.json",
+            "status": "qa_failed",
+            "qa_issues_found": ["Chinese_text_found_2_chars_[失败]"],
+        }
+    }
+
+    class Config:
+        MULTIPASS_REFINEMENT_MODE = "partial.b"
+
+    monkeypatch.setenv("CHAPTER_RANGE", "2-3")
+    monkeypatch.setenv("TRANSLATE_BOOK_TITLE", "1")
+    in_range_chapter = {"actual_chapter_num": 2, "filename": "chapter0002.xhtml"}
+
+    chapters = _append_partial_b_translation_artifact_chapters(
+        [in_range_chapter], str(tmp_path), progress, Config()
+    )
+
+    assert chapters == [in_range_chapter]
+
+
 def test_progress_update_keeps_artifact_identity_and_clears_qa(tmp_path):
     progress = ProgressManager(str(tmp_path))
     key = "__translation_artifact__:toc"
@@ -2960,6 +3047,106 @@ def test_prepare_single_qa_resolution_filters_other_foreign_failures(
     assert dummy._translation_run_forced_multipass_mode == "partial.b"
     assert os.environ["PARTIAL_B_TARGET_PROGRESS_KEY"] == "12"
     assert os.environ["PARTIAL_B_TARGET_OUTPUT_FILE"] == "chapter0012.xhtml"
+
+
+def test_prepare_multipass_filters_existing_failures_by_spine_preview(
+    tmp_path, monkeypatch
+):
+    source_path = tmp_path / "book.epub"
+    source_path.write_bytes(b"preview is stubbed")
+    failures = [
+        {
+            "source": "book.epub",
+            "source_path": str(source_path),
+            "progress_path": str(tmp_path / "translation_progress.json"),
+            "progress_key": "inside",
+            "chapter": 99,
+            "original_basename": "chapter0099.xhtml",
+            "output_file": "response_chapter0099.xhtml",
+            "issues": ["Chinese_text_found_2_chars_[失败]"],
+        },
+        {
+            "source": "book.epub",
+            "source_path": str(source_path),
+            "progress_path": str(tmp_path / "translation_progress.json"),
+            "progress_key": "outside",
+            "chapter": 2,
+            "original_basename": "chapter0002.xhtml",
+            "output_file": "response_chapter0002.xhtml",
+            "issues": ["Chinese_text_found_2_chars_[失败]"],
+        },
+    ]
+
+    class TextEntry:
+        @staticmethod
+        def text():
+            return "5-5"
+
+    class Checked:
+        @staticmethod
+        def isChecked():
+            return True
+
+    class Dummy:
+        config = {"chapter_range": "", "use_spine_order": False}
+        chapter_range_entry = TextEntry()
+        use_spine_order_checkbox = Checked()
+        translate_special_files_var = False
+        _translation_qa_failure_key = TranslatorGUI._translation_qa_failure_key
+        _qa_failure_matches_resolution_request = staticmethod(
+            TranslatorGUI._qa_failure_matches_resolution_request
+        )
+
+        def _get_output_mode(self):
+            return "translation"
+
+        def _collect_translation_qa_failures(
+            self, files=None, *, foreign_character_only=False
+        ):
+            return list(failures)
+
+        def _get_spine_filenames_for_preview(self, *_args, **_kwargs):
+            return [("[005]", "chapter0099.xhtml", False)]
+
+    dummy = Dummy()
+    monkeypatch.delenv("PARTIAL_B_TARGET_PROGRESS_KEY", raising=False)
+    monkeypatch.delenv("PARTIAL_B_TARGET_OUTPUT_FILE", raising=False)
+    monkeypatch.delenv("PARTIAL_B_TARGET_ACTUAL_NUM", raising=False)
+
+    targeted = TranslatorGUI._prepare_multipass_qa_refinement_run(
+        dummy, True, "failed"
+    )
+
+    assert [failure["progress_key"] for failure in targeted] == ["inside"]
+    assert dummy._translation_run_followup_translation_after_refinement is False
+
+
+def test_blank_live_chapter_range_clears_stale_runtime_scope(monkeypatch):
+    class BlankEntry:
+        @staticmethod
+        def text():
+            return ""
+
+    class Unchecked:
+        @staticmethod
+        def isChecked():
+            return False
+
+    class Dummy:
+        config = {"chapter_range": "9-12", "use_spine_order": True}
+        chapter_range_entry = BlankEntry()
+        use_spine_order_checkbox = Unchecked()
+
+    dummy = Dummy()
+    monkeypatch.setenv("CHAPTER_RANGE", "9-12")
+    monkeypatch.setenv("USE_SPINE_ORDER", "1")
+
+    exported = TranslatorGUI._export_chapter_range_runtime_env(dummy)
+
+    assert exported == ("", None, False)
+    assert "CHAPTER_RANGE" not in os.environ
+    assert "USE_SPINE_ORDER" not in os.environ
+    assert dummy.config["chapter_range"] == ""
 
 
 def test_progress_context_queues_one_clicked_qa_entry(tmp_path):

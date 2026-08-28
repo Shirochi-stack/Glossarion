@@ -3309,6 +3309,9 @@ class AsyncProcessingDialog:
         
         # Processing options
         env_vars['CHAPTER_RANGE'] = _text(getattr(self.gui, 'chapter_range_entry', None), '').strip()
+        env_vars['USE_SPINE_ORDER'] = "1" if _val(
+            getattr(self.gui, 'use_spine_order_checkbox', None), False
+        ) else "0"
         env_vars['REMOVE_AI_ARTIFACTS'] = str(getattr(self.gui, 'REMOVE_AI_ARTIFACTS_var', 'off') or 'off')
         env_vars['BATCH_TRANSLATION'] = "1" if _val(self.gui.batch_translation_var, False) else "0"
         env_vars['BATCH_SIZE'] = _val(self.gui.batch_size_var, 1)

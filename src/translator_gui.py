@@ -16969,6 +16969,59 @@ Recent translations to summarize:
             pass
         return enabled, mode
 
+    def _live_chapter_range_settings(self):
+        """Return the live range text, parsed bounds, and spine-order state."""
+        range_text = ""
+        entry = getattr(self, 'chapter_range_entry', None)
+        read_live_entry = False
+        if entry is not None:
+            try:
+                range_text = str(entry.text() or '').strip()
+                read_live_entry = True
+            except Exception:
+                range_text = ""
+        if not read_live_entry:
+            try:
+                range_text = str(self.config.get('chapter_range', '') or '').strip()
+            except Exception:
+                range_text = ""
+
+        parsed_range = (
+            TranslatorGUI._parse_chapter_range_text(self, range_text)
+            if range_text else None
+        )
+        spine_order = False
+        spine_checkbox = getattr(self, 'use_spine_order_checkbox', None)
+        if spine_checkbox is not None:
+            try:
+                spine_order = bool(spine_checkbox.isChecked())
+            except Exception:
+                spine_order = False
+        else:
+            try:
+                spine_order = bool(self.config.get('use_spine_order', False))
+            except Exception:
+                spine_order = False
+        return range_text, parsed_range, spine_order
+
+    def _export_chapter_range_runtime_env(self):
+        """Export one authoritative live chapter scope for every run phase."""
+        range_text, parsed_range, spine_order = TranslatorGUI._live_chapter_range_settings(self)
+        try:
+            self.config['chapter_range'] = range_text
+            self.config['use_spine_order'] = spine_order
+        except Exception:
+            pass
+
+        if range_text:
+            os.environ['CHAPTER_RANGE'] = range_text
+            os.environ['USE_SPINE_ORDER'] = '1' if spine_order else '0'
+        else:
+            # Do not let a range from a previous run leak into a blank range.
+            os.environ.pop('CHAPTER_RANGE', None)
+            os.environ.pop('USE_SPINE_ORDER', None)
+        return range_text, parsed_range, spine_order
+
     def _get_scan_phase_mode(self):
         """Return the live QA scan mode used by post-translation scanning."""
         mode = getattr(self, 'scan_phase_mode_var', None) or self.config.get('scan_phase_mode', 'quick-scan')
@@ -26212,10 +26265,78 @@ Recent translations to summarize:
                     "progress_key": str(chapter_key),
                     "chapter": chapter_num,
                     "output_file": output_file,
+                    "original_basename": chapter_info.get("original_basename") or "",
                     "issues": [str(issue).strip() for issue in issues if str(issue).strip()] or ["UNKNOWN"],
                 })
 
         return failures
+
+    @staticmethod
+    def _chapter_scope_filename_key(value):
+        """Normalize source and response filenames for preview/progress matching."""
+        basename = os.path.basename(str(value or '').replace('\\', '/')).casefold()
+        if basename.startswith('response_'):
+            basename = basename[len('response_'):]
+        return os.path.splitext(basename)[0]
+
+    def _filter_translation_qa_failures_to_current_range(self, failures):
+        """Limit pre-run multipass QA targets to the live chapter-range preview."""
+        failures = list(failures or [])
+        range_text, parsed_range, spine_order = TranslatorGUI._live_chapter_range_settings(self)
+        if not range_text or not parsed_range:
+            return failures
+
+        start, end = parsed_range
+        translate_special = bool(getattr(self, 'translate_special_files_var', False))
+        allowed_epub_names = {}
+
+        for failure in failures:
+            source_path = str(failure.get('source_path') or '').strip()
+            source_key = os.path.normcase(os.path.abspath(source_path)) if source_path else ''
+            if not source_path.lower().endswith('.epub') or not os.path.isfile(source_path):
+                continue
+            if source_key in allowed_epub_names:
+                continue
+            preview_rows = self._get_spine_filenames_for_preview(
+                source_path,
+                start,
+                end,
+                spine_order,
+                translate_special,
+            )
+            allowed_epub_names[source_key] = {
+                TranslatorGUI._chapter_scope_filename_key(filename)
+                for _label, filename, is_special_skipped in preview_rows
+                if not is_special_skipped
+            }
+
+        scoped = []
+        for failure in failures:
+            source_path = str(failure.get('source_path') or '').strip()
+            source_key = os.path.normcase(os.path.abspath(source_path)) if source_path else ''
+            allowed_names = allowed_epub_names.get(source_key)
+            if allowed_names is not None:
+                candidate_names = {
+                    TranslatorGUI._chapter_scope_filename_key(failure.get(field))
+                    for field in ('original_basename', 'output_file')
+                    if failure.get(field)
+                }
+                if candidate_names & allowed_names:
+                    scoped.append(failure)
+                    continue
+                # Spine positions are not chapter numbers. If an old progress
+                # row has no usable source filename, excluding it is safer than
+                # refining a file the preview did not select.
+                if spine_order:
+                    continue
+
+            try:
+                chapter_num = float(failure.get('chapter'))
+            except (TypeError, ValueError):
+                continue
+            if start <= chapter_num <= end:
+                scoped.append(failure)
+        return scoped
 
     def _active_translation_output_mode(self) -> str:
         override = getattr(self, '_translation_run_output_mode_override', None)
@@ -26288,8 +26409,14 @@ Recent translations to summarize:
         ):
             return []
 
-        all_failures = self._collect_translation_qa_failures()
-        targeted_failures = self._collect_translation_qa_failures(foreign_character_only=True)
+        all_failures = TranslatorGUI._filter_translation_qa_failures_to_current_range(
+            self,
+            self._collect_translation_qa_failures()
+        )
+        targeted_failures = TranslatorGUI._filter_translation_qa_failures_to_current_range(
+            self,
+            self._collect_translation_qa_failures(foreign_character_only=True)
+        )
         if requested_target:
             targeted_failures = [
                 failure for failure in targeted_failures
@@ -30429,6 +30556,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             qa_resolution_request = None
         self._clear_translation_run_overrides()
         try:
+            # Multipass preflight must see the same live range and spine-order
+            # selection that the preview and translation worker will use.
+            self._export_chapter_range_runtime_env()
             if getattr(self, '_metadata_only_run', False):
                 multipass_enabled = False
                 multipass_refinement_mode = 'failed'
@@ -33534,19 +33664,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if getattr(self, '_input_output_run_active', False):
                     self._apply_direct_text_runtime_environment()
                 
-                # Handle chapter range
-                chap_range = self.chapter_range_entry.text().strip()
+                # Re-export the exact live scope after the bulk environment
+                # update so every extraction/translation/multipass phase agrees.
+                chap_range, _parsed_range, use_spine_order = (
+                    self._export_chapter_range_runtime_env()
+                )
                 if chap_range:
-                    os.environ['CHAPTER_RANGE'] = chap_range
-                    use_spine = getattr(self, 'use_spine_order_checkbox', None)
-                    if use_spine and use_spine.isChecked():
-                        os.environ['USE_SPINE_ORDER'] = '1'
+                    if use_spine_order:
                         self.append_log(f"📊 Chapter Range (Spine Order): {chap_range}")
                     else:
-                        os.environ['USE_SPINE_ORDER'] = '0'
                         self.append_log(f"📊 Chapter Range: {chap_range}")
-                else:
-                    os.environ.pop('USE_SPINE_ORDER', None)
                 
                 # Set other environment variables (token limits, etc.)
                 if hasattr(self, 'token_limit_disabled') and self.token_limit_disabled:
@@ -34428,6 +34555,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'BATCH_SIZE': str(self.batch_size_var),
             'MULTIPASS_MODE': "1" if getattr(self, 'multipass_mode_var', self.config.get('multipass_mode', False)) else "0",
             'MULTIPASS_REFINEMENT_MODE': self._get_multipass_refinement_mode(),
+            'CHAPTER_RANGE': self.chapter_range_entry.text().strip(),
+            'USE_SPINE_ORDER': '1' if self.use_spine_order_checkbox.isChecked() else '0',
             'BATCHING_MODE': self._translation_batching_mode_for_env(),
             'BATCH_GROUP_SIZE': str(getattr(self, 'batch_group_size_var', '3')),
             # Backward compatibility for older scripts expecting CONSERVATIVE_BATCHING
