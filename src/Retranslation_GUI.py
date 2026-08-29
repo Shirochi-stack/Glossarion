@@ -79,6 +79,11 @@ from translation_artifacts import (
 _IS_MACOS = (sys.platform == 'darwin')
 _MACHINE_TRANSLATION_DIR = "Machine_Translation"
 _PROGRESS_SIDECAR_FILENAMES = frozenset({"source_epub.txt"})
+# Filesystem watchers can emit several notifications for one atomic JSON save
+# (temporary file creation, replace, directory update). Coalesce those bursts
+# before parsing and reconciling a large progress file.
+_PROGRESS_WATCH_DEBOUNCE_MS = 500
+_PROGRESS_LIVE_REFRESH_MIN_INTERVAL_SECONDS = 0.5
 _RAW_FOREIGN_TEXT_QA_RE = re.compile(
     r"(?:^|[^a-z])(?:korean|japanese|chinese|hebrew|arabic|syriac|thai|cyrillic)"
     r"_text_found_\d+_chars_",
@@ -24428,7 +24433,7 @@ class RetranslationMixin:
             gp_watcher = QFileSystemWatcher(panel)
             gp_watch_debounce = QTimer(panel)
             gp_watch_debounce.setSingleShot(True)
-            gp_watch_debounce.setInterval(100)
+            gp_watch_debounce.setInterval(_PROGRESS_WATCH_DEBOUNCE_MS)
 
             def _ensure_gp_watch_paths(path=None):
                 target = os.path.abspath(path or _find_gp_for_file(fp) or gp_path)
@@ -27059,9 +27064,29 @@ class RetranslationMixin:
             ):
                 data.pop(key, None)
 
+        def _queue_silent_refresh(delay_ms=0):
+            """Keep at most one trailing live-refresh callback queued."""
+            if data.get('_prefetch_scheduled'):
+                return
+            data['_prefetch_scheduled'] = True
+
+            def _run_queued_refresh():
+                data['_prefetch_scheduled'] = False
+                _silent_refresh()
+
+            QTimer.singleShot(max(0, int(delay_ms)), _run_queued_refresh)
+
         def _schedule_dirty_prefetch():
-            if data.pop('_prefetch_dirty', False) and _progress_page_is_visible():
-                QTimer.singleShot(0, _silent_refresh)
+            if not data.pop('_prefetch_dirty', False) or not _progress_page_is_visible():
+                return
+            elapsed = time.monotonic() - float(
+                data.get('_last_prefetch_started_at', 0.0) or 0.0
+            )
+            remaining = max(
+                0.0,
+                _PROGRESS_LIVE_REFRESH_MIN_INTERVAL_SECONDS - elapsed,
+            )
+            _queue_silent_refresh(round(remaining * 1000))
 
         def _on_prefetch_finished(payload):
             data['_prefetch_running'] = False
@@ -27127,21 +27152,37 @@ class RetranslationMixin:
                 if data.get('_prefetch_running'):
                     return
 
+                elapsed = time.monotonic() - float(
+                    data.get('_last_prefetch_started_at', 0.0) or 0.0
+                )
+                remaining = (
+                    _PROGRESS_LIVE_REFRESH_MIN_INTERVAL_SECONDS - elapsed
+                )
+                if remaining > 0:
+                    _queue_silent_refresh(round(remaining * 1000))
+                    return
+
                 data['_prefetch_running'] = True
                 data['_prefetch_dirty'] = False
+                data['_last_prefetch_started_at'] = time.monotonic()
                 generation = int(data.get('_prefetch_generation', 0)) + 1
                 data['_prefetch_generation'] = generation
                 progress_file = data.get('progress_file')
                 output_dir = data.get('output_dir')
                 last_signatures = data.get('_last_applied_snapshot_signatures')
-                fallback_prog = copy.deepcopy(data.get('prog') or {})
-                prefetch_tts = self._current_progress_output_mode(data) == 'audio' or any(
-                    isinstance(entry, dict) and (entry.get('tts_status') or entry.get('tts_file'))
-                    for entry in fallback_prog.get('chapters', {}).values()
-                )
+                # This snapshot is read-only. Avoid cloning every chapter on
+                # the GUI thread for every watcher event; copy only in the
+                # worker if a failed JSON read actually needs the fallback.
+                fallback_prog = data.get('prog') or {}
+                audio_mode = self._current_progress_output_mode(data) == 'audio'
 
                 def _bg_prefetch():
                     try:
+                        prefetch_tts = audio_mode or any(
+                            isinstance(entry, dict)
+                            and (entry.get('tts_status') or entry.get('tts_file'))
+                            for entry in fallback_prog.get('chapters', {}).values()
+                        )
                         progress_signature = _progress_path_signature(progress_file)
                         try:
                             with os.scandir(output_dir) as scan:
@@ -27179,9 +27220,13 @@ class RetranslationMixin:
                         try:
                             with open(progress_file, 'r', encoding='utf-8') as progress_stream:
                                 loaded = json.load(progress_stream)
-                            prog = loaded if isinstance(loaded, dict) else fallback_prog
+                            prog = (
+                                loaded
+                                if isinstance(loaded, dict)
+                                else copy.deepcopy(fallback_prog)
+                            )
                         except Exception:
-                            prog = fallback_prog
+                            prog = copy.deepcopy(fallback_prog)
 
                         # If an atomic replacement landed during the read, discard
                         # this snapshot and immediately queue one more pass.
@@ -27211,7 +27256,7 @@ class RetranslationMixin:
         progress_watcher = QFileSystemWatcher(data.get('container') or data.get('dialog') or self)
         progress_watch_debounce = QTimer(data.get('container') or data.get('dialog') or self)
         progress_watch_debounce.setSingleShot(True)
-        progress_watch_debounce.setInterval(100)
+        progress_watch_debounce.setInterval(_PROGRESS_WATCH_DEBOUNCE_MS)
 
         def _ensure_translation_watch_paths(progress_file=None):
             raw_target = progress_file or data.get('progress_file') or ''
@@ -28618,7 +28663,10 @@ class RetranslationMixin:
             _prefetched_prog_path = data.pop('_prefetched_prog_path', None)
             if _prefetched_prog is not None and _prefetched_prog_path == data.get('progress_file'):
                 data['prog'] = _prefetched_prog
-                data['_last_good_prog'] = copy.deepcopy(data['prog'])
+                # The background loader created this object exclusively for
+                # this snapshot. Retaining it is sufficient for fallback and
+                # avoids another full progress-tree clone on the GUI thread.
+                data['_last_good_prog'] = data['prog']
             # Check if the progress file exists first
             elif not os.path.exists(data['progress_file']):
                 print(f"⚠️ Progress file not found: {data['progress_file']}")
@@ -30183,6 +30231,42 @@ class RetranslationMixin:
             return f"output:{output_file}"
         return f"row:{info.get('num')}:{info.get('original_filename', '')}:{info.get('key', '')}"
 
+    def _progress_list_payload_revision(self, info):
+        """Return a cheap revision marker for context-menu row metadata."""
+        if not isinstance(info, dict):
+            return ()
+        entry = info.get('info') or info.get('progress_entry') or {}
+        if not isinstance(entry, dict):
+            entry = {}
+        previous = entry.get('previous_progress_entry')
+        if not isinstance(previous, dict):
+            previous = {}
+        qa_issues = entry.get('qa_issues_found')
+        if not isinstance(qa_issues, (list, tuple)):
+            qa_issues = ()
+        return (
+            info.get('progress_key'),
+            info.get('status'),
+            info.get('output_file'),
+            info.get('original_filename'),
+            info.get('num'),
+            info.get('display_num'),
+            info.get('duplicate_count'),
+            entry.get('last_updated'),
+            entry.get('status'),
+            entry.get('output_file'),
+            entry.get('model_name') or entry.get('model'),
+            entry.get('manual_editing_pending'),
+            entry.get('refinement_status'),
+            entry.get('tts_status'),
+            entry.get('tts_file'),
+            entry.get('merged_parent_chapter'),
+            tuple(str(issue) for issue in qa_issues),
+            previous.get('last_updated'),
+            previous.get('status'),
+            previous.get('model_name') or previous.get('model'),
+        )
+
     def _progress_list_display_text(self, info, data, max_original_len, max_output_len):
         status_icons = {
             'completed': '✅',
@@ -30406,6 +30490,7 @@ class RetranslationMixin:
             'info': info,
             'progress_key': info.get('progress_key'),
             'item_key': self._progress_list_item_key(info),
+            'payload_revision': self._progress_list_payload_revision(info),
         })
         item.setData(Qt.UserRole + 2, status)
         chapter_info = info.get('info') or info.get('progress_entry') or {}
@@ -30613,13 +30698,28 @@ class RetranslationMixin:
             hidden = self._progress_entry_needs_special_visibility(info) and not show_special_files
             fingerprint = (display, display_status, hidden)
             old_payload = item.data(Qt.UserRole) or {}
-            payload_changed = not isinstance(old_payload, dict) or old_payload.get('info') != info
-            if (
+            payload_changed = (
+                not isinstance(old_payload, dict)
+                or old_payload.get('payload_revision')
+                != self._progress_list_payload_revision(info)
+            )
+            row_identity_changed = (
                 not isinstance(old_payload, dict)
                 or old_payload.get('item_key') != self._progress_list_item_key(info)
-            ):
+            )
+            if row_identity_changed:
                 identity_changed = True
-            if item.data(Qt.UserRole + 4) != fingerprint or payload_changed:
+            # A fresh JSON snapshot creates new nested dictionaries for every
+            # row. Deep-comparing those trees here made an otherwise unchanged
+            # 1,000+ row list expensive on the GUI thread. The rendered
+            # fingerprint covers visible changes, while the compact payload
+            # revision keeps context-menu metadata current without comparing
+            # saved prompts or other large request fields.
+            if (
+                item.data(Qt.UserRole + 4) != fingerprint
+                or row_identity_changed
+                or payload_changed
+            ):
                 row_updates.append((item, info, display, display_status, fingerprint))
 
         if not row_updates:

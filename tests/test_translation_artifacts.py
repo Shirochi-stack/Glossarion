@@ -1,6 +1,8 @@
+import inspect
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,7 @@ from bs4 import BeautifulSoup
 import other_settings
 import Retranslation_GUI as retranslation_gui_module
 import TransateKRtoEN as translation_module
+import title_tag_translation as title_translation_module
 from chapter_chunk_progress import extract_marked_chunks, wrap_chunk_html
 from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS, mask_whitelisted_emoticons
 
@@ -115,7 +118,143 @@ def test_parallel_chapter_scan_polls_stop_before_queueing_titles():
     assert scan_source.index("progress_manager.end_deferred_save()") < scan_source.index(
         "stopped parallel queue preparation immediately"
     )
-    assert 'f"📝 Image-only chapter {log_num}: queued its "' in scan_source
+    assert "_prepare_image_only_title_plans_parallel(" in scan_source
+    assert '"📝 Queued image-only <title> translation for "' in scan_source
+    assert 'f"📝 Image-only chapter {log_num}: queued its "' not in scan_source
+
+
+def test_parallel_preflight_defers_duplicate_chunk_splitting():
+    source = Path(translation_module.__file__).read_text(encoding="utf-8")
+    preflight_start = source.index('print("📊 Calculating total chunks needed...")')
+    preflight_end = source.index("# Print range skip summary", preflight_start)
+    preflight_source = source[preflight_start:preflight_end]
+
+    batch_defer = preflight_source.index("if config.BATCH_TRANSLATION:")
+    authoritative_split = preflight_source.index(
+        "chunks = _split_chapter_for_translation("
+    )
+    assert batch_defer < authoritative_split
+    assert "exact chunk splitting is deferred to translation workers" in source
+    assert 'print("📊 Verifying chapter numbers...")' in source
+    assert 'print("📊 Setting chapter numbers...")' not in source
+
+
+def test_title_only_batch_requests_disable_chunk_progress_and_rate_limit_saves():
+    process_source = inspect.getsource(
+        translation_module.BatchTranslationProcessor.process_single_chapter
+    )
+
+    assert (
+        "self.chunk_progress_enabled and not title_tag_only_chapter"
+        in process_source
+    )
+    assert "self.progress_manager.save_rate_limited()" in process_source
+
+
+def test_progress_manager_rate_limits_bursty_live_saves(tmp_path, monkeypatch):
+    manager = translation_module.ProgressManager(str(tmp_path))
+    saves = []
+    monkeypatch.setattr(manager, "save", lambda: saves.append(time.monotonic()))
+    manager._last_progress_save_monotonic = time.monotonic()
+
+    for _ in range(31):
+        assert manager.save_rate_limited(update_batch=32, max_interval=60) is False
+    assert manager.save_rate_limited(update_batch=32, max_interval=60) is True
+    assert len(saves) == 1
+
+
+def test_progress_update_reuses_indexed_legacy_output_key(tmp_path):
+    manager = translation_module.ProgressManager(str(tmp_path))
+    manager.prog["chapters"] = {
+        "legacy-row": {
+            "actual_num": 5,
+            "output_file": "response_part0005.html",
+            "status": "pending",
+            "content_hash": "old",
+        }
+    }
+    manager._progress_output_index_signature = None
+    manager.update(
+        4,
+        5,
+        "new-hash",
+        "part0005.xhtml",
+        status="in_progress",
+    )
+
+    assert set(manager.prog["chapters"]) == {"legacy-row"}
+    assert manager.prog["chapters"]["legacy-row"]["status"] == "in_progress"
+
+
+def test_parallel_title_queue_uses_cached_xhtml_without_source_recovery(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("SKIP_TITLE_TAG_TRANSLATION", "0")
+    original = (
+        '<html><head><title>Cached title</title></head>'
+        '<body><img src="cover.jpg" /></body></html>'
+    )
+
+    def fail_source_recovery(*_args, **_kwargs):
+        raise AssertionError("cached complete XHTML must not reopen the source EPUB")
+
+    monkeypatch.setattr(
+        translation_module,
+        "_read_source_epub_html",
+        fail_source_recovery,
+    )
+    chapter = {"original_html": original, "body": original}
+
+    assert translation_module._image_only_title_translation_plan(
+        chapter,
+        str(tmp_path),
+    ) == (original, "<title>Cached title</title>")
+
+
+def test_image_only_title_plans_are_prepared_concurrently(tmp_path, monkeypatch):
+    worker_count = 4
+    barrier = threading.Barrier(worker_count)
+    worker_names = set()
+    worker_names_lock = threading.Lock()
+
+    def fake_plan(chapter, _output_dir):
+        with worker_names_lock:
+            worker_names.add(threading.current_thread().name)
+        barrier.wait(timeout=3)
+        value = chapter["num"]
+        return f"<html>{value}</html>", f"<title>{value}</title>"
+
+    monkeypatch.setattr(
+        translation_module,
+        "_image_only_title_translation_plan",
+        fake_plan,
+    )
+    candidates = [
+        (index, {"num": index}, index, index, f"hash-{index}")
+        for index in range(12)
+    ]
+
+    plans, stop_mode, errors = (
+        translation_module._prepare_image_only_title_plans_parallel(
+            candidates,
+            str(tmp_path),
+            max_workers=worker_count,
+            stop_callback=lambda: False,
+        )
+    )
+
+    assert stop_mode is None
+    assert errors == 0
+    assert set(plans) == set(range(12))
+    assert len(worker_names) == worker_count
+
+
+def test_image_only_title_queue_summary_is_compact_and_sorted():
+    values = [102, 74, 98, 76, 100, 78, 82, 84, 86, 88, 90, 92, 96]
+    assert translation_module._format_chapter_log_values(values) == (
+        "74, 76, 78, 82, 84, 86, 88, 90, 92, 96, 98, 100, 102"
+    )
 
 
 def test_legacy_use_title_is_only_a_fallback(monkeypatch):
@@ -151,6 +290,22 @@ def test_title_only_reconstruction_preserves_image_xhtml_exactly():
     assert restored == original.replace(
         "義妹生活",
         "Days with My Stepsister &amp; More",
+    )
+
+
+def test_title_payload_does_not_parse_the_image_document(monkeypatch):
+    def fail_parser(*_args, **_kwargs):
+        raise AssertionError("title extraction must not parse the whole document")
+
+    monkeypatch.setattr(title_translation_module, "BeautifulSoup", fail_parser)
+    markup = (
+        "<html><head><title>Only this text</title></head><body>"
+        + '<img src="page.jpg" />' * 10_000
+        + "</body></html>"
+    )
+
+    assert title_translation_module.title_tag_translation_payload(markup) == (
+        "<title>Only this text</title>"
     )
 
 

@@ -108,6 +108,27 @@ def _chapter_log_number(chapter, fallback=None):
     return fallback
 
 
+def _format_chapter_log_values(values, limit=32):
+    """Compact a potentially huge chapter list into one log line."""
+    def _sort_key(value):
+        try:
+            return (0, float(value))
+        except (TypeError, ValueError):
+            return (1, str(value))
+
+    def _label(value):
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+
+    ordered = sorted(dict.fromkeys(values or ()), key=_sort_key)
+    labels = [_label(value) for value in ordered[:limit]]
+    remaining = len(ordered) - len(labels)
+    if remaining > 0:
+        labels.append(f"… (+{remaining} more)")
+    return ", ".join(labels)
+
+
 def _assign_translation_display_chapter_numbers(chapters, special_check=None):
     """Attach non-resetting display numbers without changing chapter identity."""
     chapter_rows = [chapter for chapter in (chapters or []) if isinstance(chapter, dict)]
@@ -3712,6 +3733,8 @@ class ProgressManager:
             else ""
         )
         self._save_lock = threading.RLock()
+        self._last_progress_save_monotonic = 0.0
+        self._rate_limited_save_updates = 0
         local_progress_existed = os.path.isfile(self.PROGRESS_FILE)
         self.prog = self._init_or_load()
         self._loaded_subtitle_progress_from_mirror = False
@@ -4752,6 +4775,59 @@ class ProgressManager:
         self._listing_cache = (output_dir, mtime, names, norm_map)
         return names, norm_map
 
+    @staticmethod
+    def _progress_output_lookup_key(actual_num, output_file):
+        normalized = _normalize_output_filename_stem(output_file)
+        if not normalized:
+            return None
+        return str(actual_num), normalized
+
+    def _ensure_progress_output_index(self):
+        """Index progress rows by chapter number/output instead of rescanning."""
+        chapters = self.prog.setdefault("chapters", {})
+        signature = (id(chapters), len(chapters))
+        if getattr(self, "_progress_output_index_signature", None) == signature:
+            return getattr(self, "_progress_output_index", {})
+
+        index = {}
+        reverse_index = {}
+        for existing_key, candidate in chapters.items():
+            if not isinstance(candidate, dict):
+                continue
+            lookup_key = self._progress_output_lookup_key(
+                candidate.get("actual_num", candidate.get("chapter_num")),
+                candidate.get("output_file"),
+            )
+            if lookup_key is not None and lookup_key not in index:
+                index[lookup_key] = existing_key
+                reverse_index[existing_key] = lookup_key
+        self._progress_output_index = index
+        self._progress_output_reverse_index = reverse_index
+        self._progress_output_index_signature = signature
+        return index
+
+    def _remember_progress_output_index(self, chapter_key, chapter_info):
+        chapters = self.prog.setdefault("chapters", {})
+        index = getattr(self, "_progress_output_index", None)
+        reverse_index = getattr(self, "_progress_output_reverse_index", None)
+        if not isinstance(index, dict) or not isinstance(reverse_index, dict):
+            index = self._ensure_progress_output_index()
+            reverse_index = self._progress_output_reverse_index
+        previous_lookup_key = reverse_index.pop(chapter_key, None)
+        if (
+            previous_lookup_key is not None
+            and index.get(previous_lookup_key) == chapter_key
+        ):
+            index.pop(previous_lookup_key, None)
+        lookup_key = self._progress_output_lookup_key(
+            chapter_info.get("actual_num", chapter_info.get("chapter_num")),
+            chapter_info.get("output_file"),
+        )
+        if lookup_key is not None:
+            index[lookup_key] = chapter_key
+            reverse_index[chapter_key] = lookup_key
+        self._progress_output_index_signature = (id(chapters), len(chapters))
+
     def _refresh_subtitle_file_progress(self):
         """Aggregate subtitle batch rows into per-source-file progress."""
         summaries = {}
@@ -4882,6 +4958,10 @@ class ProgressManager:
             if getattr(self, "_defer_saves", False):
                 self._deferred_dirty = True
                 return
+            # A normal save is also the authoritative flush for any preceding
+            # rate-limited live updates.
+            self._last_progress_save_monotonic = time.monotonic()
+            self._rate_limited_save_updates = 0
             try:
                 progress_dir = os.path.dirname(self.PROGRESS_FILE)
                 if progress_dir:
@@ -5004,6 +5084,44 @@ class ProgressManager:
                         os.remove(temp_file)
                     except:
                         pass
+
+    def save_rate_limited(self, update_batch=32, max_interval=2.0):
+        """Persist bursty live progress without rewriting the JSON per event.
+
+        Title-only queues can move hundreds of requests through pending,
+        in-progress, and completed states in a few seconds. Each state remains
+        updated in memory immediately; disk/UI snapshots are emitted in bounded
+        batches, and the coordinator performs a normal save at batch barriers.
+        """
+        try:
+            update_batch = max(1, int(update_batch))
+        except (TypeError, ValueError):
+            update_batch = 32
+        try:
+            max_interval = max(0.05, float(max_interval))
+        except (TypeError, ValueError):
+            max_interval = 2.0
+
+        with self._save_lock:
+            if getattr(self, "_defer_saves", False):
+                self._deferred_dirty = True
+                return False
+            self._rate_limited_save_updates = int(
+                getattr(self, "_rate_limited_save_updates", 0) or 0
+            ) + 1
+            now = time.monotonic()
+            last_save = float(
+                getattr(self, "_last_progress_save_monotonic", 0.0) or 0.0
+            )
+            if (
+                last_save > 0
+                and self._rate_limited_save_updates < update_batch
+                and now - last_save < max_interval
+            ):
+                return False
+
+        self.save()
+        return True
 
     @staticmethod
     def _entry_has_qa_issue_marker(info):
@@ -5254,24 +5372,15 @@ class ProgressManager:
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
         existing_info = self.prog.get("chapters", {}).get(chapter_key, {})
         if not existing_info and output_file:
-            def _norm_out(fname):
-                base = os.path.basename(str(fname or ""))
-                if base.startswith("response_"):
-                    base = base[len("response_"):]
-                return os.path.splitext(base)[0].lower()
-            target_norm = _norm_out(output_file)
-            for existing_key, candidate in self.prog.get("chapters", {}).items():
-                if not isinstance(candidate, dict):
-                    continue
-                candidate_out = candidate.get("output_file")
-                if not candidate_out:
-                    continue
-                same_output = candidate_out == output_file or _norm_out(candidate_out) == target_norm
-                same_num = str(candidate.get("actual_num", candidate.get("chapter_num"))) == str(actual_num)
-                if same_output and same_num:
-                    chapter_key = existing_key
-                    existing_info = candidate
-                    break
+            lookup_key = self._progress_output_lookup_key(
+                actual_num,
+                output_file,
+            )
+            indexed_key = self._ensure_progress_output_index().get(lookup_key)
+            candidate = self.prog.get("chapters", {}).get(indexed_key, {})
+            if isinstance(candidate, dict) and candidate:
+                chapter_key = indexed_key
+                existing_info = candidate
 
         # A completed parent is impossible while its persisted chunk plan still
         # contains pending or failed work. This guard is deliberately applied
@@ -5513,6 +5622,7 @@ class ProgressManager:
             pass
         
         self.prog["chapters"][chapter_key] = chapter_info
+        self._remember_progress_output_index(chapter_key, chapter_info)
         if content_hash:
             self.mark_chapter_chunk_progress_status(content_hash, status)
 
@@ -8057,12 +8167,43 @@ def _original_markup_for_copy(chapter, output_dir):
         or chapter.get("raw_html")
         or ""
     )
-    recovered = _read_source_epub_html(chapter, output_dir)
     cached_has_head = bool(re.search(r"<(?:head|title)\b", cached or "", re.IGNORECASE))
+    # The extractor normally gives us the complete XHTML. Reopening the raw
+    # EPUB once per image-only chapter made 1,000-chapter queue preparation
+    # perform hundreds of redundant ZIP scans.
+    if cached and cached_has_head:
+        return cached
+
+    recovered = _read_source_epub_html(chapter, output_dir)
     recovered_has_head = bool(re.search(r"<(?:head|title)\b", recovered or "", re.IGNORECASE))
     if recovered and recovered_has_head and not cached_has_head:
         return recovered
     return cached or recovered or chapter.get("body") or ""
+
+
+def _image_only_title_translation_plan(chapter, output_dir):
+    """Build a title-only plan without mutating the chapter."""
+    original_markup = _original_markup_for_copy(chapter, output_dir)
+    payload = (
+        title_tag_translation_payload(original_markup)
+        if should_translate_title_tags()
+        else ""
+    )
+    return original_markup, payload
+
+
+def _apply_image_only_title_translation_plan(chapter, plan):
+    """Apply a prepared title-only plan to one chapter."""
+    original_markup, payload = plan if plan else ("", "")
+    if not payload:
+        return False
+    chapter["_title_tag_only_translation"] = True
+    chapter["_title_tag_original_markup"] = original_markup
+    chapter["body"] = payload
+    chapter["has_images"] = False
+    chapter["image_count"] = 0
+    chapter["file_size"] = len(payload.encode("utf-8"))
+    return True
 
 
 def _prepare_image_only_title_translation(chapter, output_dir):
@@ -8072,21 +8213,67 @@ def _prepare_image_only_title_translation(chapter, output_dir):
     response.  This lets the regular sequential or parallel translation path
     handle the title without exposing image markup to the model.
     """
-    if not should_translate_title_tags():
-        return False
+    return _apply_image_only_title_translation_plan(
+        chapter,
+        _image_only_title_translation_plan(chapter, output_dir),
+    )
 
-    original_markup = _original_markup_for_copy(chapter, output_dir)
-    payload = title_tag_translation_payload(original_markup)
-    if not payload:
-        return False
 
-    chapter["_title_tag_only_translation"] = True
-    chapter["_title_tag_original_markup"] = original_markup
-    chapter["body"] = payload
-    chapter["has_images"] = False
-    chapter["image_count"] = 0
-    chapter["file_size"] = len(payload.encode("utf-8"))
-    return True
+def _prepare_image_only_title_plans_parallel(
+    candidates,
+    output_dir,
+    max_workers,
+    stop_callback=None,
+):
+    """Prepare image-only title payloads concurrently, without chapter mutation."""
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+    candidates = list(candidates or ())
+    if not candidates:
+        return {}, None, 0
+
+    worker_count = max(1, min(int(max_workers or 1), len(candidates)))
+    executor = ThreadPoolExecutor(
+        max_workers=worker_count,
+        thread_name_prefix="TitleQueuePrep",
+    )
+    results = {}
+    errors = 0
+    stop_mode = None
+    try:
+        futures = {
+            executor.submit(
+                _image_only_title_translation_plan,
+                candidate[1],
+                output_dir,
+            ): candidate[0]
+            for candidate in candidates
+        }
+        pending = set(futures)
+        while pending:
+            stop_mode = _translation_prequeue_stop_mode(stop_callback)
+            if stop_mode:
+                for future in pending:
+                    future.cancel()
+                break
+            done, pending = wait(
+                pending,
+                timeout=0.05,
+                return_when=FIRST_COMPLETED,
+            )
+            for future in done:
+                chapter_index = futures[future]
+                try:
+                    results[chapter_index] = future.result()
+                except Exception:
+                    errors += 1
+                    results[chapter_index] = None
+    finally:
+        executor.shutdown(
+            wait=not bool(stop_mode),
+            cancel_futures=bool(stop_mode),
+        )
+    return results, stop_mode, errors
         
 # =====================================================
 # UNIFIED TRANSLATION PROCESSOR
@@ -9506,6 +9693,12 @@ class BatchTranslationProcessor:
         chapter_body = request_chapter_body
         if not isinstance(chapter_body, str):
             chapter_body = ""
+        title_tag_only_chapter = bool(
+            chapter.get("_title_tag_only_translation")
+        )
+        chapter_chunk_progress_enabled = bool(
+            self.chunk_progress_enabled and not title_tag_only_chapter
+        )
         
         # Use the pre-calculated actual_chapter_num from the main loop
         actual_num = chapter.get('actual_chapter_num')
@@ -9599,6 +9792,19 @@ class BatchTranslationProcessor:
             # Determine output filename early so we can track it in progress
             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
 
+            # A dedicated title request is exactly one tiny chunk. Creating,
+            # updating, and serializing resumable chunk metadata for it caused
+            # several full progress-file rewrites per title.
+            def _save_live_chapter_progress():
+                if (
+                    title_tag_only_chapter
+                    and self.progress_manager is not None
+                    and hasattr(self.progress_manager, "save_rate_limited")
+                ):
+                    return self.progress_manager.save_rate_limited()
+                self.save_progress_fn()
+                return True
+
             def _mark_batch_chapter_progress_on_send(chunk_idx=None):
                 with self.progress_lock:
                     try:
@@ -9608,7 +9814,7 @@ class BatchTranslationProcessor:
                         pass
                     self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=chapter)
                     if (
-                        self.chunk_progress_enabled
+                        chapter_chunk_progress_enabled
                         and chunk_idx is not None
                         and self.progress_manager is not None
                     ):
@@ -9622,7 +9828,7 @@ class BatchTranslationProcessor:
                             model_name=chunk_model,
                             key_identifier=chunk_key_identifier,
                         )
-                    self.save_progress_fn()
+                    _save_live_chapter_progress()
             
             from bs4 import BeautifulSoup
             chapter_body = ContentProcessor.image_processing_html(chapter)
@@ -9741,9 +9947,6 @@ class BatchTranslationProcessor:
             # Build chapter-specific system prompts inside the chunk worker.
             # Batch mode uses an inner chunk executor even for one chunk; keeping
             # prompt construction there preserves deferred glossary compression logs.
-            title_tag_only_chapter = bool(
-                chapter.get("_title_tag_only_translation")
-            )
             glossary_path = (
                 None
                 if title_tag_only_chapter
@@ -9817,12 +10020,12 @@ class BatchTranslationProcessor:
                         content_hash,
                         total_chunks,
                         chunk_budget,
-                        enabled=self.chunk_progress_enabled,
+                        enabled=chapter_chunk_progress_enabled,
                         legacy_keys=[str(chapter_progress_idx)],
                     )
                     if chunk_progress_changed:
-                        self.save_progress_fn()
-                if self.chunk_progress_enabled and invalidation_reason:
+                        _save_live_chapter_progress()
+                if chapter_chunk_progress_enabled and invalidation_reason:
                     print(
                         f"🧹 Chapter {log_num}: invalidated cached chunks — "
                         f"{invalidation_reason}"
@@ -9881,7 +10084,7 @@ class BatchTranslationProcessor:
                 )
 
                 def _set_batch_chunk_runtime_status(status):
-                    if not self.chunk_progress_enabled:
+                    if not chapter_chunk_progress_enabled:
                         return
                     with self.progress_lock:
                         self.progress_manager.set_chapter_chunk_runtime_status(
@@ -10967,7 +11170,7 @@ class BatchTranslationProcessor:
                                         self.save_progress_fn()
                                     print(f"⚠️ Chapter {log_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
                             chunk_abort_event.set()
-                            if self.chunk_progress_enabled:
+                            if chapter_chunk_progress_enabled:
                                 with self.progress_lock:
                                     if graceful_stop_qa_issue:
                                         self.progress_manager.set_chapter_chunk_qa(
@@ -10993,7 +11196,7 @@ class BatchTranslationProcessor:
                             )
 
                         if finish_reason == "chapter_abort":
-                            if self.chunk_progress_enabled:
+                            if chapter_chunk_progress_enabled:
                                 with self.progress_lock:
                                     self.progress_manager.set_chapter_chunk_runtime_status(
                                         content_hash,
@@ -11005,7 +11208,7 @@ class BatchTranslationProcessor:
 
                         # Handle cancelled chunks (skipped due to stop request)
                         if finish_reason == "cancelled" or (result is None and finish_reason != "stop"):
-                            if self.chunk_progress_enabled:
+                            if chapter_chunk_progress_enabled:
                                 with self.progress_lock:
                                     self.progress_manager.reset_in_progress_chapter_chunks(
                                         content_hash
@@ -11042,7 +11245,7 @@ class BatchTranslationProcessor:
                                 except Exception:
                                     pass
                             with self.progress_lock:
-                                if self.chunk_progress_enabled:
+                                if chapter_chunk_progress_enabled:
                                     if result:
                                         self.progress_manager.record_chapter_chunk(
                                             content_hash,
@@ -11098,7 +11301,7 @@ class BatchTranslationProcessor:
                                 except Exception:
                                     pass
                             with self.progress_lock:
-                                if self.chunk_progress_enabled:
+                                if chapter_chunk_progress_enabled:
                                     self.progress_manager.set_chapter_chunk_qa(
                                         content_hash,
                                         chunk_idx,
@@ -11138,7 +11341,7 @@ class BatchTranslationProcessor:
                                 except Exception:
                                     pass
                             with self.progress_lock:
-                                if self.chunk_progress_enabled:
+                                if chapter_chunk_progress_enabled:
                                     if result:
                                         self.progress_manager.record_chapter_chunk(
                                             content_hash,
@@ -11187,7 +11390,7 @@ class BatchTranslationProcessor:
                                 if is_truncated:
                                     chapter_truncated = True
 
-                            if self.chunk_progress_enabled:
+                            if chapter_chunk_progress_enabled:
                                 with self.progress_lock:
                                     self.progress_manager.record_chapter_chunk(
                                         content_hash,
@@ -11259,7 +11462,7 @@ class BatchTranslationProcessor:
             # comment boundaries so QA/retranslation tools can address one
             # chunk without deleting the rest of the chapter.
             output_chunks = translated_chunks
-            if self.chunk_progress_enabled and not is_partial_result:
+            if chapter_chunk_progress_enabled and not is_partial_result:
                 output_chunks = [
                     wrap_chunk_html(
                         content_hash,
@@ -11632,7 +11835,7 @@ class BatchTranslationProcessor:
             # cases already returned above in the early gate).
             with self.progress_lock:
                 self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="completed", ai_features=ai_features)
-                self.save_progress_fn()
+                _save_live_chapter_progress()
                 self.chapters_completed += 1
             
             # Log removed - executor loop will log "Chapter X done"
@@ -11648,7 +11851,7 @@ class BatchTranslationProcessor:
             error_lower = (error_msg or "").lower()
             error_type = getattr(e, 'error_type', None)
             if (
-                self.chunk_progress_enabled
+                chapter_chunk_progress_enabled
                 and self.progress_manager is not None
                 and content_hash
             ):
@@ -26407,9 +26610,22 @@ def main(log_callback=None, stop_callback=None):
     # When setting actual chapter numbers (in the main function)
     seq_counter = 0
     zero_phase = True
+    preflight_stop_mode = None
+    preflight_chunk_budget = (
+        None
+        if config.BATCH_TRANSLATION
+        else _translation_chunk_budget_snapshot(config)
+    )
     for idx, c in enumerate(chapters):
+        preflight_stop_mode = _translation_prequeue_stop_mode(stop_callback)
+        if preflight_stop_mode:
+            break
+        if idx and idx % 32 == 0:
+            time.sleep(0)
+
         chap_num = c["num"]
         content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
+        c["content_hash"] = content_hash
         
         # Extract the raw chapter number from the file
         raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
@@ -26498,9 +26714,18 @@ def main(log_callback=None, stop_callback=None):
                 
         # IMPORTANT: pass chapter_obj so ProgressManager can resolve composite keys
         # (e.g. when multiple spine items share the same chapter number).
-        needs_translation, skip_reason, _ = progress_manager.check_chapter_status(
+        needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
             idx, actual_num, content_hash, out, chapter_obj=c
         )
+        if config.BATCH_TRANSLATION:
+            # Nothing can change translation status between this preflight and
+            # the parallel queue scan. Reusing it avoids a second progress-tree
+            # lookup and another output-directory reconciliation per chapter.
+            c["_translation_preflight_status"] = (
+                needs_translation,
+                skip_reason,
+                existing_file,
+            )
         
         if not needs_translation:
             if start is not None and c.get('_range_allowed_for_translation', True):
@@ -26518,8 +26743,16 @@ def main(log_callback=None, stop_callback=None):
         chapter_key = str(actual_num)
         if chapter_key in progress_manager.prog["chapters"] and progress_manager.prog["chapters"][chapter_key].get("status") == "in_progress":
             pass
+
+        if config.BATCH_TRANSLATION:
+            # The batch worker performs the authoritative split immediately
+            # before dispatch. Splitting every chapter here as well doubled all
+            # tokenizer/HTML work and froze the GUI before queueing even began.
+            chunks_per_chapter[idx] = 1
+            total_chunks_needed += 1
+            continue
         
-        chunk_budget = _translation_chunk_budget_snapshot(config)
+        chunk_budget = preflight_chunk_budget
         max_output_tokens = chunk_budget["cached_output_token_limit"]
         safety_margin_output = chunk_budget["safety_margin"]
         compression_factor = chunk_budget["compression_factor"]
@@ -26541,12 +26774,12 @@ def main(log_callback=None, stop_callback=None):
         # Get filename for content type detection (prefer source_file to detect PDF context)
         chapter_filename = c.get('source_file') or c.get('filename') or c.get('original_basename', '')
         
-        if c.get('has_images', False) and ContentProcessor.is_meaningful_text_content(c["body"]):
-            # Don't modify c["body"] at all during chunk calculation
-            # Just pass the body as-is, the chunking will be slightly off but that's OK
-            chunks = _split_chapter_for_translation(chapter_splitter, c, available_tokens, filename=chapter_filename)
-        else:
-            chunks = _split_chapter_for_translation(chapter_splitter, c, available_tokens, filename=chapter_filename)
+        chunks = _split_chapter_for_translation(
+            chapter_splitter,
+            c,
+            available_tokens,
+            filename=chapter_filename,
+        )
         
         chapter_key_str = content_hash
         old_key_str = str(idx)
@@ -26559,6 +26792,18 @@ def main(log_callback=None, stop_callback=None):
         # Always count actual chunks - ignore "completed" tracking
         chunks_per_chapter[idx] = len(chunks)
         total_chunks_needed += chunks_per_chapter[idx]
+
+    if preflight_stop_mode:
+        if preflight_stop_mode == "graceful":
+            print(
+                "✅ Graceful stop: stopped chunk preflight before any API "
+                "request was queued."
+            )
+        else:
+            log_stop_once(
+                "❌ Translation force-stopped during chunk preflight."
+            )
+        return
             
     # Print range skip summary if any chapters were skipped
     if hasattr(config, '_range_skipped_chapters') and config._range_skipped_chapters:
@@ -27350,10 +27595,24 @@ def main(log_callback=None, stop_callback=None):
             print(f"\n❌ ERROR: No chapters to process!")
     
     terminology = "Sections" if is_text_file else "Chapters"
-    print(f"📊 Total chunks to translate: {total_chunks_needed}")
+    if config.BATCH_TRANSLATION:
+        print(
+            f"📊 Parallel work units to prepare: {total_chunks_needed} "
+            "(exact chunk splitting is deferred to translation workers)"
+        )
+    else:
+        print(f"📊 Total chunks to translate: {total_chunks_needed}")
     print(f"📚 {terminology} to process: {chapters_to_process}")
     
-    multi_chunk_chapters = [(idx, count) for idx, count in chunks_per_chapter.items() if count > 1]
+    multi_chunk_chapters = (
+        []
+        if config.BATCH_TRANSLATION
+        else [
+            (idx, count)
+            for idx, count in chunks_per_chapter.items()
+            if count > 1
+        ]
+    )
     if multi_chunk_chapters:
         # Determine terminology based on file type
         terminology = "Sections" if is_text_file else "Chapters"
@@ -27388,21 +27647,34 @@ def main(log_callback=None, stop_callback=None):
         
         chapters_to_translate = []
         
-        # FIX: First pass to set actual chapter numbers for ALL chapters
-        # This ensures batch mode has the same chapter numbering as non-batch mode
-        print("📊 Setting chapter numbers...")
+        # The chunk preflight already assigned every chapter number. Keep only
+        # a cheap missing-value fallback here for legacy/nonstandard inputs.
+        print("📊 Verifying chapter numbers...")
         # Coalesce the scan's per-chapter progress saves (restores,
         # auto-discoveries, empty/image-only completions) into ONE write —
         # rewriting the whole progress JSON per chapter made this phase
         # O(chapters x file size) and was the main reason it crawled.
         progress_manager.begin_deferred_save()
-        seq_counter = 0
-        zero_phase = True
         prequeue_stop_mode = None
+        image_only_title_candidates = []
+        queued_image_only_title_numbers = []
+        copied_image_only_numbers = []
+        empty_chapter_numbers = []
         for idx, c in enumerate(chapters):
             prequeue_stop_mode = _translation_prequeue_stop_mode(stop_callback)
             if prequeue_stop_mode:
                 break
+            if idx and idx % 32 == 0:
+                # Queue preparation runs on the translation worker, but most
+                # HTML parsing is Python code and can otherwise monopolize the
+                # GIL long enough to starve Qt's GUI thread.
+                time.sleep(0)
+
+            if (
+                c.get('actual_chapter_num') is not None
+                and c.get('raw_chapter_num') is not None
+            ):
+                continue
 
             # PDF/TEXT CHUNK FIX: Skip extract_actual_chapter_number for chunks - preserve decimal from c['num']
             if (is_text_file or is_pdf_file) and c.get('is_chunk', False):
@@ -27450,9 +27722,13 @@ def main(log_callback=None, stop_callback=None):
             prequeue_stop_mode = _translation_prequeue_stop_mode(stop_callback)
             if prequeue_stop_mode:
                 break
+            if idx and idx % 32 == 0:
+                time.sleep(0)
 
             chap_num = c["num"]
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
+            c["content_hash"] = content_hash
+            preflight_status = c.pop("_translation_preflight_status", None)
             
             # Check if this is a pre-split text chunk with decimal number
             # IMPORTANT: Check is_chunk FIRST, then use c['num'] regardless of float value
@@ -27467,7 +27743,13 @@ def main(log_callback=None, stop_callback=None):
             # Skip configured special files if translation is disabled.
             # When TRANSLATE_ALL_NUMBERED_HTML is on, files with a number
             # in their filename bypass the skip (translation context only).
-            raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
+            raw_num = c.get('raw_chapter_num')
+            if raw_num is None:
+                raw_num = FileUtilities.extract_actual_chapter_number(
+                    c,
+                    patterns=None,
+                    config=config,
+                )
             if not translate_special and not is_text_file:
                 name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
                 if _should_skip_configured_special_file_for_translation(name):
@@ -27478,10 +27760,20 @@ def main(log_callback=None, stop_callback=None):
                 if not _range_allows_chapter(c, actual_num, idx):
                     continue
             
-            # Check if chapter needs translation
-            needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
-                idx, actual_num, content_hash, out, c  # Pass the chapter object
-            )
+            # Reuse the status established during chunk preflight. There has
+            # been no translation request between these two phases.
+            if isinstance(preflight_status, tuple) and len(preflight_status) == 3:
+                needs_translation, skip_reason, existing_file = preflight_status
+            else:
+                needs_translation, skip_reason, existing_file = (
+                    progress_manager.check_chapter_status(
+                        idx,
+                        actual_num,
+                        content_hash,
+                        out,
+                        c,
+                    )
+                )
             # Add explicit file check for supposedly completed chapters
             if not needs_translation and existing_file:
                 file_path = os.path.join(out, existing_file)
@@ -27561,7 +27853,7 @@ def main(log_callback=None, stop_callback=None):
             
             # Handle empty chapters
             if is_empty_chapter:
-                print(f"📄 Empty chapter {log_num} detected (preserving original content as-is)")
+                empty_chapter_numbers.append(log_num)
 
                 safe_title = make_safe_filename(c['title'], c['num'])
 
@@ -27586,19 +27878,72 @@ def main(log_callback=None, stop_callback=None):
                 chapters_completed += 1
                 continue
             elif is_image_only_chapter and config.OUTPUT_MODE == "text":
-                if _prepare_image_only_title_translation(c, out):
-                    print(
-                        f"📝 Image-only chapter {log_num}: queued its "
-                        "<title> tag for parallel translation"
-                    )
-                else:
-                    print(f"📸 Image-only chapter {log_num} detected (preserving original content as-is)")
+                # Title extraction/recovery is the only new work added to the
+                # old image-only copy path. Defer all of it so hundreds of
+                # candidates can be prepared concurrently instead of opening
+                # and parsing one source document at a time.
+                image_only_title_candidates.append(
+                    (idx, c, actual_num, log_num, content_hash)
+                )
+                continue
 
+            # Add to chapters to translate
+            chapters_to_translate.append((idx, c))
+
+        if not prequeue_stop_mode and image_only_title_candidates:
+            title_plan_workers = min(
+                8,
+                max(2, int(getattr(config, "BATCH_SIZE", 2) or 2)),
+            )
+            title_plans, title_prep_stop, title_prep_errors = (
+                _prepare_image_only_title_plans_parallel(
+                    image_only_title_candidates,
+                    out,
+                    title_plan_workers,
+                    stop_callback,
+                )
+            )
+            if title_prep_stop:
+                prequeue_stop_mode = title_prep_stop
+            elif title_prep_errors:
+                print(
+                    f"⚠️ {title_prep_errors} image-only title preparation "
+                    "task(s) failed; preserving those chapters unchanged"
+                )
+
+            copied_image_references_need_repair = False
+            if not prequeue_stop_mode:
+                for candidate_pos, (
+                    idx,
+                    c,
+                    actual_num,
+                    log_num,
+                    content_hash,
+                ) in enumerate(image_only_title_candidates):
+                    if candidate_pos and candidate_pos % 32 == 0:
+                        time.sleep(0)
+                    prequeue_stop_mode = _translation_prequeue_stop_mode(
+                        stop_callback
+                    )
+                    if prequeue_stop_mode:
+                        break
+
+                    plan = title_plans.get(idx)
+                    if _apply_image_only_title_translation_plan(c, plan):
+                        chapters_to_translate.append((idx, c))
+                        queued_image_only_title_numbers.append(log_num)
+                        continue
+
+                    copied_image_only_numbers.append(log_num)
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
-                    original_markup = _original_markup_for_copy(c, out)
+                    original_markup = (
+                        plan[0]
+                        if plan and plan[0]
+                        else _original_markup_for_copy(c, out)
+                    )
                     output_path = os.path.join(out, fname)
                     write_utf8_html_file(output_path, original_markup)
-                    retroactive_update_image_references(out)
+                    copied_image_references_need_repair = True
 
                     progress_manager.update(
                         idx,
@@ -27611,10 +27956,34 @@ def main(log_callback=None, stop_callback=None):
                     )
                     progress_manager.save()
                     chapters_completed += 1
-                    continue
-            
-            # Add to chapters to translate
-            chapters_to_translate.append((idx, c))
+
+            # This scans every translated HTML file. Running it once per copied
+            # image-only chapter was quadratic in large books.
+            if copied_image_references_need_repair and not prequeue_stop_mode:
+                retroactive_update_image_references(out)
+
+        if empty_chapter_numbers:
+            print(
+                f"📄 Preserved {len(empty_chapter_numbers)} empty chapter(s): "
+                f"{_format_chapter_log_values(empty_chapter_numbers)}"
+            )
+        if queued_image_only_title_numbers:
+            title_chapter_label = (
+                "chapter"
+                if len(queued_image_only_title_numbers) == 1
+                else "chapters"
+            )
+            print(
+                "📝 Queued image-only <title> translation for "
+                f"{len(queued_image_only_title_numbers)} {title_chapter_label}: "
+                f"{_format_chapter_log_values(queued_image_only_title_numbers)}"
+            )
+        if copied_image_only_numbers:
+            print(
+                f"📸 Preserved {len(copied_image_only_numbers)} image-only "
+                "chapter(s) without a title request: chapters "
+                f"{_format_chapter_log_values(copied_image_only_numbers)}"
+            )
 
         if not prequeue_stop_mode:
             prequeue_stop_mode = _translation_prequeue_stop_mode(stop_callback)
@@ -28004,6 +28373,7 @@ def main(log_callback=None, stop_callback=None):
                             else:
                                 # print("❌ Translation stopped")  # Redundant with "Translation stopped by user" from exception
                                 executor.shutdown(wait=False, cancel_futures=True)
+                                progress_manager.save()
                                 return
                         unit = active_futures.pop(future)
                         completed_in_batch = 0
@@ -28089,6 +28459,10 @@ def main(log_callback=None, stop_callback=None):
                     if should_exit_outer_loop:
                         break
                 
+                # Flush every coalesced title-only status at this synchronization
+                # barrier instead of rewriting the progress JSON per request.
+                progress_manager.save()
+
                 # After all futures complete, if stop was requested with wait_for_chunks, exit
                 if check_stop():
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
@@ -28103,6 +28477,7 @@ def main(log_callback=None, stop_callback=None):
                     if check_stop():
                         print("❌ Translation stopped during parallel processing")
                         executor.shutdown(wait=False)
+                        progress_manager.save()
                         return
                     
                     effective_batch_size = batch_group_size if not is_merged_mode else config.BATCH_SIZE
@@ -28148,6 +28523,7 @@ def main(log_callback=None, stop_callback=None):
                             else:
                                 # print("❌ Translation stopped")  # Redundant with "Translation stopped by user" from exception
                                 executor.shutdown(wait=False)
+                                progress_manager.save()
                                 return
                         
                         unit = future_to_unit[future]
@@ -28230,6 +28606,7 @@ def main(log_callback=None, stop_callback=None):
                     print(f"\n📦 Batch Summary:")
                     print(f"   ✅ Successful: {completed_in_batch}")
                     print(f"   ❌ Failed: {failed_in_batch}")
+                    progress_manager.save()
                     
                     # After batch completes, if stop was requested with wait_for_chunks, exit
                     if check_stop():
@@ -28243,6 +28620,10 @@ def main(log_callback=None, stop_callback=None):
                         print(f"⏳ Waiting {config.DELAY}s before next batch...")
                         time.sleep(config.DELAY)
         
+        # Aggressive mode has no per-group barrier; this is its authoritative
+        # final flush. It is harmless after direct/conservative batch flushes.
+        progress_manager.save()
+
         if any(c.get("_title_tag_only_translation") for c in chapters):
             retroactive_update_image_references(out)
 

@@ -1,4 +1,5 @@
 import ast
+import copy
 import inspect
 import json
 import os
@@ -154,7 +155,8 @@ def test_translation_log_numbers_use_same_nonreset_sequence_as_progress_views():
     ).read_text(encoding="utf-8")
     assert 'f"💬 {_term} {log_num}: Chunk ' in translation_source
     assert 'current_request_label = f"Chapter {log_num} ' in translation_source
-    assert 'f"📝 Image-only chapter {log_num}: queued its "' in translation_source
+    assert '"📝 Queued image-only <title> translation for "' in translation_source
+    assert 'f"📝 Image-only chapter {log_num}: queued its "' not in translation_source
     assert translation_source.count("'chapter': log_num") >= 2
     assert "'chapter': parent_log_num" in translation_source
 
@@ -2497,7 +2499,23 @@ def test_image_only_completed_progress_rows_show_copied_without_inheriting_badge
     assert _progress_entry_is_completed_image_only_for_display(image_only_entry)
     assert _progress_entry_is_completed_image_only_for_display(wrapped_row)
     assert _progress_entry_model_for_display(image_only_entry) == "COPIED"
-    assert RetranslationMixin()._progress_entry_model_name(wrapped_row, {}) == "COPIED"
+    progress_ui = RetranslationMixin()
+    assert progress_ui._progress_entry_model_name(wrapped_row, {}) == "COPIED"
+
+    display, display_status = progress_ui._progress_list_display_text(
+        {
+            "num": 3,
+            "status": "completed",
+            "info": image_only_entry,
+            "output_file": "part0003_split_000.html",
+        },
+        {"show_model_info_state": True},
+        20,
+        25,
+    )
+    assert display_status == "completed"
+    assert "📸 Image Only (Completed)" in display
+    assert display.endswith("COPIED")
 
     active_retranslation = {
         "status": "in_progress",
@@ -3136,13 +3154,16 @@ def test_progress_managers_use_event_driven_differential_refresh():
     ).read_text(encoding="utf-8")
 
     assert "QFileSystemWatcher" in source
-    assert "progress_watch_debounce.setInterval(100)" in source
-    assert "gp_watch_debounce.setInterval(100)" in source
+    assert "progress_watch_debounce.setInterval(_PROGRESS_WATCH_DEBOUNCE_MS)" in source
+    assert "gp_watch_debounce.setInterval(_PROGRESS_WATCH_DEBOUNCE_MS)" in source
+    assert "_PROGRESS_WATCH_DEBOUNCE_MS = 500" in source
+    assert "_PROGRESS_LIVE_REFRESH_MIN_INTERVAL_SECONDS = 0.5" in source
     assert "prefetch_bridge.finished.emit(payload)" in source
     assert "_gp_timer.setInterval(2000)" in source
     assert "_auto_refresh_timer.setInterval(2000)" in source
     assert "_row_fingerprints" in source
     assert "_prefetch_ready" not in source
+    assert "fallback_prog = copy.deepcopy(data.get('prog') or {})" not in source
 
     glossary_start = source.index("        def _show_glossary_progress():")
     glossary_end = source.index(
@@ -3186,6 +3207,33 @@ def test_progress_row_identity_is_stable_when_translation_starts():
     assert gui._progress_list_item_key(waiting) == gui._progress_list_item_key(active)
 
 
+def test_progress_row_payload_revision_avoids_deep_prompt_comparison():
+    gui = RetranslationMixin()
+    original = {
+        "num": 1,
+        "status": "completed",
+        "output_file": "chapter0001.xhtml",
+        "info": {
+            "status": "completed",
+            "last_updated": 10,
+            "saved_prompt": "a" * 100_000,
+        },
+    }
+    same_visible_revision = copy.deepcopy(original)
+    same_visible_revision["info"]["saved_prompt"] = "b" * 100_000
+    changed_revision = copy.deepcopy(original)
+    changed_revision["info"]["last_updated"] = 11
+
+    assert (
+        gui._progress_list_payload_revision(original)
+        == gui._progress_list_payload_revision(same_visible_revision)
+    )
+    assert (
+        gui._progress_list_payload_revision(original)
+        != gui._progress_list_payload_revision(changed_revision)
+    )
+
+
 def test_streamed_progress_reconcile_does_not_clear_or_queue_scroll_restores():
     stream_source = inspect.getsource(
         RetranslationMixin._populate_progress_listbox_streamed
@@ -3196,6 +3244,11 @@ def test_streamed_progress_reconcile_does_not_clear_or_queue_scroll_restores():
     assert "listbox.takeItem" in stream_source
     assert "scrollToItem" not in refresh_source
     assert "_restore_scroll_again" not in refresh_source
+
+    list_update_source = inspect.getsource(
+        RetranslationMixin._update_listbox_display
+    )
+    assert "old_payload.get('info') != info" not in list_update_source
 
 
 def test_open_progress_managers_rebuild_when_input_signature_changes():

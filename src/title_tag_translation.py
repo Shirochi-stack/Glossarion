@@ -44,12 +44,18 @@ def title_tag_translation_payload(markup: str) -> str:
     """Return only non-empty title tags from *markup*, preserving their tags."""
     if not isinstance(markup, str) or not markup.strip():
         return ""
-    soup = BeautifulSoup(markup, "html.parser")
-    return "\n".join(
-        str(tag)
-        for tag in soup.find_all("title")
-        if tag.get_text(" ", strip=True)
-    )
+    # This runs while a large parallel request queue is being prepared. The
+    # title regex is already the reconstruction authority, so avoid reparsing
+    # an entire image-heavy document with BeautifulSoup for one tiny tag.
+    payloads = []
+    for match in _TITLE_TAG_RE.finditer(markup):
+        inner_markup = match.group(2) or ""
+        visible_text = html.unescape(
+            re.sub(r"<[^>]+>", " ", inner_markup)
+        )
+        if visible_text.strip():
+            payloads.append(match.group(0))
+    return "\n".join(payloads)
 
 
 def image_only_title_tag_messages(config, chapter, title_markup: str):
