@@ -7450,6 +7450,70 @@ def test_sdlxliff_review_uses_opf_over_stale_progress_order_and_labels_special_a
     assert pieces[0]["review_label"] == "[001] Ch.000 |"
 
 
+def test_sdlxliff_review_chapter_labels_do_not_reset_after_zero(tmp_path):
+    source_names = [
+        "front000.xhtml",
+        "part_a001.xhtml",
+        "part_a002.xhtml",
+        "part_b000.xhtml",
+        "part_b001.xhtml",
+    ]
+    manifest = "".join(
+        f'<item id="c{index}" href="Text/{name}" media-type="application/xhtml+xml"/>'
+        for index, name in enumerate(source_names)
+    )
+    spine = "".join(
+        f'<itemref idref="c{index}"/>'
+        for index in range(len(source_names))
+    )
+    (tmp_path / "content.opf").write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>{manifest}</manifest>
+  <spine>{spine}</spine>
+</package>""",
+        encoding="utf-8",
+    )
+
+    progress = {"chapters": {}}
+    for index, source_name in enumerate(source_names):
+        output_name = f"response_{Path(source_name).stem}.html"
+        _shared_write_html_sdlxliff_sidecar(
+            str(tmp_path),
+            output_name,
+            {"original_basename": source_name},
+            f"<html><body><p>{source_name}</p></body></html>",
+            f"<html><body><p>{source_name}</p></body></html>",
+            raise_errors=True,
+        )
+        progress["chapters"][str(index)] = {
+            "status": "completed",
+            "output_file": output_name,
+            "original_basename": source_name,
+            "actual_num": [0, 1, 2, 0, 1][index],
+        }
+    (tmp_path / "translation_progress.json").write_text(
+        json.dumps(progress),
+        encoding="utf-8",
+    )
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog.current_path = ""
+
+    pieces = dialog._load_pieces()
+
+    assert [piece["chapter_num"] for piece in pieces] == [0, 1, 2, 0, 1]
+    assert [piece["display_chapter_num"] for piece in pieces] == [0, 1, 2, 3, 4]
+    assert [piece["review_label"] for piece in pieces] == [
+        "[001] Ch.000 |",
+        "[002] Ch.001 |",
+        "[003] Ch.002 |",
+        "[004] Ch.003 |",
+        "[005] Ch.004 |",
+    ]
+
+
 def test_sdlxliff_review_deduplicates_retained_and_response_named_sidecars(tmp_path):
     retained_name = "chapter0001.xhtml"
     response_name = "response_chapter0001.html"

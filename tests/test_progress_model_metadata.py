@@ -21,6 +21,10 @@ from chapter_chunk_progress import (
     reset_chunks_for_retranslation,
     wrap_chunk_html,
 )
+from chapter_display_numbering import (
+    filename_chapter_number,
+    nonreset_chapter_display_numbers,
+)
 from Retranslation_GUI import (
     RetranslationMixin,
     _merge_and_write_retranslation_progress,
@@ -75,6 +79,74 @@ def _clear_actual_request_metadata():
     set_current_thread_actual_request_model(None, None)
     yield
     set_current_thread_actual_request_model(None, None)
+
+
+def test_chapter_display_numbers_do_not_reset_after_positive_sequence():
+    assert nonreset_chapter_display_numbers([0, 1, 2, 0, 1, 0]) == [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
+
+
+def test_chapter_display_numbers_keep_leading_zeroes_and_forward_jumps():
+    assert nonreset_chapter_display_numbers([0, 0, 5, 6, 2, 3, 10]) == [
+        0,
+        0,
+        5,
+        6,
+        7,
+        8,
+        10,
+    ]
+
+
+def test_filename_chapter_number_preserves_raw_identity_rules():
+    assert filename_chapter_number("Text/part_0042.xhtml") == 42
+    assert filename_chapter_number("Text/info.xhtml") == 0
+    assert filename_chapter_number("Text/notice0042.xhtml", is_special=True) == 0
+
+
+def test_all_requested_chapter_views_use_shared_nonreset_numbering():
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    progress_source = (source_root / "Retranslation_GUI.py").read_text(
+        encoding="utf-8"
+    )
+    reader_source = (source_root / "epub_library.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "chapter['display_chapter_num'] = display_number" in progress_source
+    assert "panel_state['_chapter_display_numbers']" in progress_source
+    assert 'metadata["display_chapter_num"] = display_chapter_num' in progress_source
+    assert "self._chapter_display_numbers = nonreset_chapter_display_numbers(" in reader_source
+
+
+def test_translation_progress_displays_nonreset_number_without_mutating_raw_num():
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    row = {
+        "num": 0,
+        "display_num": 3,
+        "status": "not_translated",
+        "output_file": "response_part_b000.html",
+        "original_filename": "part_b000.xhtml",
+        "opf_position": 3,
+        "info": {},
+    }
+
+    display, status = mixin._progress_list_display_text(
+        row,
+        {"show_model_info_state": False, "prog": {"chapters": {}}},
+        20,
+        25,
+    )
+
+    assert row["num"] == 0
+    assert status == "not_translated"
+    assert "[004] Ch.003" in display
 
 
 def test_glossary_progress_reactivates_a_manually_removed_chapter(tmp_path):

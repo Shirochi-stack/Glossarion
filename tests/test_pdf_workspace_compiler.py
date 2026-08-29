@@ -1047,6 +1047,7 @@ def test_new_runtime_modules_are_packaged_in_all_desktop_specs():
         "pdf_workspace_compiler",
         "workspace_reader",
         "pdf_output_naming",
+        "chapter_display_numbering",
     )
     spec_names = (
         "translator.spec",

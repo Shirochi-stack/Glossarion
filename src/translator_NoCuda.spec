@@ -140,6 +140,7 @@ app_files = [
     ('epub_package.py', '.'),
     ('title_tag_translation.py', '.'),
     ('chapter_chunk_progress.py', '.'),
+    ('chapter_display_numbering.py', '.'),
     # Core GUI
     ('translator_gui.py', '.'),
     ('parallel_epub_glossary.py', '.'),
@@ -448,6 +449,7 @@ app_modules = [
     'epub_package',
     'title_tag_translation',
     'chapter_chunk_progress',
+    'chapter_display_numbering',
     'TransateKRtoEN',
     'metadata_translation_worker',
     'subtitle_processor',

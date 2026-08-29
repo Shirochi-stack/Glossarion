@@ -2415,6 +2415,17 @@ def test_book_details_never_lists_source_epub_sidecar(qapp, tmp_path):
     ]
 
 
+def test_epub_reader_uses_nonreset_display_number_without_changing_row_index():
+    reader = epub_library.EpubReaderDialog.__new__(
+        epub_library.EpubReaderDialog
+    )
+    reader._chapter_display_numbers = [0, 1, 2, 3, 4]
+
+    assert reader._reader_chapter_display_number(0) == 0
+    assert reader._reader_chapter_display_number(3) == 3
+    assert reader._reader_chapter_display_number(99) == 100
+
+
 def test_gif_cover_detection_uses_content_and_movie_advances(qapp, tmp_path):
     Image = pytest.importorskip("PIL.Image")
     disguised_gif = tmp_path / "legacy-cache-name.jpg"

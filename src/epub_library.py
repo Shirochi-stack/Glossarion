@@ -47,6 +47,10 @@ from chapter_chunk_progress import (
     reset_chunks_for_retranslation,
     sorted_chunk_items,
 )
+from chapter_display_numbering import (
+    filename_chapter_number,
+    nonreset_chapter_display_numbers,
+)
 
 try:
     import dpi_setup
@@ -20074,6 +20078,7 @@ class EpubReaderDialog(QDialog):
         self._chapters_raw: list[tuple[str, str]] = []
         self._chapters_overlaid: list[tuple[str, str]] = []
         self._chapter_filenames: list[str] = []
+        self._chapter_display_numbers: list[int] = []
         self._images: dict[str, bytes] = {}
         # Whether to surface configured non-chapter spine items in the TOC.
         # Caller can force the flag; otherwise we
@@ -21390,6 +21395,15 @@ class EpubReaderDialog(QDialog):
         # Keep filenames around so callers can resolve chapter indices by
         # source filename (used by initial_chapter_filename lookup + TOC jumps).
         self._chapter_filenames = [os.path.basename(f or "").lower() for f in filenames]
+        self._chapter_display_numbers = nonreset_chapter_display_numbers(
+            filename_chapter_number(
+                filename,
+                is_special=_is_configured_special_file(
+                    filename, getattr(self, "_config", None)
+                ),
+            )
+            for filename in self._chapter_filenames
+        )
         self._chapter_page_cache = {}  # {chapter_index: page_count}
         self._loaded_chapter = -1  # track which chapter's HTML is loaded
 
@@ -23400,7 +23414,8 @@ class EpubReaderDialog(QDialog):
             all_html = ""
             for idx, (title, content) in enumerate(self._chapters):
                 processed = self._process_html(content)
-                all_html += f"<h2 style='color: {self._get_theme()['heading']}; border-bottom: 1px solid {self._get_theme()['border']}; padding-bottom: 6px; margin-top: 30px;'>Chapter {idx + 1}: {title}</h2>\n{processed}\n<hr style='border: none; border-top: 1px solid {self._get_theme()['border']}; margin: 20px 0;'>"
+                chapter_number = self._reader_chapter_display_number(idx)
+                all_html += f"<h2 style='color: {self._get_theme()['heading']}; border-bottom: 1px solid {self._get_theme()['border']}; padding-bottom: 6px; margin-top: 30px;'>Chapter {chapter_number}: {title}</h2>\n{processed}\n<hr style='border: none; border-top: 1px solid {self._get_theme()['border']}; margin: 20px 0;'>"
             _set_html(self._reader, self._wrap_html(all_html, paginated=False))
             self._loaded_chapter = -1
             self._toc_list.blockSignals(True)
@@ -23911,6 +23926,12 @@ class EpubReaderDialog(QDialog):
                 self._js_page_count(self._reader, on_count)
         QTimer.singleShot(delay, _on_resize_recount)
 
+    def _reader_chapter_display_number(self, row):
+        try:
+            return self._chapter_display_numbers[int(row)]
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return int(row) + 1
+
     def _update_nav_buttons(self):
         if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
             ch_pages = self._get_chapter_pages(self._current_row)
@@ -23925,7 +23946,10 @@ class EpubReaderDialog(QDialog):
         else:
             self._prev_btn.setEnabled(self._current_row > 0)
             self._next_btn.setEnabled(self._current_row < len(self._chapters) - 1)
-            self._page_label.setText(f"Chapter {self._current_row + 1} of {len(self._chapters)}")
+            chapter_number = self._reader_chapter_display_number(self._current_row)
+            self._page_label.setText(
+                f"Chapter {chapter_number} of {len(self._chapters)}"
+            )
 
     def _prev_chapter(self):
         if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
@@ -25222,6 +25246,7 @@ class EpubReaderDialog(QDialog):
         self._chapters_raw = []
         self._chapters_overlaid = []
         self._chapter_filenames = []
+        self._chapter_display_numbers = []
         _stop_qthread_safely(
             getattr(self, "_image_preload_thread", None),
             timeout_ms=500,

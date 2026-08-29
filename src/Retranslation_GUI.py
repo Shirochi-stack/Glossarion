@@ -98,6 +98,8 @@ from chapter_chunk_progress import (
     set_chunk_qa,
     sorted_chunk_items,
 )
+from chapter_display_numbering import nonreset_chapter_display_numbers
+
 _LLM_TOKEN_QA_RE = re.compile(
     r"(?:^|[^a-z0-9])llm[_\s-]*token[_\s-]*issue",
     re.IGNORECASE,
@@ -2777,8 +2779,15 @@ class SDLXLIFFReviewDialog(QDialog):
         self._render_token += 1
         self._clear_cached_review_pages()
         self.pieces = [piece for _old_index, piece in ordered]
-        for row, piece in enumerate(self.pieces):
+        display_numbers = nonreset_chapter_display_numbers(
+            piece.get("raw_chapter_num", piece.get("chapter_num"))
+            for piece in self.pieces
+        )
+        for row, (piece, display_chapter_num) in enumerate(
+            zip(self.pieces, display_numbers)
+        ):
             piece["index"] = row
+            piece["display_chapter_num"] = display_chapter_num
             display_position = (
                 int(piece["opf_position"]) + 1
                 if piece.get("opf_position") is not None
@@ -2787,6 +2796,7 @@ class SDLXLIFFReviewDialog(QDialog):
             piece["review_label"] = self._review_label_from_metadata({
                 "display_position": display_position,
                 "chapter_num": piece.get("chapter_num"),
+                "display_chapter_num": display_chapter_num,
             })
         if selected_path:
             self.current_path = selected_path
@@ -2922,6 +2932,14 @@ class SDLXLIFFReviewDialog(QDialog):
                 metadata["display_position"] = int(progress_index or row + 1)
             else:
                 metadata["display_position"] = int(metadata["opf_position"]) + 1
+            metadata["raw_chapter_num"] = metadata.get("chapter_num")
+            metadata["display_chapter_num"] = nonreset_chapter_display_numbers([
+                *(
+                    piece.get("raw_chapter_num", piece.get("chapter_num"))
+                    for piece in self.pieces
+                ),
+                metadata.get("chapter_num"),
+            ])[-1]
             metadata["label"] = self._review_label_from_metadata(metadata)
             piece = self._build_piece(path, row, metadata)
             total = int(getattr(self, "_generation_stream_total", 0) or 0)
@@ -3094,6 +3112,10 @@ class SDLXLIFFReviewDialog(QDialog):
                     "review_label": piece.get("review_label"),
                     "opf_position": piece.get("opf_position"),
                     "chapter_num": piece.get("chapter_num"),
+                    "raw_chapter_num": piece.get(
+                        "raw_chapter_num", piece.get("chapter_num")
+                    ),
+                    "display_chapter_num": piece.get("display_chapter_num"),
                     "output_name": piece.get("output_name"),
                 })
             self._review_piece_reload_token = int(getattr(self, "_review_piece_reload_token", 0)) + 1
@@ -3151,6 +3173,14 @@ class SDLXLIFFReviewDialog(QDialog):
                                 metadata["opf_position"] = snapshot.get("opf_position")
                             if snapshot.get("chapter_num") is not None:
                                 metadata["chapter_num"] = snapshot.get("chapter_num")
+                            if snapshot.get("raw_chapter_num") is not None:
+                                metadata["raw_chapter_num"] = snapshot.get(
+                                    "raw_chapter_num"
+                                )
+                            if snapshot.get("display_chapter_num") is not None:
+                                metadata["display_chapter_num"] = snapshot.get(
+                                    "display_chapter_num"
+                                )
                             if snapshot.get("output_name"):
                                 metadata["output_name"] = snapshot.get("output_name")
                             piece = self._build_piece(path, int(snapshot.get("row") or 0), metadata)
@@ -7387,7 +7417,9 @@ class SDLXLIFFReviewDialog(QDialog):
         if display_position is None:
             opf_position = metadata.get("opf_position")
             display_position = (int(opf_position) + 1) if opf_position is not None else 1
-        chapter_label = self._format_chapter_number(metadata.get("chapter_num"))
+        chapter_label = self._format_chapter_number(
+            metadata.get("display_chapter_num", metadata.get("chapter_num"))
+        )
         return f"[{int(display_position):03d}] Ch.{chapter_label} |"
 
     def _sidebar_label_for_piece(self, piece, row):
@@ -7832,6 +7864,10 @@ class SDLXLIFFReviewDialog(QDialog):
                 "review_label": metadata.get("label"),
                 "opf_position": metadata.get("opf_position"),
                 "chapter_num": metadata.get("chapter_num"),
+                "raw_chapter_num": metadata.get(
+                    "raw_chapter_num", metadata.get("chapter_num")
+                ),
+                "display_chapter_num": metadata.get("display_chapter_num"),
                 "sort_key": metadata.get("sort_key"),
                 "source_html": source_html,
                 "target_html": target_html,
@@ -7882,6 +7918,10 @@ class SDLXLIFFReviewDialog(QDialog):
                 "review_label": metadata.get("label"),
                 "opf_position": metadata.get("opf_position"),
                 "chapter_num": metadata.get("chapter_num"),
+                "raw_chapter_num": metadata.get(
+                    "raw_chapter_num", metadata.get("chapter_num")
+                ),
+                "display_chapter_num": metadata.get("display_chapter_num"),
                 "sort_key": metadata.get("sort_key"),
                 "source_count": 0,
                 "target_count": 0,
@@ -8009,11 +8049,18 @@ class SDLXLIFFReviewDialog(QDialog):
             work_items.append((path, metadata))
         work_items.sort(key=lambda item: item[1].get("sort_key", (999999, 999999, "")))
 
-        for index, (_path, metadata) in enumerate(work_items):
+        display_numbers = nonreset_chapter_display_numbers(
+            metadata.get("chapter_num") for _path, metadata in work_items
+        )
+        for index, ((_path, metadata), display_chapter_num) in enumerate(
+            zip(work_items, display_numbers)
+        ):
             if metadata.get("opf_position") is None:
                 metadata["display_position"] = index + 1
             else:
                 metadata["display_position"] = int(metadata["opf_position"]) + 1
+            metadata["raw_chapter_num"] = metadata.get("chapter_num")
+            metadata["display_chapter_num"] = display_chapter_num
             metadata["label"] = self._review_label_from_metadata(metadata)
         self._trace_review_perf(
             "load_pieces_metadata_ready",
@@ -19989,6 +20036,15 @@ class RetranslationMixin:
             except Exception as e:
                 print(f"Warning: Could not parse OPF: {e}")
 
+        if spine_chapters:
+            display_numbers = nonreset_chapter_display_numbers(
+                chapter.get('file_chapter_num') for chapter in spine_chapters
+            )
+            for chapter, display_number in zip(
+                spine_chapters, display_numbers
+            ):
+                chapter['display_chapter_num'] = display_number
+
         # If no OPF/spine, fall back to auto-discovery from output_dir
         if not opf_parsed or len(spine_chapters) == 0:
             if _auto_discover_from_output_dir(output_dir, prog):
@@ -20465,6 +20521,9 @@ class RetranslationMixin:
                 display_info = {
                     'key': spine_ch.get('filename', ''),
                     'num': spine_ch['file_chapter_num'],
+                    'display_num': spine_ch.get(
+                        'display_chapter_num', spine_ch['file_chapter_num']
+                    ),
                     'info': spine_ch.get('progress_entry', {}),
                     'output_file': spine_ch['output_file'],
                     'status': spine_ch['status'],
@@ -21564,11 +21623,23 @@ class RetranslationMixin:
                         return None
                 return None
 
-            def _gp_display_chapter_num(ci, fname):
+            def _gp_source_chapter_num(ci, fname):
+                try:
+                    is_special = self._is_special_file(fname)
+                except (AttributeError, TypeError):
+                    is_special = _is_special_basename(fname)
+                if is_special:
+                    return 0
                 ch_num = _gp_filename_chapter_num(fname)
                 if ch_num is not None:
                     return ch_num
                 return 0
+
+            def _gp_display_chapter_num(ci, fname):
+                return (panel_state.get('_chapter_display_numbers') or {}).get(
+                    ci,
+                    _gp_source_chapter_num(ci, fname),
+                )
 
             def _gp_filename_keys(name):
                 """Normalize a filename into a set of lowercase lookup keys."""
@@ -21577,6 +21648,18 @@ class RetranslationMixin:
             def _rebuild_reverse_lookups():
                 """Rebuild O(1) lookup dicts from chapter_map. Call after chapter_map changes."""
                 cmap = panel_state.get('chapter_map') or {}
+                spine_index_map = panel_state.get('spine_index_map') or {}
+                ordered_indices = sorted(
+                    cmap,
+                    key=lambda index: (spine_index_map.get(index, index + 1), index),
+                )
+                display_numbers = nonreset_chapter_display_numbers(
+                    _gp_source_chapter_num(index, cmap.get(index, ''))
+                    for index in ordered_indices
+                )
+                panel_state['_chapter_display_numbers'] = dict(
+                    zip(ordered_indices, display_numbers)
+                )
                 # filename key -> chapter index (first wins)
                 fk_to_ci = {}
                 for lookup_idx, (ci, mapped_name) in enumerate(cmap.items()):
@@ -22487,7 +22570,7 @@ class RetranslationMixin:
                     except (TypeError, ValueError):
                         return chapter_numbers[str(ci)]
                 fname = (panel_state.get('chapter_map') or {}).get(ci, f'chapter {ci + 1}')
-                ch_num = _gp_display_chapter_num(ci, fname)
+                ch_num = _gp_source_chapter_num(ci, fname)
                 return ch_num if ch_num is not None else ci
 
             def _gp_chapter_entry_map(_d):
@@ -22591,14 +22674,14 @@ class RetranslationMixin:
                                     entry_key = f"manual_completed_{ci}"
                                 entry = {
                                     'chapter_index': ci,
-                                    'actual_num': _gp_display_chapter_num(ci, fname),
+                                    'actual_num': _gp_source_chapter_num(ci, fname),
                                     'original_basename': fname,
                                 }
                                 chapters[entry_key] = entry
                                 entry_map[ci] = (entry_key, entry)
                             entry['status'] = 'completed'
                             entry.setdefault('chapter_index', ci)
-                            entry.setdefault('actual_num', _gp_display_chapter_num(ci, fname))
+                            entry.setdefault('actual_num', _gp_source_chapter_num(ci, fname))
                             entry.setdefault('original_basename', fname)
                             entry['last_updated'] = now
                             entry['manually_marked_completed'] = True
@@ -23102,7 +23185,7 @@ class RetranslationMixin:
                     'output_file': output_file,
                     'original_filename': progress_entry.get('original_filename') or fname,
                     'original_basename': progress_entry.get('original_basename') or fname,
-                    'num': _gp_display_chapter_num(ci, fname),
+                    'num': _gp_source_chapter_num(ci, fname),
                     'info': progress_entry,
                     'progress_key': progress_entry_key,
                 }
@@ -28903,6 +28986,9 @@ class RetranslationMixin:
             display_info = {
                 'key': spine_ch.get('filename', ''),
                 'num': spine_ch['file_chapter_num'],
+                'display_num': spine_ch.get(
+                    'display_chapter_num', spine_ch['file_chapter_num']
+                ),
                 'info': spine_ch.get('progress_entry', {}),
                 'output_file': spine_ch['output_file'],
                 'status': spine_ch['status'],
@@ -29943,7 +30029,7 @@ class RetranslationMixin:
             'unknown': 'Unknown'
         }
 
-        chapter_num = info['num']
+        chapter_num = info.get('display_num', info['num'])
         status = self._progress_display_status(info, data)
         output_file = info['output_file']
         output_display = self._progress_model_column_text(info, data, output_file)
