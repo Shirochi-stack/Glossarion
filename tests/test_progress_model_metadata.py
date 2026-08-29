@@ -42,6 +42,7 @@ from Retranslation_GUI import (
     _persist_progress_manager_source_link,
     _progress_entry_has_llm_token_qa,
     _progress_entry_has_missing_image_qa,
+    _progress_entry_is_completed_image_only_for_display,
     _progress_path_signature,
     _progress_entry_model_for_display,
     _progress_entry_refined_for_display,
@@ -2480,6 +2481,29 @@ def test_progress_display_selector_prefers_active_and_refined_entries():
     }
     assert _progress_entry_model_for_display(nested_history) == "deepseek-v4"
     assert _progress_entry_refined_for_display(nested_history)
+
+
+def test_image_only_completed_progress_rows_show_copied_without_inheriting_badge():
+    image_only_entry = {
+        "status": "completed_image_only",
+        "output_file": "part0003_split_000.html",
+    }
+    wrapped_row = {
+        "status": "completed",
+        "info": image_only_entry,
+        "output_file": "part0003_split_000.html",
+    }
+
+    assert _progress_entry_is_completed_image_only_for_display(image_only_entry)
+    assert _progress_entry_is_completed_image_only_for_display(wrapped_row)
+    assert _progress_entry_model_for_display(image_only_entry) == "COPIED"
+    assert RetranslationMixin()._progress_entry_model_name(wrapped_row, {}) == "COPIED"
+
+    active_retranslation = {
+        "status": "in_progress",
+        "previous_progress_entry": image_only_entry,
+    }
+    assert not _progress_entry_is_completed_image_only_for_display(active_retranslation)
 
 
 def test_glossary_progress_legend_includes_refinement_rows():

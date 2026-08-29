@@ -1531,6 +1531,9 @@ def _combine_glossary_progress_legend_stats(
 
 
 def _progress_entry_model_for_display(entry):
+    if _progress_entry_is_completed_image_only_for_display(entry):
+        return 'COPIED'
+
     current = entry if isinstance(entry, dict) else None
     seen = set()
     while isinstance(current, dict) and id(current) not in seen:
@@ -1542,6 +1545,26 @@ def _progress_entry_model_for_display(entry):
             return model_name
         current = current.get('previous_progress_entry')
     return ''
+
+
+def _progress_entry_is_completed_image_only_for_display(entry):
+    """Return whether the row's current result is an image-only copy."""
+    if not isinstance(entry, dict):
+        return False
+
+    # Progress Manager rows wrap the current persisted entry in either ``info``
+    # or ``progress_entry``. Do not walk ``previous_progress_entry`` here: a
+    # new translation in progress must not inherit the old image-only badge.
+    candidates = [entry]
+    for key in ('info', 'progress_entry'):
+        candidate = entry.get(key)
+        if isinstance(candidate, dict):
+            candidates.append(candidate)
+    return any(
+        str(candidate.get('status') or '').lower().strip()
+        == 'completed_image_only'
+        for candidate in candidates
+    )
 
 
 def _format_qa_issue_for_progress_display(issue, qa_issue_previews=None):
@@ -30061,6 +30084,9 @@ class RetranslationMixin:
 
     def _progress_entry_model_name(self, info, data=None):
         """Return the model name attached to a progress row, with old-file fallbacks."""
+        if _progress_entry_is_completed_image_only_for_display(info):
+            return "COPIED"
+
         candidates = []
         if isinstance(info, dict):
             candidates.append(info)
@@ -30193,7 +30219,13 @@ class RetranslationMixin:
         output_display = self._progress_model_column_text(info, data, output_file)
         icon = status_icons.get(status, '❓')
         status_label = status_labels.get(status, status)
-        if status == 'completed' and self._progress_entry_refinement_failed(info):
+        if (
+            status == 'completed'
+            and _progress_entry_is_completed_image_only_for_display(info)
+        ):
+            icon = '📸'
+            status_label = 'Image Only (Completed)'
+        elif status == 'completed' and self._progress_entry_refinement_failed(info):
             status_label = f"{status_label} 💀"
         elif status == 'completed' and self._progress_entry_is_refined(info):
             status_label = f"{status_label} ⭐"
