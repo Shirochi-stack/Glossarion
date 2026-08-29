@@ -54,6 +54,8 @@ from TransateKRtoEN import (
     ContentProcessor,
     ProgressManager,
     TranslationConfig,
+    _assign_translation_display_chapter_numbers,
+    _chapter_log_number,
     _vision_ocr_header_markdown,
 )
 from image_translator import ImageTranslator
@@ -130,6 +132,29 @@ def test_glossary_log_numbers_use_same_nonreset_sequence_as_progress_views():
         4: 4,
         5: 5,
     }
+
+
+def test_translation_log_numbers_use_same_nonreset_sequence_as_progress_views():
+    chapters = [
+        {"original_basename": "part0000.html", "actual_chapter_num": 0},
+        {"original_basename": "part0001.html", "actual_chapter_num": 1},
+        {"original_basename": "part0002.html", "actual_chapter_num": 2},
+        {"original_basename": "part0003_split_000.html", "actual_chapter_num": 0},
+        {"original_basename": "part0003_split_001.html", "actual_chapter_num": 1},
+        {"original_basename": "part0004_split_000.html", "actual_chapter_num": 0},
+    ]
+
+    assert _assign_translation_display_chapter_numbers(chapters) == [0, 1, 2, 3, 4, 5]
+    assert [_chapter_log_number(chapter) for chapter in chapters] == [0, 1, 2, 3, 4, 5]
+    assert [chapter["actual_chapter_num"] for chapter in chapters] == [0, 1, 2, 0, 1, 0]
+
+    translation_source = (
+        Path(__file__).resolve().parents[1] / "src" / "TransateKRtoEN.py"
+    ).read_text(encoding="utf-8")
+    assert 'f"💬 {_term} {log_num}: Chunk ' in translation_source
+    assert 'current_request_label = f"Chapter {log_num} ' in translation_source
+    assert translation_source.count("'chapter': log_num") >= 2
+    assert "'chapter': parent_log_num" in translation_source
 
 
 def test_all_requested_chapter_views_use_shared_nonreset_numbering():

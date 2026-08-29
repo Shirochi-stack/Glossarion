@@ -24,6 +24,10 @@ except ImportError:
     # Older versions of BeautifulSoup might not have this warning
     pass
 from collections import Counter
+from chapter_display_numbering import (
+    filename_chapter_number,
+    nonreset_chapter_display_numbers,
+)
 from epub_package import find_epub_opf_member, find_opf_path
 from title_tag_translation import (
     DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
@@ -87,6 +91,44 @@ def _direct_text_label_with_source(label, source_file):
     if not source_file or source_file.lower() in label.lower():
         return label
     return f"{label} · {source_file}"
+
+
+def _chapter_log_number(chapter, fallback=None):
+    """Return the presentation-only chapter number used in logs."""
+    if isinstance(chapter, dict):
+        value = chapter.get("display_chapter_num")
+        if value is not None:
+            return value
+        value = chapter.get("actual_chapter_num")
+        if value is not None:
+            return value
+        value = chapter.get("num")
+        if value is not None:
+            return value
+    return fallback
+
+
+def _assign_translation_display_chapter_numbers(chapters, special_check=None):
+    """Attach non-resetting display numbers without changing chapter identity."""
+    chapter_rows = [chapter for chapter in (chapters or []) if isinstance(chapter, dict)]
+    raw_numbers = []
+    for chapter in chapter_rows:
+        source_name = (
+            chapter.get("original_basename")
+            or chapter.get("original_filename")
+            or chapter.get("filename")
+            or chapter.get("source_filename")
+            or chapter.get("href")
+            or ""
+        )
+        is_special = bool(special_check(source_name)) if callable(special_check) else False
+        raw_numbers.append(
+            filename_chapter_number(source_name, is_special=is_special)
+        )
+    display_numbers = nonreset_chapter_display_numbers(raw_numbers)
+    for chapter, display_number in zip(chapter_rows, display_numbers):
+        chapter["display_chapter_num"] = display_number
+    return display_numbers
 
 
 def _content_for_text_output(content):
@@ -8689,6 +8731,7 @@ class TranslationProcessor:
         # Determine stable chapter number for this chunk (used for payload metadata)
         idx = c.get('__index', 0)
         actual_num = c.get('actual_chapter_num', c.get('num', idx + 1))
+        log_num = _chapter_log_number(c, actual_num)
         
         # Determine chunk timeout respecting runtime env overrides.
         # If RETRY_TIMEOUT is "0"/false/blank, disable chunk timeouts entirely.
@@ -8852,7 +8895,7 @@ class TranslationProcessor:
                 #request_id = f"{c['num']:03d}_chunk{chunk_idx}_{uuid.uuid4().hex[:8]}"
 
                 chapter_ctx = {
-                    'chapter': actual_num,
+                    'chapter': log_num,
                     'chunk': chunk_idx,
                     'total_chunks': total_chunks,
                     'merged_chapters': merged_chapters,
@@ -9075,12 +9118,12 @@ class TranslationProcessor:
                     # During graceful stop, don't retry - skip this chunk
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                     if graceful_stop_active:
-                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Skipped (graceful stop)")
+                        print(f"⏸️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Skipped (graceful stop)")
                         return None, "graceful_stop", None
                     
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
-                        print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                        print(f"⚠️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                         # Reinitialize the client if it was closed (check correct client based on type)
                         # Skip in multi-key mode — _ensure_thread_client handles per-thread client setup
                         if not getattr(self.client, '_multi_key_mode', False):
@@ -9106,7 +9149,7 @@ class TranslationProcessor:
                         time.sleep(retry_delay)
                         continue
                     else:
-                        print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached - marking chunk as failed")
+                        print(f"❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached - marking chunk as failed")
                         return "[TIMEOUT]", "timeout", None
                 
                 if "took" in error_msg and "timeout:" in error_msg:
@@ -9123,12 +9166,12 @@ class TranslationProcessor:
                     # During graceful stop, don't retry - skip this chunk
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                     if graceful_stop_active:
-                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Timed out during graceful stop - skipping retry")
+                        print(f"⏸️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Timed out during graceful stop - skipping retry")
                         return "[TIMEOUT]", "timeout", None
                     
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
-                        print(f"    ⏱️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
+                        print(f"    ⏱️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
                         # Use SEND_INTERVAL_SECONDS as base, random from half to full
                         import random
                         base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
@@ -9137,7 +9180,7 @@ class TranslationProcessor:
                         time.sleep(retry_delay)
                         continue
                     else:
-                        print(f"    ❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries reached - marking chunk as failed")
+                        print(f"    ❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries reached - marking chunk as failed")
                         return "[TIMEOUT]", "timeout", None
                 
                 elif "timed out" in error_msg and "timeout:" not in error_msg:
@@ -9154,12 +9197,12 @@ class TranslationProcessor:
                     # During graceful stop, don't retry - skip
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                     if graceful_stop_active:
-                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Timed out during graceful stop - skipping retry")
+                        print(f"⏸️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Timed out during graceful stop - skipping retry")
                         return "[TIMEOUT]", "timeout", None
                     
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
-                        print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                        print(f"⚠️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                         # Use SEND_INTERVAL_SECONDS as base, random from half to full
                         import random
                         base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
@@ -9168,14 +9211,14 @@ class TranslationProcessor:
                         time.sleep(retry_delay)
                         continue
                     else:
-                        print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached - marking chunk as failed")
+                        print(f"❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached - marking chunk as failed")
                         return "[TIMEOUT]", "timeout", None
                 
                 elif getattr(e, "error_type", None) == "rate_limit" or getattr(e, "http_status", None) == 429:
                     # Graceful stop may let the request that was already on the
                     # wire finish, but a failed request must never be retried.
                     if os.environ.get('GRACEFUL_STOP') == '1':
-                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Rate-limited during graceful stop — not retrying")
+                        print(f"⏸️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Rate-limited during graceful stop — not retrying")
                         return None, "graceful_stop", None
                     # Rate limit errors - clean handling without traceback
                     print("⚠️ Rate limited, sleeping 60s…")
@@ -9492,6 +9535,8 @@ class BatchTranslationProcessor:
                     actual_num = raw_num
                 
                 print(f"    📖 Extracted actual chapter number: {actual_num} (from raw: {raw_num})")
+
+        log_num = _chapter_log_number(chapter, actual_num)
         
         # APPLY INTERRUPTIBLE THREADING DELAY AFTER determining chapter number
         thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
@@ -9510,7 +9555,7 @@ class BatchTranslationProcessor:
                         # Only log if not during graceful stop (about to be cancelled)
                         graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                         if not graceful_stop_active and sleep_time >= 0.1:
-                            print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.1f}s for Chapter {actual_num}")
+                            print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.1f}s for Chapter {log_num}")
                         
                         # Interruptible sleep - check stop flag every 0.1 seconds
                         elapsed = 0
@@ -9547,7 +9592,7 @@ class BatchTranslationProcessor:
             # Check if this is from a text file
             is_text_source = self.is_text_file or chapter.get('filename', '').endswith('.txt') or chapter.get('is_chunk', False)
             terminology = "Section" if is_text_source else "Chapter"
-            defer_batch_log(f"🔄 Starting #{idx+1} (Internal: {terminology} {chap_num}, Actual: {terminology} {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
+            defer_batch_log(f"🔄 Starting #{idx+1} (Internal: {terminology} {chap_num}, Display: {terminology} {log_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
                       
             content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
             
@@ -9592,7 +9637,7 @@ class BatchTranslationProcessor:
             c = chapter
             has_images = chapter.get('has_images', False) or html_mostly_images
             if has_images and self.image_translator and self.config.ENABLE_IMAGE_TRANSLATION:
-                print(f"🖼️ Processing images for Chapter {actual_num}...")
+                print(f"🖼️ Processing images for Chapter {log_num}...")
                 chapter_image_translator = _chapter_image_translator_for_processing(
                     self.image_translator,
                     chapter,
@@ -9630,7 +9675,7 @@ class BatchTranslationProcessor:
                             chapter_obj=chapter,
                         )
                         self.save_progress_fn()
-                    print(f"⚠️ Vision image chapter {actual_num} marked as qa_failed: {', '.join(vision_qa_issues)}")
+                    print(f"⚠️ Vision image chapter {log_num} marked as qa_failed: {', '.join(vision_qa_issues)}")
                     return False, actual_num, None, None, None
                 vision_combined_failure = (
                     image_translations.get("__vision_ocr_combined_failed__")
@@ -9661,7 +9706,7 @@ class BatchTranslationProcessor:
                             chapter_obj=chapter,
                         )
                         self.save_progress_fn()
-                    print(f"⚠️ Vision OCR combined chapter {actual_num} failed; marked as qa_failed: {', '.join(qa_issue)}")
+                    print(f"⚠️ Vision OCR combined chapter {log_num} failed; marked as qa_failed: {', '.join(qa_issue)}")
                     return False, actual_num, None, None, None
                 if image_translations:
                     if (
@@ -9691,7 +9736,7 @@ class BatchTranslationProcessor:
                 else:
                     text_to_translate = c["body"]
                     image_translations = {}
-                    print(f"✅ Processed {len(image_translations)} images for Chapter {actual_num}")
+                    print(f"✅ Processed {len(image_translations)} images for Chapter {log_num}")
             
             # Build chapter-specific system prompts inside the chunk worker.
             # Batch mode uses an inner chunk executor even for one chunk; keeping
@@ -9779,7 +9824,7 @@ class BatchTranslationProcessor:
                         self.save_progress_fn()
                 if self.chunk_progress_enabled and invalidation_reason:
                     print(
-                        f"🧹 Chapter {actual_num}: invalidated cached chunks — "
+                        f"🧹 Chapter {log_num}: invalidated cached chunks — "
                         f"{invalidation_reason}"
                     )
 
@@ -9817,11 +9862,11 @@ class BatchTranslationProcessor:
             chapter_truncated_event = threading.Event()
 
             if total_chunks > 1:
-                print(f"✂️ Chapter {actual_num} requires {total_chunks} chunks - processing in parallel")
+                print(f"✂️ Chapter {log_num} requires {total_chunks} chunks - processing in parallel")
             resumed_chunk_count = sum(chunk is not None for chunk in translated_chunks)
             if resumed_chunk_count:
                 print(
-                    f"♻️ Chapter {actual_num}: resuming {resumed_chunk_count}/"
+                    f"♻️ Chapter {log_num}: resuming {resumed_chunk_count}/"
                     f"{total_chunks} chunk(s) from translation_progress.json"
                 )
             
@@ -10042,7 +10087,7 @@ class BatchTranslationProcessor:
 
                 # Abort immediately if a prior chunk triggered prohibition (NOT for user stop)
                 if chunk_abort_event.is_set():
-                    print(f"Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: stopped after chapter QA failure ({_chunk_abort_label()})")
+                    print(f"Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: stopped after chapter QA failure ({_chunk_abort_label()})")
                     return _chunk_result(None, None, False, "chapter_abort")
                 
                 # Log combined prompt token count, including assistant/memory tokens when present
@@ -10059,13 +10104,13 @@ class BatchTranslationProcessor:
                 _term = "Section" if self.is_text_file else "Chapter"
                 if self.config.CONTEXTUAL and assistant_tokens > 0:
                     defer_batch_log(
-                        f"💬 {_term} {actual_num}: Chunk {chunk_idx}/{total_chunks} combined prompt: "
+                        f"💬 {_term} {log_num}: Chunk {chunk_idx}/{total_chunks} combined prompt: "
                         f"{total_tokens:,} tokens (system + user: {non_assistant_tokens:,}, "
                         f"assistant/memory: {assistant_tokens:,}) / {budget_str} [File: {file_ref}]"
                     )
                 else:
                     defer_batch_log(
-                        f"💬 {_term} {actual_num}: Chunk {chunk_idx}/{total_chunks} combined prompt: "
+                        f"💬 {_term} {log_num}: Chunk {chunk_idx}/{total_chunks} combined prompt: "
                         f"{total_tokens:,} tokens (system + user) / {budget_str} [File: {file_ref}]"
                     )
                 
@@ -10102,14 +10147,14 @@ class BatchTranslationProcessor:
                 # Set thread-local label so downstream logs include chapter/chunk
                 try:
                     tls = self.client._get_thread_local_client()
-                    tls.current_request_label = f"Chapter {actual_num} (chunk {chunk_idx}/{total_chunks})"
+                    tls.current_request_label = f"Chapter {log_num} (chunk {chunk_idx}/{total_chunks})"
                 except Exception:
                     pass
 
                 # Log removed - unified_api_client._log_pre_stagger will log this
                 # print(f"📤 Sending Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} to API...")
                 chapter_ctx = {
-                    'chapter': actual_num,
+                    'chapter': log_num,
                     'chunk': chunk_idx,
                     'total_chunks': total_chunks,
                     'dispatch_order': chapter.get('_batch_request_order'),
@@ -10154,7 +10199,7 @@ class BatchTranslationProcessor:
                                 self._announce_ordered_request_dispatch(
                                     chapter.get('_batch_request_order'),
                                     _direct_text_label_with_source(
-                                        f"Chapter {actual_num} "
+                                        f"Chapter {log_num} "
                                         f"(chunk {chunk_idx}/{total_chunks})",
                                         chapter_ctx.get('source_file'),
                                     ),
@@ -10178,7 +10223,7 @@ class BatchTranslationProcessor:
                         error_msg = str(e)
 
                         if chunk_abort_event.is_set():
-                            print(f"Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: stopped after chapter QA failure ({_chunk_abort_label()})")
+                            print(f"Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: stopped after chapter QA failure ({_chunk_abort_label()})")
                             _set_batch_chunk_runtime_status("pending")
                             return _chunk_result(None, None, False, "chapter_abort", chunk_actual_model, chunk_actual_key)
                         
@@ -10186,7 +10231,7 @@ class BatchTranslationProcessor:
                         if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
                             # Check stop flag before retrying
                             if local_stop_cb():
-                                print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
+                                print(f"❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
                                 _restore_single_pass_glossary_in_progress(
                                     self.out_dir,
                                     chapter_num=actual_num,
@@ -10197,12 +10242,12 @@ class BatchTranslationProcessor:
                             # During graceful stop, don't retry - skip this chunk
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                             if graceful_stop_active:
-                                print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Skipped (graceful stop)")
+                                print(f"⏸️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Skipped (graceful stop)")
                                 return _chunk_result(None, None, False, "graceful_stop", chunk_actual_model, chunk_actual_key)
                             
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
-                                print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: API cancelled/client closed, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                                print(f"⚠️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: API cancelled/client closed, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                                 # Reinitialize the client if it was closed (check correct client based on type)
                                 # Skip in multi-key mode — _ensure_thread_client handles per-thread client setup
                                 if not getattr(self.client, '_multi_key_mode', False):
@@ -10230,14 +10275,14 @@ class BatchTranslationProcessor:
                                 continue
                             else:
                                 # Max retries reached, return timeout to trigger chapter abort
-                                print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached")
+                                print(f"❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached")
                                 return _chunk_result("[TIMEOUT]", None, False, "timeout", chunk_actual_model, chunk_actual_key)
                         
                         # Check for timeout errors
                         elif "timed out" in error_msg:
                             # Check stop flag before retrying
                             if local_stop_cb():
-                                print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
+                                print(f"❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
                                 _restore_single_pass_glossary_in_progress(
                                     self.out_dir,
                                     chapter_num=actual_num,
@@ -10248,12 +10293,12 @@ class BatchTranslationProcessor:
                             # During graceful stop, don't retry - skip this chunk
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                             if graceful_stop_active:
-                                print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Timed out during graceful stop - skipping retry")
+                                print(f"⏸️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Timed out during graceful stop - skipping retry")
                                 return _chunk_result("[TIMEOUT]", None, False, "timeout", chunk_actual_model, chunk_actual_key)
                             
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
-                                print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: API call timed out after {chunk_timeout} seconds, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                                print(f"⚠️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: API call timed out after {chunk_timeout} seconds, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                                 # Stagger retries to avoid simultaneous API calls
                                 # Use SEND_INTERVAL_SECONDS as base, random from half to full
                                 import random
@@ -10264,14 +10309,14 @@ class BatchTranslationProcessor:
                                 continue
                             else:
                                 # Max retries reached, return timeout to trigger chapter abort
-                                print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached")
+                                print(f"❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached")
                                 return _chunk_result("[TIMEOUT]", None, False, "timeout", chunk_actual_model, chunk_actual_key)
                         else:
                             # Not a timeout error, re-raise
                             raise
                     except Exception:
                         if chunk_abort_event.is_set():
-                            print(f"Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: stopped after chapter QA failure ({_chunk_abort_label()})")
+                            print(f"Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: stopped after chapter QA failure ({_chunk_abort_label()})")
                             _set_batch_chunk_runtime_status("pending")
                             return _chunk_result(None, None, False, "chapter_abort", chunk_actual_model, chunk_actual_key)
                         raise
@@ -10282,9 +10327,9 @@ class BatchTranslationProcessor:
                 #     print(f"🧠 Captured thought signature for chunk {chunk_idx}/{total_chunks}")
                 
                 if total_chunks and int(total_chunks) > 1:
-                    print(f"📥 Received Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
+                    print(f"📥 Received Chapter {log_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
                 else:
-                    print(f"📥 Received Chapter {actual_num} response, finish_reason: {finish_reason}")
+                    print(f"📥 Received Chapter {log_num} response, finish_reason: {finish_reason}")
 
                 # Char-ratio truncation retry (silent truncation)
                 char_ratio_exhausted = False
@@ -10340,24 +10385,24 @@ class BatchTranslationProcessor:
                         if (char_ratio < char_ratio_threshold) and (output_char_count > char_ratio_min_output_chars):
                             # If the key fallback logic triggered, accept the output to avoid burning retries on worse keys
                             if used_fallback:
-                                print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio suggests truncation but fallback key was used - accepting output")
+                                print(f"⚠️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio suggests truncation but fallback key was used - accepting output")
                                 break
 
                             if char_ratio_retry_count >= char_ratio_retry_limit:
-                                print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: All {char_ratio_retry_limit} char-ratio retries exhausted; marking as TRUNCATED")
+                                print(f"❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: All {char_ratio_retry_limit} char-ratio retries exhausted; marking as TRUNCATED")
                                 char_ratio_exhausted = True
                                 break
 
                             if char_ratio_retry_count == 0:
                                 print(
-                                    f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio suggests truncation "
+                                    f"⚠️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio suggests truncation "
                                     f"(Input chars: {input_char_count}, Output chars: {output_char_count}, Ratio: {char_ratio:.2f} < {char_ratio_threshold:.2f}). "
                                     f"Attempting up to {char_ratio_retry_limit} retry(ies)..."
                                 )
 
                             char_ratio_retry_count += 1
                             print(
-                                f"🔄 Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry attempt "
+                                f"🔄 Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry attempt "
                                 f"{char_ratio_retry_count}/{char_ratio_retry_limit}"
                             )
 
@@ -10402,7 +10447,7 @@ class BatchTranslationProcessor:
                                         self._announce_ordered_request_dispatch(
                                             chapter.get('_batch_request_order'),
                                             _direct_text_label_with_source(
-                                                f"Chapter {actual_num} "
+                                                f"Chapter {log_num} "
                                                 f"(chunk {chunk_idx}/{total_chunks})",
                                                 chapter_ctx.get('source_file'),
                                             ),
@@ -10427,7 +10472,7 @@ class BatchTranslationProcessor:
 
                                 if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
                                     if local_stop_cb():
-                                        print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during char-ratio retry")
+                                        print(f"❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during char-ratio retry")
                                         _restore_single_pass_glossary_in_progress(
                                             self.out_dir,
                                             chapter_num=actual_num,
@@ -10437,17 +10482,17 @@ class BatchTranslationProcessor:
 
                                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                                     if graceful_stop_active:
-                                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Skipped char-ratio retry (graceful stop)")
+                                        print(f"⏸️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Skipped char-ratio retry (graceful stop)")
                                         return _chunk_result(None, None, False, "graceful_stop", chunk_actual_model, chunk_actual_key)
 
-                                    print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry failed due to API cancellation")
+                                    print(f"❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry failed due to API cancellation")
                                     return _chunk_result("[TIMEOUT]", None, False, "timeout", chunk_actual_model, chunk_actual_key)
 
                                 if "timed out" in error_msg:
-                                    print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry timed out after {chunk_timeout} seconds")
+                                    print(f"❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry timed out after {chunk_timeout} seconds")
                                     return _chunk_result("[TIMEOUT]", None, False, "timeout", chunk_actual_model, chunk_actual_key)
 
-                                print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry error: {e}. Accepting current output.")
+                                print(f"⚠️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry error: {e}. Accepting current output.")
                                 break
                             finally:
                                 if tls_retry_client is not None:
@@ -10459,7 +10504,7 @@ class BatchTranslationProcessor:
                             retry_output_chars = len(result_retry) if result_retry else 0
                             if result_retry and retry_output_chars > output_char_count:
                                 print(
-                                    f"✅ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry improved output "
+                                    f"✅ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry improved output "
                                     f"({output_char_count} → {retry_output_chars} chars)"
                                 )
                                 result = result_retry
@@ -10471,7 +10516,7 @@ class BatchTranslationProcessor:
                                 continue
 
                             print(
-                                f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry did not improve output "
+                                f"⚠️ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry did not improve output "
                                 f"({output_char_count} → {retry_output_chars} chars). Trying again if attempts remain..."
                             )
                             continue
@@ -10560,7 +10605,7 @@ class BatchTranslationProcessor:
                                     self._announce_ordered_request_dispatch(
                                         chapter.get('_batch_request_order'),
                                         _direct_text_label_with_source(
-                                            f"Chapter {actual_num} "
+                                            f"Chapter {log_num} "
                                             f"(structured JSON retry "
                                             f"{retry_number})",
                                             chapter_ctx.get('source_file'),
@@ -10776,7 +10821,7 @@ class BatchTranslationProcessor:
                 except Exception:
                     pass
                 try:
-                    print(f"🛑 Chapter {actual_num}: cancelling chapter (WAIT_FOR_CHUNKS=0) — {reason}")
+                    print(f"🛑 Chapter {log_num}: cancelling chapter (WAIT_FOR_CHUNKS=0) — {reason}")
                 except Exception:
                     pass
                 # Force a real cancel so in-flight requests stop too (user asked for full-stop for this chapter)
@@ -10806,7 +10851,7 @@ class BatchTranslationProcessor:
             ]
             self.chunks_completed += resumed_chunk_count
 
-            with ThreadPoolExecutor(max_workers=max_chunk_workers, thread_name_prefix=f"Ch{actual_num}Chunk") as chunk_executor:
+            with ThreadPoolExecutor(max_workers=max_chunk_workers, thread_name_prefix=f"Ch{log_num}Chunk") as chunk_executor:
                 # Submit chunks with staggered delay to prevent simultaneous starts
                 thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
                 future_to_chunk = {}
@@ -10816,7 +10861,7 @@ class BatchTranslationProcessor:
                     if thread_delay > 0 and total_chunks > 1:
                         chunk_num = chunk_data[1]  # Extract chunk number for logging
                         if thread_delay >= 0.1:
-                            print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before submitting chunk {chunk_num}/{total_chunks}")
+                            print(f"🧵 Chapter {log_num}: Delaying {thread_delay}s before submitting chunk {chunk_num}/{total_chunks}")
                         
                         # Interruptible sleep - check stop flag every 0.1s
                         # But respect WAIT_FOR_CHUNKS setting during graceful stop
@@ -10909,7 +10954,7 @@ class BatchTranslationProcessor:
                                         graceful_stop_qa_issue = ["TRUNCATED"] if had_partial_content else ["PARTIAL"]
                                         self.save_progress_fn()
                                     saved_label = "truncated" if had_partial_content else "original source"
-                                    print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — saved {saved_label}")
+                                    print(f"⚠️ Chapter {log_num} stopped (graceful stop) — saved {saved_label}")
                                 else:
                                     with self.progress_lock:
                                         self.update_progress_fn(
@@ -10920,7 +10965,7 @@ class BatchTranslationProcessor:
                                         )
                                         graceful_stop_qa_issue = ["PARTIAL"]
                                         self.save_progress_fn()
-                                    print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
+                                    print(f"⚠️ Chapter {log_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
                             chunk_abort_event.set()
                             if self.chunk_progress_enabled:
                                 with self.progress_lock:
@@ -11035,7 +11080,7 @@ class BatchTranslationProcessor:
                         if finish_reason == "timeout":
                             chunk_abort_event.set()
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                            print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Timeout - aborting chapter")
+                            print(f"❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Timeout - aborting chapter")
                             if _should_save_failure_response(
                                 result,
                                 config=self.config,
@@ -11078,7 +11123,7 @@ class BatchTranslationProcessor:
                         if is_truncated and retry_truncated_enabled:
                             chunk_abort_event.set()
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                            print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Truncated - aborting chapter")
+                            print(f"❌ Chapter {log_num}, Chunk {chunk_idx}/{total_chunks}: Truncated - aborting chapter")
                             save_truncated_result = _should_save_truncated_response(self.config)
                             if save_truncated_result:
                                 failure_output = _failure_output_for_save(
@@ -11175,7 +11220,7 @@ class BatchTranslationProcessor:
                             if stop_requested and total_chunks > 1:
                                 if graceful_stop_active and (wait_for_chunks or _all_chunks_sent_or_done()):
                                     # Wait for remaining chunks - continue processing
-                                    print(f"⏳ Graceful stop — waiting for remaining chunks of chapter {actual_num}...")
+                                    print(f"⏳ Graceful stop — waiting for remaining chunks of chapter {log_num}...")
                                 else:
                                     # WAIT_FOR_CHUNKS disabled and not all chunks were actually sent:
                                     # cancel this chapter entirely (no partial output).
@@ -11202,7 +11247,7 @@ class BatchTranslationProcessor:
                     # Only allow partial output when WAIT_FOR_CHUNKS is explicitly enabled.
                     # When WAIT_FOR_CHUNKS is disabled, we cancel the whole chapter instead.
                     if wait_for_chunks:
-                        print(f"⚠️ Chapter {actual_num}: partial translation ({len(completed)}/{total_chunks} chunks) due to graceful stop")
+                        print(f"⚠️ Chapter {log_num}: partial translation ({len(completed)}/{total_chunks} chunks) due to graceful stop")
                         translated_chunks = [c for c in translated_chunks if c is not None]
                         is_partial_result = True
                     else:
@@ -11238,7 +11283,7 @@ class BatchTranslationProcessor:
                 ]
             if total_chunks > 1:
                 result = '\n'.join(output_chunks)
-                print(f"🔗 Combined {total_chunks} chunks for Chapter {actual_num}")
+                print(f"🔗 Combined {total_chunks} chunks for Chapter {log_num}")
             else:
                 result = output_chunks[0] if output_chunks else None
             
@@ -11256,7 +11301,7 @@ class BatchTranslationProcessor:
                 if chapter_truncated or chapter_truncated_event.is_set() or is_partial_result:
                     qa_issue = ["TRUNCATED"] if (chapter_truncated or chapter_truncated_event.is_set()) else ["PARTIAL"]
                     qa_label = "truncated" if (chapter_truncated or chapter_truncated_event.is_set()) else "partial"
-                    print(f"⚠️ {batch_label} batch {actual_num}: {qa_label} output rejected")
+                    print(f"⚠️ {batch_label} batch {log_num}: {qa_label} output rejected")
                     with self.progress_lock:
                         self.update_progress_fn(
                             chapter_progress_idx,
@@ -11282,7 +11327,7 @@ class BatchTranslationProcessor:
                     )
                     if not retry_failure:
                         print(
-                            f"❌ {batch_label} batch {actual_num}: structured "
+                            f"❌ {batch_label} batch {log_num}: structured "
                             f"JSON validation failed: {issue} — {detail}"
                         )
                     with self.progress_lock:
@@ -11318,7 +11363,7 @@ class BatchTranslationProcessor:
                     chapter,
                     self.out_dir,
                 )
-                print(f"💾 Saved {batch_label} JSON batch {actual_num}: {fname} ({len(cleaned)} chars)")
+                print(f"💾 Saved {batch_label} JSON batch {log_num}: {fname} ({len(cleaned)} chars)")
                 return True, actual_num, chapter_body, cleaned, last_chunk_raw_obj
 
             # Enhanced mode workflow (same as non-batch):
@@ -11387,7 +11432,7 @@ class BatchTranslationProcessor:
             
             # Check for empty or failed response BEFORE writing to disk
             if not cleaned or not str(cleaned).strip():
-                print(f"❌ Batch: Translation empty for chapter {actual_num}")
+                print(f"❌ Batch: Translation empty for chapter {log_num}")
                 fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                 if _should_save_failure_response(
                     cleaned,
@@ -11411,7 +11456,7 @@ class BatchTranslationProcessor:
 
             if is_qa_failed_response(cleaned):
                 failure_reason = get_failure_reason(cleaned)
-                print(f"❌ Batch: Translation failed for chapter {actual_num} - marked as failed, no output file created (reason: {failure_reason})")
+                print(f"❌ Batch: Translation failed for chapter {log_num} - marked as failed, no output file created (reason: {failure_reason})")
                 with self.progress_lock:
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                     should_save = _should_save_failure_response(
@@ -11503,9 +11548,9 @@ class BatchTranslationProcessor:
                     )
                     with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                         f.write(failure_output)
-                    print(f"💾 Saved Chapter {actual_num} ({qa_label}): {fname} ({len(failure_output)} chars)")
+                    print(f"💾 Saved Chapter {log_num} ({qa_label}): {fname} ({len(failure_output)} chars)")
                 else:
-                    print(f"⏭️ Chapter {actual_num} not saved ({qa_label}) — failure-output saving is OFF")
+                    print(f"⏭️ Chapter {log_num} not saved ({qa_label}) — failure-output saving is OFF")
 
                 with self.progress_lock:
                     self.update_progress_fn(
@@ -11514,7 +11559,7 @@ class BatchTranslationProcessor:
                         qa_issues_found=qa_issue
                     )
                     self.save_progress_fn()
-                print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: {qa_label}")
+                print(f"⚠️ Batch: Chapter {log_num} marked as qa_failed: {qa_label}")
                 return False, actual_num, None, None, None
 
             if chapter.get("_title_tag_only_translation"):
@@ -11540,7 +11585,7 @@ class BatchTranslationProcessor:
                         )
                         self.save_progress_fn()
                     print(
-                        f"⚠️ Batch: Chapter {actual_num} returned no usable "
+                        f"⚠️ Batch: Chapter {log_num} returned no usable "
                         "translated <title>; original XHTML preserved"
                     )
                     return False, actual_num, None, None, None
@@ -11581,7 +11626,7 @@ class BatchTranslationProcessor:
                 _write_html_sdlxliff_sidecar(self.out_dir, fname, chapter, chapter_body, cleaned)
                 _write_html_md_txt_sidecars(self.out_dir, fname, cleaned)
             
-            print(f"💾 Saved Chapter {actual_num}: {fname} ({len(cleaned)} chars)")
+            print(f"💾 Saved Chapter {log_num}: {fname} ({len(cleaned)} chars)")
 
             # If we reached here, the chapter completed successfully (truncated/partial
             # cases already returned above in the early gate).
@@ -11717,9 +11762,9 @@ class BatchTranslationProcessor:
             # Print consolidated error message
             if total_chunks > 1:
                 failed_chunk_idx = locals().get("chunk_idx", "?")
-                print(f"❌ Chapter {actual_num} failed (chunk {failed_chunk_idx}/{total_chunks}): {e}")
+                print(f"❌ Chapter {log_num} failed (chunk {failed_chunk_idx}/{total_chunks}): {e}")
             else:
-                print(f"❌ Chapter {actual_num} failed: {e}")
+                print(f"❌ Chapter {log_num} failed: {e}")
             # No history for failed chapters
             return False, actual_num, None, None, None
     
@@ -11745,6 +11790,7 @@ class BatchTranslationProcessor:
         chapters_data = []  # List of (chapter_num, content, idx, chapter_obj, content_hash)
         parent_idx, parent_chapter = merge_group[0]
         parent_actual_num = parent_chapter.get('actual_chapter_num', parent_chapter['num'])
+        parent_log_num = _chapter_log_number(parent_chapter, parent_actual_num)
         
         # Check for graceful stop before starting work
         graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
@@ -11758,7 +11804,10 @@ class BatchTranslationProcessor:
         
         # Only log if not about to be stopped
         thread_name = threading.current_thread().name
-        print(f"\n🔗 [{thread_name}] Processing MERGED group: Chapters {[c.get('actual_chapter_num', c['num']) for _, c in merge_group]}")
+        print(
+            f"\n🔗 [{thread_name}] Processing MERGED group: Chapters "
+            f"{[_chapter_log_number(c, c.get('actual_chapter_num', c['num'])) for _, c in merge_group]}"
+        )
         
         # Double-check stop after logging but before doing real work
         if self.check_stop_fn():
@@ -12010,9 +12059,12 @@ class BatchTranslationProcessor:
                 print(f"   🌐 Sending merged request to API...")
                 
                 # Build chapter context with merged chapter numbers for progress bar display
-                merged_chapter_nums_for_context = [cn for cn, _, _, _, _ in chapters_data]
+                merged_chapter_nums_for_context = [
+                    _chapter_log_number(chapter, chapter_num)
+                    for chapter_num, _, _, chapter, _ in chapters_data
+                ]
                 chapter_ctx = {
-                    'chapter': parent_actual_num,
+                    'chapter': parent_log_num,
                     'chunk': 1,
                     'total_chunks': 1,
                     'merged_chapters': merged_chapter_nums_for_context,
@@ -12503,7 +12555,7 @@ class BatchTranslationProcessor:
                             try:
                                 section_content = convert_enhanced_text_to_html(section_content, chapter)
                             except Exception as conv_err:
-                                print(f"   ⚠️ Enhanced HTML conversion failed for chapter {actual_num}: {conv_err}")
+                                print(f"   ⚠️ Enhanced HTML conversion failed for chapter {_chapter_log_number(chapter, actual_num)}: {conv_err}")
                         
                         # Generate filename for this chapter using content.opf naming
                         fname = FileUtilities.create_chapter_filename(chapter, actual_num)
@@ -12528,7 +12580,7 @@ class BatchTranslationProcessor:
                             _write_html_md_txt_sidecars(self.out_dir, fname, section_content)
 
                         saved_files.append((actual_num, fname, idx, chapter, content_hash))
-                        print(f"      💾 Saved Chapter {actual_num}: {fname} ({len(section_content)} chars)")
+                        print(f"      💾 Saved Chapter {_chapter_log_number(chapter, actual_num)}: {fname} ({len(section_content)} chars)")
                     
                     # Mark all chapters as completed or qa_failed (for truncated)
                     with self.progress_lock:
@@ -12590,9 +12642,9 @@ class BatchTranslationProcessor:
                         else:
                             with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                                 f.write(failure_output)
-                        print(f"   💾 Saved merged content (truncated) to Chapter {parent_actual_num}: {saved_name} ({len(failure_output)} chars)")
+                        print(f"   💾 Saved merged content (truncated) to Chapter {parent_log_num}: {saved_name} ({len(failure_output)} chars)")
                     else:
-                        print(f"   ⏭️ Merged content for Chapter {parent_actual_num} not saved (truncated) — failure-output saving is OFF")
+                        print(f"   ⏭️ Merged content for Chapter {parent_log_num} not saved (truncated) — failure-output saving is OFF")
                 else:
                     # Not truncated — always save
                     if getattr(self, 'is_text_file', False):
@@ -12603,7 +12655,7 @@ class BatchTranslationProcessor:
                         write_utf8_html_file(os.path.join(self.out_dir, fname), cleaned_to_save)
                         _write_html_sdlxliff_sidecar(self.out_dir, fname, parent_chapter, merged_content, cleaned_to_save)
                         _write_html_md_txt_sidecars(self.out_dir, fname, cleaned_to_save)
-                    print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {saved_name} ({len(cleaned_to_save)} chars)")
+                    print(f"   💾 Saved merged content to Chapter {parent_log_num}: {saved_name} ({len(cleaned_to_save)} chars)")
                 
                 with self.progress_lock:
                     if merged_truncated:
@@ -26149,6 +26201,12 @@ def main(log_callback=None, stop_callback=None):
             translate_all_numbered=_translate_all_numbered,
         )
 
+    if input_path.lower().endswith('.epub'):
+        _assign_translation_display_chapter_numbers(
+            chapters,
+            special_check=_is_configured_special_file,
+        )
+
     def _is_non_special_zero_number_file(chapter, actual_num):
         try:
             if float(actual_num) != 0:
@@ -28155,6 +28213,7 @@ def main(log_callback=None, stop_callback=None):
                 actual_num = c['num']
             else:
                 actual_num = c.get('actual_chapter_num', c['num'])
+            log_num = _chapter_log_number(c, actual_num)
             
             # Check if this chapter was processed and has qa_failed status
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
@@ -28503,7 +28562,7 @@ def main(log_callback=None, stop_callback=None):
             if not needs_translation and existing_file:
                 file_path = os.path.join(out, existing_file)
                 if not os.path.exists(file_path):
-                    print(f"⚠️ Output file missing for chapter {actual_num}: {existing_file}")
+                    print(f"⚠️ Output file missing for chapter {log_num}: {existing_file}")
                     needs_translation = True
                     skip_reason = None
                     # Update status to file_missing
@@ -28525,7 +28584,7 @@ def main(log_callback=None, stop_callback=None):
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
                 progress_manager.save()
                 chapters_completed += 1
-                print(f"⏭️ SDLXLIFF batch {actual_num}: placeholder-only; preserved without API request")
+                print(f"⏭️ SDLXLIFF batch {log_num}: placeholder-only; preserved without API request")
                 continue
 
             chapter_position = f"{chapters_completed + 1}/{chapters_to_process}"
@@ -28540,7 +28599,7 @@ def main(log_callback=None, stop_callback=None):
             else:
                 file_ref = c.get('original_basename', f'{terminology}_{actual_num}')
 
-            print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Actual: {terminology} {actual_num}) ({chapter_position} to translate): {c['title']} [File: {file_ref}]")
+            print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Display: {terminology} {log_num}) ({chapter_position} to translate): {c['title']} [File: {file_ref}]")
 
             chunk_context_manager.start_chapter(chap_num, c['title'])
             
@@ -28565,7 +28624,7 @@ def main(log_callback=None, stop_callback=None):
             is_text_only = (not has_images and has_meaningful_text)
             
             if is_empty_chapter:
-                print(f"📄 Empty chapter {actual_num} detected (preserving original content as-is)")
+                print(f"📄 Empty chapter {log_num} detected (preserving original content as-is)")
 
                 # Create filename for empty chapter
                 if isinstance(c['num'], float):
@@ -28595,11 +28654,11 @@ def main(log_callback=None, stop_callback=None):
             elif is_image_only_chapter and config.OUTPUT_MODE == "text":
                 if _prepare_image_only_title_translation(c, out):
                     print(
-                        f"📝 Image-only chapter {actual_num}: translating only "
+                        f"📝 Image-only chapter {log_num}: translating only "
                         "its <title> tag and preserving the remaining XHTML"
                     )
                 else:
-                    print(f"📸 Image-only chapter {actual_num} detected (preserving original content as-is)")
+                    print(f"📸 Image-only chapter {log_num} detected (preserving original content as-is)")
 
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
                     original_markup = _original_markup_for_copy(c, out)
@@ -28669,7 +28728,7 @@ def main(log_callback=None, stop_callback=None):
                             chapter_obj=c,
                         )
                         progress_manager.save()
-                        print(f"⚠️ Vision image chapter {actual_num} marked as qa_failed: {', '.join(vision_qa_issues)}")
+                        print(f"⚠️ Vision image chapter {log_num} marked as qa_failed: {', '.join(vision_qa_issues)}")
                         continue
                     vision_combined_failure = (
                         image_translations.get("__vision_ocr_combined_failed__")
@@ -28684,7 +28743,7 @@ def main(log_callback=None, stop_callback=None):
                             chapter_obj=c,
                         )
                         progress_manager.save()
-                        print(f"⚠️ Vision OCR combined chapter {actual_num} failed; marked as qa_failed: {', '.join(qa_issue)}")
+                        print(f"⚠️ Vision OCR combined chapter {log_num} failed; marked as qa_failed: {', '.join(qa_issue)}")
                         continue
                     
                     if image_translations:
@@ -28700,7 +28759,7 @@ def main(log_callback=None, stop_callback=None):
                 )
                 if force_stop_active or (graceful_stop_active and image_processing_attempted and not image_translations):
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
-                    print(f"❌ Image-only chapter {actual_num} stopped before completion; not marking as completed")
+                    print(f"❌ Image-only chapter {log_num} stopped before completion; not marking as completed")
                     if force_stop_active:
                         progress_manager.restore_in_progress(actual_num, fname, chapter_obj=c, content_hash=content_hash)
                         _restore_single_pass_glossary_in_progress(out, chapter_num=actual_num, chapter_file=_single_pass_progress_chapter_file(c, fname))
@@ -28777,7 +28836,7 @@ def main(log_callback=None, stop_callback=None):
 
                 # Step 3: Save with correct filename
                 if os.environ.get('TRANSLATION_CANCELLED') == '1' or (check_stop() and os.environ.get('GRACEFUL_STOP') != '1'):
-                    print(f"❌ Image-only chapter {actual_num} stopped before saving; not marking as completed")
+                    print(f"❌ Image-only chapter {log_num} stopped before saving; not marking as completed")
                     progress_manager.restore_in_progress(actual_num, fname, chapter_obj=c, content_hash=content_hash)
                     _restore_single_pass_glossary_in_progress(out, chapter_num=actual_num, chapter_file=_single_pass_progress_chapter_file(c, fname))
                     progress_manager.save()
@@ -28856,7 +28915,7 @@ def main(log_callback=None, stop_callback=None):
                             chapter_obj=c,
                         )
                         progress_manager.save()
-                        print(f"⚠️ Vision image chapter {actual_num} marked as qa_failed: {', '.join(vision_qa_issues)}")
+                        print(f"⚠️ Vision image chapter {log_num} marked as qa_failed: {', '.join(vision_qa_issues)}")
                         continue
                     vision_combined_failure = (
                         image_translations.get("__vision_ocr_combined_failed__")
@@ -28871,7 +28930,7 @@ def main(log_callback=None, stop_callback=None):
                             chapter_obj=c,
                         )
                         progress_manager.save()
-                        print(f"⚠️ Vision OCR combined chapter {actual_num} failed; marked as qa_failed: {', '.join(qa_issue)}")
+                        print(f"⚠️ Vision OCR combined chapter {log_num} failed; marked as qa_failed: {', '.join(qa_issue)}")
                         continue
                     
                     if image_translations:
@@ -28973,7 +29032,7 @@ def main(log_callback=None, stop_callback=None):
                         for g_idx, g_chapter, g_actual_num, g_content_hash in group:
                             chapters_data.append((g_actual_num, g_chapter["body"], g_chapter))
                             if g_idx != idx:  # Don't print for parent
-                                print(f"   → Including chapter {g_actual_num}")
+                                print(f"   → Including chapter {_chapter_log_number(g_chapter, g_actual_num)}")
                         
                         # Merge the content
                         original_body = c["body"]  # Save original for later
@@ -29100,7 +29159,7 @@ def main(log_callback=None, stop_callback=None):
                 progress_manager.save()
             if chunk_progress_enabled and invalidation_reason:
                 print(
-                    f"🧹 Chapter {actual_num}: invalidated cached chunks — "
+                    f"🧹 Chapter {log_num}: invalidated cached chunks — "
                     f"{invalidation_reason}"
                 )
             cached_chunk_results = (
@@ -29110,7 +29169,7 @@ def main(log_callback=None, stop_callback=None):
             )
             if cached_chunk_results:
                 print(
-                    f"♻️ Chapter {actual_num}: resuming "
+                    f"♻️ Chapter {log_num}: resuming "
                     f"{len(cached_chunk_results)}/{len(chunks)} chunk(s) from "
                     "translation_progress.json"
                 )
@@ -29137,7 +29196,7 @@ def main(log_callback=None, stop_callback=None):
                     current_chunk_number += 1
                     print(
                         f"  ♻️ Reused cached chunk {chunk_idx}/{total_chunks} "
-                        f"for Chapter {actual_num}"
+                    f"for Chapter {log_num}"
                     )
                     continue
                 # Apply thread delay before processing chunk (including first, when multiple chunks)
@@ -29145,7 +29204,7 @@ def main(log_callback=None, stop_callback=None):
                     thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
                     if thread_delay > 0:
                         if thread_delay >= 0.1:
-                            print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before processing chunk {chunk_idx}/{total_chunks}")
+                            print(f"🧵 Chapter {log_num}: Delaying {thread_delay}s before processing chunk {chunk_idx}/{total_chunks}")
                         
                         # Interruptible sleep - check stop flag every 0.1s
                         # But respect WAIT_FOR_CHUNKS setting during graceful stop
@@ -29194,7 +29253,7 @@ def main(log_callback=None, stop_callback=None):
                 if stop_requested:
                     if graceful_stop_active and wait_for_chunks and total_chunks > 1:
                         # Don't stop yet - let chunks complete
-                        print(f"⏳ Graceful stop — waiting for remaining chunks ({chunk_idx}/{total_chunks}) of chapter {actual_num}...")
+                        print(f"⏳ Graceful stop — waiting for remaining chunks ({chunk_idx}/{total_chunks}) of chapter {log_num}...")
                     elif graceful_stop_active and total_chunks > 1 and len(translated_chunks) > 0:
                         # Graceful stop without wait_for_chunks, but we have some chunks: save partial
                         print(f"⏳ Graceful stop — saving {len(translated_chunks)} completed chunk(s), skipping remaining...")
@@ -29205,7 +29264,7 @@ def main(log_callback=None, stop_callback=None):
                     else:
                         # No graceful stop - actually stop immediately
                         log_stop_once()
-                        print(f"❌ Translation stopped during chapter {actual_num}, chunk {chunk_idx}")
+                        print(f"❌ Translation stopped during chapter {log_num}, chunk {chunk_idx}")
                         # Hard stop: restore the status that existed before this in-progress run.
                         if merge_info is not None:
                             for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
@@ -29253,7 +29312,7 @@ def main(log_callback=None, stop_callback=None):
                         file_ref = c.get('original_basename', f'{terminology}_{actual_num}')
                     
                     chunk_tokens = chapter_splitter.count_tokens(chunk_html)
-                    print(f"  📄 {terminology} {actual_num} [{display_len:,} chars, {chunk_tokens:,} tokens]")
+                    print(f"  📄 {terminology} {log_num} [{display_len:,} chars, {chunk_tokens:,} tokens]")
                 
                 print(f"  ℹ️ This may take 30-60 seconds. Stop will take effect after completion.")
                 
@@ -29266,7 +29325,7 @@ def main(log_callback=None, stop_callback=None):
 
                             log_callback.__self__.append_chunk_progress(
                                 1, 1, "text", 
-                                f"{terminology} {actual_num}",
+                                f"{terminology} {log_num}",
                                 overall_current=current_chunk_number,
                                 overall_total=total_chunks_needed,
                                 extra_info=f"{display_len:,} chars"
@@ -29276,7 +29335,7 @@ def main(log_callback=None, stop_callback=None):
                                 chunk_idx, 
                                 total_chunks, 
                                 "text", 
-                                f"{terminology} {actual_num}",
+                                f"{terminology} {log_num}",
                                 overall_current=current_chunk_number,
                                 overall_total=total_chunks_needed
                             )
@@ -29287,9 +29346,9 @@ def main(log_callback=None, stop_callback=None):
                         terminology_lower = "section" if is_text_source else "chapter"
 
                         if total_chunks == 1:
-                            log_callback(f"📄 Processing {terminology} {actual_num} ({chapters_completed + 1}/{chapters_to_process}) - {progress_percent:.1f}% complete")
+                            log_callback(f"📄 Processing {terminology} {log_num} ({chapters_completed + 1}/{chapters_to_process}) - {progress_percent:.1f}% complete")
                         else:
-                            log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for {terminology_lower} {actual_num} - {progress_percent:.1f}% complete")
+                            log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for {terminology_lower} {log_num} - {progress_percent:.1f}% complete")
                         
                 # Keep the extracted title markup byte-for-byte as the user
                 # payload; the dedicated title request does not use glossary
@@ -29461,7 +29520,14 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Prepare merge_group_len and merged_chapters if this is a merged request
                 merge_group_len = len(merge_info['group']) if merge_info else None
-                merged_chapters = merge_info['expected_chapters'] if merge_info else None
+                merged_chapters = (
+                    [
+                        _chapter_log_number(g_chapter, g_actual_num)
+                        for _g_idx, g_chapter, g_actual_num, _g_hash
+                        in merge_info['group']
+                    ]
+                    if merge_info else None
+                )
 
                 def _sequential_hard_stop_active():
                     return (
@@ -29536,7 +29602,7 @@ def main(log_callback=None, stop_callback=None):
                     and finish_reason is None
                     and _sequential_hard_stop_active()
                 ):
-                    print(f"❌ Translation stopped during Chapter {actual_num}; restoring previous progress state")
+                    print(f"❌ Translation stopped during Chapter {log_num}; restoring previous progress state")
                     _restore_current_sequential_progress()
                     return
                 if finish_reason in ("length", "max_tokens"):
@@ -29577,7 +29643,7 @@ def main(log_callback=None, stop_callback=None):
                             qa_issue,
                         )
                     progress_manager.save()
-                    print(f"❌ Chunk {chunk_idx}/{total_chunks} hit content filter/prohibited; aborting chapter {actual_num}")
+                    print(f"❌ Chunk {chunk_idx}/{total_chunks} hit content filter/prohibited; aborting chapter {log_num}")
                     chunk_abort = True
                     break
                 
@@ -29620,7 +29686,7 @@ def main(log_callback=None, stop_callback=None):
                                 )
                             progress_manager.save()
                             saved_label = "truncated" if had_partial_content else "original source"
-                            print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — saved {saved_label}")
+                            print(f"⚠️ Chapter {log_num} stopped (graceful stop) — saved {saved_label}")
                         else:
                             progress_manager.update(
                                 idx, actual_num, content_hash, fname,
@@ -29635,7 +29701,7 @@ def main(log_callback=None, stop_callback=None):
                                     ["PARTIAL"],
                                 )
                             progress_manager.save()
-                            print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
+                            print(f"⚠️ Chapter {log_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
                     elif chapter_truncated:
                         progress_manager.update(
                             idx, actual_num, content_hash, fname,
@@ -29650,7 +29716,7 @@ def main(log_callback=None, stop_callback=None):
                                 ["TRUNCATED"],
                             )
                         progress_manager.save()
-                        print(f"⚠️ Chapter {actual_num} stopped (graceful stop) - preserved TRUNCATED status")
+                        print(f"⚠️ Chapter {log_num} stopped (graceful stop) - preserved TRUNCATED status")
                     else:
                         progress_manager.update(idx, actual_num, content_hash, fname, status="pending", chapter_obj=c)
                         if chunk_progress_enabled:
@@ -29660,7 +29726,7 @@ def main(log_callback=None, stop_callback=None):
                                 "pending",
                             )
                         progress_manager.save()
-                        print(f"⏸️ Chapter {actual_num} skipped (graceful stop)")
+                        print(f"⏸️ Chapter {log_num} skipped (graceful stop)")
                     chunk_abort = True
                     break
 
@@ -29681,7 +29747,7 @@ def main(log_callback=None, stop_callback=None):
                                 chunk_idx,
                                 qa_issue,
                             )
-                        print(f"❌ Chunk {chunk_idx}/{total_chunks} timed out; aborting chapter {actual_num}")
+                        print(f"❌ Chunk {chunk_idx}/{total_chunks} timed out; aborting chapter {log_num}")
                         chunk_abort = True
                     else:
                         qa_issue = ["API_ERROR"]
@@ -29692,7 +29758,7 @@ def main(log_callback=None, stop_callback=None):
                                 chunk_idx,
                                 "pending",
                             )
-                        print(f"❌ Translation failed for chapter {actual_num} - marked as failed, aborting chapter")
+                        print(f"❌ Translation failed for chapter {log_num} - marked as failed, aborting chapter")
                         chunk_abort = True
                     if _should_save_failure_response(
                         result,
@@ -29778,7 +29844,7 @@ def main(log_callback=None, stop_callback=None):
                                 # Check if we've hit the retry limit
                                 if char_ratio_retry_count >= char_ratio_retry_limit:
                                     # All retries exhausted - mark as QA_failed with TRUNCATED
-                                    print(f"    ❌ All char-ratio retries ({char_ratio_retry_limit}) exhausted for Chapter {actual_num} Chunk {chunk_idx}/{total_chunks} - marking as QA_failed")
+                                    print(f"    ❌ All char-ratio retries ({char_ratio_retry_limit}) exhausted for Chapter {log_num} Chunk {chunk_idx}/{total_chunks} - marking as QA_failed")
                                     fname = FileUtilities.create_chapter_filename(c, actual_num)
                                     save_truncated_result = _should_save_truncated_response(config)
                                     if save_truncated_result:
@@ -29815,14 +29881,14 @@ def main(log_callback=None, stop_callback=None):
                                 # Log truncation detection on first attempt
                                 if char_ratio_retry_count == 0:
                                     print(
-                                        f"    ⚠️ TRUNCATION DETECTED (char comparison) Chapter {actual_num} Chunk {chunk_idx}/{total_chunks}: "
+                                        f"    ⚠️ TRUNCATION DETECTED (char comparison) Chapter {log_num} Chunk {chunk_idx}/{total_chunks}: "
                                         f"Input={input_char_count:,} chars, Output={output_char_count:,} chars ({char_ratio:.1%} ratio, threshold={char_ratio_threshold:.0%}) "
                                         f"- {char_ratio_retry_limit} retry attempt(s) available"
                                     )
                                 
                                 char_ratio_retry_count += 1
                                 c['__char_ratio_retry_count'] = char_ratio_retry_count
-                                print(f"    🔄 Character ratio retry attempt {char_ratio_retry_count}/{char_ratio_retry_limit} [Chapter {actual_num} Chunk {chunk_idx}/{total_chunks}]")
+                                print(f"    🔄 Character ratio retry attempt {char_ratio_retry_count}/{char_ratio_retry_limit} [Chapter {log_num} Chunk {chunk_idx}/{total_chunks}]")
                                 
                                 # Set flag to prevent nested retries at BOTH levels
                                 c['__in_truncation_retry'] = True
@@ -29851,7 +29917,7 @@ def main(log_callback=None, stop_callback=None):
                                     and finish_reason_retry is None
                                     and _sequential_hard_stop_active()
                                 ):
-                                    print(f"❌ Translation stopped during Chapter {actual_num}; restoring previous progress state")
+                                    print(f"❌ Translation stopped during Chapter {log_num}; restoring previous progress state")
                                     _restore_current_sequential_progress()
                                     return
                                 
@@ -30096,7 +30162,7 @@ def main(log_callback=None, stop_callback=None):
 
             # During graceful stop, skip this check to save the completed API response
             if os.environ.get('GRACEFUL_STOP') != '1' and check_stop():
-                print(f"❌ Translation stopped before saving chapter {actual_num}")
+                print(f"❌ Translation stopped before saving chapter {log_num}")
                 # Hard stop: restore the status that existed before this in-progress run.
                 if merge_info is not None:
                     for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
@@ -30117,7 +30183,7 @@ def main(log_callback=None, stop_callback=None):
             if len(translated_chunks) < expected_total and len(translated_chunks) > 0:
                 graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                 if graceful_stop_active:
-                    print(f"⚠️ Chapter {actual_num}: partial translation ({len(translated_chunks)}/{expected_total} chunks) due to graceful stop")
+                    print(f"⚠️ Chapter {log_num}: partial translation ({len(translated_chunks)}/{expected_total} chunks) due to graceful stop")
                     is_partial_result = True
 
             if len(translated_chunks) > 1:
@@ -30239,7 +30305,7 @@ def main(log_callback=None, stop_callback=None):
                                 f.write(failure_output)
                         except Exception:
                             pass
-                    print(f"⚠️ {batch_label} batch {actual_num}: {qa_label} output rejected")
+                    print(f"⚠️ {batch_label} batch {log_num}: {qa_label} output rejected")
                     progress_manager.update(
                         idx,
                         actual_num,
@@ -30262,7 +30328,7 @@ def main(log_callback=None, stop_callback=None):
                     )
                     if not retry_failure:
                         print(
-                            f"❌ {batch_label} batch {actual_num}: structured "
+                            f"❌ {batch_label} batch {log_num}: structured "
                             f"JSON validation failed: {issue} — {detail}"
                         )
                     if _preserve_original_text_on_failure_enabled(config):
@@ -30290,7 +30356,7 @@ def main(log_callback=None, stop_callback=None):
                 progress_manager.save()
                 chapters_completed += 1
                 _materialize_completed_subtitle_bundle_file(c, out)
-                print(f"💾 Saved {batch_label} JSON batch {actual_num}: {fname} ({len(cleaned)} chars)")
+                print(f"💾 Saved {batch_label} JSON batch {log_num}: {fname} ({len(cleaned)} chars)")
                 continue
 
             cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=config.REMOVE_AI_ARTIFACTS)
@@ -30338,7 +30404,7 @@ def main(log_callback=None, stop_callback=None):
 
             # If the cleaned translation is empty/whitespace, treat as failure and skip file write
             if not cleaned or not str(cleaned).strip():
-                print(f"❌ Translation empty for chapter {actual_num} — skipping file write")
+                print(f"❌ Translation empty for chapter {log_num} — skipping file write")
                 chapter_key = progress_manager._get_chapter_key(actual_num, FileUtilities.create_chapter_filename(c, actual_num), c, content_hash)
                 existing = progress_manager.prog.get("chapters", {}).get(chapter_key, {})
                 # If already qa_failed (e.g., prohibited content), keep that; otherwise mark qa_failed with EMPTY_OUTPUT
@@ -30589,7 +30655,7 @@ def main(log_callback=None, stop_callback=None):
                         # Verify file was written successfully
                         if os.path.exists(split_output_path):
                             saved_files.append((g_idx, g_chapter, g_actual_num, g_content_hash, split_fname))
-                            print(f"      💾 Saved Chapter {g_actual_num}: {split_fname} ({len(section_content)} chars)")
+                            print(f"      💾 Saved Chapter {_chapter_log_number(g_chapter, g_actual_num)}: {split_fname} ({len(section_content)} chars)")
                         else:
                             print(f"      ⚠️ ERROR: Failed to write file {split_fname} - file does not exist after write")
                     
@@ -30633,7 +30699,7 @@ def main(log_callback=None, stop_callback=None):
                     progress_manager.save()
                     continue
                 
-                print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {parent_fname} ({len(cleaned_to_save)} chars)")
+                print(f"   💾 Saved merged content to Chapter {_chapter_log_number(parent_chapter, parent_actual_num)}: {parent_fname} ({len(cleaned_to_save)} chars)")
                 
                 if not was_truncated and not (is_text_file and not is_pdf_file):
                     _write_html_sdlxliff_sidecar(out, parent_fname, parent_chapter, merged_content, cleaned_to_save)
@@ -30746,10 +30812,10 @@ def main(log_callback=None, stop_callback=None):
                     else:
                         fname_out = fname
                         write_utf8_html_file(os.path.join(out, fname), failure_output)
-                    print(f"💾 Saved Chapter {actual_num} ({qa_label}): {fname_out} ({len(failure_output)} chars)")
+                    print(f"💾 Saved Chapter {log_num} ({qa_label}): {fname_out} ({len(failure_output)} chars)")
                 else:
                     fname_out = fname if not (is_text_file and not is_pdf_file) else fname.replace('.html', '.txt')
-                    print(f"⏭️ Chapter {actual_num} not saved ({qa_label}) — failure-output saving is OFF")
+                    print(f"⏭️ Chapter {log_num} not saved ({qa_label}) — failure-output saving is OFF")
 
                 progress_manager.update(
                     idx, actual_num, content_hash,
@@ -30757,7 +30823,7 @@ def main(log_callback=None, stop_callback=None):
                     status="qa_failed", chapter_obj=c, qa_issues_found=qa_issue
                 )
                 progress_manager.save()
-                print(f"⚠️ Chapter {actual_num} marked as qa_failed: {qa_label}")
+                print(f"⚠️ Chapter {log_num} marked as qa_failed: {qa_label}")
                 continue
 
             if c.get("_title_tag_only_translation"):
@@ -30785,7 +30851,7 @@ def main(log_callback=None, stop_callback=None):
                     )
                     progress_manager.save()
                     print(
-                        f"⚠️ Chapter {actual_num} returned no usable "
+                        f"⚠️ Chapter {log_num} returned no usable "
                         "translated <title>; original XHTML preserved"
                     )
                     continue
@@ -30809,27 +30875,27 @@ def main(log_callback=None, stop_callback=None):
                     progress_manager.save()  # Save current in_progress state
                     continue
                 
-                print(f"💾 Saved text file: {fname_txt} (Chapter {actual_num})")
+                print(f"💾 Saved text file: {fname_txt} (Chapter {log_num})")
                 
                 final_title = c['title'] or make_safe_filename(c['title'], actual_num)
                 # Don't print individual "Processed" messages - these are redundant with the main progress display
                 if os.getenv('DEBUG_CHAPTER_SAVES', '0') == '1':
-                    print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
+                    print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {log_num}: {final_title}")
                 
                 # Determine status based on comprehensive failure detection
                 qa_issues = None
                 if is_qa_failed_response(cleaned):
                     chapter_status = "qa_failed"
                     failure_reason = get_failure_reason(cleaned)
-                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
+                    print(f"⚠️ Chapter {log_num} marked as qa_failed: {failure_reason}")
                 elif finish_reason in ["length", "max_tokens", "max_length", "stop_sequence_limit", "truncated", "incomplete"]:
                     chapter_status = "qa_failed"
                     qa_issues = ["TRUNCATED"]
-                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
+                    print(f"⚠️ Chapter {log_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
                 elif is_partial_result:
                     chapter_status = "qa_failed"
                     qa_issues = ["PARTIAL"]
-                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: partial translation (graceful stop)")
+                    print(f"⚠️ Chapter {log_num} marked as qa_failed: partial translation (graceful stop)")
                 else:
                     chapter_status = "completed"
 
@@ -30851,22 +30917,22 @@ def main(log_callback=None, stop_callback=None):
                 final_title = c['title'] or make_safe_filename(c['title'], actual_num)
                 # Don't print individual "Processed" messages - these are redundant with the main progress display
                 if os.getenv('DEBUG_CHAPTER_SAVES', '0') == '1':
-                    print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
+                    print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {log_num}: {final_title}")
                 
                 # Determine status based on comprehensive failure detection
                 qa_issues = None
                 if is_qa_failed_response(cleaned):
                     chapter_status = "qa_failed"
                     failure_reason = get_failure_reason(cleaned)
-                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
+                    print(f"⚠️ Chapter {log_num} marked as qa_failed: {failure_reason}")
                 elif finish_reason in ["length", "max_tokens", "max_length", "stop_sequence_limit", "truncated", "incomplete"]:
                     chapter_status = "qa_failed"
                     qa_issues = ["TRUNCATED"]
-                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
+                    print(f"⚠️ Chapter {log_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
                 elif is_partial_result:
                     chapter_status = "qa_failed"
                     qa_issues = ["PARTIAL"]
-                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: partial translation (graceful stop)")
+                    print(f"⚠️ Chapter {log_num} marked as qa_failed: partial translation (graceful stop)")
                 else:
                     chapter_status = "completed"
 
@@ -30887,15 +30953,15 @@ def main(log_callback=None, stop_callback=None):
             # controls whether the remaining chunks of this chapter may run;
             # it must not allow the next chapter or a rolling-summary API call.
             if is_partial_result:
-                print(f"\n✅ Partial chapter {actual_num} saved. Stopping as requested (graceful stop).")
+                print(f"\n✅ Partial chapter {log_num} saved. Stopping as requested (graceful stop).")
                 log_stop_once()
                 return
             
             if graceful_stop_active:
                 if wait_for_chunks:
-                    print(f"\n✅ Chapter {actual_num} completed. Stopping as requested (wait for chunks).")
+                    print(f"\n✅ Chapter {log_num} completed. Stopping as requested (wait for chunks).")
                 else:
-                    print(f"\n✅ Chapter {actual_num} completed. Stopping before the next API call.")
+                    print(f"\n✅ Chapter {log_num} completed. Stopping before the next API call.")
                 log_stop_once()
                 return
             
