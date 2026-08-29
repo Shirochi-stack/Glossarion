@@ -7775,13 +7775,22 @@ def _create_prompt_management_section(self, parent):
     title_tag_row_h = QHBoxLayout(title_tag_row)
     title_tag_row_h.setContentsMargins(0, 0, 0, 0)
     title_tag_row_h.setSpacing(10)
+    skip_title_tag_cb.setSizePolicy(
+        QSizePolicy.Policy.Fixed,
+        QSizePolicy.Policy.Fixed,
+    )
     title_tag_row_h.addWidget(skip_title_tag_cb)
 
-    configure_title_prompt_btn = QPushButton(
-        "Configure Image-Only Title Prompt"
-    )
+    configure_title_prompt_btn = QPushButton("Configure Title Prompt")
     configure_title_prompt_btn.setObjectName(
         "configureImageOnlyTitlePromptButton"
+    )
+    configure_title_prompt_btn.setSizePolicy(
+        QSizePolicy.Policy.Fixed,
+        QSizePolicy.Policy.Fixed,
+    )
+    configure_title_prompt_btn.setFixedWidth(
+        configure_title_prompt_btn.sizeHint().width()
     )
     configure_title_prompt_btn.setToolTip(
         "Configure the dedicated system prompt used only for a non-empty "
@@ -7791,6 +7800,7 @@ def _create_prompt_management_section(self, parent):
         lambda: self.configure_image_only_title_tag_prompt()
     )
     title_tag_row_h.addWidget(configure_title_prompt_btn)
+    title_tag_row_h.addStretch()
     section_v.addWidget(title_tag_row)
     
     def _on_glossary_title_toggle(checked):

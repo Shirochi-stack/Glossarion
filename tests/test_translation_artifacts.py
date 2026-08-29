@@ -157,6 +157,10 @@ def test_translation_config_loads_dedicated_title_prompt(monkeypatch):
         == DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
     )
 
+    assert DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT.startswith(
+        "Translate only the text inside the provided <title> tag"
+    )
+
 
 def test_sequential_retry_transport_does_not_augment_title_messages(
     tmp_path,
@@ -417,7 +421,7 @@ def test_other_settings_places_new_toggle_after_image_title_setting():
     )
     title_tag_toggle = source.index('"Skip title tag translation"')
     configure_button = source.index(
-        '"Configure Image-Only Title Prompt"',
+        '"Configure Title Prompt"',
         title_tag_toggle,
     )
 
@@ -430,9 +434,13 @@ def test_other_settings_places_new_toggle_after_image_title_setting():
         "section_v.addWidget(title_tag_row)",
         title_row_start,
     )
-    assert "title_tag_row_h.addStretch()" not in source[
-        title_row_start:title_row_end
-    ]
+    title_row_source = source[title_row_start:title_row_end]
+    button_add = title_row_source.index(
+        "title_tag_row_h.addWidget(configure_title_prompt_btn)"
+    )
+    trailing_stretch = title_row_source.index("title_tag_row_h.addStretch()")
+    assert trailing_stretch > button_add
+    assert "configure_title_prompt_btn.setFixedWidth(" in title_row_source
     assert "Use title (Legacy)" not in source
 
 

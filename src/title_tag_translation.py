@@ -11,11 +11,10 @@ from bs4 import BeautifulSoup
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT = (
-    "Translate only the human-readable text inside the provided HTML/XHTML "
-    "<title> tag into {target_lang}. Preserve the <title> tag and all "
-    "attributes. Return exactly one translated <title>...</title> tag and "
-    "nothing else. Do not add explanations, Markdown fences, or requests for "
-    "more source text."
+    "Translate only the text inside the provided <title> tag into {target_lang}. "
+    "Preserve the <title> tag and all attributes. Return exactly "
+    "one translated <title>...</title> tag and nothing else. Do not add "
+    "explanations, Markdown fences, or requests for more source text."
 )
 _TITLE_TAG_RE = re.compile(
     r"(<title\b[^>]*>)(.*?)(</title\s*>)",
