@@ -9817,12 +9817,12 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         failed_set = set(failed_clean)
         merged_set = set(merged_clean)
         requested_in_progress_set = set(_unique_int_list(in_progress)) if in_progress is not None else set()
-        requested_output_stems = {}
+        requested_stem_owners = {}
         for req_idx in sorted(set(completed_clean) | set(failed_clean) | set(merged_clean) | requested_in_progress_set):
             req_file = _glossary_chapter_output_file(req_idx, context=context)
             req_stem = os.path.splitext(os.path.basename(str(req_file or "").lower()))[0]
             if req_stem:
-                requested_output_stems[int(req_idx)] = req_stem
+                requested_stem_owners.setdefault(req_stem, set()).add(int(req_idx))
 
         # Failed chapters must not also be persisted as completed. The glossary
         # extractor may keep partial entries, but the chapter itself still needs
@@ -9873,7 +9873,11 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                                 if existing_file:
                                     break
                             existing_stem = os.path.splitext(os.path.basename(str(existing_file or "").lower()))[0]
-                            if any(req_idx != int(existing_idx) and req_stem == existing_stem for req_idx, req_stem in requested_output_stems.items()):
+                            stem_owners = requested_stem_owners.get(existing_stem, set())
+                            if stem_owners and (
+                                len(stem_owners) > 1
+                                or int(existing_idx) not in stem_owners
+                            ):
                                 continue
                             existing_chapters_by_idx[int(existing_idx)] = existing_info
                             existing_status = str(existing_info.get("status", "")).lower()
@@ -10177,8 +10181,9 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             for idx in completed_clean
             if chapter_status_overrides.get(idx) in _GLOSSARY_STRUCTURAL_SKIP_STATUSES
         )
+        skipped_set = set(skipped_clean)
         persisted_completed = [
-            idx for idx in completed_clean if idx not in set(skipped_clean)
+            idx for idx in completed_clean if idx not in skipped_set
         ]
         progress_data = {
             "book_title_present": bool(context.book_title_present) if isinstance(context, GlossaryProgressContext) else bool(BOOK_TITLE_PRESENT),

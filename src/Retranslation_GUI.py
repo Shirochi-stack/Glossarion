@@ -19174,7 +19174,7 @@ class RetranslationMixin:
         except Exception as e:
             print(f"⚠️ Could not flash PM button: {e}")
 
-    def _create_retranslation_shell_dialog(self, title="Progress Manager", width_ratio=0.42, height_ratio=0.4):
+    def _create_retranslation_shell_dialog(self, title="Progress Manager", width_ratio=0.44, height_ratio=0.4):
         from PySide6.QtWidgets import QApplication
         if not QApplication.instance():
             QApplication(sys.argv)
@@ -21886,31 +21886,62 @@ class RetranslationMixin:
                 return result - comp - fail - merg - _gp_skipped_set(_d)
 
             def _gp_status_cache(_d):
-                comp, fail, merg = _gp_sets(_d)
-                skipped = _gp_skipped_set(_d)
-                in_prog = _gp_in_progress_set(_d, _precomputed_sets=(comp, fail, merg))
-                issues = _gp_qa_issue_map(_d)
+                if not isinstance(_d, dict):
+                    _d = {}
+                comp = set()
+                skipped = set()
+                fail = set()
+                merg = set()
+                in_prog = set()
                 qa_failed = set()
                 skipped_variants = {}
-                chapters = _d.get('chapters', {}) if isinstance(_d, dict) else {}
+                entries_by_ci = {}
+                represented = set()
+                chapters = _d.get('chapters', {})
                 if isinstance(chapters, dict):
                     for key, info in chapters.items():
                         if not isinstance(info, dict):
                             continue
+                        ci = _gp_index_for_entry(info, key, _d)
+                        if ci is None:
+                            continue
+                        represented.add(ci)
+                        entries_by_ci.setdefault(ci, []).append(info)
                         entry_status = str(info.get('status', '')).lower()
-                        if entry_status in (
+                        if entry_status in ('failed', 'qa_failed', 'error'):
+                            fail.add(ci)
+                        elif entry_status == 'merged':
+                            merg.add(ci)
+                        elif entry_status == 'completed':
+                            comp.add(ci)
+                        elif entry_status == 'in_progress':
+                            in_prog.add(ci)
+                        elif entry_status in (
                             'skipped_empty',
                             'skipped_image_only',
                             'skipped_title_header_only',
                         ):
-                            ci = _gp_index_for_entry(info, key, _d)
-                            if ci is not None:
-                                skipped_variants[ci] = entry_status
-                        if entry_status != 'qa_failed':
-                            continue
-                        ci = _gp_index_for_entry(info, key, _d)
-                        if ci is not None:
+                            skipped.add(ci)
+                            skipped_variants[ci] = entry_status
+                        if entry_status == 'qa_failed':
                             qa_failed.add(ci)
+
+                def _add_unrepresented(values, target):
+                    for value in _gp_int_list(values):
+                        ci = _gp_index_for_progress_value(value, _d)
+                        if ci is not None and ci not in represented:
+                            target.add(ci)
+
+                _add_unrepresented(_d.get('completed', []), comp)
+                _add_unrepresented(_d.get('skipped', []), skipped)
+                _add_unrepresented(_d.get('failed', []), fail)
+                _add_unrepresented(_d.get('merged_indices', []), merg)
+                _add_unrepresented(_d.get('in_progress', []), in_prog)
+                comp |= _gp_auto_completed_indices()
+                comp -= fail
+                skipped -= fail
+                in_prog -= comp | skipped | fail | merg
+                issues = _gp_qa_issue_map(_d)
                 return {
                     'completed': comp,
                     'skipped': skipped,
@@ -21920,6 +21951,7 @@ class RetranslationMixin:
                     'issues': issues,
                     'qa_failed': qa_failed,
                     'skipped_variants': skipped_variants,
+                    'entries_by_ci': entries_by_ci,
                 }
 
             def _gp_status_for(ci, _d, cache=None):
@@ -21972,9 +22004,11 @@ class RetranslationMixin:
             def _gp_display_for(ci, fname, _d, cache=None):
                 opf_pos = (panel_state.get('spine_index_map') or {}).get(ci, ci + 1)
                 ch_num = _gp_display_chapter_num(ci, fname)
+                cache = cache or _gp_status_cache(_d)
                 status, issues = _gp_status_for(ci, _d, cache)
-                entry = _gp_entry_for(ci, _d, status)
-                model_name = _gp_model_for(ci, _d, status, entry)
+                cached_entries = cache.get('entries_by_ci', {}).get(ci, [])
+                entry = _select_progress_entry_for_display(cached_entries, status)
+                model_name = _progress_entry_model_for_display(entry) or '(model unknown)'
                 icons = {
                     'completed': '\u2705',
                     'skipped': '⏭️',
@@ -22315,9 +22349,12 @@ class RetranslationMixin:
             p_layout.addWidget(missing_progress_label)
             
             # Stats row (clickable)
-            _comp_set_init, _fail_set_init, _merg_set_init = _gp_sets(gp_data)
-            _skip_set_init = _gp_skipped_set(gp_data)
-            _in_prog_set_init = _gp_in_progress_set(gp_data, _precomputed_sets=(_comp_set_init, _fail_set_init, _merg_set_init))
+            _status_cache_init = _gp_status_cache(gp_data)
+            _comp_set_init = _status_cache_init['completed']
+            _skip_set_init = _status_cache_init['skipped']
+            _fail_set_init = _status_cache_init['failed']
+            _merg_set_init = _status_cache_init['merged']
+            _in_prog_set_init = _status_cache_init['in_progress']
             # Completed count excludes chapters that are also merged
             n_completed = len(
                 _comp_set_init - _skip_set_init - _merg_set_init - _fail_set_init
@@ -22564,9 +22601,12 @@ class RetranslationMixin:
             _populate_gp_listbox(gp_data)
 
             def _gp_stats_for_dict(_d):
-                _comp2, _fail2, _merg2 = _gp_sets(_d)
-                _skip2 = _gp_skipped_set(_d)
-                _prog2 = _gp_in_progress_set(_d, _precomputed_sets=(_comp2, _fail2, _merg2))
+                _cache2 = _gp_status_cache(_d)
+                _comp2 = _cache2['completed']
+                _skip2 = _cache2['skipped']
+                _fail2 = _cache2['failed']
+                _merg2 = _cache2['merged']
+                _prog2 = _cache2['in_progress']
                 _total = panel_state['total']
                 _ref_counts2 = _gp_refinement_status_counts(_d)
                 return _combine_glossary_progress_legend_stats(
@@ -24141,7 +24181,12 @@ class RetranslationMixin:
                                 panel_state['spine_index_map'] = new_spine_idx
                                 panel_state['total'] = new_total
                             elif new_total == 0:
-                                _all_idx = result['comp'] | result['fail'] | result['merg']
+                                _all_idx = (
+                                    result['comp']
+                                    | result.get('skip', set())
+                                    | result['fail']
+                                    | result['merg']
+                                )
                                 panel_state['total'] = (max(_all_idx, default=0) + 1) if _all_idx else 1
                         _rebuild_reverse_lookups()
                         _rebuild_listbox(_d)
@@ -24295,10 +24340,13 @@ class RetranslationMixin:
                             if _toggle_changed:
                                 _spine_result = _read_spine_map(fp, _cur_ts)
 
-                            _comp, _fail, _merg = _gp_sets(_d)
-                            _prog = _gp_in_progress_set(_d, _precomputed_sets=(_comp, _fail, _merg))
-                            _ref_counts = _gp_refinement_status_counts(_d)
                             _cache = _gp_status_cache(_d)
+                            _comp = _cache['completed']
+                            _skip = _cache['skipped']
+                            _fail = _cache['failed']
+                            _merg = _cache['merged']
+                            _prog = _cache['in_progress']
+                            _ref_counts = _gp_refinement_status_counts(_d)
 
                             _item_updates = []
                             for ci in range(_snap_total):
@@ -24310,11 +24358,12 @@ class RetranslationMixin:
                                 if _snap_full_rebuild or _snap_fingerprints.get(ci) != fingerprint:
                                     _item_updates.append((ci, new_status, new_color, display_text, _issues))
 
-                            _nr = max(0, _snap_total - len(_comp | _fail | _merg | _prog))
+                            _nr = max(0, _snap_total - len(_comp | _skip | _fail | _merg | _prog))
                             _legend_stats = _combine_glossary_progress_legend_stats(
                                 {
                                     'total': _snap_total,
-                                    'completed': len(_comp - _merg),
+                                    'completed': len(_comp - _skip - _merg),
+                                    'skipped': len(_skip),
                                     'in_progress': len(_prog),
                                     'failed': len(_fail),
                                     'merged': len(_merg),
@@ -24330,7 +24379,7 @@ class RetranslationMixin:
                                 'toggle_changed': _toggle_changed,
                                 'spine_result': _spine_result,
                                 'cur_ts': _cur_ts,
-                                'comp': _comp, 'fail': _fail, 'merg': _merg, 'prog': _prog,
+                                'comp': _comp, 'skip': _skip, 'fail': _fail, 'merg': _merg, 'prog': _prog,
                                 'legend_stats': _legend_stats,
                                 'nr': _nr, 'total': _snap_total,
                                 'item_updates': _item_updates,

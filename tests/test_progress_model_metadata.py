@@ -320,6 +320,9 @@ def test_glossary_structural_skip_ui_and_default_toggle_are_wired():
     assert 'lbl_gp_skipped = QLabel(f"⏭️ Skipped:' in progress_gui
     assert "lbl_gp_skipped.setVisible(True)" in progress_gui
     assert "width_ratio=0.37" in progress_gui
+    assert "'entries_by_ci': entries_by_ci" in progress_gui
+    assert "cached_entries = cache.get('entries_by_ci', {}).get(ci, [])" in progress_gui
+    assert "'skipped': len(_skip)" in progress_gui
     assert "if status in skipped_labels:" in progress_gui
 
 
