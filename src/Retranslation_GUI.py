@@ -1508,6 +1508,7 @@ def _combine_glossary_progress_legend_stats(
         for key in (
             'total',
             'completed',
+            'skipped',
             'in_progress',
             'failed',
             'merged',
@@ -1573,7 +1574,6 @@ def _select_progress_entry_for_display(entries, display_status=None):
         'completed',
         'completed_empty',
         'completed_image_only',
-        'completed_title_header_only',
     )
 
     def _score(entry):
@@ -19174,7 +19174,7 @@ class RetranslationMixin:
         except Exception as e:
             print(f"⚠️ Could not flash PM button: {e}")
 
-    def _create_retranslation_shell_dialog(self, title="Progress Manager", width_ratio=0.40, height_ratio=0.4):
+    def _create_retranslation_shell_dialog(self, title="Progress Manager", width_ratio=0.42, height_ratio=0.4):
         from PySide6.QtWidgets import QApplication
         if not QApplication.instance():
             QApplication(sys.argv)
@@ -21577,6 +21577,7 @@ class RetranslationMixin:
             _pump_loading_frame()
 
             completed_indices = _gp_int_list(gp_data.get('completed', []))
+            skipped_indices = _gp_int_list(gp_data.get('skipped', []))
             failed_indices = _gp_int_list(gp_data.get('failed', []))
             merged_indices = _gp_int_list(gp_data.get('merged_indices', []))
             book_title = gp_data.get('book_title', '')
@@ -21813,12 +21814,7 @@ class RetranslationMixin:
                             fail.add(ci)
                         elif status == 'merged':
                             merg.add(ci)
-                        elif status in (
-                            'completed',
-                            'completed_empty',
-                            'completed_image_only',
-                            'completed_title_header_only',
-                        ):
+                        elif status == 'completed':
                             comp.add(ci)
 
                 # A progress file can briefly contain a mixture of structured
@@ -21833,6 +21829,32 @@ class RetranslationMixin:
                 # Failed should win over completed in the UI.
                 comp -= fail
                 return comp, fail, merg
+
+            def _gp_skipped_set(_d):
+                if not isinstance(_d, dict):
+                    _d = {}
+                skipped = set()
+                represented = set()
+                chapters = _d.get('chapters', {})
+                if isinstance(chapters, dict):
+                    for key, info in chapters.items():
+                        if not isinstance(info, dict):
+                            continue
+                        ci = _gp_index_for_entry(info, key, _d)
+                        if ci is None:
+                            continue
+                        represented.add(ci)
+                        if str(info.get('status', '')).lower() in (
+                            'skipped_empty',
+                            'skipped_image_only',
+                            'skipped_title_header_only',
+                        ):
+                            skipped.add(ci)
+                for value in _gp_int_list(_d.get('skipped', [])):
+                    ci = _gp_index_for_progress_value(value, _d)
+                    if ci is not None and ci not in represented:
+                        skipped.add(ci)
+                return skipped
 
             def _gp_in_progress_set(_d, _precomputed_sets=None):
                 if not isinstance(_d, dict):
@@ -21861,14 +21883,15 @@ class RetranslationMixin:
                     comp, fail, merg = _precomputed_sets
                 else:
                     comp, fail, merg = _gp_sets(_d)
-                return result - comp - fail - merg
+                return result - comp - fail - merg - _gp_skipped_set(_d)
 
             def _gp_status_cache(_d):
                 comp, fail, merg = _gp_sets(_d)
+                skipped = _gp_skipped_set(_d)
                 in_prog = _gp_in_progress_set(_d, _precomputed_sets=(comp, fail, merg))
                 issues = _gp_qa_issue_map(_d)
                 qa_failed = set()
-                completed_variants = {}
+                skipped_variants = {}
                 chapters = _d.get('chapters', {}) if isinstance(_d, dict) else {}
                 if isinstance(chapters, dict):
                     for key, info in chapters.items():
@@ -21876,13 +21899,13 @@ class RetranslationMixin:
                             continue
                         entry_status = str(info.get('status', '')).lower()
                         if entry_status in (
-                            'completed_empty',
-                            'completed_image_only',
-                            'completed_title_header_only',
+                            'skipped_empty',
+                            'skipped_image_only',
+                            'skipped_title_header_only',
                         ):
                             ci = _gp_index_for_entry(info, key, _d)
                             if ci is not None:
-                                completed_variants[ci] = entry_status
+                                skipped_variants[ci] = entry_status
                         if entry_status != 'qa_failed':
                             continue
                         ci = _gp_index_for_entry(info, key, _d)
@@ -21890,12 +21913,13 @@ class RetranslationMixin:
                             qa_failed.add(ci)
                 return {
                     'completed': comp,
+                    'skipped': skipped,
                     'failed': fail,
                     'merged': merg,
                     'in_progress': in_prog,
                     'issues': issues,
                     'qa_failed': qa_failed,
-                    'completed_variants': completed_variants,
+                    'skipped_variants': skipped_variants,
                 }
 
             def _gp_status_for(ci, _d, cache=None):
@@ -21911,8 +21935,10 @@ class RetranslationMixin:
                     return ('qa_failed' if issues.get(ci) or ci in cache['qa_failed'] else 'failed'), issues.get(ci, [])
                 if ci in merg:
                     return 'merged', []
-                if ci in cache['completed_variants']:
-                    return cache['completed_variants'][ci], []
+                if ci in cache['skipped_variants']:
+                    return cache['skipped_variants'][ci], []
+                if ci in cache['skipped']:
+                    return 'skipped', []
                 if ci in comp:
                     return 'completed', []
                 if ci in in_prog:
@@ -21951,9 +21977,10 @@ class RetranslationMixin:
                 model_name = _gp_model_for(ci, _d, status, entry)
                 icons = {
                     'completed': '\u2705',
-                    'completed_empty': '📄',
-                    'completed_image_only': '📸',
-                    'completed_title_header_only': '🏷️',
+                    'skipped': '⏭️',
+                    'skipped_empty': '📄',
+                    'skipped_image_only': '📸',
+                    'skipped_title_header_only': '🏷️',
                     'failed': '\u274c',
                     'qa_failed': '\u274c',
                     'merged': '\U0001f517',
@@ -21962,9 +21989,10 @@ class RetranslationMixin:
                 }
                 icon = icons.get(status) or '\u2b1c'
                 skipped_labels = {
-                    'completed_empty': 'Empty (Skipped)',
-                    'completed_image_only': 'Image Only (Skipped)',
-                    'completed_title_header_only': 'Title/Header Only (Skipped)',
+                    'skipped': 'Skipped',
+                    'skipped_empty': 'Empty (Skipped)',
+                    'skipped_image_only': 'Image Only (Skipped)',
+                    'skipped_title_header_only': 'Title/Header Only (Skipped)',
                 }
                 status_label = skipped_labels.get(
                     status,
@@ -22038,13 +22066,15 @@ class RetranslationMixin:
                 return counts
 
             def _gp_color_for(status):
-                if status in (
-                    'completed',
-                    'completed_empty',
-                    'completed_image_only',
-                    'completed_title_header_only',
-                ):
+                if status == 'completed':
                     return '#27ae60'
+                if status in (
+                    'skipped',
+                    'skipped_empty',
+                    'skipped_image_only',
+                    'skipped_title_header_only',
+                ):
+                    return '#94a3b8'
                 if status == 'merged':
                     return '#17a2b8'
                 if status == 'in_progress':
@@ -22187,7 +22217,7 @@ class RetranslationMixin:
                         _total_init = max((int(k) for k in chapter_filenames.keys() if str(k).isdigit()), default=-1) + 1
                 if _total_init <= 0:
                     _idx_values = []
-                    for _values in (completed_indices, failed_indices, merged_indices):
+                    for _values in (completed_indices, skipped_indices, failed_indices, merged_indices):
                         _idx_values.extend(_gp_int_list(_values))
                     _total_init = (max(_idx_values) + 1) if _idx_values else 1
             
@@ -22286,18 +22316,23 @@ class RetranslationMixin:
             
             # Stats row (clickable)
             _comp_set_init, _fail_set_init, _merg_set_init = _gp_sets(gp_data)
+            _skip_set_init = _gp_skipped_set(gp_data)
             _in_prog_set_init = _gp_in_progress_set(gp_data, _precomputed_sets=(_comp_set_init, _fail_set_init, _merg_set_init))
             # Completed count excludes chapters that are also merged
-            n_completed = len(_comp_set_init - _merg_set_init - _fail_set_init)
+            n_completed = len(
+                _comp_set_init - _skip_set_init - _merg_set_init - _fail_set_init
+            )
+            n_skipped = len(_skip_set_init)
             n_failed = len(_fail_set_init)
             n_merged = len(_merg_set_init)
             n_in_progress = len(_in_prog_set_init)
-            n_remaining = max(0, panel_state['total'] - len(_comp_set_init | _fail_set_init | _merg_set_init | _in_prog_set_init))
+            n_remaining = max(0, panel_state['total'] - len(_comp_set_init | _skip_set_init | _fail_set_init | _merg_set_init | _in_prog_set_init))
             _gp_ref_counts_init = _gp_refinement_status_counts(gp_data)
             _legend_stats_init = _combine_glossary_progress_legend_stats(
                 {
                     'total': panel_state['total'],
                     'completed': n_completed,
+                    'skipped': n_skipped,
                     'in_progress': n_in_progress,
                     'failed': n_failed,
                     'merged': n_merged,
@@ -22306,6 +22341,7 @@ class RetranslationMixin:
                 _gp_ref_counts_init,
             )
             n_completed = _legend_stats_init['completed']
+            n_skipped = _legend_stats_init['skipped']
             n_in_progress = _legend_stats_init['in_progress']
             n_not_refined = _legend_stats_init['not_refined']
             n_refine_failed = _legend_stats_init['refine_failed']
@@ -22324,6 +22360,13 @@ class RetranslationMixin:
             lbl_gp_completed.setStyleSheet("color: #27ae60;")
             lbl_gp_completed.setCursor(Qt.PointingHandCursor)
             gp_stats_layout.addWidget(lbl_gp_completed)
+
+            lbl_gp_skipped = QLabel(f"⏭️ Skipped: {n_skipped} | ")
+            lbl_gp_skipped.setFont(gp_stats_font)
+            lbl_gp_skipped.setStyleSheet("color: #94a3b8;")
+            lbl_gp_skipped.setCursor(Qt.PointingHandCursor)
+            lbl_gp_skipped.setVisible(True)
+            gp_stats_layout.addWidget(lbl_gp_skipped)
 
             lbl_gp_in_progress = QLabel(f"🔄 In Progress: {n_in_progress} | ")
             lbl_gp_in_progress.setFont(gp_stats_font)
@@ -22522,20 +22565,22 @@ class RetranslationMixin:
 
             def _gp_stats_for_dict(_d):
                 _comp2, _fail2, _merg2 = _gp_sets(_d)
+                _skip2 = _gp_skipped_set(_d)
                 _prog2 = _gp_in_progress_set(_d, _precomputed_sets=(_comp2, _fail2, _merg2))
                 _total = panel_state['total']
                 _ref_counts2 = _gp_refinement_status_counts(_d)
                 return _combine_glossary_progress_legend_stats(
                     {
                         'total': _total,
-                        'completed': len(_comp2 - _merg2),
+                        'completed': len(_comp2 - _skip2 - _merg2),
+                        'skipped': len(_skip2),
                         'in_progress': len(_prog2),
                         'failed': len(_fail2),
                         'merged': len(_merg2),
                         'remaining': max(
                             0,
                             _total
-                            - len(_comp2 | _fail2 | _merg2 | _prog2),
+                            - len(_comp2 | _skip2 | _fail2 | _merg2 | _prog2),
                         ),
                     },
                     _ref_counts2,
@@ -22546,6 +22591,9 @@ class RetranslationMixin:
                     return
                 lbl_total.setText(f"Total: {stats.get('total', 0)} | ")
                 lbl_gp_completed.setText(f"✅ Completed: {stats.get('completed', 0)} | ")
+                skipped_count = stats.get('skipped', 0)
+                lbl_gp_skipped.setText(f"⏭️ Skipped: {skipped_count} | ")
+                lbl_gp_skipped.setVisible(True)
                 lbl_gp_in_progress.setText(f"🔄 In Progress: {stats.get('in_progress', 0)} | ")
                 lbl_gp_in_progress.setVisible(True)
                 lbl_gp_failed.setText(f"❌ Failed: {stats.get('failed', 0)} | ")
@@ -22666,7 +22714,7 @@ class RetranslationMixin:
                 now = time.time()
 
                 if chapter_indices:
-                    for key in ('failed', 'merged_indices', 'in_progress', 'manual_removed_indices'):
+                    for key in ('skipped', 'failed', 'merged_indices', 'in_progress', 'manual_removed_indices'):
                         changed = _gp_remove_mapped_indices_from_list(
                             _d,
                             key,
@@ -22730,9 +22778,11 @@ class RetranslationMixin:
                             for field in (
                                 'qa_issues', 'qa_issues_found', 'qa_timestamp', 'failure_reason',
                                 'error_message', 'previous_status', 'previous_progress_entry',
-                                'previous_status_unknown', 'merged_parent_chapter'
+                                'previous_status_unknown', 'merged_parent_chapter', 'skip_reason'
                             ):
                                 entry.pop(field, None)
+                            if str(entry.get('model_name') or '').upper() == 'SKIPPED':
+                                entry.pop('model_name', None)
                             changed = True
 
                 if refinement_keys:
@@ -23632,9 +23682,10 @@ class RetranslationMixin:
                 selected = gp_listbox.selectedItems()
                 deletable_statuses = (
                     'completed',
-                    'completed_empty',
-                    'completed_image_only',
-                    'completed_title_header_only',
+                    'skipped',
+                    'skipped_empty',
+                    'skipped_image_only',
+                    'skipped_title_header_only',
                     'merged',
                     'in_progress',
                     'failed',
@@ -23744,7 +23795,7 @@ class RetranslationMixin:
                         _d['manual_removed_session_id'] = _d.get('progress_session_id')
                         changed = True
 
-                    for key in ('completed', 'failed', 'merged_indices', 'in_progress'):
+                    for key in ('completed', 'skipped', 'failed', 'merged_indices', 'in_progress'):
                         lst = _d.get(key, [])
                         new_lst = []
                         for v in lst:
@@ -23847,11 +23898,12 @@ class RetranslationMixin:
                     lb.scrollToItem(lb.item(nxt), QListWidget.PositionAtCenter)
                 return _handler
             
-            lbl_gp_completed.mousePressEvent = _gp_make_cycle((
-                'completed',
-                'completed_empty',
-                'completed_image_only',
-                'completed_title_header_only',
+            lbl_gp_completed.mousePressEvent = _gp_make_cycle(('completed',), gp_listbox)
+            lbl_gp_skipped.mousePressEvent = _gp_make_cycle((
+                'skipped',
+                'skipped_empty',
+                'skipped_image_only',
+                'skipped_title_header_only',
             ), gp_listbox)
             lbl_gp_in_progress.mousePressEvent = _gp_make_cycle(('in_progress',), gp_listbox)
             lbl_gp_failed.mousePressEvent = _gp_make_cycle(('failed', 'qa_failed'), gp_listbox)
@@ -24397,7 +24449,7 @@ class RetranslationMixin:
                     pass
                 gp_dialog, gp_main_layout, loading_widget, loading_label = self._create_retranslation_shell_dialog(
                     gp_title_text,
-                    width_ratio=0.35,
+                    width_ratio=0.37,
                     height_ratio=0.45,
                 )
                 gp_dialog.setAttribute(Qt.WA_DeleteOnClose, False)

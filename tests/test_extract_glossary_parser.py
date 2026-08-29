@@ -832,16 +832,16 @@ def test_title_header_only_glossary_skip_is_optional_and_defaults_enabled():
     assert glossary_extractor._glossary_structural_progress_statuses(
         candidates
     ) == {
-        0: "completed_image_only",
-        1: "completed_title_header_only",
-        2: "completed_empty",
+        0: "skipped_image_only",
+        1: "skipped_title_header_only",
+        2: "skipped_empty",
     }
     assert glossary_extractor._glossary_structural_progress_statuses(
         candidates,
         skip_title_header_only=False,
     ) == {
-        0: "completed_image_only",
-        2: "completed_empty",
+        0: "skipped_image_only",
+        2: "skipped_empty",
     }
 
 

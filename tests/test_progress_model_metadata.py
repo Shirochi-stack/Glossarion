@@ -238,7 +238,7 @@ def test_glossary_progress_reactivates_a_manually_removed_chapter(tmp_path):
     assert completed["manual_removed_indices"] == [1]
 
 
-def test_glossary_progress_persists_structural_skips_as_completed(tmp_path):
+def test_glossary_progress_persists_structural_skips_separately(tmp_path):
     progress_file = tmp_path / "book_glossary_progress.json"
     context = make_glossary_progress_context(
         progress_file=str(progress_file),
@@ -252,30 +252,49 @@ def test_glossary_progress_persists_structural_skips_as_completed(tmp_path):
         },
         total_chapters=3,
         chapter_status_overrides={
-            0: "completed_image_only",
-            1: "completed_title_header_only",
-            2: "completed_empty",
+            0: "skipped_image_only",
+            1: "skipped_title_header_only",
+            2: "skipped_empty",
         },
+    )
+
+    progress_file.write_text(
+        json.dumps(
+            {
+                "chapters": {},
+                "completed": [],
+                "skipped": [],
+                "failed": [],
+                "merged_indices": [],
+                "in_progress": [],
+                "manual_removed_indices": [0],
+                "manual_removed_session_id": glossary_extractor._GLOSSARY_PROGRESS_SESSION_ID,
+            }
+        ),
+        encoding="utf-8",
     )
 
     save_glossary_progress([0, 1, 2], [], [], context=context)
 
     progress = json.loads(progress_file.read_text(encoding="utf-8"))
-    assert progress["completed"] == [0, 1, 2]
+    assert progress["completed"] == []
+    assert progress["skipped"] == [0, 1, 2]
+    assert progress.get("manual_removed_indices", []) == []
     assert {
         key: info["status"]
         for key, info in progress["chapters"].items()
     } == {
-        "0": "completed_image_only",
-        "1": "completed_title_header_only",
-        "2": "completed_empty",
+        "0": "skipped_image_only",
+        "1": "skipped_title_header_only",
+        "2": "skipped_empty",
     }
     assert {
         info["model_name"] for info in progress["chapters"].values()
     } == {"SKIPPED"}
 
     reloaded = glossary_extractor.load_progress(context=context)
-    assert reloaded["completed"] == [0, 1, 2]
+    assert reloaded["completed"] == []
+    assert reloaded["skipped"] == [0, 1, 2]
 
 
 def test_glossary_structural_skip_ui_and_default_toggle_are_wired():
@@ -296,8 +315,11 @@ def test_glossary_structural_skip_ui_and_default_toggle_are_wired():
     assert "self.glossary_skip_title_header_only_checkbox,\n            2,\n            2," in glossary_gui
     assert "'GLOSSARY_SKIP_TITLE_HEADER_ONLY'" in translator_gui
     assert "'glossary_skip_title_header_only', True" in translator_gui
-    assert "'completed_image_only': 'Image Only (Skipped)'" in progress_gui
-    assert "'completed_title_header_only': 'Title/Header Only (Skipped)'" in progress_gui
+    assert "'skipped_image_only': 'Image Only (Skipped)'" in progress_gui
+    assert "'skipped_title_header_only': 'Title/Header Only (Skipped)'" in progress_gui
+    assert 'lbl_gp_skipped = QLabel(f"⏭️ Skipped:' in progress_gui
+    assert "lbl_gp_skipped.setVisible(True)" in progress_gui
+    assert "width_ratio=0.37" in progress_gui
     assert "if status in skipped_labels:" in progress_gui
 
 
@@ -2462,6 +2484,7 @@ def test_glossary_progress_legend_includes_refinement_rows():
         {
             "total": 674,
             "completed": 109,
+            "skipped": 3,
             "in_progress": 0,
             "failed": 0,
             "merged": 565,
@@ -2478,6 +2501,7 @@ def test_glossary_progress_legend_includes_refinement_rows():
     assert stats == {
         "total": 687,
         "completed": 113,
+        "skipped": 3,
         "in_progress": 6,
         "failed": 0,
         "merged": 565,

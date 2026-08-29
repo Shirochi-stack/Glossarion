@@ -2175,6 +2175,7 @@ def _restore_glossary_in_progress_file(context=None, indices=None):
             completed = []
             failed = []
             merged = []
+            skipped = []
             in_progress = []
             for chapter_key, info in chapters.items():
                 if not isinstance(info, dict):
@@ -2190,11 +2191,14 @@ def _restore_glossary_in_progress_file(context=None, indices=None):
                 elif status == "merged":
                     merged.append(idx)
                     completed.append(idx)
-                elif status == "completed" or status in _GLOSSARY_STRUCTURAL_COMPLETED_STATUSES:
+                elif status == "completed":
                     completed.append(idx)
+                elif status in _GLOSSARY_STRUCTURAL_SKIP_STATUSES:
+                    skipped.append(idx)
 
             progress_data["chapters"] = chapters
             progress_data["completed"] = _unique_int_list(completed)
+            progress_data["skipped"] = _unique_int_list(skipped)
             progress_data["failed"] = _unique_int_list(failed)
             progress_data["merged_indices"] = _unique_int_list(merged)
             progress_data["in_progress"] = _unique_int_list(in_progress)
@@ -3384,10 +3388,10 @@ def extract_chapters_from_subtitle(
             shutil.rmtree(temporary_root, ignore_errors=True)
 
 
-_GLOSSARY_STRUCTURAL_COMPLETED_STATUSES = {
-    "completed_empty",
-    "completed_image_only",
-    "completed_title_header_only",
+_GLOSSARY_STRUCTURAL_SKIP_STATUSES = {
+    "skipped_empty",
+    "skipped_image_only",
+    "skipped_title_header_only",
 }
 
 
@@ -3425,7 +3429,7 @@ def _glossary_structural_progress_statuses(
     *,
     skip_title_header_only=True,
 ):
-    """Map structural EPUB classifications to completed skip statuses."""
+    """Map structural EPUB classifications to distinct skip statuses."""
     statuses = {}
     for raw_idx, raw_kind in (chapter_kinds or {}).items():
         try:
@@ -3434,11 +3438,11 @@ def _glossary_structural_progress_statuses(
             continue
         kind = str(raw_kind or "").strip().lower()
         if kind == "image_only":
-            statuses[idx] = "completed_image_only"
+            statuses[idx] = "skipped_image_only"
         elif kind == "empty":
-            statuses[idx] = "completed_empty"
+            statuses[idx] = "skipped_empty"
         elif kind == "title_header_only" and skip_title_header_only:
-            statuses[idx] = "completed_title_header_only"
+            statuses[idx] = "skipped_title_header_only"
     return statuses
 
 
@@ -3724,7 +3728,7 @@ def load_progress(context=None) -> Dict:
                 # Validate the structure
                 if not isinstance(data, dict):
                     print(f"[Warning] Progress file has invalid structure, resetting...")
-                    return {"completed": [], "glossary": [], "in_progress": []}
+                    return {"completed": [], "skipped": [], "glossary": [], "in_progress": []}
                 chapters = data.get("chapters", {})
                 if not isinstance(chapters, dict):
                     chapters = {}
@@ -3736,6 +3740,7 @@ def load_progress(context=None) -> Dict:
                     del data["glossary"]
 
                 completed_from_entries = []
+                skipped_from_entries = []
                 failed_from_entries = []
                 merged_from_entries = []
                 in_progress_from_entries = []
@@ -3753,11 +3758,14 @@ def load_progress(context=None) -> Dict:
                     elif status == "merged":
                         merged_from_entries.append(idx)
                         completed_from_entries.append(idx)
-                    elif status == "completed" or status in _GLOSSARY_STRUCTURAL_COMPLETED_STATUSES:
+                    elif status == "completed":
                         completed_from_entries.append(idx)
+                    elif status in _GLOSSARY_STRUCTURAL_SKIP_STATUSES:
+                        skipped_from_entries.append(idx)
 
-                if completed_from_entries or failed_from_entries or merged_from_entries or in_progress_from_entries:
+                if completed_from_entries or skipped_from_entries or failed_from_entries or merged_from_entries or in_progress_from_entries:
                     data["completed"] = _unique_int_list(completed_from_entries)
+                    data["skipped"] = _unique_int_list(skipped_from_entries)
                     data["failed"] = _unique_int_list(failed_from_entries)
                     data["merged_indices"] = _unique_int_list(merged_from_entries)
                     data["in_progress"] = _unique_int_list(in_progress_from_entries)
@@ -3765,6 +3773,7 @@ def load_progress(context=None) -> Dict:
                     # Backward compatibility for old progress files that only
                     # had top-level arrays.
                     data["completed"] = _unique_int_list(data.get("completed", []))
+                    data["skipped"] = _unique_int_list(data.get("skipped", []))
                     data["failed"] = _unique_int_list(data.get("failed", []))
                     data["merged_indices"] = _unique_int_list(data.get("merged_indices", []))
                     data["in_progress"] = _unique_int_list(data.get("in_progress", []))
@@ -3772,7 +3781,8 @@ def load_progress(context=None) -> Dict:
                 failed_set = set(data["failed"])
                 if failed_set:
                     data["completed"] = [idx for idx in data["completed"] if idx not in failed_set]
-                done_set = set(data["completed"]) | failed_set | set(data["merged_indices"])
+                    data["skipped"] = [idx for idx in data["skipped"] if idx not in failed_set]
+                done_set = set(data["completed"]) | set(data["skipped"]) | failed_set | set(data["merged_indices"])
                 if done_set:
                     data["in_progress"] = [idx for idx in data["in_progress"] if idx not in done_set]
                 data["qa_issues_found"] = _normalize_glossary_qa_issues(
@@ -3828,11 +3838,11 @@ def load_progress(context=None) -> Dict:
                 print(f"   -> Corrupted file backed up to: {backup_name}")
             except:
                 pass
-            return {"completed": [], "glossary": [], "context_history": [], "in_progress": []}
+            return {"completed": [], "skipped": [], "glossary": [], "context_history": [], "in_progress": []}
         except Exception as e:
             print(f"[Warning] Error loading progress file: {e}")
-            return {"completed": [], "glossary": [], "context_history": [], "in_progress": []}
-    return {"completed": [], "glossary": [], "context_history": [], "merged_indices": [], "in_progress": []}
+            return {"completed": [], "skipped": [], "glossary": [], "context_history": [], "in_progress": []}
+    return {"completed": [], "skipped": [], "glossary": [], "context_history": [], "merged_indices": [], "in_progress": []}
 
 def _normalize_entry_type(entry_type, enabled_types):
     """Normalize an entry type to match an enabled type if possible.
@@ -7754,7 +7764,9 @@ def main(log_callback=None, stop_callback=None):
         prog.get('qa_issues_found'),
         prog.get('chapters')
     )
-    completed = prog['completed']
+    # Keep skipped indices in the internal done list so they never enter the
+    # request queue. ``save_progress`` persists them separately from completed.
+    completed = _unique_int_list(prog['completed'] + prog.get('skipped', []))
     failed = prog.get('failed', [])
     in_progress = prog.get('in_progress', [])
     # Remove failed chapters from completed so they get retried
@@ -7795,14 +7807,14 @@ def main(log_callback=None, stop_callback=None):
             glossary = []
     merged_indices = prog.get('merged_indices', [])
 
-    # Structural EPUB skips are completed without an API request, but retain a
-    # distinct persisted status so the glossary progress dialog explains why.
+    # Structural EPUB skips never make an API request and retain a distinct
+    # persisted status so they do not inflate the completed count.
     existing_structural_statuses = {}
     for chapter_key, info in (prog.get("chapters", {}) or {}).items():
         if not isinstance(info, dict):
             continue
         status = str(info.get("status", "")).strip().lower()
-        if status not in _GLOSSARY_STRUCTURAL_COMPLETED_STATUSES:
+        if status not in _GLOSSARY_STRUCTURAL_SKIP_STATUSES:
             continue
         idx = _glossary_progress_entry_index(info, chapter_key)
         if idx is not None:
@@ -7844,22 +7856,22 @@ def main(log_callback=None, stop_callback=None):
         )
 
     image_only_count = sum(
-        status == "completed_image_only"
+        status == "skipped_image_only"
         for status in structural_progress_statuses.values()
     )
     title_header_only_count = sum(
-        status == "completed_title_header_only"
+        status == "skipped_title_header_only"
         for status in structural_progress_statuses.values()
     )
     if image_only_count:
         print(
-            f"📸 Marked {image_only_count} image-only chapter(s) as completed "
-            "(skipped; no API request)"
+            f"📸 Marked {image_only_count} image-only chapter(s) as skipped "
+            "(no API request)"
         )
     if title_header_only_count:
         print(
             f"🏷️ Marked {title_header_only_count} title/header-only chapter(s) "
-            "as completed (skipped; no API request)"
+            "as skipped (no API request)"
         )
 
     def _mark_glossary_in_progress(indices):
@@ -7916,7 +7928,10 @@ def main(log_callback=None, stop_callback=None):
         # parallel future was removed from the executor's active-future map.
         restored_progress = _restore_glossary_in_progress_file(progress_context)
         if restored_progress is not None:
-            completed[:] = _unique_int_list(restored_progress.get("completed", []))
+            completed[:] = _unique_int_list(
+                restored_progress.get("completed", [])
+                + restored_progress.get("skipped", [])
+            )
             failed[:] = _unique_int_list(restored_progress.get("failed", []))
             merged_indices[:] = _unique_int_list(restored_progress.get("merged_indices", []))
             in_progress[:] = _unique_int_list(restored_progress.get("in_progress", []))
@@ -9881,6 +9896,16 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         if reactivated_indices:
             manual_removed_set -= reactivated_indices
             manual_removed_indices = sorted(manual_removed_set)
+        # Structural no-request rows cannot be retried through the API. Removing
+        # one from the viewer must not let it fall into the extraction queue.
+        structural_skip_indices = {
+            idx
+            for idx, status in chapter_status_overrides.items()
+            if status in _GLOSSARY_STRUCTURAL_SKIP_STATUSES
+        }
+        if manual_removed_set & structural_skip_indices:
+            manual_removed_set -= structural_skip_indices
+            manual_removed_indices = sorted(manual_removed_set)
         if manual_removed_set:
             if total_chapters:
                 all_chapters_removed = len(manual_removed_set) >= int(total_chapters)
@@ -10041,7 +10066,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 "status": status,
                 "last_updated": time.time(),
             }
-            is_structural_skip = status in _GLOSSARY_STRUCTURAL_COMPLETED_STATUSES
+            is_structural_skip = status in _GLOSSARY_STRUCTURAL_SKIP_STATUSES
             model_name = (
                 "SKIPPED"
                 if is_structural_skip
@@ -10053,7 +10078,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             if model_name:
                 chapter_info["model_name"] = model_name
             if is_structural_skip:
-                chapter_info["skip_reason"] = status.removeprefix("completed_")
+                chapter_info["skip_reason"] = status.removeprefix("skipped_")
             else:
                 key_identifier, key_pool = _current_glossary_key_context(existing_info, prefer_thread=idx in model_update_set)
                 if key_update_map.get(idx):
@@ -10147,6 +10172,14 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         progress_key_identifier = next((value for value in key_update_map.values() if value), "") or progress_key_identifier
         if progress_key_identifier:
             progress_key_pool = _glossary_key_pool_from_identifier(progress_key_identifier) or progress_key_pool
+        skipped_clean = sorted(
+            idx
+            for idx in completed_clean
+            if chapter_status_overrides.get(idx) in _GLOSSARY_STRUCTURAL_SKIP_STATUSES
+        )
+        persisted_completed = [
+            idx for idx in completed_clean if idx not in set(skipped_clean)
+        ]
         progress_data = {
             "book_title_present": bool(context.book_title_present) if isinstance(context, GlossaryProgressContext) else bool(BOOK_TITLE_PRESENT),
             # Use value from entry if present, otherwise fallback to global translated title
@@ -10154,7 +10187,8 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 context.book_title_value if context.book_title_present else context.book_title_translated
             ) if isinstance(context, GlossaryProgressContext) else (BOOK_TITLE_VALUE if BOOK_TITLE_PRESENT else BOOK_TITLE_TRANSLATED),
             "chapters": chapters,
-            "completed": completed_clean,
+            "completed": persisted_completed,
+            "skipped": skipped_clean,
             "failed": failed_clean,
             "merged_indices": merged_clean,
             "chapter_positions": {str(k): v for k, v in sorted((positions or {}).items())},
@@ -10162,7 +10196,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             "chapter_filenames": {str(k): v for k, v in sorted((filenames or {}).items())},
             "chapter_count": total_chapters,
             "glossary_output_file": output_file,
-            "progress_schema_version": "2.1",
+            "progress_schema_version": "2.2",
             "indexing": "chapter_index_zero_based",
             "qa_issues_found": {str(idx): issues for idx, issues in sorted(qa_issues_clean.items())},
             "in_progress": in_progress_clean,
