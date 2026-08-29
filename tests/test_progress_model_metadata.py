@@ -292,7 +292,8 @@ def test_glossary_structural_skip_ui_and_default_toggle_are_wired():
 
     assert '"Skip title/header-only chapters"' in glossary_gui
     assert "self.config.get('glossary_skip_title_header_only', True)" in glossary_gui
-    assert "settings_frame_layout.addWidget(\n            self.glossary_skip_title_header_only_checkbox" in glossary_gui
+    assert "settings_grid.addWidget(\n            self.glossary_skip_title_header_only_checkbox" in glossary_gui
+    assert "self.glossary_skip_title_header_only_checkbox,\n            2,\n            2," in glossary_gui
     assert "'GLOSSARY_SKIP_TITLE_HEADER_ONLY'" in translator_gui
     assert "'glossary_skip_title_header_only', True" in translator_gui
     assert "'completed_image_only': 'Image Only (Skipped)'" in progress_gui

@@ -3504,9 +3504,10 @@ class GlossaryManagerMixin:
             "the <title> tag, heading tags (<h1>-<h6>), or both.\n"
             "Image-only chapters are always skipped and recorded separately."
         )
-        settings_frame_layout.addWidget(
+        settings_grid.addWidget(
             self.glossary_skip_title_header_only_checkbox,
-            0,
+            2,
+            2,
             Qt.AlignLeft,
         )
         
