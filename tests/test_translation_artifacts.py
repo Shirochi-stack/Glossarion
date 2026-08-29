@@ -81,6 +81,43 @@ def test_title_tag_translation_is_enabled_by_default(monkeypatch):
     assert should_translate_title_tags() is True
 
 
+def test_parallel_prequeue_stop_mode_distinguishes_graceful_and_force(monkeypatch):
+    translation_module.set_stop_flag(False)
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.setenv("TRANSLATION_CANCELLED", "0")
+
+    assert translation_module._translation_prequeue_stop_mode(lambda: False) is None
+
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    assert (
+        translation_module._translation_prequeue_stop_mode(lambda: True)
+        == "graceful"
+    )
+
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("TRANSLATION_CANCELLED", "1")
+    assert translation_module._translation_prequeue_stop_mode(lambda: False) == "force"
+
+    monkeypatch.setenv("TRANSLATION_CANCELLED", "0")
+    assert translation_module._translation_prequeue_stop_mode(lambda: True) == "force"
+
+
+def test_parallel_chapter_scan_polls_stop_before_queueing_titles():
+    source = Path(translation_module.__file__).read_text(encoding="utf-8")
+    scan_start = source.index("progress_manager.begin_deferred_save()")
+    scan_end = source.index("# Thread scheduling must not redefine book order", scan_start)
+    scan_source = source[scan_start:scan_end]
+
+    assert scan_source.count(
+        "_translation_prequeue_stop_mode(stop_callback)"
+    ) >= 3
+    assert scan_source.index("progress_manager.end_deferred_save()") < scan_source.index(
+        "stopped parallel queue preparation immediately"
+    )
+    assert 'f"📝 Image-only chapter {log_num}: queued its "' in scan_source
+
+
 def test_legacy_use_title_is_only_a_fallback(monkeypatch):
     monkeypatch.delenv("SKIP_TITLE_TAG_TRANSLATION", raising=False)
     monkeypatch.setenv("USE_TITLE", "0")

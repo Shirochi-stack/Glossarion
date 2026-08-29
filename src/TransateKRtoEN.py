@@ -13791,6 +13791,31 @@ def is_stop_requested():
     global _stop_requested
     return _stop_requested
 
+
+def _translation_prequeue_stop_mode(stop_callback=None):
+    """Return the requested stop mode before any API work is dispatched.
+
+    A graceful stop must end queue preparation immediately because there is no
+    in-flight request to preserve yet.  The normal callback is intentionally
+    checked only after the graceful environment flags: the desktop callback is
+    latched for both stop modes, while the environment distinguishes the first
+    (graceful) click from a force stop.
+    """
+    if (
+        os.environ.get("GRACEFUL_STOP") == "1"
+        or os.environ.get("GRACEFUL_STOP_COMPLETED") == "1"
+    ):
+        return "graceful"
+    if os.environ.get("TRANSLATION_CANCELLED") == "1" or is_stop_requested():
+        return "force"
+    if stop_callback:
+        try:
+            if stop_callback():
+                return "force"
+        except Exception:
+            pass
+    return None
+
 def set_output_redirect(log_callback=None):
     """Redirect print statements to a callback function for GUI integration"""
     if log_callback:
@@ -27373,7 +27398,12 @@ def main(log_callback=None, stop_callback=None):
         progress_manager.begin_deferred_save()
         seq_counter = 0
         zero_phase = True
+        prequeue_stop_mode = None
         for idx, c in enumerate(chapters):
+            prequeue_stop_mode = _translation_prequeue_stop_mode(stop_callback)
+            if prequeue_stop_mode:
+                break
+
             # PDF/TEXT CHUNK FIX: Skip extract_actual_chapter_number for chunks - preserve decimal from c['num']
             if (is_text_file or is_pdf_file) and c.get('is_chunk', False):
                 # For text/PDF chunks, use the decimal number directly (1.0, 1.1, etc.)
@@ -27411,7 +27441,16 @@ def main(log_callback=None, stop_callback=None):
                     c['actual_chapter_num'] = raw_num
                     c['zero_adjusted'] = False
         
-        for idx, c in enumerate(chapters):
+        if not prequeue_stop_mode:
+            chapter_scan = enumerate(chapters)
+        else:
+            chapter_scan = ()
+
+        for idx, c in chapter_scan:
+            prequeue_stop_mode = _translation_prequeue_stop_mode(stop_callback)
+            if prequeue_stop_mode:
+                break
+
             chap_num = c["num"]
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
@@ -27577,8 +27616,23 @@ def main(log_callback=None, stop_callback=None):
             # Add to chapters to translate
             chapters_to_translate.append((idx, c))
 
+        if not prequeue_stop_mode:
+            prequeue_stop_mode = _translation_prequeue_stop_mode(stop_callback)
+
         # Flush the one coalesced progress write for the whole scan.
         progress_manager.end_deferred_save()
+
+        if prequeue_stop_mode:
+            if prequeue_stop_mode == "graceful":
+                print(
+                    "✅ Graceful stop: no API call is active; "
+                    "stopped parallel queue preparation immediately."
+                )
+            else:
+                log_stop_once(
+                    "❌ Translation force-stopped during parallel queue preparation."
+                )
+            return
 
         # Thread scheduling must not redefine book order. EPUB items use their
         # OPF spine position; PDF/text items retain their extracted list order.
