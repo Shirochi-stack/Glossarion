@@ -16,6 +16,8 @@ import logging
 import uuid
 import time
 
+from title_tag_translation import DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,6 +107,18 @@ def set_all_env_vars(config):
     os.environ['SKIP_TITLE_TAG_TRANSLATION'] = '1' if skip_title_tag else '0'
     # Compatibility for older extraction/translation components.
     os.environ['USE_TITLE'] = '0' if skip_title_tag else '1'
+    image_only_title_prompt = str(_get(
+        'image_only_title_tag_system_prompt',
+        DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
+    ) or DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT)
+    try:
+        import large_env
+        large_env.set_env(
+            'IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT',
+            image_only_title_prompt,
+        )
+    except Exception:
+        os.environ['IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT'] = image_only_title_prompt
     os.environ['USE_NCX_NAVIGATION'] = '1' if _get('use_ncx_navigation', False) else '0'
     os.environ['ATTACH_CSS_TO_CHAPTERS'] = '1' if _get('attach_css_to_chapters', False) else '0'
     os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if _get('retain_source_extension', True) else '0'

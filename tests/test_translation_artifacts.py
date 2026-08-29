@@ -19,6 +19,7 @@ from Retranslation_GUI import (
 from TransateKRtoEN import (
     BatchTranslationProcessor,
     ProgressManager,
+    TranslationConfig,
     _apply_partial_refinement_response,
     _append_partial_b_translation_artifact_chapters,
     _escape_invalid_html_tags,
@@ -59,6 +60,8 @@ from translation_artifacts import (
     update_translation_artifact_progress,
 )
 from title_tag_translation import (
+    DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
+    image_only_title_tag_messages,
     restore_translated_title_tags,
     should_translate_title_tags,
     title_tag_translation_payload,
@@ -112,6 +115,121 @@ def test_title_only_reconstruction_preserves_image_xhtml_exactly():
         "義妹生活",
         "Days with My Stepsister &amp; More",
     )
+
+
+def test_dedicated_image_only_title_messages_are_strictly_gated(monkeypatch):
+    class Config:
+        IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT = (
+            "TITLE-ONLY REQUEST FOR {target_lang}"
+        )
+
+    monkeypatch.setenv("OUTPUT_LANGUAGE", "Spanish")
+    payload = '<title class="book-title">義妹生活</title>'
+
+    assert image_only_title_tag_messages(
+        Config(),
+        {"body": payload},
+        payload,
+    ) is None
+    assert image_only_title_tag_messages(
+        Config(),
+        {
+            "body": payload,
+            "has_images": True,
+            "_title_tag_only_translation": True,
+        },
+        payload,
+    ) == [
+        {"role": "system", "content": "TITLE-ONLY REQUEST FOR Spanish"},
+        {"role": "user", "content": payload},
+    ]
+
+
+def test_translation_config_loads_dedicated_title_prompt(monkeypatch):
+    custom_prompt = "CUSTOM IMAGE TITLE PROMPT FOR {target_lang}"
+    monkeypatch.setenv("IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT", custom_prompt)
+
+    assert TranslationConfig().IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT == custom_prompt
+
+    monkeypatch.setenv("IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT", "")
+    assert (
+        TranslationConfig().IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
+        == DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
+    )
+
+
+def test_sequential_retry_transport_does_not_augment_title_messages(
+    tmp_path,
+    monkeypatch,
+):
+    class Config:
+        MODEL = "gpt-test"
+        CONTEXTUAL = True
+        TEMP = 0
+        MAX_OUTPUT_TOKENS = 1024
+        MAX_RETRY_TOKENS = 1024
+        SPLIT_FAILED_RETRY_ATTEMPTS = 1
+        DISABLE_MERGE_FALLBACK = False
+        RETRY_SPLIT_FAILED = False
+        RETRY_TRUNCATED = False
+        RETRY_TIMEOUT = False
+        CHUNK_TIMEOUT = 30
+        EMERGENCY_IMAGE_RESTORE = False
+        IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT = "ONLY {target_lang}"
+
+    sent = []
+
+    class Client:
+        def send(self, messages, **_kwargs):
+            sent.append(messages)
+            return "<title>Translated</title>", "stop"
+
+    monkeypatch.setenv("OUTPUT_LANGUAGE", "English")
+    monkeypatch.setenv("RETRY_DUPLICATE_BODIES", "0")
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    monkeypatch.setenv("RETRY_TRUNCATED", "0")
+    monkeypatch.setattr(
+        translation_module,
+        "_single_pass_glossary_mode",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        translation_module,
+        "_build_single_pass_glossary_messages",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single-pass glossary must not touch title requests")
+        ),
+    )
+
+    chapter = {
+        "num": 1,
+        "body": "<title>原題</title>",
+        "filename": "chapter.xhtml",
+        "_title_tag_only_translation": True,
+    }
+    messages = image_only_title_tag_messages(
+        Config(),
+        chapter,
+        chapter["body"],
+    )
+    processor = translation_module.TranslationProcessor(
+        Config(),
+        Client(),
+        str(tmp_path),
+        stop_callback=lambda: False,
+    )
+
+    result, finish_reason, _raw = processor.translate_with_retry(
+        messages,
+        chapter["body"],
+        chapter,
+        1,
+        1,
+    )
+
+    assert result == "<title>Translated</title>"
+    assert finish_reason == "stop"
+    assert sent == [messages]
 
 
 def test_image_only_page_becomes_title_only_translation_unit(tmp_path, monkeypatch):
@@ -172,10 +290,13 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
         MAX_RETRY_TOKENS = 1024
         EMERGENCY_IMAGE_RESTORE = False
         REMOVE_AI_ARTIFACTS = "off"
+        IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT = (
+            "DEDICATED TITLE PROMPT FOR {target_lang}"
+        )
 
         @staticmethod
         def get_system_prompt(actual_merge_count=1):
-            return "Translate."
+            raise AssertionError("normal profile prompt must not be read")
 
         @staticmethod
         def get_effective_output_limit():
@@ -189,7 +310,7 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
 
     class Client:
         def send(self, messages, **_kwargs):
-            sent.append(messages[-1]["content"])
+            sent.append(messages)
             return "<title>Days with My Stepsister</title>", "stop"
 
     monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
@@ -197,6 +318,7 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
     monkeypatch.setenv("ORDER_BATCH_REQUESTS_BY_SPINE", "0")
     monkeypatch.setenv("CHAR_RATIO_TRUNCATION_ENABLED", "0")
     monkeypatch.setenv("DIRECT_TEXT_ACTIVE", "0")
+    monkeypatch.setenv("OUTPUT_LANGUAGE", "English")
     monkeypatch.setattr(
         translation_module.ContentProcessor,
         "image_processing_html",
@@ -218,7 +340,9 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
     monkeypatch.setattr(
         translation_module,
         "build_system_prompt",
-        lambda base, *_args, **_kwargs: base,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("normal/glossary prompt builder must not run")
+        ),
     )
     monkeypatch.setattr(
         translation_module,
@@ -266,7 +390,13 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
     )
 
     assert result[0] is True
-    assert sent == ["<title>義妹生活</title>"]
+    assert sent == [[
+        {
+            "role": "system",
+            "content": "DEDICATED TITLE PROMPT FOR English",
+        },
+        {"role": "user", "content": "<title>義妹生活</title>"},
+    ]]
     assert progress_updates[-1][1]["status"] == "completed"
     output_files = [path for path in tmp_path.iterdir() if path.is_file()]
     assert len(output_files) == 1
@@ -286,9 +416,40 @@ def test_other_settings_places_new_toggle_after_image_title_setting():
         '"Skip image title translation (use original filename)"'
     )
     title_tag_toggle = source.index('"Skip title tag translation"')
+    configure_button = source.index(
+        '"Configure Image-Only Title Prompt"',
+        title_tag_toggle,
+    )
 
     assert title_tag_toggle > image_toggle
+    assert configure_button > title_tag_toggle
+    assert "def configure_image_only_title_tag_prompt" in source
+    assert "image tags but no meaningful body text" in source
+    title_row_start = source.index("title_tag_row = QWidget()")
+    title_row_end = source.index(
+        "section_v.addWidget(title_tag_row)",
+        title_row_start,
+    )
+    assert "title_tag_row_h.addStretch()" not in source[
+        title_row_start:title_row_end
+    ]
     assert "Use title (Legacy)" not in source
+
+
+def test_sequential_title_only_path_uses_isolated_message_builder():
+    source = Path(translation_module.__file__).read_text(encoding="utf-8")
+    sequential_start = source.index(
+        "for chunk_idx_enumerate, (chunk_html, chunk_idx, total_chunks)"
+    )
+    sequential_end = source.index(
+        "result, finish_reason, raw_obj = translation_processor.translate_with_retry",
+        sequential_start,
+    )
+    sequential_source = source[sequential_start:sequential_end]
+
+    assert "title_tag_messages = image_only_title_tag_messages(" in sequential_source
+    assert "msgs = title_tag_messages" in sequential_source
+    assert "if not title_tag_only_request and config.CONTEXTUAL" in sequential_source
 
 
 def test_scanner_foreign_character_filter_respects_title_skip_setting():

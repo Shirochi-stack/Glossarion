@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 
 from language_options import TARGET_LANGUAGES
+from title_tag_translation import DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
 
 # CRITICAL: Set API delay IMMEDIATELY at module level before any other imports
 # This ensures unified_api_client reads the correct value when it's imported
@@ -516,6 +517,7 @@ class GlossarionWeb:
             'thread_submission_delay': 0.1,  # CRITICAL: Default threading delay
             'prompt_profiles': {},  # Will be populated from default_prompts in __init__
             'active_profile': 'Universal',  # Default active profile
+            'image_only_title_tag_system_prompt': DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
             'save_glossary_in_output': True,
             'ocr_provider': 'custom-api',
             'bubble_detection_enabled': True,
@@ -636,6 +638,21 @@ class GlossarionWeb:
         os.environ['FAILED_TRANSLATION_RETRY_ATTEMPTS'] = str(
             config('failed_translation_retry_attempts', 3)
         )
+        skip_title_tag = bool(config('skip_title_tag_translation', False))
+        os.environ['SKIP_TITLE_TAG_TRANSLATION'] = '1' if skip_title_tag else '0'
+        os.environ['USE_TITLE'] = '0' if skip_title_tag else '1'
+        image_only_title_prompt = str(config(
+            'image_only_title_tag_system_prompt',
+            DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
+        ) or DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT)
+        try:
+            import large_env
+            large_env.set_env(
+                'IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT',
+                image_only_title_prompt,
+            )
+        except Exception:
+            os.environ['IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT'] = image_only_title_prompt
         os.environ['USE_NCX_NAVIGATION'] = '1' if config('use_ncx_navigation', False) else '0'
         os.environ['ATTACH_CSS_TO_CHAPTERS'] = '1' if config('attach_css_to_chapters', False) else '0'
         os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if config('retain_source_extension', True) else '0'

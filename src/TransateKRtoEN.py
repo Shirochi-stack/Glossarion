@@ -26,6 +26,8 @@ except ImportError:
 from collections import Counter
 from epub_package import find_epub_opf_member, find_opf_path
 from title_tag_translation import (
+    DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
+    image_only_title_tag_messages,
     restore_translated_title_tags,
     should_translate_title_tags,
     title_tag_translation_payload,
@@ -1797,6 +1799,10 @@ class TranslationConfig:
             str(os.getenv("DIRECT_TEXT_SKIP_PROMPT_PROFILE", "0") or "0").strip().lower()
             in {"1", "true", "yes", "on"}
         )
+        self.IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT = str(
+            _prompt_env_raw("IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT")
+            or DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
+        ).strip()
         default_refinement_system_prompt = DEFAULT_REFINEMENT_SYSTEM_PROMPT
         default_refinement_full_with_raw_system_prompt = DEFAULT_REFINEMENT_FULL_WITH_RAW_SYSTEM_PROMPT
         default_refinement_failed_system_prompt = DEFAULT_REFINEMENT_FAILED_SYSTEM_PROMPT
@@ -8670,9 +8676,15 @@ class TranslationProcessor:
         
         original_max_tokens = self.config.MAX_OUTPUT_TOKENS
         original_temp = self.config.TEMP
-        msgs = _with_structured_batch_prompt(msgs, c)
+        title_tag_only_request = bool(c.get("_title_tag_only_translation"))
+        single_pass_glossary_active = (
+            not title_tag_only_request and _single_pass_glossary_mode()
+        )
+        if not title_tag_only_request:
+            msgs = _with_structured_batch_prompt(msgs, c)
         original_user_prompt = msgs[-1]["content"]
-        msgs = _build_single_pass_glossary_messages(msgs, chunk_html)
+        if single_pass_glossary_active:
+            msgs = _build_single_pass_glossary_messages(msgs, chunk_html)
 
         # Determine stable chapter number for this chunk (used for payload metadata)
         idx = c.get('__index', 0)
@@ -8850,7 +8862,7 @@ class TranslationProcessor:
                 def _mark_progress_on_send():
                     if callable(before_send_callback):
                         before_send_callback()
-                    if _single_pass_glossary_mode():
+                    if single_pass_glossary_active:
                         _mark_single_pass_glossary_in_progress(
                             self.out_dir,
                             chapter_num=actual_num,
@@ -8870,7 +8882,7 @@ class TranslationProcessor:
                     before_send_callback=_mark_progress_on_send,
                 )
 
-                if _single_pass_glossary_mode() and isinstance(result, str):
+                if single_pass_glossary_active and isinstance(result, str):
                     result, glossary_block = _split_single_pass_glossary_response(result)
                     _persist_single_pass_glossary(
                         self.out_dir,
@@ -8966,7 +8978,11 @@ class TranslationProcessor:
                     # Force re-read the environment variable to ensure we have current setting
                     duplicate_enabled = os.getenv("RETRY_DUPLICATE_BODIES", "0") == "1"
                     
-                    if duplicate_enabled and duplicate_retry_count < max_duplicate_retries:
+                    if (
+                        not title_tag_only_request
+                        and duplicate_enabled
+                        and duplicate_retry_count < max_duplicate_retries
+                    ):
                         idx = c.get('__index', 0)
                         prog = c.get('__progress', {})
                         print(f"    🔍 Checking for duplicate content...")
@@ -9680,8 +9696,19 @@ class BatchTranslationProcessor:
             # Build chapter-specific system prompts inside the chunk worker.
             # Batch mode uses an inner chunk executor even for one chunk; keeping
             # prompt construction there preserves deferred glossary compression logs.
-            glossary_path = find_glossary_file(self.out_dir)
-            chapter_base_system_prompt = self.config.get_system_prompt(actual_merge_count=1)
+            title_tag_only_chapter = bool(
+                chapter.get("_title_tag_only_translation")
+            )
+            glossary_path = (
+                None
+                if title_tag_only_chapter
+                else find_glossary_file(self.out_dir)
+            )
+            chapter_base_system_prompt = (
+                ""
+                if title_tag_only_chapter
+                else self.config.get_system_prompt(actual_merge_count=1)
+            )
             chapter_ref = {
                 "chapter_num": actual_num,
                 "chapter_file": _single_pass_progress_chapter_file(chapter, fname),
@@ -9803,6 +9830,10 @@ class BatchTranslationProcessor:
                 chunk_html, chunk_idx, chunk_total = chunk_data
                 chunk_actual_model = None
                 chunk_actual_key = None
+                title_tag_only_request = title_tag_only_chapter
+                single_pass_glossary_active = (
+                    not title_tag_only_request and _single_pass_glossary_mode()
+                )
 
                 def _set_batch_chunk_runtime_status(status):
                     if not self.chunk_progress_enabled:
@@ -9840,14 +9871,20 @@ class BatchTranslationProcessor:
                         return _chunk_result(None, None, False, "cancelled")
                     # If wait_for_chunks is enabled, continue processing
                 
-                # Apply emergency glossary compliance pre-edit
-                chunk_html = apply_emergency_glossary_compliance(chunk_html, self.out_dir)
+                # The title-only payload must remain exact and must not be
+                # rewritten by glossary compliance before it reaches the API.
+                if not title_tag_only_request:
+                    chunk_html = apply_emergency_glossary_compliance(
+                        chunk_html,
+                        self.out_dir,
+                    )
                 user_prompt = chunk_html
                 
                 # Build history-based memory when contextual translation is enabled
                 memory_msgs = []
                 if (
-                    self.config.CONTEXTUAL
+                    not title_tag_only_request
+                    and self.config.CONTEXTUAL
                     and self.history_manager is not None
                     and getattr(self.config, 'HIST_LIMIT', 0) > 0
                 ):
@@ -9928,7 +9965,10 @@ class BatchTranslationProcessor:
                 
                 # Build messages for this chunk (system + optional rolling summary + optional memory + user)
                 rolling_summary_msgs = []
-                if getattr(self.config, 'USE_ROLLING_SUMMARY', False):
+                if (
+                    not title_tag_only_request
+                    and getattr(self.config, 'USE_ROLLING_SUMMARY', False)
+                ):
                     try:
                         rs_text = self.get_batch_rolling_summary_text()
                     except Exception:
@@ -9948,38 +9988,57 @@ class BatchTranslationProcessor:
 
                 # Build optional assistant prefill message if configured
                 assistant_prefill_msgs = []
-                if getattr(self.config, 'ASSISTANT_PROMPT', '') and self.config.ASSISTANT_PROMPT.strip():
+                if (
+                    not title_tag_only_request
+                    and getattr(self.config, 'ASSISTANT_PROMPT', '')
+                    and self.config.ASSISTANT_PROMPT.strip()
+                ):
                     assistant_prefill_msgs = [{"role": "assistant", "content": self.config.ASSISTANT_PROMPT.strip()}]
 
-                current_glossary_path = find_glossary_file(self.out_dir) if _single_pass_glossary_mode() else glossary_path
-                current_chapter_system_prompt = build_system_prompt(
-                    chapter_base_system_prompt,
-                    current_glossary_path,
-                    source_text=chunk_html,
-                    chapter_ref=chapter_ref,
-                )
-                current_chapter_system_prompt, chunk_prompt_msgs, user_prompt = _build_translation_chunk_prompt_parts(
-                    current_chapter_system_prompt,
-                    chunk_html,
-                    chunk_idx,
-                    total_chunks,
+                title_tag_messages = image_only_title_tag_messages(
                     self.config,
-                    previous_chunk_html=previous_chunk_html,
-                )
-
-                chapter_msgs = (
-                    [{"role": "system", "content": current_chapter_system_prompt}]
-                    + rolling_summary_msgs
-                    + memory_msgs
-                    + chunk_prompt_msgs
-                    + assistant_prefill_msgs
-                    + [{"role": "user", "content": user_prompt}]
-                )
-                chapter_msgs = _build_single_pass_glossary_messages(chapter_msgs, chunk_html)
-                chapter_msgs = _with_structured_batch_prompt(
-                    chapter_msgs,
                     chapter,
+                    chunk_html,
                 )
+                if title_tag_messages is not None:
+                    chapter_msgs = title_tag_messages
+                else:
+                    current_glossary_path = (
+                        find_glossary_file(self.out_dir)
+                        if single_pass_glossary_active
+                        else glossary_path
+                    )
+                    current_chapter_system_prompt = build_system_prompt(
+                        chapter_base_system_prompt,
+                        current_glossary_path,
+                        source_text=chunk_html,
+                        chapter_ref=chapter_ref,
+                    )
+                    current_chapter_system_prompt, chunk_prompt_msgs, user_prompt = _build_translation_chunk_prompt_parts(
+                        current_chapter_system_prompt,
+                        chunk_html,
+                        chunk_idx,
+                        total_chunks,
+                        self.config,
+                        previous_chunk_html=previous_chunk_html,
+                    )
+
+                    chapter_msgs = (
+                        [{"role": "system", "content": current_chapter_system_prompt}]
+                        + rolling_summary_msgs
+                        + memory_msgs
+                        + chunk_prompt_msgs
+                        + assistant_prefill_msgs
+                        + [{"role": "user", "content": user_prompt}]
+                    )
+                    chapter_msgs = _build_single_pass_glossary_messages(
+                        chapter_msgs,
+                        chunk_html,
+                    )
+                    chapter_msgs = _with_structured_batch_prompt(
+                        chapter_msgs,
+                        chapter,
+                    )
 
                 # Abort immediately if a prior chunk triggered prohibition (NOT for user stop)
                 if chunk_abort_event.is_set():
@@ -10074,7 +10133,7 @@ class BatchTranslationProcessor:
                     try:
                         def _mark_batch_chunk_progress_on_send():
                             _mark_batch_chapter_progress_on_send(chunk_idx)
-                            if _single_pass_glossary_mode():
+                            if single_pass_glossary_active:
                                 _mark_single_pass_glossary_in_progress(
                                     self.out_dir,
                                     chapter_num=actual_num,
@@ -10105,7 +10164,7 @@ class BatchTranslationProcessor:
                             local_cancel_only_check=chunk_abort_event.is_set,
                         )
                         chunk_actual_model, chunk_actual_key = _capture_thread_actual_request_metadata()
-                        if _single_pass_glossary_mode() and isinstance(result, str):
+                        if single_pass_glossary_active and isinstance(result, str):
                             result, glossary_block = _split_single_pass_glossary_response(result)
                             _persist_single_pass_glossary(
                                 self.out_dir,
@@ -10353,7 +10412,7 @@ class BatchTranslationProcessor:
                                     local_cancel_only_check=chunk_abort_event.is_set,
                                 )
                                 retry_actual_model, retry_actual_key = _capture_thread_actual_request_metadata()
-                                if _single_pass_glossary_mode() and isinstance(result_retry, str):
+                                if single_pass_glossary_active and isinstance(result_retry, str):
                                     result_retry, glossary_block_retry = _split_single_pass_glossary_response(result_retry)
                                     _persist_single_pass_glossary(
                                         self.out_dir,
@@ -29062,6 +29121,9 @@ def main(log_callback=None, stop_callback=None):
             
             for chunk_idx_enumerate, (chunk_html, chunk_idx, total_chunks) in enumerate(chunks):
                 previous_chunk_html = chunks[chunk_idx_enumerate - 1][0] if chunk_idx_enumerate > 0 else ""
+                title_tag_only_request = bool(
+                    c.get("_title_tag_only_translation")
+                )
                 cached_result = cached_chunk_results.get(str(chunk_idx))
                 if isinstance(cached_result, str):
                     translated_chunks.append((cached_result, chunk_idx, total_chunks))
@@ -29229,11 +29291,17 @@ def main(log_callback=None, stop_callback=None):
                         else:
                             log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for {terminology_lower} {actual_num} - {progress_percent:.1f}% complete")
                         
-                # Apply emergency glossary compliance pre-edit
-                chunk_html = apply_emergency_glossary_compliance(chunk_html, out)
+                # Keep the extracted title markup byte-for-byte as the user
+                # payload; the dedicated title request does not use glossary
+                # pre-edits or any other chapter prompt augmentation.
+                if not title_tag_only_request:
+                    chunk_html = apply_emergency_glossary_compliance(
+                        chunk_html,
+                        out,
+                    )
                 user_prompt = chunk_html
                 
-                if config.CONTEXTUAL:
+                if not title_tag_only_request and config.CONTEXTUAL:
                     history = history_manager.load_history()
                     trimmed = history[-config.HIST_LIMIT*2:]
                     chunk_context = chunk_context_manager.get_context_messages(limit=2)
@@ -29301,48 +29369,57 @@ def main(log_callback=None, stop_callback=None):
                     chunk_context = []
                     memory_msgs = []
 
-                # Build the current system prompt from the original each time.
-                # Apply per-chunk glossary compression if enabled
-                # Use get_system_prompt() with actual merge count to conditionally include split marker instruction
-                actual_merge_count = len(merge_info['group']) if merge_info else 1
-                base_prompt = config.get_system_prompt(actual_merge_count=actual_merge_count)
-                current_glossary_path = find_glossary_file(out) if _single_pass_glossary_mode() else glossary_path
-                current_chapter_ref = {
-                    "chapter_num": actual_num,
-                    "chapter_file": _single_pass_progress_chapter_file(c, FileUtilities.create_chapter_filename(c, actual_num)),
-                }
-                os.environ["CURRENT_CHAPTER_FILE"] = str(current_chapter_ref["chapter_file"] or "")
-                os.environ["CURRENT_CHAPTER_NUM"] = str(actual_num)
-                if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1" and current_glossary_path and os.path.exists(current_glossary_path):
-                    # Rebuild system prompt with compressed glossary for THIS SPECIFIC CHUNK
-                    current_system_content = build_system_prompt(
-                        base_prompt,
-                        current_glossary_path,
-                        source_text=chunk_html,
-                        chapter_ref=current_chapter_ref,
-                    )
-                else:
-                    # Use base prompt with glossary from original_system_prompt but without stale split marker
-                    current_system_content = build_system_prompt(
-                        base_prompt,
-                        current_glossary_path,
-                        source_text=None,
-                        chapter_ref=current_chapter_ref,
-                    )
-                current_system_content, chunk_prompt_msg, user_prompt = _build_translation_chunk_prompt_parts(
-                    current_system_content,
-                    chunk_html,
-                    chunk_idx,
-                    total_chunks,
+                title_tag_messages = image_only_title_tag_messages(
                     config,
-                    previous_chunk_html=previous_chunk_html,
+                    c,
+                    chunk_html,
                 )
-                current_base = [{"role": "system", "content": current_system_content}]
+                if title_tag_messages is not None:
+                    current_base = []
+                    chunk_prompt_msg = []
+                else:
+                    # Build the current system prompt from the original each time.
+                    # Apply per-chunk glossary compression if enabled
+                    # Use get_system_prompt() with actual merge count to conditionally include split marker instruction
+                    actual_merge_count = len(merge_info['group']) if merge_info else 1
+                    base_prompt = config.get_system_prompt(actual_merge_count=actual_merge_count)
+                    current_glossary_path = find_glossary_file(out) if _single_pass_glossary_mode() else glossary_path
+                    current_chapter_ref = {
+                        "chapter_num": actual_num,
+                        "chapter_file": _single_pass_progress_chapter_file(c, FileUtilities.create_chapter_filename(c, actual_num)),
+                    }
+                    os.environ["CURRENT_CHAPTER_FILE"] = str(current_chapter_ref["chapter_file"] or "")
+                    os.environ["CURRENT_CHAPTER_NUM"] = str(actual_num)
+                    if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1" and current_glossary_path and os.path.exists(current_glossary_path):
+                        # Rebuild system prompt with compressed glossary for THIS SPECIFIC CHUNK
+                        current_system_content = build_system_prompt(
+                            base_prompt,
+                            current_glossary_path,
+                            source_text=chunk_html,
+                            chapter_ref=current_chapter_ref,
+                        )
+                    else:
+                        # Use base prompt with glossary from original_system_prompt but without stale split marker
+                        current_system_content = build_system_prompt(
+                            base_prompt,
+                            current_glossary_path,
+                            source_text=None,
+                            chapter_ref=current_chapter_ref,
+                        )
+                    current_system_content, chunk_prompt_msg, user_prompt = _build_translation_chunk_prompt_parts(
+                        current_system_content,
+                        chunk_html,
+                        chunk_idx,
+                        total_chunks,
+                        config,
+                        previous_chunk_html=previous_chunk_html,
+                    )
+                    current_base = [{"role": "system", "content": current_system_content}]
 
                 # Inject rolling_summary.txt verbatim as an assistant message.
                 # IMPORTANT: Do NOT parse, re-header, or otherwise modify rolling_summary.txt here.
                 summary_msgs_list = []
-                if config.USE_ROLLING_SUMMARY:
+                if not title_tag_only_request and config.USE_ROLLING_SUMMARY:
                     rolling_summary_text = ""
                     try:
                         summary_file = os.path.join(out, "rolling_summary.txt")
@@ -29365,11 +29442,18 @@ def main(log_callback=None, stop_callback=None):
 
                 # Build optional assistant prefill message if configured
                 assistant_prefill_msgs = []
-                if getattr(config, 'ASSISTANT_PROMPT', '') and config.ASSISTANT_PROMPT.strip():
+                if (
+                    not title_tag_only_request
+                    and getattr(config, 'ASSISTANT_PROMPT', '')
+                    and config.ASSISTANT_PROMPT.strip()
+                ):
                     assistant_prefill_msgs = [{"role": "assistant", "content": config.ASSISTANT_PROMPT.strip()}]
 
                 # Build final message list for this chunk
-                msgs = current_base + summary_msgs_list + chunk_context + memory_msgs + chunk_prompt_msg + assistant_prefill_msgs + [{"role": "user", "content": user_prompt}]
+                if title_tag_messages is not None:
+                    msgs = title_tag_messages
+                else:
+                    msgs = current_base + summary_msgs_list + chunk_context + memory_msgs + chunk_prompt_msg + assistant_prefill_msgs + [{"role": "user", "content": user_prompt}]
 
                 c['__index'] = idx
                 c['__progress'] = progress_manager.prog

@@ -112,6 +112,7 @@ from refinement_prompts import (
 from language_options import TARGET_LANGUAGES
 from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS
 from epub_package import find_epub_opf_member, find_opf_path
+from title_tag_translation import DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
 
 
 _AUTHGROK_ADD_ACCOUNT_SENTINEL = "__authgrok_add_account__"
@@ -14260,6 +14261,9 @@ Text to analyze:
         # Default prompts
         self.default_translation_chunk_prompt = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned."
         self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
+        self.default_image_only_title_tag_system_prompt = (
+            DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
+        )
         self.default_vision_ocr_prompt = (
             "Extract all readable text that is physically present in the image, in natural reading order. Return Markdown only, not HTML. "
             "Output plain text by default. Use Markdown only to preserve visible source structure or styling when it is actually present in the image: paragraph breaks, meaningful line breaks, bullet lists, numbered lists, blockquotes, tables, bold, italic, strikethrough/deleted text, inline code/code blocks, or visibly printed Markdown characters. "
@@ -15959,6 +15963,10 @@ Recent translations to summarize:
         if self.translation_chunk_prompt_role_var not in {'system', 'assistant', 'user'}:
             self.translation_chunk_prompt_role_var = 'assistant'
         self.image_chunk_prompt = self.config.get('image_chunk_prompt', self.default_image_chunk_prompt)
+        self.image_only_title_tag_system_prompt = str(self.config.get(
+            'image_only_title_tag_system_prompt',
+            self.default_image_only_title_tag_system_prompt,
+        ) or self.default_image_only_title_tag_system_prompt).strip()
         self.vision_ocr_prompt = self.config.get('vision_ocr_prompt', self.default_vision_ocr_prompt)
         if not self.vision_ocr_prompt or not str(self.vision_ocr_prompt).strip():
             self.vision_ocr_prompt = self.default_vision_ocr_prompt
@@ -30933,6 +30941,17 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 skip_title_tag = bool(self.config.get('skip_title_tag_translation', False))
                 os.environ['SKIP_TITLE_TAG_TRANSLATION'] = '1' if skip_title_tag else '0'
                 os.environ['USE_TITLE'] = '0' if skip_title_tag else '1'
+                try:
+                    import large_env
+                    large_env.set_env(
+                        'IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT',
+                        str(self.config.get(
+                            'image_only_title_tag_system_prompt',
+                            DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
+                        ) or DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT),
+                    )
+                except Exception:
+                    pass
                 os.environ['REMOVE_DUPLICATE_H1_P'] = '1' if self.config.get('remove_duplicate_h1_p', False) else '0'
                 os.environ['FIX_STRAY_P_GT_EPUB'] = '1' if self.config.get('fix_stray_p_gt_epub', False) else '0'
                 os.environ['FIX_STRAY_P_GT_BS'] = '1' if self.config.get('fix_stray_p_gt_bs', False) else '0'
@@ -34470,6 +34489,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SKIP_IMAGE_TITLE_TRANSLATION': "1" if getattr(self, 'skip_image_title_translation_var', True) else "0",
             'SKIP_TITLE_TAG_TRANSLATION': "1" if getattr(self, 'skip_title_tag_translation_var', False) else "0",
             'USE_TITLE': "0" if getattr(self, 'skip_title_tag_translation_var', False) else "1",
+            'IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT': str(getattr(
+                self,
+                'image_only_title_tag_system_prompt',
+                self.config.get(
+                    'image_only_title_tag_system_prompt',
+                    DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
+                ),
+            ) or DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT),
             'BOOK_TITLE_PROMPT': self.book_title_prompt,
             'BOOK_TITLE_SYSTEM_PROMPT': self.config.get('book_title_system_prompt', 
                 "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."),
@@ -36991,6 +37018,17 @@ Important rules:
             # Set prompts
             import large_env
             large_env.set_env('SYSTEM_PROMPT', self.prompt_text.toPlainText().strip())
+            large_env.set_env(
+                'IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT',
+                str(getattr(
+                    self,
+                    'image_only_title_tag_system_prompt',
+                    self.config.get(
+                        'image_only_title_tag_system_prompt',
+                        DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
+                    ),
+                ) or DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT),
+            )
 
             # PDF output settings
             os.environ['ENABLE_PDF_OUTPUT'] = '1' if getattr(self, 'enable_pdf_output_var', self.config.get('enable_pdf_output', False)) else '0'
@@ -45558,6 +45596,7 @@ Important rules:
                 ('book_title_prompt', ['book_title_prompt'], '', str),
                 ('translation_chunk_prompt', ['translation_chunk_prompt'], '', str),
                 ('image_chunk_prompt', ['image_chunk_prompt'], '', str),
+                ('image_only_title_tag_system_prompt', ['image_only_title_tag_system_prompt'], DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT, str),
                 ('vision_ocr_prompt', ['vision_ocr_prompt'], getattr(self, 'default_vision_ocr_prompt', ''), str),
                 ('vision_ocr_user_prompt', ['vision_ocr_user_prompt'], getattr(self, 'default_vision_ocr_user_prompt', ''), str),
                 ('vision_ocr_combined_context_prompt', ['vision_ocr_combined_context_prompt'], getattr(self, 'default_vision_ocr_combined_context_prompt', ''), str),
@@ -46038,6 +46077,10 @@ Important rules:
             self.config.setdefault('include_previous_chunk', False)
             self.config.setdefault('previous_chunk_context_limit', 3)
             self.config.setdefault('translation_chunk_prompt_role', 'assistant')
+            self.config.setdefault(
+                'image_only_title_tag_system_prompt',
+                DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
+            )
             # Image compression defaults
             compression_defaults = {'enable_image_compression': False, 'auto_compress_enabled': True, 'target_image_tokens': 1000, 'image_compression_format': 'auto', 'webp_quality': 85, 'jpeg_quality': 85, 'png_compression': 6, 'max_image_dimension': 2048, 'max_image_size_mb': 10, 'preserve_transparency': False, 'preserve_original_format': False, 'optimize_for_ocr': True, 'progressive_encoding': True, 'save_compressed_images': False}
             for key, val in compression_defaults.items():
@@ -46947,6 +46990,14 @@ Important rules:
                 ('SKIP_PDF_TITLE_TRANSLATION', '1' if getattr(self, 'skip_pdf_title_translation_var', False) else '0'),
                 ('SKIP_IMAGE_TITLE_TRANSLATION', '1' if getattr(self, 'skip_image_title_translation_var', True) else '0'),
                 ('SKIP_TITLE_TAG_TRANSLATION', '1' if getattr(self, 'skip_title_tag_translation_var', False) else '0'),
+                ('IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT', str(getattr(
+                    self,
+                    'image_only_title_tag_system_prompt',
+                    self.config.get(
+                        'image_only_title_tag_system_prompt',
+                        DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
+                    ),
+                ) or DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT)),
                 ('BOOK_TITLE_PROMPT', getattr(self, 'book_title_prompt', '')),
                 ('GLOSSARY_INCLUDE_BOOK_TITLE', '1' if getattr(self, 'include_book_title_glossary_var', True) else '0'),
                 ('GLOSSARY_AUTO_INJECT_BOOK_TITLE', '1' if getattr(self, 'auto_inject_book_title_var', self.config.get('auto_inject_book_title', False)) else '0'),
@@ -47184,8 +47235,14 @@ Important rules:
             for env_key, env_value in env_mappings:
                 try:
                     old_value = os.environ.get(env_key, '<NOT SET>')
-                    os.environ[env_key] = str(env_value) if env_value is not None else ''
-                    new_value = os.environ[env_key]
+                    env_text = str(env_value) if env_value is not None else ''
+                    if env_key == 'IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT':
+                        import large_env
+                        large_env.set_env(env_key, env_text)
+                        new_value = large_env.get_env(env_key, '') or ''
+                    else:
+                        os.environ[env_key] = env_text
+                        new_value = os.environ[env_key]
                     
                     if old_value != new_value and debug_mode:
                         self.append_log(f"🔍 [INIT] ENV {env_key}: '{old_value}' → '{new_value[:50]}{'...' if len(str(new_value)) > 50 else ''}'")

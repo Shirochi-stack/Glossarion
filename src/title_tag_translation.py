@@ -10,6 +10,13 @@ from bs4 import BeautifulSoup
 
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
+DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT = (
+    "Translate only the human-readable text inside the provided HTML/XHTML "
+    "<title> tag into {target_lang}. Preserve the <title> tag and all "
+    "attributes. Return exactly one translated <title>...</title> tag and "
+    "nothing else. Do not add explanations, Markdown fences, or requests for "
+    "more source text."
+)
 _TITLE_TAG_RE = re.compile(
     r"(<title\b[^>]*>)(.*?)(</title\s*>)",
     flags=re.IGNORECASE | re.DOTALL,
@@ -44,6 +51,35 @@ def title_tag_translation_payload(markup: str) -> str:
         for tag in soup.find_all("title")
         if tag.get_text(" ", strip=True)
     )
+
+
+def image_only_title_tag_messages(config, chapter, title_markup: str):
+    """Build the isolated request used by the image-only title path.
+
+    Returning ``None`` unless the internal title-only marker is present keeps
+    this prompt unavailable to ordinary text, mixed-content, metadata, header,
+    OCR, and image translation requests.
+    """
+    if not isinstance(chapter, dict) or not chapter.get(
+        "_title_tag_only_translation"
+    ):
+        return None
+
+    configured_prompt = getattr(
+        config,
+        "IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT",
+        DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
+    )
+    system_prompt = str(configured_prompt or "").strip()
+    if not system_prompt:
+        system_prompt = DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
+
+    target_lang = str(os.getenv("OUTPUT_LANGUAGE", "English") or "English").strip()
+    system_prompt = system_prompt.replace("{target_lang}", target_lang or "English")
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": str(title_markup or "")},
+    ]
 
 
 def restore_translated_title_tags(original_markup: str, translated: str):

@@ -43,6 +43,7 @@ from translation_artifacts import (
     update_translation_artifact_progress,
 )
 from epub_package import find_epub_opf_member, find_opf_path
+from title_tag_translation import DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
 
 
 DEEPSEEK_V4_EFFORT_OPTIONS = ("none", "low", "high", "max")
@@ -596,6 +597,7 @@ def setup_other_settings_methods(gui_instance):
         '_update_multi_key_status_label',
         # Prompt configuration dialogs
         'configure_translation_chunk_prompt', 'configure_image_chunk_prompt', 'configure_vision_ocr_prompt',
+        'configure_image_only_title_tag_prompt',
         'configure_image_compression',
         # Helper methods for styling
         '_create_styled_checkbox', '_disable_combobox_mousewheel', '_disable_spinbox_mousewheel',
@@ -6218,6 +6220,144 @@ def show_ai_hunter_settings(self):
         _center_messagebox_buttons(msg_box)
         msg_box.exec()
 
+def configure_image_only_title_tag_prompt(self):
+    """Configure the isolated prompt for image-only document titles."""
+    from PySide6.QtWidgets import QApplication
+
+    if (
+        hasattr(self, '_image_only_title_tag_prompt_dialog')
+        and self._image_only_title_tag_prompt_dialog is not None
+    ):
+        try:
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(
+                    self._image_only_title_tag_prompt_dialog,
+                    duration=220,
+                )
+            except Exception:
+                self._image_only_title_tag_prompt_dialog.show()
+            self._image_only_title_tag_prompt_dialog.raise_()
+            self._image_only_title_tag_prompt_dialog.activateWindow()
+            return
+        except RuntimeError:
+            self._image_only_title_tag_prompt_dialog = None
+
+    parent = getattr(self, '_other_settings_dialog', None) or self
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("Configure Image-Only Title Prompt")
+    dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+    screen = QApplication.primaryScreen().geometry()
+    dialog.resize(int(screen.width() * 0.40), int(screen.height() * 0.48))
+    try:
+        dialog.setWindowIcon(QIcon("halgakos.ico"))
+    except Exception:
+        pass
+    dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+    self._image_only_title_tag_prompt_dialog = dialog
+
+    main_layout = QVBoxLayout(dialog)
+    main_layout.setContentsMargins(20, 20, 20, 20)
+
+    title = QLabel("Image-Only HTML/XHTML Title Prompt")
+    title.setStyleSheet("font-size: 14pt; font-weight: bold;")
+    main_layout.addWidget(title)
+
+    desc = QLabel(
+        "This system prompt is used only when an HTML/XHTML chapter contains "
+        "image tags but no meaningful body text and has a non-empty <title> "
+        "tag that needs translation. The request contains only that existing "
+        "<title>...</title> tag. It is never used for normal text or mixed "
+        "chapters, visible headings, metadata, OCR, image filenames, or other "
+        "translation requests."
+    )
+    desc.setStyleSheet("color: gray; font-size: 10pt;")
+    desc.setWordWrap(True)
+    main_layout.addWidget(desc)
+
+    placeholder_hint = QLabel(
+        "Available placeholder: {target_lang}. The active profile, glossary, "
+        "memory, chunk prompt, and assistant prefill are not added to this request."
+    )
+    placeholder_hint.setStyleSheet("color: #9ca3af; font-size: 9pt;")
+    placeholder_hint.setWordWrap(True)
+    main_layout.addWidget(placeholder_hint)
+    main_layout.addSpacing(10)
+
+    prompt_box = QGroupBox("Dedicated System Prompt")
+    prompt_layout = QVBoxLayout(prompt_box)
+    prompt_text = QTextEdit()
+    prompt_text.setAcceptRichText(False)
+    prompt_text.setPlainText(str(getattr(
+        self,
+        'image_only_title_tag_system_prompt',
+        self.config.get(
+            'image_only_title_tag_system_prompt',
+            DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
+        ),
+    ) or DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT))
+    prompt_layout.addWidget(prompt_text)
+    main_layout.addWidget(prompt_box, 1)
+
+    button_layout = QHBoxLayout()
+
+    def save_prompt():
+        configured_prompt = prompt_text.toPlainText().strip()
+        if not configured_prompt:
+            configured_prompt = DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
+            prompt_text.setPlainText(configured_prompt)
+        self.image_only_title_tag_system_prompt = configured_prompt
+        self.config['image_only_title_tag_system_prompt'] = configured_prompt
+        try:
+            import large_env
+            large_env.set_env(
+                'IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT',
+                configured_prompt,
+            )
+        except Exception:
+            os.environ['IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT'] = configured_prompt
+        try:
+            self.save_config(show_message=False)
+        except Exception:
+            pass
+        QMessageBox.information(
+            dialog,
+            "Success",
+            "Image-only title prompt saved!",
+        )
+        dialog.hide()
+
+    def reset_prompt():
+        result = QMessageBox.question(
+            dialog,
+            "Reset Prompt",
+            "Reset the image-only title prompt to its default?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if result == QMessageBox.Yes:
+            prompt_text.setPlainText(DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT)
+
+    save_btn = QPushButton("Save")
+    save_btn.clicked.connect(save_prompt)
+    button_layout.addWidget(save_btn)
+
+    reset_btn = QPushButton("Reset to Default")
+    reset_btn.clicked.connect(reset_prompt)
+    button_layout.addWidget(reset_btn)
+
+    cancel_btn = QPushButton("Cancel")
+    cancel_btn.clicked.connect(dialog.hide)
+    button_layout.addWidget(cancel_btn)
+    main_layout.addLayout(button_layout)
+
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
+
+
 def configure_translation_chunk_prompt(self):
     """Configure the prompt template for translation chunks (PySide6)"""
     from PySide6.QtWidgets import (
@@ -7631,7 +7771,27 @@ def _create_prompt_management_section(self, parent):
             pass
 
     skip_title_tag_cb.toggled.connect(_on_skip_title_tag_toggle)
-    section_v.addWidget(skip_title_tag_cb)
+    title_tag_row = QWidget()
+    title_tag_row_h = QHBoxLayout(title_tag_row)
+    title_tag_row_h.setContentsMargins(0, 0, 0, 0)
+    title_tag_row_h.setSpacing(10)
+    title_tag_row_h.addWidget(skip_title_tag_cb)
+
+    configure_title_prompt_btn = QPushButton(
+        "Configure Image-Only Title Prompt"
+    )
+    configure_title_prompt_btn.setObjectName(
+        "configureImageOnlyTitlePromptButton"
+    )
+    configure_title_prompt_btn.setToolTip(
+        "Configure the dedicated system prompt used only for a non-empty "
+        "<title> in an otherwise image-only HTML/XHTML chapter."
+    )
+    configure_title_prompt_btn.clicked.connect(
+        lambda: self.configure_image_only_title_tag_prompt()
+    )
+    title_tag_row_h.addWidget(configure_title_prompt_btn)
+    section_v.addWidget(title_tag_row)
     
     def _on_glossary_title_toggle(checked):
         try:
