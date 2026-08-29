@@ -441,6 +441,7 @@ def test_other_settings_places_new_toggle_after_image_title_setting():
     trailing_stretch = title_row_source.index("title_tag_row_h.addStretch()")
     assert trailing_stretch > button_add
     assert "configure_title_prompt_btn.setFixedWidth(" in title_row_source
+    assert "configure_title_prompt_btn.sizeHint().width() + 12" in title_row_source
     assert "Use title (Legacy)" not in source
 
 

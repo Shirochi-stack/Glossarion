@@ -7790,7 +7790,7 @@ def _create_prompt_management_section(self, parent):
         QSizePolicy.Policy.Fixed,
     )
     configure_title_prompt_btn.setFixedWidth(
-        configure_title_prompt_btn.sizeHint().width()
+        configure_title_prompt_btn.sizeHint().width() + 12
     )
     configure_title_prompt_btn.setToolTip(
         "Configure the dedicated system prompt used only for a non-empty "
