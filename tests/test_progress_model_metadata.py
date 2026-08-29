@@ -153,6 +153,7 @@ def test_translation_log_numbers_use_same_nonreset_sequence_as_progress_views():
     ).read_text(encoding="utf-8")
     assert 'f"💬 {_term} {log_num}: Chunk ' in translation_source
     assert 'current_request_label = f"Chapter {log_num} ' in translation_source
+    assert 'f"📝 Image-only chapter {log_num}: queued its "' in translation_source
     assert translation_source.count("'chapter': log_num") >= 2
     assert "'chapter': parent_log_num" in translation_source
 

@@ -27423,6 +27423,7 @@ def main(log_callback=None, stop_callback=None):
                 c['actual_chapter_num'] = actual_num  # UPDATE THE CHAPTER DICT!
             else:
                 actual_num = c.get('actual_chapter_num', c['num'])  # Now this will exist!
+            log_num = _chapter_log_number(c, actual_num)
             
             # Skip configured special files if translation is disabled.
             # When TRANSLATE_ALL_NUMBERED_HTML is on, files with a number
@@ -27500,7 +27501,7 @@ def main(log_callback=None, stop_callback=None):
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
                 progress_manager.save()
                 chapters_completed += 1
-                print(f"⏭️ SDLXLIFF batch {actual_num}: placeholder-only; preserved without API request")
+                print(f"⏭️ SDLXLIFF batch {log_num}: placeholder-only; preserved without API request")
                 continue
             
             # Check for empty or image-only chapters
@@ -27521,7 +27522,7 @@ def main(log_callback=None, stop_callback=None):
             
             # Handle empty chapters
             if is_empty_chapter:
-                print(f"📄 Empty chapter {actual_num} detected (preserving original content as-is)")
+                print(f"📄 Empty chapter {log_num} detected (preserving original content as-is)")
 
                 safe_title = make_safe_filename(c['title'], c['num'])
 
@@ -27548,11 +27549,11 @@ def main(log_callback=None, stop_callback=None):
             elif is_image_only_chapter and config.OUTPUT_MODE == "text":
                 if _prepare_image_only_title_translation(c, out):
                     print(
-                        f"📝 Image-only chapter {actual_num}: queued its "
+                        f"📝 Image-only chapter {log_num}: queued its "
                         "<title> tag for parallel translation"
                     )
                 else:
-                    print(f"📸 Image-only chapter {actual_num} detected (preserving original content as-is)")
+                    print(f"📸 Image-only chapter {log_num} detected (preserving original content as-is)")
 
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
                     original_markup = _original_markup_for_copy(c, out)
