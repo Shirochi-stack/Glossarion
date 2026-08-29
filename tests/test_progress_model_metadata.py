@@ -298,6 +298,7 @@ def test_glossary_structural_skip_ui_and_default_toggle_are_wired():
     assert "'glossary_skip_title_header_only', True" in translator_gui
     assert "'completed_image_only': 'Image Only (Skipped)'" in progress_gui
     assert "'completed_title_header_only': 'Title/Header Only (Skipped)'" in progress_gui
+    assert "if status in skipped_labels:" in progress_gui
 
 
 def test_glossary_refinement_watchdog_label_is_not_taken_from_prompt_content():

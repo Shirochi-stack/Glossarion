@@ -21974,7 +21974,10 @@ class RetranslationMixin:
                     status_label = f"{status_label} 💀"
                 elif status == 'completed' and _progress_entry_refined_for_display(entry):
                     status_label = f"{status_label} ⭐"
-                display = f"[{opf_pos:03d}] Ch.{ch_num:03d} | {icon} {status_label:14s} | {fname} -> {model_name}"
+                if status in skipped_labels:
+                    display = f"[{opf_pos:03d}] Ch.{ch_num:03d} | {icon} {status_label:14s} | {fname}"
+                else:
+                    display = f"[{opf_pos:03d}] Ch.{ch_num:03d} | {icon} {status_label:14s} | {fname} -> {model_name}"
                 if issues:
                     qa_issue_previews = entry.get('qa_issue_previews', {}) if isinstance(entry, dict) else {}
                     if not isinstance(qa_issue_previews, dict):
