@@ -1482,6 +1482,7 @@ class GlossaryManagerMixin:
                     ('strict_gender_compression_checkbox', 'compress_glossary_strict_gender_matching', False),
                     ('consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column', False),
                     ('save_glossary_in_output_checkbox', 'save_glossary_in_output', False),
+                    ('glossary_skip_title_header_only_checkbox', 'glossary_skip_title_header_only', True),
                 ]
                 for attr, cfg_key, default in _sync_pairs:
                     if hasattr(self, attr):
@@ -1988,6 +1989,7 @@ class GlossaryManagerMixin:
                     ('skip_identical_entries_checkbox', 'glossary_skip_identical_entries_var'),
                     ('skip_gender_tracking_checkbox', 'glossary_skip_gender_tracking_var'),
                     ('disable_glossary_history_checkbox', 'disable_glossary_history_var'),
+                    ('glossary_skip_title_header_only_checkbox', 'glossary_skip_title_header_only_var'),
                 ]
                 
                 # Handle inverted logic for disable_smart_filtering_checkbox
@@ -2050,6 +2052,8 @@ class GlossaryManagerMixin:
                             os.environ['GLOSSARY_SKIP_GENDER_TRACKING'] = '1' if checked else '0'
                         elif checkbox_name == 'disable_glossary_history_checkbox':
                             self.config['disable_glossary_history'] = bool(checked)
+                        elif checkbox_name == 'glossary_skip_title_header_only_checkbox':
+                            self.config['glossary_skip_title_header_only'] = bool(checked)
 
                 # If Append Glossary + Auto-load are enabled, auto-fill glossary selection/mapping
                 # (Skip if a glossary is already mapped — dialog is recreated each open)
@@ -3487,6 +3491,24 @@ class GlossaryManagerMixin:
             "Glossary Merge Count:", self.glossary_request_merge_count_entry,
             tooltip="When request merging is on, combine this many chunks\nbefore one glossary API call."
         ), 2, 1)
+
+        if not hasattr(self, 'glossary_skip_title_header_only_checkbox'):
+            self.glossary_skip_title_header_only_checkbox = self._create_styled_checkbox(
+                "Skip title/header-only chapters"
+            )
+        self.glossary_skip_title_header_only_checkbox.setChecked(
+            self.config.get('glossary_skip_title_header_only', True)
+        )
+        self.glossary_skip_title_header_only_checkbox.setToolTip(
+            "Skip glossary API requests when a chapter's only text is inside "
+            "the <title> tag, heading tags (<h1>-<h6>), or both.\n"
+            "Image-only chapters are always skipped and recorded separately."
+        )
+        settings_frame_layout.addWidget(
+            self.glossary_skip_title_header_only_checkbox,
+            0,
+            Qt.AlignLeft,
+        )
         
         # Shortcut button: Anti Duplicate Parameters (glossary-specific)
         anti_dup_btn = QPushButton("Anti Duplicate Parameters")

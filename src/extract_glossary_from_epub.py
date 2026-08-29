@@ -1722,6 +1722,7 @@ class GlossaryProgressContext:
         book_title_translated=None,
         book_title_present=False,
         book_title_value=None,
+        chapter_status_overrides=None,
     ):
         self.progress_file = progress_file
         self.output_file = output_file or ""
@@ -1736,6 +1737,11 @@ class GlossaryProgressContext:
         self.book_title_translated = book_title_translated
         self.book_title_present = bool(book_title_present)
         self.book_title_value = book_title_value
+        self.chapter_status_overrides = {
+            int(k): str(v)
+            for k, v in (chapter_status_overrides or {}).items()
+            if str(v or "").strip()
+        }
 
 def make_glossary_progress_context(**kwargs):
     return GlossaryProgressContext(**kwargs)
@@ -2184,7 +2190,7 @@ def _restore_glossary_in_progress_file(context=None, indices=None):
                 elif status == "merged":
                     merged.append(idx)
                     completed.append(idx)
-                elif status == "completed":
+                elif status == "completed" or status in _GLOSSARY_STRUCTURAL_COMPLETED_STATUSES:
                     completed.append(idx)
 
             progress_data["chapters"] = chapters
@@ -3378,13 +3384,77 @@ def extract_chapters_from_subtitle(
             shutil.rmtree(temporary_root, ignore_errors=True)
 
 
-def extract_chapters_from_epub(epub_path: str, return_metadata: bool = False) -> List:
+_GLOSSARY_STRUCTURAL_COMPLETED_STATUSES = {
+    "completed_empty",
+    "completed_image_only",
+    "completed_title_header_only",
+}
+
+
+def _classify_glossary_html_document(raw_html) -> Dict[str, str]:
+    """Extract text while identifying documents that need no glossary request."""
+    soup = BeautifulSoup(raw_html or b"", "html.parser")
+    for tag in soup.find_all(["script", "style", "noscript", "template"]):
+        tag.decompose()
+
+    text = soup.get_text("\n", strip=True)
+    has_images = bool(soup.find(["img", "image"]))
+
+    content_soup = BeautifulSoup(str(soup), "html.parser")
+    for tag in content_soup.find_all(["title", "h1", "h2", "h3", "h4", "h5", "h6"]):
+        tag.decompose()
+    remaining_text = content_soup.get_text("\n", strip=True)
+
+    if has_images and not remaining_text:
+        structural_kind = "image_only"
+    elif text and not remaining_text:
+        structural_kind = "title_header_only"
+    elif not text:
+        structural_kind = "empty"
+    else:
+        structural_kind = ""
+
+    return {
+        "text": text,
+        "structural_kind": structural_kind,
+    }
+
+
+def _glossary_structural_progress_statuses(
+    chapter_kinds,
+    *,
+    skip_title_header_only=True,
+):
+    """Map structural EPUB classifications to completed skip statuses."""
+    statuses = {}
+    for raw_idx, raw_kind in (chapter_kinds or {}).items():
+        try:
+            idx = int(raw_idx)
+        except (TypeError, ValueError):
+            continue
+        kind = str(raw_kind or "").strip().lower()
+        if kind == "image_only":
+            statuses[idx] = "completed_image_only"
+        elif kind == "empty":
+            statuses[idx] = "completed_empty"
+        elif kind == "title_header_only" and skip_title_header_only:
+            statuses[idx] = "completed_title_header_only"
+    return statuses
+
+
+def extract_chapters_from_epub(
+    epub_path: str,
+    return_metadata: bool = False,
+    return_document_metadata: bool = False,
+) -> List:
     """Extract chapters from EPUB for glossary extraction.
     
     Args:
         epub_path: Path to the EPUB file
         return_metadata: If True, returns list of (text, filename) tuples.
                         If False (default), returns list of text strings for backward compat.
+        return_document_metadata: If True, retains every spine document and
+            returns dictionaries with its text, filename, and structural kind.
     """
     chapters = []
     items = []
@@ -3495,11 +3565,18 @@ def extract_chapters_from_epub(epub_path: str, return_metadata: bool = False) ->
                         continue
 
             raw = item.get_content()
-            soup = BeautifulSoup(raw, 'html.parser')
-            text = soup.get_text("\n", strip=True)
-            if text:
+            document = _classify_glossary_html_document(raw)
+            text = document["text"]
+            filename = os.path.basename(item_name) if item_name else ""
+            if return_document_metadata:
+                chapters.append({
+                    "text": text,
+                    "filename": filename,
+                    "structural_kind": document["structural_kind"],
+                })
+            elif text:
                 if return_metadata:
-                    chapters.append((text, os.path.basename(item_name) if item_name else ''))
+                    chapters.append((text, filename))
                 else:
                     chapters.append(text)
         except Exception as e:
@@ -3676,7 +3753,7 @@ def load_progress(context=None) -> Dict:
                     elif status == "merged":
                         merged_from_entries.append(idx)
                         completed_from_entries.append(idx)
-                    elif status == "completed":
+                    elif status == "completed" or status in _GLOSSARY_STRUCTURAL_COMPLETED_STATUSES:
                         completed_from_entries.append(idx)
 
                 if completed_from_entries or failed_from_entries or merged_from_entries or in_progress_from_entries:
@@ -6971,6 +7048,7 @@ def main(log_callback=None, stop_callback=None):
     is_pdf_file = epub_path.lower().endswith('.pdf')
     is_sdlxliff_file = epub_path.lower().endswith('.sdlxliff')
     is_subtitle_source = is_subtitle_glossary_source(epub_path)
+    _chapter_structural_kinds = {}
     
     if is_subtitle_source:
         _raw_chapters = extract_chapters_from_subtitle(
@@ -7000,10 +7078,21 @@ def main(log_callback=None, stop_callback=None):
 
         file_base = os.path.splitext(os.path.basename(epub_path))[0]
     else:
-        # Existing EPUB code — request metadata so we can show filenames in logs
-        _raw_chapters = extract_chapters_from_epub(epub_path, return_metadata=True)
-        chapters = [text for text, _fn in _raw_chapters]
-        _chapter_filenames = {idx: fn for idx, (text, fn) in enumerate(_raw_chapters)}
+        # Keep structural metadata so image-only and empty spine documents stay
+        # represented in glossary progress without entering the API queue.
+        _raw_chapters = extract_chapters_from_epub(
+            epub_path,
+            return_document_metadata=True,
+        )
+        chapters = [item["text"] for item in _raw_chapters]
+        _chapter_filenames = {
+            idx: item["filename"] for idx, item in enumerate(_raw_chapters)
+        }
+        _chapter_structural_kinds = {
+            idx: item["structural_kind"]
+            for idx, item in enumerate(_raw_chapters)
+            if item.get("structural_kind")
+        }
         epub_base = os.path.splitext(os.path.basename(epub_path))[0]
         file_base = epub_base
 
@@ -7414,6 +7503,15 @@ def main(log_callback=None, stop_callback=None):
     if chapter_split_enabled or os.getenv("DEBUG_CHAPTER_SPLIT_LOG", "0") == "1":
         print(f"✂️  Chapter Split Enabled: {'✅' if chapter_split_enabled else '❌'}")
 
+    skip_title_header_only = (
+        os.getenv("GLOSSARY_SKIP_TITLE_HEADER_ONLY", "1") == "1"
+    )
+    if not is_text_file and not is_pdf_file and not is_sdlxliff_file and not is_subtitle_source:
+        print(
+            "🏷️ Skip title/header-only glossary chapters: "
+            f"{'✅' if skip_title_header_only else '❌'}"
+        )
+
     # Resolve effective output token limit, including active per-key pool overrides.
     effective_output_tokens = _effective_glossary_output_limit(config, model)
 
@@ -7508,6 +7606,7 @@ def main(log_callback=None, stop_callback=None):
     else:
         print("📑 Using default extraction prompt")
 
+    _chapter_structural_kinds = {}
     if is_subtitle_source:
         # Subtitle input was already read above. ZIP extraction uses a
         # temporary directory, so retain the in-memory chapters and filenames
@@ -7525,9 +7624,19 @@ def main(log_callback=None, stop_callback=None):
         chapters = _extract_pdf_chapters_for_glossary(args.epub, check_stop)
         _chapter_filenames = {}
     else:
-        _raw_chapters = extract_chapters_from_epub(args.epub, return_metadata=True)
-        chapters = [text for text, _fn in _raw_chapters]
-        _chapter_filenames = {idx: fn for idx, (text, fn) in enumerate(_raw_chapters)}
+        _raw_chapters = extract_chapters_from_epub(
+            args.epub,
+            return_document_metadata=True,
+        )
+        chapters = [item["text"] for item in _raw_chapters]
+        _chapter_filenames = {
+            idx: item["filename"] for idx, item in enumerate(_raw_chapters)
+        }
+        _chapter_structural_kinds = {
+            idx: item["structural_kind"]
+            for idx, item in enumerate(_raw_chapters)
+            if item.get("structural_kind")
+        }
     
     # Rebuild chapter positions from the final chapter list
     # (this is the definitive load used for processing)
@@ -7625,6 +7734,11 @@ def main(log_callback=None, stop_callback=None):
     progress_context.chapter_numbers = dict(_GLOSSARY_CHAPTER_NUMBERS)
     progress_context.chapter_filenames = dict(_GLOSSARY_CHAPTER_FILENAMES)
     progress_context.total_chapters = _GLOSSARY_TOTAL_CHAPTERS
+    structural_progress_statuses = _glossary_structural_progress_statuses(
+        _chapter_structural_kinds,
+        skip_title_header_only=skip_title_header_only,
+    )
+    progress_context.chapter_status_overrides = dict(structural_progress_statuses)
 
     if not chapters:
         print("No chapters found. Exiting.")
@@ -7680,6 +7794,73 @@ def main(log_callback=None, stop_callback=None):
         else:
             glossary = []
     merged_indices = prog.get('merged_indices', [])
+
+    # Structural EPUB skips are completed without an API request, but retain a
+    # distinct persisted status so the glossary progress dialog explains why.
+    existing_structural_statuses = {}
+    for chapter_key, info in (prog.get("chapters", {}) or {}).items():
+        if not isinstance(info, dict):
+            continue
+        status = str(info.get("status", "")).strip().lower()
+        if status not in _GLOSSARY_STRUCTURAL_COMPLETED_STATUSES:
+            continue
+        idx = _glossary_progress_entry_index(info, chapter_key)
+        if idx is not None:
+            existing_structural_statuses[int(idx)] = status
+
+    structural_changed = False
+    for idx, old_status in existing_structural_statuses.items():
+        if structural_progress_statuses.get(idx) == old_status:
+            continue
+        if idx in completed:
+            completed.remove(idx)
+            structural_changed = True
+        if idx in merged_indices:
+            merged_indices.remove(idx)
+            structural_changed = True
+
+    for idx in sorted(structural_progress_statuses):
+        if idx not in completed:
+            completed.append(idx)
+            structural_changed = True
+        if idx in failed:
+            failed.remove(idx)
+            structural_changed = True
+        if idx in merged_indices:
+            merged_indices.remove(idx)
+            structural_changed = True
+        if idx in in_progress:
+            in_progress.remove(idx)
+            structural_changed = True
+
+    if structural_progress_statuses or structural_changed:
+        save_progress(
+            completed,
+            glossary,
+            merged_indices,
+            failed=failed,
+            in_progress=in_progress,
+            context=progress_context,
+        )
+
+    image_only_count = sum(
+        status == "completed_image_only"
+        for status in structural_progress_statuses.values()
+    )
+    title_header_only_count = sum(
+        status == "completed_title_header_only"
+        for status in structural_progress_statuses.values()
+    )
+    if image_only_count:
+        print(
+            f"📸 Marked {image_only_count} image-only chapter(s) as completed "
+            "(skipped; no API request)"
+        )
+    if title_header_only_count:
+        print(
+            f"🏷️ Marked {title_header_only_count} title/header-only chapter(s) "
+            "as completed (skipped; no API request)"
+        )
 
     def _mark_glossary_in_progress(indices):
         changed = False
@@ -9605,6 +9786,11 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
     _refresh_book_title_flags()
     progress_file = _resolved_glossary_progress_file(context)
     _progress_file, output_file, positions, numbers, filenames, total_chapters = _progress_context_values(context)
+    chapter_status_overrides = (
+        dict(context.chapter_status_overrides)
+        if isinstance(context, GlossaryProgressContext)
+        else {}
+    )
 
     # Acquire local and cross-process locks to prevent concurrent writers from
     # replacing each other's chapter/refinement progress.
@@ -9846,7 +10032,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             elif idx in in_progress_set:
                 status = "in_progress"
             else:
-                status = "completed"
+                status = chapter_status_overrides.get(idx, "completed")
 
             chapter_info = {
                 "chapter_index": idx,
@@ -9855,17 +10041,28 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 "status": status,
                 "last_updated": time.time(),
             }
-            model_name = model_update_map.get(idx) or _current_glossary_model_name(existing_info, prefer_thread=idx in model_update_set)
+            is_structural_skip = status in _GLOSSARY_STRUCTURAL_COMPLETED_STATUSES
+            model_name = (
+                "SKIPPED"
+                if is_structural_skip
+                else model_update_map.get(idx) or _current_glossary_model_name(
+                    existing_info,
+                    prefer_thread=idx in model_update_set,
+                )
+            )
             if model_name:
                 chapter_info["model_name"] = model_name
-            key_identifier, key_pool = _current_glossary_key_context(existing_info, prefer_thread=idx in model_update_set)
-            if key_update_map.get(idx):
-                key_identifier = key_update_map[idx]
-                key_pool = _glossary_key_pool_from_identifier(key_identifier) or key_pool
-            if key_identifier:
-                chapter_info["key_identifier"] = key_identifier
-            if key_pool:
-                chapter_info["key_pool"] = key_pool
+            if is_structural_skip:
+                chapter_info["skip_reason"] = status.removeprefix("completed_")
+            else:
+                key_identifier, key_pool = _current_glossary_key_context(existing_info, prefer_thread=idx in model_update_set)
+                if key_update_map.get(idx):
+                    key_identifier = key_update_map[idx]
+                    key_pool = _glossary_key_pool_from_identifier(key_identifier) or key_pool
+                if key_identifier:
+                    chapter_info["key_identifier"] = key_identifier
+                if key_pool:
+                    chapter_info["key_pool"] = key_pool
             if chapter_file:
                 # Match TransateKRtoEN.py's progress shape: every chapter gets
                 # a stable filename anchor so OPF offsets do not shift rows.

@@ -1569,7 +1569,12 @@ def _select_progress_entry_for_display(entries, display_status=None):
         return {}
 
     desired = str(display_status or '').lower().strip()
-    completed_statuses = ('completed', 'completed_empty', 'completed_image_only')
+    completed_statuses = (
+        'completed',
+        'completed_empty',
+        'completed_image_only',
+        'completed_title_header_only',
+    )
 
     def _score(entry):
         status = str(entry.get('status') or '').lower().strip()
@@ -21808,7 +21813,12 @@ class RetranslationMixin:
                             fail.add(ci)
                         elif status == 'merged':
                             merg.add(ci)
-                        elif status == 'completed':
+                        elif status in (
+                            'completed',
+                            'completed_empty',
+                            'completed_image_only',
+                            'completed_title_header_only',
+                        ):
                             comp.add(ci)
 
                 # A progress file can briefly contain a mixture of structured
@@ -21858,12 +21868,22 @@ class RetranslationMixin:
                 in_prog = _gp_in_progress_set(_d, _precomputed_sets=(comp, fail, merg))
                 issues = _gp_qa_issue_map(_d)
                 qa_failed = set()
+                completed_variants = {}
                 chapters = _d.get('chapters', {}) if isinstance(_d, dict) else {}
                 if isinstance(chapters, dict):
                     for key, info in chapters.items():
                         if not isinstance(info, dict):
                             continue
-                        if str(info.get('status', '')).lower() != 'qa_failed':
+                        entry_status = str(info.get('status', '')).lower()
+                        if entry_status in (
+                            'completed_empty',
+                            'completed_image_only',
+                            'completed_title_header_only',
+                        ):
+                            ci = _gp_index_for_entry(info, key, _d)
+                            if ci is not None:
+                                completed_variants[ci] = entry_status
+                        if entry_status != 'qa_failed':
                             continue
                         ci = _gp_index_for_entry(info, key, _d)
                         if ci is not None:
@@ -21875,6 +21895,7 @@ class RetranslationMixin:
                     'in_progress': in_prog,
                     'issues': issues,
                     'qa_failed': qa_failed,
+                    'completed_variants': completed_variants,
                 }
 
             def _gp_status_for(ci, _d, cache=None):
@@ -21890,6 +21911,8 @@ class RetranslationMixin:
                     return ('qa_failed' if issues.get(ci) or ci in cache['qa_failed'] else 'failed'), issues.get(ci, [])
                 if ci in merg:
                     return 'merged', []
+                if ci in cache['completed_variants']:
+                    return cache['completed_variants'][ci], []
                 if ci in comp:
                     return 'completed', []
                 if ci in in_prog:
@@ -21928,6 +21951,9 @@ class RetranslationMixin:
                 model_name = _gp_model_for(ci, _d, status, entry)
                 icons = {
                     'completed': '\u2705',
+                    'completed_empty': '📄',
+                    'completed_image_only': '📸',
+                    'completed_title_header_only': '🏷️',
                     'failed': '\u274c',
                     'qa_failed': '\u274c',
                     'merged': '\U0001f517',
@@ -21935,7 +21961,15 @@ class RetranslationMixin:
                     'not_completed': '\u2b1c',
                 }
                 icon = icons.get(status) or '\u2b1c'
-                status_label = status.replace('_', ' ').title()
+                skipped_labels = {
+                    'completed_empty': 'Empty (Skipped)',
+                    'completed_image_only': 'Image Only (Skipped)',
+                    'completed_title_header_only': 'Title/Header Only (Skipped)',
+                }
+                status_label = skipped_labels.get(
+                    status,
+                    status.replace('_', ' ').title(),
+                )
                 if status == 'completed' and _progress_entry_refinement_failed_for_display(entry):
                     status_label = f"{status_label} 💀"
                 elif status == 'completed' and _progress_entry_refined_for_display(entry):
@@ -22001,7 +22035,12 @@ class RetranslationMixin:
                 return counts
 
             def _gp_color_for(status):
-                if status == 'completed':
+                if status in (
+                    'completed',
+                    'completed_empty',
+                    'completed_image_only',
+                    'completed_title_header_only',
+                ):
                     return '#27ae60'
                 if status == 'merged':
                     return '#17a2b8'
@@ -23588,7 +23627,17 @@ class RetranslationMixin:
                     gp_listbox.clearSelection()
                     clicked_item.setSelected(True)
                 selected = gp_listbox.selectedItems()
-                deletable_statuses = ('completed', 'merged', 'in_progress', 'failed', 'qa_failed', 'not_refined')
+                deletable_statuses = (
+                    'completed',
+                    'completed_empty',
+                    'completed_image_only',
+                    'completed_title_header_only',
+                    'merged',
+                    'in_progress',
+                    'failed',
+                    'qa_failed',
+                    'not_refined',
+                )
                 removable_targets = []
                 mark_completed_targets = []
                 footnote_targets = []
@@ -23795,7 +23844,12 @@ class RetranslationMixin:
                     lb.scrollToItem(lb.item(nxt), QListWidget.PositionAtCenter)
                 return _handler
             
-            lbl_gp_completed.mousePressEvent = _gp_make_cycle(('completed',), gp_listbox)
+            lbl_gp_completed.mousePressEvent = _gp_make_cycle((
+                'completed',
+                'completed_empty',
+                'completed_image_only',
+                'completed_title_header_only',
+            ), gp_listbox)
             lbl_gp_in_progress.mousePressEvent = _gp_make_cycle(('in_progress',), gp_listbox)
             lbl_gp_failed.mousePressEvent = _gp_make_cycle(('failed', 'qa_failed'), gp_listbox)
             lbl_gp_merged.mousePressEvent = _gp_make_cycle(('merged',), gp_listbox)

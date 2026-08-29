@@ -238,6 +238,67 @@ def test_glossary_progress_reactivates_a_manually_removed_chapter(tmp_path):
     assert completed["manual_removed_indices"] == [1]
 
 
+def test_glossary_progress_persists_structural_skips_as_completed(tmp_path):
+    progress_file = tmp_path / "book_glossary_progress.json"
+    context = make_glossary_progress_context(
+        progress_file=str(progress_file),
+        output_file=str(tmp_path / "book_glossary.json"),
+        chapter_positions={0: 1, 1: 2, 2: 3},
+        chapter_numbers={0: 1, 1: 2, 2: 3},
+        chapter_filenames={
+            0: "image.xhtml",
+            1: "heading.xhtml",
+            2: "empty.xhtml",
+        },
+        total_chapters=3,
+        chapter_status_overrides={
+            0: "completed_image_only",
+            1: "completed_title_header_only",
+            2: "completed_empty",
+        },
+    )
+
+    save_glossary_progress([0, 1, 2], [], [], context=context)
+
+    progress = json.loads(progress_file.read_text(encoding="utf-8"))
+    assert progress["completed"] == [0, 1, 2]
+    assert {
+        key: info["status"]
+        for key, info in progress["chapters"].items()
+    } == {
+        "0": "completed_image_only",
+        "1": "completed_title_header_only",
+        "2": "completed_empty",
+    }
+    assert {
+        info["model_name"] for info in progress["chapters"].values()
+    } == {"SKIPPED"}
+
+    reloaded = glossary_extractor.load_progress(context=context)
+    assert reloaded["completed"] == [0, 1, 2]
+
+
+def test_glossary_structural_skip_ui_and_default_toggle_are_wired():
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    glossary_gui = (source_root / "GlossaryManager_GUI.py").read_text(
+        encoding="utf-8"
+    )
+    translator_gui = (source_root / "translator_gui.py").read_text(
+        encoding="utf-8"
+    )
+    progress_gui = (source_root / "Retranslation_GUI.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"Skip title/header-only chapters"' in glossary_gui
+    assert "self.config.get('glossary_skip_title_header_only', True)" in glossary_gui
+    assert "settings_frame_layout.addWidget(\n            self.glossary_skip_title_header_only_checkbox" in glossary_gui
+    assert "'GLOSSARY_SKIP_TITLE_HEADER_ONLY'" in translator_gui
+    assert "'glossary_skip_title_header_only', True" in translator_gui
+    assert "'completed_image_only': 'Image Only (Skipped)'" in progress_gui
+    assert "'completed_title_header_only': 'Title/Header Only (Skipped)'" in progress_gui
+
+
 def test_glossary_refinement_watchdog_label_is_not_taken_from_prompt_content():
     prompt = "Refine this glossary entry whose description mentions Chapter 29."
     label = _glossary_watchdog_request_label(

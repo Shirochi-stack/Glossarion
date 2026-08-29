@@ -5,6 +5,8 @@ import time
 import zipfile
 from pathlib import Path
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QRect, Qt
@@ -19,6 +21,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
 )
 
+import extract_glossary_from_epub as glossary_extractor
 from extract_glossary_from_epub import (
     DEFAULT_GLOSSARY_PROMPT,
     extract_chapters_from_epub,
@@ -750,6 +753,114 @@ def test_parallel_epub_round_trips_through_shared_extractor(tmp_path, monkeypatc
     assert "原文 Alice" in chapters[0][0]
     assert "[TRANSLATED EPUB START — chapter-01-en.xhtml]" in chapters[0][0]
     assert "Translated Alice" in chapters[0][0]
+
+
+def test_glossary_epub_document_metadata_keeps_structural_skip_chapters(monkeypatch):
+    class Item:
+        media_type = "application/xhtml+xml"
+
+        def __init__(self, name, html):
+            self._name = name
+            self._html = html.encode("utf-8")
+
+        def get_name(self):
+            return self._name
+
+        def get_content(self):
+            return self._html
+
+    items = {
+        "image": Item(
+            "part0001.xhtml",
+            "<html><head><title>Illustration</title></head><body><img src='1.jpg'/></body></html>",
+        ),
+        "header": Item(
+            "part0002.xhtml",
+            "<html><head><title>Chapter Two</title></head><body><h1>Chapter Two</h1></body></html>",
+        ),
+        "normal": Item(
+            "part0003.xhtml",
+            "<html><head><title>Chapter Three</title></head><body><p>Actual prose.</p></body></html>",
+        ),
+        "pure_image": Item(
+            "part0004.xhtml",
+            "<html><body><svg><image href='2.jpg'/></svg></body></html>",
+        ),
+    }
+
+    class Book:
+        spine = [(item_id, "yes") for item_id in items]
+
+        @staticmethod
+        def get_item_with_id(item_id):
+            return items[item_id]
+
+    monkeypatch.setattr(
+        "extract_glossary_from_epub.epub.read_epub",
+        lambda _path: Book(),
+    )
+    monkeypatch.setattr("extract_glossary_from_epub._stop_requested", False)
+
+    documents = extract_chapters_from_epub(
+        "book.epub",
+        return_document_metadata=True,
+    )
+
+    assert [item["filename"] for item in documents] == [
+        "part0001.xhtml",
+        "part0002.xhtml",
+        "part0003.xhtml",
+        "part0004.xhtml",
+    ]
+    assert [item["structural_kind"] for item in documents] == [
+        "image_only",
+        "title_header_only",
+        "",
+        "image_only",
+    ]
+    assert documents[3]["text"] == ""
+
+
+def test_title_header_only_glossary_skip_is_optional_and_defaults_enabled():
+    candidates = {
+        0: "image_only",
+        1: "title_header_only",
+        2: "empty",
+        3: "",
+    }
+
+    assert glossary_extractor._glossary_structural_progress_statuses(
+        candidates
+    ) == {
+        0: "completed_image_only",
+        1: "completed_title_header_only",
+        2: "completed_empty",
+    }
+    assert glossary_extractor._glossary_structural_progress_statuses(
+        candidates,
+        skip_title_header_only=False,
+    ) == {
+        0: "completed_image_only",
+        2: "completed_empty",
+    }
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<html><head><title>Title only</title></head><body></body></html>",
+        "<html><head></head><body><h2>Heading only</h2></body></html>",
+        (
+            "<html><head><title>Title</title></head>"
+            "<body><h1>Heading</h1><h3>Subheading</h3></body></html>"
+        ),
+    ],
+)
+def test_title_heading_structural_classification_covers_each_supported_shape(html):
+    document = glossary_extractor._classify_glossary_html_document(html)
+
+    assert document["structural_kind"] == "title_header_only"
+    assert document["text"]
 
 
 def test_parallel_epub_requires_both_text_placeholders(tmp_path):

@@ -16060,6 +16060,7 @@ Recent translations to summarize:
             ('translation_history_rolling_var', 'translation_history_rolling', True),
             ('glossary_history_rolling_var', 'glossary_history_rolling', True),
             ('disable_glossary_history_var', 'disable_glossary_history', True),
+            ('glossary_skip_title_header_only_var', 'glossary_skip_title_header_only', True),
             ('translate_book_title_var', 'translate_book_title', True),
             ('skip_txt_title_translation_var', 'skip_txt_title_translation', True),
             ('skip_pdf_title_translation_var', 'skip_pdf_title_translation', False),
@@ -25728,6 +25729,15 @@ Recent translations to summarize:
             return '0'
         return '1' if getattr(self, 'contextual_var', False) else '0'
 
+    def _glossary_skip_title_header_only_env_value(self):
+        enabled = self._live_bool_setting(
+            'glossary_skip_title_header_only_checkbox',
+            'glossary_skip_title_header_only_var',
+            'glossary_skip_title_header_only',
+            True,
+        )
+        return '1' if enabled else '0'
+
     def _on_context_mode_changed(self, index=None):
         """Map the Context Mode combo onto the existing runtime config flags."""
         mode = 'off'
@@ -34600,6 +34610,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_REQUEST_MERGING_ENABLED': glossary_request_merging_enabled,
             'GLOSSARY_REQUEST_MERGE_COUNT': glossary_request_merge_count,
             'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
+            'GLOSSARY_SKIP_TITLE_HEADER_ONLY': self._glossary_skip_title_header_only_env_value(),
             'ENABLE_AUTO_GLOSSARY': "1" if auto_glossary_mode == 'minimal' else "0",
             'AUTO_GLOSSARY_MODE': auto_glossary_mode,
             'SINGLE_PASS_GLOSSARY_MODE': '1' if auto_glossary_mode == 'single_pass' else '',
@@ -36451,6 +36462,7 @@ Important rules:
                     'GLOSSARY_REFINEMENT_COMPRESSION_FACTOR': str(getattr(self, 'compression_factor_var', self.config.get('compression_factor', 1.0))),
                     'GLOSSARY_OUTPUT_LEGACY_JSON': '1' if getattr(self, 'glossary_output_legacy_json_var', False) else '0',
                     'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
+                    'GLOSSARY_SKIP_TITLE_HEADER_ONLY': self._glossary_skip_title_header_only_env_value(),
                     # Optional assistant prefill prompt
                     'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',
                     # Subprocess PDF extraction to prevent GUI lag
@@ -45749,6 +45761,7 @@ Important rules:
                 ('manual_context_limit', ['manual_context_entry', 'manual_context_var'], 5, lambda v: safe_int(v, 5)),
                 ('glossary_history_rolling', ['glossary_history_rolling_var'], True, bool),
                 ('disable_glossary_history', ['disable_glossary_history_checkbox', 'disable_glossary_history_var'], True, bool),
+                ('glossary_skip_title_header_only', ['glossary_skip_title_header_only_checkbox', 'glossary_skip_title_header_only_var'], True, bool),
                 ('enable_auto_glossary', ['enable_auto_glossary_checkbox', 'enable_auto_glossary_var'], False, bool),
                 ('auto_glossary_mode', ['auto_glossary_mode_var'], 'balanced', str),
                 ('glossary_use_legacy_csv', ['use_legacy_csv_checkbox', 'use_legacy_csv_var'], False, bool),
@@ -47004,6 +47017,7 @@ Important rules:
                 ('GLOSSARY_REQUEST_MERGING_ENABLED', env_glossary_merging_enabled),
                 ('GLOSSARY_REQUEST_MERGE_COUNT', env_glossary_merge_count),
                 ('GLOSSARY_ENABLE_CHAPTER_SPLIT', env_glossary_chapter_split),
+                ('GLOSSARY_SKIP_TITLE_HEADER_ONLY', self._glossary_skip_title_header_only_env_value()),
 
                 # Safety/merge toggles
                 ('EMERGENCY_PARAGRAPH_RESTORE', '1' if getattr(self, 'emergency_restore_var', False) else '0'),
