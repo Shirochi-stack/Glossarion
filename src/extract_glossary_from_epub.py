@@ -15,6 +15,7 @@ import re
 import tempfile
 import shutil
 from ebooklib import epub
+from chapter_display_numbering import nonreset_chapter_display_numbers
 from chapter_splitter import ChapterSplitter
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import List, Dict, Tuple
@@ -1926,6 +1927,27 @@ def _glossary_chapter_number_from_filename(value):
     if extension.lower() in (".html", ".xhtml", ".htm"):
         return 0
     return None
+
+
+def _glossary_chapter_display_number_map(filenames=None, positions=None):
+    """Return the non-resetting chapter numbers used in progress and logs.
+
+    ``positions`` remains the raw identity used for range filtering.  This map
+    is presentation-only so split filenames such as ``part0003_split_000`` and
+    ``part0003_split_001`` are shown as the next chapters instead of resetting
+    lifecycle logs back to Chapter 0/1.
+    """
+    filenames = {int(k): v for k, v in (filenames or {}).items()}
+    positions = {int(k): int(v) for k, v in (positions or {}).items()}
+    indices = sorted(set(filenames) | set(positions))
+    raw_numbers = []
+    for idx in indices:
+        raw_number = _glossary_chapter_number_from_filename(filenames.get(idx, ""))
+        if raw_number is None:
+            raw_number = positions.get(idx, idx + 1)
+        raw_numbers.append(raw_number)
+    display_numbers = nonreset_chapter_display_numbers(raw_numbers)
+    return dict(zip(indices, display_numbers))
 
 def _normalize_glossary_qa_issues(value=None, chapters=None):
     """Normalize glossary QA issue storage to {chapter_index: [issue, ...]}."""
@@ -7594,13 +7616,10 @@ def main(log_callback=None, stop_callback=None):
     global _GLOSSARY_CHAPTER_POSITIONS, _GLOSSARY_CHAPTER_NUMBERS, _GLOSSARY_CHAPTER_FILENAMES, _GLOSSARY_TOTAL_CHAPTERS
     _GLOSSARY_CHAPTER_POSITIONS = {int(k): int(v) for k, v in (_chapter_positions or {}).items()}
     _GLOSSARY_CHAPTER_FILENAMES = {int(k): os.path.basename(str(v or "")) for k, v in (_chapter_filenames or {}).items()}
-    _GLOSSARY_CHAPTER_NUMBERS = {}
-    for _idx, _fname in _GLOSSARY_CHAPTER_FILENAMES.items():
-        _display_num = _glossary_chapter_number_from_filename(_fname)
-        if _display_num is not None:
-            _GLOSSARY_CHAPTER_NUMBERS[_idx] = _display_num
-    for _idx, _pos in _GLOSSARY_CHAPTER_POSITIONS.items():
-        _GLOSSARY_CHAPTER_NUMBERS.setdefault(_idx, _pos)
+    _GLOSSARY_CHAPTER_NUMBERS = _glossary_chapter_display_number_map(
+        _GLOSSARY_CHAPTER_FILENAMES,
+        _GLOSSARY_CHAPTER_POSITIONS,
+    )
     _GLOSSARY_TOTAL_CHAPTERS = len(chapters)
     progress_context.chapter_positions = dict(_GLOSSARY_CHAPTER_POSITIONS)
     progress_context.chapter_numbers = dict(_GLOSSARY_CHAPTER_NUMBERS)
@@ -7965,7 +7984,10 @@ def main(log_callback=None, stop_callback=None):
                 print(f"\n🔄 Processing Batch {batch_num+1}/{total_batches} ({len(current_batch_units)} merged groups, {chapters_in_batch} chapters)")
             else:
                 current_batch = [unit[0] for unit in current_batch_units]
-                chapter_nums = sorted(idx + 1 for idx, _ in current_batch)
+                chapter_nums = sorted(
+                    _glossary_chapter_actual_num(idx, context=progress_context)
+                    for idx, _ in current_batch
+                )
                 # Collapse consecutive chapter numbers into ranges (e.g. 168–171)
                 ranges = []
                 i = 0

@@ -61,6 +61,7 @@ from scan_html_folder import update_progress_file
 from unified_api_client import UnifiedClient, set_current_thread_actual_request_model
 from extract_glossary_from_epub import (
     _confirmed_merged_child_indices,
+    _glossary_chapter_display_number_map,
     _glossary_watchdog_request_label,
     _glossary_is_hard_stop_requested,
     _graceful_stop_should_drain_after_result,
@@ -108,6 +109,27 @@ def test_filename_chapter_number_preserves_raw_identity_rules():
     assert filename_chapter_number("Text/part_0042.xhtml") == 42
     assert filename_chapter_number("Text/info.xhtml") == 0
     assert filename_chapter_number("Text/notice0042.xhtml", is_special=True) == 0
+
+
+def test_glossary_log_numbers_use_same_nonreset_sequence_as_progress_views():
+    filenames = {
+        0: "part0000.html",
+        1: "part0001.html",
+        2: "part0002.html",
+        3: "part0003_split_000.html",
+        4: "part0003_split_001.html",
+        5: "part0004_split_000.html",
+    }
+    positions = {idx: idx + 1 for idx in filenames}
+
+    assert _glossary_chapter_display_number_map(filenames, positions) == {
+        0: 0,
+        1: 1,
+        2: 2,
+        3: 3,
+        4: 4,
+        5: 5,
+    }
 
 
 def test_all_requested_chapter_views_use_shared_nonreset_numbering():
