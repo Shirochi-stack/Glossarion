@@ -84,6 +84,27 @@ def test_title_tag_translation_is_enabled_by_default(monkeypatch):
     assert should_translate_title_tags() is True
 
 
+def test_epub_container_batch_preserves_selection_order_without_parent_opf_lookup(
+    monkeypatch,
+):
+    selected = [
+        r"G:\Raws-1\[437111] first-selected.epub",
+        r"G:\Raws-1\[158171] second-selected.epub",
+    ]
+    gui = TranslatorGUI.__new__(TranslatorGUI)
+    gui.append_log = lambda _message: None
+
+    def fail_parent_opf_lookup(_root_dir):
+        pytest.fail("EPUB container batches must not search their parent for an OPF")
+
+    monkeypatch.setattr(
+        "translator_gui.find_opf_path",
+        fail_parent_opf_lookup,
+    )
+
+    assert TranslatorGUI._get_opf_file_order(gui, selected) == selected
+
+
 def test_parallel_prequeue_stop_mode_distinguishes_graceful_and_force(monkeypatch):
     translation_module.set_stop_flag(False)
     monkeypatch.setenv("GRACEFUL_STOP", "0")

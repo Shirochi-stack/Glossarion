@@ -30372,6 +30372,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
         This ensures notice files, copyright pages, etc. are processed in the correct order.
         Returns sorted file list based on OPF, or original list if no OPF found.
         """
+        source_files = list(file_list or [])
+
+        # An EPUB is the package container, not an item in another package's
+        # spine.  Looking for an OPF below the EPUB's parent directory can pick
+        # up an unrelated extracted book, then incorrectly compare outer
+        # ``*.epub`` names with that book's internal ``*.html`` spine entries.
+        # Preserve the user's batch order here; each EPUB is opened later and
+        # its own internal OPF controls its chapter order.
+        if any(
+            os.path.splitext(os.fspath(path))[1].casefold() == '.epub'
+            for path in source_files
+        ):
+            return source_files
+
         try:
             import xml.etree.ElementTree as ET
             import zipfile
@@ -31595,6 +31609,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             # Sort files based on OPF order if available
             original_file_count = len(self.selected_files)
+            has_epub_sources = any(
+                os.path.splitext(os.fspath(path))[1].casefold() == '.epub'
+                for path in self.selected_files
+            )
             if getattr(self, '_metadata_only_run', False):
                 self.append_log(
                     f"🌐 Processing {original_file_count} EPUB metadata "
@@ -31604,9 +31622,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.selected_files = self._get_opf_file_order(
                     self.selected_files
                 )
-                self.append_log(
-                    f"📚 Processing {original_file_count} files in reading order"
-                )
+                if has_epub_sources:
+                    self.append_log(
+                        f"📚 Processing {original_file_count} source file(s) in "
+                        "selection order; each EPUB uses its own internal OPF spine"
+                    )
+                else:
+                    self.append_log(
+                        f"📚 Processing {original_file_count} files in reading order"
+                    )
             # ====================================================
 
             # ── Generative-only mode (no input file) ───────────────────────
@@ -35309,8 +35333,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # ========== NEW: APPLY OPF-BASED SORTING ==========
             # Sort files based on OPF order if available
             original_file_count = len(self.selected_files)
+            has_epub_sources = any(
+                os.path.splitext(os.fspath(path))[1].casefold() == '.epub'
+                for path in self.selected_files
+            )
             self.selected_files = self._get_opf_file_order(self.selected_files)
-            self.append_log(f"📚 Processing {original_file_count} files in reading order for glossary extraction")
+            if has_epub_sources:
+                self.append_log(
+                    f"📚 Processing {original_file_count} source file(s) in "
+                    "selection order for glossary extraction; each EPUB uses "
+                    "its own internal OPF spine"
+                )
+            else:
+                self.append_log(f"📚 Processing {original_file_count} files in reading order for glossary extraction")
             # ====================================================
             
             # Group files by type and folder
