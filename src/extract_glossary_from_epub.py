@@ -19,7 +19,15 @@ from chapter_display_numbering import nonreset_chapter_display_numbers
 from chapter_splitter import ChapterSplitter
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import List, Dict, Tuple
-from unified_api_client import UnifiedClient, UnifiedClientError
+from unified_api_client import (
+    UnifiedClient,
+    UnifiedClientError,
+    _api_queue_admissions,
+    _api_queue_target,
+    _api_watchdog_set_backlog,
+    _api_watchdog_set_scheduler_queue,
+    _lazy_batch_window_backlog,
+)
 from glossary_paths import (
     get_book_glossary_dir,
     migrate_all_legacy_glossary_files,
@@ -39,6 +47,37 @@ from epub_package import find_epub_opf_member
 _glossary_thread_submit_lock = threading.Lock()
 _glossary_last_thread_submit = 0.0
 _gender_tracker_lock = threading.Lock()
+_glossary_stop_summary_lock = threading.Lock()
+_glossary_stopped_request_labels = set()
+
+
+def _reset_glossary_stop_summary():
+    """Start a fresh coalesced stop summary for one extraction run."""
+    with _glossary_stop_summary_lock:
+        _glossary_stopped_request_labels.clear()
+
+
+def _record_glossary_stopped_request(chapter_num, chunk_idx=None, total_chunks=None):
+    """Record one stopped request without printing from its worker thread."""
+    label = str(chapter_num)
+    if chunk_idx is not None and total_chunks is not None:
+        label = f"{label}:{chunk_idx}/{total_chunks}"
+    with _glossary_stop_summary_lock:
+        _glossary_stopped_request_labels.add(label)
+
+
+def _flush_glossary_stop_summary():
+    """Emit one log after stopped glossary workers have settled."""
+    with _glossary_stop_summary_lock:
+        count = len(_glossary_stopped_request_labels)
+        _glossary_stopped_request_labels.clear()
+    if count:
+        noun = "request" if count == 1 else "requests"
+        print(
+            f"🛑 Glossary stop: {count} API {noun} "
+            "were cancelled or skipped."
+        )
+    return count
 
 
 class _OrderedGlossaryBatchDispatcher:
@@ -431,6 +470,20 @@ def _is_graceful_stop_skip_error(err: Exception) -> bool:
     return (
         "skipped before api call" in s
         or "stopped by user during threading delay" in s
+    )
+
+
+def _is_glossary_user_stop_error(err: Exception) -> bool:
+    """True only for deliberate graceful/force stop interruptions."""
+    if _is_graceful_stop_skip_error(err):
+        return True
+    try:
+        error_text = str(err).lower()
+    except Exception:
+        return False
+    return (
+        "glossary extraction stopped by user" in error_text
+        or "operation cancelled by user" in error_text
     )
 
 
@@ -6437,13 +6490,15 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
         }
             
     except UnifiedClientError as e:
-        # Graceful-stop cancellations are expected when queued calls are prevented from starting.
-        # Keep a concise log so it's clear why extraction stopped/skipped without spamming the full error.
-        if _is_graceful_stop_skip_error(e):
-            if chunk_idx and total_chunks and int(total_chunks) > 1:
-                print(f"⏭️ Chapter {display_chapter_num} chunk {chunk_idx}/{total_chunks} skipped (graceful stop)")
-            else:
-                print(f"⏭️ Chapter {display_chapter_num} skipped (graceful stop)")
+        # Stop can settle hundreds of workers at once. Record those expected
+        # interruptions in memory and emit one summary at the batch barrier.
+        user_stop_skip = _is_glossary_user_stop_error(e)
+        if user_stop_skip:
+            _record_glossary_stopped_request(
+                display_chapter_num,
+                chunk_idx=chunk_idx,
+                total_chunks=total_chunks,
+            )
         else:
             print(f"[Error] API call interrupted/failed for chapter {display_chapter_num}: {e}")
 
@@ -6456,6 +6511,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             'key_identifier': _current_glossary_key_context({}, prefer_thread=True)[0],
             'error': str(e),
             'graceful_stop_skip': _is_graceful_stop_skip_error(e),
+            'user_stop_skip': user_stop_skip,
         }
     except Exception as e:
         print(f"[Error] Unexpected error for chapter {display_chapter_num}: {e}")
@@ -6535,6 +6591,7 @@ def process_single_chapter_with_split(idx: int,
     last_key_identifier = ""
     last_key_pool = ""
     any_chunk_truncated = False
+    stopped_request_result = None
     for chunk_html, chunk_idx, total_chunks in chunks:
         if stop_check_fn():
             print(f"❌ Glossary extraction stopped during chunk {chunk_idx}/{total_chunks} of chapter {display_chapter_num}")
@@ -6575,6 +6632,9 @@ def process_single_chapter_with_split(idx: int,
             chapter_num=display_chapter_num,
             before_send_callback=before_send_callback,
         )
+        if result.get('user_stop_skip') or result.get('graceful_stop_skip'):
+            stopped_request_result = result
+            break
         if result.get("data"):
             aggregated_data.extend(result["data"])
         last_resp = result.get("resp", last_resp)
@@ -6601,7 +6661,16 @@ def process_single_chapter_with_split(idx: int,
         'model_name': last_model_name,
         'key_identifier': last_key_identifier,
         'key_pool': last_key_pool,
-        'error': None
+        'error': (
+            stopped_request_result.get('error')
+            if stopped_request_result
+            else None
+        ),
+        'user_stop_skip': bool(stopped_request_result),
+        'graceful_stop_skip': bool(
+            stopped_request_result
+            and stopped_request_result.get('graceful_stop_skip')
+        ),
     }
 
 def process_merged_group_api_call(merge_group: list, msgs_builder_fn, 
@@ -6995,6 +7064,7 @@ def main(log_callback=None, stop_callback=None):
     GLOSSARY_SOURCE_SCRIPT_IS_CJK = None
     _GLOSSARY_SOURCE_SCRIPT_READY = False
     _GLOSSARY_SOURCE_SCRIPT_LOGGED = False
+    _reset_glossary_stop_summary()
 
     # Thread identifiers may be reused between runs.  Never let an aborted
     # request's partial thinking stream attach to a later glossary request.
@@ -7453,6 +7523,10 @@ def main(log_callback=None, stop_callback=None):
     # Check for batch mode
     batch_enabled = os.getenv("BATCH_TRANSLATION", "0") == "1"
     batch_size = int(os.getenv("BATCH_SIZE", "5"))
+    try:
+        api_preflight_size = max(-1, int(os.getenv("API_QUEUE_SIZE", "4") or "4"))
+    except (TypeError, ValueError):
+        api_preflight_size = 4
     batching_mode = (os.getenv("BATCHING_MODE", "direct") or "direct").strip().lower()
     batch_group_size = int(os.getenv("BATCH_GROUP_SIZE", "3"))
 
@@ -7464,6 +7538,10 @@ def main(log_callback=None, stop_callback=None):
 
     print(f"[DEBUG] BATCH_TRANSLATION = {os.getenv('BATCH_TRANSLATION')} (enabled: {batch_enabled})")
     print(f"[DEBUG] BATCH_SIZE = {batch_size}")
+    print(
+        "[DEBUG] API_PREFLIGHT = "
+        + ("matches active calls" if api_preflight_size == -1 else str(api_preflight_size))
+    )
     log_batching_mode = "no batching" if batching_mode == "aggressive" else batching_mode
     print(f"[DEBUG] BATCHING_MODE = {log_batching_mode}")
     print(f"[DEBUG] BATCH_GROUP_SIZE = {batch_group_size}")
@@ -7474,7 +7552,15 @@ def main(log_callback=None, stop_callback=None):
         if batching_mode == 'conservative':
             print(f"   Conservative group size: {batch_group_size}")
         elif batching_mode == 'aggressive':
-            print(f"   Aggressive mode: keeps {batch_size} parallel calls and auto-refills")
+            api_preflight_description = (
+                "matches active calls"
+                if api_preflight_size == -1
+                else str(api_preflight_size)
+            )
+            print(
+                f"   Up to {batch_size} parallel calls with "
+                f"API preflight {api_preflight_description}"
+            )
         print(f"📑 Note: Glossary extraction uses a simplified batching process for API calls.")
     
     #API call delay — show effective delay (per-key > global)
@@ -8215,6 +8301,7 @@ def main(log_callback=None, stop_callback=None):
             
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
                 futures = {}
+                request_started_callback = None
 
                 # Collect batch results for history update (same as TransateKRtoEN)
                 batch_history_map = {}  # Will store (idx, user_prompt, resp, raw_obj) for each successful chapter
@@ -8230,6 +8317,9 @@ def main(log_callback=None, stop_callback=None):
                     ):
                         ordered_batch_dispatcher.wait_for_turn(dispatch_order)
                         _mark_glossary_in_progress(unit_indices)
+                        callback = request_started_callback
+                        if callable(callback):
+                            callback(dispatch_order)
 
                     if is_merged_mode:
                         future = executor.submit(
@@ -8465,8 +8555,16 @@ def main(log_callback=None, stop_callback=None):
                             raw_obj = result.get('raw_obj')
                             
                             if error:
-                                # Suppress expected "graceful stop" pre-send cancellations.
-                                if (isinstance(error, str) and _is_graceful_stop_skip_error(error)) or result.get('graceful_stop_skip'):
+                                # Deliberate stop results remain Pending and are
+                                # represented by the single batch summary.
+                                if (
+                                    result.get('user_stop_skip')
+                                    or result.get('graceful_stop_skip')
+                                    or (
+                                        isinstance(error, str)
+                                        and _is_glossary_user_stop_error(error)
+                                    )
+                                ):
                                     return False
                                 print(f"[Chapter {display_idx}] Error: {error}")
                                 _mark_glossary_failed(failed, idx, "API_ERROR")
@@ -8562,92 +8660,220 @@ def main(log_callback=None, stop_callback=None):
                         return True
 
                 if aggressive_mode:
-                    # Aggressive mode: keep pool full, auto-refill as futures complete.
-                    # Use wait(FIRST_COMPLETED) so newly-submitted futures are also observed promptly.
+                    # Admit glossary work lazily. BATCH_SIZE remains the provider
+                    # concurrency cap; API Preflight controls only work prepared
+                    # ahead of the real provider-send boundary.
+                    scheduler_lock = threading.RLock()
                     active_futures = {}
+                    provider_started_futures = set()
+                    future_by_dispatch_order = {}
+                    dispatch_started_orders = set()
                     next_unit_idx = 0
                     graceful_drain_requested = False
                     graceful_drain_announced = False
-                    # Ensure batch_size is at least 1 to avoid submission loops never running
                     effective_aggressive_batch_size = max(1, batch_size)
+
+                    def _running_future_counts():
+                        running_futures = tuple(
+                            future
+                            for future in active_futures
+                            if not future.done()
+                        )
+                        active_count = sum(
+                            1
+                            for future in running_futures
+                            if future in provider_started_futures
+                        )
+                        return (
+                            len(running_futures),
+                            active_count,
+                            max(0, len(running_futures) - active_count),
+                        )
+
+                    def _remaining_unit_count():
+                        return max(0, len(current_batch_units) - next_unit_idx)
+
+                    def _sync_glossary_preflight(*, publish=False):
+                        admitted_count, active_count, queued_count = _running_future_counts()
+                        queue_target = _api_queue_target(
+                            active_count,
+                            effective_aggressive_batch_size,
+                            api_preflight_size,
+                        )
+                        _api_watchdog_set_backlog(
+                            _lazy_batch_window_backlog(
+                                _remaining_unit_count(),
+                                admitted_count,
+                                effective_aggressive_batch_size + queue_target,
+                            ),
+                            publish=publish,
+                        )
+                        _api_watchdog_set_scheduler_queue(
+                            queued_count,
+                            publish=publish,
+                        )
 
                     def _submit_next():
                         nonlocal next_unit_idx
                         if next_unit_idx >= len(current_batch_units):
                             return False
+                        if (
+                            _glossary_is_graceful_stop_active()
+                            or _glossary_is_hard_stop_requested(stop_callback)
+                        ):
+                            return False
                         unit = current_batch_units[next_unit_idx]
                         next_unit_idx += 1
                         fut = _submit_unit(unit)
                         active_futures[fut] = unit
+                        dispatch_order = unit_dispatch_order.get(unit[0][0]) if unit else None
+                        if dispatch_order is not None:
+                            future_by_dispatch_order[int(dispatch_order)] = fut
+                        _sync_glossary_preflight()
                         return True
 
-                    # Prime the executor to fill all slots
-                    while len(active_futures) < effective_aggressive_batch_size and _submit_next():
-                        pass
+                    def _grow_glossary_preflight():
+                        _, active_count, queued_count = _running_future_counts()
+                        additions = _api_queue_admissions(
+                            active_count,
+                            queued_count,
+                            _remaining_unit_count(),
+                            api_preflight_size,
+                            effective_aggressive_batch_size,
+                        )
+                        for _ in range(additions):
+                            if not _submit_next():
+                                break
+                        _sync_glossary_preflight()
 
-                    while active_futures or next_unit_idx < len(current_batch_units):
-                        if _glossary_is_graceful_stop_active():
-                            graceful_drain_requested = True
-                        if check_stop():
-                            stopped_early = True
-                            for active_unit in list(active_futures.values()):
-                                _restore_glossary_in_progress_for_hard_stop([u_idx for u_idx, _ in active_unit])
-                            cancelled = cancel_all_futures(list(active_futures.keys()))
-                            if cancelled > 0:
-                                print(f"✅ Cancelled {cancelled} pending API calls")
-                            executor.shutdown(wait=False)
-                            active_futures.clear()
-                            break
+                    def _provider_request_started(dispatch_order):
+                        """Grow glossary preflight only at the provider boundary."""
+                        try:
+                            dispatch_order = int(dispatch_order)
+                        except (TypeError, ValueError):
+                            return
+                        with scheduler_lock:
+                            if dispatch_order in dispatch_started_orders:
+                                return
+                            dispatch_started_orders.add(dispatch_order)
+                            started_future = future_by_dispatch_order.get(dispatch_order)
+                            if started_future is not None:
+                                provider_started_futures.add(started_future)
+                            if not (
+                                _glossary_is_graceful_stop_active()
+                                or _glossary_is_hard_stop_requested(stop_callback)
+                            ):
+                                _grow_glossary_preflight()
 
-                        # Auto-refill to maintain batch_size parallel calls (but not during graceful stop)
-                        if os.environ.get('GRACEFUL_STOP') != '1':
-                            while len(active_futures) < effective_aggressive_batch_size and _submit_next():
-                                pass
+                    request_started_callback = _provider_request_started
 
-                        # Only break if truly done: no active futures AND nothing left to submit
-                        if not active_futures and next_unit_idx >= len(current_batch_units):
-                            break
-                        
-                        # If active_futures is empty but there are items left, submit them now
-                        # (This handles edge cases where graceful stop was briefly set then cleared)
-                        if not active_futures and next_unit_idx < len(current_batch_units):
-                            if os.environ.get('GRACEFUL_STOP') == '1':
+                    try:
+                        # Seed exactly one preparation task. Each provider-boundary
+                        # transition grows the window according to API Preflight.
+                        with scheduler_lock:
+                            _submit_next()
+                            _sync_glossary_preflight(publish=True)
+
+                        while True:
+                            hard_stop_requested = _glossary_is_hard_stop_requested(stop_callback)
+                            graceful_stop_requested = _glossary_is_graceful_stop_active()
+
+                            if hard_stop_requested:
+                                stopped_early = True
+                                with scheduler_lock:
+                                    next_unit_idx = len(current_batch_units)
+                                    for active_future, active_unit in list(active_futures.items()):
+                                        if active_future in provider_started_futures:
+                                            _restore_glossary_in_progress_for_hard_stop(
+                                                [u_idx for u_idx, _ in active_unit]
+                                            )
+                                        active_future.cancel()
+                                    _api_watchdog_set_backlog(0)
+                                    _api_watchdog_set_scheduler_queue(0)
+                                break
+
+                            if graceful_stop_requested:
                                 graceful_drain_requested = True
-                                break
-                            while len(active_futures) < effective_aggressive_batch_size and _submit_next():
-                                pass
-                            if not active_futures:
-                                # Still empty after trying to submit - something's wrong, break to avoid infinite loop
-                                print("⚠️ Warning: Could not submit remaining items, breaking loop")
-                                break
-
-                        done, _ = wait(active_futures.keys(), return_when=FIRST_COMPLETED)
-
-                        for future in done:
-                            unit = active_futures.pop(future, None)
-                            if unit is None:
-                                continue
-
-                            # Refill freed slot ASAP (unless graceful stop is active)
-                            if os.environ.get('GRACEFUL_STOP') != '1':
-                                while len(active_futures) < effective_aggressive_batch_size and _submit_next():
-                                    pass
-
-                            result_committed = _handle_future_result(future, unit)
-                            if stopped_early:
-                                break
-
-                            if _graceful_stop_should_drain_after_result(result_committed):
-                                graceful_drain_requested = True
+                                with scheduler_lock:
+                                    # Drop all work which has not crossed the real
+                                    # provider boundary. Active calls are left alone.
+                                    next_unit_idx = len(current_batch_units)
+                                    for pending_future in active_futures:
+                                        if pending_future not in provider_started_futures:
+                                            pending_future.cancel()
+                                    _api_watchdog_set_backlog(0)
+                                    _api_watchdog_set_scheduler_queue(0)
                                 if not graceful_drain_announced:
                                     print(
-                                        "⏳ Graceful stop: Result saved; waiting for all "
-                                        "remaining in-flight API calls to finish..."
+                                        "⏳ Graceful stop: No new glossary requests will "
+                                        "start; waiting for active API calls to finish..."
                                     )
                                     graceful_drain_announced = True
 
-                        if stopped_early:
-                            break
+                            with scheduler_lock:
+                                if (
+                                    not active_futures
+                                    and _remaining_unit_count()
+                                    and not graceful_stop_requested
+                                ):
+                                    # Recover if the seed failed before reaching
+                                    # the provider boundary.
+                                    _submit_next()
+                                futures_snapshot = tuple(active_futures)
+                                has_unsent = bool(_remaining_unit_count())
+
+                            if not futures_snapshot:
+                                if not has_unsent or graceful_stop_requested:
+                                    break
+                                continue
+
+                            done, _ = wait(
+                                futures_snapshot,
+                                timeout=0.1,
+                                return_when=FIRST_COMPLETED,
+                            )
+                            if not done:
+                                continue
+
+                            for future in done:
+                                with scheduler_lock:
+                                    unit = active_futures.pop(future, None)
+                                    provider_started_futures.discard(future)
+                                    futures.pop(future, None)
+                                    if unit:
+                                        dispatch_order = unit_dispatch_order.get(unit[0][0])
+                                        if (
+                                            dispatch_order is not None
+                                            and future_by_dispatch_order.get(int(dispatch_order)) is future
+                                        ):
+                                            future_by_dispatch_order.pop(int(dispatch_order), None)
+                                if unit is None or future.cancelled():
+                                    continue
+
+                                result_committed = _handle_future_result(future, unit)
+                                if stopped_early:
+                                    break
+
+                                if _graceful_stop_should_drain_after_result(result_committed):
+                                    graceful_drain_requested = True
+
+                                if not (
+                                    _glossary_is_graceful_stop_active()
+                                    or _glossary_is_hard_stop_requested(stop_callback)
+                                ):
+                                    with scheduler_lock:
+                                        admitted_count, _, _ = _running_future_counts()
+                                        if admitted_count == 0 and _remaining_unit_count():
+                                            _submit_next()
+                                        else:
+                                            _grow_glossary_preflight()
+
+                            if stopped_early:
+                                break
+                    finally:
+                        request_started_callback = None
+                        _api_watchdog_set_backlog(0, publish=True)
+                        _api_watchdog_set_scheduler_queue(0, publish=True)
 
                     if graceful_drain_requested and not stopped_early:
                         stopped_early = True
@@ -8696,6 +8922,10 @@ def main(log_callback=None, stop_callback=None):
                         stopped_early = True
                         print("✅ Graceful stop: All completed in-flight API results were saved.")
             
+            # All workers have settled, so publish one stop summary rather than
+            # one GUI log event per cancelled request.
+            _flush_glossary_stop_summary()
+
             # Graceful-stop workers have now been drained. Restore only a request
             # marker that never produced a committable result.
             if stopped_early:

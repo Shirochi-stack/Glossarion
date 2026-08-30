@@ -1365,6 +1365,74 @@ def _merge_and_write_retranslation_progress(
         return merged
 
 
+def _bulk_retranslation_sidecar_updates(
+    paths,
+    *,
+    manual_editing,
+    max_workers,
+):
+    """Reset or delete independent SDLXLIFF sidecars in parallel."""
+    unique_paths = []
+    seen = set()
+    for path in paths or []:
+        if not path:
+            continue
+        normalized = os.path.normcase(os.path.abspath(os.fspath(path)))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_paths.append(os.fspath(path))
+
+    result = {
+        "cleared": 0,
+        "deleted": 0,
+        "failed": [],
+    }
+    if not unique_paths:
+        return result
+
+    try:
+        worker_count = min(
+            len(unique_paths),
+            max(1, int(max_workers or 1)),
+        )
+    except (TypeError, ValueError):
+        worker_count = 1
+
+    def _update_one(path):
+        try:
+            if manual_editing:
+                changed = _reset_sdlxliff_target_for_manual_retranslation(path)
+                return "cleared" if changed else "missing", path, None
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                return "missing", path, None
+            return "deleted", path, None
+        except Exception as exc:
+            return "failed", path, str(exc)
+
+    if worker_count == 1:
+        outcomes = map(_update_one, unique_paths)
+        for status, path, error in outcomes:
+            if status in {"cleared", "deleted"}:
+                result[status] += 1
+            elif status == "failed":
+                result["failed"].append((path, error))
+        return result
+
+    with ThreadPoolExecutor(
+        max_workers=worker_count,
+        thread_name_prefix="RetranslationSidecar",
+    ) as executor:
+        for status, path, error in executor.map(_update_one, unique_paths):
+            if status in {"cleared", "deleted"}:
+                result[status] += 1
+            elif status == "failed":
+                result["failed"].append((path, error))
+    return result
+
+
 def _persist_progress_manager_source_link(file_path, output_dir):
     """Persist the raw input used by a Progress Manager workspace.
 
@@ -26369,6 +26437,7 @@ class RetranslationMixin:
             sidecar_deleted_count = 0
             sidecar_cleared_count = 0
             sidecar_failed_count = 0
+            sidecar_paths_to_update = {}
             machine_translation_deleted_count = 0
             machine_translation_failed_count = 0
             chunk_reset_count = 0
@@ -26737,8 +26806,6 @@ class RetranslationMixin:
                         match = (progress_key, working_progress["chapters"][progress_key])
                     else:
                         match = _find_progress_entry(ch_info, working_progress)
-                    old_status = ch_info['status']
-                    
                     if match:
                         chapter_key, ch_entry = match
                         target_output_file = ch_entry.get('output_file') or ch_info['output_file']
@@ -26749,7 +26816,6 @@ class RetranslationMixin:
                                 if os.path.exists(output_path):
                                     os.remove(output_path)
                                     deleted_count += 1
-                                    print(f"Deleted: {output_path}")
                             except Exception as e:
                                 print(f"Failed to delete {output_path}: {e}")
 
@@ -26773,41 +26839,22 @@ class RetranslationMixin:
                                     seen_machine_translation.add(machine_translation_key)
                                     machine_translation_paths.append(machine_translation_path)
                         for sidecar_path in sidecar_paths:
-                            if manual_editing_retranslation:
-                                try:
-                                    if os.path.exists(sidecar_path):
-                                        if _reset_sdlxliff_target_for_manual_retranslation(sidecar_path):
-                                            sidecar_cleared_count += 1
-                                            print(
-                                                "Retained SDLXLIFF sidecar and cleared translated "
-                                                f"target for manual editing: {sidecar_path}"
-                                            )
-                                except Exception as e:
-                                    sidecar_failed_count += 1
-                                    print(
-                                        "Failed to clear translated target in retained SDLXLIFF "
-                                        f"sidecar {sidecar_path}: {e}"
-                                    )
-                            else:
-                                try:
-                                    if os.path.exists(sidecar_path):
-                                        os.remove(sidecar_path)
-                                        sidecar_deleted_count += 1
-                                        print(f"Deleted SDLXLIFF sidecar: {sidecar_path}")
-                                except Exception as e:
-                                    sidecar_failed_count += 1
-                                    print(f"Failed to delete SDLXLIFF sidecar {sidecar_path}: {e}")
+                            sidecar_key = os.path.normcase(
+                                os.path.abspath(sidecar_path)
+                            )
+                            sidecar_paths_to_update.setdefault(
+                                sidecar_key,
+                                sidecar_path,
+                            )
                         for machine_translation_path in machine_translation_paths:
                             try:
                                 if os.path.exists(machine_translation_path):
                                     os.remove(machine_translation_path)
                                     machine_translation_deleted_count += 1
-                                    print(f"Deleted Machine Translation preview: {machine_translation_path}")
                             except Exception as e:
                                 machine_translation_failed_count += 1
                                 print(f"Failed to delete Machine Translation preview {machine_translation_path}: {e}")
 
-                        print(f"Resetting {old_status} status to pending for chapter {actual_num} (key: {chapter_key}, output file: {target_output_file})")
                         ch_entry["status"] = "pending"
                         ch_entry["failure_reason"] = ""
                         ch_entry["error_message"] = ""
@@ -26866,6 +26913,75 @@ class RetranslationMixin:
                     # Just marking for translation (no file to delete)
                     marked_count += 1
             
+            if sidecar_paths_to_update:
+                retranslation_config = getattr(self, "config", {})
+                if not isinstance(retranslation_config, dict):
+                    retranslation_config = {}
+                parallel_enabled = bool(
+                    getattr(
+                        self,
+                        "enable_parallel_extraction_var",
+                        retranslation_config.get(
+                            "enable_parallel_extraction",
+                            True,
+                        ),
+                    )
+                )
+                raw_sidecar_workers = getattr(
+                    self,
+                    "extraction_workers_var",
+                    retranslation_config.get(
+                        "extraction_workers",
+                        os.environ.get("EXTRACTION_WORKERS", "1"),
+                    ),
+                )
+                sidecar_workers = raw_sidecar_workers if parallel_enabled else 1
+                sidecar_result = _bulk_retranslation_sidecar_updates(
+                    sidecar_paths_to_update.values(),
+                    manual_editing=manual_editing_retranslation,
+                    max_workers=sidecar_workers,
+                )
+                sidecar_cleared_count += int(sidecar_result["cleared"])
+                sidecar_deleted_count += int(sidecar_result["deleted"])
+                sidecar_failures = list(sidecar_result["failed"])
+                sidecar_failed_count += len(sidecar_failures)
+                failed_action = (
+                    "clear translated target in"
+                    if manual_editing_retranslation
+                    else "delete"
+                )
+                for failed_path, error in sidecar_failures[:10]:
+                    print(
+                        f"Failed to {failed_action} SDLXLIFF sidecar "
+                        f"{failed_path}: {error}"
+                    )
+                if len(sidecar_failures) > 10:
+                    print(
+                        "Additional SDLXLIFF sidecar failures omitted: "
+                        f"{len(sidecar_failures) - 10}"
+                    )
+
+            cleanup_summary = []
+            if deleted_count:
+                cleanup_summary.append(
+                    f"deleted {deleted_count} translated output file(s)"
+                )
+            if sidecar_cleared_count:
+                cleanup_summary.append(
+                    f"reset {sidecar_cleared_count} retained SDLXLIFF sidecar(s)"
+                )
+            if sidecar_deleted_count:
+                cleanup_summary.append(
+                    f"deleted {sidecar_deleted_count} SDLXLIFF sidecar(s)"
+                )
+            if machine_translation_deleted_count:
+                cleanup_summary.append(
+                    "deleted "
+                    f"{machine_translation_deleted_count} Machine Translation preview(s)"
+                )
+            if cleanup_summary:
+                print("Bulk retranslation cleanup: " + ", ".join(cleanup_summary))
+
             # Save the updated progress if we made changes
             if progress_updated:
                 try:

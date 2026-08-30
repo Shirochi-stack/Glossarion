@@ -513,6 +513,68 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
     except Exception:
         pass
 
+def _lazy_batch_window_backlog(unsent_count, admitted_count, batch_size):
+    """Return unadmitted work represented by the current concurrency window."""
+    try:
+        unsent = max(0, int(unsent_count or 0))
+    except (TypeError, ValueError):
+        unsent = 0
+    try:
+        admitted = max(0, int(admitted_count or 0))
+    except (TypeError, ValueError):
+        admitted = 0
+    try:
+        capacity = max(0, int(batch_size or 0))
+    except (TypeError, ValueError):
+        capacity = 0
+    return min(unsent, max(0, capacity - admitted))
+
+
+def _api_queue_target(active_count, batch_size, queue_size):
+    """Return the desired waiting depth for the configured preflight mode."""
+    try:
+        active = max(0, int(active_count or 0))
+    except (TypeError, ValueError):
+        active = 0
+    try:
+        concurrency = max(1, int(batch_size or 1))
+    except (TypeError, ValueError):
+        concurrency = 1
+    try:
+        configured = max(-1, int(queue_size))
+    except (TypeError, ValueError):
+        configured = 4
+
+    # -1 keeps one waiting request for every active provider call.
+    target = min(active, concurrency) if configured == -1 else configured
+
+    # A zero preflight still needs one transient successor while provider
+    # concurrency is ramping. It is not retained after the active pool is full.
+    if active < concurrency:
+        target = max(1, target)
+    return target
+
+
+def _api_queue_admissions(
+    active_count,
+    queued_count,
+    unsent_count,
+    queue_size,
+    batch_size,
+):
+    """Return how many requests are needed to reach the preflight target."""
+    try:
+        queued = max(0, int(queued_count or 0))
+    except (TypeError, ValueError):
+        queued = 0
+    try:
+        unsent = max(0, int(unsent_count or 0))
+    except (TypeError, ValueError):
+        unsent = 0
+    target = _api_queue_target(active_count, batch_size, queue_size)
+    return min(unsent, max(0, target - queued))
+
+
 def _api_watchdog_set_backlog(count: Any, *, publish: bool = False) -> None:
     """Publish unadmitted work in the current batch-concurrency window.
 

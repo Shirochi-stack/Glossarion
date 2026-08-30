@@ -73,6 +73,21 @@ def _enable_refinement(monkeypatch):
     monkeypatch.setenv("GLOSSARY_CUSTOM_FIELDS", json.dumps(["description"]))
 
 
+def test_glossary_stop_request_logs_are_coalesced(capsys):
+    glossary_extractor._reset_glossary_stop_summary()
+    glossary_extractor._record_glossary_stopped_request(1036)
+    glossary_extractor._record_glossary_stopped_request(1098)
+    glossary_extractor._record_glossary_stopped_request(1036)
+
+    assert capsys.readouterr().out == ""
+    assert glossary_extractor._flush_glossary_stop_summary() == 2
+    output = capsys.readouterr().out
+    assert output.count("Glossary stop:") == 1
+    assert "2 API requests were cancelled or skipped" in output
+    assert glossary_extractor._flush_glossary_stop_summary() == 0
+    assert capsys.readouterr().out == ""
+
+
 def test_glossary_refinement_request_mode_defaults_to_all_types(monkeypatch):
     monkeypatch.delenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", raising=False)
     assert refinement_chunking_mode() == "all"

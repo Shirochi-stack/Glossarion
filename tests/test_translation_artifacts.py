@@ -280,6 +280,40 @@ def test_aggressive_queue_primes_one_unit_and_advances_on_provider_start():
     assert "_sync_lazy_window_backlog(publish=True)" in aggressive_source
 
 
+def test_glossary_queue_uses_api_preflight_at_provider_boundary():
+    source = (
+        Path(translation_module.__file__)
+        .with_name("extract_glossary_from_epub.py")
+        .read_text(encoding="utf-8")
+    )
+    scheduler_start = source.index(
+        "if aggressive_mode:\n"
+        "                    # Admit glossary work lazily."
+    )
+    scheduler_end = source.index(
+        "else:\n                    # Submit all units in this batch",
+        scheduler_start,
+    )
+    scheduler_source = source[scheduler_start:scheduler_end]
+    prime_start = scheduler_source.index("# Seed exactly one preparation task")
+    prime_end = scheduler_source.index("while True:", prime_start)
+
+    assert 'os.getenv("API_QUEUE_SIZE", "4")' in source
+    assert "_submit_next()" in scheduler_source[prime_start:prime_end]
+    assert "while len(active_futures) <" not in scheduler_source
+    assert "def _provider_request_started(dispatch_order):" in scheduler_source
+    assert "request_started_callback = _provider_request_started" in scheduler_source
+    assert "_api_queue_admissions(" in scheduler_source
+    assert "api_preflight_size" in scheduler_source
+    assert "timeout=0.1" in scheduler_source
+    assert "pending_future not in provider_started_futures" in scheduler_source
+    assert "_api_watchdog_set_scheduler_queue(" in scheduler_source
+
+    callback_start = source.index("def _mark_unit_progress_on_send(")
+    callback_end = source.index("if is_merged_mode:", callback_start)
+    assert "callback(dispatch_order)" in source[callback_start:callback_end]
+
+
 def test_lazy_batch_backlog_is_bounded_by_the_batch_window():
     backlog = translation_module._lazy_batch_window_backlog
 

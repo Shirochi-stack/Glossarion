@@ -43,9 +43,12 @@ from unified_api_client import (
     extend_deferred_batch_logs,
     get_current_thread_actual_request_key_identifier,
     get_current_thread_actual_request_model,
+    _api_queue_admissions,
+    _api_queue_target,
     _api_watchdog_mark_in_flight,
     _api_watchdog_set_backlog,
     _api_watchdog_set_scheduler_queue,
+    _lazy_batch_window_backlog,
     pop_deferred_batch_logs,
     set_current_thread_actual_request_model,
 )
@@ -14473,75 +14476,6 @@ def _translation_prequeue_stop_mode(stop_callback=None):
         except Exception:
             pass
     return None
-
-
-def _lazy_batch_window_backlog(unsent_count, admitted_count, batch_size):
-    """Return unsent work represented by the current concurrency window.
-
-    The watchdog backlog is not the entire remaining book. It is only the
-    portion of ``BATCH_SIZE`` which lazy dispatch has not admitted yet. Thus a
-    batch size of one with one admitted request has no backlog.
-    """
-    try:
-        unsent = max(0, int(unsent_count or 0))
-    except (TypeError, ValueError):
-        unsent = 0
-    try:
-        admitted = max(0, int(admitted_count or 0))
-    except (TypeError, ValueError):
-        admitted = 0
-    try:
-        capacity = max(0, int(batch_size or 0))
-    except (TypeError, ValueError):
-        capacity = 0
-    return min(unsent, max(0, capacity - admitted))
-
-
-def _api_queue_target(active_count, batch_size, queue_size):
-    """Return the desired waiting depth for the configured queue mode."""
-    try:
-        active = max(0, int(active_count or 0))
-    except (TypeError, ValueError):
-        active = 0
-    try:
-        concurrency = max(1, int(batch_size or 1))
-    except (TypeError, ValueError):
-        concurrency = 1
-    try:
-        configured = max(-1, int(queue_size))
-    except (TypeError, ValueError):
-        configured = 4
-
-    # -1 restores the proportional mode: one waiting request for every
-    # provider call which is currently active.
-    target = min(active, concurrency) if configured == -1 else configured
-
-    # Even with a zero waiting queue, release one successor at each provider
-    # boundary until BATCH_SIZE active calls have been reached. This transient
-    # ramp slot is not retained after the active pool is full.
-    if active < concurrency:
-        target = max(1, target)
-    return target
-
-
-def _api_queue_admissions(
-    active_count,
-    queued_count,
-    unsent_count,
-    queue_size,
-    batch_size,
-):
-    """Return how many requests are needed to reach the current queue target."""
-    try:
-        queued = max(0, int(queued_count or 0))
-    except (TypeError, ValueError):
-        queued = 0
-    try:
-        unsent = max(0, int(unsent_count or 0))
-    except (TypeError, ValueError):
-        unsent = 0
-    target = _api_queue_target(active_count, batch_size, queue_size)
-    return min(unsent, max(0, target - queued))
 
 
 def set_output_redirect(log_callback=None):

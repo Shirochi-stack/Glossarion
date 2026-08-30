@@ -35,7 +35,12 @@ from TransateKRtoEN import (
     should_skip_configured_special_file_for_translation,
 )
 import Retranslation_GUI as retranslation_gui_module
-from Retranslation_GUI import RetranslationMixin, SDLXLIFFReviewDialog, _sdlxliff_machine_translation_path
+from Retranslation_GUI import (
+    RetranslationMixin,
+    SDLXLIFFReviewDialog,
+    _bulk_retranslation_sidecar_updates,
+    _sdlxliff_machine_translation_path,
+)
 from qa_scan_runtime import default_qa_scan_settings
 from Chapter_Extractor import prepare_epub_image_assets
 from scan_html_folder import (
@@ -3232,7 +3237,7 @@ def test_retranslation_cleanup_deletes_machine_translation_preview_with_sdlxliff
     assert '"Machine_Translation"' in source
     assert "_machine_translation_path_for_output_file" in retranslate_body
     assert "machine_translation_deleted_count" in retranslate_body
-    assert "Deleted Machine Translation preview" in retranslate_body
+    assert "Machine Translation preview(s)" in retranslate_body
 
 
 def test_manual_retranslation_reset_retains_sidecar_and_is_parallel_safe(tmp_path):
@@ -3311,6 +3316,46 @@ def test_manual_retranslation_reset_retains_sidecar_and_is_parallel_safe(tmp_pat
     assert [row["target"] for row in piece["rows"]] == ["", ""]
 
 
+def test_bulk_retranslation_sidecar_updates_reset_and_delete(tmp_path):
+    sidecars = []
+    for index in range(8):
+        sidecars.append(
+            _shared_write_html_sdlxliff_sidecar(
+                str(tmp_path),
+                f"response_chapter{index:04d}.html",
+                {"original_basename": f"chapter{index:04d}.xhtml"},
+                f"<p>Source {index}</p>",
+                f"<p>Target {index}</p>",
+                raise_errors=True,
+                record_freshness=False,
+            )
+        )
+
+    reset_result = _bulk_retranslation_sidecar_updates(
+        sidecars,
+        manual_editing=True,
+        max_workers=4,
+    )
+
+    assert reset_result == {"cleared": 8, "deleted": 0, "failed": []}
+    for sidecar in sidecars:
+        tree = etree.parse(sidecar)
+        target = tree.xpath("//*[local-name()='target']")[0]
+        assert target.get("state") == "new"
+        assert BeautifulSoup(target.text or "", "html.parser").get_text(
+            " ", strip=True
+        ) == ""
+
+    delete_result = _bulk_retranslation_sidecar_updates(
+        sidecars,
+        manual_editing=False,
+        max_workers=4,
+    )
+
+    assert delete_result == {"cleared": 0, "deleted": 8, "failed": []}
+    assert not any(Path(sidecar).exists() for sidecar in sidecars)
+
+
 def test_parallel_retranslation_progress_updates_merge_disjoint_selections(tmp_path):
     progress_path = tmp_path / "translation_progress.json"
     original = {
@@ -3350,10 +3395,14 @@ def test_retranslate_selected_uses_manual_sidecar_reset_only_when_toggle_is_on()
     retranslate_body = source[retranslate_start:source.index("# Add buttons", retranslate_start)]
 
     assert "manual_editing_retranslation = _manual_editing_enabled()" in retranslate_body
-    assert "_reset_sdlxliff_target_for_manual_retranslation(sidecar_path)" in retranslate_body
+    assert "_bulk_retranslation_sidecar_updates(" in retranslate_body
     assert 'ch_entry["manual_editing_pending"] = True' in retranslate_body
     assert 'ch_entry.pop("manual_editing_pending", None)' in retranslate_body
     assert "_merge_and_write_retranslation_progress" in retranslate_body
+    assert 'print(f"Deleted: {output_path}")' not in retranslate_body
+    assert "Retained SDLXLIFF sidecar and cleared translated" not in retranslate_body
+    assert "Resetting {old_status} status to pending" not in retranslate_body
+    assert 'print("Bulk retranslation cleanup: "' in retranslate_body
 
 
 def test_sdlxliff_review_summary_updates_when_target_row_is_emptied():
