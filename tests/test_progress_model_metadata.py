@@ -44,6 +44,7 @@ from Retranslation_GUI import (
     _progress_entry_has_llm_token_qa,
     _progress_entry_has_missing_image_qa,
     _progress_entry_is_completed_image_only_for_display,
+    _progress_entry_has_meaningful_tts_state,
     _progress_path_signature,
     _progress_entry_model_for_display,
     _progress_entry_refined_for_display,
@@ -107,6 +108,112 @@ def test_chapter_display_numbers_keep_leading_zeroes_and_forward_jumps():
         8,
         10,
     ]
+
+
+def test_progress_rematch_does_not_scan_duplicate_split_number_buckets(
+    tmp_path,
+    monkeypatch,
+):
+    gui = RetranslationMixin()
+    gui.config = {}
+    row_count = 600
+    spine_chapters = []
+    progress_chapters = {}
+    for index in range(row_count):
+        split_suffix = index % 2
+        spine_name = f"part{index:04d}_split_{split_suffix:03d}.html"
+        spine_chapters.append({
+            "filename": spine_name,
+            "file_chapter_num": split_suffix,
+            "display_chapter_num": index,
+            "position": index,
+            "is_special": False,
+            "status": "unknown",
+            "output_file": None,
+        })
+        progress_chapters[f"orphan-{index}"] = {
+            "actual_num": split_suffix,
+            "original_basename": (
+                f"unrelated{index:04d}_split_{split_suffix:03d}.html"
+            ),
+            "output_file": (
+                f"response_unrelated{index:04d}_split_"
+                f"{split_suffix:03d}.html"
+            ),
+            "status": "completed",
+        }
+
+    original_normalize = (
+        retranslation_gui_module._normalize_progress_match_name
+    )
+    normalize_calls = 0
+
+    def counted_normalize(value):
+        nonlocal normalize_calls
+        normalize_calls += 1
+        return original_normalize(value)
+
+    monkeypatch.setattr(
+        retranslation_gui_module,
+        "_normalize_progress_match_name",
+        counted_normalize,
+    )
+    data = {
+        "prog": {"chapters": progress_chapters},
+        "output_dir": str(tmp_path),
+        "progress_file": str(tmp_path / "translation_progress.json"),
+        "file_path": str(tmp_path / "book.epub"),
+        "spine_chapters": spine_chapters,
+        "_refresh_read_only": True,
+        "_prefetched_output_listing": set(),
+    }
+
+    gui._rematch_spine_chapters(data)
+
+    # Linear index construction plus constant-time failed lookups. The former
+    # raw-number fallback performed hundreds of thousands of comparisons here.
+    assert normalize_calls < row_count * 20
+    assert all(
+        chapter["status"] == "not_translated"
+        for chapter in spine_chapters
+    )
+
+
+def test_text_progress_ignores_inert_no_tts_placeholders(tmp_path):
+    assert not _progress_entry_has_meaningful_tts_state({})
+    assert not _progress_entry_has_meaningful_tts_state({"tts_status": "no_tts"})
+    assert _progress_entry_has_meaningful_tts_state({"tts_status": "in_progress"})
+    assert _progress_entry_has_meaningful_tts_state({"tts_file": "chapter.mp3"})
+
+    gui = RetranslationMixin()
+    gui.config = {}
+    gui._existing_audio_for_entry = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("text-mode no_tts entries must not enter audio reconciliation")
+    )
+    data = {
+        "output_dir": str(tmp_path),
+        "prog": {
+            "output_mode": "text",
+            "chapters": {
+                str(index): {
+                    "output_file": f"chapter{index:04d}.html",
+                    "tts_status": "no_tts",
+                }
+                for index in range(1_000)
+            },
+        },
+    }
+
+    assert gui._reconcile_tts_audio_files(data) is False
+
+
+def test_sdlxliff_streamed_numbering_does_not_rewalk_prior_pieces():
+    source = inspect.getsource(
+        retranslation_gui_module.SDLXLIFFReviewDialog
+        ._append_generated_sidecar_stream_piece
+    )
+
+    assert "nonreset_chapter_display_numbers" not in source
 
 
 def test_filename_chapter_number_preserves_raw_identity_rules():
@@ -3157,7 +3264,7 @@ def test_progress_managers_use_event_driven_differential_refresh():
     assert "progress_watch_debounce.setInterval(_PROGRESS_WATCH_DEBOUNCE_MS)" in source
     assert "gp_watch_debounce.setInterval(_PROGRESS_WATCH_DEBOUNCE_MS)" in source
     assert "_PROGRESS_WATCH_DEBOUNCE_MS = 500" in source
-    assert "_PROGRESS_LIVE_REFRESH_MIN_INTERVAL_SECONDS = 2.0" in source
+    assert "_PROGRESS_LIVE_REFRESH_MIN_INTERVAL_SECONDS = 0.5" in source
     assert "prefetch_bridge.finished.emit(payload)" in source
     assert "_gp_timer.setInterval(2000)" in source
     assert "_auto_refresh_timer.setInterval(2000)" in source

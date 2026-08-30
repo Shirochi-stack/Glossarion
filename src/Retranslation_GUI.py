@@ -84,7 +84,7 @@ _PROGRESS_SIDECAR_FILENAMES = frozenset({"source_epub.txt"})
 # (temporary file creation, replace, directory update). Coalesce those bursts
 # before parsing and reconciling a large progress file.
 _PROGRESS_WATCH_DEBOUNCE_MS = 500
-_PROGRESS_LIVE_REFRESH_MIN_INTERVAL_SECONDS = 2.0
+_PROGRESS_LIVE_REFRESH_MIN_INTERVAL_SECONDS = 0.5
 _PROGRESS_DIRECT_ROW_UPDATE_LIMIT = 96
 _RAW_FOREIGN_TEXT_QA_RE = re.compile(
     r"(?:^|[^a-z])(?:korean|japanese|chinese|hebrew|arabic|syriac|thai|cyrillic)"
@@ -686,6 +686,16 @@ def _normalize_progress_match_name(name):
     if not name:
         return ""
     return _normalize_progress_match_text(str(name))
+
+
+def _progress_entry_has_meaningful_tts_state(entry):
+    """Return whether a non-audio progress entry still needs TTS reconciliation."""
+    if not isinstance(entry, dict):
+        return False
+    if entry.get('tts_file'):
+        return True
+    tts_status = str(entry.get('tts_status') or '').lower().strip()
+    return tts_status not in ('', 'none', 'no_tts')
 
 
 def _sdlxliff_logical_output_key(path_or_name):
@@ -2974,13 +2984,36 @@ class SDLXLIFFReviewDialog(QDialog):
             else:
                 metadata["display_position"] = int(metadata["opf_position"]) + 1
             metadata["raw_chapter_num"] = metadata.get("chapter_num")
-            metadata["display_chapter_num"] = nonreset_chapter_display_numbers([
-                *(
-                    piece.get("raw_chapter_num", piece.get("chapter_num"))
-                    for piece in self.pieces
-                ),
-                metadata.get("chapter_num"),
-            ])[-1]
+            try:
+                raw_display_number = max(
+                    0,
+                    int(metadata.get("chapter_num")),
+                )
+            except (TypeError, ValueError, OverflowError):
+                raw_display_number = 0
+            if self.pieces:
+                previous_piece = self.pieces[-1]
+                try:
+                    previous_display_number = max(
+                        0,
+                        int(
+                            previous_piece.get(
+                                "display_chapter_num",
+                                previous_piece.get(
+                                    "raw_chapter_num",
+                                    previous_piece.get("chapter_num", 0),
+                                ),
+                            )
+                        ),
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    previous_display_number = 0
+                if (
+                    previous_display_number > 0
+                    and raw_display_number < previous_display_number
+                ):
+                    raw_display_number = previous_display_number + 1
+            metadata["display_chapter_num"] = raw_display_number
             metadata["label"] = self._review_label_from_metadata(metadata)
             piece = self._build_piece(path, row, metadata)
             total = int(getattr(self, "_generation_stream_total", 0) or 0)
@@ -27310,8 +27343,7 @@ class RetranslationMixin:
                 def _bg_prefetch():
                     try:
                         prefetch_tts = audio_mode or any(
-                            isinstance(entry, dict)
-                            and (entry.get('tts_status') or entry.get('tts_file'))
+                            _progress_entry_has_meaningful_tts_state(entry)
                             for entry in fallback_prog.get('chapters', {}).values()
                         )
                         progress_signature = _progress_path_signature(progress_file)
@@ -29083,6 +29115,9 @@ class RetranslationMixin:
         basename_to_progress = {}
         response_to_progress = {}
         actualnum_to_progress = {}
+        actualnum_orig_to_progress = {}
+        actualnum_out_to_progress = {}
+        actualnum_merged_without_orig = {}
         composite_to_progress = {}
 
         chapters_dict = prog.get("chapters", {})
@@ -29091,16 +29126,29 @@ class RetranslationMixin:
             orig = ch.get("original_basename", "")
             out = ch.get("output_file", "")
             actual_num = ch.get("actual_num")
+            norm_orig = _normalize_opf_match_name(orig) if orig else ""
+            norm_out = _normalize_opf_match_name(out) if out else ""
 
             if orig:
-                basename_to_progress.setdefault(_normalize_opf_match_name(orig), []).append(progress_ref)
+                basename_to_progress.setdefault(norm_orig, []).append(progress_ref)
             if out:
                 response_to_progress.setdefault(out, []).append(progress_ref)
-                norm_out = _normalize_opf_match_name(out)
                 if norm_out != out:
                     response_to_progress.setdefault(norm_out, []).append(progress_ref)
             if actual_num is not None:
                 actualnum_to_progress.setdefault(actual_num, []).append(progress_ref)
+                if norm_orig:
+                    actualnum_orig_to_progress.setdefault(
+                        (actual_num, norm_orig), []
+                    ).append(progress_ref)
+                if norm_out:
+                    actualnum_out_to_progress.setdefault(
+                        (actual_num, norm_out), []
+                    ).append(progress_ref)
+                if ch.get('status') == 'merged' and not norm_orig:
+                    actualnum_merged_without_orig.setdefault(
+                        actual_num, []
+                    ).append(progress_ref)
 
             fname_for_comp = orig or out
             if fname_for_comp and actual_num is not None:
@@ -29128,6 +29176,11 @@ class RetranslationMixin:
         def file_exists_fast(fname: str) -> bool:
             return fname in existing_files
 
+        retain_source_extension = (
+            os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1'
+            or self.config.get('retain_source_extension', False)
+        )
+
         for spine_ch in spine_chapters:
             # Do not retain a progress object removed by a newer JSON snapshot.
             spine_ch.pop('progress_key', None)
@@ -29137,7 +29190,7 @@ class RetranslationMixin:
             is_special = spine_ch.get('is_special', False)
 
             base_name = os.path.splitext(filename)[0]
-            retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
+            retain = retain_source_extension
 
             if is_special:
                 response_with_prefix = f"response_{base_name}.html"
@@ -29223,30 +29276,81 @@ class RetranslationMixin:
 
             # 4) actual_num map fallback (avoid mis-matching special files)
             if not matched_info and chapter_num in actualnum_to_progress:
-                for chapter_key, ch in actualnum_to_progress[chapter_num]:
+                # Split filenames end in _000/_001, so hundreds of unrelated
+                # rows can share the same raw number. The former fallback
+                # rescanned that entire bucket for every unmatched spine row,
+                # creating an O(n²) GUI-thread stall on large split EPUBs.
+                # Exact composite indexes preserve the legacy fallback without
+                # considering candidates whose filenames cannot possibly match.
+                normalized_expected = _normalize_opf_match_name(
+                    expected_response
+                )
+                candidate_refs = []
+                seen_candidate_keys = set()
+                for refs in (
+                    actualnum_orig_to_progress.get(
+                        (chapter_num, basename_key), ()
+                    ),
+                    actualnum_out_to_progress.get(
+                        (chapter_num, normalized_expected), ()
+                    ),
+                    actualnum_out_to_progress.get(
+                        (chapter_num, basename_key), ()
+                    ),
+                    actualnum_merged_without_orig.get(chapter_num, ()),
+                ):
+                    for candidate_key, candidate_info in refs:
+                        if candidate_key in seen_candidate_keys:
+                            continue
+                        seen_candidate_keys.add(candidate_key)
+                        candidate_refs.append(
+                            (candidate_key, candidate_info)
+                        )
+
+                for chapter_key, ch in candidate_refs:
                     status = ch.get('status', '')
                     out_file = ch.get('output_file')
-                    orig_base = os.path.basename(ch.get('original_basename', '') or '')
+                    orig_base = ch.get('original_basename', '') or ''
+                    normalized_orig = _normalize_opf_match_name(orig_base)
+                    normalized_out = _normalize_opf_match_name(out_file)
 
                     # If this spine entry is a special file (no digits), require filename match to avoid hijacking by other chapter 0 entries
                     if is_special:
                         fname_matches = (
-                            (orig_base and _opf_names_equal(orig_base, filename)) or
-                            (out_file and (_opf_names_equal(out_file, expected_response) or out_file == expected_response))
+                            (normalized_orig and normalized_orig == basename_key)
+                            or (
+                                out_file
+                                and (
+                                    normalized_out == normalized_expected
+                                    or out_file == expected_response
+                                )
+                            )
                         )
                         if not fname_matches:
                             continue
 
                     if status == 'merged':
-                        if _opf_names_equal(orig_base, filename) or not orig_base:
+                        if normalized_orig == basename_key or not orig_base:
                             _set_matched_progress(chapter_key, ch)
                             break
                     elif status in ['in_progress', 'failed', 'pending', 'qa_failed']:
-                        if out_file and (_opf_names_equal(out_file, expected_response) or out_file == expected_response):
+                        if out_file and (
+                            normalized_out == normalized_expected
+                            or out_file == expected_response
+                        ):
                             _set_matched_progress(chapter_key, ch)
                             break
                     else:
-                        if (orig_base and _opf_names_equal(orig_base, filename)) or (out_file and (_opf_names_equal(out_file, expected_response) or out_file == expected_response)):
+                        if (
+                            (normalized_orig and normalized_orig == basename_key)
+                            or (
+                                out_file
+                                and (
+                                    normalized_out == normalized_expected
+                                    or out_file == expected_response
+                                )
+                            )
+                        ):
                             _set_matched_progress(chapter_key, ch)
                             break
 
@@ -29990,9 +30094,12 @@ class RetranslationMixin:
         if not output_dir:
             return False
         chapters = prog.get('chapters', {})
-        if self._current_progress_output_mode(data) != 'audio' and not any(
-            isinstance(entry, dict) and (entry.get('tts_status') or entry.get('tts_file'))
-            for entry in chapters.values()
+        if (
+            self._current_progress_output_mode(data) != 'audio'
+            and not any(
+                _progress_entry_has_meaningful_tts_state(entry)
+                for entry in chapters.values()
+            )
         ):
             return False
 
