@@ -4958,6 +4958,7 @@ class ProgressManager:
             if getattr(self, "_defer_saves", False):
                 self._deferred_dirty = True
                 return
+            self._stop_save_pending = False
             # A normal save is also the authoritative flush for any preceding
             # rate-limited live updates.
             self._last_progress_save_monotonic = time.monotonic()
@@ -5123,6 +5124,20 @@ class ProgressManager:
         self.save()
         return True
 
+    def save_parallel_worker_progress(self, *, stop_requested=False):
+        """Coalesce parallel-worker updates into bounded progress snapshots.
+
+        Worker status changes are already shared in ``self.prog``. Serializing
+        the entire mapping for each API event also makes an open Progress
+        Manager rebuild after every request. During a stop, defer all writes to
+        the coordinator; during normal work, emit only rate-limited snapshots.
+        """
+        if stop_requested:
+            with self._save_lock:
+                self._stop_save_pending = True
+            return False
+        return self.save_rate_limited(update_batch=32, max_interval=2.0)
+
     @staticmethod
     def _entry_has_qa_issue_marker(info):
         if not isinstance(info, dict):
@@ -5237,75 +5252,91 @@ class ProgressManager:
                 copied = True
         return copied
 
-    def _disk_in_progress_snapshot(self):
-        """Load the on-disk in-progress rows once per file version."""
+    def _disk_progress_snapshot(self):
+        """Load and index the on-disk chapter rows once per file version."""
         try:
             stat = os.stat(self.PROGRESS_FILE)
             cache_key = (stat.st_mtime_ns, stat.st_size)
             cached = getattr(self, "_disk_in_progress_cache", None)
             if isinstance(cached, dict) and cached.get("cache_key") == cache_key:
-                return cached.get("keys", set()), cached.get("refs", set())
+                return cached
             with open(self.PROGRESS_FILE, "r", encoding="utf-8") as f:
                 disk_progress = json.load(f)
             disk_chapters = disk_progress.get("chapters", {}) if isinstance(disk_progress, dict) else {}
             keys = set()
             refs = set()
+            chapter_rows = {}
+            chapter_refs = {}
             if isinstance(disk_chapters, dict):
                 for key, candidate in disk_chapters.items():
                     if not isinstance(candidate, dict):
                         continue
-                    if str(candidate.get("status", "")).lower() != "in_progress":
-                        continue
-                    keys.add(str(key))
+                    key = str(key)
+                    candidate = dict(candidate)
+                    chapter_rows[key] = candidate
                     out = candidate.get("output_file")
                     num = candidate.get("actual_num") or candidate.get("chapter_num")
                     if out and num is not None:
+                        chapter_refs.setdefault((str(num), str(out)), (key, candidate))
+                    if str(candidate.get("status", "")).lower() != "in_progress":
+                        continue
+                    keys.add(key)
+                    if out and num is not None:
                         refs.add((str(num), str(out)))
-            self._disk_in_progress_cache = {"cache_key": cache_key, "keys": keys, "refs": refs}
-            return keys, refs
+            self._disk_in_progress_cache = {
+                "cache_key": cache_key,
+                "keys": keys,
+                "refs": refs,
+                "chapters": chapter_rows,
+                "chapter_refs": chapter_refs,
+            }
+            return self._disk_in_progress_cache
         except Exception:
             # If the file cannot be read, avoid restoring stale completed/merged state.
             return None
 
-    def _disk_entry_is_still_in_progress(self, chapter_key, chapter_info):
+    def _disk_in_progress_snapshot(self):
+        """Return indexed in-progress keys/references for compatibility."""
+        snapshot = self._disk_progress_snapshot()
+        if not snapshot:
+            return None
+        return snapshot.get("keys", set()), snapshot.get("refs", set())
+
+    def _disk_entry_is_still_in_progress(self, chapter_key, chapter_info, snapshot=None):
         """Return False when the user deleted/changed the in-progress row on disk."""
-        snapshot = self._disk_in_progress_snapshot()
+        if snapshot is None:
+            snapshot = self._disk_progress_snapshot()
         if not snapshot:
             return False
-        keys, refs = snapshot
+        keys = snapshot.get("keys", set())
+        refs = snapshot.get("refs", set())
         if str(chapter_key) in keys:
             return True
         target_out = chapter_info.get("output_file")
         target_num = chapter_info.get("actual_num") or chapter_info.get("chapter_num")
         return bool(target_out and target_num is not None and (str(target_num), str(target_out)) in refs)
 
-    def _disk_chapter_entry(self, chapter_key, chapter_info):
-        """Load the matching on-disk chapter row, if it still exists."""
-        try:
-            with open(self.PROGRESS_FILE, "r", encoding="utf-8") as f:
-                disk_progress = json.load(f)
-            disk_chapters = disk_progress.get("chapters", {}) if isinstance(disk_progress, dict) else {}
-            if not isinstance(disk_chapters, dict):
-                return None, None
+    def _disk_chapter_entry(self, chapter_key, chapter_info, snapshot=None):
+        """Return a matching row from the shared on-disk snapshot."""
+        if snapshot is None:
+            snapshot = self._disk_progress_snapshot()
+        if not snapshot:
+            return None, None
 
-            key = str(chapter_key)
-            candidate = disk_chapters.get(key)
-            if isinstance(candidate, dict):
-                return key, dict(candidate)
+        key = str(chapter_key)
+        candidate = snapshot.get("chapters", {}).get(key)
+        if isinstance(candidate, dict):
+            return key, dict(candidate)
 
-            target_out = chapter_info.get("output_file")
-            target_num = chapter_info.get("actual_num") or chapter_info.get("chapter_num")
-            if target_out and target_num is not None:
-                target_ref = (str(target_num), str(target_out))
-                for disk_key, candidate in disk_chapters.items():
-                    if not isinstance(candidate, dict):
-                        continue
-                    out = candidate.get("output_file")
-                    num = candidate.get("actual_num") or candidate.get("chapter_num")
-                    if out and num is not None and (str(num), str(out)) == target_ref:
-                        return str(disk_key), dict(candidate)
-        except Exception:
-            pass
+        target_out = chapter_info.get("output_file")
+        target_num = chapter_info.get("actual_num") or chapter_info.get("chapter_num")
+        if target_out and target_num is not None:
+            match = snapshot.get("chapter_refs", {}).get(
+                (str(target_num), str(target_out))
+            )
+            if match:
+                disk_key, candidate = match
+                return str(disk_key), dict(candidate)
         return None, None
 
     def _preserve_disk_previous_progress_entries(self):
@@ -5819,8 +5850,17 @@ class ProgressManager:
         if not os.path.exists(self.PROGRESS_FILE):
             self._mark_all_known_progress_failed_after_file_delete()
             return True
-        if not self._disk_entry_is_still_in_progress(chapter_key, chapter_info):
-            disk_key, disk_entry = self._disk_chapter_entry(chapter_key, chapter_info)
+        disk_snapshot = self._disk_progress_snapshot()
+        if not self._disk_entry_is_still_in_progress(
+            chapter_key,
+            chapter_info,
+            snapshot=disk_snapshot,
+        ):
+            disk_key, disk_entry = self._disk_chapter_entry(
+                chapter_key,
+                chapter_info,
+                snapshot=disk_snapshot,
+            )
             if isinstance(disk_entry, dict):
                 disk_status = ProgressManager._status_with_qa_marker(disk_entry.get("status", ""), disk_entry)
                 if disk_status and disk_status != "in_progress":
@@ -5845,7 +5885,11 @@ class ProgressManager:
                 if failed:
                     self.prog["chapters"][chapter_key] = failed
             return True
-        disk_key, disk_entry = self._disk_chapter_entry(chapter_key, chapter_info)
+        disk_key, disk_entry = self._disk_chapter_entry(
+            chapter_key,
+            chapter_info,
+            snapshot=disk_snapshot,
+        )
         restore_source = chapter_info
         if isinstance(disk_entry, dict) and str(disk_entry.get("status", "")).lower() == "in_progress":
             disk_has_previous = (
@@ -5881,14 +5925,25 @@ class ProgressManager:
             before = len(chapters)
             self._mark_all_known_progress_failed_after_file_delete()
             return before
+        # One immutable disk snapshot is enough for the entire stop.  The old
+        # path reopened and reparsed the full JSON for every chapter row.
+        disk_snapshot = self._disk_progress_snapshot()
         changed = 0
         for chapter_key, chapter_info in list(chapters.items()):
             if not isinstance(chapter_info, dict):
                 continue
             if str(chapter_info.get("status", "")).lower() != "in_progress":
                 continue
-            if not self._disk_entry_is_still_in_progress(chapter_key, chapter_info):
-                disk_key, disk_entry = self._disk_chapter_entry(chapter_key, chapter_info)
+            if not self._disk_entry_is_still_in_progress(
+                chapter_key,
+                chapter_info,
+                snapshot=disk_snapshot,
+            ):
+                disk_key, disk_entry = self._disk_chapter_entry(
+                    chapter_key,
+                    chapter_info,
+                    snapshot=disk_snapshot,
+                )
                 if isinstance(disk_entry, dict):
                     disk_status = ProgressManager._status_with_qa_marker(disk_entry.get("status", ""), disk_entry)
                     if disk_status and disk_status != "in_progress":
@@ -5920,7 +5975,11 @@ class ProgressManager:
                         if failed:
                             chapters[chapter_key] = failed
             else:
-                disk_key, disk_entry = self._disk_chapter_entry(chapter_key, chapter_info)
+                disk_key, disk_entry = self._disk_chapter_entry(
+                    chapter_key,
+                    chapter_info,
+                    snapshot=disk_snapshot,
+                )
                 restore_source = chapter_info
                 if isinstance(disk_entry, dict) and str(disk_entry.get("status", "")).lower() == "in_progress":
                     disk_has_previous = (
@@ -9829,7 +9888,10 @@ class BatchTranslationProcessor:
                             model_name=chunk_model,
                             key_identifier=chunk_key_identifier,
                         )
-                    _save_live_chapter_progress()
+                    # Dispatch state is live in the shared mapping immediately.
+                    # Do not rewrite the full progress JSON immediately before
+                    # every API call; completion/error snapshots are coalesced
+                    # and the executor barrier performs an authoritative save.
             
             from bs4 import BeautifulSoup
             chapter_body = ContentProcessor.image_processing_html(chapter)
@@ -12094,7 +12156,8 @@ class BatchTranslationProcessor:
                     for actual_num, _, idx, chapter, content_hash in chapters_data:
                         fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                         self.update_progress_fn(idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=chapter)
-                    self.save_progress_fn()
+                    # Keep the pre-send transition memory-only. Persisting here
+                    # blocks dispatch and wakes the GUI for every API call.
             
             # Merge chapter contents
             merge_input = [(cn, content, ch) for cn, content, _, ch, _ in chapters_data]
@@ -28022,11 +28085,21 @@ def main(log_callback=None, stop_callback=None):
             print(f"📁 Auto-discovered {_auto_disc} existing translated file(s) on disk")
 
         print(f"📊 Found {len(chapters_to_translate)} chapters to translate in parallel")
+
+        def _save_parallel_worker_progress():
+            # During a stop, every worker updates the same in-memory progress
+            # mapping.  Let the coordinator serialize it once after executor
+            # shutdown instead of making cancelled workers rewrite it in turn.
+            return progress_manager.save_parallel_worker_progress(
+                stop_requested=bool(
+                    _translation_prequeue_stop_mode(stop_callback)
+                )
+            )
         
         # Continue with the rest of the existing batch processing code...
         batch_processor = BatchTranslationProcessor(
             config, client, base_msg, out, progress_lock,
-            progress_manager.save, 
+            _save_parallel_worker_progress,
             lambda idx, actual_num, content_hash, output_file=None, status="completed", **kwargs: progress_manager.update(idx, actual_num, content_hash, output_file, status, **kwargs),
             check_stop,
             image_translator,
@@ -28302,7 +28375,27 @@ def main(log_callback=None, stop_callback=None):
             for _chapter_index, chapter in unit:
                 chapter['_batch_request_order'] = request_order
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=config.BATCH_SIZE) as executor:
+        @contextmanager
+        def _parallel_progress_executor():
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=config.BATCH_SIZE)
+            try:
+                yield executor
+            finally:
+                stop_mode = _translation_prequeue_stop_mode(stop_callback)
+                wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                cancel_queued = bool(
+                    stop_mode
+                    and not (stop_mode == "graceful" and wait_for_chunks)
+                )
+                # Wait only for already-running work.  A stop must never start
+                # the executor's remaining queued futures merely because the
+                # context manager is exiting.
+                executor.shutdown(wait=True, cancel_futures=cancel_queued)
+                # Worker stop updates were intentionally memory-only.  Flush
+                # the fully settled mapping exactly once here.
+                progress_manager.save()
+
+        with _parallel_progress_executor() as executor:
             if batching_mode == 'aggressive':
                 import threading
                 batch_submit_lock = threading.Lock()
@@ -28374,7 +28467,6 @@ def main(log_callback=None, stop_callback=None):
                             else:
                                 # print("❌ Translation stopped")  # Redundant with "Translation stopped by user" from exception
                                 executor.shutdown(wait=False, cancel_futures=True)
-                                progress_manager.save()
                                 return
                         unit = active_futures.pop(future)
                         completed_in_batch = 0
@@ -28478,7 +28570,6 @@ def main(log_callback=None, stop_callback=None):
                     if check_stop():
                         print("❌ Translation stopped during parallel processing")
                         executor.shutdown(wait=False)
-                        progress_manager.save()
                         return
                     
                     effective_batch_size = batch_group_size if not is_merged_mode else config.BATCH_SIZE
@@ -28524,7 +28615,6 @@ def main(log_callback=None, stop_callback=None):
                             else:
                                 # print("❌ Translation stopped")  # Redundant with "Translation stopped by user" from exception
                                 executor.shutdown(wait=False)
-                                progress_manager.save()
                                 return
                         
                         unit = future_to_unit[future]

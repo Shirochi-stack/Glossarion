@@ -151,6 +151,29 @@ def test_title_only_batch_requests_disable_chunk_progress_and_rate_limit_saves()
     assert "self.progress_manager.save_rate_limited()" in process_source
 
 
+def test_parallel_api_dispatch_updates_progress_without_writing_the_json():
+    single_source = inspect.getsource(
+        translation_module.BatchTranslationProcessor.process_single_chapter
+    )
+    mark_start = single_source.index(
+        "def _mark_batch_chapter_progress_on_send"
+    )
+    mark_end = single_source.index("from bs4 import BeautifulSoup", mark_start)
+    mark_source = single_source[mark_start:mark_end]
+
+    merged_source = inspect.getsource(
+        translation_module.BatchTranslationProcessor.process_merged_group
+    )
+    merged_start = merged_source.index("def _mark_merged_progress_on_send")
+    merged_end = merged_source.index("# Merge chapter contents", merged_start)
+
+    assert 'status="in_progress"' in mark_source
+    assert "_save_live_chapter_progress()" not in mark_source
+    assert "self.save_progress_fn()" not in merged_source[
+        merged_start:merged_end
+    ]
+
+
 def test_progress_manager_rate_limits_bursty_live_saves(tmp_path, monkeypatch):
     manager = translation_module.ProgressManager(str(tmp_path))
     saves = []
@@ -161,6 +184,74 @@ def test_progress_manager_rate_limits_bursty_live_saves(tmp_path, monkeypatch):
         assert manager.save_rate_limited(update_batch=32, max_interval=60) is False
     assert manager.save_rate_limited(update_batch=32, max_interval=60) is True
     assert len(saves) == 1
+
+
+def test_parallel_stop_defers_every_worker_save_to_the_coordinator(
+    tmp_path,
+    monkeypatch,
+):
+    manager = translation_module.ProgressManager(str(tmp_path))
+    saves = []
+    monkeypatch.setattr(manager, "save", lambda: saves.append("saved"))
+
+    for _ in range(1000):
+        assert manager.save_parallel_worker_progress(stop_requested=True) is False
+
+    assert saves == []
+    assert manager._stop_save_pending is True
+
+    assert manager.save_parallel_worker_progress(stop_requested=False) is True
+    assert saves == ["saved"]
+
+
+def test_parallel_worker_progress_rate_limits_normal_queue_updates(
+    tmp_path,
+    monkeypatch,
+):
+    manager = translation_module.ProgressManager(str(tmp_path))
+    saves = []
+    monkeypatch.setattr(manager, "save", lambda: saves.append("saved"))
+    manager._last_progress_save_monotonic = time.monotonic()
+
+    for _ in range(31):
+        assert manager.save_parallel_worker_progress() is False
+    assert manager.save_parallel_worker_progress() is True
+    assert saves == ["saved"]
+
+
+def test_hard_stop_restores_large_progress_snapshot_once(tmp_path, monkeypatch):
+    manager = translation_module.ProgressManager(str(tmp_path))
+    rows = {}
+    for chapter_num in range(1000):
+        output_file = f"part{chapter_num:04d}.html"
+        previous = {
+            "actual_num": chapter_num,
+            "output_file": output_file,
+            "status": "pending",
+        }
+        rows[str(chapter_num)] = {
+            **previous,
+            "status": "in_progress",
+            "previous_status": "pending",
+            "previous_progress_entry": previous,
+        }
+    manager.prog = {"chapters": rows}
+    manager._write_progress_snapshot(manager.PROGRESS_FILE, manager.prog)
+
+    snapshot_calls = []
+    original_snapshot = manager._disk_progress_snapshot
+
+    def counted_snapshot():
+        snapshot_calls.append(1)
+        return original_snapshot()
+
+    monkeypatch.setattr(manager, "_disk_progress_snapshot", counted_snapshot)
+
+    assert manager.restore_all_in_progress_for_hard_stop() == 1000
+    assert len(snapshot_calls) == 1
+    assert {
+        row["status"] for row in manager.prog["chapters"].values()
+    } == {"pending"}
 
 
 def test_progress_update_reuses_indexed_legacy_output_key(tmp_path):
