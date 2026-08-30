@@ -2084,6 +2084,21 @@ def test_cached_header_translation_can_update_untouched_source_heading(
     assert "<p>BODY</p>" in updated
 
 
+def test_missing_header_html_mappings_are_logged_once(tmp_path, capsys):
+    translator = BatchHeaderTranslator(None, {})
+
+    translator._update_html_headers_exact(
+        str(tmp_path),
+        {number: f"Header {number}" for number in range(1358, 1378, 2)},
+        {},
+    )
+
+    output = capsys.readouterr().out
+    assert output.count("No HTML file mapping") == 1
+    assert "No HTML file mapping for 10 chapter(s)" in output
+    assert "1358, 1360, 1362, 1364, 1366, +5 more" in output
+
+
 def test_apply_existing_translations_does_not_promote_working_html_header(
     tmp_path, monkeypatch
 ):

@@ -2868,10 +2868,11 @@ class BatchHeaderTranslator:
         updated_count = 0
         added_count = 0
         skipped_files = []  # collect up-to-date files for a single summary line
+        missing_mappings = []
 
         for num, new_title in translated_headers.items():
             if num not in current_titles:
-                print(f"⚠️ No HTML file mapping for chapter {num}")
+                missing_mappings.append(num)
                 continue
 
             current_info = current_titles[num]
@@ -2981,6 +2982,15 @@ class BatchHeaderTranslator:
                 import traceback
                 traceback.print_exc()
         
+        if missing_mappings:
+            shown = ", ".join(str(num) for num in missing_mappings[:5])
+            if len(missing_mappings) > 5:
+                shown += f", +{len(missing_mappings) - 5} more"
+            print(
+                f"⚠️ No HTML file mapping for {len(missing_mappings)} "
+                f"chapter(s) ({shown}); skipped those header updates"
+            )
+
         if skipped_files:
             print(f"⏭️ {len(skipped_files)} file(s) already up-to-date (skipped write)")
         print(f"\n📝 Updated {updated_count} HTML files, added headers to {added_count} files")

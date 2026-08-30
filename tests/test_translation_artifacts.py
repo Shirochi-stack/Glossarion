@@ -914,9 +914,20 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
     sent = []
 
     class Client:
+        last_actual_request_model = None
+        last_actual_key_identifier = None
+
         def send(self, messages, **_kwargs):
+            self.last_actual_request_model = "authnd/moonshotai/kimi-k3"
+            self.last_actual_key_identifier = "AuthND (moonshotai/kimi-k3)"
             sent.append(messages)
             return "<title>Days with My Stepsister</title>", "stop"
+
+        def get_last_actual_request_model(self):
+            return self.last_actual_request_model
+
+        def get_last_actual_request_key_identifier(self):
+            return self.last_actual_key_identifier
 
     monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
     monkeypatch.setenv("SEND_INTERVAL_SECONDS", "0")
@@ -1007,6 +1018,8 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
         {"role": "user", "content": "<title>義妹生活</title>"},
     ]]
     assert progress_updates[-1][1]["status"] == "completed"
+    assert progress_updates[-1][1]["model_name"] == "authnd/moonshotai/kimi-k3"
+    assert progress_updates[-1][1]["key_identifier"] == "AuthND (moonshotai/kimi-k3)"
     assert any(
         request.get("in_progress") is True
         for request in progress_save_requests
@@ -2924,7 +2937,14 @@ def test_toc_progress_writer_preserves_chapter_rows(tmp_path):
     progress_path.write_text(
         json.dumps({
             "version": "2.1",
-            "chapters": {"1": {"status": "completed", "output_file": "ch1.xhtml"}},
+            "chapters": {
+                "1": {
+                    "status": "completed",
+                    "output_file": "ch1.xhtml",
+                    "model_name": "provider/chapter-model",
+                    "key_identifier": "ChapterKey#1",
+                }
+            },
         }),
         encoding="utf-8",
     )
@@ -2935,6 +2955,8 @@ def test_toc_progress_writer_preserves_chapter_rows(tmp_path):
 
     progress = json.loads(progress_path.read_text(encoding="utf-8"))
     assert progress["chapters"]["1"]["status"] == "completed"
+    assert progress["chapters"]["1"]["model_name"] == "provider/chapter-model"
+    assert progress["chapters"]["1"]["key_identifier"] == "ChapterKey#1"
     assert progress["chapters"][
         "__translation_artifact__:toc"
     ]["status"] == "in_progress"

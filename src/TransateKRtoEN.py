@@ -12006,6 +12006,8 @@ class BatchTranslationProcessor:
                         status="completed",
                         ai_features=ai_features,
                         chapter_obj=chapter,
+                        model_name=final_actual_model,
+                        key_identifier=final_actual_key,
                     )
                     self.save_progress_fn()
                     self.chapters_completed += 1
@@ -12268,7 +12270,16 @@ class BatchTranslationProcessor:
                 
                 # Update with .txt filename
                 with self.progress_lock:
-                    self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname_txt, status="completed", ai_features=ai_features)
+                    self.update_progress_fn(
+                        chapter_progress_idx,
+                        actual_num,
+                        content_hash,
+                        fname_txt,
+                        status="completed",
+                        ai_features=ai_features,
+                        model_name=final_actual_model,
+                        key_identifier=final_actual_key,
+                    )
                     self.save_progress_fn()
             else:
                 # Original code for EPUB files
@@ -12281,7 +12292,16 @@ class BatchTranslationProcessor:
             # If we reached here, the chapter completed successfully (truncated/partial
             # cases already returned above in the early gate).
             with self.progress_lock:
-                self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="completed", ai_features=ai_features)
+                self.update_progress_fn(
+                    chapter_progress_idx,
+                    actual_num,
+                    content_hash,
+                    fname,
+                    status="completed",
+                    ai_features=ai_features,
+                    model_name=final_actual_model,
+                    key_identifier=final_actual_key,
+                )
                 _save_live_chapter_progress()
                 self.chapters_completed += 1
             
