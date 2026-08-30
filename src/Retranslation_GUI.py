@@ -1570,6 +1570,12 @@ def _progress_entry_model_for_display(entry):
     return ''
 
 
+def _progress_status_hides_model_for_display(status):
+    """Return whether a row has not started and therefore has no current model."""
+    normalized = str(status or '').strip().lower().replace(' ', '_')
+    return normalized in {'pending', 'not_translated', 'not_completed'}
+
+
 def _progress_entry_is_completed_image_only_for_display(entry):
     """Return whether the row's current result is an image-only copy."""
     if not isinstance(entry, dict):
@@ -22187,6 +22193,8 @@ class RetranslationMixin:
                 return _select_progress_entry_for_display(_gp_entries_for(ci, _d), status)
 
             def _gp_model_for(ci, _d, status=None, entry=None):
+                if _progress_status_hides_model_for_display(status):
+                    return ''
                 selected = entry if isinstance(entry, dict) and entry else _gp_entry_for(ci, _d, status)
                 model_name = _progress_entry_model_for_display(selected)
                 if model_name:
@@ -22200,7 +22208,12 @@ class RetranslationMixin:
                 status, issues = _gp_status_for(ci, _d, cache)
                 cached_entries = cache.get('entries_by_ci', {}).get(ci, [])
                 entry = _select_progress_entry_for_display(cached_entries, status)
-                model_name = _progress_entry_model_for_display(entry) or '(model unknown)'
+                hide_model = _progress_status_hides_model_for_display(status)
+                model_name = (
+                    ''
+                    if hide_model
+                    else _progress_entry_model_for_display(entry) or '(model unknown)'
+                )
                 icons = {
                     'completed': '\u2705',
                     'skipped': '⏭️',
@@ -22228,7 +22241,7 @@ class RetranslationMixin:
                     status_label = f"{status_label} 💀"
                 elif status == 'completed' and _progress_entry_refined_for_display(entry):
                     status_label = f"{status_label} ⭐"
-                if status in skipped_labels:
+                if status in skipped_labels or hide_model:
                     display = f"[{opf_pos:03d}] Ch.{ch_num:03d} | {icon} {status_label:14s} | {fname}"
                 else:
                     display = f"[{opf_pos:03d}] Ch.{ch_num:03d} | {icon} {status_label:14s} | {fname} -> {model_name}"
@@ -30620,6 +30633,10 @@ class RetranslationMixin:
 
     def _progress_model_column_text(self, info, data, fallback_output):
         if isinstance(data, dict) and data.get('show_model_info_state'):
+            if _progress_status_hides_model_for_display(
+                info.get('status') if isinstance(info, dict) else None
+            ):
+                return ''
             return self._progress_entry_model_name(info, data)
         return fallback_output
 
@@ -30751,6 +30768,15 @@ class RetranslationMixin:
         status = self._progress_display_status(info, data)
         output_file = info['output_file']
         output_display = self._progress_model_column_text(info, data, output_file)
+        show_model_info = bool(
+            isinstance(data, dict) and data.get('show_model_info_state')
+        )
+        hide_model_info = (
+            show_model_info
+            and _progress_status_hides_model_for_display(status)
+        )
+        pipe_column_suffix = '' if hide_model_info else f" | {output_display}"
+        arrow_column_suffix = '' if hide_model_info else f" -> {output_display}"
         icon = status_icons.get(status, '❓')
         status_label = status_labels.get(status, status)
         if (
@@ -30795,8 +30821,8 @@ class RetranslationMixin:
                 chapter_label = f"Ch.{chapter_num}"
             display = (
                 f"   ↳ {chapter_label} Chunk {info.get('chunk_index')}/"
-                f"{info.get('total_chunks')} | {icon} {status_label:11s} | "
-                f"{output_display}"
+                f"{info.get('total_chunks')} | {icon} {status_label:11s}"
+                f"{pipe_column_suffix}"
             )
         elif self._is_metadata_progress_info(info):
             metadata_label = (
@@ -30804,7 +30830,10 @@ class RetranslationMixin:
                 or (info.get('info') or {}).get('metadata_label')
                 or 'Metadata'
             )
-            display = f"{metadata_label} | {icon} {status_label:11s} | metadata.json -> {output_display}"
+            display = (
+                f"{metadata_label} | {icon} {status_label:11s} | "
+                f"metadata.json{arrow_column_suffix}"
+            )
         elif self._is_translation_artifact_progress_info(info):
             artifact_label = (
                 info.get('translation_artifact_label')
@@ -30815,7 +30844,7 @@ class RetranslationMixin:
             )
             display = (
                 f"{artifact_label} | {icon} {status_label:11s} | "
-                f"{output_file} -> {output_display}"
+                f"{output_file}{arrow_column_suffix}"
             )
         elif info.get('pdf_toc_section') or chapter_info.get('pdf_toc_section'):
             start_page = (
@@ -30847,10 +30876,13 @@ class RetranslationMixin:
                 section_label = str(chapter_num)
             display = (
                 f"Section {section_label} | {icon} {status_label:14s} | "
-                f"{page_label} | {output_display}"
+                f"{page_label}{pipe_column_suffix}"
             )
         elif info.get('pdf_ocr'):
-            display = f"PDF OCR | {icon} {status_label:18s} | {output_display}"
+            display = (
+                f"PDF OCR | {icon} {status_label:18s}"
+                f"{pipe_column_suffix}"
+            )
         elif info.get('is_subtitle'):
             original_file = info.get('original_filename') or os.path.basename(output_file)
             try:
@@ -30866,25 +30898,28 @@ class RetranslationMixin:
             )
             display = (
                 f"Subtitle {int(chapter_num):03d} | {icon} {status_label:11s} | "
-                f"{original_file} -> {output_display}{batch_label}"
+                f"{original_file}{arrow_column_suffix}{batch_label}"
             )
         elif 'opf_position' in info:
             original_file = info.get('original_filename', '')
             opf_pos = info['opf_position'] + 1
             if isinstance(chapter_num, float):
                 if chapter_num.is_integer():
-                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
+                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}}{arrow_column_suffix}"
                 else:
-                    display = f"[{opf_pos:03d}] Ch.{chapter_num:06.1f} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
+                    display = f"[{opf_pos:03d}] Ch.{chapter_num:06.1f} | {icon} {status_label:11s} | {original_file:<{max_original_len}}{arrow_column_suffix}"
             else:
-                display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
+                display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}}{arrow_column_suffix}"
         else:
             if isinstance(chapter_num, float) and chapter_num.is_integer():
-                display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_display}"
+                display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s}{pipe_column_suffix}"
             elif isinstance(chapter_num, float):
-                display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_display}"
+                display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s}{pipe_column_suffix}"
             else:
-                display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_display}"
+                display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s}{pipe_column_suffix}"
+
+        if hide_model_info:
+            display = display.rstrip()
 
         if status == 'qa_failed':
             qa_issues = chapter_info.get('qa_issues_found', []) if isinstance(chapter_info, dict) else []

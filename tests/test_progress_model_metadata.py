@@ -48,6 +48,7 @@ from Retranslation_GUI import (
     _progress_path_signature,
     _progress_entry_model_for_display,
     _progress_entry_refined_for_display,
+    _progress_status_hides_model_for_display,
     _progress_item_is_html,
     _repair_empty_attribute_qa_file,
     _snapshot_progress_output_dir,
@@ -321,6 +322,54 @@ def test_translation_progress_displays_nonreset_number_without_mutating_raw_num(
     assert row["num"] == 0
     assert status == "not_translated"
     assert "[004] Ch.003" in display
+
+
+def test_pending_progress_rows_hide_model_metadata_in_both_progress_views():
+    assert _progress_status_hides_model_for_display("pending")
+    assert _progress_status_hides_model_for_display("not_translated")
+    assert _progress_status_hides_model_for_display("not completed")
+    assert not _progress_status_hides_model_for_display("in_progress")
+    assert not _progress_status_hides_model_for_display("completed")
+
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    row = {
+        "num": 3,
+        "status": "not_translated",
+        "output_file": "response_part0003.html",
+        "original_filename": "part0003.xhtml",
+        "opf_position": 3,
+        "info": {
+            "status": "pending",
+            "previous_progress_entry": {
+                "status": "completed",
+                "model_name": "old-provider/model",
+            },
+        },
+    }
+
+    display, status = mixin._progress_list_display_text(
+        row,
+        {"show_model_info_state": True, "prog": {"chapters": {}}},
+        20,
+        25,
+    )
+
+    assert status == "not_translated"
+    assert "part0003.xhtml" in display
+    assert "old-provider/model" not in display
+    assert "(model unknown)" not in display
+    assert " -> " not in display
+
+    glossary_source = Path(retranslation_gui_module.__file__).read_text(
+        encoding="utf-8"
+    )
+    glossary_start = glossary_source.index("def _gp_display_for(")
+    glossary_end = glossary_source.index(
+        "def _gp_refinement_rows(", glossary_start
+    )
+    glossary_display_source = glossary_source[glossary_start:glossary_end]
+    assert "hide_model = _progress_status_hides_model_for_display(status)" in glossary_display_source
+    assert "if status in skipped_labels or hide_model:" in glossary_display_source
 
 
 def test_glossary_progress_reactivates_a_manually_removed_chapter(tmp_path):
