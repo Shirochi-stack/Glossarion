@@ -29106,7 +29106,7 @@ def main(log_callback=None, stop_callback=None):
             print(
                 "⚡ Using AGGRESSIVE batching: "
                 f"up to {config.BATCH_SIZE} parallel calls with "
-                f"API queue {api_queue_description}"
+                f"preflight {api_queue_description}"
             )
         
         @contextmanager

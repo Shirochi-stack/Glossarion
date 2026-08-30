@@ -24046,13 +24046,13 @@ Recent translations to summarize:
         self.delay_entry.setText(str(self.config.get('delay', 5)))
         self.delay_entry.setMaximumWidth(80)
 
-        api_queue_label = QLabel("API Queue:")
+        api_queue_label = QLabel("API Preflight:")
 
         self.api_queue_entry = QLineEdit()
         self.api_queue_entry.setText(str(self.api_queue_var))
         self.api_queue_entry.setMaximumWidth(60)
         self.api_queue_entry.setToolTip(
-            "Waiting requests (0 = none, -1 = match active calls)."
+            "Preflight requests (0 = none, -1 = match active calls)."
         )
         self.api_queue_entry.textChanged.connect(
             lambda: setattr(
@@ -27948,7 +27948,7 @@ Recent translations to summarize:
             if backlog:
                 label += f" (+{backlog} queued)"
             if _queued_count:
-                label += f" • API Queue: {_queued_count}"
+                label += f" • Preflight: {_queued_count}"
             if waiting_entries:
                 label += f" • Cooldown: {len(waiting_entries)}"
             if age > 0:
@@ -27962,7 +27962,7 @@ Recent translations to summarize:
             if backlog:
                 tooltip += f"\nQueued requests awaiting admission: {backlog}"
             if _queued_count:
-                tooltip += f"\nAPI Queue (admitted/staged): {_queued_count}"
+                tooltip += f"\nPreflight: {_queued_count}"
             if waiting_entries:
                 tooltip += f"\nCooldown: {len(waiting_entries)}"
             if age > 0:
@@ -45563,7 +45563,7 @@ Important rules:
             if show_message:
                 validation_map = [
                     (self.delay_entry, "API call delay", lambda v: v.replace('.', '', 1).isdigit() or v == ""),
-                    (self.api_queue_entry, "API Queue", lambda v: v.lstrip('-').isdigit() and int(v) >= -1),
+                    (self.api_queue_entry, "API Preflight", lambda v: v.lstrip('-').isdigit() and int(v) >= -1),
                     (self.thread_delay_entry, "Threading Delay", lambda v: v.replace('.', '', 1).isdigit()),
                     (self.trans_temp, "Temperature", lambda v: v == "" or v.replace('.', '', 1).replace('-', '', 1).isdigit()),
                     (self.trans_history, "Translation History Limit", lambda v: v.isdigit() or v == ""),

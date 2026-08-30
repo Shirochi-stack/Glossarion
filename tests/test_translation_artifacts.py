@@ -328,7 +328,7 @@ def test_api_queue_control_is_beside_delay_and_exported():
         Path(translation_module.__file__).with_name("async_api_processor.py")
     ).read_text(encoding="utf-8")
 
-    assert 'QLabel("API Queue:")' in settings_source
+    assert 'QLabel("API Preflight:")' in settings_source
     assert "api_timing_layout.addWidget(self.delay_entry)" in settings_source
     assert "api_timing_layout.addWidget(api_queue_label)" in settings_source
     assert "api_timing_layout.addWidget(self.api_queue_entry)" in settings_source
@@ -343,7 +343,7 @@ def test_watchdog_displays_lazy_queue_as_a_separate_backlog():
     assert "state.get('scheduler_queued', 0)" in source
     assert "_queued_count = max(_queued_entry_count, scheduler_queued)" in source
     assert 'label += f" (+{backlog} queued)"' in source
-    assert 'label += f" • API Queue: {_queued_count}"' in source
+    assert 'label += f" • Preflight: {_queued_count}"' in source
     assert "Backlog:" not in source
     assert "_total_active > 0 or backlog > 0" in source
     assert "Queued requests awaiting admission" in source
