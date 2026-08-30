@@ -59,6 +59,39 @@ class TupleInterruptClient(SlowInterruptClient):
         return "translated text", "stop"
 
 
+class QueuedBoundaryClient(SlowInterruptClient):
+    """Fake a client which entered send() but has not reached HTTP dispatch."""
+
+    def __init__(self):
+        super().__init__(sleep_seconds=0)
+        self.send_entered = threading.Event()
+
+    def send(self, messages, temperature=0.0, max_tokens=None, context=None):
+        self.send_entered.set()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            check = getattr(self.tls, "local_cancel_check", None)
+            if callable(check) and check():
+                return "cancelled before provider boundary"
+            time.sleep(0.01)
+        raise AssertionError("queued request was not cancelled")
+
+
+class ActiveBoundaryClient(SlowInterruptClient):
+    def __init__(self):
+        super().__init__(sleep_seconds=0)
+        self.provider_started = threading.Event()
+        self.release = threading.Event()
+
+    def send(self, messages, temperature=0.0, max_tokens=None, context=None):
+        callback = getattr(self.tls, "pre_api_call_callback", None)
+        assert callable(callback)
+        callback()
+        self.provider_started.set()
+        assert self.release.wait(2.0)
+        return "active result"
+
+
 def _install_fake_argos(monkeypatch, translate_func):
     calls = []
 
@@ -302,6 +335,97 @@ def test_send_with_interrupt_graceful_stop_does_not_cancel_active_call(monkeypat
     assert client.cancel_calls == 0
     assert client._cancelled is False
     assert os.environ.get("GRACEFUL_STOP_COMPLETED") == "1"
+
+
+def test_graceful_stop_clears_queued_send_without_cancelling_client(monkeypatch):
+    from TransateKRtoEN import (
+        cancel_queued_translation_sends,
+        send_with_interrupt,
+    )
+    from unified_api_client import UnifiedClientError
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+
+    client = QueuedBoundaryClient()
+    outcome = {}
+
+    def run_send():
+        try:
+            send_with_interrupt(
+                [{"role": "user", "content": "hello"}],
+                client,
+                temperature=0.0,
+                max_tokens=8,
+                stop_check_fn=lambda: os.environ.get("GRACEFUL_STOP") == "1",
+                context="translation",
+                before_send_callback=lambda: pytest.fail(
+                    "queued request crossed the provider boundary"
+                ),
+            )
+        except Exception as exc:
+            outcome["error"] = exc
+
+    runner = threading.Thread(target=run_send)
+    runner.start()
+    assert client.send_entered.wait(1.0)
+
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    assert cancel_queued_translation_sends() == 1
+    runner.join(1.0)
+
+    assert not runner.is_alive()
+    assert isinstance(outcome.get("error"), UnifiedClientError)
+    assert "queue cleared" in str(outcome["error"]).lower()
+    assert client.cancel_calls == 0
+    assert client._cancelled is False
+
+
+def test_graceful_stop_preserves_send_after_provider_boundary(monkeypatch):
+    from TransateKRtoEN import (
+        cancel_queued_translation_sends,
+        send_with_interrupt,
+    )
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+
+    client = ActiveBoundaryClient()
+    outcome = {}
+
+    def run_send():
+        try:
+            outcome["result"] = send_with_interrupt(
+                [{"role": "user", "content": "hello"}],
+                client,
+                temperature=0.0,
+                max_tokens=8,
+                stop_check_fn=lambda: os.environ.get("GRACEFUL_STOP") == "1",
+                context="translation",
+                before_send_callback=lambda: None,
+            )
+        except Exception as exc:
+            outcome["error"] = exc
+
+    runner = threading.Thread(target=run_send)
+    runner.start()
+    assert client.provider_started.wait(1.0)
+
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    assert cancel_queued_translation_sends() == 0
+    client.release.set()
+    runner.join(1.0)
+
+    assert not runner.is_alive()
+    assert "error" not in outcome
+    assert outcome["result"] == "active result"
+    assert client.cancel_calls == 0
 
 
 def test_send_with_interrupt_marks_graceful_completion_for_normal_tuple_response(monkeypatch):

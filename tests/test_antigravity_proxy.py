@@ -2322,6 +2322,47 @@ def test_watchdog_tracks_lazy_backlog_without_writing_every_dequeue(monkeypatch)
         unified_api_client._api_watchdog_reset()
 
 
+def test_watchdog_graceful_clear_removes_only_pending_requests(monkeypatch):
+    writes = []
+    monkeypatch.setattr(
+        unified_api_client,
+        "_api_watchdog_external_write",
+        lambda state: writes.append(dict(state)),
+    )
+    unified_api_client._api_watchdog_reset()
+    writes.clear()
+
+    try:
+        unified_api_client._api_watchdog_started(
+            "translation", request_id="active", chapter=1, queued=True,
+        )
+        unified_api_client._api_watchdog_mark_in_flight("active", "model-a")
+        unified_api_client._api_watchdog_started(
+            "translation", request_id="queued", chapter=2, queued=True,
+        )
+        unified_api_client._api_watchdog_started(
+            "translation", request_id="cooldown", chapter=3, queued=True,
+        )
+        unified_api_client._api_watchdog_mark_waiting(
+            "cooldown", "model-b", "delay",
+        )
+        unified_api_client._api_watchdog_set_backlog(50)
+        writes.clear()
+
+        removed = unified_api_client._api_watchdog_clear_pending_requests()
+
+        state = unified_api_client.get_api_watchdog_state()
+        assert removed == 2
+        assert state["in_flight"] == 1
+        assert state["backlog"] == 0
+        assert [
+            entry["request_id"] for entry in state["in_flight_entries"]
+        ] == ["active"]
+        assert len(writes) == 1
+    finally:
+        unified_api_client._api_watchdog_reset()
+
+
 def test_shared_instance_cancel_does_not_cancel_sibling_batch_request(monkeypatch):
     client = object.__new__(UnifiedClient)
     client._cancelled = True

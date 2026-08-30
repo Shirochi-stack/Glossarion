@@ -296,10 +296,11 @@ def _acquire_gate(
     *,
     log_fn: Optional[Callable[[str], None]] = None,
     wait_message: str = "",
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> None:
     waited = False
     while not gate.acquire(timeout=0.1):
-        if _is_cancelled():
+        if _is_cancelled() or (callable(cancel_check) and cancel_check()):
             raise RuntimeError("stream cancelled")
         if wait_message and not waited:
             _log(log_fn, wait_message)
@@ -1041,7 +1042,11 @@ def _qtwebengine_chromium_flags(existing: str = "") -> str:
     return " ".join(merged)
 
 
-def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
+def _mint_captcha_token_subprocess(
+    page_url: str,
+    timeout: int,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> str:
     helper_timeout = max(30, int(timeout))
     if _is_frozen_app():
         # In PyInstaller builds sys.executable is the Glossarion exe, not a
@@ -1078,7 +1083,7 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
         TOKEN_SUBPROCESS_CONCURRENCY_ENV,
         DEFAULT_TOKEN_SUBPROCESS_CONCURRENCY_LIMIT,
     )
-    _acquire_gate(subprocess_gate)
+    _acquire_gate(subprocess_gate, cancel_check=cancel_check)
     proc = None
     deadline = time.time() + helper_timeout + 20
     stdout = ""
@@ -1095,7 +1100,7 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
         with _active_helper_lock:
             _active_helper_processes.add(proc)
         while proc.poll() is None:
-            if _is_cancelled():
+            if _is_cancelled() or (callable(cancel_check) and cancel_check()):
                 _terminate_process_tree(proc, kill=True)
                 raise RuntimeError("stream cancelled")
             if time.time() >= deadline:
@@ -1538,17 +1543,26 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
             pass
 
 
-def get_captcha_token(page_url: str, timeout: int = 90) -> str:
+def get_captcha_token(
+    page_url: str,
+    timeout: int = 90,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> str:
     mode = os.getenv("AUTHND_TOKEN_MODE", "subprocess").strip().lower()
     if mode == "inline":
         return _mint_captcha_token_qt(page_url, timeout)
-    return _mint_captcha_token_subprocess(page_url, timeout)
+    return _mint_captcha_token_subprocess(
+        page_url,
+        timeout,
+        cancel_check=cancel_check,
+    )
 
 
 def _get_captcha_token_for_request(
     page_url: str,
     timeout: int = 90,
     log_fn: Optional[Callable[[str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> str:
     captcha_gate = _get_configured_gate(
         TOKEN_CONCURRENCY_ENV,
@@ -1558,9 +1572,14 @@ def _get_captcha_token_for_request(
         captcha_gate,
         log_fn=log_fn,
         wait_message="⏳ AuthND: waiting for browser token slot",
+        cancel_check=cancel_check,
     )
     try:
-        return get_captcha_token(page_url, timeout)
+        return get_captcha_token(
+            page_url,
+            timeout,
+            cancel_check=cancel_check,
+        )
     finally:
         captcha_gate.release()
 
@@ -2231,9 +2250,16 @@ def send_chat_completion(
     stream: Optional[bool] = None,
     log_stream: Optional[bool] = None,
     progress_label: Optional[str] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    before_send_callback: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
     del account_id  # AuthND has no account slots; kept for unified handler symmetry.
-    if _is_cancelled():
+    def _request_cancelled() -> bool:
+        return _is_cancelled() or (
+            callable(cancel_check) and bool(cancel_check())
+        )
+
+    if _request_cancelled():
         raise RuntimeError("stream cancelled")
 
     publisher, model_id, page_url = _normalize_model(model)
@@ -2277,12 +2303,24 @@ def send_chat_completion(
     last_error: Optional[Exception] = None
 
     for attempt in range(2):
-        if _is_cancelled():
+        if _request_cancelled():
             raise RuntimeError("stream cancelled")
         try:
-            captcha_token = _get_captcha_token_for_request(page_url, token_timeout, log_fn=log_fn)
+            if callable(cancel_check):
+                captcha_token = _get_captcha_token_for_request(
+                    page_url,
+                    token_timeout,
+                    log_fn=log_fn,
+                    cancel_check=cancel_check,
+                )
+            else:
+                captcha_token = _get_captcha_token_for_request(
+                    page_url,
+                    token_timeout,
+                    log_fn=log_fn,
+                )
         except RuntimeError as exc:
-            if _is_cancelled() or "cancelled" in str(exc).lower():
+            if _request_cancelled() or "cancelled" in str(exc).lower():
                 raise RuntimeError("stream cancelled") from exc
             error_detail = _short_error(exc)
             _log(
@@ -2294,7 +2332,7 @@ def send_chat_completion(
                 _log(log_fn, "🔁 AuthND: retrying captcha token flow with a fresh browser helper")
                 continue
             raise
-        if _is_cancelled():
+        if _request_cancelled():
             raise RuntimeError("stream cancelled")
         _log(
             log_fn,
@@ -2302,6 +2340,8 @@ def send_chat_completion(
             debug_only=True,
         )
         _log(log_fn, "📨 AuthND: captcha token acquired; sending NVIDIA request")
+        if callable(before_send_callback):
+            before_send_callback()
         post_progress_label = progress_label or f"📤 [{threading.current_thread().name}] API call in progress"
         try:
             result = _post_prediction(

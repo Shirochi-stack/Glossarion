@@ -456,6 +456,63 @@ def test_send_chat_completion_retries_token_helper_failure(monkeypatch):
     assert any("fresh browser helper" in message for message in logs)
 
 
+def test_send_chat_completion_honors_request_local_queue_cancel(monkeypatch):
+    authnd._cancel_event.clear()
+    state = {"cancelled": False}
+    post_calls = []
+
+    def fake_get_token(page_url, timeout, log_fn=None, cancel_check=None):
+        assert callable(cancel_check)
+        state["cancelled"] = True
+        assert cancel_check() is True
+        raise RuntimeError("stream cancelled")
+
+    monkeypatch.setattr(authnd, "_get_captcha_token_for_request", fake_get_token)
+    monkeypatch.setattr(
+        authnd,
+        "_post_prediction",
+        lambda **kwargs: post_calls.append(kwargs),
+    )
+
+    with pytest.raises(RuntimeError, match="stream cancelled"):
+        authnd.send_chat_completion(
+            messages=[{"role": "user", "content": "test"}],
+            model="z-ai/glm-5.1",
+            stream=False,
+            cancel_check=lambda: state["cancelled"],
+        )
+
+    assert post_calls == []
+    assert authnd._cancel_event.is_set() is False
+
+
+def test_authnd_provider_boundary_callback_runs_immediately_before_post(monkeypatch):
+    authnd._cancel_event.clear()
+    events = []
+
+    monkeypatch.setattr(
+        authnd,
+        "_get_captcha_token_for_request",
+        lambda *args, **kwargs: "fresh-token",
+    )
+
+    def fake_post_prediction(**kwargs):
+        events.append("post")
+        return {"content": "ok", "finish_reason": "stop"}
+
+    monkeypatch.setattr(authnd, "_post_prediction", fake_post_prediction)
+
+    result = authnd.send_chat_completion(
+        messages=[{"role": "user", "content": "test"}],
+        model="z-ai/glm-5.1",
+        stream=False,
+        before_send_callback=lambda: events.append("boundary"),
+    )
+
+    assert result["content"] == "ok"
+    assert events == ["boundary", "post"]
+
+
 def test_hcaptcha_timeout_hint_is_actionable(monkeypatch):
     monkeypatch.setenv("AUTHND_TOKEN_CONCURRENCY", "3")
 

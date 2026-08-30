@@ -540,6 +540,41 @@ def _api_watchdog_set_backlog(count: Any, *, publish: bool = False) -> None:
     except Exception:
         pass
 
+def _api_watchdog_clear_pending_requests() -> int:
+    """Remove requests which have not crossed the provider-send boundary.
+
+    Graceful Stop must leave real HTTP calls alone, but queued stagger/cooldown
+    entries are not active calls and should disappear immediately.  Clear them
+    under the watchdog lock and publish one snapshot so the GUI cannot spend
+    seconds displaying a queue which is already being cancelled.
+    """
+    global _api_watchdog_last_change_ts
+    global _api_watchdog_backlog, _api_watchdog_backlog_last_change_ts
+    removed = 0
+    try:
+        now = time.time()
+        with _api_watchdog_lock:
+            pending_ids = [
+                request_id
+                for request_id, entry in _api_watchdog_entries.items()
+                if isinstance(entry, dict)
+                and entry.get("status") in {"queued", "waiting_cooldown"}
+            ]
+            for request_id in pending_ids:
+                _api_watchdog_entries.pop(request_id, None)
+            removed = len(pending_ids)
+            backlog_changed = _api_watchdog_backlog != 0
+            _api_watchdog_backlog = 0
+            if backlog_changed:
+                _api_watchdog_backlog_last_change_ts = now
+            if removed or backlog_changed:
+                _api_watchdog_last_change_ts = now
+        if removed or backlog_changed:
+            _api_watchdog_external_write(get_api_watchdog_state())
+    except Exception:
+        return removed
+    return removed
+
 def _api_watchdog_reset():
     """Hard reset watchdog state (used on force-cancel)."""
     global _api_watchdog_in_flight, _api_watchdog_peak, _api_watchdog_last_change_ts
@@ -17994,7 +18029,9 @@ class UnifiedClient:
             tls = self._get_thread_local_client()
             self._remember_actual_request_model()
             active_model_lower = str(self._get_active_request_model() or '').strip().lower()
-            defer_progress_callback = active_model_lower.startswith('authza')
+            defer_progress_callback = active_model_lower.startswith(
+                ('authnd', 'authza')
+            )
             if not defer_progress_callback:
                 cb = getattr(tls, 'pre_api_call_callback', None)
                 if callable(cb):
@@ -18004,6 +18041,11 @@ class UnifiedClient:
                 if hasattr(tls, 'pre_api_call_callback'):
                     tls.pre_api_call_callback = None
         except Exception as cb_err:
+            if (
+                isinstance(cb_err, UnifiedClientError)
+                and getattr(cb_err, "error_type", None) == "cancelled"
+            ):
+                raise
             try:
                 print(f"⚠️ Pre-send progress callback failed: {cb_err}")
             except Exception:
@@ -27807,18 +27849,28 @@ class UnifiedClient:
                     pass
                 authnd_watchdog_marked = False
 
-                def _authnd_log_fn(message):
+                def _authnd_provider_started():
                     nonlocal authnd_watchdog_marked
-                    try:
-                        if (
-                            not authnd_watchdog_marked
-                            and authnd_request_id
-                            and str(message or "") == authnd_progress_label
-                        ):
-                            _api_watchdog_mark_in_flight(authnd_request_id, getattr(self, 'model', None))
-                            authnd_watchdog_marked = True
-                    except Exception:
-                        pass
+                    if authnd_watchdog_marked:
+                        return
+                    callback = getattr(
+                        tls,
+                        'pre_api_call_callback',
+                        None,
+                    )
+                    if callable(callback):
+                        tls.last_pre_api_call_callback = callback
+                        tls.last_pre_api_call_callback_request_id = authnd_request_id
+                        callback()
+                    if hasattr(tls, 'pre_api_call_callback'):
+                        tls.pre_api_call_callback = None
+                    _api_watchdog_mark_in_flight(
+                        authnd_request_id,
+                        getattr(self, 'model', None),
+                    )
+                    authnd_watchdog_marked = True
+
+                def _authnd_log_fn(message):
                     print(message)
 
                 result = _authnd_send(
@@ -27835,6 +27887,8 @@ class UnifiedClient:
                     progress_label=authnd_progress_label,
                     stream=True,
                     log_stream=authnd_log_stream,
+                    cancel_check=self._is_local_cancel_requested,
+                    before_send_callback=_authnd_provider_started,
                 )
 
                 content = result.get("content", "")
@@ -28131,6 +28185,11 @@ class UnifiedClient:
                 if hasattr(_tls, 'pre_api_call_callback'):
                     _tls.pre_api_call_callback = None
             except Exception as cb_err:
+                if (
+                    isinstance(cb_err, UnifiedClientError)
+                    and getattr(cb_err, "error_type", None) == "cancelled"
+                ):
+                    raise
                 print(f"⚠️ Pre-send AuthZA progress callback failed: {cb_err}")
         try:
             _api_watchdog_mark_in_flight(_request_id, request_model)

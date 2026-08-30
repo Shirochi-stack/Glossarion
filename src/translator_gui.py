@@ -37777,6 +37777,42 @@ Important rules:
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
         if not graceful_stop:
             os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+
+        # A graceful first click preserves only requests which have crossed the
+        # real provider boundary.  Cancel admitted-but-waiting wrappers and
+        # remove their queued/cooldown watchdog rows in one snapshot so the GUI
+        # immediately reflects the queue being closed.
+        if graceful_stop:
+            cancelled_queued = 0
+            cleared_watchdog = 0
+            try:
+                import TransateKRtoEN as _translation_module
+                cancel_queued = getattr(
+                    _translation_module,
+                    'cancel_queued_translation_sends',
+                    None,
+                )
+                if callable(cancel_queued):
+                    cancelled_queued = int(cancel_queued() or 0)
+            except Exception:
+                cancelled_queued = 0
+            try:
+                import unified_api_client as _uac
+                clear_pending = getattr(
+                    _uac,
+                    '_api_watchdog_clear_pending_requests',
+                    None,
+                )
+                if callable(clear_pending):
+                    cleared_watchdog = int(clear_pending() or 0)
+            except Exception:
+                cleared_watchdog = 0
+            queued_count = max(cancelled_queued, cleared_watchdog)
+            if queued_count:
+                self.append_log(
+                    f"⏹️ Graceful stop cleared {queued_count} queued API "
+                    "request(s); active calls will finish."
+                )
         
         # Set wait for chunks mode - only applies when graceful stop is also enabled
         wait_for_chunks = getattr(self, 'wait_for_chunks_var', False) and graceful_stop

@@ -43,6 +43,7 @@ from unified_api_client import (
     extend_deferred_batch_logs,
     get_current_thread_actual_request_key_identifier,
     get_current_thread_actual_request_model,
+    _api_watchdog_mark_in_flight,
     _api_watchdog_set_backlog,
     pop_deferred_batch_logs,
     set_current_thread_actual_request_model,
@@ -53,6 +54,34 @@ _translation_thread_submit_lock = threading.Lock()
 _translation_last_thread_submit = 0.0
 _single_pass_glossary_lock = threading.Lock()
 _single_pass_glossary_active_indices = set()
+_pending_translation_send_lock = threading.Lock()
+_pending_translation_sends = {}
+
+
+def cancel_queued_translation_sends() -> int:
+    """Cancel admitted sends which have not started their provider call.
+
+    This is intentionally request-local.  A first-click graceful stop calls it
+    after publishing ``GRACEFUL_STOP=1``; records which already crossed the
+    provider boundary are skipped and continue normally.
+    """
+    cancelled = 0
+    with _pending_translation_send_lock:
+        for record in tuple(_pending_translation_sends.values()):
+            started_event = record.get("provider_started")
+            cancel_event = record.get("cancel_event")
+            if (
+                isinstance(started_event, threading.Event)
+                and isinstance(cancel_event, threading.Event)
+                and not started_event.is_set()
+                and not cancel_event.is_set()
+            ):
+                state = record.get("state")
+                if isinstance(state, dict):
+                    state["cancel_reason"] = "graceful queue clear"
+                cancel_event.set()
+                cancelled += 1
+    return cancelled
 
 
 def _direct_text_html_source_name(chapter):
@@ -22087,7 +22116,9 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     
     result_queue = queue.Queue()
     cancel_event = threading.Event()
+    provider_call_started = threading.Event()
     api_call_state = {"tls": None, "cancel_reason": None}
+    pending_send_token = uuid.uuid4().hex
     deferred_batch_logs = pop_deferred_batch_logs()
 
     def _publish_direct_text_response(api_result):
@@ -22310,6 +22341,35 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             pass
         if hasattr(client, 'cancel_current_operation'):
             client.cancel_current_operation()
+
+    def _mark_provider_call_started() -> None:
+        """Atomically cross the graceful-stop/provider-call boundary."""
+        with _pending_translation_send_lock:
+            if cancel_event.is_set():
+                raise UnifiedClientError(
+                    "Graceful stop cleared this queued request",
+                    error_type="cancelled",
+                )
+            try:
+                api_tls = api_call_state.get("tls")
+                watchdog_request_id = getattr(
+                    api_tls,
+                    'current_request_id',
+                    None,
+                )
+                if watchdog_request_id:
+                    _api_watchdog_mark_in_flight(
+                        watchdog_request_id,
+                        getattr(client, 'model', None),
+                    )
+            except Exception:
+                pass
+            provider_call_started.set()
+
+    def _provider_boundary_callback() -> None:
+        _mark_provider_call_started()
+        if callable(before_send_callback):
+            before_send_callback()
     
     def api_call():
         tls_for_local_cancel = None
@@ -22388,11 +22448,18 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 try:
                     if hasattr(client, '_get_thread_local_client'):
                         tls_for_callback = client._get_thread_local_client()
-                        tls_for_callback.pre_api_call_callback = before_send_callback
+                        tls_for_callback.pre_api_call_callback = _provider_boundary_callback
                     else:
-                        before_send_callback()
+                        _provider_boundary_callback()
                 except Exception as cb_err:
+                    if isinstance(cb_err, UnifiedClientError):
+                        raise
                     print(f"⚠️ Failed to register pre-send progress callback: {cb_err}")
+            else:
+                # Callers without a true provider-boundary callback retain the
+                # legacy meaning: once client.send() is entered, the call is
+                # treated as active and graceful stop will not interrupt it.
+                _mark_provider_call_started()
 
             try:
                 result = client.send(**send_params)
@@ -22433,6 +22500,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 pass
             result_queue.put(e)
         finally:
+            with _pending_translation_send_lock:
+                _pending_translation_sends.pop(pending_send_token, None)
             if tls_for_local_cancel is not None:
                 try:
                     if had_local_cancel:
@@ -22475,6 +22544,13 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 _translation_last_thread_submit = time.time()
             else:
                 _translation_last_thread_submit = now
+
+    with _pending_translation_send_lock:
+        _pending_translation_sends[pending_send_token] = {
+            "cancel_event": cancel_event,
+            "provider_started": provider_call_started,
+            "state": api_call_state,
+        }
 
     api_thread = threading.Thread(target=api_call)
     api_thread.daemon = True
@@ -22592,6 +22668,26 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             # Hard cancellation (e.g. double-click force stop via hard_cancel_all)
             # overrides graceful stop protection for in-flight calls.
             hard_cancelled = hasattr(client, 'is_globally_cancelled') and client.is_globally_cancelled()
+
+            # A graceful first click cancels admitted work which was still in
+            # stagger/setup and never reached the provider boundary.  Active
+            # calls have provider_call_started set and remain protected.
+            queued_graceful_cancel = (
+                graceful_active
+                and cancel_event.is_set()
+                and not provider_call_started.is_set()
+            )
+
+            if queued_graceful_cancel:
+                _clear_watchdog_for_chapter_context()
+                try:
+                    api_thread.join(timeout=0.2)
+                except Exception:
+                    pass
+                raise UnifiedClientError(
+                    "Translation queue cleared by graceful stop",
+                    error_type="cancelled",
+                )
             
             should_cancel = (
                 hard_cancelled
