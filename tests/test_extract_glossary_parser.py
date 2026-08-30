@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 import extract_glossary_from_epub as glossary_extractor
+from unified_api_client import UnifiedClientError
 from extract_glossary_from_epub import (
     DEFAULT_GLOSSARY_PROMPT,
     extract_chapters_from_epub,
@@ -86,6 +87,69 @@ def test_glossary_stop_request_logs_are_coalesced(capsys):
     assert "2 API requests were cancelled or skipped" in output
     assert glossary_extractor._flush_glossary_stop_summary() == 0
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Glossary extraction stopped before provider dispatch",
+        "AuthND: Translation stopped by user",
+    ],
+)
+def test_glossary_stop_classifier_suppresses_provider_stop_variants(message):
+    error = UnifiedClientError(message, error_type="cancelled")
+
+    assert glossary_extractor._is_glossary_user_stop_error(error)
+
+
+def test_glossary_stop_classifier_keeps_real_provider_errors_visible():
+    error = UnifiedClientError(
+        "AuthND: 400 invalid CAPTCHA token",
+        error_type="validation",
+    )
+
+    assert not glossary_extractor._is_glossary_user_stop_error(error)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Glossary extraction stopped before provider dispatch",
+        "AuthND: Translation stopped by user",
+    ],
+)
+def test_glossary_worker_does_not_print_per_request_stop_errors(
+    message,
+    monkeypatch,
+    capsys,
+    tmp_path,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    glossary_extractor._reset_glossary_stop_summary()
+
+    def stopped_send(**_kwargs):
+        raise UnifiedClientError(message, error_type="cancelled")
+
+    monkeypatch.setattr(
+        glossary_extractor,
+        "send_with_interrupt",
+        stopped_send,
+    )
+    result = glossary_extractor.process_single_chapter_api_call(
+        91,
+        "chapter text",
+        [{"role": "user", "content": "chapter text"}],
+        object(),
+        0.0,
+        128,
+        lambda: False,
+        chapter_num=92,
+    )
+
+    assert result["user_stop_skip"] is True
+    assert "API call interrupted/failed" not in capsys.readouterr().out
+    glossary_extractor._reset_glossary_stop_summary()
 
 
 def test_glossary_refinement_request_mode_defaults_to_all_types(monkeypatch):

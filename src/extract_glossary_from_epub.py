@@ -376,6 +376,8 @@ def _is_graceful_stop_skip_error(err: Exception) -> bool:
         return False
     if "graceful stop active - not starting new api call" in s:
         return True
+    if "stopped before provider dispatch" in s:
+        return True
     if not _glossary_is_graceful_stop_active():
         return False
     return (
@@ -389,11 +391,18 @@ def _is_glossary_user_stop_error(err: Exception) -> bool:
     if _is_graceful_stop_skip_error(err):
         return True
     try:
+        if str(getattr(err, "error_type", "") or "").lower() == "cancelled":
+            return True
+    except Exception:
+        pass
+    try:
         error_text = str(err).lower()
     except Exception:
         return False
     return (
         "glossary extraction stopped by user" in error_text
+        or "translation stopped by user" in error_text
+        or "stopped before provider dispatch" in error_text
         or "operation cancelled by user" in error_text
     )
 
@@ -6792,9 +6801,9 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
         }
         
     except UnifiedClientError as e:
-        # Check if this is a user stop (not an actual error)
-        err_lower = str(e).lower()
-        if "stopped by user" in err_lower or "cancelled" in err_lower or "operation cancelled" in err_lower:
+        # Expected stop/cancellation errors are summarized once at the batch
+        # barrier instead of being printed once per merged request.
+        if _is_glossary_user_stop_error(e):
             # print(f"🛑 Glossary extraction stopped by user")  # Redundant
             # Re-raise to propagate the stop signal up the call stack
             raise
@@ -8391,8 +8400,13 @@ def main(log_callback=None, stop_callback=None):
                                 display_idx = _glossary_chapter_actual_num(idx, context=progress_context)
                                 
                                 if error:
-                                    # Suppress expected "graceful stop" pre-send cancellations.
-                                    if isinstance(error, str) and _is_graceful_stop_skip_error(error):
+                                    # Stop cancellations are represented by the
+                                    # single coalesced batch summary.
+                                    if (
+                                        result.get('user_stop_skip')
+                                        or result.get('graceful_stop_skip')
+                                        or _is_glossary_user_stop_error(error)
+                                    ):
                                         return False
                                     print(f"[Chapter {display_idx}] Error: {error}")
                                     _mark_glossary_failed(failed, idx, "API_ERROR")
@@ -8562,8 +8576,9 @@ def main(log_callback=None, stop_callback=None):
                         return True
                         
                     except Exception as e:
-                        # Suppress expected "graceful stop" pre-send cancellations.
-                        if _is_graceful_stop_skip_error(e):
+                        # Suppress every expected graceful/force stop variant;
+                        # genuine provider failures still follow the error path.
+                        if _is_glossary_user_stop_error(e):
                             return False
                         if _glossary_is_hard_stop_requested(stop_callback):
                             stopped_early = True
