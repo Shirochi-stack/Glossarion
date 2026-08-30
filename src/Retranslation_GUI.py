@@ -26333,11 +26333,19 @@ class RetranslationMixin:
                 )
                 if reply != QMessageBox.Yes:
                     return
-            
+
+            # Everything above this point reads Qt selection state and displays
+            # confirmation UI.  The caller resumes the generator below on a
+            # worker thread so bulk file resets and progress merging cannot
+            # block the GUI event loop.
+            yield "run_background"
+
             # Capture this window's starting snapshot.  The final save merges
             # only our changes into the newest on-disk progress so concurrent
             # Retranslate Selected actions do not clobber one another.
             progress_baseline = copy.deepcopy(data['prog'])
+            working_progress = copy.deepcopy(progress_baseline)
+            merged_progress = None
 
             # Process chapters - DELETE FILES AND UPDATE PROGRESS
             deleted_count = 0
@@ -26382,11 +26390,23 @@ class RetranslationMixin:
                             f"{artifact_path}: {e}"
                         )
                 linked_reset_count = reset_translation_artifact_progress_entries(
-                    data['prog'], ("toc", "headers")
+                    working_progress, ("toc", "headers")
                 )
                 if linked_reset_count:
                     status_reset_count += linked_reset_count
                     progress_updated = True
+
+            merged_children_by_parent = {}
+            for child_key, child_entry in working_progress.get(
+                "chapters", {}
+            ).items():
+                if (
+                    isinstance(child_entry, dict)
+                    and child_entry.get("status") == "merged"
+                ):
+                    merged_children_by_parent.setdefault(
+                        child_entry.get("merged_parent_chapter"), []
+                    ).append(child_key)
 
             for ch_info in selected_chapters:
                 output_file = ch_info['output_file']
@@ -26394,7 +26414,7 @@ class RetranslationMixin:
                 progress_key = ch_info.get('progress_key')
 
                 chapter_entry = (
-                    data['prog'].get("chapters", {}).get(progress_key)
+                    working_progress.get("chapters", {}).get(progress_key)
                     if progress_key
                     else None
                 )
@@ -26445,10 +26465,10 @@ class RetranslationMixin:
                     )
                     if delete_complete_chunk_file:
                         processed_full_chunk_keys.add(chunk_key)
-                    chunk_entry = data['prog'].get("chapter_chunks", {}).get(
+                    chunk_entry = working_progress.get("chapter_chunks", {}).get(
                         chunk_key
                     )
-                    parent_entry = data['prog'].get("chapters", {}).get(
+                    parent_entry = working_progress.get("chapters", {}).get(
                         parent_key
                     )
                     if not isinstance(chunk_entry, dict) or not isinstance(
@@ -26474,7 +26494,7 @@ class RetranslationMixin:
                                     "original_filename", ""
                                 ),
                             },
-                            data['prog'],
+                            working_progress,
                         )
                     )
                     if resolved_output_path:
@@ -26589,7 +26609,7 @@ class RetranslationMixin:
                         parent_entry["last_updated"] = time.time()
                         _clear_refinement_progress_fields(parent_entry)
                         _sync_parent_chunk_qa_summary(
-                            data['prog'], parent_key, chunk_key
+                            working_progress, parent_key, chunk_key
                         )
                         chunk_reset_count += len(reset)
                         status_reset_count += 1
@@ -26615,7 +26635,7 @@ class RetranslationMixin:
                             print(f"Failed to delete metadata.json: {e}")
 
                     entry_key = progress_key or METADATA_PROGRESS_KEY
-                    entry = data['prog'].setdefault('chapters', {}).setdefault(
+                    entry = working_progress.setdefault('chapters', {}).setdefault(
                         entry_key,
                         {
                             'actual_num': -1,
@@ -26647,7 +26667,7 @@ class RetranslationMixin:
                     subtitle_matches = []
                     seen_subtitle_keys = set()
                     for subtitle_key in ch_info.get('progress_keys', []):
-                        subtitle_entry = data['prog'].get('chapters', {}).get(subtitle_key)
+                        subtitle_entry = working_progress.get('chapters', {}).get(subtitle_key)
                         if (
                             subtitle_key not in seen_subtitle_keys
                             and isinstance(subtitle_entry, dict)
@@ -26693,17 +26713,17 @@ class RetranslationMixin:
                             f"Reset subtitle batch to pending "
                             f"(file index: {actual_num}, key: {subtitle_key})"
                         )
-                    data['prog'].pop('subtitle_files', None)
+                    working_progress.pop('subtitle_files', None)
                     progress_updated = True
                     continue
                 
                 if ch_info['status'] != 'not_translated':
                     # Reset status to pending for ALL non-not_translated chapters, but only if we can match the exact progress entry
                     match = None
-                    if progress_key and progress_key in data['prog']["chapters"]:
-                        match = (progress_key, data['prog']["chapters"][progress_key])
+                    if progress_key and progress_key in working_progress["chapters"]:
+                        match = (progress_key, working_progress["chapters"][progress_key])
                     else:
-                        match = _find_progress_entry(ch_info, data['prog'])
+                        match = _find_progress_entry(ch_info, working_progress)
                     old_status = ch_info['status']
                     
                     if match:
@@ -26794,7 +26814,7 @@ class RetranslationMixin:
                         parent_chunk_key = str(
                             ch_entry.get("content_hash") or chapter_key
                         )
-                        parent_chunk_entry = data['prog'].get(
+                        parent_chunk_entry = working_progress.get(
                             "chapter_chunks", {}
                         ).get(parent_chunk_key)
                         if isinstance(parent_chunk_entry, dict):
@@ -26810,7 +26830,7 @@ class RetranslationMixin:
                                     reset_key, set()
                                 ).update(int(index) for index in reset)
                             _sync_parent_chunk_qa_summary(
-                                data['prog'], chapter_key, parent_chunk_key
+                                working_progress, chapter_key, parent_chunk_key
                             )
                         progress_updated = True
                         status_reset_count += 1
@@ -26821,12 +26841,12 @@ class RetranslationMixin:
                     # ONLY clear children that still have "merged" status
                     # If split-the-merge succeeded, children will have their own status (completed/qa_failed)
                     # and should NOT be deleted when parent is retranslated
-                    for child_key, child_data in list(data['prog']["chapters"].items()):
-                        child_status = child_data.get("status")
-                        if child_status == "merged" and child_data.get("merged_parent_chapter") == actual_num:
+                    for child_key in merged_children_by_parent.pop(actual_num, []):
+                        child_data = working_progress["chapters"].get(child_key)
+                        if isinstance(child_data, dict) and child_data.get("status") == "merged":
                             child_actual_num = child_data.get("actual_num")
                             print(f"🔓 Clearing merged status for child chapter {child_actual_num} (parent {actual_num} being retranslated)")
-                            del data['prog']["chapters"][child_key]
+                            del working_progress["chapters"][child_key]
                             merged_cleared_count += 1
                             progress_updated = True
                 else:
@@ -26839,7 +26859,7 @@ class RetranslationMixin:
                     merged_progress = _merge_and_write_retranslation_progress(
                         data['progress_file'],
                         progress_baseline,
-                        data['prog'],
+                        working_progress,
                         authoritative_chunk_resets=[
                             {
                                 "chunk_key": chunk_key,
@@ -26850,15 +26870,26 @@ class RetranslationMixin:
                             in authoritative_chunk_resets.items()
                         ],
                     )
-                    data['prog'].clear()
-                    data['prog'].update(merged_progress)
                     print(f"Updated progress tracking file - reset {status_reset_count} chapter statuses to pending")
                 except Exception as e:
                     print(f"Failed to update progress file: {e}")
-            
+
+            # File/progress work is complete. Resume the remaining UI-only
+            # refresh and result dialogs on the Qt thread.
+            yield "apply_ui"
+
+            if isinstance(merged_progress, dict):
+                data['prog'].clear()
+                data['prog'].update(merged_progress)
+
             # Auto-refresh the display to show updated status
             data['skip_cleanup'] = True  # Disable cleanup for this dialog after retranslate to avoid deleting pending/failed
-            self._refresh_retranslation_data(data)
+            data['_prefetch_dirty'] = True
+            progress_debounce = data.get('_progress_watch_debounce')
+            if progress_debounce is not None:
+                progress_debounce.start()
+            else:
+                QTimer.singleShot(0, lambda: self._refresh_retranslation_data(data))
             
             # Build success message
             success_parts = []
@@ -26951,6 +26982,101 @@ class RetranslationMixin:
                 self._styled_msgbox(QMessageBox.Information, data.get('dialog', self), "Success", success_msg)
             else:
                 self._styled_msgbox(QMessageBox.Information, data.get('dialog', self), "Info", "No changes made.")
+
+        def _launch_retranslate_selected():
+            """Confirm on Qt, execute the reset off-thread, then apply on Qt."""
+            if data.get('_retranslate_selected_active'):
+                return
+
+            steps = retranslate_selected()
+            try:
+                marker = next(steps)
+            except StopIteration:
+                return
+            except Exception as exc:
+                self._styled_msgbox(
+                    QMessageBox.Critical,
+                    data.get('dialog', self),
+                    "Retranslation Reset Failed",
+                    str(exc),
+                )
+                return
+            if marker != "run_background":
+                return
+
+            data['_retranslate_selected_active'] = True
+            try:
+                btn_retranslate.setEnabled(False)
+                data['listbox'].setEnabled(False)
+            except (RuntimeError, KeyError):
+                pass
+
+            def _finish_busy_state():
+                data['_retranslate_selected_active'] = False
+                try:
+                    btn_retranslate.setEnabled(True)
+                    data['listbox'].setEnabled(True)
+                except (RuntimeError, KeyError):
+                    pass
+                if data.pop('_prefetch_dirty', False):
+                    progress_debounce = data.get('_progress_watch_debounce')
+                    if progress_debounce is not None:
+                        progress_debounce.start()
+
+            def _apply_retranslation_result(marker):
+                try:
+                    if marker != "apply_ui":
+                        raise RuntimeError(
+                            "Retranslation reset ended before its UI update."
+                        )
+                    _finish_busy_state()
+                    try:
+                        next(steps)
+                    except StopIteration:
+                        pass
+                except Exception as exc:
+                    _finish_busy_state()
+                    self._styled_msgbox(
+                        QMessageBox.Critical,
+                        data.get('dialog', self),
+                        "Retranslation Reset Failed",
+                        str(exc),
+                    )
+                finally:
+                    data.pop('_retranslate_selected_bridge', None)
+
+            def _apply_retranslation_error(message):
+                _finish_busy_state()
+                data.pop('_retranslate_selected_bridge', None)
+                self._styled_msgbox(
+                    QMessageBox.Critical,
+                    data.get('dialog', self),
+                    "Retranslation Reset Failed",
+                    message,
+                )
+
+            bridge = _GlossaryProgressAsyncBridge(
+                on_finished=_apply_retranslation_result,
+                on_failed=_apply_retranslation_error,
+                parent=data.get('dialog') or self,
+            )
+            data['_retranslate_selected_bridge'] = bridge
+
+            def _run_retranslation_reset():
+                try:
+                    bridge.finished.emit(next(steps))
+                except StopIteration:
+                    bridge.failed.emit(
+                        "Retranslation reset ended before completion."
+                    )
+                except Exception as exc:
+                    bridge.failed.emit(str(exc))
+
+            threading.Thread(
+                target=_run_retranslation_reset,
+                name="progress-retranslate-selected",
+                daemon=True,
+            ).start()
         
         # Add buttons - First row
         btn_select_all = QPushButton("Select All")
@@ -26989,7 +27115,7 @@ class RetranslationMixin:
         btn_retranslate = QPushButton("Reset TTS Selected" if self._current_progress_output_mode(data) == 'audio' else "Retranslate Selected")
         btn_retranslate.setMinimumHeight(32)
         btn_retranslate.setStyleSheet("QPushButton { background-color: #d39e00; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
-        btn_retranslate.clicked.connect(retranslate_selected)
+        btn_retranslate.clicked.connect(_launch_retranslate_selected)
         button_layout.addWidget(btn_retranslate, 1, 0, 1, 2)
         
         btn_remove_qa = QPushButton("Remove QA Failed Mark")
@@ -27357,6 +27483,11 @@ class RetranslationMixin:
         def _silent_refresh():
             try:
                 if not btn_refresh.isEnabled() or not _progress_page_is_visible():
+                    return
+                if data.get('_retranslate_selected_active'):
+                    # The reset worker owns the mutable progress snapshot until
+                    # it commits. Keep only one trailing refresh request.
+                    data['_prefetch_dirty'] = True
                     return
                 if data.get('_prefetch_running'):
                     return
@@ -28436,7 +28567,7 @@ class RetranslationMixin:
             elif act_open_epub_reader and chosen == act_open_epub_reader:
                 _open_epub_reader_for_item(display_info)
             elif chosen == act_retranslate:
-                retranslate_selected()
+                _launch_retranslate_selected()
             elif act_resolve_qa and chosen == act_resolve_qa:
                 if has_llm_token_qa:
                     _resolve_llm_token_qa_issue(

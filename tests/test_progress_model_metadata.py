@@ -3414,6 +3414,20 @@ def test_streamed_progress_reconcile_does_not_clear_or_queue_scroll_restores():
     assert "_PROGRESS_DIRECT_ROW_UPDATE_LIMIT" in list_update_source
 
 
+def test_retranslate_selected_bulk_reset_runs_off_the_qt_thread():
+    source = Path(retranslation_gui_module.__file__).read_text(encoding="utf-8")
+    reset_start = source.index("def retranslate_selected():")
+    reset_end = source.index("# Add buttons", reset_start)
+    reset_source = source[reset_start:reset_end]
+
+    assert 'yield "run_background"' in reset_source
+    assert 'yield "apply_ui"' in reset_source
+    assert 'name="progress-retranslate-selected"' in reset_source
+    assert "working_progress = copy.deepcopy(progress_baseline)" in reset_source
+    assert "merged_children_by_parent" in reset_source
+    assert "for child_key, child_data in list(data['prog']" not in reset_source
+
+
 def test_open_progress_managers_rebuild_when_input_signature_changes():
     refresh_source = inspect.getsource(
         RetranslationMixin._refresh_open_progress_managers_for_input_change
