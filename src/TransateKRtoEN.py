@@ -9472,7 +9472,6 @@ class TranslationProcessor:
                     chunk_timeout,
                     context='translation',
                     chapter_context=chapter_ctx,
-                    bypass_graceful_stop=True,
                     before_send_callback=_mark_progress_on_send,
                 )
 
@@ -10820,7 +10819,6 @@ class BatchTranslationProcessor:
                             chunk_timeout=chunk_timeout,
                             context='translation',
                             chapter_context=chapter_ctx,
-                            bypass_graceful_stop=True,
                             before_dispatch_callback=lambda: (
                                 self._announce_ordered_request_dispatch(
                                     chapter.get('_batch_request_order'),
@@ -11068,7 +11066,6 @@ class BatchTranslationProcessor:
                                     chunk_timeout=chunk_timeout,
                                     context='translation',
                                     chapter_context=chapter_ctx,
-                                    bypass_graceful_stop=True,
                                     before_dispatch_callback=lambda: (
                                         self._announce_ordered_request_dispatch(
                                             chapter.get('_batch_request_order'),
@@ -11226,7 +11223,6 @@ class BatchTranslationProcessor:
                                 chunk_timeout=chunk_timeout,
                                 context='translation',
                                 chapter_context=retry_context,
-                                bypass_graceful_stop=True,
                                 before_dispatch_callback=lambda: (
                                     self._announce_ordered_request_dispatch(
                                         chapter.get('_batch_request_order'),
@@ -11441,35 +11437,26 @@ class BatchTranslationProcessor:
                 return int(total_chunks or 0) > 0 and len(sent_or_done_chunks) >= int(total_chunks or 0)
 
             def _cancel_chapter_due_to_stop(reason: str):
-                # Ensure remaining chunk workers abort quickly
                 try:
-                    chunk_abort_event.set()
+                    print(
+                        f"🛑 Chapter {log_num}: stopping unsent chunks "
+                        f"(WAIT_FOR_CHUNKS=0) — {reason}"
+                    )
                 except Exception:
                     pass
-                try:
-                    print(f"🛑 Chapter {log_num}: cancelling chapter (WAIT_FOR_CHUNKS=0) — {reason}")
-                except Exception:
-                    pass
-                # Force a real cancel so in-flight requests stop too (user asked for full-stop for this chapter)
-                try:
-                    from unified_api_client import UnifiedClientError
-                    import unified_api_client
-                    if hasattr(unified_api_client, 'set_stop_flag'):
-                        unified_api_client.set_stop_flag(True)
-                    if hasattr(unified_api_client, 'global_stop_flag'):
-                        unified_api_client.global_stop_flag = True
-                    if hasattr(unified_api_client, 'UnifiedClient'):
-                        unified_api_client.UnifiedClient._global_cancelled = True
-                    if hasattr(unified_api_client, 'hard_cancel_all'):
-                        unified_api_client.hard_cancel_all()
-                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                except Exception as e:
-                    # If UnifiedClientError isn't available for some reason, raise a normal cancellation
-                    raise
+                # This is a graceful scheduling stop, not a transport cancel.
+                # Any provider calls which crossed the send boundary must be
+                # allowed to finish; only the force-stop path may close them.
+                from unified_api_client import UnifiedClientError
+                raise UnifiedClientError(
+                    "Graceful stop active - unsent chapter chunks abandoned",
+                    error_type="cancelled",
+                )
 
             last_chunk_raw_obj = None
             chapter_truncated = False  # Track if any chunk was truncated
             graceful_stop_qa_issue = None  # Preserve QA status if graceful stop exits before the post-loop gate
+            halt_chunk_submission = False
             pending_chunks = [
                 chunk_data
                 for chunk_data in chunks
@@ -11509,7 +11496,8 @@ class BatchTranslationProcessor:
                                         # Should be rare here (we're still about to submit), but keep consistent.
                                         pass
                                     else:
-                                        _cancel_chapter_due_to_stop("stop requested before all chunks were sent")
+                                        halt_chunk_submission = True
+                                        break
                                 else:
                                     # Immediate stop
                                     raise Exception("Translation stopped by user during chunk submission delay")
@@ -11520,6 +11508,9 @@ class BatchTranslationProcessor:
                             sleep_chunk = min(check_interval, thread_delay - elapsed)
                             time.sleep(sleep_chunk)
                             elapsed += sleep_chunk
+
+                        if halt_chunk_submission:
+                            break
                     
                     # Now submit the chunk
                     future = chunk_executor.submit(process_chunk, chunk_data)
@@ -11592,7 +11583,6 @@ class BatchTranslationProcessor:
                                         graceful_stop_qa_issue = ["PARTIAL"]
                                         self.save_progress_fn()
                                     print(f"⚠️ Chapter {log_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
-                            chunk_abort_event.set()
                             if chapter_chunk_progress_enabled:
                                 with self.progress_lock:
                                     if graceful_stop_qa_issue:
@@ -11607,16 +11597,11 @@ class BatchTranslationProcessor:
                                             chunk_idx,
                                             "pending",
                                         )
-                                    self.progress_manager.reset_in_progress_chapter_chunks(
-                                        content_hash
-                                    )
                                     self.save_progress_fn()
-                            chunk_executor.shutdown(wait=False, cancel_futures=True)
-                            # Let the outer handler preserve any QA state or mark the chapter as pending/skipped.
-                            raise UnifiedClientError(
-                                "Graceful stop active - not starting new API call",
-                                error_type="cancelled"
-                            )
+                            # This future never opened a provider call.  Keep
+                            # draining sibling futures so calls which did start
+                            # can finish and publish their terminal state.
+                            continue
 
                         if finish_reason == "chapter_abort":
                             if chapter_chunk_progress_enabled:
@@ -11848,13 +11833,13 @@ class BatchTranslationProcessor:
                                     # Wait for remaining chunks - continue processing
                                     print(f"⏳ Graceful stop — waiting for remaining chunks of chapter {log_num}...")
                                 else:
-                                    # WAIT_FOR_CHUNKS disabled and not all chunks were actually sent:
-                                    # cancel this chapter entirely (no partial output).
-                                    try:
-                                        chunk_executor.shutdown(wait=False, cancel_futures=True)
-                                    except Exception:
-                                        pass
-                                    _cancel_chapter_due_to_stop("stop requested before all chunks were sent")
+                                    # Unsent chunks will decline at their own
+                                    # pre-send boundary.  Do not interrupt any
+                                    # sibling provider calls already in flight.
+                                    print(
+                                        f"⏳ Graceful stop — waiting for active chunks "
+                                        f"of chapter {log_num} to finish..."
+                                    )
                     except Exception as e:
                         chunk_idx = future_to_chunk[future]
                         # Don't print chunk error - will be printed at chapter level
@@ -11869,15 +11854,14 @@ class BatchTranslationProcessor:
                 graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                 wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
 
-                if graceful_stop_active and completed:
+                if graceful_stop_active and completed and wait_for_chunks:
                     # Only allow partial output when WAIT_FOR_CHUNKS is explicitly enabled.
                     # When WAIT_FOR_CHUNKS is disabled, we cancel the whole chapter instead.
-                    if wait_for_chunks:
-                        print(f"⚠️ Chapter {log_num}: partial translation ({len(completed)}/{total_chunks} chunks) due to graceful stop")
-                        translated_chunks = [c for c in translated_chunks if c is not None]
-                        is_partial_result = True
-                    else:
-                        _cancel_chapter_due_to_stop(f"missing chunks {missing} (WAIT_FOR_CHUNKS=0)")
+                    print(f"⚠️ Chapter {log_num}: partial translation ({len(completed)}/{total_chunks} chunks) due to graceful stop")
+                    translated_chunks = [c for c in translated_chunks if c is not None]
+                    is_partial_result = True
+                elif graceful_stop_active and not wait_for_chunks:
+                    _cancel_chapter_due_to_stop(f"missing chunks {missing} (WAIT_FOR_CHUNKS=0)")
                 else:
                     raise Exception(f"Failed to translate chunks: {missing}")
             
@@ -22062,7 +22046,7 @@ def _skip_thinking_env(context_key, *, quiet=False):
 # =====================================================
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn,
                         chunk_timeout=None, request_id=None, context=None,
-                        chapter_context=None, bypass_graceful_stop=False,
+                        chapter_context=None,
                         before_send_callback=None, local_cancel_only_check=None,
                         before_dispatch_callback=None):
     """Send API request with interrupt capability and optional timeout retry.
@@ -22569,24 +22553,39 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 return api_result
             return result
         except queue.Empty:
-            # During graceful stop, don't cancel the API call - let it complete
-            # Unless bypass_graceful_stop is enabled, in which case we defer to stop_check_fn logic
+            # A first-click graceful stop never cancels a provider call which
+            # has already started.  Chapter-local QA aborts and the second-click
+            # force stop remain immediate transport cancellations.
             should_stop = stop_check_fn()
             graceful_active = os.environ.get('GRACEFUL_STOP') == '1'
+            try:
+                local_cancel_requested = bool(
+                    callable(local_cancel_only_check)
+                    and local_cancel_only_check()
+                )
+            except Exception:
+                local_cancel_requested = False
             
             # Hard cancellation (e.g. double-click force stop via hard_cancel_all)
             # overrides graceful stop protection for in-flight calls.
             hard_cancelled = hasattr(client, 'is_globally_cancelled') and client.is_globally_cancelled()
             
-            # During graceful stop, protect in-flight calls unless the caller
-            # supplied its own graceful-stop policy via stop_check_fn.
-            should_cancel = hard_cancelled or (should_stop and (bypass_graceful_stop or not graceful_active))
+            should_cancel = (
+                hard_cancelled
+                or local_cancel_requested
+                or (should_stop and not graceful_active)
+            )
             
             if should_cancel:
                 # Set cleanup flag when user stops
                 if hasattr(client, '_in_cleanup'):
                     client._in_cleanup = True
-                cancel_reason = "hard stop" if hard_cancelled else "stop requested"
+                if hard_cancelled:
+                    cancel_reason = "hard stop"
+                elif local_cancel_requested:
+                    cancel_reason = "chapter-local abort"
+                else:
+                    cancel_reason = "stop requested"
                 _cancel_current_api_call(mark_client_cancel=True, reason=cancel_reason)
                 # Clear watchdog entries for this chapter since we're abandoning the result.
                 _clear_watchdog_for_chapter_context()
@@ -26234,19 +26233,23 @@ def main(log_callback=None, stop_callback=None):
                                     except Exception:
                                         pass
 
-                                    # 2) Hard-cancel HTTP sessions in THIS process (best-effort).
-                                    try:
-                                        import unified_api_client
-                                        if hasattr(unified_api_client, 'set_stop_flag'):
-                                            unified_api_client.set_stop_flag(True)
-                                        if hasattr(unified_api_client, 'global_stop_flag'):
-                                            unified_api_client.global_stop_flag = True
-                                        if hasattr(unified_api_client, 'UnifiedClient'):
-                                            unified_api_client.UnifiedClient._global_cancelled = True
-                                        if hasattr(unified_api_client, 'hard_cancel_all'):
-                                            unified_api_client.hard_cancel_all()
-                                    except Exception:
-                                        pass
+                                    # 2) Only a force stop may close HTTP
+                                    # sessions in this process.  A graceful
+                                    # glossary stop can overlap active batch
+                                    # translation calls and must not kill them.
+                                    if not graceful_stop_active:
+                                        try:
+                                            import unified_api_client
+                                            if hasattr(unified_api_client, 'set_stop_flag'):
+                                                unified_api_client.set_stop_flag(True)
+                                            if hasattr(unified_api_client, 'global_stop_flag'):
+                                                unified_api_client.global_stop_flag = True
+                                            if hasattr(unified_api_client, 'UnifiedClient'):
+                                                unified_api_client.UnifiedClient._global_cancelled = True
+                                            if hasattr(unified_api_client, 'hard_cancel_all'):
+                                                unified_api_client.hard_cancel_all()
+                                        except Exception:
+                                            pass
 
                                     # 3) Terminate glossary subprocess(es) if they are still running.
                                     # ProcessPoolExecutor cancellation does NOT reliably kill a running worker.
@@ -29008,14 +29011,37 @@ def main(log_callback=None, stop_callback=None):
                 graceful_stop_message_shown = False  # Track if we've shown the message
                 
                 while True:
-                    # Check for graceful stop before submitting new work
-                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    stop_mode = _translation_prequeue_stop_mode(stop_callback)
+
+                    if stop_mode == "force":
+                        with batch_submit_lock:
+                            unsent_units.clear()
+                            _api_watchdog_set_backlog(0)
+                            for pending_future in active_futures:
+                                pending_future.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        return
+
+                    if stop_mode == "graceful":
+                        # The first click closes only the scheduler side of the
+                        # queue.  Futures which already crossed the provider
+                        # boundary stay tracked and are drained normally.
+                        with batch_submit_lock:
+                            if unsent_units:
+                                unsent_units.clear()
+                                _api_watchdog_set_backlog(0)
+                        if not graceful_stop_message_shown:
+                            print(
+                                "⏳ Graceful stop — no new requests will start; "
+                                "waiting for active API call(s) to finish..."
+                            )
+                            graceful_stop_message_shown = True
 
                     with batch_submit_lock:
                         if (
                             not active_futures
                             and unsent_units
-                            and not graceful_stop_active
+                            and stop_mode is None
                         ):
                             # Recovery path for a unit that failed before it
                             # reached the provider boundary.
@@ -29023,7 +29049,7 @@ def main(log_callback=None, stop_callback=None):
                         futures_snapshot = tuple(active_futures)
                         has_unsent = bool(unsent_units)
                     if not futures_snapshot:
-                        if not has_unsent or graceful_stop_active:
+                        if not has_unsent or stop_mode:
                             break
                         continue
 
@@ -29034,42 +29060,17 @@ def main(log_callback=None, stop_callback=None):
                         return_when=concurrent.futures.FIRST_COMPLETED,
                     )
                     if not done:
-                        if check_stop() and not (
-                            graceful_stop_active
-                            and os.environ.get('WAIT_FOR_CHUNKS') == '1'
-                        ):
-                            executor.shutdown(
-                                wait=False,
-                                cancel_futures=True,
-                            )
-                            return
                         continue
-                    
-                    # Track if we should exit the outer loop after processing done futures
-                    should_exit_outer_loop = False
-                    
+
                     for future in done:
-                        if check_stop():
-                            # Check if wait_for_chunks is enabled - if so, let current chapters finish
-                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                            wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
-                            if graceful_stop_active and wait_for_chunks:
-                                # Only print message once
-                                if not graceful_stop_message_shown:
-                                    print("⏳ Graceful stop — waiting for current chapter(s) to finish...")
-                                    graceful_stop_message_shown = True
-                                # Process only completed futures, skip cancelled ones
-                                # Clear all remaining futures and exit both loops
-                                with batch_submit_lock:
-                                    active_futures.clear()
-                                    unsent_units.clear()
-                                    _api_watchdog_set_backlog(0)
-                                should_exit_outer_loop = True
-                                break
-                            else:
-                                # print("❌ Translation stopped")  # Redundant with "Translation stopped by user" from exception
-                                executor.shutdown(wait=False, cancel_futures=True)
-                                return
+                        if _translation_prequeue_stop_mode(stop_callback) == "force":
+                            with batch_submit_lock:
+                                unsent_units.clear()
+                                _api_watchdog_set_backlog(0)
+                                for pending_future in active_futures:
+                                    pending_future.cancel()
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            return
                         with batch_submit_lock:
                             unit = active_futures.pop(future, None)
                         if unit is None:
@@ -29150,17 +29151,13 @@ def main(log_callback=None, stop_callback=None):
                         # A failure before the provider boundary would not have
                         # released a successor. Recover by submitting one unit;
                         # successful calls normally refill from the callback.
-                        if not check_stop():
+                        if _translation_prequeue_stop_mode(stop_callback) is None:
                             with batch_submit_lock:
                                 if (
                                     len(active_futures) < config.BATCH_SIZE
                                     and unsent_units
                                 ):
                                     submit_next_unit()
-                    
-                    # Exit outer loop if graceful stop was triggered
-                    if should_exit_outer_loop:
-                        break
                 
                 # Flush every coalesced title-only status at this synchronization
                 # barrier instead of rewriting the progress JSON per request.
@@ -29177,10 +29174,14 @@ def main(log_callback=None, stop_callback=None):
             
             else:
                 # direct or conservative: keep legacy batch grouping behaviour
+                graceful_stop_message_shown = False
                 for batch_start in range(0, len(units_to_process), batch_group_size if not is_merged_mode else config.BATCH_SIZE):
-                    if check_stop():
-                        print("❌ Translation stopped during parallel processing")
-                        executor.shutdown(wait=False)
+                    stop_mode = _translation_prequeue_stop_mode(stop_callback)
+                    if stop_mode:
+                        if stop_mode == "graceful":
+                            print("✅ Active API call(s) completed. Stopping as requested.")
+                        else:
+                            print("❌ Translation stopped during parallel processing")
                         return
                     
                     effective_batch_size = batch_group_size if not is_merged_mode else config.BATCH_SIZE
@@ -29214,19 +29215,34 @@ def main(log_callback=None, stop_callback=None):
                     completed_in_batch = 0
                     failed_in_batch = 0
                     batch_history_map = {}
+                    graceful_stop_in_batch = False
                     
                     for future in concurrent.futures.as_completed(future_to_unit):
-                        if check_stop():
-                            # Check if wait_for_chunks is enabled - if so, let current chapters finish
-                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                        stop_mode = _translation_prequeue_stop_mode(stop_callback)
+                        if stop_mode == "force":
+                            for pending_future in future_to_unit:
+                                pending_future.cancel()
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            return
+                        if stop_mode == "graceful":
+                            graceful_stop_in_batch = True
                             wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
-                            if graceful_stop_active and wait_for_chunks:
-                                print("⏳ Graceful stop — waiting for current chapter(s) to finish...")
-                                # Don't shutdown - let this batch complete
-                            else:
-                                # print("❌ Translation stopped")  # Redundant with "Translation stopped by user" from exception
-                                executor.shutdown(wait=False)
-                                return
+                            if not wait_for_chunks:
+                                # These are executor-queued chapter tasks, not
+                                # active provider calls.  Running futures return
+                                # False from cancel() and are drained below.
+                                for pending_future in future_to_unit:
+                                    if pending_future is not future:
+                                        pending_future.cancel()
+                            if not graceful_stop_message_shown:
+                                print(
+                                    "⏳ Graceful stop — no new requests will start; "
+                                    "waiting for active API call(s) to finish..."
+                                )
+                                graceful_stop_message_shown = True
+
+                        if future.cancelled():
+                            continue
                         
                         unit = future_to_unit[future]
                         
@@ -29310,13 +29326,13 @@ def main(log_callback=None, stop_callback=None):
                     print(f"   ❌ Failed: {failed_in_batch}")
                     progress_manager.save()
                     
-                    # After batch completes, if stop was requested with wait_for_chunks, exit
-                    if check_stop():
-                        graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                        wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
-                        if graceful_stop_active and wait_for_chunks:
-                            print("\n✅ Current batch completed. Stopping as requested (wait for chunks).")
-                            return
+                    # A graceful stop drains only this already-submitted batch;
+                    # it must never open the next batch.
+                    if graceful_stop_in_batch or _translation_prequeue_stop_mode(stop_callback) == "graceful":
+                        print("\n✅ Active API call(s) completed. Stopping as requested.")
+                        return
+                    if _translation_prequeue_stop_mode(stop_callback) == "force":
+                        return
                     
                     if batch_end < total_to_process:
                         print(f"⏳ Waiting {config.DELAY}s before next batch...")

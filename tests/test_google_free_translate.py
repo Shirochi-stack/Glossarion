@@ -277,6 +277,33 @@ def test_send_with_interrupt_user_stop_marks_client_cancel(monkeypatch):
     assert client._cancelled is True
 
 
+def test_send_with_interrupt_graceful_stop_does_not_cancel_active_call(monkeypatch):
+    from TransateKRtoEN import send_with_interrupt
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "1")
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+
+    client = SlowInterruptClient(sleep_seconds=0.6)
+
+    result = send_with_interrupt(
+        [{"role": "user", "content": "hello"}],
+        client,
+        temperature=0.0,
+        max_tokens=8,
+        stop_check_fn=lambda: True,
+        chunk_timeout=10,
+        context="translation",
+    )
+
+    assert result == "late result"
+    assert client.cancel_calls == 0
+    assert client._cancelled is False
+    assert os.environ.get("GRACEFUL_STOP_COMPLETED") == "1"
+
+
 def test_send_with_interrupt_marks_graceful_completion_for_normal_tuple_response(monkeypatch):
     from TransateKRtoEN import send_with_interrupt
 

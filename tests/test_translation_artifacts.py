@@ -106,6 +106,22 @@ def test_parallel_prequeue_stop_mode_distinguishes_graceful_and_force(monkeypatc
     assert translation_module._translation_prequeue_stop_mode(lambda: True) == "force"
 
 
+def test_batch_graceful_stop_never_escalates_to_global_hard_cancel():
+    processor_source = inspect.getsource(
+        BatchTranslationProcessor.process_single_chapter
+    )
+    send_source = inspect.getsource(translation_module.send_with_interrupt)
+
+    assert "bypass_graceful_stop" not in send_source
+    for forbidden in (
+        "hard_cancel_all",
+        "global_stop_flag",
+        "_global_cancelled",
+        "set_stop_flag",
+    ):
+        assert forbidden not in processor_source
+
+
 def test_parallel_chapter_scan_polls_stop_before_queueing_titles():
     source = Path(translation_module.__file__).read_text(encoding="utf-8")
     scan_start = source.index('print("📊 Verifying chapter numbers...")')
