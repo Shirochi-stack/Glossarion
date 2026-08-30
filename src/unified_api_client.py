@@ -269,6 +269,7 @@ _api_watchdog_last_model = None
 _api_watchdog_entries = {}
 _api_watchdog_backlog = 0
 _api_watchdog_backlog_last_change_ts = 0.0
+_api_watchdog_scheduler_queued = 0
 
 # Per-key API call delay tracking (module-level, thread-safe)
 # Maps (api_key, model) -> last_call_timestamp; used to enforce per-key cooldown
@@ -540,6 +541,25 @@ def _api_watchdog_set_backlog(count: Any, *, publish: bool = False) -> None:
     except Exception:
         pass
 
+def _api_watchdog_set_scheduler_queue(count: Any, *, publish: bool = False) -> None:
+    """Publish the aggressive scheduler's fixed queued-future count."""
+    global _api_watchdog_scheduler_queued, _api_watchdog_last_change_ts
+    try:
+        normalized = max(0, int(count or 0))
+    except (TypeError, ValueError):
+        normalized = 0
+    try:
+        changed = False
+        with _api_watchdog_lock:
+            if _api_watchdog_scheduler_queued != normalized:
+                _api_watchdog_scheduler_queued = normalized
+                _api_watchdog_last_change_ts = time.time()
+                changed = True
+        if publish and changed:
+            _api_watchdog_external_write(get_api_watchdog_state())
+    except Exception:
+        pass
+
 def _api_watchdog_clear_pending_requests() -> int:
     """Remove requests which have not crossed the provider-send boundary.
 
@@ -550,6 +570,7 @@ def _api_watchdog_clear_pending_requests() -> int:
     """
     global _api_watchdog_last_change_ts
     global _api_watchdog_backlog, _api_watchdog_backlog_last_change_ts
+    global _api_watchdog_scheduler_queued
     removed = 0
     try:
         now = time.time()
@@ -564,12 +585,14 @@ def _api_watchdog_clear_pending_requests() -> int:
                 _api_watchdog_entries.pop(request_id, None)
             removed = len(pending_ids)
             backlog_changed = _api_watchdog_backlog != 0
+            scheduler_queue_changed = _api_watchdog_scheduler_queued != 0
             _api_watchdog_backlog = 0
+            _api_watchdog_scheduler_queued = 0
             if backlog_changed:
                 _api_watchdog_backlog_last_change_ts = now
-            if removed or backlog_changed:
+            if removed or backlog_changed or scheduler_queue_changed:
                 _api_watchdog_last_change_ts = now
-        if removed or backlog_changed:
+        if removed or backlog_changed or scheduler_queue_changed:
             _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:
         return removed
@@ -581,6 +604,7 @@ def _api_watchdog_reset():
     global _api_watchdog_last_start_ts, _api_watchdog_last_finish_ts
     global _api_watchdog_last_context, _api_watchdog_last_model, _api_watchdog_entries
     global _api_watchdog_backlog, _api_watchdog_backlog_last_change_ts
+    global _api_watchdog_scheduler_queued
     try:
         with _api_watchdog_lock:
             _api_watchdog_in_flight = 0
@@ -593,6 +617,7 @@ def _api_watchdog_reset():
             _api_watchdog_entries.clear()
             _api_watchdog_backlog = 0
             _api_watchdog_backlog_last_change_ts = time.time()
+            _api_watchdog_scheduler_queued = 0
         _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:
         pass
@@ -785,6 +810,7 @@ def get_api_watchdog_state() -> Dict[str, Any]:
                 "last_context": _api_watchdog_last_context,
                 "last_model": _api_watchdog_last_model,
                 "backlog": _api_watchdog_backlog,
+                "scheduler_queued": _api_watchdog_scheduler_queued,
                 "backlog_last_change_ts": _api_watchdog_backlog_last_change_ts,
                 "in_flight_entries": entries,
             }

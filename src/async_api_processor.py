@@ -3315,6 +3315,9 @@ class AsyncProcessingDialog:
         env_vars['REMOVE_AI_ARTIFACTS'] = str(getattr(self.gui, 'REMOVE_AI_ARTIFACTS_var', 'off') or 'off')
         env_vars['BATCH_TRANSLATION'] = "1" if _val(self.gui.batch_translation_var, False) else "0"
         env_vars['BATCH_SIZE'] = _val(self.gui.batch_size_var, 1)
+        env_vars['API_QUEUE_SIZE'] = str(
+            _val(getattr(self.gui, 'api_queue_var', 4), 4)
+        )
         env_vars['BATCHING_MODE'] = str(_val(getattr(self.gui, 'batch_mode_var', 'direct'), 'direct'))
         env_vars['BATCH_GROUP_SIZE'] = str(_val(getattr(self.gui, 'batch_group_size_var', 3), 3))
         # Backward compatibility for downstream components expecting CONSERVATIVE_BATCHING

@@ -270,6 +270,9 @@ def test_aggressive_queue_primes_one_unit_and_advances_on_provider_start():
     assert "submit_next_unit()" in aggressive_source[prime_start:prime_end]
     assert "while len(active_futures)" not in aggressive_source
     assert "def _provider_request_started(request_order):" in aggressive_source
+    assert "def _grow_lazy_prefetch_window():" in aggressive_source
+    assert "_fixed_api_queue_admissions(" in aggressive_source
+    assert "config.API_QUEUE_SIZE" in aggressive_source
     assert "batch_processor.set_request_started_callback(" in aggressive_source
     assert "unsent_units = deque(units_to_process)" in aggressive_source
     assert "def _sync_lazy_window_backlog(*, publish=False):" in aggressive_source
@@ -286,10 +289,37 @@ def test_lazy_batch_backlog_is_bounded_by_the_batch_window():
     assert backlog(0, admitted_count=1, batch_size=1000) == 0
 
 
+def test_fixed_api_queue_admissions_use_configured_depth():
+    admissions = translation_module._fixed_api_queue_admissions
+
+    assert admissions(queued_count=0, unsent_count=100, queue_size=4) == 4
+    assert admissions(queued_count=1, unsent_count=100, queue_size=4) == 3
+    assert admissions(queued_count=4, unsent_count=100, queue_size=4) == 0
+    assert admissions(queued_count=0, unsent_count=2, queue_size=4) == 2
+    assert admissions(queued_count=0, unsent_count=100, queue_size=1) == 1
+
+
+def test_api_queue_control_is_beside_delay_and_exported():
+    settings_source = inspect.getsource(TranslatorGUI._create_settings_section)
+    env_source = inspect.getsource(TranslatorGUI._get_environment_variables)
+    async_source = (
+        Path(translation_module.__file__).with_name("async_api_processor.py")
+    ).read_text(encoding="utf-8")
+
+    assert 'QLabel("API Queue:")' in settings_source
+    assert "api_timing_layout.addWidget(self.delay_entry)" in settings_source
+    assert "api_timing_layout.addWidget(api_queue_label)" in settings_source
+    assert "api_timing_layout.addWidget(self.api_queue_entry)" in settings_source
+    assert "'API_QUEUE_SIZE': self.api_queue_entry.text().strip() or '4'" in env_source
+    assert "env_vars['API_QUEUE_SIZE']" in async_source
+
+
 def test_watchdog_displays_lazy_queue_as_a_separate_backlog():
     source = inspect.getsource(TranslatorGUI._update_api_watchdog)
 
     assert "state.get('backlog', 0)" in source
+    assert "state.get('scheduler_queued', 0)" in source
+    assert "_queued_count = max(_queued_entry_count, scheduler_queued)" in source
     assert 'label += f" • Backlog: {backlog}"' in source
     assert "_total_active > 0 or backlog > 0" in source
     assert "Unadmitted slots in current batch window" in source

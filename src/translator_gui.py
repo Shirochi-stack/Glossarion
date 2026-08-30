@@ -16180,6 +16180,7 @@ Recent translations to summarize:
             ('chunk_timeout_var', 'chunk_timeout', '1800'),
             ('timeout_retry_attempts_var', 'timeout_retry_attempts', '2'),
             ('batch_size_var', 'batch_size', '5'),
+            ('api_queue_var', 'api_queue', '4'),
             ('vision_ocr_batch_size_var', 'vision_ocr_batch_size', '-1'),
             ('batch_mode_var', 'batching_mode', 'aggressive'),
             ('batch_group_size_var', 'batch_group_size', '3'),
@@ -24044,7 +24045,39 @@ Recent translations to summarize:
         self.delay_entry = QLineEdit()
         self.delay_entry.setText(str(self.config.get('delay', 5)))
         self.delay_entry.setMaximumWidth(80)
-        self.frame.addWidget(self.delay_entry, 4, 1, Qt.AlignLeft)
+
+        api_queue_label = QLabel("API Queue:")
+
+        self.api_queue_entry = QLineEdit()
+        self.api_queue_entry.setText(str(self.api_queue_var))
+        self.api_queue_entry.setMaximumWidth(60)
+        self.api_queue_entry.setToolTip(
+            "Requests waiting behind active API calls."
+        )
+        self.api_queue_entry.textChanged.connect(
+            lambda: setattr(
+                self,
+                'api_queue_var',
+                self.api_queue_entry.text(),
+            )
+        )
+
+        api_timing_container = QWidget()
+        api_timing_layout = QHBoxLayout(api_timing_container)
+        api_timing_layout.setContentsMargins(0, 0, 0, 0)
+        api_timing_layout.setSpacing(8)
+        api_timing_layout.addWidget(self.delay_entry)
+        api_timing_layout.addWidget(api_queue_label)
+        api_timing_layout.addWidget(self.api_queue_entry)
+        api_timing_layout.addStretch()
+        self.frame.addWidget(
+            api_timing_container,
+            4,
+            1,
+            1,
+            3,
+            Qt.AlignLeft,
+        )
 
         # Optional help text (spanning both columns)
         help_label = QLabel("(0 = simultaneous)")
@@ -27500,6 +27533,7 @@ Recent translations to summarize:
 
         in_flight = 0
         backlog = 0
+        scheduler_queued = 0
         last_change = 0.0
         try:
             in_flight = int(state.get('in_flight', 0))
@@ -27509,6 +27543,13 @@ Recent translations to summarize:
             backlog = max(0, int(state.get('backlog', 0) or 0))
         except Exception:
             backlog = 0
+        try:
+            scheduler_queued = max(
+                0,
+                int(state.get('scheduler_queued', 0) or 0),
+            )
+        except Exception:
+            scheduler_queued = 0
         try:
             last_change = float(state.get('last_change_ts', 0.0) or 0.0)
         except Exception:
@@ -27535,6 +27576,7 @@ Recent translations to summarize:
                 if files:
                     total_in_flight = 0
                     total_backlog = 0
+                    total_scheduler_queued = 0
                     latest_change = 0.0
                     latest_ctx = None
                     latest_model = None
@@ -27547,6 +27589,15 @@ Recent translations to summarize:
                             cnt = int(st.get("in_flight", 0) or 0)
                             total_in_flight += cnt
                             total_backlog += max(0, int(st.get("backlog", 0) or 0))
+                            try:
+                                state_pid = int(st.get("pid", 0) or 0)
+                            except (TypeError, ValueError):
+                                state_pid = 0
+                            if state_pid != os.getpid():
+                                total_scheduler_queued = max(
+                                    total_scheduler_queued,
+                                    max(0, int(st.get("scheduler_queued", 0) or 0)),
+                                )
                             lc = float(st.get("last_change_ts", 0.0) or 0.0)
                             if lc > latest_change:
                                 latest_change = lc
@@ -27563,6 +27614,10 @@ Recent translations to summarize:
                     # Do not let stale/zero external snapshots wipe out a real
                     # in-memory in-flight request in this GUI process.
                     backlog = max(backlog, total_backlog)
+                    scheduler_queued = max(
+                        scheduler_queued,
+                        total_scheduler_queued,
+                    )
                     if total_in_flight or latest_change:
                         in_flight = max(in_flight, total_in_flight)
                         last_change = max(last_change, latest_change)
@@ -27587,7 +27642,8 @@ Recent translations to summarize:
 
         # Count waiting_cooldown and queued entries separately for display
         _waiting_count = sum(1 for e in entries if isinstance(e, dict) and e.get("status") == "waiting_cooldown")
-        _queued_count = sum(1 for e in entries if isinstance(e, dict) and e.get("status") == "queued")
+        _queued_entry_count = sum(1 for e in entries if isinstance(e, dict) and e.get("status") == "queued")
+        _queued_count = max(_queued_entry_count, scheduler_queued)
         _total_active = in_flight + _waiting_count + _queued_count
 
         if _total_active > 0 or backlog > 0:
@@ -27889,10 +27945,10 @@ Recent translations to summarize:
                 active_bits = []
 
             label = f"API calls: {in_flight}"
-            if waiting_entries or queued_entries:
+            if waiting_entries or _queued_count:
                 _extra_parts = []
-                if queued_entries:
-                    _extra_parts.append(f"{len(queued_entries)} queued")
+                if _queued_count:
+                    _extra_parts.append(f"{_queued_count} queued")
                 if waiting_entries:
                     _extra_parts.append(f"{len(waiting_entries)} cooldown")
                 label += f" (+{', '.join(_extra_parts)})"
@@ -33160,6 +33216,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
                 # Set API call delay from GUI
                 os.environ['SEND_INTERVAL_SECONDS'] = str(self.delay_entry.text() or '2.0')
+                os.environ['API_QUEUE_SIZE'] = self.api_queue_entry.text().strip() or '4'
 
                 # Determine parallelism from batch settings
                 use_batch = getattr(self, 'batch_translation_var', True)
@@ -33280,6 +33337,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             # Set API call delay from GUI (same as image mode + main pipeline)
             os.environ['SEND_INTERVAL_SECONDS'] = str(self.delay_entry.text() or '2.0')
+            os.environ['API_QUEUE_SIZE'] = self.api_queue_entry.text().strip() or '4'
             os.environ['THREAD_SUBMISSION_DELAY_SECONDS'] = self.thread_delay_entry.text().strip() or '0.0001'
 
             # Determine parallelism from batch settings
@@ -34491,6 +34549,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'MODEL': self.model_var,
             'CONTEXTUAL': '1' if self.contextual_var else '0',
             'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
+            'API_QUEUE_SIZE': self.api_queue_entry.text().strip() or '4',
             'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.0001',
             'MAX_OUTPUT_TOKENS': str(current_max_tokens),
             'API_KEY': api_key,
@@ -45503,6 +45562,7 @@ Important rules:
             if show_message:
                 validation_map = [
                     (self.delay_entry, "API call delay", lambda v: v.replace('.', '', 1).isdigit() or v == ""),
+                    (self.api_queue_entry, "API Queue", lambda v: v.isdigit() and int(v) >= 1),
                     (self.thread_delay_entry, "Threading Delay", lambda v: v.replace('.', '', 1).isdigit()),
                     (self.trans_temp, "Temperature", lambda v: v == "" or v.replace('.', '', 1).replace('-', '', 1).isdigit()),
                     (self.trans_history, "Translation History Limit", lambda v: v.isdigit() or v == ""),
@@ -45553,6 +45613,7 @@ Important rules:
                 
                 # Numeric settings
                 ('delay', ['delay_entry'], 5.0, lambda v: safe_float(v, 5.0)),
+                ('api_queue', ['api_queue_entry', 'api_queue_var'], 4, lambda v: max(1, safe_int(v, 4))),
                 ('thread_submission_delay', ['thread_delay_entry'], '0.0001', _format_plain_decimal_setting),
                 ('translation_temperature', ['trans_temp'], 0.3, lambda v: safe_float(v, 0.3)),
                 ('disable_temperature', ['disable_temperature_checkbox', 'disable_temperature_var'], False, bool),

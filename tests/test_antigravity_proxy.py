@@ -2347,6 +2347,7 @@ def test_watchdog_graceful_clear_removes_only_pending_requests(monkeypatch):
             "cooldown", "model-b", "delay",
         )
         unified_api_client._api_watchdog_set_backlog(50)
+        unified_api_client._api_watchdog_set_scheduler_queue(4)
         writes.clear()
 
         removed = unified_api_client._api_watchdog_clear_pending_requests()
@@ -2355,6 +2356,7 @@ def test_watchdog_graceful_clear_removes_only_pending_requests(monkeypatch):
         assert removed == 2
         assert state["in_flight"] == 1
         assert state["backlog"] == 0
+        assert state["scheduler_queued"] == 0
         assert [
             entry["request_id"] for entry in state["in_flight_entries"]
         ] == ["active"]

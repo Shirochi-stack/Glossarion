@@ -45,6 +45,7 @@ from unified_api_client import (
     get_current_thread_actual_request_model,
     _api_watchdog_mark_in_flight,
     _api_watchdog_set_backlog,
+    _api_watchdog_set_scheduler_queue,
     pop_deferred_batch_logs,
     set_current_thread_actual_request_model,
 )
@@ -2018,6 +2019,13 @@ class TranslationConfig:
         self.EMERGENCY_RESTORE = os.getenv("EMERGENCY_PARAGRAPH_RESTORE", "1") == "1"
         self.BATCH_TRANSLATION = os.getenv("BATCH_TRANSLATION", "0") == "1"  
         self.BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
+        try:
+            self.API_QUEUE_SIZE = max(
+                1,
+                int(os.getenv("API_QUEUE_SIZE", "4") or "4"),
+            )
+        except (TypeError, ValueError):
+            self.API_QUEUE_SIZE = 4
         # Snapshot failure-output settings on the run config as well as keeping
         # their environment bridge. Batch workers run on nested threads, so the
         # config object is the stable source of truth for the whole run.
@@ -14489,6 +14497,23 @@ def _lazy_batch_window_backlog(unsent_count, admitted_count, batch_size):
     return min(unsent, max(0, capacity - admitted))
 
 
+def _fixed_api_queue_admissions(queued_count, unsent_count, queue_size):
+    """Return how many requests are needed to fill the fixed API queue."""
+    try:
+        queued = max(0, int(queued_count or 0))
+    except (TypeError, ValueError):
+        queued = 0
+    try:
+        unsent = max(0, int(unsent_count or 0))
+    except (TypeError, ValueError):
+        unsent = 0
+    try:
+        capacity = max(1, int(queue_size or 1))
+    except (TypeError, ValueError):
+        capacity = 1
+    return min(unsent, max(0, capacity - queued))
+
+
 def set_output_redirect(log_callback=None):
     """Redirect print statements to a callback function for GUI integration"""
     if log_callback:
@@ -26111,7 +26136,8 @@ def main(log_callback=None, stop_callback=None):
                         'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY', 'GLOSSARY_ALIAS_AWARE_NAME_MATCHING',
                         'GLOSSARY_ALIAS_AWARE_GENDER_ONLY',
                         # Match GUI batching settings
-                        'BATCH_TRANSLATION', 'BATCH_SIZE', 'BATCHING_MODE', 'BATCH_GROUP_SIZE',
+                        'BATCH_TRANSLATION', 'BATCH_SIZE', 'API_QUEUE_SIZE',
+                        'BATCHING_MODE', 'BATCH_GROUP_SIZE',
                         # Keep submission staggering consistent with GUI
                         'THREAD_SUBMISSION_DELAY_SECONDS',
                     ]
@@ -29042,7 +29068,11 @@ def main(log_callback=None, stop_callback=None):
             print(f"📦 Using direct batching: group size {batch_group_size}, parallel {config.BATCH_SIZE}")
         else:  # aggressive
             batch_group_size = batch_group_size_cfg  # not used for throttling, only for logging/summary grouping
-            print(f"⚡ Using AGGRESSIVE batching: keeps {config.BATCH_SIZE} parallel calls, auto-refills when any finishes")
+            print(
+                "⚡ Using AGGRESSIVE batching: "
+                f"up to {config.BATCH_SIZE} parallel calls with "
+                f"API queue {config.API_QUEUE_SIZE}"
+            )
         
         @contextmanager
         def _parallel_progress_executor():
@@ -29054,6 +29084,7 @@ def main(log_callback=None, stop_callback=None):
                 # graceful stop, and force stop.  This is a single teardown
                 # publication, not one write per abandoned queue unit.
                 _api_watchdog_set_backlog(0, publish=True)
+                _api_watchdog_set_scheduler_queue(0, publish=True)
                 stop_mode = _translation_prequeue_stop_mode(stop_callback)
                 wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
                 cancel_queued = bool(
@@ -29078,14 +29109,38 @@ def main(log_callback=None, stop_callback=None):
                 active_futures = {}
                 unsent_units = deque(units_to_process)
                 dispatch_started_orders = set()
+                provider_started_futures = set()
+                future_by_request_order = {}
+
+                def _running_future_counts():
+                    running_futures = tuple(
+                        future
+                        for future in active_futures
+                        if not future.done()
+                    )
+                    active_count = sum(
+                        1
+                        for future in running_futures
+                        if future in provider_started_futures
+                    )
+                    return (
+                        len(running_futures),
+                        active_count,
+                        max(0, len(running_futures) - active_count),
+                    )
 
                 def _sync_lazy_window_backlog(*, publish=False):
+                    admitted_count, _, queued_count = _running_future_counts()
                     _api_watchdog_set_backlog(
                         _lazy_batch_window_backlog(
                             len(unsent_units),
-                            len(active_futures),
-                            config.BATCH_SIZE,
+                            admitted_count,
+                            config.BATCH_SIZE + config.API_QUEUE_SIZE,
                         ),
+                        publish=publish,
+                    )
+                    _api_watchdog_set_scheduler_queue(
+                        queued_count,
                         publish=publish,
                     )
                 
@@ -29104,11 +29159,31 @@ def main(log_callback=None, stop_callback=None):
                     else:
                         fut = executor.submit(batch_processor.process_single_chapter, unit[0])
                     active_futures[fut] = unit
+                    try:
+                        request_order = int(
+                            unit[0][1].get('_batch_request_order')
+                        )
+                        future_by_request_order[request_order] = fut
+                    except (AttributeError, IndexError, TypeError, ValueError):
+                        pass
                     _sync_lazy_window_backlog()
                     return True
 
+                def _grow_lazy_prefetch_window():
+                    """Fill the user-configured fixed API queue."""
+                    _, _, queued_count = _running_future_counts()
+                    additions = _fixed_api_queue_admissions(
+                        queued_count,
+                        len(unsent_units),
+                        config.API_QUEUE_SIZE,
+                    )
+                    for _ in range(additions):
+                        if not submit_next_unit():
+                            break
+                    _sync_lazy_window_backlog()
+
                 def _provider_request_started(request_order):
-                    """Advance one queue slot only at the real provider boundary."""
+                    """Grow the queue only at the real provider boundary."""
                     try:
                         request_order = int(request_order)
                     except (TypeError, ValueError):
@@ -29117,22 +29192,22 @@ def main(log_callback=None, stop_callback=None):
                         if request_order in dispatch_started_orders:
                             return
                         dispatch_started_orders.add(request_order)
-                        if (
-                            len(active_futures) < config.BATCH_SIZE
-                            and not _translation_prequeue_stop_mode(
-                                stop_callback
-                            )
-                        ):
-                            submit_next_unit()
+                        started_future = future_by_request_order.get(
+                            request_order
+                        )
+                        if started_future is not None:
+                            provider_started_futures.add(started_future)
+                        if not _translation_prequeue_stop_mode(stop_callback):
+                            _grow_lazy_prefetch_window()
 
                 batch_processor.set_request_started_callback(
                     _provider_request_started
                 )
                 
-                # Prime exactly one preparation task. Each true provider-call
-                # start releases the next unit, gradually filling BATCH_SIZE
-                # with genuinely active calls without creating a wall of
-                # waiting workers.
+                # Prime exactly one preparation task. Once it crosses the real
+                # provider boundary, maintain the configured fixed API queue.
+                # ThreadPoolExecutor still caps executing workers at BATCH_SIZE;
+                # any additional queue entries remain lightweight futures.
                 with batch_submit_lock:
                     submit_next_unit()
                     _sync_lazy_window_backlog(publish=True)
@@ -29146,6 +29221,7 @@ def main(log_callback=None, stop_callback=None):
                         with batch_submit_lock:
                             unsent_units.clear()
                             _api_watchdog_set_backlog(0)
+                            _api_watchdog_set_scheduler_queue(0)
                             for pending_future in active_futures:
                                 pending_future.cancel()
                         executor.shutdown(wait=False, cancel_futures=True)
@@ -29159,6 +29235,10 @@ def main(log_callback=None, stop_callback=None):
                             if unsent_units:
                                 unsent_units.clear()
                                 _api_watchdog_set_backlog(0)
+                                _api_watchdog_set_scheduler_queue(0)
+                            for pending_future in active_futures:
+                                if pending_future not in provider_started_futures:
+                                    pending_future.cancel()
                         if not graceful_stop_message_shown:
                             print(
                                 "⏳ Graceful stop — no new requests will start; "
@@ -29196,13 +29276,26 @@ def main(log_callback=None, stop_callback=None):
                             with batch_submit_lock:
                                 unsent_units.clear()
                                 _api_watchdog_set_backlog(0)
+                                _api_watchdog_set_scheduler_queue(0)
                                 for pending_future in active_futures:
                                     pending_future.cancel()
                             executor.shutdown(wait=False, cancel_futures=True)
                             return
                         with batch_submit_lock:
                             unit = active_futures.pop(future, None)
+                            provider_started_futures.discard(future)
+                            if unit is not None:
+                                try:
+                                    request_order = int(
+                                        unit[0][1].get('_batch_request_order')
+                                    )
+                                    if future_by_request_order.get(request_order) is future:
+                                        future_by_request_order.pop(request_order, None)
+                                except (AttributeError, IndexError, TypeError, ValueError):
+                                    pass
                         if unit is None:
+                            continue
+                        if future.cancelled():
                             continue
                         completed_in_batch = 0
                         failed_in_batch = 0
@@ -29277,16 +29370,15 @@ def main(log_callback=None, stop_callback=None):
                                 print(f"⚠️ Batch rolling summary update failed: {e}")
                                 rolling_summary_for_next_batch = ""
                         
-                        # A failure before the provider boundary would not have
-                        # released a successor. Recover by submitting one unit;
-                        # successful calls normally refill from the callback.
+                        # Recover the seed after a pre-boundary failure, or
+                        # restore the configured fixed API queue after completion.
                         if _translation_prequeue_stop_mode(stop_callback) is None:
                             with batch_submit_lock:
-                                if (
-                                    len(active_futures) < config.BATCH_SIZE
-                                    and unsent_units
-                                ):
+                                admitted_count, _, _ = _running_future_counts()
+                                if admitted_count == 0 and unsent_units:
                                     submit_next_unit()
+                                else:
+                                    _grow_lazy_prefetch_window()
                 
                 # Flush every coalesced title-only status at this synchronization
                 # barrier instead of rewriting the progress JSON per request.
