@@ -271,7 +271,7 @@ def test_aggressive_queue_primes_one_unit_and_advances_on_provider_start():
     assert "while len(active_futures)" not in aggressive_source
     assert "def _provider_request_started(request_order):" in aggressive_source
     assert "def _grow_lazy_prefetch_window():" in aggressive_source
-    assert "_fixed_api_queue_admissions(" in aggressive_source
+    assert "_api_queue_admissions(" in aggressive_source
     assert "config.API_QUEUE_SIZE" in aggressive_source
     assert "batch_processor.set_request_started_callback(" in aggressive_source
     assert "unsent_units = deque(units_to_process)" in aggressive_source
@@ -289,14 +289,36 @@ def test_lazy_batch_backlog_is_bounded_by_the_batch_window():
     assert backlog(0, admitted_count=1, batch_size=1000) == 0
 
 
-def test_fixed_api_queue_admissions_use_configured_depth():
-    admissions = translation_module._fixed_api_queue_admissions
+def test_api_queue_admissions_support_fixed_zero_and_proportional_modes():
+    admissions = translation_module._api_queue_admissions
 
-    assert admissions(queued_count=0, unsent_count=100, queue_size=4) == 4
-    assert admissions(queued_count=1, unsent_count=100, queue_size=4) == 3
-    assert admissions(queued_count=4, unsent_count=100, queue_size=4) == 0
-    assert admissions(queued_count=0, unsent_count=2, queue_size=4) == 2
-    assert admissions(queued_count=0, unsent_count=100, queue_size=1) == 1
+    assert admissions(5, 0, 100, queue_size=4, batch_size=10) == 4
+    assert admissions(5, 1, 100, queue_size=4, batch_size=10) == 3
+    assert admissions(5, 4, 100, queue_size=4, batch_size=10) == 0
+    assert admissions(5, 0, 2, queue_size=4, batch_size=10) == 2
+
+    # Zero retains no waiting queue after the active pool is full, but releases
+    # one transient successor at a time while concurrency is still ramping up.
+    assert admissions(5, 0, 100, queue_size=0, batch_size=10) == 1
+    assert admissions(10, 0, 100, queue_size=0, batch_size=10) == 0
+
+    # -1 keeps one waiting request per active provider call.
+    assert admissions(6, 0, 100, queue_size=-1, batch_size=10) == 6
+    assert admissions(6, 2, 100, queue_size=-1, batch_size=10) == 4
+    assert admissions(10, 0, 100, queue_size=-1, batch_size=10) == 10
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [("4", 4), ("0", 0), ("-1", -1)],
+)
+def test_translation_config_accepts_all_api_queue_modes(
+    monkeypatch,
+    configured,
+    expected,
+):
+    monkeypatch.setenv("API_QUEUE_SIZE", configured)
+    assert TranslationConfig().API_QUEUE_SIZE == expected
 
 
 def test_api_queue_control_is_beside_delay_and_exported():
@@ -320,9 +342,11 @@ def test_watchdog_displays_lazy_queue_as_a_separate_backlog():
     assert "state.get('backlog', 0)" in source
     assert "state.get('scheduler_queued', 0)" in source
     assert "_queued_count = max(_queued_entry_count, scheduler_queued)" in source
-    assert 'label += f" • Backlog: {backlog}"' in source
+    assert 'label += f" (+{backlog} queued)"' in source
+    assert 'label += f" • API Queue: {_queued_count}"' in source
+    assert "Backlog:" not in source
     assert "_total_active > 0 or backlog > 0" in source
-    assert "Unadmitted slots in current batch window" in source
+    assert "Queued requests awaiting admission" in source
 
 
 def test_parallel_preflight_defers_duplicate_chunk_splitting():

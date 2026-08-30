@@ -24052,7 +24052,7 @@ Recent translations to summarize:
         self.api_queue_entry.setText(str(self.api_queue_var))
         self.api_queue_entry.setMaximumWidth(60)
         self.api_queue_entry.setToolTip(
-            "Requests waiting behind active API calls."
+            "Waiting requests (0 = none, -1 = match active calls)."
         )
         self.api_queue_entry.textChanged.connect(
             lambda: setattr(
@@ -27945,15 +27945,12 @@ Recent translations to summarize:
                 active_bits = []
 
             label = f"API calls: {in_flight}"
-            if waiting_entries or _queued_count:
-                _extra_parts = []
-                if _queued_count:
-                    _extra_parts.append(f"{_queued_count} queued")
-                if waiting_entries:
-                    _extra_parts.append(f"{len(waiting_entries)} cooldown")
-                label += f" (+{', '.join(_extra_parts)})"
             if backlog:
-                label += f" • Backlog: {backlog}"
+                label += f" (+{backlog} queued)"
+            if _queued_count:
+                label += f" • API Queue: {_queued_count}"
+            if waiting_entries:
+                label += f" • Cooldown: {len(waiting_entries)}"
             if age > 0:
                 label += f" • last change {age}s ago"
             if active_bits:
@@ -27963,7 +27960,11 @@ Recent translations to summarize:
 
             tooltip = f"In-flight API calls: {in_flight}"
             if backlog:
-                tooltip += f"\nUnadmitted slots in current batch window: {backlog}"
+                tooltip += f"\nQueued requests awaiting admission: {backlog}"
+            if _queued_count:
+                tooltip += f"\nAPI Queue (admitted/staged): {_queued_count}"
+            if waiting_entries:
+                tooltip += f"\nCooldown: {len(waiting_entries)}"
             if age > 0:
                 tooltip += f"\nLast change: {age}s ago"
             if last_context:
@@ -45562,7 +45563,7 @@ Important rules:
             if show_message:
                 validation_map = [
                     (self.delay_entry, "API call delay", lambda v: v.replace('.', '', 1).isdigit() or v == ""),
-                    (self.api_queue_entry, "API Queue", lambda v: v.isdigit() and int(v) >= 1),
+                    (self.api_queue_entry, "API Queue", lambda v: v.lstrip('-').isdigit() and int(v) >= -1),
                     (self.thread_delay_entry, "Threading Delay", lambda v: v.replace('.', '', 1).isdigit()),
                     (self.trans_temp, "Temperature", lambda v: v == "" or v.replace('.', '', 1).replace('-', '', 1).isdigit()),
                     (self.trans_history, "Translation History Limit", lambda v: v.isdigit() or v == ""),
@@ -45613,7 +45614,7 @@ Important rules:
                 
                 # Numeric settings
                 ('delay', ['delay_entry'], 5.0, lambda v: safe_float(v, 5.0)),
-                ('api_queue', ['api_queue_entry', 'api_queue_var'], 4, lambda v: max(1, safe_int(v, 4))),
+                ('api_queue', ['api_queue_entry', 'api_queue_var'], 4, lambda v: max(-1, safe_int(v, 4))),
                 ('thread_submission_delay', ['thread_delay_entry'], '0.0001', _format_plain_decimal_setting),
                 ('translation_temperature', ['trans_temp'], 0.3, lambda v: safe_float(v, 0.3)),
                 ('disable_temperature', ['disable_temperature_checkbox', 'disable_temperature_var'], False, bool),

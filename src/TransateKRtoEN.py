@@ -2021,7 +2021,7 @@ class TranslationConfig:
         self.BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
         try:
             self.API_QUEUE_SIZE = max(
-                1,
+                -1,
                 int(os.getenv("API_QUEUE_SIZE", "4") or "4"),
             )
         except (TypeError, ValueError):
@@ -14497,8 +14497,41 @@ def _lazy_batch_window_backlog(unsent_count, admitted_count, batch_size):
     return min(unsent, max(0, capacity - admitted))
 
 
-def _fixed_api_queue_admissions(queued_count, unsent_count, queue_size):
-    """Return how many requests are needed to fill the fixed API queue."""
+def _api_queue_target(active_count, batch_size, queue_size):
+    """Return the desired waiting depth for the configured queue mode."""
+    try:
+        active = max(0, int(active_count or 0))
+    except (TypeError, ValueError):
+        active = 0
+    try:
+        concurrency = max(1, int(batch_size or 1))
+    except (TypeError, ValueError):
+        concurrency = 1
+    try:
+        configured = max(-1, int(queue_size))
+    except (TypeError, ValueError):
+        configured = 4
+
+    # -1 restores the proportional mode: one waiting request for every
+    # provider call which is currently active.
+    target = min(active, concurrency) if configured == -1 else configured
+
+    # Even with a zero waiting queue, release one successor at each provider
+    # boundary until BATCH_SIZE active calls have been reached. This transient
+    # ramp slot is not retained after the active pool is full.
+    if active < concurrency:
+        target = max(1, target)
+    return target
+
+
+def _api_queue_admissions(
+    active_count,
+    queued_count,
+    unsent_count,
+    queue_size,
+    batch_size,
+):
+    """Return how many requests are needed to reach the current queue target."""
     try:
         queued = max(0, int(queued_count or 0))
     except (TypeError, ValueError):
@@ -14507,11 +14540,8 @@ def _fixed_api_queue_admissions(queued_count, unsent_count, queue_size):
         unsent = max(0, int(unsent_count or 0))
     except (TypeError, ValueError):
         unsent = 0
-    try:
-        capacity = max(1, int(queue_size or 1))
-    except (TypeError, ValueError):
-        capacity = 1
-    return min(unsent, max(0, capacity - queued))
+    target = _api_queue_target(active_count, batch_size, queue_size)
+    return min(unsent, max(0, target - queued))
 
 
 def set_output_redirect(log_callback=None):
@@ -29068,10 +29098,15 @@ def main(log_callback=None, stop_callback=None):
             print(f"📦 Using direct batching: group size {batch_group_size}, parallel {config.BATCH_SIZE}")
         else:  # aggressive
             batch_group_size = batch_group_size_cfg  # not used for throttling, only for logging/summary grouping
+            api_queue_description = (
+                "matches active calls"
+                if config.API_QUEUE_SIZE == -1
+                else str(config.API_QUEUE_SIZE)
+            )
             print(
                 "⚡ Using AGGRESSIVE batching: "
                 f"up to {config.BATCH_SIZE} parallel calls with "
-                f"API queue {config.API_QUEUE_SIZE}"
+                f"API queue {api_queue_description}"
             )
         
         @contextmanager
@@ -29130,12 +29165,17 @@ def main(log_callback=None, stop_callback=None):
                     )
 
                 def _sync_lazy_window_backlog(*, publish=False):
-                    admitted_count, _, queued_count = _running_future_counts()
+                    admitted_count, active_count, queued_count = _running_future_counts()
+                    queue_target = _api_queue_target(
+                        active_count,
+                        config.BATCH_SIZE,
+                        config.API_QUEUE_SIZE,
+                    )
                     _api_watchdog_set_backlog(
                         _lazy_batch_window_backlog(
                             len(unsent_units),
                             admitted_count,
-                            config.BATCH_SIZE + config.API_QUEUE_SIZE,
+                            config.BATCH_SIZE + queue_target,
                         ),
                         publish=publish,
                     )
@@ -29170,12 +29210,14 @@ def main(log_callback=None, stop_callback=None):
                     return True
 
                 def _grow_lazy_prefetch_window():
-                    """Fill the user-configured fixed API queue."""
-                    _, _, queued_count = _running_future_counts()
-                    additions = _fixed_api_queue_admissions(
+                    """Fill the queue according to its configured mode."""
+                    _, active_count, queued_count = _running_future_counts()
+                    additions = _api_queue_admissions(
+                        active_count,
                         queued_count,
                         len(unsent_units),
                         config.API_QUEUE_SIZE,
+                        config.BATCH_SIZE,
                     )
                     for _ in range(additions):
                         if not submit_next_unit():
