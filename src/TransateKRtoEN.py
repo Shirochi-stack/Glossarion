@@ -8274,6 +8274,154 @@ def _prepare_image_only_title_plans_parallel(
             cancel_futures=bool(stop_mode),
         )
     return results, stop_mode, errors
+
+
+DEFAULT_IMAGE_ONLY_TITLE_MAX_WORKERS = 32
+
+
+def _image_only_title_worker_count(config, title_count):
+    """Return a dedicated title-pool size without altering normal batching."""
+    try:
+        requested = max(1, int(getattr(config, "BATCH_SIZE", 1) or 1))
+    except (TypeError, ValueError):
+        requested = 1
+    try:
+        available = max(0, int(title_count or 0))
+    except (TypeError, ValueError):
+        available = 0
+    try:
+        title_limit = max(
+            1,
+            int(
+                os.getenv(
+                    "IMAGE_ONLY_TITLE_MAX_WORKERS",
+                    str(DEFAULT_IMAGE_ONLY_TITLE_MAX_WORKERS),
+                )
+                or DEFAULT_IMAGE_ONLY_TITLE_MAX_WORKERS
+            ),
+        )
+    except (TypeError, ValueError):
+        title_limit = DEFAULT_IMAGE_ONLY_TITLE_MAX_WORKERS
+    return min(requested, available, title_limit) if available else 0
+
+
+def _process_image_only_titles_parallel(
+    title_chapters,
+    batch_processor,
+    progress_manager,
+    check_stop_fn,
+    config,
+):
+    """Process title-only jobs in a bounded pool separate from body chapters.
+
+    The normal chapter executor deliberately keeps the user's BATCH_SIZE
+    semantics. Image-only title translation is additional work introduced on
+    top of that legacy queue, so admitting every title to the normal nested
+    chapter/chunk/API pipeline can multiply the live worker count for large
+    illustrated books. This phase remains parallel while keeping those extra
+    jobs out of the known-good body-chapter queue.
+    """
+    title_chapters = list(title_chapters or ())
+    worker_count = _image_only_title_worker_count(config, len(title_chapters))
+    stats = {
+        "processed": 0,
+        "successful": 0,
+        "failed": 0,
+        "stopped": False,
+        "workers": worker_count,
+    }
+    if not worker_count:
+        return stats
+
+    if _translation_prequeue_stop_mode(check_stop_fn):
+        stats["stopped"] = True
+        return stats
+
+    print(
+        f"📝 Translating {len(title_chapters)} image-only title(s) in a "
+        f"dedicated parallel phase ({worker_count} workers)"
+    )
+
+    executor = ThreadPoolExecutor(
+        max_workers=worker_count,
+        thread_name_prefix="ImageOnlyTitle",
+    )
+    next_title = 0
+    active = {}
+
+    def _submit_one():
+        nonlocal next_title
+        if next_title >= len(title_chapters):
+            return False
+        chapter_data = title_chapters[next_title]
+        next_title += 1
+        future = executor.submit(
+            batch_processor.process_single_chapter,
+            chapter_data,
+        )
+        active[future] = chapter_data
+        return True
+
+    try:
+        while (
+            not _translation_prequeue_stop_mode(check_stop_fn)
+            and len(active) < worker_count
+            and _submit_one()
+        ):
+            pass
+
+        while active:
+            if _translation_prequeue_stop_mode(check_stop_fn):
+                stats["stopped"] = True
+                for future in active:
+                    future.cancel()
+                break
+
+            done, _pending = wait(
+                active,
+                timeout=0.1,
+                return_when=FIRST_COMPLETED,
+            )
+            if not done:
+                continue
+
+            for future in done:
+                active.pop(future, None)
+                stats["processed"] += 1
+                try:
+                    result = future.result()
+                    if isinstance(result, tuple) and result and result[0]:
+                        stats["successful"] += 1
+                    else:
+                        stats["failed"] += 1
+                except Exception as exc:
+                    stats["failed"] += 1
+                    print(f"❌ Image-only title worker error: {exc}")
+
+            if not _translation_prequeue_stop_mode(check_stop_fn):
+                while (
+                    len(active) < worker_count
+                    and not _translation_prequeue_stop_mode(check_stop_fn)
+                    and _submit_one()
+                ):
+                    pass
+            else:
+                stats["stopped"] = True
+                for future in active:
+                    future.cancel()
+                break
+    finally:
+        executor.shutdown(
+            wait=not stats["stopped"],
+            cancel_futures=stats["stopped"],
+        )
+        progress_manager.save()
+
+    print(
+        "📝 Image-only title phase complete: "
+        f"{stats['successful']} translated, {stats['failed']} failed"
+    )
+    return stats
         
 # =====================================================
 # UNIFIED TRANSLATION PROCESSOR
@@ -27645,7 +27793,11 @@ def main(log_callback=None, stop_callback=None):
         
         progress_lock = Lock()
         
+        # Preserve the legacy body-chapter queue shape. Image-only title work
+        # is an additional feature and must not inflate this executor's work
+        # set (especially when BATCH_SIZE is configured in the thousands).
         chapters_to_translate = []
+        image_only_titles_to_translate = []
         
         # The chunk preflight already assigned every chapter number. Keep only
         # a cheap missing-value fallback here for legacy/nonstandard inputs.
@@ -27930,7 +28082,7 @@ def main(log_callback=None, stop_callback=None):
 
                     plan = title_plans.get(idx)
                     if _apply_image_only_title_translation_plan(c, plan):
-                        chapters_to_translate.append((idx, c))
+                        image_only_titles_to_translate.append((idx, c))
                         queued_image_only_title_numbers.append(log_num)
                         continue
 
@@ -28006,6 +28158,7 @@ def main(log_callback=None, stop_callback=None):
         # Thread scheduling must not redefine book order. EPUB items use their
         # OPF spine position; PDF/text items retain their extracted list order.
         chapters_to_translate.sort(key=_batch_spine_order_key)
+        image_only_titles_to_translate.sort(key=_batch_spine_order_key)
 
         # Print skip summary for batch mode
         if hasattr(config, '_batch_skipped_chapters') and config._batch_skipped_chapters:
@@ -28020,7 +28173,10 @@ def main(log_callback=None, stop_callback=None):
         if _auto_disc > 0:
             print(f"📁 Auto-discovered {_auto_disc} existing translated file(s) on disk")
 
-        print(f"📊 Found {len(chapters_to_translate)} chapters to translate in parallel")
+        print(
+            f"📊 Found {len(chapters_to_translate)} body chapter(s) for the "
+            "normal parallel queue"
+        )
         
         # Continue with the rest of the existing batch processing code...
         batch_processor = BatchTranslationProcessor(
@@ -28216,7 +28372,10 @@ def main(log_callback=None, stop_callback=None):
                 config.ROLLING_SUMMARY_MODE = old_mode
                 config.ROLLING_SUMMARY_MAX_ENTRIES = old_max_entries
         
-        total_to_process = len(chapters_to_translate)
+        normal_total_to_process = len(chapters_to_translate)
+        total_to_process = (
+            normal_total_to_process + len(image_only_titles_to_translate)
+        )
         processed = 0
         
         # ==========================
@@ -28286,7 +28445,7 @@ def main(log_callback=None, stop_callback=None):
 
                     merge_groups.append(group)
 
-            print(f"🔗 Created {len(merge_groups)} merge groups from {total_to_process} chapters (after size adjustment)")
+            print(f"🔗 Created {len(merge_groups)} merge groups from {normal_total_to_process} chapters (after size adjustment)")
 
             units_to_process = merge_groups
             is_merged_mode = True
@@ -28300,6 +28459,14 @@ def main(log_callback=None, stop_callback=None):
         for request_order, unit in enumerate(units_to_process):
             for _chapter_index, chapter in unit:
                 chapter['_batch_request_order'] = request_order
+
+        title_request_order_start = len(units_to_process)
+        for title_offset, (_chapter_index, chapter) in enumerate(
+            image_only_titles_to_translate
+        ):
+            chapter['_batch_request_order'] = (
+                title_request_order_start + title_offset
+            )
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=config.BATCH_SIZE) as executor:
             if batching_mode == 'aggressive':
@@ -28616,9 +28783,37 @@ def main(log_callback=None, stop_callback=None):
                             print("\n✅ Current batch completed. Stopping as requested (wait for chunks).")
                             return
                     
-                    if batch_end < total_to_process:
+                    if batch_end < normal_total_to_process:
                         print(f"⏳ Waiting {config.DELAY}s before next batch...")
                         time.sleep(config.DELAY)
+
+        if image_only_titles_to_translate:
+            stop_mode = _translation_prequeue_stop_mode(stop_callback)
+            if stop_mode:
+                progress_manager.save()
+                return
+
+            # Body requests have fully left the legacy executor. Advance the
+            # dispatch ticket to the first title even if an earlier body unit
+            # failed before reaching its first API call.
+            with batch_processor._ordered_dispatch_condition:
+                batch_processor._ordered_dispatch_next = max(
+                    batch_processor._ordered_dispatch_next,
+                    title_request_order_start,
+                )
+                batch_processor._ordered_dispatch_condition.notify_all()
+
+            title_stats = _process_image_only_titles_parallel(
+                image_only_titles_to_translate,
+                batch_processor,
+                progress_manager,
+                stop_callback,
+                config,
+            )
+            processed += title_stats["processed"]
+            if title_stats["stopped"]:
+                progress_manager.save()
+                return
         
         # Aggressive mode has no per-group barrier; this is its authoritative
         # final flush. It is harmless after direct/conservative batch flushes.
