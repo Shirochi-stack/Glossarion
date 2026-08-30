@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import threading
 import time
@@ -2295,6 +2296,64 @@ def test_watchdog_request_cleanup_preserves_sibling_with_same_chapter_number():
         assert state["in_flight"] == 1
         assert [entry["request_id"] for entry in state["in_flight_entries"]] == ["frontmatter-b"]
     finally:
+        unified_api_client._api_watchdog_reset()
+
+
+def test_watchdog_external_writer_cannot_publish_an_older_snapshot(tmp_path, monkeypatch):
+    monkeypatch.delenv("GLOSSARION_WATCHDOG_DIR", raising=False)
+    unified_api_client._api_watchdog_reset()
+    try:
+        unified_api_client._api_watchdog_started(
+            "glossary", request_id="chapter-a", chapter=1, queued=True,
+        )
+        unified_api_client._api_watchdog_started(
+            "glossary", request_id="chapter-b", chapter=2, queued=True,
+        )
+        monkeypatch.setenv("GLOSSARION_WATCHDOG_DIR", str(tmp_path))
+
+        first_dump_started = threading.Event()
+        release_first_dump = threading.Event()
+        real_dump = unified_api_client.json.dump
+        dump_calls = 0
+        dump_calls_lock = threading.Lock()
+
+        def blocking_dump(*args, **kwargs):
+            nonlocal dump_calls
+            with dump_calls_lock:
+                dump_calls += 1
+                current_call = dump_calls
+            if current_call == 1:
+                first_dump_started.set()
+                assert release_first_dump.wait(2.0)
+            return real_dump(*args, **kwargs)
+
+        monkeypatch.setattr(unified_api_client.json, "dump", blocking_dump)
+        first_worker = threading.Thread(
+            target=unified_api_client._api_watchdog_mark_in_flight,
+            args=("chapter-a", "authnd/model"),
+        )
+        first_worker.start()
+        assert first_dump_started.wait(2.0)
+
+        # This update arrives after the first worker captured its state.  It
+        # must not block on disk I/O, and the active writer must republish the
+        # newer two-request snapshot before exiting.
+        unified_api_client._api_watchdog_mark_in_flight("chapter-b", "authnd/model")
+        assert first_worker.is_alive()
+        release_first_dump.set()
+        first_worker.join(2.0)
+        assert not first_worker.is_alive()
+
+        watchdog_path = tmp_path / f"api_watchdog_{os.getpid()}.json"
+        published = json.loads(watchdog_path.read_text(encoding="utf-8"))
+        assert published["in_flight"] == 2
+        assert {
+            entry["request_id"] for entry in published["in_flight_entries"]
+            if entry.get("status") == "in_flight"
+        } == {"chapter-a", "chapter-b"}
+        assert dump_calls == 2
+    finally:
+        monkeypatch.delenv("GLOSSARION_WATCHDOG_DIR", raising=False)
         unified_api_client._api_watchdog_reset()
 
 

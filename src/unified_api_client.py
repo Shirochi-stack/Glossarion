@@ -259,6 +259,9 @@ global_stop_flag = False
 
 # --- API Watchdog: track in-flight API calls for GUI progress indicators ---
 _api_watchdog_lock = threading.RLock()
+_api_watchdog_external_write_lock = threading.Lock()
+_api_watchdog_external_write_generation = 0
+_api_watchdog_external_write_active = False
 _api_watchdog_in_flight = 0
 _api_watchdog_peak = 0
 _api_watchdog_last_change_ts = 0.0
@@ -416,19 +419,46 @@ def _api_watchdog_external_path() -> Optional[str]:
 
 def _api_watchdog_external_write(state: dict) -> None:
     """Write watchdog state to a per-process JSON file."""
+    global _api_watchdog_external_write_generation
+    global _api_watchdog_external_write_active
     try:
         path = _api_watchdog_external_path()
         if not path:
             return
-        tmp_path = f"{path}.tmp"
-        state = dict(state or {})
-        state["pid"] = os.getpid()
-        state["updated_ts"] = time.time()
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False)
-        os.replace(tmp_path, path)
+        # Coalesce concurrent worker publications.  Waiting for every worker to
+        # perform its own disk write would serialize provider dispatch, while
+        # allowing them all to write the same temp file lets an older snapshot
+        # win.  One worker publishes; callers arriving meanwhile only advance
+        # the generation and return immediately.
+        with _api_watchdog_external_write_lock:
+            _api_watchdog_external_write_generation += 1
+            if _api_watchdog_external_write_active:
+                return
+            _api_watchdog_external_write_active = True
+
+        fallback_state = state
+        while True:
+            with _api_watchdog_external_write_lock:
+                publish_generation = _api_watchdog_external_write_generation
+            try:
+                state = get_api_watchdog_state()
+            except Exception:
+                state = fallback_state
+            tmp_path = f"{path}.tmp"
+            state = dict(state or {})
+            state["pid"] = os.getpid()
+            state["updated_ts"] = time.time()
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False)
+            os.replace(tmp_path, path)
+
+            with _api_watchdog_external_write_lock:
+                if publish_generation == _api_watchdog_external_write_generation:
+                    _api_watchdog_external_write_active = False
+                    return
     except Exception:
-        pass
+        with _api_watchdog_external_write_lock:
+            _api_watchdog_external_write_active = False
 
 def _chapter_term():
     """Return 'Section' for text file translations, 'Chapter' otherwise."""
