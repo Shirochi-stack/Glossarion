@@ -43,6 +43,7 @@ from unified_api_client import (
     extend_deferred_batch_logs,
     get_current_thread_actual_request_key_identifier,
     get_current_thread_actual_request_model,
+    _api_watchdog_set_backlog,
     pop_deferred_batch_logs,
     set_current_thread_actual_request_model,
 )
@@ -28927,6 +28928,10 @@ def main(log_callback=None, stop_callback=None):
             try:
                 yield executor
             finally:
+                # Clear the lazy-dispatch count on every completion, exception,
+                # graceful stop, and force stop.  This is a single teardown
+                # publication, not one write per abandoned queue unit.
+                _api_watchdog_set_backlog(0, publish=True)
                 stop_mode = _translation_prequeue_stop_mode(stop_callback)
                 wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
                 cancel_queued = bool(
@@ -28950,6 +28955,7 @@ def main(log_callback=None, stop_callback=None):
                 batch_submit_lock = threading.RLock()
                 active_futures = {}
                 unsent_units = deque(units_to_process)
+                _api_watchdog_set_backlog(len(unsent_units), publish=True)
                 dispatch_started_orders = set()
                 
                 def submit_next_unit():
@@ -28959,6 +28965,7 @@ def main(log_callback=None, stop_callback=None):
                     if _translation_prequeue_stop_mode(stop_callback):
                         return False
                     unit = unsent_units.popleft()
+                    _api_watchdog_set_backlog(len(unsent_units))
                     if config.USE_ROLLING_SUMMARY:
                         batch_processor.set_batch_rolling_summary_text(rolling_summary_for_next_batch)
                         time.sleep(0.000001)
@@ -29056,6 +29063,7 @@ def main(log_callback=None, stop_callback=None):
                                 with batch_submit_lock:
                                     active_futures.clear()
                                     unsent_units.clear()
+                                    _api_watchdog_set_backlog(0)
                                 should_exit_outer_loop = True
                                 break
                             else:

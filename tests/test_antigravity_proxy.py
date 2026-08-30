@@ -2298,6 +2298,30 @@ def test_watchdog_request_cleanup_preserves_sibling_with_same_chapter_number():
         unified_api_client._api_watchdog_reset()
 
 
+def test_watchdog_tracks_lazy_backlog_without_writing_every_dequeue(monkeypatch):
+    writes = []
+    monkeypatch.setattr(
+        unified_api_client,
+        "_api_watchdog_external_write",
+        lambda state: writes.append(dict(state)),
+    )
+    unified_api_client._api_watchdog_reset()
+    writes.clear()
+
+    try:
+        unified_api_client._api_watchdog_set_backlog(1000, publish=True)
+        unified_api_client._api_watchdog_set_backlog(999)
+        unified_api_client._api_watchdog_set_backlog(998)
+
+        assert unified_api_client.get_api_watchdog_state()["backlog"] == 998
+        assert [state["backlog"] for state in writes] == [1000]
+
+        unified_api_client._api_watchdog_set_backlog(0, publish=True)
+        assert [state["backlog"] for state in writes] == [1000, 0]
+    finally:
+        unified_api_client._api_watchdog_reset()
+
+
 def test_shared_instance_cancel_does_not_cancel_sibling_batch_request(monkeypatch):
     client = object.__new__(UnifiedClient)
     client._cancelled = True

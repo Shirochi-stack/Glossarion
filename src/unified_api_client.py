@@ -267,6 +267,8 @@ _api_watchdog_last_finish_ts = 0.0
 _api_watchdog_last_context = None
 _api_watchdog_last_model = None
 _api_watchdog_entries = {}
+_api_watchdog_backlog = 0
+_api_watchdog_backlog_last_change_ts = 0.0
 
 # Per-key API call delay tracking (module-level, thread-safe)
 # Maps (api_key, model) -> last_call_timestamp; used to enforce per-key cooldown
@@ -510,11 +512,39 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
     except Exception:
         pass
 
+def _api_watchdog_set_backlog(count: Any, *, publish: bool = False) -> None:
+    """Publish lightweight work that has not entered the API client yet.
+
+    Lazy aggressive batching deliberately keeps these units out of the executor
+    and out of ``_api_watchdog_entries``.  Keeping a separate scalar makes that
+    backlog visible without manufacturing queued requests or repeatedly writing
+    the cross-process watchdog file while a large deque is being drained.
+    """
+    global _api_watchdog_backlog, _api_watchdog_backlog_last_change_ts
+    try:
+        normalized = max(0, int(count or 0))
+    except (TypeError, ValueError):
+        normalized = 0
+
+    try:
+        with _api_watchdog_lock:
+            if _api_watchdog_backlog != normalized:
+                _api_watchdog_backlog = normalized
+                _api_watchdog_backlog_last_change_ts = time.time()
+        # Normal API watchdog transitions already publish the current scalar.
+        # Force a write only at queue creation/teardown barriers so a 1,000-item
+        # lazy deque cannot cause 1,000 extra JSON replacements.
+        if publish:
+            _api_watchdog_external_write(get_api_watchdog_state())
+    except Exception:
+        pass
+
 def _api_watchdog_reset():
     """Hard reset watchdog state (used on force-cancel)."""
     global _api_watchdog_in_flight, _api_watchdog_peak, _api_watchdog_last_change_ts
     global _api_watchdog_last_start_ts, _api_watchdog_last_finish_ts
     global _api_watchdog_last_context, _api_watchdog_last_model, _api_watchdog_entries
+    global _api_watchdog_backlog, _api_watchdog_backlog_last_change_ts
     try:
         with _api_watchdog_lock:
             _api_watchdog_in_flight = 0
@@ -525,6 +555,8 @@ def _api_watchdog_reset():
             _api_watchdog_last_context = None
             _api_watchdog_last_model = None
             _api_watchdog_entries.clear()
+            _api_watchdog_backlog = 0
+            _api_watchdog_backlog_last_change_ts = time.time()
         _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:
         pass
@@ -716,10 +748,17 @@ def get_api_watchdog_state() -> Dict[str, Any]:
                 "last_finish_ts": _api_watchdog_last_finish_ts,
                 "last_context": _api_watchdog_last_context,
                 "last_model": _api_watchdog_last_model,
+                "backlog": _api_watchdog_backlog,
+                "backlog_last_change_ts": _api_watchdog_backlog_last_change_ts,
                 "in_flight_entries": entries,
             }
     except Exception:
-        return {"in_flight": 0, "peak_in_flight": 0, "last_change_ts": 0.0}
+        return {
+            "in_flight": 0,
+            "peak_in_flight": 0,
+            "last_change_ts": 0.0,
+            "backlog": 0,
+        }
 
 # Enable HTTP request logging for debugging
 def setup_http_logging():

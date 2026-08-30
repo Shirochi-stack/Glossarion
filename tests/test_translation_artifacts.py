@@ -256,6 +256,17 @@ def test_aggressive_queue_primes_one_unit_and_advances_on_provider_start():
     assert "def _provider_request_started(request_order):" in aggressive_source
     assert "batch_processor.set_request_started_callback(" in aggressive_source
     assert "unsent_units = deque(units_to_process)" in aggressive_source
+    assert "_api_watchdog_set_backlog(len(unsent_units), publish=True)" in aggressive_source
+    assert "_api_watchdog_set_backlog(len(unsent_units))" in aggressive_source
+
+
+def test_watchdog_displays_lazy_queue_as_a_separate_backlog():
+    source = inspect.getsource(TranslatorGUI._update_api_watchdog)
+
+    assert "state.get('backlog', 0)" in source
+    assert 'label += f" • Backlog: {backlog}"' in source
+    assert "_total_active > 0 or backlog > 0" in source
+    assert "Unsubmitted lazy-dispatch backlog" in source
 
 
 def test_parallel_preflight_defers_duplicate_chunk_splitting():

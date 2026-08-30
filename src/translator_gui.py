@@ -27499,11 +27499,16 @@ Recent translations to summarize:
             state = {}
 
         in_flight = 0
+        backlog = 0
         last_change = 0.0
         try:
             in_flight = int(state.get('in_flight', 0))
         except Exception:
             in_flight = 0
+        try:
+            backlog = max(0, int(state.get('backlog', 0) or 0))
+        except Exception:
+            backlog = 0
         try:
             last_change = float(state.get('last_change_ts', 0.0) or 0.0)
         except Exception:
@@ -27529,6 +27534,7 @@ Recent translations to summarize:
                 files = glob.glob(os.path.join(watchdog_dir, "api_watchdog_*.json"))
                 if files:
                     total_in_flight = 0
+                    total_backlog = 0
                     latest_change = 0.0
                     latest_ctx = None
                     latest_model = None
@@ -27540,6 +27546,7 @@ Recent translations to summarize:
                                 st = _json.load(f)
                             cnt = int(st.get("in_flight", 0) or 0)
                             total_in_flight += cnt
+                            total_backlog += max(0, int(st.get("backlog", 0) or 0))
                             lc = float(st.get("last_change_ts", 0.0) or 0.0)
                             if lc > latest_change:
                                 latest_change = lc
@@ -27555,6 +27562,7 @@ Recent translations to summarize:
                     # Merge external files with the live in-process watchdog.
                     # Do not let stale/zero external snapshots wipe out a real
                     # in-memory in-flight request in this GUI process.
+                    backlog = max(backlog, total_backlog)
                     if total_in_flight or latest_change:
                         in_flight = max(in_flight, total_in_flight)
                         last_change = max(last_change, latest_change)
@@ -27582,7 +27590,7 @@ Recent translations to summarize:
         _queued_count = sum(1 for e in entries if isinstance(e, dict) and e.get("status") == "queued")
         _total_active = in_flight + _waiting_count + _queued_count
 
-        if _total_active > 0:
+        if _total_active > 0 or backlog > 0:
             # Keep determinate mode so text is not overridden by busy animation
             max_val = max(1, _total_active)
             if self.api_watchdog_bar.maximum() != max_val or self.api_watchdog_bar.minimum() != 0:
@@ -27888,6 +27896,8 @@ Recent translations to summarize:
                 if waiting_entries:
                     _extra_parts.append(f"{len(waiting_entries)} cooldown")
                 label += f" (+{', '.join(_extra_parts)})"
+            if backlog:
+                label += f" • Backlog: {backlog}"
             if age > 0:
                 label += f" • last change {age}s ago"
             if active_bits:
@@ -27896,6 +27906,8 @@ Recent translations to summarize:
             self.api_watchdog_bar.setFormat(label)
 
             tooltip = f"In-flight API calls: {in_flight}"
+            if backlog:
+                tooltip += f"\nUnsubmitted lazy-dispatch backlog: {backlog}"
             if age > 0:
                 tooltip += f"\nLast change: {age}s ago"
             if last_context:
