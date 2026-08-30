@@ -513,12 +513,13 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
         pass
 
 def _api_watchdog_set_backlog(count: Any, *, publish: bool = False) -> None:
-    """Publish lightweight work that has not entered the API client yet.
+    """Publish unadmitted work in the current batch-concurrency window.
 
-    Lazy aggressive batching deliberately keeps these units out of the executor
-    and out of ``_api_watchdog_entries``.  Keeping a separate scalar makes that
-    backlog visible without manufacturing queued requests or repeatedly writing
-    the cross-process watchdog file while a large deque is being drained.
+    Lazy aggressive batching deliberately keeps these slots out of the executor
+    and out of ``_api_watchdog_entries``. This scalar is bounded by BATCH_SIZE;
+    it does not represent every remaining chapter in the book. Keeping it
+    separate makes the window visible without manufacturing queued requests or
+    repeatedly writing the cross-process watchdog file as it is filled.
     """
     global _api_watchdog_backlog, _api_watchdog_backlog_last_change_ts
     try:
@@ -532,8 +533,8 @@ def _api_watchdog_set_backlog(count: Any, *, publish: bool = False) -> None:
                 _api_watchdog_backlog = normalized
                 _api_watchdog_backlog_last_change_ts = time.time()
         # Normal API watchdog transitions already publish the current scalar.
-        # Force a write only at queue creation/teardown barriers so a 1,000-item
-        # lazy deque cannot cause 1,000 extra JSON replacements.
+        # Force a write only at queue creation/teardown barriers so filling a
+        # large lazy-dispatch window cannot cause repeated JSON replacements.
         if publish:
             _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:

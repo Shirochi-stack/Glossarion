@@ -14437,6 +14437,29 @@ def _translation_prequeue_stop_mode(stop_callback=None):
             pass
     return None
 
+
+def _lazy_batch_window_backlog(unsent_count, admitted_count, batch_size):
+    """Return unsent work represented by the current concurrency window.
+
+    The watchdog backlog is not the entire remaining book. It is only the
+    portion of ``BATCH_SIZE`` which lazy dispatch has not admitted yet. Thus a
+    batch size of one with one admitted request has no backlog.
+    """
+    try:
+        unsent = max(0, int(unsent_count or 0))
+    except (TypeError, ValueError):
+        unsent = 0
+    try:
+        admitted = max(0, int(admitted_count or 0))
+    except (TypeError, ValueError):
+        admitted = 0
+    try:
+        capacity = max(0, int(batch_size or 0))
+    except (TypeError, ValueError):
+        capacity = 0
+    return min(unsent, max(0, capacity - admitted))
+
+
 def set_output_redirect(log_callback=None):
     """Redirect print statements to a callback function for GUI integration"""
     if log_callback:
@@ -28958,8 +28981,17 @@ def main(log_callback=None, stop_callback=None):
                 batch_submit_lock = threading.RLock()
                 active_futures = {}
                 unsent_units = deque(units_to_process)
-                _api_watchdog_set_backlog(len(unsent_units), publish=True)
                 dispatch_started_orders = set()
+
+                def _sync_lazy_window_backlog(*, publish=False):
+                    _api_watchdog_set_backlog(
+                        _lazy_batch_window_backlog(
+                            len(unsent_units),
+                            len(active_futures),
+                            config.BATCH_SIZE,
+                        ),
+                        publish=publish,
+                    )
                 
                 def submit_next_unit():
                     """Submit one lightweight unit; caller holds batch_submit_lock."""
@@ -28968,7 +29000,6 @@ def main(log_callback=None, stop_callback=None):
                     if _translation_prequeue_stop_mode(stop_callback):
                         return False
                     unit = unsent_units.popleft()
-                    _api_watchdog_set_backlog(len(unsent_units))
                     if config.USE_ROLLING_SUMMARY:
                         batch_processor.set_batch_rolling_summary_text(rolling_summary_for_next_batch)
                         time.sleep(0.000001)
@@ -28977,6 +29008,7 @@ def main(log_callback=None, stop_callback=None):
                     else:
                         fut = executor.submit(batch_processor.process_single_chapter, unit[0])
                     active_futures[fut] = unit
+                    _sync_lazy_window_backlog()
                     return True
 
                 def _provider_request_started(request_order):
@@ -29007,6 +29039,7 @@ def main(log_callback=None, stop_callback=None):
                 # waiting workers.
                 with batch_submit_lock:
                     submit_next_unit()
+                    _sync_lazy_window_backlog(publish=True)
                 
                 graceful_stop_message_shown = False  # Track if we've shown the message
                 

@@ -272,8 +272,18 @@ def test_aggressive_queue_primes_one_unit_and_advances_on_provider_start():
     assert "def _provider_request_started(request_order):" in aggressive_source
     assert "batch_processor.set_request_started_callback(" in aggressive_source
     assert "unsent_units = deque(units_to_process)" in aggressive_source
-    assert "_api_watchdog_set_backlog(len(unsent_units), publish=True)" in aggressive_source
-    assert "_api_watchdog_set_backlog(len(unsent_units))" in aggressive_source
+    assert "def _sync_lazy_window_backlog(*, publish=False):" in aggressive_source
+    assert "_lazy_batch_window_backlog(" in aggressive_source
+    assert "_sync_lazy_window_backlog(publish=True)" in aggressive_source
+
+
+def test_lazy_batch_backlog_is_bounded_by_the_batch_window():
+    backlog = translation_module._lazy_batch_window_backlog
+
+    assert backlog(742, admitted_count=1, batch_size=1) == 0
+    assert backlog(1499, admitted_count=1, batch_size=1000) == 999
+    assert backlog(20, admitted_count=1, batch_size=1000) == 20
+    assert backlog(0, admitted_count=1, batch_size=1000) == 0
 
 
 def test_watchdog_displays_lazy_queue_as_a_separate_backlog():
@@ -282,7 +292,7 @@ def test_watchdog_displays_lazy_queue_as_a_separate_backlog():
     assert "state.get('backlog', 0)" in source
     assert 'label += f" • Backlog: {backlog}"' in source
     assert "_total_active > 0 or backlog > 0" in source
-    assert "Unsubmitted lazy-dispatch backlog" in source
+    assert "Unadmitted slots in current batch window" in source
 
 
 def test_parallel_preflight_defers_duplicate_chunk_splitting():

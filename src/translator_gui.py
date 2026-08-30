@@ -27907,7 +27907,7 @@ Recent translations to summarize:
 
             tooltip = f"In-flight API calls: {in_flight}"
             if backlog:
-                tooltip += f"\nUnsubmitted lazy-dispatch backlog: {backlog}"
+                tooltip += f"\nUnadmitted slots in current batch window: {backlog}"
             if age > 0:
                 tooltip += f"\nLast change: {age}s ago"
             if last_context:
