@@ -108,11 +108,11 @@ class _OrderedGlossaryBatchDispatcher:
 
         try:
             timeout = max(
-                5.0,
-                float(os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "120")),
+                1.0,
+                float(os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")),
             )
         except (TypeError, ValueError):
-            timeout = 120.0
+            timeout = 1.0
         deadline = time.monotonic() + timeout
 
         with self._condition:
@@ -127,10 +127,6 @@ class _OrderedGlossaryBatchDispatcher:
                     return
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    print(
-                        "⚠️ Ordered glossary batch dispatch timed out waiting "
-                        "for an earlier spine item; releasing this request"
-                    )
                     self._next_order = request_order
                     break
                 self._condition.wait(timeout=min(0.1, remaining))
@@ -8768,10 +8764,12 @@ def main(log_callback=None, stop_callback=None):
                     request_started_callback = _provider_request_started
 
                     try:
-                        # Seed exactly one preparation task. Each provider-boundary
-                        # transition grows the window according to API Preflight.
+                        # Fill API Preflight immediately so slow provider setup
+                        # on the first AuthND request cannot delay admission of
+                        # every following request. Later provider transitions
+                        # continue replenishing the same bounded window.
                         with scheduler_lock:
-                            _submit_next()
+                            _grow_glossary_preflight()
                             _sync_glossary_preflight(publish=True)
 
                         while True:

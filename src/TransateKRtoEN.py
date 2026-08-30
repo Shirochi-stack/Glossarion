@@ -29200,12 +29200,12 @@ def main(log_callback=None, stop_callback=None):
                     _provider_request_started
                 )
                 
-                # Prime exactly one preparation task. Once it crosses the real
-                # provider boundary, maintain the configured fixed API queue.
-                # ThreadPoolExecutor still caps executing workers at BATCH_SIZE;
-                # any additional queue entries remain lightweight futures.
+                # Fill the configured preflight window immediately. Waiting
+                # for one AuthND request to finish browser/CAPTCHA setup before
+                # admitting its successor creates a large artificial startup
+                # gap even when API call delay is only one second.
                 with batch_submit_lock:
-                    submit_next_unit()
+                    _grow_lazy_prefetch_window()
                     _sync_lazy_window_backlog(publish=True)
                 
                 graceful_stop_message_shown = False  # Track if we've shown the message

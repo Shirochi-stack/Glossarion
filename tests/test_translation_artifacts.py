@@ -270,7 +270,7 @@ def test_queue_content_analysis_is_cached_per_body(monkeypatch):
     assert calls == ["<p>chapter</p>"]
 
 
-def test_aggressive_queue_primes_one_unit_and_advances_on_provider_start():
+def test_aggressive_queue_primes_full_preflight_and_advances_on_provider_start():
     source = Path(translation_module.__file__).read_text(encoding="utf-8")
     executor_start = source.index("with _parallel_progress_executor() as executor:")
     aggressive_start = source.index(
@@ -282,13 +282,15 @@ def test_aggressive_queue_primes_one_unit_and_advances_on_provider_start():
         aggressive_start,
     )
     aggressive_source = source[aggressive_start:aggressive_end]
-    prime_start = aggressive_source.index("# Prime exactly one preparation task")
+    prime_start = aggressive_source.index(
+        "# Fill the configured preflight window immediately."
+    )
     prime_end = aggressive_source.index(
         "graceful_stop_message_shown",
         prime_start,
     )
 
-    assert "submit_next_unit()" in aggressive_source[prime_start:prime_end]
+    assert "_grow_lazy_prefetch_window()" in aggressive_source[prime_start:prime_end]
     assert "while len(active_futures)" not in aggressive_source
     assert "def _provider_request_started(request_order):" in aggressive_source
     assert "def _grow_lazy_prefetch_window():" in aggressive_source
@@ -316,11 +318,11 @@ def test_glossary_queue_uses_api_preflight_at_provider_boundary():
         scheduler_start,
     )
     scheduler_source = source[scheduler_start:scheduler_end]
-    prime_start = scheduler_source.index("# Seed exactly one preparation task")
+    prime_start = scheduler_source.index("# Fill API Preflight immediately")
     prime_end = scheduler_source.index("while True:", prime_start)
 
     assert 'os.getenv("API_QUEUE_SIZE", "4")' in source
-    assert "_submit_next()" in scheduler_source[prime_start:prime_end]
+    assert "_grow_glossary_preflight()" in scheduler_source[prime_start:prime_end]
     assert "while len(active_futures) <" not in scheduler_source
     assert "def _provider_request_started(dispatch_order):" in scheduler_source
     assert "request_started_callback = _provider_request_started" in scheduler_source
@@ -356,6 +358,9 @@ def test_lazy_batch_backlog_is_bounded_by_the_batch_window():
 def test_api_queue_admissions_support_fixed_zero_and_proportional_modes():
     admissions = translation_module._api_queue_admissions
 
+    # Startup fills the complete configured preflight instead of waiting for
+    # the first slow provider setup to cross its send boundary.
+    assert admissions(0, 0, 100, queue_size=50, batch_size=1000) == 50
     assert admissions(5, 0, 100, queue_size=4, batch_size=10) == 4
     assert admissions(5, 1, 100, queue_size=4, batch_size=10) == 3
     assert admissions(5, 4, 100, queue_size=4, batch_size=10) == 0

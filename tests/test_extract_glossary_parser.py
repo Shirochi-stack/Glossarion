@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 import threading
@@ -86,6 +87,16 @@ def test_glossary_stop_request_logs_are_coalesced(capsys):
     assert "2 API requests were cancelled or skipped" in output
     assert glossary_extractor._flush_glossary_stop_summary() == 0
     assert capsys.readouterr().out == ""
+
+
+def test_ordered_glossary_dispatch_fallback_is_one_second_and_silent():
+    source = inspect.getsource(
+        glossary_extractor._OrderedGlossaryBatchDispatcher.wait_for_turn
+    )
+
+    assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")' in source
+    assert "timeout = 1.0" in source
+    assert "timed out waiting for an earlier spine item" not in source
 
 
 def test_glossary_refinement_request_mode_defaults_to_all_types(monkeypatch):
