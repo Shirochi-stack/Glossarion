@@ -5124,7 +5124,17 @@ class ProgressManager:
         self.save()
         return True
 
-    def save_parallel_worker_progress(self, *, stop_requested=False):
+    def begin_parallel_worker_progress(self):
+        """Start a new coalesced parallel-progress publishing phase."""
+        with self._save_lock:
+            self._parallel_in_progress_snapshot_published = False
+
+    def save_parallel_worker_progress(
+        self,
+        *,
+        stop_requested=False,
+        in_progress=False,
+    ):
         """Coalesce parallel-worker updates into bounded progress snapshots.
 
         Worker status changes are already shared in ``self.prog``. Serializing
@@ -5136,7 +5146,20 @@ class ProgressManager:
             with self._save_lock:
                 self._stop_save_pending = True
             return False
-        return self.save_rate_limited(update_batch=32, max_interval=2.0)
+        publish_first_in_progress = False
+        if in_progress:
+            with self._save_lock:
+                if not getattr(
+                    self,
+                    "_parallel_in_progress_snapshot_published",
+                    False,
+                ):
+                    self._parallel_in_progress_snapshot_published = True
+                    publish_first_in_progress = True
+        if publish_first_in_progress:
+            self.save()
+            return True
+        return self.save_rate_limited(update_batch=128, max_interval=2.0)
 
     @staticmethod
     def _entry_has_qa_issue_marker(info):
@@ -9855,14 +9878,13 @@ class BatchTranslationProcessor:
             # A dedicated title request is exactly one tiny chunk. Creating,
             # updating, and serializing resumable chunk metadata for it caused
             # several full progress-file rewrites per title.
-            def _save_live_chapter_progress():
-                if (
-                    title_tag_only_chapter
-                    and self.progress_manager is not None
-                    and hasattr(self.progress_manager, "save_rate_limited")
-                ):
-                    return self.progress_manager.save_rate_limited()
-                self.save_progress_fn()
+            def _save_live_chapter_progress(*, in_progress=False):
+                try:
+                    return self.save_progress_fn(in_progress=in_progress)
+                except TypeError:
+                    # Compatibility for embedders/tests that provide the older
+                    # no-argument save callback.
+                    return self.save_progress_fn()
                 return True
 
             def _mark_batch_chapter_progress_on_send(chunk_idx=None):
@@ -9888,10 +9910,11 @@ class BatchTranslationProcessor:
                             model_name=chunk_model,
                             key_identifier=chunk_key_identifier,
                         )
-                    # Dispatch state is live in the shared mapping immediately.
-                    # Do not rewrite the full progress JSON immediately before
-                    # every API call; completion/error snapshots are coalesced
-                    # and the executor barrier performs an authoritative save.
+                    # Publish the first actual dispatch immediately, then use
+                    # the coalesced worker saver. Queue preparation remains
+                    # pending; only an API call that is about to send becomes
+                    # visible as in-progress in the separate Progress Manager.
+                    _save_live_chapter_progress(in_progress=True)
             
             from bs4 import BeautifulSoup
             chapter_body = ContentProcessor.image_processing_html(chapter)
@@ -12156,8 +12179,10 @@ class BatchTranslationProcessor:
                     for actual_num, _, idx, chapter, content_hash in chapters_data:
                         fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                         self.update_progress_fn(idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=chapter)
-                    # Keep the pre-send transition memory-only. Persisting here
-                    # blocks dispatch and wakes the GUI for every API call.
+                    try:
+                        self.save_progress_fn(in_progress=True)
+                    except TypeError:
+                        self.save_progress_fn()
             
             # Merge chapter contents
             merge_input = [(cn, content, ch) for cn, content, _, ch, _ in chapters_data]
@@ -28086,14 +28111,17 @@ def main(log_callback=None, stop_callback=None):
 
         print(f"📊 Found {len(chapters_to_translate)} chapters to translate in parallel")
 
-        def _save_parallel_worker_progress():
+        progress_manager.begin_parallel_worker_progress()
+
+        def _save_parallel_worker_progress(*, in_progress=False):
             # During a stop, every worker updates the same in-memory progress
             # mapping.  Let the coordinator serialize it once after executor
             # shutdown instead of making cancelled workers rewrite it in turn.
             return progress_manager.save_parallel_worker_progress(
                 stop_requested=bool(
                     _translation_prequeue_stop_mode(stop_callback)
-                )
+                ),
+                in_progress=in_progress,
             )
         
         # Continue with the rest of the existing batch processing code...
@@ -29066,6 +29094,7 @@ def main(log_callback=None, stop_callback=None):
                 actual_num = c['num']  # Preserve the decimal for text/PDF chunks
             else:
                 actual_num = c.get('actual_chapter_num', c['num'])
+            log_num = _chapter_log_number(c, actual_num)
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
             # Skip configured special files if translation is disabled.

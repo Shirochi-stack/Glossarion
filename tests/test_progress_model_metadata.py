@@ -268,6 +268,22 @@ def test_translation_log_numbers_use_same_nonreset_sequence_as_progress_views():
     assert "'chapter': parent_log_num" in translation_source
 
 
+def test_sequential_translation_assigns_log_number_before_first_use():
+    source_file = inspect.getsourcefile(ProgressManager)
+    translation_source = Path(source_file).read_text(encoding="utf-8")
+    sequential_start = translation_source.index("# Second pass: process chapters")
+    assignment = translation_source.index(
+        "log_num = _chapter_log_number(c, actual_num)",
+        sequential_start,
+    )
+    first_use = translation_source.index(
+        "Output file missing for chapter {log_num}",
+        sequential_start,
+    )
+
+    assert assignment < first_use
+
+
 def test_all_requested_chapter_views_use_shared_nonreset_numbering():
     source_root = Path(__file__).resolve().parents[1] / "src"
     progress_source = (source_root / "Retranslation_GUI.py").read_text(

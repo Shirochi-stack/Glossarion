@@ -139,7 +139,7 @@ def test_parallel_preflight_defers_duplicate_chunk_splitting():
     assert 'print("📊 Setting chapter numbers...")' not in source
 
 
-def test_title_only_batch_requests_disable_chunk_progress_and_rate_limit_saves():
+def test_title_only_batch_requests_disable_chunk_progress_and_publish_coalesced_saves():
     process_source = inspect.getsource(
         translation_module.BatchTranslationProcessor.process_single_chapter
     )
@@ -148,10 +148,10 @@ def test_title_only_batch_requests_disable_chunk_progress_and_rate_limit_saves()
         "self.chunk_progress_enabled and not title_tag_only_chapter"
         in process_source
     )
-    assert "self.progress_manager.save_rate_limited()" in process_source
+    assert "self.save_progress_fn(in_progress=in_progress)" in process_source
 
 
-def test_parallel_api_dispatch_updates_progress_without_writing_the_json():
+def test_parallel_api_dispatch_publishes_coalesced_in_progress_snapshot():
     single_source = inspect.getsource(
         translation_module.BatchTranslationProcessor.process_single_chapter
     )
@@ -168,8 +168,8 @@ def test_parallel_api_dispatch_updates_progress_without_writing_the_json():
     merged_end = merged_source.index("# Merge chapter contents", merged_start)
 
     assert 'status="in_progress"' in mark_source
-    assert "_save_live_chapter_progress()" not in mark_source
-    assert "self.save_progress_fn()" not in merged_source[
+    assert "_save_live_chapter_progress(in_progress=True)" in mark_source
+    assert "self.save_progress_fn(in_progress=True)" in merged_source[
         merged_start:merged_end
     ]
 
@@ -213,9 +213,25 @@ def test_parallel_worker_progress_rate_limits_normal_queue_updates(
     monkeypatch.setattr(manager, "save", lambda: saves.append("saved"))
     manager._last_progress_save_monotonic = time.monotonic()
 
-    for _ in range(31):
+    for _ in range(127):
         assert manager.save_parallel_worker_progress() is False
     assert manager.save_parallel_worker_progress() is True
+    assert saves == ["saved"]
+
+
+def test_parallel_first_active_request_is_published_immediately(
+    tmp_path,
+    monkeypatch,
+):
+    manager = translation_module.ProgressManager(str(tmp_path))
+    saves = []
+    monkeypatch.setattr(manager, "save", lambda: saves.append("saved"))
+    manager._last_progress_save_monotonic = time.monotonic()
+    manager.begin_parallel_worker_progress()
+
+    assert manager.save_parallel_worker_progress(in_progress=True) is True
+    assert saves == ["saved"]
+    assert manager.save_parallel_worker_progress(in_progress=True) is False
     assert saves == ["saved"]
 
 
@@ -666,13 +682,14 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
         '<body><img src="../image/kuchie-004.jpg" /></body></html>'
     )
     progress_updates = []
+    progress_save_requests = []
     processor = BatchTranslationProcessor(
         Config(),
         Client(),
         [],
         str(tmp_path),
         threading.RLock(),
-        lambda: None,
+        lambda **kwargs: progress_save_requests.append(kwargs),
         lambda *args, **kwargs: progress_updates.append((args, kwargs)),
         lambda: False,
     )
@@ -700,6 +717,10 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
         {"role": "user", "content": "<title>義妹生活</title>"},
     ]]
     assert progress_updates[-1][1]["status"] == "completed"
+    assert any(
+        request.get("in_progress") is True
+        for request in progress_save_requests
+    )
     output_files = [path for path in tmp_path.iterdir() if path.is_file()]
     assert len(output_files) == 1
     output_soup = BeautifulSoup(
