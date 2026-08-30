@@ -1813,6 +1813,7 @@ class _InputOutputDialog(QDialog):
         'DIRECT_TEXT_PROFILE_USER_PROMPT',
         'DIRECT_TEXT_SKIP_PROMPT_PROFILE',
         'DIRECT_TEXT_ORDERED_BATCH',
+        'ORDER_BATCH_REQUESTS_BY_SPINE',
         'SYSTEM_PROMPT_TO_USER',
     )
     _STATUS_FIRST_CHARS = set(
@@ -9243,6 +9244,8 @@ class _InputOutputDialog(QDialog):
             os.environ['DIRECT_TEXT_ORDERED_BATCH'] = (
                 '1' if self._run_source_is_attachment else '0'
             )
+            if self._run_source_is_attachment:
+                os.environ['ORDER_BATCH_REQUESTS_BY_SPINE'] = '1'
             gui._apply_forced_streaming_environment()
             gui._apply_direct_text_runtime_environment()
 

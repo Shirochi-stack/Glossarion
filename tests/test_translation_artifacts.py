@@ -335,88 +335,6 @@ def test_glossary_queue_uses_api_preflight_at_provider_boundary():
     assert "callback(dispatch_order)" in source[callback_start:callback_end]
 
 
-def test_batch_dispatch_has_no_timeout_or_artificial_spacing():
-    translation_source = Path(translation_module.__file__).read_text(
-        encoding="utf-8"
-    )
-    glossary_source = (
-        Path(translation_module.__file__)
-        .with_name("extract_glossary_from_epub.py")
-        .read_text(encoding="utf-8")
-    )
-
-    for source in (translation_source, glossary_source):
-        assert "ORDERED_BATCH_DISPATCH_TIMEOUT" not in source
-        assert "ORDERED_BATCH_DISPATCH_INTERVAL" not in source
-        assert "timed out waiting for an earlier spine item" not in source
-
-    assert "_wait_for_request_dispatch(" in translation_source
-    assert "spine_send_dispatcher.wait_for_turn(" in glossary_source
-    assert "spine_send_dispatcher.mark_sent(" in glossary_source
-
-
-def test_spine_send_dispatcher_releases_on_send_not_completion():
-    dispatcher = translation_module.SpineSendDispatcher()
-    second_released = threading.Event()
-
-    def wait_for_second():
-        assert dispatcher.wait_for_turn(1)
-        second_released.set()
-
-    waiter = threading.Thread(target=wait_for_second)
-    waiter.start()
-    time.sleep(0.05)
-    assert not second_released.is_set()
-
-    assert dispatcher.wait_for_turn(0)
-    time.sleep(0.05)
-    assert not second_released.is_set()
-
-    # This is the provider-send boundary, not response completion.
-    dispatcher.mark_sent(0)
-    assert second_released.wait(0.5)
-    waiter.join(timeout=0.5)
-
-
-def test_spine_send_dispatcher_skips_failed_unsent_ticket():
-    dispatcher = translation_module.SpineSendDispatcher()
-    third_released = threading.Event()
-
-    assert dispatcher.wait_for_turn(0)
-    dispatcher.mark_sent(0)
-
-    waiter = threading.Thread(
-        target=lambda: (
-            dispatcher.wait_for_turn(2) and third_released.set()
-        )
-    )
-    waiter.start()
-    time.sleep(0.05)
-    assert not third_released.is_set()
-
-    dispatcher.abandon_if_unsent(1)
-    assert third_released.wait(0.5)
-    waiter.join(timeout=0.5)
-
-
-def test_spine_send_dispatcher_cancels_waiting_ticket_on_graceful_stop():
-    stop_requested = threading.Event()
-    dispatcher = translation_module.SpineSendDispatcher(
-        stop_check=stop_requested.is_set
-    )
-    wait_result = []
-
-    waiter = threading.Thread(
-        target=lambda: wait_result.append(dispatcher.wait_for_turn(1))
-    )
-    waiter.start()
-    time.sleep(0.05)
-    stop_requested.set()
-
-    waiter.join(timeout=0.5)
-    assert wait_result == [False]
-
-
 def test_direct_glossary_run_exports_live_api_preflight_field():
     source = inspect.getsource(TranslatorGUI._extract_glossary_from_text_file)
 
@@ -1043,6 +961,7 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
 
     monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
     monkeypatch.setenv("SEND_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("ORDER_BATCH_REQUESTS_BY_SPINE", "0")
     monkeypatch.setenv("CHAR_RATIO_TRUNCATION_ENABLED", "0")
     monkeypatch.setenv("DIRECT_TEXT_ACTIVE", "0")
     monkeypatch.setenv("OUTPUT_LANGUAGE", "English")
@@ -1115,7 +1034,7 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
                 "_title_tag_original_markup": original,
                 "filename": "chapter001.xhtml",
                 "original_basename": "chapter001.xhtml",
-                "_batch_request_order": 0,
+                "_batch_request_order": 7,
             },
         )
     )
@@ -1135,7 +1054,7 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
         request.get("in_progress") is True
         for request in progress_save_requests
     )
-    assert provider_starts == [0]
+    assert provider_starts == [7]
     output_files = [path for path in tmp_path.iterdir() if path.is_file()]
     assert len(output_files) == 1
     output_soup = BeautifulSoup(
@@ -1628,6 +1547,7 @@ def _run_batch_chapter_failure(
 
     monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
     monkeypatch.setenv("SEND_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("ORDER_BATCH_REQUESTS_BY_SPINE", "0")
     monkeypatch.setenv("CHAR_RATIO_TRUNCATION_ENABLED", "0")
     monkeypatch.setenv("DIRECT_TEXT_ACTIVE", "0")
     monkeypatch.setattr(

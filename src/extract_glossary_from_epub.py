@@ -20,7 +20,6 @@ from chapter_splitter import ChapterSplitter
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import List, Dict, Tuple
 from unified_api_client import (
-    SpineSendDispatcher,
     UnifiedClient,
     UnifiedClientError,
     _api_queue_admissions,
@@ -80,6 +79,96 @@ def _flush_glossary_stop_summary():
         )
     return count
 
+
+class _OrderedGlossaryBatchDispatcher:
+    """Release batch units into their first API send in reading order."""
+
+    def __init__(self, enabled=True, stop_check=None):
+        self.enabled = bool(enabled)
+        self.stop_check = stop_check
+        self._condition = threading.Condition()
+        self._next_order = 0
+        self._released = set()
+        self._abandoned = set()
+        self._last_release = 0.0
+
+    def _advance_abandoned_locked(self):
+        while self._next_order in self._abandoned:
+            self._abandoned.remove(self._next_order)
+            self._next_order += 1
+
+    def wait_for_turn(self, request_order):
+        """Gate only the first send; retries and later chunks pass immediately."""
+        if not self.enabled or request_order is None:
+            return
+        try:
+            request_order = int(request_order)
+        except (TypeError, ValueError):
+            return
+
+        try:
+            timeout = max(
+                5.0,
+                float(os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "120")),
+            )
+        except (TypeError, ValueError):
+            timeout = 120.0
+        deadline = time.monotonic() + timeout
+
+        with self._condition:
+            if (
+                request_order in self._released
+                or request_order < self._next_order
+            ):
+                return
+            self._advance_abandoned_locked()
+            while request_order != self._next_order:
+                if callable(self.stop_check) and self.stop_check():
+                    return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    print(
+                        "⚠️ Ordered glossary batch dispatch timed out waiting "
+                        "for an earlier spine item; releasing this request"
+                    )
+                    self._next_order = request_order
+                    break
+                self._condition.wait(timeout=min(0.1, remaining))
+                self._advance_abandoned_locked()
+
+            try:
+                release_interval = max(
+                    0.0,
+                    float(os.getenv("ORDERED_BATCH_DISPATCH_INTERVAL", "0.025")),
+                )
+            except (TypeError, ValueError):
+                release_interval = 0.025
+            while self._last_release:
+                delay = self._last_release + release_interval - time.monotonic()
+                if delay <= 0:
+                    break
+                self._condition.wait(timeout=min(0.05, delay))
+
+            self._released.add(request_order)
+            self._last_release = time.monotonic()
+            self._next_order = max(self._next_order, request_order + 1)
+            self._advance_abandoned_locked()
+            self._condition.notify_all()
+
+    def abandon_if_unsent(self, request_order):
+        """Prevent one pre-send worker failure from blocking later spine items."""
+        if not self.enabled or request_order is None:
+            return
+        try:
+            request_order = int(request_order)
+        except (TypeError, ValueError):
+            return
+        with self._condition:
+            if request_order in self._released or request_order < self._next_order:
+                return
+            self._abandoned.add(request_order)
+            self._advance_abandoned_locked()
+            self._condition.notify_all()
 
 # Direct Text needs the glossary phase to be a first-class part of the chat,
 # not just a collection of provider lifecycle logs.  The API client already
@@ -376,8 +465,6 @@ def _is_graceful_stop_skip_error(err: Exception) -> bool:
         return False
     if "graceful stop active - not starting new api call" in s:
         return True
-    if "stopped before provider dispatch" in s:
-        return True
     if not _glossary_is_graceful_stop_active():
         return False
     return (
@@ -391,18 +478,11 @@ def _is_glossary_user_stop_error(err: Exception) -> bool:
     if _is_graceful_stop_skip_error(err):
         return True
     try:
-        if str(getattr(err, "error_type", "") or "").lower() == "cancelled":
-            return True
-    except Exception:
-        pass
-    try:
         error_text = str(err).lower()
     except Exception:
         return False
     return (
         "glossary extraction stopped by user" in error_text
-        or "translation stopped by user" in error_text
-        or "stopped before provider dispatch" in error_text
         or "operation cancelled by user" in error_text
     )
 
@@ -592,7 +672,7 @@ def _glossary_watchdog_request_label(context, chunk_idx=None, total_chunks=None)
     return label
 
 
-def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, chapter_idx=None, chapter_num=None, chunk_idx=None, total_chunks=None, merged_chapters=None, before_send_callback=None, before_dispatch_callback=None, context='glossary'):
+def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, chapter_idx=None, chapter_num=None, chunk_idx=None, total_chunks=None, merged_chapters=None, before_send_callback=None, context='glossary'):
     """Send API request with interrupt capability and optional timeout retry
     
     Args:
@@ -956,11 +1036,6 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 api_delay = 2.0
 
         # Delay is handled by _apply_api_call_stagger inside client.send()
-
-        # Do not count ordered queue waiting against the API timeout. Provider
-        # setup (including AuthND CAPTCHA minting) begins only after this permit.
-        if callable(before_dispatch_callback):
-            before_dispatch_callback()
 
         api_thread = threading.Thread(target=api_call)
         api_thread.daemon = True
@@ -6238,8 +6313,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                                   stop_check_fn, chunk_timeout: int = None,
                                   chunk_idx: int = None, total_chunks: int = None,
                                   chapter_num: int = None,
-                                  before_send_callback=None,
-                                  before_dispatch_callback=None) -> Dict:
+                                  before_send_callback=None) -> Dict:
     """Process a single chapter API call with thread-safe payload handling"""
     display_chapter_num = chapter_num if chapter_num is not None else idx + 1
     
@@ -6339,7 +6413,6 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             chunk_idx=chunk_idx,
             total_chunks=total_chunks,
             before_send_callback=before_send_callback,
-            before_dispatch_callback=before_dispatch_callback,
         )
         request_model_name = _current_glossary_model_name({}, prefer_thread=True)
         request_key_identifier, request_key_pool = _current_glossary_key_context({}, prefer_thread=True)
@@ -6469,7 +6542,6 @@ def process_single_chapter_with_split(idx: int,
                                       stop_check_fn,
                                       chunk_timeout: int = None,
                                       before_send_callback=None,
-                                      before_dispatch_callback=None,
                                       chapter_num: int = None):
     """
     Wrapper that performs chapter-level splitting (using output-limit budget) before calling the API.
@@ -6504,7 +6576,7 @@ def process_single_chapter_with_split(idx: int,
                     + assistant_prefill_msgs
                     + [{"role": "user", "content": user_prompt}]
                 )
-        return process_single_chapter_api_call(idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout, chapter_num=display_chapter_num, before_send_callback=before_send_callback, before_dispatch_callback=before_dispatch_callback)
+        return process_single_chapter_api_call(idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout, chapter_num=display_chapter_num, before_send_callback=before_send_callback)
 
     print(f"⚠️ Chapter {display_chapter_num} exceeds chunk budget ({chapter_tokens:,} > {available_tokens:,}); splitting...")
     # Wrap plain text as simple HTML for splitter
@@ -6559,7 +6631,6 @@ def process_single_chapter_with_split(idx: int,
             chunk_idx=chunk_idx, total_chunks=total_chunks,
             chapter_num=display_chapter_num,
             before_send_callback=before_send_callback,
-            before_dispatch_callback=before_dispatch_callback,
         )
         if result.get('user_stop_skip') or result.get('graceful_stop_skip'):
             stopped_request_result = result
@@ -6606,7 +6677,6 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
                                    client, temp: float, mtoks: int,
                                    stop_check_fn, chunk_timeout: int = None,
                                    before_send_callback=None,
-                                   before_dispatch_callback=None,
                                    chapter_num_map=None) -> Dict:
     """
     Process a merged group of chapters in a single API call.
@@ -6638,7 +6708,6 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
             idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout,
             chapter_num=(chapter_num_map or {}).get(idx, idx + 1),
             before_send_callback=before_send_callback,
-            before_dispatch_callback=before_dispatch_callback,
         )
         return {'results': [result], 'merged_indices': []}
     
@@ -6707,7 +6776,6 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
             chapter_num=chapter_nums[0] if chapter_nums else parent_idx + 1,
             merged_chapters=chapter_nums,
             before_send_callback=before_send_callback,
-            before_dispatch_callback=before_dispatch_callback,
         )
         request_model_name = _current_glossary_model_name({}, prefer_thread=True)
         request_key_identifier, request_key_pool = _current_glossary_key_context({}, prefer_thread=True)
@@ -6801,9 +6869,9 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
         }
         
     except UnifiedClientError as e:
-        # Expected stop/cancellation errors are summarized once at the batch
-        # barrier instead of being printed once per merged request.
-        if _is_glossary_user_stop_error(e):
+        # Check if this is a user stop (not an actual error)
+        err_lower = str(e).lower()
+        if "stopped by user" in err_lower or "cancelled" in err_lower or "operation cancelled" in err_lower:
             # print(f"🛑 Glossary extraction stopped by user")  # Redundant
             # Re-raise to propagate the stop signal up the call stack
             raise
@@ -8089,20 +8157,27 @@ def main(log_callback=None, stop_callback=None):
             units_to_process = [[ch] for ch in chapters_to_process]  # Each chapter as single-item group
             is_merged_mode = False
 
-        # Stable request tickets let workers prepare in parallel, then enter
-        # provider setup in spine order. The next ticket is released at the
-        # real network-send boundary, never after response completion.
+        # ``extract_chapters_from_epub`` returns documents in OPF spine order,
+        # and every merge group above preserves that sequence. Futures are also
+        # submitted in this order, but worker scheduling can otherwise let a
+        # later unit reach client.send() first. Assign a stable ticket to each
+        # unit and gate only its first send so parallel requests stay parallel
+        # after being released in reading order.
+        ordered_batch_dispatch_enabled = (
+            os.getenv("ORDER_BATCH_REQUESTS_BY_SPINE", "1").strip().lower()
+            not in ("0", "false", "no", "off")
+        )
+        ordered_batch_dispatcher = _OrderedGlossaryBatchDispatcher(
+            enabled=ordered_batch_dispatch_enabled,
+            stop_check=check_stop,
+        )
         unit_dispatch_order = {
             int(unit[0][0]): order
             for order, unit in enumerate(units_to_process)
             if unit
         }
-        spine_send_dispatcher = SpineSendDispatcher(
-            stop_check=lambda: (
-                _glossary_is_graceful_stop_active()
-                or _glossary_is_hard_stop_requested(stop_callback)
-            )
-        )
+        if ordered_batch_dispatch_enabled:
+            print("📚 Glossary batch API dispatch: OPF spine order")
         
         aggressive_mode = batching_mode == 'aggressive'
         if batching_mode == 'conservative':
@@ -8240,29 +8315,17 @@ def main(log_callback=None, stop_callback=None):
                         unit_indices=unit_indices,
                         dispatch_order=dispatch_order,
                     ):
-                        spine_send_dispatcher.mark_sent(dispatch_order)
+                        ordered_batch_dispatcher.wait_for_turn(dispatch_order)
                         _mark_glossary_in_progress(unit_indices)
                         callback = request_started_callback
                         if callable(callback):
                             callback(dispatch_order)
-
-                    def _wait_for_unit_dispatch(
-                        dispatch_order=dispatch_order,
-                    ):
-                        if not spine_send_dispatcher.wait_for_turn(
-                            dispatch_order
-                        ):
-                            raise UnifiedClientError(
-                                "Glossary extraction stopped before provider dispatch",
-                                error_type="cancelled",
-                            )
 
                     if is_merged_mode:
                         future = executor.submit(
                             process_merged_group_api_call,
                             unit, build_prompt, client, temp, mtoks, check_stop, chunk_timeout,
                             _mark_unit_progress_on_send,
-                            _wait_for_unit_dispatch,
                             chapter_num_map={
                                 u_idx: _glossary_chapter_actual_num(u_idx, context=progress_context)
                                 for u_idx, _ in unit
@@ -8309,15 +8372,12 @@ def main(log_callback=None, stop_callback=None):
                             check_stop,
                             chunk_timeout,
                             _mark_unit_progress_on_send,
-                            _wait_for_unit_dispatch,
                             chapter_num=_glossary_chapter_actual_num(idx, context=progress_context),
                         )
                     futures[future] = unit
                     future.add_done_callback(
-                        lambda _future, dispatch_order=dispatch_order: (
-                            spine_send_dispatcher.abandon_if_unsent(
-                                dispatch_order
-                            )
+                        lambda _future, order=dispatch_order: (
+                            ordered_batch_dispatcher.abandon_if_unsent(order)
                         )
                     )
                     # Small yield to keep GUI responsive
@@ -8400,13 +8460,8 @@ def main(log_callback=None, stop_callback=None):
                                 display_idx = _glossary_chapter_actual_num(idx, context=progress_context)
                                 
                                 if error:
-                                    # Stop cancellations are represented by the
-                                    # single coalesced batch summary.
-                                    if (
-                                        result.get('user_stop_skip')
-                                        or result.get('graceful_stop_skip')
-                                        or _is_glossary_user_stop_error(error)
-                                    ):
+                                    # Suppress expected "graceful stop" pre-send cancellations.
+                                    if isinstance(error, str) and _is_graceful_stop_skip_error(error):
                                         return False
                                     print(f"[Chapter {display_idx}] Error: {error}")
                                     _mark_glossary_failed(failed, idx, "API_ERROR")
@@ -8576,9 +8631,8 @@ def main(log_callback=None, stop_callback=None):
                         return True
                         
                     except Exception as e:
-                        # Suppress every expected graceful/force stop variant;
-                        # genuine provider failures still follow the error path.
-                        if _is_glossary_user_stop_error(e):
+                        # Suppress expected "graceful stop" pre-send cancellations.
+                        if _is_graceful_stop_skip_error(e):
                             return False
                         if _glossary_is_hard_stop_requested(stop_callback):
                             stopped_early = True
