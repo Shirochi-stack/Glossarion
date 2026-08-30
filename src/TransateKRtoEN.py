@@ -22367,10 +22367,20 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     None,
                 )
                 if watchdog_request_id:
-                    _api_watchdog_mark_in_flight(
+                    claimed = _api_watchdog_mark_in_flight(
                         watchdog_request_id,
                         getattr(client, 'model', None),
                     )
+                    if not claimed and (
+                        os.environ.get('GRACEFUL_STOP') == '1'
+                        or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+                    ):
+                        raise UnifiedClientError(
+                            "Graceful stop cleared this queued request",
+                            error_type="cancelled",
+                        )
+            except UnifiedClientError:
+                raise
             except Exception:
                 pass
             provider_call_started.set()

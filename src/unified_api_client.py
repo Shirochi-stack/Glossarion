@@ -751,20 +751,39 @@ def _api_watchdog_clear_request(request_id: Optional[str]) -> None:
         return
     _api_watchdog_finished(request_id=request_id)
 
-def _api_watchdog_mark_in_flight(request_id: Optional[str], model: Optional[str] = None) -> None:
-    """Transition a queued entry to in-flight and increment counter once."""
+def _api_watchdog_mark_in_flight(
+    request_id: Optional[str],
+    model: Optional[str] = None,
+    *,
+    allow_during_graceful: bool = False,
+) -> bool:
+    """Atomically claim a queued request at the provider-send boundary.
+
+    Returning ``False`` tells the caller that Graceful Stop (or pending-row
+    cleanup) won the race and the provider request must not be sent.  Existing
+    in-flight entries remain claimable so a first-click graceful stop never
+    interrupts a call which already crossed the boundary.
+    """
     global _api_watchdog_in_flight, _api_watchdog_peak, _api_watchdog_last_change_ts
     global _api_watchdog_last_start_ts, _api_watchdog_last_model
     if not request_id:
-        return
+        return False
     try:
         now = time.time()
         with _api_watchdog_lock:
             entry = _api_watchdog_entries.get(request_id)
             if not entry:
-                return
+                return False
             if entry.get("status") == "in_flight":
-                return  # already counted
+                return True  # already counted
+            if (
+                not allow_during_graceful
+                and (
+                    os.environ.get("GRACEFUL_STOP") == "1"
+                    or os.environ.get("GRACEFUL_STOP_COMPLETED") == "1"
+                )
+            ):
+                return False
             entry["status"] = "in_flight"
             if model:
                 entry["model"] = model
@@ -776,8 +795,9 @@ def _api_watchdog_mark_in_flight(request_id: Optional[str], model: Optional[str]
             if model:
                 _api_watchdog_last_model = model
         _api_watchdog_external_write(get_api_watchdog_state())
+        return True
     except Exception:
-        pass
+        return False
 def _api_watchdog_update_model(model: Optional[str], request_id: Optional[str] = None) -> None:
     """Update watchdog's last/active model after key rotation or late binding."""
     global _api_watchdog_last_model
@@ -18140,17 +18160,59 @@ class UnifiedClient:
         except Exception:
             pass
 
-        # Most providers are ready to send at this point. AuthZA still needs to
-        # install/start and health-check its local proxy, so its progress
-        # callback is deliberately consumed by _send_authza after readiness.
+        # Ensure client_type is initialized before deciding where the real
+        # provider boundary lives (important for multi-key/dedicated clients).
+        try:
+            if not hasattr(self, 'client_type') or self.client_type is None:
+                self._ensure_thread_client()
+        except Exception:
+            if not hasattr(self, 'client_type'):
+                self.client_type = None
+
+        # Most providers are ready to send at this point. AuthND still needs a
+        # browser token and AuthZA still needs a healthy local proxy, so those
+        # routes claim their watchdog row inside their provider handler. For
+        # every other route, claim before changing progress to In Progress.
         try:
             tls = self._get_thread_local_client()
             self._remember_actual_request_model()
-            active_model_lower = str(self._get_active_request_model() or '').strip().lower()
-            defer_progress_callback = active_model_lower.startswith(
-                ('authnd', 'authza')
+            deferred_provider_boundary = {'authnd', 'authza'}
+            active_model_lower = str(
+                self._get_active_request_model() or ''
+            ).strip().lower()
+            try:
+                actual_provider_lower = str(
+                    self._get_actual_provider() or ''
+                ).strip().lower()
+            except Exception:
+                actual_provider_lower = ''
+            defer_progress_callback = (
+                active_model_lower.startswith(('authnd', 'authza'))
+                or str(getattr(self, 'client_type', '') or '').lower()
+                in deferred_provider_boundary
+                or actual_provider_lower in deferred_provider_boundary
             )
             if not defer_progress_callback:
+                rid = (
+                    request_id
+                    or getattr(tls, 'current_request_id', None)
+                )
+                if rid:
+                    claimed = _api_watchdog_mark_in_flight(
+                        rid,
+                        self._get_active_request_model(),
+                        allow_during_graceful=bool(
+                            getattr(self, '_ignore_graceful_stop', False)
+                        ),
+                    )
+                    if not claimed and (
+                        os.environ.get('GRACEFUL_STOP') == '1'
+                        or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+                    ):
+                        raise UnifiedClientError(
+                            "Graceful stop active - not starting new API call",
+                            error_type="cancelled",
+                        )
                 cb = getattr(tls, 'pre_api_call_callback', None)
                 if callable(cb):
                     tls.last_pre_api_call_callback = cb
@@ -18166,33 +18228,6 @@ class UnifiedClient:
                 raise
             try:
                 print(f"⚠️ Pre-send progress callback failed: {cb_err}")
-            except Exception:
-                pass
-
-        # Ensure client_type is initialized before routing (important for multi-key mode)
-        try:
-            if not hasattr(self, 'client_type') or self.client_type is None:
-                self._ensure_thread_client()
-        except Exception:
-            # Guard against missing attribute in extreme early paths
-            if not hasattr(self, 'client_type'):
-                self.client_type = None
-
-        try:
-            deferred_watchdog_providers = {'authnd', 'authza'}
-            defer_watchdog_mark = (
-                str(getattr(self, 'client_type', '') or '').lower() in deferred_watchdog_providers
-                or self._get_actual_provider() in deferred_watchdog_providers
-            )
-        except Exception:
-            defer_watchdog_mark = str(getattr(self, 'client_type', '') or '').lower() in {'authnd', 'authza'}
-        if not defer_watchdog_mark:
-            try:
-                rid = request_id
-                if not rid:
-                    tls = self._get_thread_local_client()
-                    rid = getattr(tls, 'current_request_id', None)
-                _api_watchdog_mark_in_flight(rid, self._get_active_request_model())
             except Exception:
                 pass
 
@@ -27967,10 +28002,40 @@ class UnifiedClient:
                     pass
                 authnd_watchdog_marked = False
 
+                def _authnd_pre_dispatch_cancelled():
+                    if self._is_local_cancel_requested():
+                        return True
+                    return bool(
+                        not getattr(self, '_ignore_graceful_stop', False)
+                        and (
+                            os.environ.get('GRACEFUL_STOP') == '1'
+                            or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+                        )
+                    )
+
                 def _authnd_provider_started():
                     nonlocal authnd_watchdog_marked
                     if authnd_watchdog_marked:
                         return
+                    if authnd_request_id:
+                        claimed = _api_watchdog_mark_in_flight(
+                            authnd_request_id,
+                            getattr(self, 'model', None),
+                            allow_during_graceful=bool(
+                                getattr(self, '_ignore_graceful_stop', False)
+                            ),
+                        )
+                        if not claimed and _authnd_pre_dispatch_cancelled():
+                            raise UnifiedClientError(
+                                "Graceful stop active - not starting new API call",
+                                error_type="cancelled",
+                            )
+                    elif _authnd_pre_dispatch_cancelled():
+                        raise UnifiedClientError(
+                            "Graceful stop active - not starting new API call",
+                            error_type="cancelled",
+                        )
+                    authnd_watchdog_marked = True
                     callback = getattr(
                         tls,
                         'pre_api_call_callback',
@@ -27982,11 +28047,6 @@ class UnifiedClient:
                         callback()
                     if hasattr(tls, 'pre_api_call_callback'):
                         tls.pre_api_call_callback = None
-                    _api_watchdog_mark_in_flight(
-                        authnd_request_id,
-                        getattr(self, 'model', None),
-                    )
-                    authnd_watchdog_marked = True
 
                 def _authnd_log_fn(message):
                     print(message)
@@ -28005,7 +28065,7 @@ class UnifiedClient:
                     progress_label=authnd_progress_label,
                     stream=True,
                     log_stream=authnd_log_stream,
-                    cancel_check=self._is_local_cancel_requested,
+                    cancel_check=_authnd_pre_dispatch_cancelled,
                     before_send_callback=_authnd_provider_started,
                 )
 
@@ -28056,6 +28116,18 @@ class UnifiedClient:
                 error_str = str(exc)
                 error_l = error_str.lower()
                 if "stream cancelled" in error_str.lower():
+                    if (
+                        not getattr(self, '_ignore_graceful_stop', False)
+                        and (
+                            os.environ.get('GRACEFUL_STOP') == '1'
+                            or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+                        )
+                        and not authnd_watchdog_marked
+                    ):
+                        raise UnifiedClientError(
+                            "Graceful stop active - not starting new API call",
+                            error_type="cancelled",
+                        )
                     self._log_once("AuthND: Stream cancelled by user")
                     raise UnifiedClientError(
                         "AuthND: Translation stopped by user",

@@ -1223,6 +1223,132 @@ def _make_missing_finish_client(monkeypatch, model):
     return unified, client
 
 
+def test_authnd_graceful_stop_cannot_cross_cleared_provider_boundary(monkeypatch):
+    import unified_api_client as unified
+
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.setenv("MAX_RETRIES", "1")
+    monkeypatch.setattr(unified, "_api_watchdog_external_write", lambda _state: None)
+    entered_preflight = threading.Event()
+    release_preflight = threading.Event()
+    provider_posts = []
+    progress_updates = []
+    preflight_cancel_checks = []
+
+    def fake_authnd_send(**kwargs):
+        entered_preflight.set()
+        assert release_preflight.wait(2.0)
+        preflight_cancel_checks.append(kwargs["cancel_check"]())
+        # Exercise the final atomic boundary as well, even though the real
+        # AuthND helper exits as soon as the cancellation check turns true.
+        kwargs["before_send_callback"]()
+        provider_posts.append(True)
+        return {
+            "content": "translated",
+            "finish_reason": "stop",
+            "finish_reason_explicit": True,
+            "finish_reason_inference": "provider",
+            "usage": None,
+        }
+
+    monkeypatch.setattr(unified, "_authnd_send", fake_authnd_send)
+    unified, client = _make_missing_finish_client(
+        monkeypatch, "authnd/moonshotai/kimi-k3",
+    )
+    request_id = "authnd-graceful-pending"
+    unified._api_watchdog_reset()
+    unified._api_watchdog_started(
+        "glossary", request_id=request_id, chapter=12, queued=True,
+    )
+    outcome = {}
+
+    def run_request():
+        try:
+            tls = client._get_thread_local_client()
+            tls.current_request_id = request_id
+            tls.pre_api_call_callback = lambda: progress_updates.append(True)
+            outcome["result"] = client._send_authnd([], 0.2, 1024, "test")
+        except Exception as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run_request)
+    worker.start()
+    assert entered_preflight.wait(2.0)
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    assert unified._api_watchdog_clear_pending_requests() == 1
+    release_preflight.set()
+    worker.join(2.0)
+
+    assert not worker.is_alive()
+    assert isinstance(outcome.get("error"), unified.UnifiedClientError)
+    assert outcome["error"].error_type == "cancelled"
+    assert preflight_cancel_checks == [True]
+    assert progress_updates == []
+    assert provider_posts == []
+    assert unified.get_api_watchdog_state()["in_flight"] == 0
+    unified._api_watchdog_reset()
+
+
+def test_authnd_graceful_stop_preserves_claimed_provider_call(monkeypatch):
+    import unified_api_client as unified
+
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.setenv("MAX_RETRIES", "1")
+    monkeypatch.setattr(unified, "_api_watchdog_external_write", lambda _state: None)
+    provider_started = threading.Event()
+    release_provider = threading.Event()
+    progress_updates = []
+
+    def fake_authnd_send(**kwargs):
+        kwargs["before_send_callback"]()
+        provider_started.set()
+        assert release_provider.wait(2.0)
+        return {
+            "content": "translated",
+            "finish_reason": "stop",
+            "finish_reason_explicit": True,
+            "finish_reason_inference": "provider",
+            "usage": None,
+        }
+
+    monkeypatch.setattr(unified, "_authnd_send", fake_authnd_send)
+    unified, client = _make_missing_finish_client(
+        monkeypatch, "authnd/moonshotai/kimi-k3",
+    )
+    request_id = "authnd-graceful-active"
+    unified._api_watchdog_reset()
+    unified._api_watchdog_started(
+        "glossary", request_id=request_id, chapter=12, queued=True,
+    )
+    outcome = {}
+
+    def run_request():
+        try:
+            tls = client._get_thread_local_client()
+            tls.current_request_id = request_id
+            tls.pre_api_call_callback = lambda: progress_updates.append(True)
+            outcome["result"] = client._send_authnd([], 0.2, 1024, "test")
+        except Exception as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run_request)
+    worker.start()
+    assert provider_started.wait(2.0)
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    assert unified._api_watchdog_clear_pending_requests() == 0
+    assert unified.get_api_watchdog_state()["in_flight"] == 1
+    release_provider.set()
+    worker.join(2.0)
+
+    assert not worker.is_alive()
+    assert "error" not in outcome
+    assert outcome["result"].content == "translated"
+    assert progress_updates == [True]
+    unified._api_watchdog_reset()
+
+
 @pytest.mark.parametrize(
     "provider,model,send_attr,result",
     MISSING_FINISH_PROVIDERS,
