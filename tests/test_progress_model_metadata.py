@@ -3423,3 +3423,65 @@ def test_open_progress_managers_rebuild_when_input_signature_changes():
     assert "dialog.deleteLater()" in refresh_source
     assert "self.force_retranslation()" in refresh_source
     assert "self._reopen_glossary_progress_after_input_change()" in refresh_source
+
+
+def test_live_epub_progress_matching_is_prepared_off_the_gui_thread():
+    builder_source = inspect.getsource(
+        RetranslationMixin._add_retranslation_buttons_opf
+    )
+
+    assert "prepared_data = {" in builder_source
+    assert "append_auxiliary=False" in builder_source
+    assert "prepared_chapter_display_info" in builder_source
+    assert "_deferred_prefetched_progress_payload" in builder_source
+
+
+def test_background_spine_rematch_can_skip_live_qt_auxiliary_rows(tmp_path):
+    gui = RetranslationMixin()
+    gui.config = {}
+    auxiliary_calls = []
+    gui._append_chunk_progress_display_info = lambda *_: auxiliary_calls.append(
+        "chunks"
+    )
+    gui._append_metadata_display_info = lambda *_: auxiliary_calls.append(
+        "metadata"
+    )
+    gui._append_translation_artifact_display_info = (
+        lambda *_: auxiliary_calls.append("artifacts")
+    )
+    gui._append_pdf_ocr_display_info = lambda *_: auxiliary_calls.append("ocr")
+    gui._append_image_gen_display_info = lambda *_: auxiliary_calls.append(
+        "images"
+    )
+    data = {
+        "prog": {"chapters": {}},
+        "output_dir": str(tmp_path),
+        "spine_chapters": [
+            {
+                "filename": "part0001.xhtml",
+                "file_chapter_num": 1,
+                "display_chapter_num": 1,
+                "position": 0,
+                "status": "unknown",
+                "output_file": None,
+                "is_special": False,
+            }
+        ],
+        "_prefetched_output_listing": set(),
+        "_refresh_read_only": True,
+    }
+
+    gui._rematch_spine_chapters(data, append_auxiliary=False)
+
+    assert auxiliary_calls == []
+    assert data["chapter_display_info"][0]["display_num"] == 1
+    assert data["chapter_display_info"][0]["status"] == "not_translated"
+
+
+def test_streamed_progress_reconcile_applies_only_latest_deferred_snapshot():
+    stream_source = inspect.getsource(
+        RetranslationMixin._populate_progress_listbox_streamed
+    )
+
+    assert "_deferred_prefetched_progress_payload" in stream_source
+    assert "_apply_prefetched_progress_payload" in stream_source

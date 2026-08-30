@@ -27228,6 +27228,57 @@ class RetranslationMixin:
             ):
                 data.pop(key, None)
 
+        def _apply_prefetched_progress_payload(payload):
+            """Apply one already-prepared snapshot without GUI-thread rematching."""
+            if not isinstance(payload, dict) or not _progress_page_is_visible():
+                return
+
+            prepared_spine = payload.get('prepared_spine_chapters')
+            prepared_rows = payload.get('prepared_chapter_display_info')
+            if prepared_spine is None or prepared_rows is None:
+                data['_prefetched_prog'] = payload.get('prog')
+                data['_prefetched_prog_path'] = payload.get('progress_file')
+                data['_prefetched_output_listing'] = payload.get('listing', set())
+                if payload.get('tts_listing') is not None:
+                    data['_prefetched_tts_listing'] = payload.get('tts_listing')
+                data['_prefetched_signatures'] = payload.get('signatures')
+                try:
+                    data['_refresh_read_only'] = True
+                    self._refresh_retranslation_data(data)
+                    data['_last_applied_snapshot_signatures'] = payload.get('signatures')
+                finally:
+                    data['_refresh_read_only'] = False
+                    _clear_prefetched_progress_data()
+                return
+
+            prog = payload.get('prog')
+            if not isinstance(prog, dict):
+                return
+            data['prog'] = prog
+            data['_last_good_prog'] = prog
+            data['spine_chapters'] = prepared_spine
+            chapter_display_info = prepared_rows
+
+            # These small auxiliary rows may consult live Qt settings, so only
+            # the pure OPF/progress matching is performed in the worker.
+            self._append_chunk_progress_display_info(data, chapter_display_info)
+            self._append_metadata_display_info(data, chapter_display_info)
+            self._append_translation_artifact_display_info(
+                data,
+                chapter_display_info,
+            )
+            self._append_pdf_ocr_display_info(data, chapter_display_info)
+            self._append_image_gen_display_info(data, chapter_display_info)
+            data['chapter_display_info'] = chapter_display_info
+            self._update_listbox_display(data)
+            self._update_statistics_display(data)
+            self._progress_list_show_special(data)
+            data['_last_applied_snapshot_signatures'] = payload.get('signatures')
+
+        data['_apply_prefetched_progress_payload'] = (
+            _apply_prefetched_progress_payload
+        )
+
         def _queue_silent_refresh(delay_ms=0):
             """Keep at most one trailing live-refresh callback queued."""
             if data.get('_prefetch_scheduled'):
@@ -27270,19 +27321,13 @@ class RetranslationMixin:
                 _schedule_dirty_prefetch()
                 return
 
-            data['_prefetched_prog'] = payload.get('prog')
-            data['_prefetched_prog_path'] = payload.get('progress_file')
-            data['_prefetched_output_listing'] = payload.get('listing', set())
-            if payload.get('tts_listing') is not None:
-                data['_prefetched_tts_listing'] = payload.get('tts_listing')
-            data['_prefetched_signatures'] = payload.get('signatures')
-            try:
-                data['_refresh_read_only'] = True
-                self._refresh_retranslation_data(data)
-                data['_last_applied_snapshot_signatures'] = payload.get('signatures')
-            finally:
-                data['_refresh_read_only'] = False
-                _clear_prefetched_progress_data()
+            if data.get('_listbox_populate_active'):
+                # A newer snapshot supersedes an older one. Never restart the
+                # streamed 1,000+ row reconcile from row zero while it is still
+                # running; apply only the newest snapshot after it finishes.
+                data['_deferred_prefetched_progress_payload'] = payload
+            else:
+                _apply_prefetched_progress_payload(payload)
             _schedule_dirty_prefetch()
 
         def _on_prefetch_failed(message):
@@ -27339,6 +27384,21 @@ class RetranslationMixin:
                 # worker if a failed JSON read actually needs the fallback.
                 fallback_prog = data.get('prog') or {}
                 audio_mode = self._current_progress_output_mode(data) == 'audio'
+                refresh_file_path = str(data.get('file_path') or '')
+                spine_snapshot = None
+                if (
+                    not audio_mode
+                    and refresh_file_path.lower().endswith('.epub')
+                    and data.get('spine_chapters')
+                ):
+                    # Copy only the small spine dictionaries on the GUI thread.
+                    # All progress matching and row-model construction then
+                    # happens in the worker instead of blocking Qt.
+                    spine_snapshot = [
+                        dict(chapter)
+                        for chapter in data.get('spine_chapters', ())
+                        if isinstance(chapter, dict)
+                    ]
 
                 def _bg_prefetch():
                     try:
@@ -27397,6 +27457,26 @@ class RetranslationMixin:
                             payload['retry'] = True
                             _emit_prefetch_finished(payload)
                             return
+
+                        if spine_snapshot is not None:
+                            prepared_data = {
+                                'prog': prog,
+                                'output_dir': output_dir,
+                                'file_path': refresh_file_path,
+                                'spine_chapters': spine_snapshot,
+                                '_prefetched_output_listing': listing,
+                                '_refresh_read_only': True,
+                            }
+                            self._rematch_spine_chapters(
+                                prepared_data,
+                                append_auxiliary=False,
+                            )
+                            payload['prepared_spine_chapters'] = prepared_data[
+                                'spine_chapters'
+                            ]
+                            payload['prepared_chapter_display_info'] = prepared_data[
+                                'chapter_display_info'
+                            ]
 
                         payload.update({
                             'prog': prog,
@@ -29099,7 +29179,7 @@ class RetranslationMixin:
             except Exception:
                 pass
     
-    def _rematch_spine_chapters(self, data):
+    def _rematch_spine_chapters(self, data, append_auxiliary=True):
         """Re-run the full spine chapter matching logic against updated progress JSON"""
         prog = data['prog']
         output_dir = data['output_dir']
@@ -29465,13 +29545,14 @@ class RetranslationMixin:
             }
             chapter_display_info.append(display_info)
         
-        self._append_chunk_progress_display_info(data, chapter_display_info)
-        self._append_metadata_display_info(data, chapter_display_info)
-        self._append_translation_artifact_display_info(
-            data, chapter_display_info
-        )
-        self._append_pdf_ocr_display_info(data, chapter_display_info)
-        self._append_image_gen_display_info(data, chapter_display_info)
+        if append_auxiliary:
+            self._append_chunk_progress_display_info(data, chapter_display_info)
+            self._append_metadata_display_info(data, chapter_display_info)
+            self._append_translation_artifact_display_info(
+                data, chapter_display_info
+            )
+            self._append_pdf_ocr_display_info(data, chapter_display_info)
+            self._append_image_gen_display_info(data, chapter_display_info)
         data['chapter_display_info'] = chapter_display_info
     
     def _rebuild_chapter_display_info(self, data):
@@ -30825,6 +30906,17 @@ class RetranslationMixin:
                     listbox.viewport().update()
                 except RuntimeError:
                     pass
+
+            deferred_payload = data.pop(
+                '_deferred_prefetched_progress_payload',
+                None,
+            )
+            deferred_applier = data.get('_apply_prefetched_progress_payload')
+            if deferred_payload is not None and callable(deferred_applier):
+                QTimer.singleShot(
+                    0,
+                    lambda payload=deferred_payload: deferred_applier(payload),
+                )
 
         def _add_chunk():
             if generation != data.get('_listbox_populate_generation'):

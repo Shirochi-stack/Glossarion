@@ -257,114 +257,19 @@ def test_image_only_title_queue_summary_is_compact_and_sorted():
     )
 
 
-def test_image_only_titles_do_not_inflate_the_legacy_body_executor():
+def test_image_only_titles_share_the_normal_configured_batch_executor():
     source = Path(translation_module.__file__).read_text(encoding="utf-8")
-    scan_start = source.index("chapters_to_translate = []")
-    scan_end = source.index("# Print skip summary for batch mode", scan_start)
-    scan_source = source[scan_start:scan_end]
-
-    assert "image_only_titles_to_translate = []" in scan_source
-    assert "image_only_titles_to_translate.append((idx, c))" in scan_source
-    assert "chapters_to_translate.append((idx, c))" in scan_source
-
-    title_plan_start = scan_source.index(
+    plan_start = source.index(
         "if _apply_image_only_title_translation_plan(c, plan):"
     )
-    title_plan_end = scan_source.index("continue", title_plan_start)
-    assert "chapters_to_translate.append" not in scan_source[
-        title_plan_start:title_plan_end
+    plan_end = source.index("continue", plan_start)
+
+    assert "chapters_to_translate.append((idx, c))" in source[
+        plan_start:plan_end
     ]
-    assert (
-        "ThreadPoolExecutor(max_workers=config.BATCH_SIZE)" in source
-    )
-
-
-def test_image_only_title_phase_is_parallel_but_independently_bounded(
-    monkeypatch,
-):
-    monkeypatch.setenv("GRACEFUL_STOP", "0")
-    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
-    monkeypatch.setenv("TRANSLATION_CANCELLED", "0")
-    monkeypatch.setenv("IMAGE_ONLY_TITLE_MAX_WORKERS", "4")
-    translation_module.set_stop_flag(False)
-
-    class Config:
-        BATCH_SIZE = 2000
-
-    class Progress:
-        def __init__(self):
-            self.saves = 0
-
-        def save(self):
-            self.saves += 1
-
-    active = 0
-    max_active = 0
-    active_lock = threading.Lock()
-    first_wave = threading.Barrier(4)
-
-    class Processor:
-        def process_single_chapter(self, chapter_data):
-            nonlocal active, max_active
-            with active_lock:
-                active += 1
-                max_active = max(max_active, active)
-            if chapter_data[0] < 4:
-                first_wave.wait(timeout=3)
-            time.sleep(0.01)
-            with active_lock:
-                active -= 1
-            return True, chapter_data[1]["num"], None, None, None
-
-    progress = Progress()
-    stats = translation_module._process_image_only_titles_parallel(
-        [(index, {"num": index}) for index in range(12)],
-        Processor(),
-        progress,
-        lambda: False,
-        Config(),
-    )
-
-    assert stats == {
-        "processed": 12,
-        "successful": 12,
-        "failed": 0,
-        "stopped": False,
-        "workers": 4,
-    }
-    assert max_active == 4
-    assert progress.saves == 1
-
-
-def test_image_only_title_phase_honors_stop_before_submitting(monkeypatch):
-    monkeypatch.setenv("GRACEFUL_STOP", "1")
-    monkeypatch.setenv("TRANSLATION_CANCELLED", "0")
-    translation_module.set_stop_flag(False)
-    calls = []
-
-    class Config:
-        BATCH_SIZE = 2000
-
-    class Processor:
-        def process_single_chapter(self, chapter_data):
-            calls.append(chapter_data)
-            return True, 1, None, None, None
-
-    class Progress:
-        def save(self):
-            pass
-
-    stats = translation_module._process_image_only_titles_parallel(
-        [(0, {"num": 1})],
-        Processor(),
-        Progress(),
-        lambda: True,
-        Config(),
-    )
-
-    assert stats["stopped"] is True
-    assert stats["processed"] == 0
-    assert calls == []
+    assert "ThreadPoolExecutor(max_workers=config.BATCH_SIZE)" in source
+    assert "IMAGE_ONLY_TITLE_MAX_WORKERS" not in source
+    assert "image_only_titles_to_translate" not in source
 
 
 def test_legacy_use_title_is_only_a_fallback(monkeypatch):
