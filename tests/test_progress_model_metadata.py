@@ -498,7 +498,16 @@ def test_glossary_structural_skip_ui_and_default_toggle_are_wired():
     assert "'entries_by_ci': entries_by_ci" in progress_gui
     assert "cached_entries = cache.get('entries_by_ci', {}).get(ci, [])" in progress_gui
     assert "'skipped': len(_skip)" in progress_gui
-    assert "if status in skipped_labels:" in progress_gui
+    assert "if status in skipped_labels or hide_model:" in progress_gui
+
+
+def test_glossary_progress_does_not_infer_cover_as_completed():
+    progress_gui = (
+        Path(__file__).resolve().parents[1] / "src" / "Retranslation_GUI.py"
+    ).read_text(encoding="utf-8")
+
+    assert "_gp_auto_completed_indices" not in progress_gui
+    assert "panel_state['_auto_completed']" not in progress_gui
 
 
 def test_glossary_refinement_watchdog_label_is_not_taken_from_prompt_content():

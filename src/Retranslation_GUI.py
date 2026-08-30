@@ -21960,19 +21960,6 @@ class RetranslationMixin:
                     if lookup_idx and lookup_idx % 200 == 0:
                         _pump_loading_frame()
                 panel_state['_anum_to_ci'] = anum_to_ci
-                # auto-completed (cover pages) — cached set
-                auto_comp = set()
-                for lookup_idx, (ci, fname) in enumerate(cmap.items()):
-                    stem = os.path.splitext(os.path.basename(str(fname or "")))[0].lower()
-                    if stem == 'cover':
-                        auto_comp.add(ci)
-                    if lookup_idx and lookup_idx % 200 == 0:
-                        _pump_loading_frame()
-                panel_state['_auto_completed'] = auto_comp
-
-            def _gp_auto_completed_indices():
-                return panel_state.get('_auto_completed') or set()
-
             def _gp_index_for_actual_num(actual_num, _d=None):
                 try:
                     actual_num = int(actual_num)
@@ -22091,7 +22078,6 @@ class RetranslationMixin:
                 comp |= _index_set(_d.get('completed', [])) - represented
                 fail |= _index_set(_d.get('failed', [])) - represented
                 merg |= _index_set(_d.get('merged_indices', [])) - represented
-                comp |= _gp_auto_completed_indices()
                 # Failed should win over completed in the UI.
                 comp -= fail
                 return comp, fail, merg
@@ -22203,7 +22189,6 @@ class RetranslationMixin:
                 _add_unrepresented(_d.get('failed', []), fail)
                 _add_unrepresented(_d.get('merged_indices', []), merg)
                 _add_unrepresented(_d.get('in_progress', []), in_prog)
-                comp |= _gp_auto_completed_indices()
                 comp -= fail
                 skipped -= fail
                 in_prog -= comp | skipped | fail | merg
