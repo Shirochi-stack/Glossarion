@@ -36454,6 +36454,7 @@ Important rules:
                     'OPENROUTER_USE_HTTP_ONLY': '1' if self.openrouter_http_only_var else '0',
                     'GLOSSARY_DUPLICATE_KEY_MODE': 'skip',  # Always use skip mode for new format
                     'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
+                    'API_QUEUE_SIZE': self.api_queue_entry.text().strip() or '4',
                     'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.0001',
                     'CONTEXTUAL': self._glossary_contextual_env_value(),
                     'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),

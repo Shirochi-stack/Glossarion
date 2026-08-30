@@ -314,6 +314,15 @@ def test_glossary_queue_uses_api_preflight_at_provider_boundary():
     assert "callback(dispatch_order)" in source[callback_start:callback_end]
 
 
+def test_direct_glossary_run_exports_live_api_preflight_field():
+    source = inspect.getsource(TranslatorGUI._extract_glossary_from_text_file)
+
+    assert (
+        "'API_QUEUE_SIZE': self.api_queue_entry.text().strip() or '4'"
+        in source
+    )
+
+
 def test_lazy_batch_backlog_is_bounded_by_the_batch_window():
     backlog = translation_module._lazy_batch_window_backlog
 
