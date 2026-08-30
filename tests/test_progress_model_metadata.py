@@ -3157,7 +3157,7 @@ def test_progress_managers_use_event_driven_differential_refresh():
     assert "progress_watch_debounce.setInterval(_PROGRESS_WATCH_DEBOUNCE_MS)" in source
     assert "gp_watch_debounce.setInterval(_PROGRESS_WATCH_DEBOUNCE_MS)" in source
     assert "_PROGRESS_WATCH_DEBOUNCE_MS = 500" in source
-    assert "_PROGRESS_LIVE_REFRESH_MIN_INTERVAL_SECONDS = 0.5" in source
+    assert "_PROGRESS_LIVE_REFRESH_MIN_INTERVAL_SECONDS = 2.0" in source
     assert "prefetch_bridge.finished.emit(payload)" in source
     assert "_gp_timer.setInterval(2000)" in source
     assert "_auto_refresh_timer.setInterval(2000)" in source
@@ -3234,6 +3234,57 @@ def test_progress_row_payload_revision_avoids_deep_prompt_comparison():
     )
 
 
+def test_unchanged_progress_rows_skip_display_formatting():
+    gui = RetranslationMixin()
+    info = {
+        "key": "chapter0001.xhtml",
+        "num": 1,
+        "status": "in_progress",
+        "output_file": "chapter0001.xhtml",
+        "original_filename": "chapter0001.xhtml",
+        "opf_position": 0,
+        "info": {
+            "status": "in_progress",
+            "last_updated": 10,
+        },
+    }
+
+    class _Item:
+        def __init__(self):
+            self.roles = {
+                retranslation_gui_module.Qt.UserRole: {
+                    "item_key": gui._progress_list_item_key(info),
+                    "payload_revision": gui._progress_list_payload_revision(info),
+                }
+            }
+
+        def data(self, role):
+            return self.roles.get(role)
+
+    class _Listbox:
+        def __init__(self):
+            self.row = _Item()
+
+        def count(self):
+            return 1
+
+        def item(self, index):
+            return self.row if index == 0 else None
+
+    gui._progress_list_display_text = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("unchanged rows must not be formatted")
+    )
+    data = {
+        "listbox": _Listbox(),
+        "chapter_display_info": [info],
+        "show_special_files_state": False,
+        "show_model_info_state": False,
+        "_progress_list_view_revision": (False, False),
+    }
+
+    gui._update_listbox_display(data)
+
+
 def test_streamed_progress_reconcile_does_not_clear_or_queue_scroll_restores():
     stream_source = inspect.getsource(
         RetranslationMixin._populate_progress_listbox_streamed
@@ -3249,6 +3300,11 @@ def test_streamed_progress_reconcile_does_not_clear_or_queue_scroll_restores():
         RetranslationMixin._update_listbox_display
     )
     assert "old_payload.get('info') != info" not in list_update_source
+    assert (
+        list_update_source.index("payload_revision =")
+        < list_update_source.index("self._progress_list_display_text(")
+    )
+    assert "_PROGRESS_DIRECT_ROW_UPDATE_LIMIT" in list_update_source
 
 
 def test_open_progress_managers_rebuild_when_input_signature_changes():

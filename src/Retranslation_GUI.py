@@ -13,6 +13,7 @@ import copy
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from difflib import SequenceMatcher
+from functools import lru_cache
 from urllib.parse import unquote
 from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget, 
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -83,7 +84,8 @@ _PROGRESS_SIDECAR_FILENAMES = frozenset({"source_epub.txt"})
 # (temporary file creation, replace, directory update). Coalesce those bursts
 # before parsing and reconciling a large progress file.
 _PROGRESS_WATCH_DEBOUNCE_MS = 500
-_PROGRESS_LIVE_REFRESH_MIN_INTERVAL_SECONDS = 0.5
+_PROGRESS_LIVE_REFRESH_MIN_INTERVAL_SECONDS = 2.0
+_PROGRESS_DIRECT_ROW_UPDATE_LIMIT = 96
 _RAW_FOREIGN_TEXT_QA_RE = re.compile(
     r"(?:^|[^a-z])(?:korean|japanese|chinese|hebrew|arabic|syriac|thai|cyrillic)"
     r"_text_found_\d+_chars_",
@@ -665,19 +667,25 @@ def _schedule_epub_reader_engine_prewarm():
 # -----------------------------------------------------------------------------
 
 
+@lru_cache(maxsize=32768)
+def _normalize_progress_match_text(name):
+    """Cached string-only implementation for stable chapter filenames."""
+    base = os.path.basename(name)
+    if base.startswith("response_"):
+        base = base[len("response_"):]
+    # This is the hot path for every OPF/progress comparison.  Once basename
+    # has removed the directory, rfind preserves splitext's dotfile behavior
+    # without repeatedly invoking the much heavier path parser.
+    while (dot_index := base.rfind(".")) > 0:
+        base = base[:dot_index]
+    return base
+
+
 def _normalize_progress_match_name(name):
     """Normalize source/output names used by Progress Manager matching."""
     if not name:
         return ""
-    base = os.path.basename(str(name))
-    if base.startswith("response_"):
-        base = base[len("response_"):]
-    while True:
-        new_base, ext = os.path.splitext(base)
-        if not ext:
-            break
-        base = new_base
-    return base
+    return _normalize_progress_match_text(str(name))
 
 
 def _sdlxliff_logical_output_key(path_or_name):
@@ -18632,14 +18640,42 @@ class RetranslationMixin:
             return True
 
         prog = data.get('prog') if isinstance(data.get('prog'), dict) else {}
-        if isinstance(prog.get('subtitle_files'), dict):
-            return True
         chapters = prog.get('chapters', {})
-        if isinstance(chapters, dict) and any(
-            self._is_subtitle_progress_entry(entry)
-            for entry in chapters.values()
-            if isinstance(entry, dict)
+        cached = data.get('_progress_view_is_subtitle_cache')
+        if (
+            isinstance(cached, tuple)
+            and len(cached) == 4
+            and cached[0] is prog
+            and cached[1] is chapters
+            and cached[2] == file_path
         ):
+            return bool(cached[3])
+
+        # EPUB/PDF progress cannot be a subtitle bundle. Avoid probing every
+        # chapter entry on each newly loaded JSON object for those large books.
+        if extension in ('.epub', '.pdf'):
+            data['_progress_view_is_subtitle_cache'] = (
+                prog,
+                chapters,
+                file_path,
+                False,
+            )
+            return False
+
+        is_subtitle = isinstance(prog.get('subtitle_files'), dict)
+        if not is_subtitle and isinstance(chapters, dict):
+            is_subtitle = any(
+                self._is_subtitle_progress_entry(entry)
+                for entry in chapters.values()
+                if isinstance(entry, dict)
+            )
+        if is_subtitle:
+            data['_progress_view_is_subtitle_cache'] = (
+                prog,
+                chapters,
+                file_path,
+                True,
+            )
             return True
 
         # A newly opened subtitle ZIP can precede its first progress entry.
@@ -18660,8 +18696,83 @@ class RetranslationMixin:
                         and os.path.normcase(os.path.abspath(str(mapped_archive)))
                         == archive_key
                     ):
+                        data['_progress_view_is_subtitle_cache'] = (
+                            prog,
+                            chapters,
+                            file_path,
+                            True,
+                        )
                         return True
+        data['_progress_view_is_subtitle_cache'] = (
+            prog,
+            chapters,
+            file_path,
+            False,
+        )
         return False
+
+    def _progress_managed_special_entries(self, data):
+        """Index metadata/header artifact rows once per progress snapshot."""
+        data = data if isinstance(data, dict) else {}
+        prog = data.get('prog') if isinstance(data.get('prog'), dict) else {}
+        chapters = prog.get('chapters', {})
+        cached = data.get('_progress_managed_special_entries_cache')
+        if (
+            isinstance(cached, tuple)
+            and len(cached) == 4
+            and cached[0] is prog
+            and cached[1] is chapters
+        ):
+            return cached[2], cached[3]
+
+        metadata_entries = []
+        artifact_entries = {
+            spec['kind']: [] for spec in TRANSLATION_ARTIFACT_SPECS
+        }
+        artifact_kind_by_key = {
+            spec['progress_key']: spec['kind']
+            for spec in TRANSLATION_ARTIFACT_SPECS
+        }
+        artifact_kind_by_filename = {
+            spec['filename'].casefold(): spec['kind']
+            for spec in TRANSLATION_ARTIFACT_SPECS
+        }
+        if isinstance(chapters, dict):
+            for key, entry in chapters.items():
+                if not isinstance(entry, dict):
+                    continue
+                key_text = str(key or '')
+                if (
+                    key_text.startswith('__metadata__')
+                    or entry.get('special_type') == 'metadata'
+                ):
+                    metadata_entries.append((key, entry))
+                output_basename = (
+                    str(entry.get('output_file') or '')
+                    .replace('\\', '/')
+                    .rsplit('/', 1)[-1]
+                    .casefold()
+                )
+                special_type = entry.get('special_type')
+                artifact_kind = (
+                    special_type
+                    if special_type in artifact_entries
+                    else artifact_kind_by_key.get(key_text)
+                    or artifact_kind_by_key.get(
+                        entry.get('translation_artifact_progress_key')
+                    )
+                    or artifact_kind_by_filename.get(output_basename)
+                )
+                if artifact_kind:
+                    artifact_entries[artifact_kind].append((key, entry))
+
+        data['_progress_managed_special_entries_cache'] = (
+            prog,
+            chapters,
+            metadata_entries,
+            artifact_entries,
+        )
+        return metadata_entries, artifact_entries
 
     def _append_metadata_display_info(self, data, chapter_display_info):
         """Add each tracked metadata API phase as a selectable row."""
@@ -18672,14 +18783,12 @@ class RetranslationMixin:
         if not file_path.lower().endswith(('.epub', '.pdf')):
             return
         metadata_enabled = self._metadata_progress_tracking_enabled(file_path)
-        prog = data.get('prog') or {}
-        chapters = prog.get('chapters', {})
         rows = []
         if metadata_enabled:
-            entries = [
-                (key, entry) for key, entry in chapters.items()
-                if isinstance(entry, dict) and is_metadata_progress_entry(key, entry)
-            ]
+            entries, _artifact_entries = self._progress_managed_special_entries(
+                data
+            )
+            entries = list(entries)
             entries.sort(key=lambda item: (item[1].get('metadata_index', 999), str(item[0])))
             if not entries:
                 return
@@ -18732,33 +18841,55 @@ class RetranslationMixin:
         if not file_path.lower().endswith(('.epub', '.pdf')):
             return
 
+        _metadata_entries, artifact_entries = (
+            self._progress_managed_special_entries(data)
+        )
         # The fallback chapter builder iterates every progress entry, including
-        # TOC/header artifacts.  Remove those generic rows before inserting the
-        # canonical artifact rows below so initial loads and refreshes cannot
-        # display each managed artifact twice.
+        # TOC/header artifacts. Remove those generic rows before inserting the
+        # canonical rows. Use the snapshot's tiny set of artifact keys instead
+        # of running the general artifact classifier across every chapter.
+        artifact_progress_keys = {
+            key
+            for entries in artifact_entries.values()
+            for key, _entry in entries
+        }
+        artifact_kinds = set(artifact_entries)
+        artifact_filenames = {
+            spec['filename'].casefold()
+            for spec in TRANSLATION_ARTIFACT_SPECS
+        }
+
+        def _is_managed_artifact_row(info):
+            if not isinstance(info, dict):
+                return False
+            nested = info.get('info')
+            if not isinstance(nested, dict):
+                nested = {}
+            if (
+                info.get('progress_key') in artifact_progress_keys
+                or info.get('key') in artifact_progress_keys
+                or info.get('special_type') in artifact_kinds
+                or nested.get('special_type') in artifact_kinds
+            ):
+                return True
+            output_basename = (
+                str(info.get('output_file') or nested.get('output_file') or '')
+                .replace('\\', '/')
+                .rsplit('/', 1)[-1]
+                .casefold()
+            )
+            return output_basename in artifact_filenames
+
         chapter_display_info[:] = [
             info for info in chapter_display_info
-            if not self._is_translation_artifact_progress_info(info)
+            if not _is_managed_artifact_row(info)
         ]
-
-        prog = data.get('prog') or {}
-        chapters = prog.get('chapters', {})
         rows = []
         for spec in TRANSLATION_ARTIFACT_SPECS:
             enabled = self._translation_artifact_progress_tracking_enabled(
                 spec['kind'], file_path
             )
-            entries = [
-                (key, entry)
-                for key, entry in chapters.items()
-                if isinstance(entry, dict)
-                and (
-                    entry.get('special_type') == spec['kind']
-                    or os.path.basename(
-                        str(entry.get('output_file') or '')
-                    ).casefold() == spec['filename'].casefold()
-                )
-            ]
+            entries = artifact_entries.get(spec['kind'], [])
             if enabled:
                 if not entries:
                     continue
@@ -30521,6 +30652,11 @@ class RetranslationMixin:
         self._progress_list_sync_model_toggle(data)
         infos = list(data.get('chapter_display_info') or [])
         max_original_len, max_output_len = self._progress_list_column_widths(infos, data)
+        data['_progress_list_column_widths'] = (max_original_len, max_output_len)
+        data['_progress_list_view_revision'] = (
+            self._progress_list_show_special(data),
+            bool(data.get('show_model_info_state')),
+        )
 
         selected_keys = set()
         if preserve_selection:
@@ -30669,61 +30805,96 @@ class RetranslationMixin:
         # Avoiding clear/rebuild keeps the scrollbar range and viewport stable.
         infos = data.get('chapter_display_info') or []
         show_special_files = self._progress_list_show_special(data)
-        max_original_len, max_output_len = self._progress_list_column_widths(
-            infos,
-            data,
+        view_revision = (
+            show_special_files,
+            bool(data.get('show_model_info_state')),
         )
 
-        selected_keys = set()
-        try:
-            for selected_item in listbox.selectedItems():
-                payload = selected_item.data(Qt.UserRole) or {}
-                if isinstance(payload, dict) and payload.get('item_key'):
-                    selected_keys.add(payload['item_key'])
-        except RuntimeError:
-            selected_keys = set()
-
-        row_updates = []
+        # Reject unchanged rows using only compact Python tuples before doing
+        # any display formatting or status/model resolution.  The former order
+        # formatted every one of 1,000+ rows on every progress-file update and
+        # only then discovered that almost all QListWidgetItems were unchanged.
+        candidate_updates = []
         identity_changed = False
+        view_changed = data.get('_progress_list_view_revision') != view_revision
         for idx, info in enumerate(infos):
             item = listbox.item(idx)
             if not item:
                 continue
+            old_payload = item.data(Qt.UserRole) or {}
+            payload_revision = self._progress_list_payload_revision(info)
+            item_key = self._progress_list_item_key(info)
+            payload_changed = (
+                not isinstance(old_payload, dict)
+                or old_payload.get('payload_revision')
+                != payload_revision
+            )
+            row_identity_changed = (
+                not isinstance(old_payload, dict)
+                or old_payload.get('item_key') != item_key
+            )
+            if row_identity_changed:
+                identity_changed = True
+            if view_changed or row_identity_changed or payload_changed:
+                candidate_updates.append((item, info))
+
+        if not candidate_updates:
+            return
+
+        # Width changes affect the padding of every OPF row. Recompute widths
+        # only when at least one row changed, and fall back to a streamed
+        # all-row reconcile if the shared layout actually changed.
+        max_original_len, max_output_len = self._progress_list_column_widths(
+            infos,
+            data,
+        )
+        column_widths = (max_original_len, max_output_len)
+        if data.get('_progress_list_column_widths') != column_widths:
+            candidate_updates = [
+                (listbox.item(idx), info)
+                for idx, info in enumerate(infos)
+                if listbox.item(idx) is not None
+            ]
+
+        # A large status transition (for example queueing hundreds of title-only
+        # chapters) must yield between Qt batches. Reuse the existing streamed
+        # reconciler instead of executing hundreds of item mutations in one GUI
+        # callback.
+        if len(candidate_updates) > _PROGRESS_DIRECT_ROW_UPDATE_LIMIT:
+            self._populate_progress_listbox_streamed(
+                data,
+                chunk_size=_PROGRESS_DIRECT_ROW_UPDATE_LIMIT,
+                preserve_selection=True,
+                preserve_scroll=True,
+            )
+            return
+
+        row_updates = []
+        for item, info in candidate_updates:
             display, display_status = self._progress_list_display_text(
                 info,
                 data,
                 max_original_len,
                 max_output_len,
             )
-            hidden = self._progress_entry_needs_special_visibility(info) and not show_special_files
+            hidden = (
+                self._progress_entry_needs_special_visibility(info)
+                and not show_special_files
+            )
             fingerprint = (display, display_status, hidden)
-            old_payload = item.data(Qt.UserRole) or {}
-            payload_changed = (
-                not isinstance(old_payload, dict)
-                or old_payload.get('payload_revision')
-                != self._progress_list_payload_revision(info)
+            row_updates.append(
+                (item, info, display, display_status, fingerprint)
             )
-            row_identity_changed = (
-                not isinstance(old_payload, dict)
-                or old_payload.get('item_key') != self._progress_list_item_key(info)
-            )
-            if row_identity_changed:
-                identity_changed = True
-            # A fresh JSON snapshot creates new nested dictionaries for every
-            # row. Deep-comparing those trees here made an otherwise unchanged
-            # 1,000+ row list expensive on the GUI thread. The rendered
-            # fingerprint covers visible changes, while the compact payload
-            # revision keeps context-menu metadata current without comparing
-            # saved prompts or other large request fields.
-            if (
-                item.data(Qt.UserRole + 4) != fingerprint
-                or row_identity_changed
-                or payload_changed
-            ):
-                row_updates.append((item, info, display, display_status, fingerprint))
 
-        if not row_updates:
-            return
+        selected_keys = set()
+        if identity_changed:
+            try:
+                for selected_item in listbox.selectedItems():
+                    payload = selected_item.data(Qt.UserRole) or {}
+                    if isinstance(payload, dict) and payload.get('item_key'):
+                        selected_keys.add(payload['item_key'])
+            except RuntimeError:
+                selected_keys = set()
 
         updates_were_enabled = listbox.updatesEnabled()
         signals_were_blocked = listbox.signalsBlocked()
@@ -30731,10 +30902,18 @@ class RetranslationMixin:
         listbox.blockSignals(True)
         try:
             for item, info, display, display_status, fingerprint in row_updates:
-                item.setText(display)
-                self._apply_progress_list_item_visuals(item, display_status)
+                old_fingerprint = item.data(Qt.UserRole + 4)
+                if item.text() != display:
+                    item.setText(display)
+                if (
+                    not isinstance(old_fingerprint, tuple)
+                    or len(old_fingerprint) < 2
+                    or old_fingerprint[1] != display_status
+                ):
+                    self._apply_progress_list_item_visuals(item, display_status)
                 self._set_progress_list_item_metadata(item, info, display_status, show_special_files)
-                item.setData(Qt.UserRole + 4, fingerprint)
+                if old_fingerprint != fingerprint:
+                    item.setData(Qt.UserRole + 4, fingerprint)
             if identity_changed:
                 for row in range(listbox.count()):
                     item = listbox.item(row)
@@ -30747,6 +30926,8 @@ class RetranslationMixin:
         finally:
             listbox.blockSignals(signals_were_blocked)
             listbox.setUpdatesEnabled(updates_were_enabled)
+        data['_progress_list_column_widths'] = column_widths
+        data['_progress_list_view_revision'] = view_revision
 
     def _update_statistics_display(self, data):
         """Update statistics display for both OPF and non-OPF files"""
