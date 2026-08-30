@@ -37,6 +37,7 @@ from title_tag_translation import (
     title_tag_translation_payload,
 )
 from unified_api_client import (
+    SpineSendDispatcher,
     UnifiedClient,
     UnifiedClientError,
     defer_batch_log,
@@ -9922,6 +9923,12 @@ class BatchTranslationProcessor:
         self.progress_manager = progress_manager
         self.request_started_callback = request_started_callback
         self.check_stop_fn = check_stop_fn
+        self._spine_send_dispatcher = SpineSendDispatcher(
+            stop_check=lambda: (
+                os.environ.get("GRACEFUL_STOP") == "1"
+                or check_stop_fn()
+            )
+        )
         self.image_translator = image_translator
         self.chapters_completed = 0
         self.chunks_completed = 0
@@ -9941,14 +9948,6 @@ class BatchTranslationProcessor:
         import threading
         self._batch_rolling_summary_lock = threading.Lock()
         self._batch_rolling_summary_text = ""  # exact rolling_summary.txt contents for current batch
-        self._ordered_request_dispatch = (
-            os.getenv("ORDER_BATCH_REQUESTS_BY_SPINE", "1").strip().lower()
-            not in ("0", "false", "no", "off")
-        )
-        self._ordered_dispatch_condition = threading.Condition()
-        self._ordered_dispatch_next = 0
-        self._ordered_dispatch_released = set()
-        self._ordered_dispatch_last_release = 0.0
         
        # Optionally log multi-key status
         if hasattr(self.client, 'use_multi_keys') and self.client.use_multi_keys:
@@ -9985,89 +9984,19 @@ class BatchTranslationProcessor:
             # into a translation failure.
             print(f"⚠️ Could not advance lazy batch dispatch: {exc}")
 
-    def _wait_for_ordered_request_dispatch(self, request_order):
-        """Release each batch unit's first API call in reading-order sequence.
-
-        Calls remain concurrent after this very small pre-send gate. Retries and
-        later chunks from an already released unit pass through immediately.
-        """
-        if not self._ordered_request_dispatch or request_order is None:
-            return
-        try:
-            request_order = int(request_order)
-        except (TypeError, ValueError):
-            return
-
-        timeout = 120.0
-        try:
-            timeout = max(
-                5.0,
-                float(os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "120")),
-            )
-        except (TypeError, ValueError):
-            pass
-        deadline = time.monotonic() + timeout
-
-        with self._ordered_dispatch_condition:
-            if (
-                request_order in self._ordered_dispatch_released
-                or request_order < self._ordered_dispatch_next
-            ):
-                return
-            while request_order != self._ordered_dispatch_next:
-                if self.check_stop_fn():
-                    return
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    print(
-                        "⚠️ Ordered batch dispatch timed out waiting for an "
-                        "earlier spine item; releasing the ready request"
-                    )
-                    self._ordered_dispatch_next = request_order
-                    break
-                self._ordered_dispatch_condition.wait(
-                    timeout=min(0.1, remaining)
-                )
-
-            # Give the released worker a small head start into client.send().
-            # Without this spacing, the next Python thread can wake quickly
-            # enough to overtake it before the provider transport is entered.
-            try:
-                release_interval = max(
-                    0.0,
-                    float(os.getenv("ORDERED_BATCH_DISPATCH_INTERVAL", "0.025")),
-                )
-            except (TypeError, ValueError):
-                release_interval = 0.025
-            while self._ordered_dispatch_last_release:
-                release_delay = (
-                    self._ordered_dispatch_last_release
-                    + release_interval
-                    - time.monotonic()
-                )
-                if release_delay <= 0:
-                    break
-                self._ordered_dispatch_condition.wait(
-                    timeout=min(0.05, release_delay)
-                )
-
-            self._ordered_dispatch_released.add(request_order)
-            self._ordered_dispatch_last_release = time.monotonic()
-            self._ordered_dispatch_next = max(
-                self._ordered_dispatch_next,
-                request_order + 1,
-            )
-            self._ordered_dispatch_condition.notify_all()
-
-    def _announce_ordered_request_dispatch(self, request_order, label):
-        """Gate and identify a Direct Text request by its spine ticket.
+    def _wait_for_request_dispatch(self, request_order, label):
+        """Wait to enter provider setup, then identify the spine ticket.
 
         Provider-specific progress records are not guaranteed to retain the
         chapter context.  Emit one request-bound marker immediately after the
-        ordered gate so the Direct Text UI can sort cards independently of
+        ordered permit so the Direct Text UI can sort cards independently of
         worker scheduling or response completion order.
         """
-        self._wait_for_ordered_request_dispatch(request_order)
+        if not self._spine_send_dispatcher.wait_for_turn(request_order):
+            raise UnifiedClientError(
+                "Translation stopped before provider dispatch",
+                error_type="cancelled",
+            )
         if os.getenv("DIRECT_TEXT_ORDERED_BATCH", "0") != "1":
             return
         try:
@@ -10081,6 +10010,12 @@ class BatchTranslationProcessor:
             f"📚 [{threading.current_thread().name}] {request_label} "
             f"[spine-order:{request_order}] Direct Text dispatch"
         )
+
+    def _mark_request_sent(self, request_order):
+        self._spine_send_dispatcher.mark_sent(request_order)
+
+    def _abandon_request_dispatch(self, request_order):
+        self._spine_send_dispatcher.abandon_if_unsent(request_order)
 
     def _restore_cancelled_chapter_progress(self, idx, actual_num, content_hash, chapter):
         fname = FileUtilities.create_chapter_filename(chapter, actual_num)
@@ -10242,6 +10177,7 @@ class BatchTranslationProcessor:
                 return True
 
             def _mark_batch_chapter_progress_on_send(chunk_idx=None):
+                self._mark_request_sent(chapter.get("_batch_request_order"))
                 with self.progress_lock:
                     try:
                         if chapter_truncated_event.is_set():
@@ -10860,7 +10796,7 @@ class BatchTranslationProcessor:
                             context='translation',
                             chapter_context=chapter_ctx,
                             before_dispatch_callback=lambda: (
-                                self._announce_ordered_request_dispatch(
+                                self._wait_for_request_dispatch(
                                     chapter.get('_batch_request_order'),
                                     _direct_text_label_with_source(
                                         f"Chapter {log_num} "
@@ -11107,7 +11043,7 @@ class BatchTranslationProcessor:
                                     context='translation',
                                     chapter_context=chapter_ctx,
                                     before_dispatch_callback=lambda: (
-                                        self._announce_ordered_request_dispatch(
+                                        self._wait_for_request_dispatch(
                                             chapter.get('_batch_request_order'),
                                             _direct_text_label_with_source(
                                                 f"Chapter {log_num} "
@@ -11264,7 +11200,7 @@ class BatchTranslationProcessor:
                                 context='translation',
                                 chapter_context=retry_context,
                                 before_dispatch_callback=lambda: (
-                                    self._announce_ordered_request_dispatch(
+                                    self._wait_for_request_dispatch(
                                         chapter.get('_batch_request_order'),
                                         _direct_text_label_with_source(
                                             f"Chapter {log_num} "
@@ -12561,6 +12497,9 @@ class BatchTranslationProcessor:
         
         try:
             def _mark_merged_progress_on_send():
+                self._mark_request_sent(
+                    parent_chapter.get("_batch_request_order")
+                )
                 with self.progress_lock:
                     for actual_num, _, idx, chapter, content_hash in chapters_data:
                         fname = FileUtilities.create_chapter_filename(chapter, actual_num)
@@ -12773,7 +12712,7 @@ class BatchTranslationProcessor:
                     context='translation',
                     chapter_context=chapter_ctx,
                     before_dispatch_callback=lambda: (
-                        self._announce_ordered_request_dispatch(
+                        self._wait_for_request_dispatch(
                             parent_chapter.get('_batch_request_order'),
                             (
                                 f"Merged {merged_chapter_nums_for_context[0]}-"
@@ -22429,19 +22368,6 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             except Exception:
                 tls_for_local_cancel = None
 
-            # Batch ordering belongs before client.send(), so request setup and
-            # its visible pre-stagger log follow spine order as well. Progress
-            # marking remains in before_send_callback at the true in-flight
-            # boundary inside UnifiedClient.
-            if callable(before_dispatch_callback):
-                try:
-                    before_dispatch_callback()
-                except Exception as dispatch_err:
-                    print(
-                        "⚠️ Ordered batch pre-dispatch callback failed: "
-                        f"{dispatch_err}"
-                    )
-            
             # Build send parameters (context is optional)
             send_params = {
                 'messages': messages,
@@ -22553,6 +22479,12 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 _translation_last_thread_submit = time.time()
             else:
                 _translation_last_thread_submit = now
+
+    # Queue waiting is preparation time, not API time. Keep it outside the
+    # timeout/cancellation helper thread, and enter client.send only after the
+    # preceding spine ticket reaches its real provider-send callback.
+    if callable(before_dispatch_callback):
+        before_dispatch_callback()
 
     with _pending_translation_send_lock:
         _pending_translation_sends[pending_send_token] = {
@@ -29158,6 +29090,13 @@ def main(log_callback=None, stop_callback=None):
                             unit[0][1].get('_batch_request_order')
                         )
                         future_by_request_order[request_order] = fut
+                        fut.add_done_callback(
+                            lambda _future, request_order=request_order: (
+                                batch_processor._abandon_request_dispatch(
+                                    request_order
+                                )
+                            )
+                        )
                     except (AttributeError, IndexError, TypeError, ValueError):
                         pass
                     _sync_lazy_window_backlog()
@@ -29428,6 +29367,22 @@ def main(log_callback=None, stop_callback=None):
                             executor.submit(batch_processor.process_single_chapter, unit[0]): unit
                             for unit in current_batch_units
                         }
+                    for submitted_future, submitted_unit in future_to_unit.items():
+                        try:
+                            submitted_order = int(
+                                submitted_unit[0][1].get(
+                                    '_batch_request_order'
+                                )
+                            )
+                        except (AttributeError, IndexError, TypeError, ValueError):
+                            continue
+                        submitted_future.add_done_callback(
+                            lambda _future, request_order=submitted_order: (
+                                batch_processor._abandon_request_dispatch(
+                                    request_order
+                                )
+                            )
+                        )
                     
                     completed_in_batch = 0
                     failed_in_batch = 0
