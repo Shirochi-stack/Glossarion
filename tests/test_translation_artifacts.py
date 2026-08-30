@@ -108,19 +108,154 @@ def test_parallel_prequeue_stop_mode_distinguishes_graceful_and_force(monkeypatc
 
 def test_parallel_chapter_scan_polls_stop_before_queueing_titles():
     source = Path(translation_module.__file__).read_text(encoding="utf-8")
-    scan_start = source.index("progress_manager.begin_deferred_save()")
-    scan_end = source.index("# Thread scheduling must not redefine book order", scan_start)
+    scan_start = source.index('print("📊 Verifying chapter numbers...")')
+    scan_end = source.index("# Print skip summary for batch mode", scan_start)
     scan_source = source[scan_start:scan_end]
 
     assert scan_source.count(
         "_translation_prequeue_stop_mode(stop_callback)"
     ) >= 3
-    assert scan_source.index("progress_manager.end_deferred_save()") < scan_source.index(
+    assert scan_source.index("progress_manager.end_deferred_save(force=True)") < scan_source.index(
         "stopped parallel queue preparation immediately"
     )
     assert "_prepare_image_only_title_plans_parallel(" in scan_source
     assert '"📝 Queued image-only <title> translation for "' in scan_source
     assert 'f"📝 Image-only chapter {log_num}: queued its "' not in scan_source
+
+
+def test_batch_queue_uses_exactly_two_forced_snapshot_barriers():
+    source = Path(translation_module.__file__).read_text(encoding="utf-8")
+    preflight_start = source.index(
+        "batch_queue_records = {} if config.BATCH_TRANSLATION else None"
+    )
+    queue_end = source.index("# Print skip summary for batch mode", preflight_start)
+    queue_source = source[preflight_start:queue_end]
+
+    assert queue_source.count("progress_manager.begin_deferred_save()") == 2
+    assert queue_source.count(
+        "progress_manager.end_deferred_save(force=True)"
+    ) >= 2
+    assert "status=\"pending\"" in queue_source
+    pending_start = queue_source.index(
+        "# Finalize chapter order and Pending rows in memory."
+    )
+    pending_end = queue_source.index("# Snapshot barrier 2", pending_start)
+    assert 'status="in_progress"' not in queue_source[pending_start:pending_end]
+
+
+def test_deferred_queue_transactions_write_two_snapshots_for_1500_rows(
+    tmp_path,
+    monkeypatch,
+):
+    manager = translation_module.ProgressManager(str(tmp_path))
+    physical_saves = []
+    original_save = manager.save
+
+    def counted_save():
+        if not getattr(manager, "_defer_saves", False):
+            physical_saves.append(len(manager.prog.get("chapters", {})))
+        return original_save()
+
+    monkeypatch.setattr(manager, "save", counted_save)
+
+    manager.begin_deferred_save()
+    for chapter_num in range(1500):
+        manager.prog.setdefault("chapters", {})[str(chapter_num)] = {
+            "actual_num": chapter_num,
+            "status": "not_translated",
+        }
+        manager.save()
+    manager.end_deferred_save(force=True)
+
+    manager.begin_deferred_save()
+    for entry in manager.prog["chapters"].values():
+        entry["status"] = "pending"
+        manager.save()
+    manager.end_deferred_save(force=True)
+
+    assert physical_saves == [1500, 1500]
+
+
+@pytest.mark.parametrize("stop_after", [0, 731])
+def test_stopped_deferred_queue_flushes_one_prefix_snapshot(
+    tmp_path,
+    monkeypatch,
+    stop_after,
+):
+    manager = translation_module.ProgressManager(str(tmp_path))
+    physical_saves = []
+    original_save = manager.save
+
+    def counted_save():
+        if not getattr(manager, "_defer_saves", False):
+            physical_saves.append(1)
+        return original_save()
+
+    monkeypatch.setattr(manager, "save", counted_save)
+    manager.begin_deferred_save()
+    for chapter_num in range(1500):
+        if chapter_num > stop_after:
+            break
+        manager.prog.setdefault("chapters", {})[str(chapter_num)] = {
+            "actual_num": chapter_num,
+            "status": "pending",
+        }
+        manager.save()
+    manager.end_deferred_save(force=True)
+
+    assert physical_saves == [1]
+
+
+def test_queue_content_analysis_is_cached_per_body(monkeypatch):
+    calls = []
+
+    def analyze_once(html):
+        calls.append(html)
+        return {
+            "html": html,
+            "html_mostly_images": False,
+            "has_meaningful_text": True,
+            "is_image_link_only": False,
+            "image_count": 0,
+        }
+
+    monkeypatch.setattr(
+        translation_module.ContentProcessor,
+        "_analyze_queue_html_once",
+        staticmethod(analyze_once),
+    )
+    chapter = {"body": "<p>chapter</p>", "file_size": 14}
+
+    first = translation_module.ContentProcessor.queue_content_analysis(chapter)
+    second = translation_module.ContentProcessor.queue_content_analysis(chapter)
+
+    assert second is first
+    assert calls == ["<p>chapter</p>"]
+
+
+def test_aggressive_queue_primes_one_unit_and_advances_on_provider_start():
+    source = Path(translation_module.__file__).read_text(encoding="utf-8")
+    executor_start = source.index("with _parallel_progress_executor() as executor:")
+    aggressive_start = source.index(
+        "if batching_mode == 'aggressive':",
+        executor_start,
+    )
+    aggressive_end = source.index(
+        "else:\n                # direct or conservative",
+        aggressive_start,
+    )
+    aggressive_source = source[aggressive_start:aggressive_end]
+    prime_start = aggressive_source.index("# Prime exactly one preparation task")
+    prime_end = aggressive_source.index(
+        "graceful_stop_message_shown",
+        prime_start,
+    )
+
+    assert "submit_next_unit()" in aggressive_source[prime_start:prime_end]
+    assert "while len(active_futures)" not in aggressive_source
+    assert "def _provider_request_started(request_order):" in aggressive_source
+    assert "batch_processor.set_request_started_callback(" in aggressive_source
+    assert "unsent_units = deque(units_to_process)" in aggressive_source
 
 
 def test_parallel_preflight_defers_duplicate_chunk_splitting():
@@ -377,6 +512,33 @@ def test_image_only_titles_share_the_normal_configured_batch_executor():
     assert "ThreadPoolExecutor(max_workers=config.BATCH_SIZE)" in source
     assert "IMAGE_ONLY_TITLE_MAX_WORKERS" not in source
     assert "image_only_titles_to_translate" not in source
+
+
+def test_request_merging_keeps_title_only_units_isolated_in_same_queue():
+    chapters = [
+        (0, {"num": 1, "actual_chapter_num": 1}),
+        (
+            1,
+            {
+                "num": 2,
+                "actual_chapter_num": 2,
+                "_title_tag_only_translation": True,
+            },
+        ),
+        (2, {"num": 3, "actual_chapter_num": 3}),
+        (3, {"num": 4, "actual_chapter_num": 4}),
+    ]
+
+    groups = translation_module.RequestMerger.create_merge_groups(
+        chapters,
+        merge_count=3,
+    )
+
+    assert [[item[0] for item in group] for group in groups] == [
+        [0],
+        [1],
+        [2, 3],
+    ]
 
 
 def test_legacy_use_title_is_only_a_fallback(monkeypatch):
@@ -683,6 +845,7 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
     )
     progress_updates = []
     progress_save_requests = []
+    provider_starts = []
     processor = BatchTranslationProcessor(
         Config(),
         Client(),
@@ -692,6 +855,7 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
         lambda **kwargs: progress_save_requests.append(kwargs),
         lambda *args, **kwargs: progress_updates.append((args, kwargs)),
         lambda: False,
+        request_started_callback=provider_starts.append,
     )
     result = processor.process_single_chapter(
         (
@@ -704,6 +868,7 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
                 "_title_tag_original_markup": original,
                 "filename": "chapter001.xhtml",
                 "original_basename": "chapter001.xhtml",
+                "_batch_request_order": 7,
             },
         )
     )
@@ -721,6 +886,7 @@ def test_parallel_worker_rebuilds_title_only_xhtml(tmp_path, monkeypatch):
         request.get("in_progress") is True
         for request in progress_save_requests
     )
+    assert provider_starts == [7]
     output_files = [path for path in tmp_path.iterdir() if path.is_file()]
     assert len(output_files) == 1
     output_soup = BeautifulSoup(

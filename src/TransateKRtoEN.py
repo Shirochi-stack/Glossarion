@@ -2773,6 +2773,24 @@ class RequestMerger:
         prev_num = None
 
         for ch in chapters_to_translate:
+            try:
+                chapter_obj = ch[1]
+            except Exception:
+                chapter_obj = None
+            if (
+                isinstance(chapter_obj, dict)
+                and chapter_obj.get("_title_tag_only_translation")
+            ):
+                # Dedicated title requests share the normal executor and
+                # BATCH_SIZE, but must never inherit the merged/profile prompt
+                # or carry neighboring chapter content in their user payload.
+                if current_group:
+                    groups.append(current_group)
+                    current_group = []
+                groups.append([ch])
+                prev_num = None
+                continue
+
             # Use proximity key (spine order when available) instead of the
             # logical chapter number alone. This prevents far‑apart chapters
             # with the same numeric label (e.g. multiple "Ch.004" entries in
@@ -4739,13 +4757,19 @@ class ProgressManager:
             self._defer_saves = True
             self._deferred_dirty = False
 
-    def end_deferred_save(self):
-        """Flush a deferred save (if anything changed) and resume normal saves."""
+    def end_deferred_save(self, *, force=False):
+        """Flush one deferred snapshot and resume normal saves.
+
+        ``force`` is used at queue transaction barriers.  Those barriers are
+        deliberately observable by the Progress Manager even when the scan
+        only confirmed existing in-memory state and no individual helper
+        happened to call :meth:`save`.
+        """
         with self._save_lock:
             was_dirty = getattr(self, "_deferred_dirty", False)
             self._defer_saves = False
             self._deferred_dirty = False
-        if was_dirty:
+        if was_dirty or force:
             self.save()
 
     def _cached_output_listing(self, output_dir):
@@ -8101,6 +8125,250 @@ class ContentProcessor:
             return original
         return body
 
+    @staticmethod
+    def _queue_image_link_text_only(text):
+        """Image-path-only check for text already extracted from one soup."""
+        if not text:
+            return False
+        image_ext = r'(?:png|jpe?g|gif|webp|svg|bmp)'
+        md_img = re.compile(r'!\[[^\]]*\]\(([^)]+)\)', re.IGNORECASE)
+        url_pat = re.compile(
+            r'https?://[^\s)>\"]+\.' + image_ext + r'(?:\?[^\s)>\"]*)?',
+            re.IGNORECASE,
+        )
+        path_pat = re.compile(
+            r'(?:[A-Za-z]:)?[^\s)>\"]+\.' + image_ext + r'(?:\?[^\s)>\"]*)?',
+            re.IGNORECASE,
+        )
+        found_any = False
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return False
+        for line in lines:
+            line_work = line
+            for match in md_img.findall(line_work):
+                if url_pat.search(match) or path_pat.search(match):
+                    found_any = True
+            line_work = md_img.sub(' ', line_work)
+            if url_pat.search(line_work):
+                found_any = True
+            line_work = url_pat.sub(' ', line_work)
+            if path_pat.search(line_work):
+                found_any = True
+            line_work = path_pat.sub(' ', line_work)
+            if re.sub(r'[\s\.,;:\(\)\[\]<>{}\"\'\-\u200b]+', '', line_work):
+                return False
+        return found_any
+
+    @staticmethod
+    def _analyze_queue_html_once(html_content):
+        """Return every queue classification fact from one HTML parse."""
+        html_content = ContentProcessor.normalize_escaped_image_tags(
+            html_content or ""
+        )
+        stripped = html_content.strip()
+        if not stripped:
+            return {
+                "html": html_content,
+                "html_mostly_images": False,
+                "has_meaningful_text": False,
+                "is_image_link_only": False,
+                "image_count": 0,
+            }
+
+        has_html_tags = bool(
+            re.search(r'<[A-Za-z][^>]*>', stripped[:1000])
+        )
+        if (
+            not has_html_tags
+            or stripped.startswith('#')
+            or (not has_html_tags and '\n\n' in stripped[:500])
+        ):
+            image_links_only = ContentProcessor._queue_image_link_text_only(
+                stripped
+            )
+            return {
+                "html": html_content,
+                "html_mostly_images": False,
+                "has_meaningful_text": (
+                    not image_links_only and len(stripped) > 50
+                ),
+                "is_image_link_only": image_links_only,
+                "image_count": 0,
+            }
+
+        soup = BeautifulSoup(html_content, 'html.parser')
+        image_nodes = list(soup.find_all('img'))
+        image_count = len(image_nodes)
+        image_nodes.extend(soup.find_all('image'))
+        image_nodes.extend(
+            tag for tag in soup.find_all('object') if tag.get('data')
+        )
+        image_nodes.extend(
+            tag for tag in soup.find_all('video') if tag.get('poster')
+        )
+        image_nodes.extend(
+            tag
+            for tag in soup.find_all(style=True)
+            if 'url(' in (tag.get('style') or '')
+        )
+
+        image_markup_len = sum(len(str(tag)) for tag in image_nodes)
+        total_markup_len = max(len(str(soup)), 1)
+        for tag in list(dict.fromkeys(image_nodes)):
+            try:
+                tag.decompose()
+            except Exception:
+                pass
+        image_removed_text = soup.get_text(separator=' ', strip=True)
+        image_removed_text_len = len(image_removed_text)
+        html_mostly_images = bool(
+            image_nodes
+            and (
+                image_removed_text_len <= 100
+                or (
+                    image_removed_text_len <= 500
+                    and image_markup_len / total_markup_len >= 0.08
+                )
+            )
+        )
+        image_links_only = ContentProcessor._queue_image_link_text_only(
+            image_removed_text
+        )
+
+        for tag in soup.find_all(
+            ['head', 'title', 'script', 'style', 'meta', 'link']
+        ):
+            tag.decompose()
+        image_ext_re = re.compile(
+            r'\.(?:png|jpe?g|gif|webp|svg|bmp)(?:[?#][^\s<>"\']*)?$',
+            re.IGNORECASE,
+        )
+        for tag in soup.find_all(['a', 'source']):
+            ref = tag.get('href') or tag.get('src') or tag.get('data') or ''
+            tag_text = tag.get_text(" ", strip=True)
+            if (
+                image_ext_re.search(ref.strip())
+                or image_ext_re.search(tag_text.strip())
+            ):
+                tag.decompose()
+
+        headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+        header_text = ' '.join(
+            header.get_text(strip=True) for header in headers
+        )
+        for header in headers:
+            header.decompose()
+
+        def _clean_visible_text(value):
+            value = re.sub(r'https?://\S+', ' ', value or '')
+            value = re.sub(
+                r'\b\S+\.(?:png|jpe?g|gif|webp|svg|bmp)(?:[?#]\S*)?',
+                ' ',
+                value,
+                flags=re.IGNORECASE,
+            )
+            return value.strip()
+
+        paragraph_text = _clean_visible_text(' '.join(
+            element.get_text(strip=True) for element in soup.find_all('p')
+        ))
+        div_span_text = _clean_visible_text(' '.join(
+            element.get_text(strip=True)
+            for element in soup.find_all(['div', 'span'])
+        ))
+        all_visible_text = _clean_visible_text(
+            soup.get_text(separator=' ', strip=True)
+        )
+        has_meaningful_text = bool(
+            paragraph_text
+            or len(div_span_text) > 200
+            or header_text.strip()
+            or len(re.sub(r'\s+', '', all_visible_text)) > 50
+        )
+        return {
+            "html": html_content,
+            "html_mostly_images": html_mostly_images,
+            "has_meaningful_text": has_meaningful_text,
+            "is_image_link_only": image_links_only,
+            "image_count": image_count,
+        }
+
+    @staticmethod
+    def queue_content_analysis(chapter):
+        """Classify one batch chapter once and cache the reusable result.
+
+        Queue construction and the worker previously repeated the same image
+        source selection and BeautifulSoup-backed classification.  The cache
+        is tied to the current body value, so preprocessing that removes a
+        title/header naturally invalidates an older result.
+        """
+        body = chapter.get("body", "") or ""
+        cached = chapter.get("_batch_queue_content_analysis")
+        if (
+            isinstance(cached, dict)
+            and cached.get("body_cache_key") == body
+        ):
+            return cached
+
+        normalized_body = ContentProcessor.normalize_escaped_image_tags(body)
+        original = ContentProcessor.normalize_escaped_image_tags(
+            chapter.get("original_html")
+            or chapter.get("source_html")
+            or chapter.get("raw_html")
+            or ""
+        )
+        selected = None
+        if chapter.get("_title_tag_only_translation"):
+            selected = ContentProcessor._analyze_queue_html_once(
+                normalized_body
+            )
+        elif original and original == normalized_body:
+            selected = ContentProcessor._analyze_queue_html_once(original)
+        elif original and re.search(
+            r'<(?:img|image|object|video)\b|url\s*\(',
+            original,
+            re.IGNORECASE,
+        ):
+            original_analysis = ContentProcessor._analyze_queue_html_once(
+                original
+            )
+            if original_analysis["html_mostly_images"]:
+                selected = original_analysis
+        if selected is None:
+            selected = ContentProcessor._analyze_queue_html_once(
+                normalized_body
+            )
+
+        image_source_html = selected["html"]
+        html_mostly_images = selected["html_mostly_images"]
+        has_images = bool(chapter.get("has_images", False) or html_mostly_images)
+        has_meaningful_text = selected["has_meaningful_text"]
+        is_image_link_only = selected["is_image_link_only"]
+        try:
+            text_size = float(chapter.get("file_size", 0) or 0)
+        except (TypeError, ValueError):
+            text_size = 0
+        is_empty_chapter = bool(
+            not has_images and (text_size < 1 or is_image_link_only)
+        )
+        is_image_only_chapter = bool(
+            has_images and not has_meaningful_text
+        )
+        analysis = {
+            "body_cache_key": body,
+            "image_source_html": image_source_html,
+            "html_mostly_images": html_mostly_images,
+            "has_images": has_images,
+            "image_count": selected["image_count"],
+            "has_meaningful_text": has_meaningful_text,
+            "is_image_link_only": is_image_link_only,
+            "is_empty_chapter": is_empty_chapter,
+            "is_image_only_chapter": is_image_only_chapter,
+        }
+        chapter["_batch_queue_content_analysis"] = analysis
+        return analysis
+
 
 def _library_origins_raw_epubs_for_stem(folder_stem):
     """Raw source EPUB paths in library_origins.txt matching *folder_stem*.
@@ -8323,33 +8591,45 @@ def _prepare_image_only_title_plans_parallel(
     errors = 0
     stop_mode = None
     try:
-        futures = {
-            executor.submit(
+        candidate_iter = iter(candidates)
+        active = {}
+
+        def _submit_one():
+            try:
+                candidate = next(candidate_iter)
+            except StopIteration:
+                return False
+            future = executor.submit(
                 _image_only_title_translation_plan,
                 candidate[1],
                 output_dir,
-            ): candidate[0]
-            for candidate in candidates
-        }
-        pending = set(futures)
-        while pending:
+            )
+            active[future] = candidate[0]
+            return True
+
+        while len(active) < worker_count and _submit_one():
+            pass
+
+        while active:
             stop_mode = _translation_prequeue_stop_mode(stop_callback)
             if stop_mode:
-                for future in pending:
+                for future in active:
                     future.cancel()
                 break
-            done, pending = wait(
-                pending,
+            done, _ = wait(
+                tuple(active),
                 timeout=0.05,
                 return_when=FIRST_COMPLETED,
             )
             for future in done:
-                chapter_index = futures[future]
+                chapter_index = active.pop(future)
                 try:
                     results[chapter_index] = future.result()
                 except Exception:
                     errors += 1
                     results[chapter_index] = None
+                if not stop_mode:
+                    _submit_one()
     finally:
         executor.shutdown(
             wait=not bool(stop_mode),
@@ -9574,13 +9854,23 @@ def _batch_spine_order_key(chapter_data):
     return (reading_order, stable_index)
 
 
+def _yield_large_queue_scan(last_yield, interval=0.008):
+    """Cooperatively release the GIL on elapsed time, not item count."""
+    now = time.monotonic()
+    if now - last_yield >= interval:
+        time.sleep(0)
+        return time.monotonic()
+    return last_yield
+
+
 class BatchTranslationProcessor:
     """Handles batch/parallel translation processing"""
     
     def __init__(self, config, client, base_msg, out_dir, progress_lock, 
                  save_progress_fn, update_progress_fn, check_stop_fn, 
                  image_translator=None, is_text_file=False, history_manager=None,
-                 restore_progress_fn=None, progress_manager=None):
+                 restore_progress_fn=None, progress_manager=None,
+                 request_started_callback=None):
         self.config = config
         self.client = client
         self.base_msg = base_msg
@@ -9590,6 +9880,7 @@ class BatchTranslationProcessor:
         self.update_progress_fn = update_progress_fn
         self.restore_progress_fn = restore_progress_fn
         self.progress_manager = progress_manager
+        self.request_started_callback = request_started_callback
         self.check_stop_fn = check_stop_fn
         self.image_translator = image_translator
         self.chapters_completed = 0
@@ -9638,6 +9929,21 @@ class BatchTranslationProcessor:
         """Get the rolling summary snapshot (thread-safe)."""
         with self._batch_rolling_summary_lock:
             return self._batch_rolling_summary_text
+
+    def set_request_started_callback(self, callback):
+        """Install the coordinator hook for the true provider-call boundary."""
+        self.request_started_callback = callback
+
+    def _notify_request_started(self, request_order):
+        callback = self.request_started_callback
+        if not callable(callback):
+            return
+        try:
+            callback(request_order)
+        except Exception as exc:
+            # Scheduling telemetry must never turn a valid provider request
+            # into a translation failure.
+            print(f"⚠️ Could not advance lazy batch dispatch: {exc}")
 
     def _wait_for_ordered_request_dispatch(self, request_order):
         """Release each batch unit's first API call in reading-order sequence.
@@ -9870,10 +10176,18 @@ class BatchTranslationProcessor:
             terminology = "Section" if is_text_source else "Chapter"
             defer_batch_log(f"🔄 Starting #{idx+1} (Internal: {terminology} {chap_num}, Display: {terminology} {log_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
                       
-            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
+            queue_record = chapter.get("_batch_queue_record") or {}
+            content_hash = (
+                queue_record.get("content_hash")
+                or chapter.get("content_hash")
+                or ContentProcessor.get_content_hash(chapter["body"])
+            )
             
             # Determine output filename early so we can track it in progress
-            fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+            fname = (
+                queue_record.get("output_filename")
+                or FileUtilities.create_chapter_filename(chapter, actual_num)
+            )
 
             # A dedicated title request is exactly one tiny chunk. Creating,
             # updating, and serializing resumable chunk metadata for it caused
@@ -9915,19 +10229,41 @@ class BatchTranslationProcessor:
                     # pending; only an API call that is about to send becomes
                     # visible as in-progress in the separate Progress Manager.
                     _save_live_chapter_progress(in_progress=True)
+                self._notify_request_started(
+                    chapter.get("_batch_request_order")
+                )
             
-            from bs4 import BeautifulSoup
-            chapter_body = ContentProcessor.image_processing_html(chapter)
-            html_mostly_images = ContentProcessor.is_mostly_image_html(chapter_body)
+            queue_analysis = chapter.get("_batch_queue_content_analysis")
+            if title_tag_only_chapter:
+                chapter_body = chapter.get("body", "") or ""
+                html_mostly_images = False
+            elif isinstance(queue_analysis, dict):
+                chapter_body = queue_analysis.get(
+                    "image_source_html",
+                    chapter.get("body", "") or "",
+                )
+                html_mostly_images = bool(
+                    queue_analysis.get("html_mostly_images")
+                )
+            else:
+                queue_analysis = ContentProcessor.queue_content_analysis(
+                    chapter
+                )
+                chapter_body = queue_analysis["image_source_html"]
+                html_mostly_images = queue_analysis["html_mostly_images"]
             if html_mostly_images and chapter_body != chapter.get("body", ""):
                 chapter["body"] = chapter_body
                 chapter["has_images"] = True
                 chapter["image_count"] = max(
                     chapter.get("image_count", 0),
-                    len(BeautifulSoup(chapter_body, 'html.parser').find_all('img'))
+                    queue_analysis.get("image_count", 0),
                 )
             c = chapter
-            has_images = chapter.get('has_images', False) or html_mostly_images
+            has_images = (
+                bool(queue_analysis.get("has_images"))
+                if isinstance(queue_analysis, dict) and not title_tag_only_chapter
+                else chapter.get('has_images', False) or html_mostly_images
+            )
             if has_images and self.image_translator and self.config.ENABLE_IMAGE_TRANSLATION:
                 print(f"🖼️ Processing images for Chapter {log_num}...")
                 chapter_image_translator = _chapter_image_translator_for_processing(
@@ -12115,7 +12451,12 @@ class BatchTranslationProcessor:
         
         for idx, chapter in merge_group:
             actual_num = chapter.get('actual_chapter_num', chapter['num'])
-            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
+            queue_record = chapter.get("_batch_queue_record") or {}
+            content_hash = (
+                queue_record.get("content_hash")
+                or chapter.get("content_hash")
+                or ContentProcessor.get_content_hash(chapter["body"])
+            )
             
             # Get chapter body and apply ignore filters if needed
             chapter_body = chapter["body"]
@@ -12183,6 +12524,9 @@ class BatchTranslationProcessor:
                         self.save_progress_fn(in_progress=True)
                     except TypeError:
                         self.save_progress_fn()
+                self._notify_request_started(
+                    parent_chapter.get("_batch_request_order")
+                )
             
             # Merge chapter contents
             merge_input = [(cn, content, ch) for cn, content, _, ch, _ in chapters_data]
@@ -26705,12 +27049,21 @@ def main(log_callback=None, stop_callback=None):
         if config.BATCH_TRANSLATION
         else _translation_chunk_budget_snapshot(config)
     )
+    batch_queue_records = {} if config.BATCH_TRANSLATION else None
+    if config.BATCH_TRANSLATION:
+        # Snapshot transaction 1 starts before status reconciliation.  Calls
+        # inside check_chapter_status() may request saves while restoring or
+        # discovering files; all of those mutations stay in memory until the
+        # preflight barrier below.
+        progress_manager.begin_deferred_save()
+    preflight_last_yield = time.monotonic()
     for idx, c in enumerate(chapters):
         preflight_stop_mode = _translation_prequeue_stop_mode(stop_callback)
         if preflight_stop_mode:
             break
-        if idx and idx % 32 == 0:
-            time.sleep(0)
+        preflight_last_yield = _yield_large_queue_scan(
+            preflight_last_yield
+        )
 
         chap_num = c["num"]
         content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
@@ -26774,6 +27127,38 @@ def main(log_callback=None, stop_callback=None):
         c['_range_allowed_for_translation'] = _range_allows_chapter(c, actual_num, idx)
         if start is not None and c['_range_allowed_for_translation']:
             range_matched_chapters.append(range_display_value if range_display_value is not None else actual_num)
+
+        if config.BATCH_TRANSLATION:
+            try:
+                expected_output = FileUtilities.create_chapter_filename(
+                    c,
+                    actual_num,
+                )
+            except Exception:
+                expected_output = None
+            progress_key = progress_manager._get_chapter_key(
+                actual_num,
+                output_file=expected_output,
+                chapter_obj=c,
+                content_hash=content_hash,
+            )
+            existing_progress = progress_manager.prog.get(
+                "chapters",
+                {},
+            ).get(progress_key, {})
+            queue_record = {
+                "index": idx,
+                "actual_num": actual_num,
+                "raw_num": c.get("raw_chapter_num"),
+                "log_num": _chapter_log_number(c, actual_num),
+                "content_hash": content_hash,
+                "existing_status": existing_progress.get("status"),
+                "output_filename": expected_output,
+                "content_classification": None,
+                "preflight_status": None,
+            }
+            batch_queue_records[idx] = queue_record
+            c["_batch_queue_record"] = queue_record
         
         # Skip configured special files if translation is disabled.
         # Display/progress chapter 0 is cosmetic and must not imply special-file skipping.
@@ -26803,14 +27188,21 @@ def main(log_callback=None, stop_callback=None):
                 
         # IMPORTANT: pass chapter_obj so ProgressManager can resolve composite keys
         # (e.g. when multiple spine items share the same chapter number).
-        needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
-            idx, actual_num, content_hash, out, chapter_obj=c
-        )
+        try:
+            needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
+                idx, actual_num, content_hash, out, chapter_obj=c
+            )
+        except BaseException:
+            if config.BATCH_TRANSLATION:
+                # A failed preflight still publishes the coherent prefix once;
+                # never leave save deferral active while unwinding.
+                progress_manager.end_deferred_save(force=True)
+            raise
         if config.BATCH_TRANSLATION:
             # Nothing can change translation status between this preflight and
-            # the parallel queue scan. Reusing it avoids a second progress-tree
-            # lookup and another output-directory reconciliation per chapter.
-            c["_translation_preflight_status"] = (
+            # the parallel queue scan. Reusing the queue record avoids a second
+            # progress-tree lookup and output-directory reconciliation.
+            queue_record["preflight_status"] = (
                 needs_translation,
                 skip_reason,
                 existing_file,
@@ -26881,6 +27273,11 @@ def main(log_callback=None, stop_callback=None):
         # Always count actual chunks - ignore "completed" tracking
         chunks_per_chapter[idx] = len(chunks)
         total_chunks_needed += chunks_per_chapter[idx]
+
+    if config.BATCH_TRANSLATION:
+        # Snapshot barrier 1: eligibility, restored outputs, discovered files,
+        # and every status decision are now coherent.
+        progress_manager.end_deferred_save(force=True)
 
     if preflight_stop_mode:
         if preflight_stop_mode == "graceful":
@@ -27749,15 +28146,15 @@ def main(log_callback=None, stop_callback=None):
         queued_image_only_title_numbers = []
         copied_image_only_numbers = []
         empty_chapter_numbers = []
+        image_reference_repair_needed = False
+        prequeue_last_yield = time.monotonic()
         for idx, c in enumerate(chapters):
             prequeue_stop_mode = _translation_prequeue_stop_mode(stop_callback)
             if prequeue_stop_mode:
                 break
-            if idx and idx % 32 == 0:
-                # Queue preparation runs on the translation worker, but most
-                # HTML parsing is Python code and can otherwise monopolize the
-                # GIL long enough to starve Qt's GUI thread.
-                time.sleep(0)
+            prequeue_last_yield = _yield_large_queue_scan(
+                prequeue_last_yield
+            )
 
             if (
                 c.get('actual_chapter_num') is not None
@@ -27811,28 +28208,38 @@ def main(log_callback=None, stop_callback=None):
             prequeue_stop_mode = _translation_prequeue_stop_mode(stop_callback)
             if prequeue_stop_mode:
                 break
-            if idx and idx % 32 == 0:
-                time.sleep(0)
+            prequeue_last_yield = _yield_large_queue_scan(
+                prequeue_last_yield
+            )
 
+            queue_record = batch_queue_records.get(idx) or {}
             chap_num = c["num"]
-            content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
-            c["content_hash"] = content_hash
-            preflight_status = c.pop("_translation_preflight_status", None)
+            content_hash = queue_record.get("content_hash")
+            if not content_hash:
+                content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
+                c["content_hash"] = content_hash
+                queue_record["content_hash"] = content_hash
+            preflight_status = queue_record.get("preflight_status")
             
             # Check if this is a pre-split text chunk with decimal number
             # IMPORTANT: Check is_chunk FIRST, then use c['num'] regardless of float value
             # This handles cases like 1.0 where float equals integer but should still be preserved
             if (is_text_file or is_pdf_file) and c.get('is_chunk', False):
-                actual_num = c['num']  # Preserve the decimal for text/PDF chunks
+                actual_num = queue_record.get("actual_num", c['num'])
                 c['actual_chapter_num'] = actual_num  # UPDATE THE CHAPTER DICT!
             else:
-                actual_num = c.get('actual_chapter_num', c['num'])  # Now this will exist!
-            log_num = _chapter_log_number(c, actual_num)
+                actual_num = queue_record.get(
+                    "actual_num",
+                    c.get('actual_chapter_num', c['num']),
+                )
+            log_num = queue_record.get("log_num")
+            if log_num is None:
+                log_num = _chapter_log_number(c, actual_num)
             
             # Skip configured special files if translation is disabled.
             # When TRANSLATE_ALL_NUMBERED_HTML is on, files with a number
             # in their filename bypass the skip (translation context only).
-            raw_num = c.get('raw_chapter_num')
+            raw_num = queue_record.get("raw_num", c.get('raw_chapter_num'))
             if raw_num is None:
                 raw_num = FileUtilities.extract_actual_chapter_number(
                     c,
@@ -27854,15 +28261,19 @@ def main(log_callback=None, stop_callback=None):
             if isinstance(preflight_status, tuple) and len(preflight_status) == 3:
                 needs_translation, skip_reason, existing_file = preflight_status
             else:
-                needs_translation, skip_reason, existing_file = (
-                    progress_manager.check_chapter_status(
-                        idx,
-                        actual_num,
-                        content_hash,
-                        out,
-                        c,
+                try:
+                    needs_translation, skip_reason, existing_file = (
+                        progress_manager.check_chapter_status(
+                            idx,
+                            actual_num,
+                            content_hash,
+                            out,
+                            c,
+                        )
                     )
-                )
+                except BaseException:
+                    progress_manager.end_deferred_save(force=True)
+                    raise
             # Add explicit file check for supposedly completed chapters
             if not needs_translation and existing_file:
                 file_path = os.path.join(out, existing_file)
@@ -27872,7 +28283,6 @@ def main(log_callback=None, stop_callback=None):
                     skip_reason = None
                     # Update status to file_missing
                     progress_manager.update(idx, actual_num, content_hash, None, status="file_missing", chapter_obj=c)
-                    progress_manager.save()
             
             # -------------------------------------------------------------------------
             # BATCH PRE-PROCESSING
@@ -27919,26 +28329,36 @@ def main(log_callback=None, stop_callback=None):
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(_sdlxliff_preserved_batch_body(c) if c.get("sdlxliff_batch") else (c.get("body") or ""))
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
-                progress_manager.save()
                 chapters_completed += 1
                 print(f"⏭️ SDLXLIFF batch {log_num}: placeholder-only; preserved without API request")
                 continue
             
-            # Check for empty or image-only chapters
-            from bs4 import BeautifulSoup
-            image_source_html = ContentProcessor.image_processing_html(c)
-            html_mostly_images = ContentProcessor.is_mostly_image_html(image_source_html)
-            has_images = c.get('has_images', False) or html_mostly_images
+            # Check for empty or image-only chapters exactly once.  The same
+            # cached analysis is consumed by the eventual worker.
+            try:
+                content_analysis = ContentProcessor.queue_content_analysis(c)
+            except BaseException:
+                progress_manager.end_deferred_save(force=True)
+                raise
+            image_source_html = content_analysis["image_source_html"]
+            html_mostly_images = content_analysis["html_mostly_images"]
             if html_mostly_images and image_source_html and image_source_html != c.get("body", ""):
                 c["body"] = image_source_html
                 c["has_images"] = True
-                c["image_count"] = max(c.get("image_count", 0), len(BeautifulSoup(image_source_html, 'html.parser').find_all('img')))
-            has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
-            text_size = c.get('file_size', 0)
-            
-            is_image_link_only = ContentProcessor.is_only_image_links(c["body"])
-            is_empty_chapter = (not has_images and (text_size < 1 or is_image_link_only))
-            is_image_only_chapter = (has_images and not has_meaningful_text)
+                c["image_count"] = max(
+                    c.get("image_count", 0),
+                    content_analysis.get("image_count", 0),
+                )
+                content_analysis["body_cache_key"] = image_source_html
+            is_empty_chapter = content_analysis["is_empty_chapter"]
+            is_image_only_chapter = content_analysis["is_image_only_chapter"]
+            queue_record["content_classification"] = (
+                "empty"
+                if is_empty_chapter
+                else "image_only"
+                if is_image_only_chapter
+                else "mixed_or_text"
+            )
             
             # Handle empty chapters
             if is_empty_chapter:
@@ -27963,7 +28383,6 @@ def main(log_callback=None, stop_callback=None):
                 write_utf8_html_file(os.path.join(out, fname), original_markup)
 
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty", chapter_obj=c)
-                progress_manager.save()
                 chapters_completed += 1
                 continue
             elif is_image_only_chapter and config.OUTPUT_MODE == "text":
@@ -28000,17 +28419,17 @@ def main(log_callback=None, stop_callback=None):
                     "task(s) failed; preserving those chapters unchanged"
                 )
 
-            copied_image_references_need_repair = False
             if not prequeue_stop_mode:
-                for candidate_pos, (
+                for (
                     idx,
                     c,
                     actual_num,
                     log_num,
                     content_hash,
-                ) in enumerate(image_only_title_candidates):
-                    if candidate_pos and candidate_pos % 32 == 0:
-                        time.sleep(0)
+                ) in image_only_title_candidates:
+                    prequeue_last_yield = _yield_large_queue_scan(
+                        prequeue_last_yield
+                    )
                     prequeue_stop_mode = _translation_prequeue_stop_mode(
                         stop_callback
                     )
@@ -28021,6 +28440,7 @@ def main(log_callback=None, stop_callback=None):
                     if _apply_image_only_title_translation_plan(c, plan):
                         chapters_to_translate.append((idx, c))
                         queued_image_only_title_numbers.append(log_num)
+                        image_reference_repair_needed = True
                         continue
 
                     copied_image_only_numbers.append(log_num)
@@ -28032,7 +28452,7 @@ def main(log_callback=None, stop_callback=None):
                     )
                     output_path = os.path.join(out, fname)
                     write_utf8_html_file(output_path, original_markup)
-                    copied_image_references_need_repair = True
+                    image_reference_repair_needed = True
 
                     progress_manager.update(
                         idx,
@@ -28043,13 +28463,11 @@ def main(log_callback=None, stop_callback=None):
                         chapter_obj=c,
                         model_name="COPIED",
                     )
-                    progress_manager.save()
                     chapters_completed += 1
 
-            # This scans every translated HTML file. Running it once per copied
-            # image-only chapter was quadratic in large books.
-            if copied_image_references_need_repair and not prequeue_stop_mode:
-                retroactive_update_image_references(out)
+            # Image-reference repair is intentionally deferred to the single
+            # final translation barrier below. Queue construction must not scan
+            # the output directory after every copy phase.
 
         if empty_chapter_numbers:
             print(
@@ -28077,8 +28495,174 @@ def main(log_callback=None, stop_callback=None):
         if not prequeue_stop_mode:
             prequeue_stop_mode = _translation_prequeue_stop_mode(stop_callback)
 
-        # Flush the one coalesced progress write for the whole scan.
-        progress_manager.end_deferred_save()
+        if not prequeue_stop_mode:
+            # Finalize chapter order and Pending rows in memory. No worker has
+            # reached a provider call, so nothing may be In Progress here.
+            chapters_to_translate.sort(key=_batch_spine_order_key)
+            for idx, c in chapters_to_translate:
+                prequeue_stop_mode = _translation_prequeue_stop_mode(
+                    stop_callback
+                )
+                if prequeue_stop_mode:
+                    break
+                prequeue_last_yield = _yield_large_queue_scan(
+                    prequeue_last_yield
+                )
+                queue_record = c.get("_batch_queue_record") or {}
+                actual_num = queue_record.get(
+                    "actual_num",
+                    c.get("actual_chapter_num", c.get("num")),
+                )
+                content_hash = queue_record.get(
+                    "content_hash",
+                    c.get("content_hash"),
+                )
+                output_filename = queue_record.get("output_filename")
+                if not output_filename:
+                    output_filename = FileUtilities.create_chapter_filename(
+                        c,
+                        actual_num,
+                    )
+                    queue_record["output_filename"] = output_filename
+                progress_manager.update(
+                    idx,
+                    actual_num,
+                    content_hash,
+                    output_filename,
+                    status="pending",
+                    raw_num=queue_record.get("raw_num"),
+                    chapter_obj=c,
+                    prefer_thread_model=False,
+                )
+
+        units_to_process = []
+        is_merged_mode = False
+        if not prequeue_stop_mode and use_request_merging:
+            try:
+                proximity_runs = RequestMerger.create_merge_groups(
+                    chapters_to_translate,
+                    max(1, len(chapters_to_translate)),
+                )
+            except BaseException:
+                progress_manager.end_deferred_save(force=True)
+                raise
+            max_output_tokens = config.get_effective_output_limit()
+            safety_margin_output = 500
+            compression_factor = config.get_effective_compression_factor()
+            available_tokens = int(
+                (max_output_tokens - safety_margin_output)
+                / compression_factor
+            )
+            available_tokens = max(available_tokens, 1000)
+
+            merge_groups = []
+            for run in proximity_runs:
+                prequeue_stop_mode = _translation_prequeue_stop_mode(
+                    stop_callback
+                )
+                if prequeue_stop_mode:
+                    break
+                prequeue_last_yield = _yield_large_queue_scan(
+                    prequeue_last_yield
+                )
+                if len(run) <= 1:
+                    merge_groups.append(run)
+                    continue
+
+                run_index = 0
+                while run_index < len(run):
+                    prequeue_stop_mode = _translation_prequeue_stop_mode(
+                        stop_callback
+                    )
+                    if prequeue_stop_mode:
+                        break
+                    prequeue_last_yield = _yield_large_queue_scan(
+                        prequeue_last_yield
+                    )
+                    group = [run[run_index]]
+                    run_index += 1
+                    while (
+                        run_index < len(run)
+                        and len(group) < config.REQUEST_MERGE_COUNT
+                    ):
+                        prequeue_stop_mode = (
+                            _translation_prequeue_stop_mode(stop_callback)
+                        )
+                        if prequeue_stop_mode:
+                            break
+                        prequeue_last_yield = _yield_large_queue_scan(
+                            prequeue_last_yield
+                        )
+                        candidate = run[run_index]
+                        merge_input = [
+                            (
+                                chapter.get(
+                                    'actual_chapter_num',
+                                    chapter['num'],
+                                ),
+                                chapter["body"],
+                                chapter,
+                            )
+                            for (_index, chapter) in (group + [candidate])
+                        ]
+                        try:
+                            merged_preview = RequestMerger.merge_chapters(
+                                merge_input,
+                                log_injections=False,
+                            )
+                            merged_tokens = chapter_splitter.count_tokens(
+                                merged_preview
+                            )
+                        except BaseException:
+                            progress_manager.end_deferred_save(force=True)
+                            raise
+                        if merged_tokens <= available_tokens:
+                            group.append(candidate)
+                            run_index += 1
+                        else:
+                            break
+                    merge_groups.append(group)
+                    if prequeue_stop_mode:
+                        break
+                if prequeue_stop_mode:
+                    break
+
+            units_to_process = merge_groups
+            is_merged_mode = True
+            if not prequeue_stop_mode:
+                print(
+                    f"🔗 Created {len(merge_groups)} merge groups from "
+                    f"{len(chapters_to_translate)} chapters "
+                    "(after size adjustment)"
+                )
+        elif not prequeue_stop_mode:
+            for chapter_item in chapters_to_translate:
+                prequeue_stop_mode = _translation_prequeue_stop_mode(
+                    stop_callback
+                )
+                if prequeue_stop_mode:
+                    break
+                prequeue_last_yield = _yield_large_queue_scan(
+                    prequeue_last_yield
+                )
+                units_to_process.append([chapter_item])
+
+        if not prequeue_stop_mode:
+            for request_order, unit in enumerate(units_to_process):
+                prequeue_stop_mode = _translation_prequeue_stop_mode(
+                    stop_callback
+                )
+                if prequeue_stop_mode:
+                    break
+                prequeue_last_yield = _yield_large_queue_scan(
+                    prequeue_last_yield
+                )
+                for _chapter_index, chapter in unit:
+                    chapter['_batch_request_order'] = request_order
+
+        # Snapshot barrier 2: the complete request queue and every copied or
+        # empty terminal row are finalized. Queued requests remain Pending.
+        progress_manager.end_deferred_save(force=True)
 
         if prequeue_stop_mode:
             if prequeue_stop_mode == "graceful":
@@ -28091,10 +28675,6 @@ def main(log_callback=None, stop_callback=None):
                     "❌ Translation force-stopped during parallel queue preparation."
                 )
             return
-
-        # Thread scheduling must not redefine book order. EPUB items use their
-        # OPF spine position; PDF/text items retain their extracted list order.
-        chapters_to_translate.sort(key=_batch_spine_order_key)
 
         # Print skip summary for batch mode
         if hasattr(config, '_batch_skipped_chapters') and config._batch_skipped_chapters:
@@ -28341,68 +28921,6 @@ def main(log_callback=None, stop_callback=None):
             batch_group_size = batch_group_size_cfg  # not used for throttling, only for logging/summary grouping
             print(f"⚡ Using AGGRESSIVE batching: keeps {config.BATCH_SIZE} parallel calls, auto-refills when any finishes")
         
-        # Create merge groups if request merging is enabled
-        if use_request_merging:
-            # Build proximity runs first (so we never merge far-apart chapters),
-            # then pack each run under the token budget. This avoids patterns like
-            # 2+1, 2+1 when REQUEST_MERGE_COUNT=3 but only 2 chapters fit; instead
-            # we repack into 2+2, 2+2 when possible.
-            proximity_runs = RequestMerger.create_merge_groups(
-                chapters_to_translate,
-                max(1, len(chapters_to_translate)),
-            )
-
-            max_output_tokens = config.get_effective_output_limit()
-            safety_margin_output = 500
-            compression_factor = config.get_effective_compression_factor()
-            available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
-            available_tokens = max(available_tokens, 1000)
-
-            merge_groups = []
-            for run in proximity_runs:
-                if len(run) <= 1:
-                    merge_groups.append(run)
-                    continue
-
-                i = 0
-                while i < len(run):
-                    group = [run[i]]
-                    i += 1
-
-                    # Try to grow the group up to REQUEST_MERGE_COUNT, but stop
-                    # when adding the next chapter would exceed the token budget.
-                    while i < len(run) and len(group) < config.REQUEST_MERGE_COUNT:
-                        candidate = run[i]
-                        merge_input = [
-                            (ch.get('actual_chapter_num', ch['num']), ch["body"], ch)
-                            for (idx, ch) in (group + [candidate])
-                        ]
-                        merged_preview = RequestMerger.merge_chapters(merge_input, log_injections=False)
-                        merged_tokens = chapter_splitter.count_tokens(merged_preview)
-
-                        if merged_tokens <= available_tokens:
-                            group.append(candidate)
-                            i += 1
-                        else:
-                            break
-
-                    merge_groups.append(group)
-
-            print(f"🔗 Created {len(merge_groups)} merge groups from {total_to_process} chapters (after size adjustment)")
-
-            units_to_process = merge_groups
-            is_merged_mode = True
-        else:
-            units_to_process = [[ch] for ch in chapters_to_translate]  # Wrap each chapter as single-item group
-            is_merged_mode = False
-
-        # Assign a contiguous ticket after request merging. A merged group may
-        # span several chapter indices, so chapter numbers themselves are not a
-        # safe synchronization key for ordered dispatch.
-        for request_order, unit in enumerate(units_to_process):
-            for _chapter_index, chapter in unit:
-                chapter['_batch_request_order'] = request_order
-        
         @contextmanager
         def _parallel_progress_executor():
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=config.BATCH_SIZE)
@@ -28422,19 +28940,25 @@ def main(log_callback=None, stop_callback=None):
                 # Worker stop updates were intentionally memory-only.  Flush
                 # the fully settled mapping exactly once here.
                 progress_manager.save()
+                if image_reference_repair_needed:
+                    retroactive_update_image_references(out)
 
         with _parallel_progress_executor() as executor:
             if batching_mode == 'aggressive':
                 import threading
-                batch_submit_lock = threading.Lock()
+                from collections import deque
+                batch_submit_lock = threading.RLock()
                 active_futures = {}
-                next_unit_idx = 0
+                unsent_units = deque(units_to_process)
+                dispatch_started_orders = set()
                 
                 def submit_next_unit():
-                    nonlocal next_unit_idx
-                    if next_unit_idx >= len(units_to_process):
+                    """Submit one lightweight unit; caller holds batch_submit_lock."""
+                    if not unsent_units:
                         return False
-                    unit = units_to_process[next_unit_idx]
+                    if _translation_prequeue_stop_mode(stop_callback):
+                        return False
+                    unit = unsent_units.popleft()
                     if config.USE_ROLLING_SUMMARY:
                         batch_processor.set_batch_rolling_summary_text(rolling_summary_for_next_batch)
                         time.sleep(0.000001)
@@ -28443,36 +28967,76 @@ def main(log_callback=None, stop_callback=None):
                     else:
                         fut = executor.submit(batch_processor.process_single_chapter, unit[0])
                     active_futures[fut] = unit
-                    next_unit_idx += 1
                     return True
+
+                def _provider_request_started(request_order):
+                    """Advance one queue slot only at the real provider boundary."""
+                    try:
+                        request_order = int(request_order)
+                    except (TypeError, ValueError):
+                        return
+                    with batch_submit_lock:
+                        if request_order in dispatch_started_orders:
+                            return
+                        dispatch_started_orders.add(request_order)
+                        if (
+                            len(active_futures) < config.BATCH_SIZE
+                            and not _translation_prequeue_stop_mode(
+                                stop_callback
+                            )
+                        ):
+                            submit_next_unit()
+
+                batch_processor.set_request_started_callback(
+                    _provider_request_started
+                )
                 
-                # Prime the executor
+                # Prime exactly one preparation task. Each true provider-call
+                # start releases the next unit, gradually filling BATCH_SIZE
+                # with genuinely active calls without creating a wall of
+                # waiting workers.
                 with batch_submit_lock:
-                    while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
-                        pass
+                    submit_next_unit()
                 
                 graceful_stop_message_shown = False  # Track if we've shown the message
                 
-                while active_futures or next_unit_idx < len(units_to_process):
+                while True:
                     # Check for graceful stop before submitting new work
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                    
-                    # Ensure we have work submitted (but not during graceful stop)
-                    if not active_futures:
-                        with batch_submit_lock:
-                            while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
-                                pass
-                        if not active_futures:
-                            break  # No more work to do
-                    elif not graceful_stop_active:
-                        # Auto-refill: submit new work to maintain BATCH_SIZE parallel calls
-                        # But DON'T submit new work if graceful stop is active
-                        with batch_submit_lock:
-                            while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
-                                pass
-                    
+
+                    with batch_submit_lock:
+                        if (
+                            not active_futures
+                            and unsent_units
+                            and not graceful_stop_active
+                        ):
+                            # Recovery path for a unit that failed before it
+                            # reached the provider boundary.
+                            submit_next_unit()
+                        futures_snapshot = tuple(active_futures)
+                        has_unsent = bool(unsent_units)
+                    if not futures_snapshot:
+                        if not has_unsent or graceful_stop_active:
+                            break
+                        continue
+
                     # Use wait() with FIRST_COMPLETED to properly handle dynamic future sets
-                    done, _ = concurrent.futures.wait(active_futures.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
+                    done, _ = concurrent.futures.wait(
+                        futures_snapshot,
+                        timeout=0.1,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
+                    if not done:
+                        if check_stop() and not (
+                            graceful_stop_active
+                            and os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                        ):
+                            executor.shutdown(
+                                wait=False,
+                                cancel_futures=True,
+                            )
+                            return
+                        continue
                     
                     # Track if we should exit the outer loop after processing done futures
                     should_exit_outer_loop = False
@@ -28489,14 +29053,19 @@ def main(log_callback=None, stop_callback=None):
                                     graceful_stop_message_shown = True
                                 # Process only completed futures, skip cancelled ones
                                 # Clear all remaining futures and exit both loops
-                                active_futures.clear()
+                                with batch_submit_lock:
+                                    active_futures.clear()
+                                    unsent_units.clear()
                                 should_exit_outer_loop = True
                                 break
                             else:
                                 # print("❌ Translation stopped")  # Redundant with "Translation stopped by user" from exception
                                 executor.shutdown(wait=False, cancel_futures=True)
                                 return
-                        unit = active_futures.pop(future)
+                        with batch_submit_lock:
+                            unit = active_futures.pop(future, None)
+                        if unit is None:
+                            continue
                         completed_in_batch = 0
                         failed_in_batch = 0
                         batch_history_map = {}
@@ -28570,11 +29139,16 @@ def main(log_callback=None, stop_callback=None):
                                 print(f"⚠️ Batch rolling summary update failed: {e}")
                                 rolling_summary_for_next_batch = ""
                         
-                        # Refill slots aggressively (but not if stop requested)
+                        # A failure before the provider boundary would not have
+                        # released a successor. Recover by submitting one unit;
+                        # successful calls normally refill from the callback.
                         if not check_stop():
                             with batch_submit_lock:
-                                while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
-                                    pass
+                                if (
+                                    len(active_futures) < config.BATCH_SIZE
+                                    and unsent_units
+                                ):
+                                    submit_next_unit()
                     
                     # Exit outer loop if graceful stop was triggered
                     if should_exit_outer_loop:
@@ -28582,6 +29156,7 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Flush every coalesced title-only status at this synchronization
                 # barrier instead of rewriting the progress JSON per request.
+                batch_processor.set_request_started_callback(None)
                 progress_manager.save()
 
                 # After all futures complete, if stop was requested with wait_for_chunks, exit
@@ -28742,9 +29317,6 @@ def main(log_callback=None, stop_callback=None):
         # Aggressive mode has no per-group barrier; this is its authoritative
         # final flush. It is harmless after direct/conservative batch flushes.
         progress_manager.save()
-
-        if any(c.get("_title_tag_only_translation") for c in chapters):
-            retroactive_update_image_references(out)
 
         chapters_completed = batch_processor.chapters_completed
         chunks_completed = batch_processor.chunks_completed
