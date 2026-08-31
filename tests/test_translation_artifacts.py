@@ -2934,6 +2934,9 @@ def test_isolated_dedicated_pools_rotate_immediately_on_rate_limit(
     from multi_api_key_manager import APIKeyPool
     from unified_api_client import UnifiedClient, UnifiedClientError
 
+    # Error rotation is independent of scheduled/forced rotation.
+    monkeypatch.setenv("FORCE_KEY_ROTATION", "0")
+    monkeypatch.setenv("ROTATION_FREQUENCY", "99")
     monkeypatch.setattr(
         UnifiedClient,
         "_setup_client",
@@ -2974,6 +2977,112 @@ def test_isolated_dedicated_pools_rotate_immediately_on_rate_limit(
     assert attempted_models == ["dedicated-model-1", "dedicated-model-2"]
     assert pool.keys[0].is_cooling_down is True
     assert pool.keys[1].success_count == 1
+
+
+def test_isolated_dedicated_pool_respects_rotation_frequency(monkeypatch):
+    from multi_api_key_manager import APIKeyPool
+    from unified_api_client import UnifiedClient
+
+    monkeypatch.setenv("FORCE_KEY_ROTATION", "1")
+    monkeypatch.setenv("ROTATION_FREQUENCY", "3")
+    monkeypatch.setattr(
+        UnifiedClient,
+        "_setup_client",
+        lambda self: setattr(self, "client_type", "test"),
+    )
+    client = UnifiedClient(api_key="main-key", model="main-model")
+    pool = APIKeyPool("Dedicated frequency test pool")
+    key_data = [
+        {"api_key": "dedicated-key-1", "model": "dedicated-model-1"},
+        {"api_key": "dedicated-key-2", "model": "dedicated-model-2"},
+    ]
+    attempted_models = []
+
+    def fake_send_internal(temp_client, *_args, **_kwargs):
+        attempted_models.append(temp_client.model)
+        return "ok", "stop"
+
+    monkeypatch.setattr(UnifiedClient, "_send_internal", fake_send_internal)
+
+    for request_number in range(4):
+        # Metadata-style routes reload an unchanged pool before each request;
+        # that must not reset the frequency counter.
+        pool.load_from_list(key_data)
+        result = client._send_with_isolated_dedicated_key(
+            pool,
+            key_data,
+            "Metadata",
+            "MetadataKey",
+            [{"role": "user", "content": str(request_number)}],
+            context="metadata",
+            request_id=f"request-{request_number}",
+        )
+        assert result == ("ok", "stop")
+
+    assert attempted_models == [
+        "dedicated-model-1",
+        "dedicated-model-1",
+        "dedicated-model-1",
+        "dedicated-model-2",
+    ]
+
+
+def test_nonisolated_dedicated_pool_respects_rotation_frequency(monkeypatch):
+    from multi_api_key_manager import APIKeyPool
+    from unified_api_client import UnifiedClient
+
+    monkeypatch.setenv("FORCE_KEY_ROTATION", "1")
+    monkeypatch.setenv("ROTATION_FREQUENCY", "3")
+    monkeypatch.setattr(
+        UnifiedClient,
+        "_setup_client",
+        lambda self: setattr(self, "client_type", "test"),
+    )
+    client = UnifiedClient(api_key="main-key", model="main-model")
+    pool = APIKeyPool("Non-isolated dedicated frequency test pool")
+    key_data = [
+        {"api_key": "dedicated-key-1", "model": "dedicated-model-1"},
+        {"api_key": "dedicated-key-2", "model": "dedicated-model-2"},
+    ]
+    pool.load_from_list(key_data)
+    attempted_models = []
+
+    for _request_number in range(4):
+        state = client._apply_dedicated_key_pool_override(
+            pool,
+            key_data,
+            "Glossary",
+            "GlossaryKey",
+        )
+        assert state is not None
+        attempted_models.append(client.model)
+        client._restore_dedicated_key_pool_override(state)
+
+    assert attempted_models == [
+        "dedicated-model-1",
+        "dedicated-model-1",
+        "dedicated-model-1",
+        "dedicated-model-2",
+    ]
+
+
+def test_dedicated_pool_rotation_settings_load_when_main_pool_is_disabled(monkeypatch):
+    from unified_api_client import UnifiedClient
+
+    monkeypatch.setenv("USE_MULTI_API_KEYS", "0")
+    monkeypatch.setenv("FORCE_KEY_ROTATION", "1")
+    monkeypatch.setenv("ROTATION_FREQUENCY", "99")
+    monkeypatch.setattr(
+        UnifiedClient,
+        "_setup_client",
+        lambda self: setattr(self, "client_type", "test"),
+    )
+
+    client = UnifiedClient(api_key="main-key", model="main-model")
+
+    assert client._multi_key_mode is False
+    assert client._force_rotation is True
+    assert client._rotation_frequency == 99
 
 
 def test_batch_header_progress_uses_actual_metadata_key_model(tmp_path, monkeypatch):

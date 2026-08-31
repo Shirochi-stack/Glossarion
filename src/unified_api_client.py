@@ -4139,6 +4139,7 @@ class UnifiedClient:
         self._multi_key_mode = False  # INSTANCE variable, not class!
         self._force_rotation = True
         self._rotation_frequency = 1
+        self._refresh_rotation_settings_from_environment()
         
         # CRITICAL: Flag to prevent infinite fallback recursion
         # This flag is set to True ONLY for temporary clients created during fallback attempts
@@ -4274,8 +4275,8 @@ class UnifiedClient:
             multi_keys_json = os.getenv('MULTI_API_KEYS', '[]')
             if debug_enabled:
                 print(f"[DEBUG] Loading multi-keys config...")
-            force_rotation = os.getenv('FORCE_KEY_ROTATION', '1') == '1'
-            rotation_frequency = int(os.getenv('ROTATION_FREQUENCY', '1'))
+            force_rotation = self._force_rotation
+            rotation_frequency = self._rotation_frequency
             
             multi_keys = []
             try:
@@ -5139,6 +5140,19 @@ class UnifiedClient:
             return True
         
         return False
+
+    def _refresh_rotation_settings_from_environment(self):
+        """Refresh the global rotation controls for every key-pool route."""
+        force_rotation = os.getenv('FORCE_KEY_ROTATION')
+        if force_rotation is not None:
+            self._force_rotation = force_rotation == '1'
+
+        rotation_frequency = os.getenv('ROTATION_FREQUENCY')
+        if rotation_frequency is not None:
+            try:
+                self._rotation_frequency = max(1, int(rotation_frequency))
+            except (TypeError, ValueError):
+                pass
 
     def _handle_rate_limit_for_thread(self):
         """Handle rate limit by marking current thread's key and getting a new one (thread-safe)"""
@@ -6701,6 +6715,8 @@ class UnifiedClient:
         if not any(getattr(k, 'enabled', True) for k in pool.keys):
             return None
 
+        self._refresh_rotation_settings_from_environment()
+
         self._dedicated_override_lock.acquire()
         state = {
             'api_key': self.api_key,
@@ -6723,7 +6739,14 @@ class UnifiedClient:
             pass
 
         try:
-            key_info = self._get_next_available_key()
+            if hasattr(pool, 'get_key_for_request'):
+                selected = pool.get_key_for_request(
+                    force_rotation=getattr(self, '_force_rotation', True),
+                    rotation_frequency=getattr(self, '_rotation_frequency', 1),
+                )
+                key_info = (selected[0], selected[1]) if selected else None
+            else:
+                key_info = self._get_next_available_key()
             if not key_info:
                 self._restore_dedicated_key_pool_override(state)
                 return None
@@ -6800,6 +6823,10 @@ class UnifiedClient:
         if not pool or not getattr(pool, 'keys', []):
             raise UnifiedClientError(f"{label} key pool has no keys", error_type="no_keys")
 
+        # These controls are global in the manager and may change while a
+        # long-lived client is serving a dedicated pool.
+        self._refresh_rotation_settings_from_environment()
+
         max_attempts = max(1, len(getattr(pool, 'keys', []) or []))
         last_error = None
         for _attempt in range(max_attempts):
@@ -6807,10 +6834,13 @@ class UnifiedClient:
                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
 
             try:
-                key_info = pool.get_key_for_thread(
-                    force_rotation=True,
+                key_info = pool.get_key_for_request(
+                    force_rotation=getattr(self, '_force_rotation', True),
                     rotation_frequency=getattr(self, '_rotation_frequency', 1),
-                ) if hasattr(pool, 'get_key_for_thread') else None
+                ) if hasattr(pool, 'get_key_for_request') else pool.get_key_for_thread(
+                    force_rotation=False,
+                    rotation_frequency=getattr(self, '_rotation_frequency', 1),
+                )
             except Exception as exc:
                 raise UnifiedClientError(f"{label} key pool selection failed: {exc}", error_type="no_keys")
             if not key_info:
@@ -7143,6 +7173,7 @@ class UnifiedClient:
         Unified front for send and send_image. Includes multi-key retry wrapper.
         """
         temperature = self._effective_temperature(temperature)
+        self._refresh_rotation_settings_from_environment()
         if not context:
             inherited_context = str(getattr(self, 'context', '') or '').strip()
             if inherited_context in (

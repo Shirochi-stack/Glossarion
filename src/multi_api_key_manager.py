@@ -495,6 +495,11 @@ class APIKeyPool:
         self.keys: List[APIKeyEntry] = []
         self.lock = threading.Lock()  # This already exists
         self._rotation_index = 0
+        # Stateless/isolated callers cannot retain a thread assignment between
+        # requests. Track their configured rotation frequency at the pool level
+        # so dedicated pools obey the same "every N requests" setting.
+        self._request_rotation_index = None
+        self._request_rotation_count = 0
         self._thread_assignments = {}
         self._rate_limit_cache = RateLimitCache()
         self._last_load_log_signature = None
@@ -611,6 +616,15 @@ class APIKeyPool:
                     for key in self.keys
                 ),
             )
+            if log_signature != getattr(self, '_last_load_log_signature', None):
+                self._request_rotation_index = None
+                self._request_rotation_count = 0
+            elif (
+                self._request_rotation_index is not None
+                and self._request_rotation_index >= len(self.keys)
+            ):
+                self._request_rotation_index = None
+                self._request_rotation_count = 0
             disabled_note = f", {disabled_count} disabled" if disabled_count else ""
             log_message = (
                 f"{pool_name}: loaded {enabled_count} enabled / {configured_count} configured "
@@ -755,6 +769,72 @@ class APIKeyPool:
                 return key, best_key_index, key_id
 
             logger.error(f"[Thread-{thread_name}] No keys available at all")
+            return None
+
+    def get_key_for_request(self, force_rotation: bool = False,
+                            rotation_frequency: int = 1) -> Optional[Tuple[APIKeyEntry, int, str]]:
+        """Select a key for a stateless request while respecting rotation frequency.
+
+        Dedicated batch/parallel requests use a fresh temporary client for each
+        call, so thread assignments cannot carry their request count. This
+        pool-level selector keeps one count shared by those calls. A key that
+        enters cooldown is replaced immediately, regardless of the configured
+        frequency.
+        """
+        if self._is_stop_requested():
+            logger.info("Stop requested during request key selection, returning None")
+            return None
+
+        try:
+            frequency = max(1, int(rotation_frequency or 1))
+        except (TypeError, ValueError):
+            frequency = 1
+
+        self._rate_limit_cache.clear_expired()
+        with self.key_selection_lock:
+            if not self.keys:
+                return None
+
+            current_index = self._request_rotation_index
+            current_available = False
+            if current_index is not None and 0 <= current_index < len(self.keys):
+                current_key = self.keys[current_index]
+                current_key_id = f"Key#{current_index+1} ({current_key.model})"
+                with self.key_locks.get(current_index, threading.Lock()):
+                    current_available = (
+                        current_key.is_available()
+                        and not self._rate_limit_cache.is_rate_limited(current_key_id)
+                    )
+
+            frequency_reached = (
+                bool(force_rotation)
+                and self._request_rotation_count >= frequency
+            )
+            if current_available and not frequency_reached:
+                self._request_rotation_count += 1
+                return current_key, current_index, current_key_id
+
+            attempts = 0
+            while attempts < len(self.keys):
+                if self._is_stop_requested():
+                    logger.info("Stop requested during request key rotation loop")
+                    return None
+
+                key_index = self._rotation_index
+                self._rotation_index = (self._rotation_index + 1) % len(self.keys)
+                key = self.keys[key_index]
+                key_id = f"Key#{key_index+1} ({key.model})"
+
+                with self.key_locks.get(key_index, threading.Lock()):
+                    if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                        self._request_rotation_index = key_index
+                        self._request_rotation_count = 1
+                        return key, key_index, key_id
+                attempts += 1
+
+            self._request_rotation_index = None
+            self._request_rotation_count = 0
+            logger.warning(f"[{self.pool_name}] No request keys are currently available")
             return None
 
     def mark_key_error(self, key_index: int, error_code: int = None):
