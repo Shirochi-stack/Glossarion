@@ -153,6 +153,29 @@ def test_ordered_translation_dispatch_fallback_is_one_second_and_silent():
     assert "timed out waiting for an earlier spine item" not in source
 
 
+def test_dispatch_order_timeout_other_setting_is_shared_by_both_pipelines():
+    root = Path(translation_module.__file__).resolve().parent
+    other_settings_source = (root / "other_settings.py").read_text(
+        encoding="utf-8"
+    )
+    gui_source = (root / "translator_gui.py").read_text(encoding="utf-8")
+    glossary_source = (root / "extract_glossary_from_epub.py").read_text(
+        encoding="utf-8"
+    )
+    translation_source = inspect.getsource(
+        BatchTranslationProcessor._wait_for_ordered_request_dispatch
+    )
+
+    assert '"Dispatch order timeout (s):"' in other_settings_source
+    assert '"dispatch_order_timeout"' in other_settings_source
+    assert '"ORDERED_BATCH_DISPATCH_TIMEOUT"' in other_settings_source
+    assert "'ORDERED_BATCH_DISPATCH_TIMEOUT': _bounded_config_int" in gui_source
+    assert "_update_env('ORDERED_BATCH_DISPATCH_TIMEOUT'" in gui_source
+    assert "('ORDERED_BATCH_DISPATCH_TIMEOUT', _int_config" in gui_source
+    assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")' in translation_source
+    assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")' in glossary_source
+
+
 def test_parallel_chapter_scan_polls_stop_before_queueing_titles():
     source = Path(translation_module.__file__).read_text(encoding="utf-8")
     scan_start = source.index('print("📊 Verifying chapter numbers...")')

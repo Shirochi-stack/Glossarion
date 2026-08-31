@@ -3911,6 +3911,20 @@ def _create_response_handling_section(self, parent):
         "Maximum seconds for one AuthND browser helper to load the NVIDIA page and acquire an hCaptcha token.",
         minimum=30,
     ))
+    authnd_timeout_h.addSpacing(18)
+    authnd_timeout_h.addWidget(_make_authnd_spin_control(
+        "Dispatch order timeout (s):",
+        "dispatch_order_timeout_var",
+        "dispatch_order_timeout_spin",
+        "dispatch_order_timeout",
+        "ORDERED_BATCH_DISPATCH_TIMEOUT",
+        1,
+        120,
+        10,
+        30,
+        "Maximum seconds a ready batch request waits for an earlier spine item before it is released.",
+        minimum=1,
+    ))
     authnd_timeout_h.addStretch()
     section_v.addWidget(authnd_timeout_row)
 
