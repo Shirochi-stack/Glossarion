@@ -143,6 +143,16 @@ def test_batch_graceful_stop_never_escalates_to_global_hard_cancel():
         assert forbidden not in processor_source
 
 
+def test_ordered_translation_dispatch_fallback_is_one_second_and_silent():
+    source = inspect.getsource(
+        BatchTranslationProcessor._wait_for_ordered_request_dispatch
+    )
+
+    assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")' in source
+    assert "timeout = 1.0" in source
+    assert "timed out waiting for an earlier spine item" not in source
+
+
 def test_parallel_chapter_scan_polls_stop_before_queueing_titles():
     source = Path(translation_module.__file__).read_text(encoding="utf-8")
     scan_start = source.index('print("📊 Verifying chapter numbers...")')

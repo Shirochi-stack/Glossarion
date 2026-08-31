@@ -9998,11 +9998,11 @@ class BatchTranslationProcessor:
         except (TypeError, ValueError):
             return
 
-        timeout = 120.0
+        timeout = 1.0
         try:
             timeout = max(
-                5.0,
-                float(os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "120")),
+                1.0,
+                float(os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")),
             )
         except (TypeError, ValueError):
             pass
@@ -10019,10 +10019,6 @@ class BatchTranslationProcessor:
                     return
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    print(
-                        "⚠️ Ordered batch dispatch timed out waiting for an "
-                        "earlier spine item; releasing the ready request"
-                    )
                     self._ordered_dispatch_next = request_order
                     break
                 self._ordered_dispatch_condition.wait(
