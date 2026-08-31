@@ -3922,8 +3922,15 @@ def _create_response_handling_section(self, parent):
         120,
         10,
         30,
-        "Maximum seconds a ready batch request waits for an earlier spine item before it is released.",
-        minimum=1,
+        (
+            "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+            "Maximum seconds a ready batch request waits for an earlier spine "
+            "item before it is released. Affects all providers' batched "
+            "translation and glossary-extraction requests, not only AuthND. "
+            "Set to 0 for no waiting."
+            "</p></qt>"
+        ),
+        minimum=0,
     ))
     authnd_timeout_h.addStretch()
     section_v.addWidget(authnd_timeout_row)

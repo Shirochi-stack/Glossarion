@@ -108,7 +108,7 @@ class _OrderedGlossaryBatchDispatcher:
 
         try:
             timeout = max(
-                1.0,
+                0.0,
                 float(os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")),
             )
         except (TypeError, ValueError):

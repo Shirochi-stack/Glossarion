@@ -10001,7 +10001,7 @@ class BatchTranslationProcessor:
         timeout = 1.0
         try:
             timeout = max(
-                1.0,
+                0.0,
                 float(os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")),
             )
         except (TypeError, ValueError):
@@ -29340,9 +29340,6 @@ def main(log_callback=None, stop_callback=None):
                                 processed += 1
                             print(f"❌ Thread error: {e}")
                         
-                        progress_percent = (processed / total_to_process) * 100
-                        print(f"📊 Overall Progress: {processed}/{total_to_process} ({progress_percent:.1f}%)")
-                        
                         # History append immediately for this unit
                         if config.CONTEXTUAL and getattr(config, 'HIST_LIMIT', 0) > 0:
                             hist_limit = getattr(config, 'HIST_LIMIT', 0)
@@ -29506,9 +29503,6 @@ def main(log_callback=None, stop_callback=None):
                                 processed += 1
                             print(f"❌ Thread error: {e}")
                         
-                        progress_percent = (processed / total_to_process) * 100
-                        print(f"📊 Overall Progress: {processed}/{total_to_process} ({progress_percent:.1f}%)")
-                    
                     # After all futures in this batch complete, append their history entries
                     if config.CONTEXTUAL and getattr(config, 'HIST_LIMIT', 0) > 0:
                         hist_limit = getattr(config, 'HIST_LIMIT', 0)

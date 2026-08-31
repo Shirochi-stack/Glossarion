@@ -14100,7 +14100,7 @@ Text to analyze:
             self.dispatch_order_timeout_var = min(
                 120,
                 max(
-                    1,
+                    0,
                     int(float(self.config.get('dispatch_order_timeout', 1))),
                 ),
             )
@@ -34758,7 +34758,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'AUTHND_TOKEN_CONCURRENCY': authnd_token_limit,
             'AUTHND_TOKEN_SUBPROCESS_CONCURRENCY': authnd_subprocess_limit,
             'AUTHND_TOKEN_TIMEOUT': _bounded_config_int('authnd_token_timeout_var', 'authnd_token_timeout', 180, 30, 600),
-            'ORDERED_BATCH_DISPATCH_TIMEOUT': _bounded_config_int('dispatch_order_timeout_var', 'dispatch_order_timeout', 1, 1, 120),
+            'ORDERED_BATCH_DISPATCH_TIMEOUT': _bounded_config_int('dispatch_order_timeout_var', 'dispatch_order_timeout', 1, 0, 120),
             'GEMINI_FREE_ADAPTIVE_SPLIT': '1' if _bool_config_value('gemini_free_adaptive_split_var', 'gemini_free_adaptive_split', True) else '0',
             'GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT': '1' if _bool_config_value('gemini_free_html_text_node_transport_var', 'gemini_free_html_text_node_transport', True) else '0',
             'GEMINI_FREE_SUBCHUNK_PROMPT_CHARS': _bounded_config_int('gemini_free_subchunk_prompt_chars_var', 'gemini_free_subchunk_prompt_chars', 7000, 300, 7000),
@@ -45856,7 +45856,7 @@ Important rules:
                 ('authnd_token_concurrency', ['authnd_token_concurrency_var'], 1, lambda v: max(1, safe_int(v, 1))),
                 ('authnd_token_subprocess_concurrency', ['authnd_token_subprocess_concurrency_var'], 1, lambda v: max(1, safe_int(v, 1))),
                 ('authnd_token_timeout', ['authnd_token_timeout_var'], 180, lambda v: min(600, max(30, safe_int(v, 180)))),
-                ('dispatch_order_timeout', ['dispatch_order_timeout_var'], 1, lambda v: min(120, max(1, safe_int(v, 1)))),
+                ('dispatch_order_timeout', ['dispatch_order_timeout_var'], 1, lambda v: min(120, max(0, safe_int(v, 1)))),
                 ('gemini_free_adaptive_split', ['gemini_free_adaptive_split_checkbox', 'gemini_free_adaptive_split_var'], True, bool),
                 ('gemini_free_html_text_node_transport', ['gemini_free_html_text_node_transport_checkbox', 'gemini_free_html_text_node_transport_var'], True, bool),
                 ('gemini_free_subchunk_prompt_chars', ['gemini_free_subchunk_prompt_chars_var'], 7000, lambda v: min(7000, max(300, safe_int(v, 7000)))),
@@ -46323,7 +46323,7 @@ Important rules:
             env_vars_set.append(_update_env('AUTHND_TOKEN_CONCURRENCY', authnd_token_limit))
             env_vars_set.append(_update_env('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', authnd_subprocess_limit))
             env_vars_set.append(_update_env('AUTHND_TOKEN_TIMEOUT', _config_int('authnd_token_timeout', 180, 30, 600)))
-            env_vars_set.append(_update_env('ORDERED_BATCH_DISPATCH_TIMEOUT', _config_int('dispatch_order_timeout', 1, 1, 120)))
+            env_vars_set.append(_update_env('ORDERED_BATCH_DISPATCH_TIMEOUT', _config_int('dispatch_order_timeout', 1, 0, 120)))
             env_vars_set.append(_update_env('GEMINI_FREE_ADAPTIVE_SPLIT', _config_bool('gemini_free_adaptive_split', True), is_bool=True))
             env_vars_set.append(_update_env('GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT', _config_bool('gemini_free_html_text_node_transport', True), is_bool=True))
             env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _config_int('gemini_free_subchunk_prompt_chars', 7000, 300, 7000)))
@@ -46933,7 +46933,7 @@ Important rules:
                 ('AUTHND_TOKEN_CONCURRENCY', str(authnd_token_limit)),
                 ('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', str(authnd_subprocess_limit)),
                 ('AUTHND_TOKEN_TIMEOUT', _int_config('authnd_token_timeout', 180, 30, 600)),
-                ('ORDERED_BATCH_DISPATCH_TIMEOUT', _int_config('dispatch_order_timeout', 1, 1, 120)),
+                ('ORDERED_BATCH_DISPATCH_TIMEOUT', _int_config('dispatch_order_timeout', 1, 0, 120)),
                 ('GEMINI_FREE_ADAPTIVE_SPLIT', '1' if _bool_config('gemini_free_adaptive_split', True) else '0'),
                 ('GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT', '1' if _bool_config('gemini_free_html_text_node_transport', True) else '0'),
                 ('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _int_config('gemini_free_subchunk_prompt_chars', 7000, 300, 7000)),

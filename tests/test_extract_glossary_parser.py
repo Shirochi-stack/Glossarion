@@ -96,6 +96,7 @@ def test_ordered_glossary_dispatch_fallback_is_one_second_and_silent():
 
     assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")' in source
     assert "timeout = 1.0" in source
+    assert "max(\n                0.0," in source
     assert "timed out waiting for an earlier spine item" not in source
 
 

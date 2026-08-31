@@ -150,6 +150,7 @@ def test_ordered_translation_dispatch_fallback_is_one_second_and_silent():
 
     assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")' in source
     assert "timeout = 1.0" in source
+    assert "max(\n                0.0," in source
     assert "timed out waiting for an earlier spine item" not in source
 
 
@@ -169,11 +170,20 @@ def test_dispatch_order_timeout_other_setting_is_shared_by_both_pipelines():
     assert '"Dispatch order timeout (s):"' in other_settings_source
     assert '"dispatch_order_timeout"' in other_settings_source
     assert '"ORDERED_BATCH_DISPATCH_TIMEOUT"' in other_settings_source
+    assert "Set to 0 for no waiting." in other_settings_source
+    assert "Affects all providers' batched" in other_settings_source
+    assert "max-width: 32em" in other_settings_source
     assert "'ORDERED_BATCH_DISPATCH_TIMEOUT': _bounded_config_int" in gui_source
     assert "_update_env('ORDERED_BATCH_DISPATCH_TIMEOUT'" in gui_source
     assert "('ORDERED_BATCH_DISPATCH_TIMEOUT', _int_config" in gui_source
     assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")' in translation_source
     assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")' in glossary_source
+
+
+def test_batch_translation_does_not_log_settled_futures_as_overall_progress():
+    source = Path(translation_module.__file__).read_text(encoding="utf-8")
+
+    assert "Overall Progress:" not in source
 
 
 def test_parallel_chapter_scan_polls_stop_before_queueing_titles():
