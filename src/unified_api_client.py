@@ -6838,7 +6838,16 @@ class UnifiedClient:
             temp._thread_last_payload_paths = {}
             temp._image_thread_dir_cache = {}
             temp._payload_context_thread_dir_cache = {}
-            temp._multi_key_mode = False
+            # Keep the isolated request in multi-key error mode even though the
+            # helper, rather than _send_core, owns key selection.  _send_internal
+            # uses this flag to decide whether a 429 should be surfaced for pool
+            # rotation or retried indefinitely as a single key.  Binding the
+            # dedicated pool also keeps every pool-aware check inside its route.
+            temp._multi_key_mode = True
+            temp._api_key_pool = pool
+            # The helper already selected and initialized this attempt's key.
+            # Do not let _send_internal rotate once more before sending it.
+            temp._skip_next_ensure_thread = True
             temp._active_key_pool_scope = key_prefix
             temp._active_key_pool_expected_pool = pool
             temp._force_image_output_mode = getattr(self, '_force_image_output_mode', False)

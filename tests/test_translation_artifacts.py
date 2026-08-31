@@ -2915,6 +2915,67 @@ def test_sequential_metadata_chunks_are_isolated_without_bypassing_lock(
     assert send_lock.events == ["acquire", "release", "acquire", "release"]
 
 
+@pytest.mark.parametrize(
+    ("label", "key_prefix"),
+    (
+        ("Glossary", "GlossaryKey"),
+        ("GlossaryRefinement", "GlossaryRefinementKey"),
+        ("Metadata", "MetadataKey"),
+        ("RollingSummary", "RollingSummaryKey"),
+        ("Vision", "VisionKey"),
+        ("ImageGenEdit", "ImageGenEditKey"),
+        ("AITruncationDetection", "AITruncationDetectionKey"),
+        ("TruncationRetry", "TruncationRetryKey"),
+    ),
+)
+def test_isolated_dedicated_pools_rotate_immediately_on_rate_limit(
+    monkeypatch, label, key_prefix
+):
+    from multi_api_key_manager import APIKeyPool
+    from unified_api_client import UnifiedClient, UnifiedClientError
+
+    monkeypatch.setattr(
+        UnifiedClient,
+        "_setup_client",
+        lambda self: setattr(self, "client_type", "test"),
+    )
+    client = UnifiedClient(api_key="main-key", model="main-model")
+    pool = APIKeyPool(f"{label} test pool")
+    key_data = [
+        {"api_key": "dedicated-key-1", "model": "dedicated-model-1", "cooldown": 60},
+        {"api_key": "dedicated-key-2", "model": "dedicated-model-2", "cooldown": 60},
+    ]
+    pool.load_from_list(key_data)
+    attempted_models = []
+
+    def fake_send_internal(temp_client, *_args, **_kwargs):
+        assert temp_client._multi_key_mode is True
+        assert temp_client._api_key_pool is pool
+        assert temp_client._active_key_pool_expected_pool is pool
+        assert temp_client._skip_next_ensure_thread is True
+        attempted_models.append(temp_client.model)
+        if temp_client.model == "dedicated-model-1":
+            raise UnifiedClientError("rate limited", error_type="rate_limit", http_status=429)
+        return "ok", "stop"
+
+    monkeypatch.setattr(UnifiedClient, "_send_internal", fake_send_internal)
+
+    result = client._send_with_isolated_dedicated_key(
+        pool,
+        key_data,
+        label,
+        key_prefix,
+        [{"role": "user", "content": "test"}],
+        context="glossary",
+        request_id="request-1",
+    )
+
+    assert result == ("ok", "stop")
+    assert attempted_models == ["dedicated-model-1", "dedicated-model-2"]
+    assert pool.keys[0].is_cooling_down is True
+    assert pool.keys[1].success_count == 1
+
+
 def test_batch_header_progress_uses_actual_metadata_key_model(tmp_path, monkeypatch):
     from metadata_batch_translator import BatchHeaderTranslator
     from unified_api_client import set_current_thread_actual_request_model
