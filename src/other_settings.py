@@ -3918,7 +3918,7 @@ def _create_response_handling_section(self, parent):
         "dispatch_order_timeout_spin",
         "dispatch_order_timeout",
         "ORDERED_BATCH_DISPATCH_TIMEOUT",
-        1,
+        3,
         120,
         10,
         30,
@@ -4909,7 +4909,7 @@ def _create_response_handling_section(self, parent):
     
     # Wait for Chunks toggle (child of graceful stop)
     if not hasattr(self, 'wait_for_chunks_var'):
-        self.wait_for_chunks_var = self.config.get('wait_for_chunks', False)
+        self.wait_for_chunks_var = self.config.get('wait_for_chunks', True)
     
     self.wait_for_chunks_checkbox = self._create_styled_checkbox("Wait for all chunks to complete")
     self.wait_for_chunks_checkbox.setContentsMargins(40, 0, 0, 0)

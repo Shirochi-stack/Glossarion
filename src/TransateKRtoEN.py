@@ -9998,11 +9998,11 @@ class BatchTranslationProcessor:
         except (TypeError, ValueError):
             return
 
-        timeout = 1.0
+        timeout = 3.0
         try:
             timeout = max(
                 0.0,
-                float(os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")),
+                float(os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "3")),
             )
         except (TypeError, ValueError):
             pass
@@ -11575,67 +11575,67 @@ class BatchTranslationProcessor:
 
                         # Handle graceful-stop skipped chunks
                         if finish_reason == "graceful_stop":
+                            fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                             save_partial_results = _save_partial_results_enabled(self.config)
+                            partial_content = None
                             if save_partial_results:
-                                fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                                partial_content = None
                                 try:
                                     tls = self.client._get_thread_local_client()
                                     partial_content = getattr(tls, '_last_truncated_content', None)
                                 except Exception:
                                     partial_content = getattr(self.client, '_last_truncated_content', None)
-                                had_partial_content = isinstance(partial_content, str) and bool(partial_content)
-                                partial_content = _failure_output_for_save(
+                            had_partial_content = (
+                                isinstance(partial_content, str)
+                                and bool(partial_content.strip())
+                            )
+                            if save_partial_results and had_partial_content:
+                                failure_output = _failure_output_for_save(
                                     partial_content,
                                     original_chapter_body,
                                     self.config,
-                                    qa_issue=["TRUNCATED"] if had_partial_content else ["PARTIAL"],
+                                    qa_issue=["TRUNCATED"],
                                 )
-                                if partial_content:
+                                if failure_output:
                                     try:
                                         with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                                            f.write(partial_content)
+                                            f.write(failure_output)
                                     except Exception:
                                         pass
-                                    with self.progress_lock:
-                                        self.update_progress_fn(
-                                            chapter_progress_idx, actual_num, content_hash, fname,
-                                            status="qa_failed",
-                                            qa_issues_found=["TRUNCATED"] if had_partial_content else ["PARTIAL"],
-                                            chapter_obj=chapter
-                                        )
-                                        graceful_stop_qa_issue = ["TRUNCATED"] if had_partial_content else ["PARTIAL"]
-                                        self.save_progress_fn()
-                                    saved_label = "truncated" if had_partial_content else "original source"
-                                    print(f"⚠️ Chapter {log_num} stopped (graceful stop) — saved {saved_label}")
-                                else:
-                                    with self.progress_lock:
-                                        self.update_progress_fn(
-                                            chapter_progress_idx, actual_num, content_hash, fname,
-                                            status="qa_failed",
-                                            qa_issues_found=["PARTIAL"],
-                                            chapter_obj=chapter
-                                        )
-                                        graceful_stop_qa_issue = ["PARTIAL"]
-                                        self.save_progress_fn()
-                                    print(f"⚠️ Chapter {log_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
-                            if chapter_chunk_progress_enabled:
                                 with self.progress_lock:
-                                    if graceful_stop_qa_issue:
+                                    self.update_progress_fn(
+                                        chapter_progress_idx, actual_num, content_hash, fname,
+                                        status="qa_failed",
+                                        qa_issues_found=["TRUNCATED"],
+                                        chapter_obj=chapter
+                                    )
+                                    graceful_stop_qa_issue = ["TRUNCATED"]
+                                    if chapter_chunk_progress_enabled:
                                         self.progress_manager.set_chapter_chunk_qa(
                                             content_hash,
                                             chunk_idx,
                                             graceful_stop_qa_issue,
                                         )
-                                    else:
-                                        self.progress_manager.set_chapter_chunk_runtime_status(
+                                    self.save_progress_fn()
+                                print(f"⚠️ Chapter {log_num} stopped (graceful stop) — saved truncated response")
+                            else:
+                                # An unsplit chapter is still represented internally as
+                                # chunk 1/1. A graceful stop with no captured response is
+                                # resumable pending work, not a PARTIAL QA failure.
+                                with self.progress_lock:
+                                    self.update_progress_fn(
+                                        chapter_progress_idx, actual_num, content_hash, fname,
+                                        status="pending",
+                                        chapter_obj=chapter,
+                                    )
+                                    if chapter_chunk_progress_enabled:
+                                        self.progress_manager.set_chapter_chunk_qa(
                                             content_hash,
                                             chunk_idx,
-                                            "pending",
+                                            [],
                                         )
                                     self.save_progress_fn()
-                            # This future never opened a provider call.  Keep
-                            # draining sibling futures so calls which did start
+                            # This worker has no committed result. Keep draining
+                            # sibling futures so provider calls which did start
                             # can finish and publish their terminal state.
                             continue
 
@@ -31020,58 +31020,30 @@ def main(log_callback=None, stop_callback=None):
                 if finish_reason == "graceful_stop":
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
                     save_partial_results = _save_partial_results_enabled(config)
+                    partial_content = None
                     if save_partial_results:
-                        # If we have a truncated partial response, save it and mark TRUNCATED
-                        partial_content = None
                         try:
                             tls = translation_processor.client._get_thread_local_client()
                             partial_content = getattr(tls, '_last_truncated_content', None)
                         except Exception:
                             partial_content = getattr(translation_processor.client, '_last_truncated_content', None)
-                        had_partial_content = isinstance(partial_content, str) and bool(partial_content)
-                        partial_content = _failure_output_for_save(
+                    had_partial_content = (
+                        isinstance(partial_content, str)
+                        and bool(partial_content.strip())
+                    )
+                    if save_partial_results and had_partial_content:
+                        failure_output = _failure_output_for_save(
                             partial_content,
                             chunk_html,
                             config,
-                            qa_issue=["TRUNCATED"] if had_partial_content else ["PARTIAL"],
+                            qa_issue=["TRUNCATED"],
                         )
-                        if partial_content:
+                        if failure_output:
                             try:
                                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                                    f.write(partial_content)
+                                    f.write(failure_output)
                             except Exception:
                                 pass
-                            progress_manager.update(
-                                idx, actual_num, content_hash, fname,
-                                status="qa_failed",
-                                qa_issues_found=["TRUNCATED"] if had_partial_content else ["PARTIAL"],
-                                chapter_obj=c
-                            )
-                            if chunk_progress_enabled:
-                                progress_manager.set_chapter_chunk_qa(
-                                    chapter_key_str,
-                                    chunk_idx,
-                                    ["TRUNCATED"] if had_partial_content else ["PARTIAL"],
-                                )
-                            progress_manager.save()
-                            saved_label = "truncated" if had_partial_content else "original source"
-                            print(f"⚠️ Chapter {log_num} stopped (graceful stop) — saved {saved_label}")
-                        else:
-                            progress_manager.update(
-                                idx, actual_num, content_hash, fname,
-                                status="qa_failed",
-                                qa_issues_found=["PARTIAL"],
-                                chapter_obj=c
-                            )
-                            if chunk_progress_enabled:
-                                progress_manager.set_chapter_chunk_qa(
-                                    chapter_key_str,
-                                    chunk_idx,
-                                    ["PARTIAL"],
-                                )
-                            progress_manager.save()
-                            print(f"⚠️ Chapter {log_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
-                    elif chapter_truncated:
                         progress_manager.update(
                             idx, actual_num, content_hash, fname,
                             status="qa_failed",
@@ -31085,17 +31057,33 @@ def main(log_callback=None, stop_callback=None):
                                 ["TRUNCATED"],
                             )
                         progress_manager.save()
-                        print(f"⚠️ Chapter {log_num} stopped (graceful stop) - preserved TRUNCATED status")
-                    else:
-                        progress_manager.update(idx, actual_num, content_hash, fname, status="pending", chapter_obj=c)
+                        print(f"⚠️ Chapter {log_num} stopped (graceful stop) — saved truncated response")
+                    elif chapter_truncated:
+                        progress_manager.update(
+                            idx, actual_num, content_hash, fname,
+                            status="qa_failed",
+                            qa_issues_found=["TRUNCATED"],
+                            chapter_obj=c,
+                        )
                         if chunk_progress_enabled:
-                            progress_manager.set_chapter_chunk_runtime_status(
+                            progress_manager.set_chapter_chunk_qa(
                                 chapter_key_str,
                                 chunk_idx,
-                                "pending",
+                                ["TRUNCATED"],
                             )
                         progress_manager.save()
-                        print(f"⏸️ Chapter {log_num} skipped (graceful stop)")
+                        print(f"⚠️ Chapter {log_num} stopped (graceful stop) — preserved TRUNCATED status")
+                    else:
+                        # No provider response was captured. Chunk 1/1 is only
+                        # the internal representation of an unsplit chapter.
+                        progress_manager.update(idx, actual_num, content_hash, fname, status="pending", chapter_obj=c)
+                        if chunk_progress_enabled:
+                            progress_manager.set_chapter_chunk_qa(
+                                chapter_key_str,
+                                chunk_idx,
+                                [],
+                            )
+                        progress_manager.save()
                     chunk_abort = True
                     break
 

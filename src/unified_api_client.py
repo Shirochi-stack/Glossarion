@@ -9832,6 +9832,25 @@ class UnifiedClient:
         # Initialize variables that might be referenced in exception handlers
         extracted_content = ""
         finish_reason = 'error'
+
+        def _finalize_prohibited_failure(error):
+            """Return the provider's blocked-content result without starting another attempt."""
+            self._save_failed_request(messages, error, context)
+            self._track_stats(
+                context,
+                False,
+                type(error).__name__,
+                time.time() - start_time,
+            )
+            fallback_content = self._handle_empty_result(messages, context, str(error))
+            return self._failure_response_content(
+                messages,
+                context,
+                provider_content=extracted_content,
+                error=error,
+                fallback=fallback_content,
+                failure_reason='prohibited_content',
+            ), 'prohibited_content'
         
         # Track whether we already attempted a Gemma/OpenRouter system->user retry
         gemma_no_system_retry_done = False
@@ -10605,8 +10624,13 @@ class UnifiedClient:
                 except Exception:
                     print(f"UnifiedClient error: {e}")
                 
-                # Abort all further handling if stop was requested during error processing
+                # Abort all further handling if stop was requested during error processing.
+                # A provider failure which already happened is authoritative: a graceful
+                # stop may prevent its fallback/retry, but must not relabel prohibited
+                # content as a cancelled/partial response.
                 if self._should_abort_retry():
+                    if e.error_type == "prohibited_content":
+                        return _finalize_prohibited_failure(e)
                     self._cancelled = True
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
 
@@ -10789,17 +10813,7 @@ class UnifiedClient:
                         print("[FALLBACK DIRECT] Fallback keys disabled; skipping prohibited-content retry")
                     
                     # Fallthrough: record and return generic fallback
-                    self._save_failed_request(messages, e, context)
-                    self._track_stats(context, False, type(e).__name__, time.time() - start_time)
-                    fallback_content = self._handle_empty_result(messages, context, str(e))
-                    return self._failure_response_content(
-                        messages,
-                        context,
-                        provider_content=extracted_content,
-                        error=e,
-                        fallback=fallback_content,
-                        failure_reason='prohibited_content',
-                    ), 'prohibited_content'
+                    return _finalize_prohibited_failure(e)
                 
                 # Check for retryable server errors (500, 502, 503, 504)
                 http_status = getattr(e, 'http_status', None)

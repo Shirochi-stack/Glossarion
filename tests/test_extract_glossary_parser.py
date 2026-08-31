@@ -89,13 +89,13 @@ def test_glossary_stop_request_logs_are_coalesced(capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_ordered_glossary_dispatch_fallback_is_one_second_and_silent():
+def test_ordered_glossary_dispatch_fallback_is_three_seconds_and_silent():
     source = inspect.getsource(
         glossary_extractor._OrderedGlossaryBatchDispatcher.wait_for_turn
     )
 
-    assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")' in source
-    assert "timeout = 1.0" in source
+    assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "3")' in source
+    assert "timeout = 3.0" in source
     assert "max(\n                0.0," in source
     assert "timed out waiting for an earlier spine item" not in source
 

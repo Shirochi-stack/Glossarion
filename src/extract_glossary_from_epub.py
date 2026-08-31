@@ -109,10 +109,10 @@ class _OrderedGlossaryBatchDispatcher:
         try:
             timeout = max(
                 0.0,
-                float(os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")),
+                float(os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "3")),
             )
         except (TypeError, ValueError):
-            timeout = 1.0
+            timeout = 3.0
         deadline = time.monotonic() + timeout
 
         with self._condition:

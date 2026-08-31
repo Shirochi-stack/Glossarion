@@ -143,13 +143,13 @@ def test_batch_graceful_stop_never_escalates_to_global_hard_cancel():
         assert forbidden not in processor_source
 
 
-def test_ordered_translation_dispatch_fallback_is_one_second_and_silent():
+def test_ordered_translation_dispatch_fallback_is_three_seconds_and_silent():
     source = inspect.getsource(
         BatchTranslationProcessor._wait_for_ordered_request_dispatch
     )
 
-    assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")' in source
-    assert "timeout = 1.0" in source
+    assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "3")' in source
+    assert "timeout = 3.0" in source
     assert "max(\n                0.0," in source
     assert "timed out waiting for an earlier spine item" not in source
 
@@ -176,8 +176,8 @@ def test_dispatch_order_timeout_other_setting_is_shared_by_both_pipelines():
     assert "'ORDERED_BATCH_DISPATCH_TIMEOUT': _bounded_config_int" in gui_source
     assert "_update_env('ORDERED_BATCH_DISPATCH_TIMEOUT'" in gui_source
     assert "('ORDERED_BATCH_DISPATCH_TIMEOUT', _int_config" in gui_source
-    assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")' in translation_source
-    assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "1")' in glossary_source
+    assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "3")' in translation_source
+    assert 'os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "3")' in glossary_source
 
 
 def test_batch_translation_does_not_log_settled_futures_as_overall_progress():
@@ -1561,6 +1561,10 @@ def _run_batch_chapter_failure(
     provider_text="streamed response",
     finish_reason="prohibited_content",
     raised_error=None,
+    graceful_stop_on_send=False,
+    captured_partial_content=None,
+    expected_statuses=("qa_failed", "failed"),
+    expected_output_count=1,
 ):
     class Config:
         MODEL = "gpt-test"
@@ -1588,7 +1592,11 @@ def _run_batch_chapter_failure(
             return 1
 
     class Client:
+        _last_truncated_content = captured_partial_content
+
         def send(self, messages, temperature=None, max_tokens=None, context=None):
+            if graceful_stop_on_send:
+                monkeypatch.setenv("GRACEFUL_STOP", "1")
             if raised_error is not None:
                 raise raised_error
             return provider_text, finish_reason
@@ -1662,9 +1670,66 @@ def _run_batch_chapter_failure(
     )
     output_files = [path for path in tmp_path.iterdir() if path.is_file()]
     assert result[0] is False
-    assert progress_updates[-1][1]["status"] in {"qa_failed", "failed"}
-    assert len(output_files) == 1
-    return source, output_files[0].read_text(encoding="utf-8")
+    assert progress_updates[-1][1]["status"] in set(expected_statuses)
+    assert len(output_files) == expected_output_count
+    saved = output_files[0].read_text(encoding="utf-8") if output_files else None
+    return source, saved
+
+
+def test_batch_graceful_stop_without_response_leaves_unsplit_chapter_pending(
+    tmp_path,
+    monkeypatch,
+):
+    from unified_api_client import UnifiedClientError
+
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.setenv("WAIT_FOR_CHUNKS", "0")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", "1")
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "0")
+
+    _source, saved = _run_batch_chapter_failure(
+        tmp_path,
+        monkeypatch,
+        raised_error=UnifiedClientError(
+            "Operation cancelled before graceful-stop retry",
+            error_type="cancelled",
+        ),
+        graceful_stop_on_send=True,
+        expected_statuses=("pending",),
+        expected_output_count=0,
+    )
+
+    assert saved is None
+
+
+def test_batch_graceful_stop_keeps_real_captured_partial_as_truncated(
+    tmp_path,
+    monkeypatch,
+):
+    from unified_api_client import UnifiedClientError
+
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.setenv("WAIT_FOR_CHUNKS", "0")
+    monkeypatch.setenv("SAVE_PARTIAL_RESULTS", "1")
+    monkeypatch.setenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", "0")
+    partial = "<p>captured provider output</p>"
+
+    _source, saved = _run_batch_chapter_failure(
+        tmp_path,
+        monkeypatch,
+        raised_error=UnifiedClientError(
+            "Operation cancelled before graceful-stop retry",
+            error_type="cancelled",
+        ),
+        graceful_stop_on_send=True,
+        captured_partial_content=partial,
+        expected_statuses=("qa_failed",),
+        expected_output_count=1,
+    )
+
+    assert saved == partial
 
 
 @pytest.mark.parametrize("source_extension", [".epub", ".pdf"])
@@ -2252,6 +2317,53 @@ def test_terminal_blocked_response_returns_accumulated_stream_text(monkeypatch):
         max_tokens=100,
         context="translation",
         request_id="streamed-block-test",
+    ) == (streamed, "prohibited_content")
+
+
+def test_graceful_stop_does_not_relabel_provider_block_as_partial(monkeypatch):
+    from unified_api_client import UnifiedClient, UnifiedClientError
+
+    monkeypatch.delenv("PRESERVE_ORIGINAL_TEXT_ON_FAILURE", raising=False)
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.setenv("MAX_RETRIES", "1")
+    monkeypatch.setenv("USE_MULTI_API_KEYS", "0")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("USE_GLOSSARY_KEYS", "0")
+    monkeypatch.setenv("USE_GLOSSARY_REFINEMENT_KEYS", "0")
+
+    client = UnifiedClient(api_key="test-key", model="gpt-test")
+    streamed = "translated text received before the block"
+
+    def raise_block_after_graceful_stop(*args, **kwargs):
+        monkeypatch.setenv("GRACEFUL_STOP", "1")
+        raise UnifiedClientError(
+            "Content blocked: FinishReason.PROHIBITED_CONTENT",
+            error_type="prohibited_content",
+            details={"partial_content": streamed},
+        )
+
+    monkeypatch.setattr(client, "_get_response", raise_block_after_graceful_stop)
+    monkeypatch.setattr(
+        client,
+        "_get_file_names",
+        lambda messages, context=None: ("payload.json", "response.txt"),
+    )
+    for method_name in (
+        "_save_payload",
+        "_save_response",
+        "_save_failed_request",
+        "_track_stats",
+        "_attach_usage_to_last_payload",
+    ):
+        monkeypatch.setattr(client, method_name, lambda *args, **kwargs: None)
+
+    assert client._send_internal(
+        messages=[{"role": "user", "content": "raw source"}],
+        temperature=0.2,
+        max_tokens=100,
+        context="translation",
+        request_id="graceful-block-test",
     ) == (streamed, "prohibited_content")
 
 
