@@ -523,3 +523,19 @@ def test_hcaptcha_timeout_hint_is_actionable(monkeypatch):
     assert "js.hcaptcha.com" in hint
     assert "AUTHND_TOKEN_TIMEOUT" in hint
     assert "currently 3; try 1" in hint
+
+
+def test_authnd_uses_buildapi_prediction_gateway():
+    assert authnd.PREDICT_API_BASE_URL == "https://buildapi.ngc.nvidia.com"
+
+
+def test_authnd_rejects_redirect_before_stream_parsing():
+    response = types.SimpleNamespace(
+        status_code=302,
+        headers={"location": "https://ngc.nvidia.com/404"},
+        text="",
+        reason="Found",
+    )
+
+    with pytest.raises(RuntimeError, match=r"redirected to https://ngc\.nvidia\.com/404"):
+        authnd._raise_for_status(response)

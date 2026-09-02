@@ -28,6 +28,7 @@ import requests
 
 BUILD_BASE_URL = "https://build.nvidia.com"
 API_BASE_URL = "https://api.ngc.nvidia.com"
+PREDICT_API_BASE_URL = "https://buildapi.ngc.nvidia.com"
 DEFAULT_ORG_ID = "qc69jvmznzxy"
 CATALOG_SEARCH_URL = f"{API_BASE_URL}/v2/search/catalog/resources/ENDPOINT"
 CATALOG_PAGE_SIZE = 200
@@ -150,10 +151,16 @@ def _sanitize_error_text(text: str) -> str:
 
 def _authnd_http_error_message(status_code: int, headers: Any, body: str, reason: str = "") -> str:
     nv_error = ""
+    location = ""
     try:
         nv_error = headers.get("x-nv-error-msg") or headers.get("x-nv-error-code") or ""
+        location = headers.get("location") or ""
     except Exception:
         nv_error = ""
+        location = ""
+    if 300 <= status_code < 400:
+        target = _captcha_debug_url(location)
+        return f"AuthND HTTP {status_code}: redirected to {target or 'an unknown location'}"
     detail = " ".join(part for part in (nv_error, _sanitize_error_text(body)) if part).strip()
     return f"AuthND HTTP {status_code}: {detail or reason or 'HTTP error'}"
 
@@ -2006,7 +2013,7 @@ def _log_non_stream_summary(
 
 
 def _raise_for_status(response: requests.Response) -> None:
-    if response.status_code < 400:
+    if 200 <= response.status_code < 300:
         return
     raise RuntimeError(
         _authnd_http_error_message(
@@ -2052,7 +2059,7 @@ def _post_prediction(
     org_id = metadata.get("namespace") or DEFAULT_ORG_ID
     endpoint_id = metadata.get("endpoint_id") or model_id
     payload_model = _select_payload_model(metadata.get("payload_model") or "", model_path, log_fn=log_fn)
-    url = f"{API_BASE_URL}/v2/predict/models/{org_id}/{endpoint_id}"
+    url = f"{PREDICT_API_BASE_URL}/v2/predict/models/{org_id}/{endpoint_id}"
     payload: Dict[str, Any] = {
         "messages": messages,
         "model": payload_model,
@@ -2101,7 +2108,7 @@ def _post_prediction(
         "accept-encoding": "identity",
         "origin": BUILD_BASE_URL,
         "referer": page_url,
-        "host": "api.ngc.nvidia.com",
+        "host": "buildapi.ngc.nvidia.com",
         "nv-captcha-token": captcha_token,
         "user-agent": USER_AGENT,
     }
@@ -2151,7 +2158,7 @@ def _post_prediction(
                     f"🔎 AuthND debug response: status={response.status_code}, content_type={response.headers.get('content-type', '')}, transport=httpx",
                     debug_only=True,
                 )
-                if response.status_code >= 400:
+                if not 200 <= response.status_code < 300:
                     exc = _httpx_status_error(response)
                     _log(log_fn, f"⚠️ AuthND HTTP failure: {_short_error(exc)}")
                     _unregister_response_closer(closer)
@@ -2194,13 +2201,14 @@ def _post_prediction(
         json=payload,
         timeout=request_timeout,
         stream=stream,
+        allow_redirects=False,
     )
     _log(
         log_fn,
         f"🔎 AuthND debug response: status={response.status_code}, content_type={response.headers.get('content-type', '')}",
         debug_only=True,
     )
-    if response.status_code >= 400:
+    if not 200 <= response.status_code < 300:
         _log(
             log_fn,
             f"⚠️ AuthND HTTP failure: {_authnd_http_error_message(response.status_code, response.headers, response.text or '', response.reason)}",
