@@ -256,6 +256,11 @@ def effective_gender(
     decision = normalized_decision(entry)
     if decision in BINARY_GENDERS:
         return decision
+    if isinstance(chapter_ref, Mapping) and chapter_ref.get("use_storage_gender"):
+        return (
+            resolved_storage_gender(entry, stored_gender)
+            or normalize_gender(stored_gender)
+        )
     return (
         automatic_chapter_gender(entry, chapter_ref, threshold, bias)
         or resolved_storage_gender(entry, stored_gender)

@@ -34921,6 +34921,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'EMERGENCY_GLOSSARY_COMPLIANCE': "1" if (getattr(self, 'emergency_glossary_compliance_var', False) and auto_glossary_mode != 'no_glossary') else "0",
             'EMERGENCY_GLOSSARY_COMPLIANCE_MODE': str(getattr(self, 'emergency_glossary_compliance_mode_var', 'characters')),
             'EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES': json.dumps(getattr(self, 'emergency_glossary_compliance_custom_types_var', [])),
+            'COMPRESS_GLOSSARY_PROMPT': '1' if self.config.get('compress_glossary_prompt') else '0',
             'COMPRESSION_FACTOR': str(self.compression_factor_var),
             'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
             'GEMINI_SAFETY_THRESHOLD': str(self.config.get('gemini_safety_threshold', 'BLOCK_NONE')),

@@ -1131,6 +1131,7 @@ def translate_headers_standalone(
     # written beside the HTML files currently being translated.
     config = dict(config or {})
     config['output_dir'] = os.path.abspath(output_dir)
+    config['source_path'] = os.path.abspath(epub_path)
 
     log("=" * 80)
     log("Starting Standalone Header Translation (OPF Based)")
@@ -1684,6 +1685,7 @@ def run_translate_headers_gui(gui_instance):
                     from metadata_batch_translator import BatchHeaderTranslator
                     retry_config = dict(config or {})
                     retry_config['output_dir'] = os.path.abspath(output_dir)
+                    retry_config['source_path'] = os.path.abspath(current_epub)
                     retry_translator = BatchHeaderTranslator(
                         gui_instance.api_client, retry_config
                     )

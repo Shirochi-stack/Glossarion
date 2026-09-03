@@ -889,6 +889,12 @@ def translate_pdf_workspace_artifacts(
 
     translator_config = dict(config or {})
     translator_config["output_dir"] = os.path.abspath(output_dir)
+    try:
+        from output_workspace import read_workspace_source_path
+
+        translator_config["source_path"] = read_workspace_source_path(output_dir)
+    except Exception:
+        pass
     translator = BatchHeaderTranslator(
         api_client,
         translator_config,

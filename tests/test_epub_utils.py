@@ -1282,6 +1282,37 @@ def test_valid_html_tag_entities_rehydrate_real_markup():
     )
 
 
+def test_valid_html_tag_entities_rehydrate_complete_html_comments_only():
+    marker = (
+        "&lt;!-- GLOSSARION_CHUNK_START key=3074ef4c7a008874 "
+        "idx=1 total=2 --&gt;"
+    )
+
+    assert unescape_valid_html_tag_entities(marker) == (
+        "<!-- GLOSSARION_CHUNK_START key=3074ef4c7a008874 idx=1 total=2 -->"
+    )
+    assert unescape_valid_html_tag_entities("&lt;!-- unterminated&gt;") == (
+        "&lt;!-- unterminated&gt;"
+    )
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "<!-- GLOSSARION_CHUNK_START key=abc idx=1 total=2 -->",
+        "&lt;!-- GLOSSARION_CHUNK_START key=abc idx=1 total=2 --&gt;",
+    ],
+)
+def test_xhtml_converter_preserves_glossarion_html_comments(marker):
+    converted = epub_converter.XHTMLConverter.ensure_compliance(
+        f"<p>Before</p>{marker}<p>After</p>",
+        "Comment marker",
+    )
+
+    assert "<!-- GLOSSARION_CHUNK_START key=abc idx=1 total=2 -->" in converted
+    assert "&lt;!-- GLOSSARION_CHUNK_START" not in converted
+
+
 def test_valid_html_tag_entities_rehydrate_ruby_base_markup():
     html = (
         "&lt;ruby&gt;&lt;rb&gt;Tomoki&lt;/rb&gt;"

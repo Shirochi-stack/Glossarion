@@ -39,6 +39,96 @@ import re
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 
+_GLOSSARY_CONFIG_OPTIONS = {
+    'append_glossary': 'APPEND_GLOSSARY',
+    'append_glossary_prompt': 'APPEND_GLOSSARY_PROMPT',
+    'compress_glossary_prompt': 'COMPRESS_GLOSSARY_PROMPT',
+    'add_additional_glossary': 'ADD_ADDITIONAL_GLOSSARY',
+    'auto_glossary_mode': 'AUTO_GLOSSARY_MODE',
+    'manual_glossary': 'MANUAL_GLOSSARY',
+    'glossary_shared_dir': 'GLOSSARY_SHARED_DIR',
+    'emergency_glossary_compliance': 'EMERGENCY_GLOSSARY_COMPLIANCE',
+    'emergency_glossary_compliance_mode': 'EMERGENCY_GLOSSARY_COMPLIANCE_MODE',
+    'emergency_glossary_compliance_custom_types': 'EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES',
+    'glossary_skip_gender_tracking': 'GLOSSARY_SKIP_GENDER_TRACKING',
+    'glossary_gender_noise_threshold': 'GLOSSARY_GENDER_NOISE_THRESHOLD',
+    'glossary_gender_tracking_bias': 'GLOSSARY_GENDER_TRACKING_BIAS',
+    'compress_glossary_strict_gender_matching': 'COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING',
+    'compress_glossary_consider_translated_column': 'COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN',
+    'output_language': 'OUTPUT_LANGUAGE',
+    'model': 'MODEL',
+}
+
+
+def _glossary_request_settings(config):
+    """Return request-local glossary settings without mutating ``os.environ``."""
+    config = config or {}
+    explicit = config.get('_glossary_settings')
+    settings = dict(explicit) if isinstance(explicit, dict) else {}
+    for config_name, env_name in _GLOSSARY_CONFIG_OPTIONS.items():
+        if config_name not in config:
+            continue
+        value = config.get(config_name)
+        if isinstance(value, bool):
+            value = '1' if value else '0'
+        elif isinstance(value, (list, tuple, dict)):
+            value = json.dumps(value, ensure_ascii=False)
+        settings[env_name] = value
+    return settings or None
+
+
+def _prepare_artifact_glossary_request(
+    system_prompt,
+    payload,
+    config,
+    client,
+    *,
+    chapter_ref=None,
+):
+    """Use the chapter translation glossary pipeline for metadata artifacts."""
+    config = config or {}
+    settings = _glossary_request_settings(config)
+    output_dir = (
+        config.get('output_dir')
+        or getattr(client, 'output_dir', None)
+        or (settings or {}).get('OUTPUT_DIRECTORY')
+        or os.getenv('OUTPUT_DIRECTORY')
+        or os.getcwd()
+    )
+    source_path = (
+        config.get('source_path')
+        or (settings or {}).get('GLOSSARY_SOURCE_PATH')
+        or (settings or {}).get('EPUB_PATH')
+        or os.getenv('GLOSSARY_SOURCE_PATH')
+        or os.getenv('EPUB_PATH')
+    )
+    from TransateKRtoEN import prepare_glossary_aware_request
+
+    return prepare_glossary_aware_request(
+        system_prompt,
+        payload,
+        output_dir=output_dir,
+        glossary_path=config.get('glossary_path'),
+        source_path=source_path,
+        chapter_ref=chapter_ref,
+        settings=settings,
+    )
+
+
+def _first_header_chapter_ref(headers):
+    """Return the chapter identity represented by the first item in a batch."""
+    if not headers:
+        return None
+    first_key = next(iter(headers))
+    try:
+        chapter_num = float(first_key)
+        if chapter_num.is_integer():
+            chapter_num = int(chapter_num)
+    except (TypeError, ValueError):
+        return None
+    return {'chapter_num': chapter_num}
+
+
 class MetadataBatchTranslatorUI:
     """UI handlers for metadata and batch translation features"""
     
@@ -2305,9 +2395,10 @@ class BatchHeaderTranslator:
         
         print(f"[DEBUG] Using temperature: {temperature}, max_tokens: {max_tokens} (from GUI/env)")
         
-        # Count system prompt tokens once (use the formatted version with target_lang replaced)
-        system_tokens = count_tokens(system_prompt)
-        print(f"[DEBUG] System prompt tokens: {system_tokens}")
+        # The final system prompt is built per batch because glossary compression
+        # and chapter-aware gender resolution depend on that batch's source text.
+        base_system_tokens = count_tokens(system_prompt)
+        print(f"[DEBUG] Base system prompt tokens: {base_system_tokens}")
         
         # Determine max workers from config or environment variable
         # Use extraction_workers setting, with fallback to default of 3
@@ -2375,11 +2466,23 @@ class BatchHeaderTranslator:
                 return None
             
             try:
-                titles_json = json.dumps(batch_headers, ensure_ascii=False, indent=2)
+                batch_system_prompt, compliant_headers, _ = (
+                    _prepare_artifact_glossary_request(
+                        system_prompt,
+                        batch_headers,
+                        self.config,
+                        self.client,
+                        chapter_ref=_first_header_chapter_ref(batch_headers),
+                    )
+                )
+                titles_json = json.dumps(
+                    compliant_headers, ensure_ascii=False, indent=2
+                )
                 user_prompt = user_prompt_template + titles_json
                 
                 # Count tokens in the user prompt
                 user_tokens = count_tokens(user_prompt)
+                system_tokens = count_tokens(batch_system_prompt)
                 total_input_tokens = system_tokens + user_tokens
                 
                 # Debug output showing input tokens
@@ -2390,6 +2493,7 @@ class BatchHeaderTranslator:
                 direct_text_order = 1_000_000 + batch_num
                 print(f"\n📚 Translating {type_label} batch {batch_num + 1}/{total_batches}")
                 print(f"[DEBUG] Batch {batch_num + 1} input tokens:")
+                print(f"  - System prompt: {system_tokens} tokens")
                 print(f"  - User prompt: {user_tokens} tokens")
                 print(f"  - Total input: {total_input_tokens} tokens (including system prompt)")
                 print(f"  - Headers in batch: {len(batch_headers)}")
@@ -2411,7 +2515,7 @@ class BatchHeaderTranslator:
                         return None
                 
                 messages = [
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": batch_system_prompt},
                     {"role": "user", "content": user_prompt}
                 ]
                 
@@ -3462,8 +3566,19 @@ class MetadataTranslator:
         
         # Replace variables
         prompt_template = prompt_template.replace('{target_lang}', output_lang)
-        
-        user_prompt = f"Fields to translate:\n{json.dumps(fields_to_send, ensure_ascii=False, indent=2)}"
+        metadata_system_prompt, compliant_fields, _ = (
+            _prepare_artifact_glossary_request(
+                prompt_template,
+                fields_to_send,
+                self.config,
+                self.client,
+                chapter_ref={'use_storage_gender': True},
+            )
+        )
+        user_prompt = (
+            "Fields to translate:\n"
+            + json.dumps(compliant_fields, ensure_ascii=False, indent=2)
+        )
         
         # Check if we're using a translation service (not AI)
         client_type = getattr(self.client, 'client_type', '')
@@ -3474,14 +3589,17 @@ class MetadataTranslator:
                 # For translation services, send only the field values without AI prompts
                 self._print(f"🌐 Using translation service ({client_type}) - sending fields directly")
                 # Convert fields to a simple text format
-                field_text = "\n".join([f"{field}: {value}" for field, value in fields_to_send.items()])
+                field_text = "\n".join(
+                    f"{field}: {value}"
+                    for field, value in compliant_fields.items()
+                )
                 messages = [
                     {"role": "user", "content": field_text}
                 ]
             else:
                 # Use the batch metadata prompt as the system prompt
                 messages = [
-                    {"role": "system", "content": prompt_template},
+                    {"role": "system", "content": metadata_system_prompt},
                     {"role": "user", "content": user_prompt}
                 ]
             
@@ -3643,18 +3761,33 @@ class MetadataTranslator:
         
         # Replace variables
         prompt = prompt_template.replace('{target_lang}', output_lang)
-        prompt = prompt.replace('{field_value}', field_value_text)
         if is_list_value:
             prompt += (
                 " The input is a JSON array. Output only a JSON array with "
                 "the same number of items in the same order, translating each "
                 "item separately."
             )
-        self._print(f"[DEBUG] prompt_template BEFORE replace: '{prompt_template}'")
-        self._print(f"[DEBUG] prompt AFTER replace: '{prompt[:200]}'")
-        
         # Clean up double spaces
         prompt = ' '.join(prompt.split())
+        prepared_prompt, compliant_value, _ = (
+            _prepare_artifact_glossary_request(
+                prompt,
+                field_value,
+                self.config,
+                self.client,
+                chapter_ref={'use_storage_gender': True},
+            )
+        )
+        compliant_field_value_text = (
+            json.dumps(compliant_value, ensure_ascii=False)
+            if is_list_value
+            else str(compliant_value)
+        )
+        prepared_prompt = prepared_prompt.replace(
+            '{field_value}', compliant_field_value_text
+        )
+        self._print(f"[DEBUG] prompt_template BEFORE replace: '{prompt_template}'")
+        self._print(f"[DEBUG] prompt AFTER replace: '{prepared_prompt[:200]}'")
         
         # Check if we're using a translation service (not AI)
         client_type = getattr(self.client, 'client_type', '')
@@ -3664,19 +3797,19 @@ class MetadataTranslator:
             if is_translation_service:
                 # For translation services, send only the field value without AI prompts
                 messages = [
-                    {"role": "user", "content": field_value_text}
+                    {"role": "user", "content": compliant_field_value_text}
                 ]
             else:
                 # Replace {target_lang} in prompts with output language
                 # Use field-specific prompt as system prompt if available, otherwise fall back to base
-                if prompt:
-                    system_prompt = prompt
+                if prepared_prompt:
+                    system_prompt = prepared_prompt
                 else:
                     system_prompt = self.system_prompt.replace('{target_lang}', output_lang) if self.system_prompt else ""
                 self._print(f"[DEBUG] FINAL system_prompt sent to API: '{system_prompt[:200]}'")
                 messages = [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": field_value_text}
+                    {"role": "user", "content": compliant_field_value_text}
                 ]
             
             # Get temperature and max_tokens from environment or config
@@ -3875,6 +4008,16 @@ def enhance_epub_compiler(compiler_instance):
                     break
                 except Exception as e:
                     print(f"[WARNING] Failed to load config from {config_path}: {e}")
+
+        # Keep artifact requests tied to this compiler. This is required when
+        # several books share one API client or run concurrently.
+        config['output_dir'] = os.path.abspath(compiler_instance.output_dir)
+        config['source_path'] = (
+            getattr(compiler_instance, 'epub_path', None)
+            or os.getenv('GLOSSARY_SOURCE_PATH')
+            or os.getenv('EPUB_PATH')
+            or ''
+        )
         
         # PRIORITY: Use GUI values from environment first, then config as fallback
         

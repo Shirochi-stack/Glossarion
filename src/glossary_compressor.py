@@ -16,6 +16,7 @@ import json
 import csv
 import time
 import threading
+from contextvars import ContextVar
 from io import StringIO
 from gender_tracking import (
     BINARY_GENDERS,
@@ -25,6 +26,7 @@ from gender_tracking import (
     normalize_gender as _shared_normalize_gender,
     normalized_decision as _shared_normalized_decision,
     rare_genders as _shared_rare_genders,
+    resolved_storage_gender as _shared_resolved_storage_gender,
     rarity_stats as _shared_rarity_stats,
     tracker_entry_for_raw as _shared_tracker_entry_for_raw,
     tracker_path_for_glossary as _shared_tracker_path_for_glossary,
@@ -50,6 +52,17 @@ except ImportError:
     _get_custom_entry_types = None
 
 _gender_bias_log_seen = set()
+_ACTIVE_GLOSSARY_SETTINGS = ContextVar(
+    "glossary_compressor_settings", default=None
+)
+
+
+def _setting(name, default=None):
+    settings = _ACTIVE_GLOSSARY_SETTINGS.get()
+    if isinstance(settings, dict) and name in settings:
+        value = settings.get(name)
+        return default if value is None else value
+    return os.getenv(name, default)
 
 
 def _should_use_raw_name_fallback():
@@ -63,7 +76,7 @@ def _should_use_raw_name_fallback():
 
     Allowed modes: 'off_no_automap' (Manual Glossary Only), 'off', 'off_fuzzy'.
     """
-    mode = os.getenv('AUTO_GLOSSARY_MODE', 'off').lower().strip()
+    mode = str(_setting('AUTO_GLOSSARY_MODE', 'off') or 'off').lower().strip()
     return mode in ('off', 'off_no_automap', 'off_fuzzy')
 
 
@@ -81,14 +94,14 @@ def _get_gender_types():
 
 def _strict_gender_name_matching_enabled():
     """Return True when gender-enabled entries must match the full raw name."""
-    return str(os.getenv("COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0")).strip().lower() in (
+    return str(_setting("COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0")).strip().lower() in (
         "1", "true", "yes", "on"
     )
 
 
 def _consider_translated_column_enabled():
     """Return True when glossary compression may match translated_name too."""
-    return str(os.getenv("COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN", "0")).strip().lower() in (
+    return str(_setting("COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN", "0")).strip().lower() in (
         "1", "true", "yes", "on"
     )
 
@@ -132,7 +145,7 @@ def _gender_tracker_path_for_glossary(glossary_path):
 
 
 def _load_gender_tracker(glossary_path):
-    if str(os.getenv("GLOSSARY_SKIP_GENDER_TRACKING", "0")).strip().lower() in ("1", "true", "yes", "on"):
+    if str(_setting("GLOSSARY_SKIP_GENDER_TRACKING", "0")).strip().lower() in ("1", "true", "yes", "on"):
         return None
     tracker_path = _gender_tracker_path_for_glossary(glossary_path)
     if not tracker_path or not os.path.exists(tracker_path):
@@ -163,9 +176,9 @@ def _chapter_ref_parts(chapter_ref):
         chapter_num = chapter_ref
         chapter_file = None
     if chapter_num is None:
-        chapter_num = os.getenv("CURRENT_CHAPTER_NUM")
+        chapter_num = _setting("CURRENT_CHAPTER_NUM")
     if not chapter_file:
-        chapter_file = os.getenv("CURRENT_CHAPTER_FILE")
+        chapter_file = _setting("CURRENT_CHAPTER_FILE")
     try:
         chapter_num_f = float(chapter_num)
     except Exception:
@@ -192,14 +205,16 @@ def _available_gender_set(available_genders, raw_name):
 
 def _gender_noise_threshold():
     try:
-        value = float(os.getenv("GLOSSARY_GENDER_NOISE_THRESHOLD", "10"))
+        value = float(_setting("GLOSSARY_GENDER_NOISE_THRESHOLD", "10"))
     except Exception:
         value = 10.0
     return max(0.0, min(100.0, value)) / 100.0
 
 
 def _gender_bias():
-    return _shared_normalize_bias()
+    return _shared_normalize_bias(
+        _setting("GLOSSARY_GENDER_TRACKING_BIAS", None)
+    )
 
 
 def _gender_rarity_stats(entry):
@@ -244,6 +259,8 @@ def _gender_is_rare_noise(entry, actual_gender, raw_name=None):
 
 
 def _tracker_gender_for_entry(entry, chapter_ref=None):
+    if isinstance(chapter_ref, dict) and chapter_ref.get("use_storage_gender"):
+        return _shared_resolved_storage_gender(entry, "")
     return _shared_automatic_chapter_gender(
         entry,
         chapter_ref,
@@ -327,7 +344,29 @@ def _replace_token_gender(line, gender):
     return f"{line.rstrip()} [{gender}]"
 
 
-def compress_glossary(glossary_content, source_text, glossary_format='auto', glossary_path=None, chapter_ref=None):
+def compress_glossary(
+    glossary_content,
+    source_text,
+    glossary_format='auto',
+    glossary_path=None,
+    chapter_ref=None,
+    settings=None,
+):
+    """Run compression with an optional thread-safe request settings snapshot."""
+    token = _ACTIVE_GLOSSARY_SETTINGS.set(settings)
+    try:
+        return _compress_glossary_impl(
+            glossary_content,
+            source_text,
+            glossary_format=glossary_format,
+            glossary_path=glossary_path,
+            chapter_ref=chapter_ref,
+        )
+    finally:
+        _ACTIVE_GLOSSARY_SETTINGS.reset(token)
+
+
+def _compress_glossary_impl(glossary_content, source_text, glossary_format='auto', glossary_path=None, chapter_ref=None):
     """
     Compress glossary by excluding entries that don't appear in the source text.
     

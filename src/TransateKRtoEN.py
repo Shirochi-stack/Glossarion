@@ -13567,10 +13567,27 @@ def clean_ai_artifacts(text, remove_artifacts=True):
     """Remove AI response artifacts from text"""
     return ContentProcessor.clean_ai_artifacts(text, remove_artifacts)
 
-def find_glossary_file(output_dir):
+def _request_glossary_setting(settings, name, default=None):
+    """Read a glossary option from an explicit request snapshot or the env."""
+    if isinstance(settings, dict) and name in settings:
+        value = settings.get(name)
+        return default if value is None else value
+    return os.getenv(name, default)
+
+
+def find_glossary_file(
+    output_dir,
+    *,
+    source_path=None,
+    manual_glossary=None,
+    settings=None,
+):
     """Return path to glossary file preferring CSV/MD/TXT over JSON, or None if not found"""
     ext_priority = [".csv", ".md", ".txt", ".json"]
-    auto_mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower().replace(" ", "_").replace("-", "_")
+    output_dir = os.path.abspath(str(output_dir or os.getcwd()))
+    auto_mode = str(
+        _request_glossary_setting(settings, "AUTO_GLOSSARY_MODE", "") or ""
+    ).strip().lower().replace(" ", "_").replace("-", "_")
     if auto_mode in ("no_glossary", "noglossary"):
         return None
 
@@ -13594,13 +13611,14 @@ def find_glossary_file(output_dir):
     def _matching_glossary_candidates(glossary_dir):
         if not glossary_dir or not os.path.isdir(glossary_dir):
             return []
-        source_path = (
-            os.getenv("GLOSSARY_SOURCE_PATH", "").strip()
-            or os.getenv("EPUB_PATH", "").strip()
+        identity_source_path = (
+            str(source_path or "").strip()
+            or str(_request_glossary_setting(settings, "GLOSSARY_SOURCE_PATH", "") or "").strip()
+            or str(_request_glossary_setting(settings, "EPUB_PATH", "") or "").strip()
         )
         base = (
-            os.path.splitext(os.path.basename(source_path))[0]
-            if source_path
+            os.path.splitext(os.path.basename(identity_source_path))[0]
+            if identity_source_path
             else ""
         )
         if not base and output_dir:
@@ -13648,15 +13666,37 @@ def find_glossary_file(output_dir):
         fallback.sort(key=lambda item: (item[0], item[1]))
         return [item[3] for item in direct] + [item[2] for item in fallback]
 
-    shared_glossary_dir = _single_pass_shared_glossary_dir(output_dir)
-    output_override_active = bool((os.getenv("OUTPUT_DIRECTORY") or os.getenv("OUTPUT_DIR") or "").strip())
+    output_override = str(
+        _request_glossary_setting(settings, "OUTPUT_DIRECTORY", "")
+        or _request_glossary_setting(settings, "OUTPUT_DIR", "")
+        or ""
+    ).strip()
+    shared_override = str(
+        _request_glossary_setting(settings, "GLOSSARY_SHARED_DIR", "") or ""
+    ).strip()
+    if output_override:
+        shared_glossary_dir = os.path.join(
+            os.path.abspath(output_override), "Glossary"
+        )
+    elif shared_override:
+        shared_glossary_dir = os.path.abspath(shared_override)
+    else:
+        shared_glossary_dir = _single_pass_shared_glossary_dir(output_dir)
+    output_override_active = bool(output_override)
+    explicit_single_pass = str(
+        _request_glossary_setting(settings, "SINGLE_PASS_GLOSSARY_MODE", "") or ""
+    ).strip().lower().replace(" ", "_").replace("-", "_")
     prefer_shared = (
         auto_mode in ("balanced", "full", "single_pass")
-        or bool(_single_pass_glossary_mode())
+        or explicit_single_pass in ("1", "true", "yes", "single_pass", "singlepass", "single")
         or output_override_active
     )
 
-    manual_glossary = (os.getenv("MANUAL_GLOSSARY") or "").strip()
+    if manual_glossary is None:
+        manual_glossary = _request_glossary_setting(
+            settings, "MANUAL_GLOSSARY", ""
+        )
+    manual_glossary = str(manual_glossary or "").strip()
     manual_candidates = [manual_glossary] if _usable_glossary_file(manual_glossary) else []
 
     candidates = [
@@ -13670,6 +13710,15 @@ def find_glossary_file(output_dir):
     glossary_dir = os.path.join(output_dir, "Glossary")
     if os.path.isdir(glossary_dir):
         candidates.extend(_matching_glossary_candidates(glossary_dir))
+    sibling_glossary_dir = os.path.join(
+        os.path.dirname(output_dir), "Glossary"
+    )
+    if (
+        os.path.normcase(sibling_glossary_dir)
+        != os.path.normcase(shared_glossary_dir)
+        and os.path.isdir(sibling_glossary_dir)
+    ):
+        candidates.extend(_matching_glossary_candidates(sibling_glossary_dir))
     if not prefer_shared:
         candidates.extend(_matching_glossary_candidates(shared_glossary_dir))
     candidates = manual_candidates + candidates
@@ -14175,7 +14224,14 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
             print(f"⚠️ Single Pass Glossary: failed to persist glossary: {e}")
             return 0
 
-def apply_emergency_glossary_compliance(content, output_dir):
+def apply_emergency_glossary_compliance(
+    content,
+    output_dir,
+    glossary_path=None,
+    *,
+    settings=None,
+    source_path=None,
+):
     """Pre-edit source text by replacing glossary raw_names with translated_names.
     
     Reads EMERGENCY_GLOSSARY_COMPLIANCE, EMERGENCY_GLOSSARY_COMPLIANCE_MODE,
@@ -14183,10 +14239,14 @@ def apply_emergency_glossary_compliance(content, output_dir):
     Supports CSV, token-efficient (parsed), and JSON glossary formats.
     Returns the modified content (unchanged if feature is disabled or no glossary found).
     """
-    if os.getenv("EMERGENCY_GLOSSARY_COMPLIANCE", "0") != "1":
+    if str(_request_glossary_setting(
+        settings, "EMERGENCY_GLOSSARY_COMPLIANCE", "0"
+    )) != "1":
         return content
 
-    auto_mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower().replace(" ", "_").replace("-", "_")
+    auto_mode = str(_request_glossary_setting(
+        settings, "AUTO_GLOSSARY_MODE", ""
+    ) or "").strip().lower().replace(" ", "_").replace("-", "_")
     if auto_mode in ("no_glossary", "noglossary"):
         try:
             if not getattr(apply_emergency_glossary_compliance, "_logged_no_glossary_skip", False):
@@ -14196,15 +14256,30 @@ def apply_emergency_glossary_compliance(content, output_dir):
             pass
         return content
     
-    mode = os.getenv("EMERGENCY_GLOSSARY_COMPLIANCE_MODE", "characters").lower()
+    mode = str(_request_glossary_setting(
+        settings, "EMERGENCY_GLOSSARY_COMPLIANCE_MODE", "characters"
+    ) or "characters").lower()
     custom_types = []
     if mode == "custom":
         try:
-            custom_types = json.loads(os.getenv("EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES", "[]"))
+            custom_types_value = _request_glossary_setting(
+                settings,
+                "EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES",
+                "[]",
+            )
+            custom_types = (
+                list(custom_types_value)
+                if isinstance(custom_types_value, (list, tuple))
+                else json.loads(str(custom_types_value or "[]"))
+            )
         except Exception:
             custom_types = []
-    
-    glossary_path = find_glossary_file(output_dir)
+
+    glossary_path = glossary_path or find_glossary_file(
+        output_dir,
+        source_path=source_path,
+        settings=settings,
+    )
     if not glossary_path or not os.path.exists(glossary_path):
         print("⚠️ Emergency Glossary Compliance: No glossary file found — skipping")
         return content
@@ -22788,11 +22863,17 @@ def parse_token_limit(env_value):
     
     return 1000000, "1000000 (default)"
 
-def _glossary_compression_source_text(source_text=None, chapter_ref=None):
+def _glossary_compression_source_text(
+    source_text=None, chapter_ref=None, settings=None
+):
     """Prefer Vision OCR source EPUB text when compressing glossary prompts."""
     ocr_epub = (
-        os.getenv("GLOSSARY_COMPRESSION_SOURCE_EPUB", "").strip()
-        or os.getenv("VISION_OCR_SOURCE_EPUB", "").strip()
+        str(_request_glossary_setting(
+            settings, "GLOSSARY_COMPRESSION_SOURCE_EPUB", ""
+        ) or "").strip()
+        or str(_request_glossary_setting(
+            settings, "VISION_OCR_SOURCE_EPUB", ""
+        ) or "").strip()
     )
     if ocr_epub and os.path.exists(ocr_epub):
         try:
@@ -22805,13 +22886,23 @@ def _glossary_compression_source_text(source_text=None, chapter_ref=None):
     return source_text
 
 
-def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapter_ref=None):
+def build_system_prompt(
+    user_prompt,
+    glossary_path=None,
+    source_text=None,
+    chapter_ref=None,
+    settings=None,
+):
     """Build the system prompt with glossary - TRUE BRUTE FORCE VERSION"""
-    append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
+    append_glossary = str(_request_glossary_setting(
+        settings, "APPEND_GLOSSARY", "1"
+    )) == "1"
     actual_glossary_path = glossary_path
     
     # Replace {target_lang} placeholder if present
-    target_lang = os.getenv("OUTPUT_LANGUAGE", "English")
+    target_lang = str(_request_glossary_setting(
+        settings, "OUTPUT_LANGUAGE", "English"
+    ) or "English")
     if user_prompt and "{target_lang}" in user_prompt:
         user_prompt = user_prompt.replace("{target_lang}", target_lang)
     
@@ -22839,8 +22930,12 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
                     glossary_text = gf.read()
             
             # Apply glossary compression if enabled and source text is provided
-            compress_glossary_enabled = os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1"
-            compression_source_text = _glossary_compression_source_text(source_text, chapter_ref)
+            compress_glossary_enabled = str(_request_glossary_setting(
+                settings, "COMPRESS_GLOSSARY_PROMPT", "0"
+            )) == "1"
+            compression_source_text = _glossary_compression_source_text(
+                source_text, chapter_ref, settings
+            )
             glossary_compression_logged = False
             if compress_glossary_enabled and compression_source_text:
                 try:
@@ -22853,6 +22948,7 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
                         glossary_format='auto',
                         glossary_path=actual_glossary_path,
                         chapter_ref=chapter_ref,
+                        settings=settings,
                     )
                     compressed_length = len(glossary_text)
                     reduction_pct = ((original_length - compressed_length) / original_length * 100) if original_length > 0 else 0
@@ -22861,7 +22957,10 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
                     try:
                         import tiktoken
                         try:
-                            enc = tiktoken.encoding_for_model(os.getenv("MODEL", "gpt-4"))
+                            enc = tiktoken.encoding_for_model(str(
+                                _request_glossary_setting(settings, "MODEL", "gpt-4")
+                                or "gpt-4"
+                            ))
                         except:
                             enc = tiktoken.get_encoding("cl100k_base")
                         
@@ -22870,8 +22969,8 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
                         compressed_tokens = len(enc.encode(glossary_text))
                         token_reduction = original_tokens - compressed_tokens
                         token_reduction_pct = (token_reduction / original_tokens * 100) if original_tokens > 0 else 0
-                        strict_gender_note = " (strict gender ON)" if os.getenv("COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0").strip().lower() in ("1", "true", "yes", "on") else ""
-                        translated_column_note = " (translated column ON)" if os.getenv("COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN", "0").strip().lower() in ("1", "true", "yes", "on") else ""
+                        strict_gender_note = " (strict gender ON)" if str(_request_glossary_setting(settings, "COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0")).strip().lower() in ("1", "true", "yes", "on") else ""
+                        translated_column_note = " (translated column ON)" if str(_request_glossary_setting(settings, "COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN", "0")).strip().lower() in ("1", "true", "yes", "on") else ""
                         
                         defer_batch_log(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%), {original_tokens:,}→{compressed_tokens:,} tokens ({token_reduction_pct:.1f}%){strict_gender_note}{translated_column_note}")
                         glossary_compression_logged = True
@@ -22886,7 +22985,9 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
             if system:
                 system += "\n\n"
             
-            custom_prompt = os.getenv("APPEND_GLOSSARY_PROMPT", "").strip()
+            custom_prompt = str(_request_glossary_setting(
+                settings, "APPEND_GLOSSARY_PROMPT", ""
+            ) or "").strip()
             if not custom_prompt:
                 raise ValueError(
                     "APPEND_GLOSSARY_PROMPT environment variable is not set!\n"
@@ -22903,7 +23004,9 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
                 defer_batch_log("ℹ️ Glossary skipped for this chapter (no matching entries after compression)")
             
             # Check for glossary extension file (only if ADD_ADDITIONAL_GLOSSARY is enabled)
-            add_additional_glossary = os.getenv("ADD_ADDITIONAL_GLOSSARY", "0") == "1"
+            add_additional_glossary = str(_request_glossary_setting(
+                settings, "ADD_ADDITIONAL_GLOSSARY", "0"
+            )) == "1"
             if add_additional_glossary:
                 glossary_dir = os.path.dirname(actual_glossary_path)
                 # Check for extension with any supported format
@@ -22931,6 +23034,7 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
                                     glossary_format='auto',
                                     glossary_path=additional_glossary_path,
                                     chapter_ref=chapter_ref,
+                                    settings=settings,
                                 )
                                 compressed_add_length = len(additional_glossary_text)
                                 add_reduction_pct = ((original_add_length - compressed_add_length) / original_add_length * 100) if original_add_length > 0 else 0
@@ -22965,7 +23069,10 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
     try:
         import tiktoken
         try:
-            enc = tiktoken.encoding_for_model(os.getenv("MODEL", "gpt-4"))
+            enc = tiktoken.encoding_for_model(str(
+                _request_glossary_setting(settings, "MODEL", "gpt-4")
+                or "gpt-4"
+            ))
         except:
             enc = tiktoken.get_encoding("cl100k_base")
         system_tokens = len(enc.encode(system))
@@ -22975,7 +23082,84 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
     
     return system
 
-def translate_title(title, client, system_prompt, user_prompt, temperature=0.3, return_status=False):
+
+def prepare_glossary_aware_request(
+    system_prompt,
+    payload,
+    *,
+    output_dir=None,
+    glossary_path=None,
+    source_path=None,
+    source_text=None,
+    chapter_ref=None,
+    settings=None,
+):
+    """Prepare an artifact request with the normal chapter glossary pipeline.
+
+    ``payload`` may be a string, list, or mapping. Compliance is applied to
+    string values before callers serialize JSON, while compression always sees
+    the original source text so raw glossary names can still be matched.
+    """
+    resolved_output_dir = os.path.abspath(str(
+        output_dir
+        or (os.path.dirname(glossary_path) if glossary_path else "")
+        or os.getcwd()
+    ))
+    actual_glossary_path = glossary_path
+    if not actual_glossary_path or not os.path.isfile(actual_glossary_path):
+        actual_glossary_path = find_glossary_file(
+            resolved_output_dir,
+            source_path=source_path,
+            settings=settings,
+        )
+
+    if source_text is None:
+        if isinstance(payload, (dict, list, tuple)):
+            source_text = json.dumps(payload, ensure_ascii=False, indent=2)
+        else:
+            source_text = str(payload or "")
+
+    def compliant_value(value):
+        if isinstance(value, dict):
+            return {key: compliant_value(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [compliant_value(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(compliant_value(item) for item in value)
+        if isinstance(value, str):
+            return apply_emergency_glossary_compliance(
+                value,
+                resolved_output_dir,
+                actual_glossary_path,
+                settings=settings,
+                source_path=source_path,
+            )
+        return value
+
+    compliant_payload = compliant_value(payload)
+    prepared_system_prompt = build_system_prompt(
+        system_prompt,
+        actual_glossary_path,
+        source_text=source_text,
+        chapter_ref=chapter_ref,
+        settings=settings,
+    )
+    return prepared_system_prompt, compliant_payload, actual_glossary_path
+
+
+def translate_title(
+    title,
+    client,
+    system_prompt,
+    user_prompt,
+    temperature=0.3,
+    return_status=False,
+    *,
+    output_dir=None,
+    glossary_path=None,
+    source_path=None,
+    settings=None,
+):
     """Translate the book title using the configured settings"""
     def _result(value, succeeded):
         return (value, succeeded) if return_status else value
@@ -22986,7 +23170,9 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3, 
     print(f"📚 Processing book title: {title}")
     
     try:
-        if os.getenv("TRANSLATE_BOOK_TITLE", "1") == "0":
+        if str(_request_glossary_setting(
+            settings, "TRANSLATE_BOOK_TITLE", "1"
+        )) == "0":
             print(f"📚 Book title translation disabled - keeping original")
             return _result(title, False)
         
@@ -22995,6 +23181,45 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3, 
             print(f"⏭️ Title translation skipped (graceful stop)")
             return _result(title, False)
         
+        output_lang = str(_request_glossary_setting(
+            settings, "OUTPUT_LANGUAGE", "English"
+        ) or "English")
+        book_title_prompt = str(
+            user_prompt
+            if user_prompt is not None
+            else _request_glossary_setting(settings, "BOOK_TITLE_PROMPT", "")
+        ).replace("{target_lang}", output_lang)
+        book_title_system_prompt = str(
+            system_prompt
+            if system_prompt is not None
+            else _request_glossary_setting(
+                settings,
+                "BOOK_TITLE_SYSTEM_PROMPT",
+                "Translate this book title to English while retaining any "
+                "acronyms. Do not output anything other than the translated text.",
+            )
+        ).replace("{target_lang}", output_lang)
+        book_title_system_prompt, compliant_title, _ = (
+            prepare_glossary_aware_request(
+                book_title_system_prompt,
+                str(title),
+                output_dir=(
+                    output_dir
+                    or getattr(client, "output_dir", None)
+                    or _request_glossary_setting(settings, "OUTPUT_DIRECTORY", "")
+                ),
+                glossary_path=glossary_path,
+                source_path=(
+                    source_path
+                    or _request_glossary_setting(settings, "GLOSSARY_SOURCE_PATH", "")
+                    or _request_glossary_setting(settings, "EPUB_PATH", "")
+                ),
+                source_text=str(title),
+                chapter_ref={"use_storage_gender": True},
+                settings=settings,
+            )
+        )
+
         # Check if we're using a translation service (not AI)
         client_type = getattr(client, 'client_type', '')
         is_translation_service = client_type in ['deepl', 'google_translate']
@@ -23003,30 +23228,20 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3, 
             # For translation services, send only the text without AI prompts
             print(f"📚 Using translation service ({client_type}) - sending text directly")
             messages = [
-                {"role": "user", "content": title}
+                {"role": "user", "content": compliant_title}
             ]
         else:
-            # For AI services, use prompts as before
-            book_title_prompt = os.getenv("BOOK_TITLE_PROMPT", "")
-            
-            # Get the system prompt for book titles, with fallback to default
-            book_title_system_prompt = os.getenv("BOOK_TITLE_SYSTEM_PROMPT", 
-                "Translate this book title to English while retaining any acronyms. Do not output anything other than the translated text.")
-            
-            # Replace {target_lang} variable with output language
-            output_lang = os.getenv("OUTPUT_LANGUAGE", "English")
-            book_title_prompt = book_title_prompt.replace("{target_lang}", output_lang)
-            book_title_system_prompt = book_title_system_prompt.replace("{target_lang}", output_lang)
-            
             # Build user content - only include instruction if user prompt is not blank
-            user_content = f"{book_title_prompt}\n\n{title}" if book_title_prompt.strip() else title
+            user_content = f"{book_title_prompt}\n\n{compliant_title}" if book_title_prompt.strip() else compliant_title
             
             messages = [
                 {"role": "system", "content": book_title_system_prompt},
                 {"role": "user", "content": user_content}
             ]
         
-        max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
+        max_tokens = int(_request_glossary_setting(
+            settings, "MAX_OUTPUT_TOKENS", "8192"
+        ))
         
         # Use send_with_interrupt for retry/timeout/interrupt support
         def _stop_check():
@@ -25583,6 +25798,8 @@ def main(log_callback=None, stop_callback=None):
                 None,
                 config.TEMP,
                 return_status=True,
+                output_dir=out,
+                source_path=input_path,
             )
             if title_request_succeeded:
                 if translated_title != original_title:
@@ -25636,6 +25853,8 @@ def main(log_callback=None, stop_callback=None):
 
                 # Build config from environment variables
                 mt_config = {
+                    'output_dir': out,
+                    'source_path': input_path,
                     'output_language': os.getenv('OUTPUT_LANGUAGE', 'English'),
                     'lang_prompt_behavior': os.getenv('LANG_PROMPT_BEHAVIOR', 'auto'),
                     'forced_source_lang': os.getenv('FORCED_SOURCE_LANG', 'Korean'),

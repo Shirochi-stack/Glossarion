@@ -192,24 +192,38 @@ def _translate_title(
     if stop_check_fn():
         return title, False
 
+    output_language = str(env.get("OUTPUT_LANGUAGE") or "English")
+    user_prompt = str(env.get("BOOK_TITLE_PROMPT") or "").replace(
+        "{target_lang}", output_language
+    )
+    system_prompt = str(
+        env.get("BOOK_TITLE_SYSTEM_PROMPT")
+        or (
+            "Translate this book title to English while retaining any "
+            "acronyms. Do not output anything other than the translated text."
+        )
+    ).replace("{target_lang}", output_language)
+    from TransateKRtoEN import prepare_glossary_aware_request
+
+    system_prompt, compliant_title, _ = prepare_glossary_aware_request(
+        system_prompt,
+        title_text,
+        output_dir=getattr(client, "output_dir", None),
+        source_path=(
+            env.get("GLOSSARY_SOURCE_PATH") or env.get("EPUB_PATH")
+        ),
+        source_text=title_text,
+        chapter_ref={"use_storage_gender": True},
+        settings=dict(env),
+    )
+
     client_type = getattr(client, "client_type", "")
     if client_type in {"deepl", "google_translate"}:
-        messages = [{"role": "user", "content": title_text}]
+        messages = [{"role": "user", "content": compliant_title}]
     else:
-        output_language = str(env.get("OUTPUT_LANGUAGE") or "English")
-        user_prompt = str(env.get("BOOK_TITLE_PROMPT") or "").replace(
-            "{target_lang}", output_language
-        )
-        system_prompt = str(
-            env.get("BOOK_TITLE_SYSTEM_PROMPT")
-            or (
-                "Translate this book title to English while retaining any "
-                "acronyms. Do not output anything other than the translated text."
-            )
-        ).replace("{target_lang}", output_language)
         user_content = (
-            f"{user_prompt}\n\n{title_text}"
-            if user_prompt.strip() else title_text
+            f"{user_prompt}\n\n{compliant_title}"
+            if user_prompt.strip() else compliant_title
         )
         messages = [
             {"role": "system", "content": system_prompt},
@@ -399,7 +413,11 @@ def run_metadata_translation_job(
 
         mt_config = {
             "_prefer_explicit_config": True,
+            "_glossary_settings": dict(env),
             "quiet": True,
+            "output_dir": output_folder,
+            "source_path": source_path,
+            "glossary_path": str(env.get("MANUAL_GLOSSARY") or ""),
             "metadata_system_prompt": str(
                 env.get("METADATA_SYSTEM_PROMPT") or ""
             ),

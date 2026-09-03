@@ -2101,6 +2101,7 @@ class EPUBCompiler:
                                     'batch_header_prompt': os.environ.get('BATCH_HEADER_PROMPT'),
                                     'output_language': os.environ.get('OUTPUT_LANGUAGE'),
                                     'output_dir': self.output_dir,
+                                    'source_path': getattr(self, 'epub_path', ''),
                                 }
                                 retry_translator = BatchHeaderTranslator(
                                     self.api_client, retry_config
@@ -2238,6 +2239,7 @@ class EPUBCompiler:
                                                         from metadata_batch_translator import BatchHeaderTranslator
                                                         _bt_config = {
                                                             'output_dir': self.output_dir,
+                                                            'source_path': getattr(self, 'epub_path', ''),
                                                         }
                                                         if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
                                                             _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
@@ -7151,6 +7153,7 @@ img {
                 'batch_header_prompt': os.environ.get('BATCH_HEADER_PROMPT'),
                 'output_language': os.environ.get('OUTPUT_LANGUAGE'),
                 'output_dir': self.output_dir,
+                'source_path': getattr(self, 'epub_path', ''),
             }
             translator = BatchHeaderTranslator(self.api_client, retry_config)
 
@@ -7563,6 +7566,7 @@ img {
                                 from metadata_batch_translator import BatchHeaderTranslator
                                 _bt_config = {
                                     'output_dir': self.output_dir,
+                                    'source_path': getattr(self, 'epub_path', ''),
                                 }
                                 if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
                                     _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
@@ -7705,6 +7709,7 @@ img {
                         # Build config from env vars set by GUI so user's custom prompts are used
                         _bt_config = {
                             'output_dir': self.output_dir,
+                            'source_path': getattr(self, 'epub_path', ''),
                         }
                         if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
                             _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']

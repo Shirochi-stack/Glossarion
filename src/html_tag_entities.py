@@ -40,12 +40,26 @@ _ATTR_ASSIGN_RE = re.compile(
 
 
 def looks_like_valid_html_tag(inner: str, valid_tags=None) -> bool:
-    """Return True only for real HTML-like tag syntax, not prose in angle brackets."""
+    """Return True only for real HTML-like markup, not prose in angle brackets.
+
+    ``inner`` is the text between the outer angle brackets.  HTML comments do
+    not have a tag name, but they still need to pass through every caller that
+    uses this helper to distinguish markup from narrative text.
+    """
     if not isinstance(inner, str):
         return False
     valid_tags = VALID_ENTITY_TAGS if valid_tags is None else valid_tags
     stripped = inner.strip()
-    if not stripped or stripped.startswith(('!', '?')):
+    if not stripped:
+        return False
+
+    # A complete ``<!-- ... -->`` comment appears here without its outer
+    # angle brackets: ``!-- ... --``.  Keep the minimum length check so an
+    # unterminated ``<!-->`` fragment is not accepted as markup.
+    if stripped.startswith('!--'):
+        return len(stripped) >= 5 and stripped.endswith('--')
+
+    if stripped.startswith(('!', '?')):
         return False
 
     closing = stripped.startswith('/')
@@ -76,7 +90,7 @@ def looks_like_valid_html_tag(inner: str, valid_tags=None) -> bool:
 
 
 def unescape_valid_html_tag_entities(text: str) -> str:
-    """Turn encoded known HTML tags into real tags while preserving narrative angle text."""
+    """Rehydrate known tags and complete comments while preserving angle-bracket prose."""
     if not isinstance(text, str) or '&' not in text:
         return text
 
