@@ -107,6 +107,7 @@ tests/**
 !tests/test_gemini_openai_thinking.py
 !tests/test_review_volume_mode.py
 !tests/test_glossary_dedup_logging.py
+!tests/test_gender_tracking.py
 !tests/test_extract_glossary_parser.py
 !tests/test_manga_ocr_io.py
 !tests/test_manga_drag_drop.py

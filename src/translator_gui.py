@@ -36032,7 +36032,10 @@ Important rules:
                     from extract_glossary_from_epub import skip_duplicate_entries, remove_honorifics
                     # Set environment variable for honorifics toggle
                     os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if honorifics_disabled else '0'
-                    final_entries = skip_duplicate_entries(all_glossary_entries)
+                    final_entries = skip_duplicate_entries(
+                        all_glossary_entries,
+                        glossary_path=output_file,
+                    )
                 except:
                     # Fallback implementation
                     def remove_honorifics_local(name):
@@ -36288,7 +36291,7 @@ Important rules:
             # Apply skip logic
             try:
                 from extract_glossary_from_epub import skip_duplicate_entries
-                unique_entries = skip_duplicate_entries(entries)
+                unique_entries = skip_duplicate_entries(entries, glossary_path=output_file)
             except:
                 # Fallback
                 seen = set()

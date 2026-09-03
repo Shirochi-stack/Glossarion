@@ -14140,7 +14140,11 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
             progress_existing = progress.get("glossary", []) if isinstance(progress, dict) else []
             json_existing = glossary_extractor._load_glossary_file(json_path)
             combined = existing + progress_existing + json_existing + valid
-            deduped = glossary_extractor.skip_duplicate_entries(combined, output_dir=glossary_dir)
+            deduped = glossary_extractor.skip_duplicate_entries(
+                combined,
+                output_dir=glossary_dir,
+                glossary_path=json_path,
+            )
 
             completed, failed, merged_indices = _single_pass_progress_lists_for_ref(progress, chapter_idx, chapter_basename)
             if chapter_idx is not None and chapter_idx not in completed:

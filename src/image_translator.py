@@ -3206,7 +3206,11 @@ class ImageTranslator:
                             existing.extend(glossary_extractor._load_glossary_file(path))
                         except Exception:
                             pass
-                deduped = glossary_extractor.skip_duplicate_entries(existing + valid, output_dir=glossary_dir)
+                deduped = glossary_extractor.skip_duplicate_entries(
+                    existing + valid,
+                    output_dir=glossary_dir,
+                    glossary_path=json_path,
+                )
                 glossary_extractor.save_glossary_json(deduped, json_path)
                 glossary_extractor.save_glossary_csv(deduped, json_path)
                 self._vision_glossary_processed_hashes.add(text_hash)

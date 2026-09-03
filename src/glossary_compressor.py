@@ -17,6 +17,18 @@ import csv
 import time
 import threading
 from io import StringIO
+from gender_tracking import (
+    BINARY_GENDERS,
+    automatic_chapter_gender as _shared_automatic_chapter_gender,
+    effective_gender as _shared_effective_gender,
+    normalize_bias as _shared_normalize_bias,
+    normalize_gender as _shared_normalize_gender,
+    normalized_decision as _shared_normalized_decision,
+    rare_genders as _shared_rare_genders,
+    rarity_stats as _shared_rarity_stats,
+    tracker_entry_for_raw as _shared_tracker_entry_for_raw,
+    tracker_path_for_glossary as _shared_tracker_path_for_glossary,
+)
 
 # Serialize glossary compression across translation worker threads.
 # Compression is pure-Python (terms x chapter-text substring scans); when
@@ -116,14 +128,7 @@ _SECTION_HEADER_RE = re.compile(
 
 
 def _gender_tracker_path_for_glossary(glossary_path):
-    if not glossary_path:
-        return None
-    stem, _ext = os.path.splitext(glossary_path)
-    if stem.endswith("_glossary"):
-        stem = stem[:-len("_glossary")]
-    elif os.path.basename(stem).lower() == "glossary":
-        stem = os.path.join(os.path.dirname(stem), "gender")
-    return f"{stem}_gender_tracker.json"
+    return _shared_tracker_path_for_glossary(glossary_path) or None
 
 
 def _load_gender_tracker(glossary_path):
@@ -143,20 +148,7 @@ def _load_gender_tracker(glossary_path):
 
 
 def _normal_gender(value):
-    gender = str(value or "").strip().lower()
-    aliases = {
-        "m": "male",
-        "man": "male",
-        "boy": "male",
-        "masc": "male",
-        "masculine": "male",
-        "f": "female",
-        "woman": "female",
-        "girl": "female",
-        "fem": "female",
-        "feminine": "female",
-    }
-    return aliases.get(gender, gender)
+    return _shared_normalize_gender(value)
 
 
 def _has_explicit_gender_value(value):
@@ -182,10 +174,7 @@ def _chapter_ref_parts(chapter_ref):
 
 
 def _tracker_entry_for_raw(tracker, raw_name):
-    if not tracker or not raw_name:
-        return None
-    entry = tracker.get("entries", {}).get(str(raw_name).strip().casefold())
-    return entry if isinstance(entry, dict) else None
+    return _shared_tracker_entry_for_raw(tracker, raw_name)
 
 
 def _remember_available_gender(available_genders, raw_name, gender):
@@ -210,43 +199,15 @@ def _gender_noise_threshold():
 
 
 def _gender_bias():
-    bias = _normal_gender(os.getenv("GLOSSARY_GENDER_TRACKING_BIAS", "none"))
-    return bias if bias in {"male", "female"} else "none"
+    return _shared_normalize_bias()
 
 
 def _gender_rarity_stats(entry):
-    occurrences = [o for o in entry.get("occurrences", []) if isinstance(o, dict)] if isinstance(entry, dict) else []
-    genders = [_normal_gender(o.get("gender")) for o in occurrences]
-    genders = [g for g in genders if g not in {"", "unknown", "n/a", "na", "none", "-"}]
-    total = len(genders)
-    stats = {}
-    if not total:
-        return stats
-    for gender in set(genders):
-        count = sum(1 for g in genders if g == gender)
-        stats[gender] = {
-            "count": count,
-            "total": total,
-            "ratio": count / total,
-        }
-    return stats
+    return _shared_rarity_stats(entry)
 
 
 def _rare_tracker_genders(entry):
-    if not entry:
-        return set()
-    threshold = _gender_noise_threshold()
-    if threshold <= 0:
-        return set()
-    bias = _gender_bias()
-    stats = _gender_rarity_stats(entry)
-    rare = set()
-    for gender, values in stats.items():
-        if gender == bias:
-            continue
-        if values["ratio"] <= threshold:
-            rare.add(gender)
-    return rare
+    return _shared_rare_genders(entry, _gender_noise_threshold(), _gender_bias())
 
 
 def _log_gender_bias_effect(entry, raw_name, actual_gender):
@@ -283,35 +244,12 @@ def _gender_is_rare_noise(entry, actual_gender, raw_name=None):
 
 
 def _tracker_gender_for_entry(entry, chapter_ref=None):
-    if not isinstance(entry, dict):
-        return None
-    occurrences = [o for o in entry.get("occurrences", []) if isinstance(o, dict)]
-    rare_genders = _rare_tracker_genders(entry)
-    if rare_genders:
-        filtered_occurrences = [o for o in occurrences if _normal_gender(o.get("gender")) not in rare_genders]
-        if filtered_occurrences:
-            occurrences = filtered_occurrences
-    if not occurrences:
-        return None
-    chapter_num, chapter_file = _chapter_ref_parts(chapter_ref)
-    if chapter_file:
-        for occ in reversed(occurrences):
-            if os.path.basename(str(occ.get("chapter_file", ""))) == chapter_file:
-                return _normal_gender(occ.get("gender"))
-    if chapter_num is not None:
-        best = None
-        best_num = None
-        for occ in occurrences:
-            try:
-                occ_num = float(occ.get("chapter_num"))
-            except Exception:
-                continue
-            if occ_num <= chapter_num and (best_num is None or occ_num >= best_num):
-                best = occ
-                best_num = occ_num
-        if best:
-            return _normal_gender(best.get("gender"))
-    return _normal_gender(occurrences[-1].get("gender"))
+    return _shared_automatic_chapter_gender(
+        entry,
+        chapter_ref,
+        _gender_noise_threshold(),
+        _gender_bias(),
+    )
 
 
 def _gender_variant_allowed(tracker, raw_name, gender, chapter_ref=None, available_genders=None):
@@ -320,9 +258,17 @@ def _gender_variant_allowed(tracker, raw_name, gender, chapter_ref=None, availab
         return True
     bias = _gender_bias()
     available = _available_gender_set(available_genders, raw_name)
+    entry = _tracker_entry_for_raw(tracker, raw_name)
+    decision = _shared_normalized_decision(entry)
+    if entry and len(available) <= 1:
+        # Consolidated glossaries have only a carrier row.  Never discard it
+        # based on that stored gender; the emission step materializes the
+        # chapter-aware Auto result or the manual decision.
+        return True
+    if decision in BINARY_GENDERS:
+        return actual == decision
     if _gender_noise_threshold() >= 1.0 and bias == "none":
         return True
-    entry = _tracker_entry_for_raw(tracker, raw_name)
     if _gender_is_rare_noise(entry, actual, raw_name):
         if bias != "none" and bias not in available:
             return True
@@ -333,6 +279,52 @@ def _gender_variant_allowed(tracker, raw_name, gender, chapter_ref=None, availab
     if wanted not in available:
         return True
     return actual == wanted
+
+
+def _emitted_gender(tracker, raw_name, stored_gender, chapter_ref=None, available_genders=None):
+    """Return the plain gender that should be emitted for a surviving row."""
+    entry = _tracker_entry_for_raw(tracker, raw_name)
+    if not entry:
+        return _normal_gender(stored_gender)
+    available = _available_gender_set(available_genders, raw_name)
+    decision = _shared_normalized_decision(entry)
+    # With old two-row Auto glossaries, filtering already selected the correct
+    # row.  Preserve the 100% threshold's intentional keep-both behavior too.
+    if len(available) > 1 and decision == "auto":
+        return _normal_gender(stored_gender)
+    return _shared_effective_gender(
+        entry,
+        stored_gender,
+        chapter_ref,
+        _gender_noise_threshold(),
+        _gender_bias(),
+    )
+
+
+def _replace_token_gender(line, gender):
+    """Replace or insert a token-efficient entry's bracketed gender."""
+    gender = _normal_gender(gender)
+    if gender not in BINARY_GENDERS:
+        return line
+    bracket = re.search(r"\s*\[[^\]]*\](?=\s*(?::|$))", line)
+    if bracket:
+        return f"{line[:bracket.start()]} [{gender}]{line[bracket.end():]}"
+
+    # Insert immediately before the first top-level description colon.
+    paren_depth = 0
+    bracket_depth = 0
+    for index, char in enumerate(line):
+        if char == "(" and bracket_depth == 0:
+            paren_depth += 1
+        elif char == ")" and bracket_depth == 0 and paren_depth:
+            paren_depth -= 1
+        elif char == "[" and paren_depth == 0:
+            bracket_depth += 1
+        elif char == "]" and paren_depth == 0 and bracket_depth:
+            bracket_depth -= 1
+        elif char == ":" and paren_depth == 0 and bracket_depth == 0:
+            return f"{line[:index].rstrip()} [{gender}]{line[index:]}"
+    return f"{line.rstrip()} [{gender}]"
 
 
 def compress_glossary(glossary_content, source_text, glossary_format='auto', glossary_path=None, chapter_ref=None):
@@ -549,7 +541,14 @@ def _compress_token_efficient_format(lines, source_text, glossary_path=None, cha
                 if current_section:
                     filtered_lines.append(current_section)
                     current_section = None
-                filtered_lines.append(line)
+                emitted_gender = _emitted_gender(
+                    gender_tracker,
+                    raw_name,
+                    gender,
+                    chapter_ref,
+                    available_genders,
+                )
+                filtered_lines.append(_replace_token_gender(line, emitted_gender) if is_gender_entry else line)
         elif not stripped:
             # Keep blank lines
             filtered_lines.append(line)
@@ -627,7 +626,18 @@ def _compress_legacy_csv_format(lines, source_text, glossary_path=None, chapter_
                 
                 is_char = entry_type in _get_gender_types() or _has_explicit_gender_value(gender)
                 if _entry_matches_source(source_text, raw_name, translated_name, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
-                    filtered_lines.append(line)
+                    emitted_gender = _emitted_gender(
+                        gender_tracker,
+                        raw_name,
+                        gender,
+                        chapter_ref,
+                        available_genders,
+                    )
+                    if is_char and emitted_gender in BINARY_GENDERS and gender_idx < len(parts):
+                        parts[gender_idx] = emitted_gender
+                        filtered_lines.append(sep.join(parts))
+                    else:
+                        filtered_lines.append(line)
         except Exception:
             # If parsing fails, keep the line to be safe
             filtered_lines.append(line)
@@ -688,6 +698,22 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
         return available_genders
 
     available_genders = _json_available_genders(json_data)
+
+    def _resolved_json_value(value, raw_name, gender):
+        if not isinstance(value, dict):
+            return value
+        emitted = _emitted_gender(
+            gender_tracker,
+            raw_name,
+            gender,
+            chapter_ref,
+            available_genders,
+        )
+        if emitted not in BINARY_GENDERS or _normal_gender(value.get("gender", "")) == emitted:
+            return value
+        resolved = value.copy()
+        resolved["gender"] = emitted
+        return resolved
     
     if isinstance(json_data, dict):
         # Handle dict with 'entries' key
@@ -701,7 +727,7 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
                 raw_name = raw_name or key
                 translated_name = _json_translated_name(value, key)
                 if _entry_matches_source(source_text, raw_name, translated_name, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
-                    filtered_entries[key] = value
+                    filtered_entries[key] = _resolved_json_value(value, raw_name, gender)
             
             result = json_data.copy()
             result['entries'] = filtered_entries
@@ -720,7 +746,7 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
                     raw_name = raw_name or key
                     translated_name = _json_translated_name(value, key)
                     if _entry_matches_source(source_text, raw_name, translated_name, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
-                        filtered_dict[key] = value
+                        filtered_dict[key] = _resolved_json_value(value, raw_name, gender)
             return filtered_dict
     
     elif isinstance(json_data, list):
@@ -735,7 +761,7 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
                 gender = entry.get("gender", "")
                 is_char = entry.get('type', '').lower() in _get_gender_types() or _has_explicit_gender_value(gender)
                 if _entry_matches_source(source_text, raw_term, translated_name, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_term, gender, chapter_ref, available_genders):
-                    filtered_list.append(entry)
+                    filtered_list.append(_resolved_json_value(entry, raw_term, gender))
         return filtered_list
     
     return json_data

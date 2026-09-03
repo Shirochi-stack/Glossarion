@@ -17895,7 +17895,12 @@ class MangaTranslationTab(QObject):
 
             if entries:
                 try:
-                    entries = skip_duplicate_entries(entries, output_dir=os.path.dirname(self._manga_glossary_output_json_path()))
+                    manga_glossary_path = self._manga_glossary_output_json_path()
+                    entries = skip_duplicate_entries(
+                        entries,
+                        output_dir=os.path.dirname(manga_glossary_path),
+                        glossary_path=manga_glossary_path,
+                    )
                 except Exception as dedupe_err:
                     self._log(f"⚠️ Manga glossary dedupe skipped: {dedupe_err}", "warning")
 

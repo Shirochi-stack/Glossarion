@@ -42,11 +42,17 @@ from glossary_refinement import (
 )
 from glossary_usage import compact_extracted_entries
 from epub_package import find_epub_opf_member
+from gender_tracking import (
+    BINARY_GENDERS,
+    collapse_tracked_gender_variants,
+    normalize_gender as _shared_normalize_gender,
+    tracker_path_for_glossary as _shared_gender_tracker_path,
+)
 
 # Thread submission throttling (glossary batch) — mirrors translation behavior
 _glossary_thread_submit_lock = threading.Lock()
 _glossary_last_thread_submit = 0.0
-_gender_tracker_lock = threading.Lock()
+_gender_tracker_lock = threading.RLock()
 _glossary_stop_summary_lock = threading.Lock()
 _glossary_stopped_request_labels = set()
 
@@ -2538,20 +2544,7 @@ def get_custom_entry_types():
         }
 
 def _normalize_gender_value(value) -> str:
-    gender = str(value or "").strip().lower()
-    aliases = {
-        "m": "male",
-        "man": "male",
-        "boy": "male",
-        "masc": "male",
-        "masculine": "male",
-        "f": "female",
-        "woman": "female",
-        "girl": "female",
-        "fem": "female",
-        "feminine": "female",
-    }
-    return aliases.get(gender, gender)
+    return _shared_normalize_gender(value)
 
 def _gender_is_trackable(gender: str) -> bool:
     return bool(gender) and gender not in {"unknown", "n/a", "na", "none", "-"}
@@ -2596,12 +2589,7 @@ def _strip_private_glossary_keys(entry: Dict) -> Dict:
     return {k: v for k, v in entry.items() if not str(k).startswith("_gender_tracker_")}
 
 def _gender_tracker_path_for_output(output_path: str) -> str:
-    stem, _ext = os.path.splitext(output_path)
-    if stem.endswith("_glossary"):
-        stem = stem[:-len("_glossary")]
-    elif os.path.basename(stem).lower() == "glossary":
-        stem = os.path.join(os.path.dirname(stem), "gender")
-    return f"{stem}_gender_tracker.json"
+    return _shared_gender_tracker_path(output_path)
 
 def _gender_tracking_disabled() -> bool:
     return os.getenv("GLOSSARY_SKIP_GENDER_TRACKING", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -2622,7 +2610,7 @@ def _alias_entry_allowed(entry: Dict) -> bool:
 
 def _load_gender_tracker(path: str) -> Dict:
     if not path or not os.path.exists(path):
-        return {"version": 1, "entries": {}}
+        return {"version": 2, "entries": {}}
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -2632,7 +2620,7 @@ def _load_gender_tracker(path: str) -> Dict:
             return data
     except Exception:
         pass
-    return {"version": 1, "entries": {}}
+    return {"version": 2, "entries": {}}
 
 def _tracker_int(value, fallback=10**9):
     try:
@@ -2711,6 +2699,7 @@ def _write_gender_tracker(path: str, tracker: Dict):
     try:
         output_dir = os.path.dirname(path) or "."
         os.makedirs(output_dir, exist_ok=True)
+        tracker["version"] = max(2, _tracker_int(tracker.get("version"), fallback=2))
         tracker["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         tracker = _normalize_gender_tracker_order(tracker)
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output_dir, delete=False, suffix=".tmp") as temp_f:
@@ -2748,10 +2737,12 @@ def update_gender_tracker(entries: List[Dict], output_path: str, source_path: st
             item = tracker_entries.setdefault(key, {
                 "raw_name": raw_name,
                 "translated_name": entry.get("translated_name", ""),
+                "decision": "auto",
                 "genders": {},
                 "occurrences": [],
                 "changes": [],
             })
+            item.setdefault("decision", "auto")
             if entry.get("translated_name") and not item.get("translated_name"):
                 item["translated_name"] = entry.get("translated_name", "")
             item.setdefault("genders", {}).setdefault(gender, {
@@ -2792,6 +2783,51 @@ def update_gender_tracker(entries: List[Dict], output_path: str, source_path: st
 
         if changed:
             _write_gender_tracker(tracker_path, tracker)
+
+
+def set_gender_tracker_decisions(output_path: str, decisions: Dict[str, str]) -> bool:
+    """Atomically merge editor decisions into the latest tracker on disk."""
+    if _gender_tracking_disabled() or not output_path or not decisions:
+        return False
+    tracker_path = _gender_tracker_path_for_output(output_path)
+    if not os.path.exists(tracker_path):
+        return False
+    changed = False
+    with _gender_tracker_lock:
+        tracker = _load_gender_tracker(tracker_path)
+        tracker_entries = tracker.get("entries", {})
+        for raw_name, requested in decisions.items():
+            key = _raw_tracker_key(raw_name)
+            item = tracker_entries.get(key)
+            if not isinstance(item, dict):
+                continue
+            decision = _normalize_gender_value(requested)
+            if decision not in {"auto", *BINARY_GENDERS}:
+                decision = "auto"
+            if item.get("decision", "auto") != decision:
+                item["decision"] = decision
+                changed = True
+        if changed:
+            _write_gender_tracker(tracker_path, tracker)
+    return changed
+
+
+def resolve_glossary_gender_variants(glossary: List[Dict], output_path: str = None,
+                                     tracker: Dict = None):
+    """Return one persisted row for each tracker-confirmed gender conflict."""
+    if _gender_tracking_disabled() or not glossary:
+        return list(glossary or []), 0
+    if tracker is None:
+        tracker_path = _gender_tracker_path_for_output(output_path) if output_path else ""
+        if not tracker_path or not os.path.exists(tracker_path):
+            return list(glossary), 0
+        tracker = _load_gender_tracker(tracker_path)
+    return collapse_tracked_gender_variants(
+        glossary,
+        tracker,
+        has_gender=_entry_type_has_gender,
+        score_entry=_dedup_preference_score,
+    )
 
 def sync_gender_tracker_with_glossary(glossary: List[Dict], output_path: str):
     """Keep tracker raw/translated names aligned with the final saved glossary."""
@@ -2969,6 +3005,7 @@ def save_glossary_json(glossary: List[Dict], output_path: str):
     # Check if legacy JSON output is enabled (default disabled)
     if os.getenv('GLOSSARY_OUTPUT_LEGACY_JSON', '0') != '1':
         return
+    glossary, _collapsed = resolve_glossary_gender_variants(glossary, output_path=output_path)
     glossary = _harmonize_gender_variant_translations(_harmonize_alias_name_translations([
         _strip_private_glossary_keys(e) for e in _ensure_book_title_entry(glossary)
     ]))
@@ -3044,6 +3081,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
             except Exception:
                 pass
 
+        glossary, _collapsed = resolve_glossary_gender_variants(glossary, output_path=output_path)
         glossary = _harmonize_gender_variant_translations(_harmonize_alias_name_translations([
             _strip_private_glossary_keys(e) for e in _ensure_book_title_entry(glossary)
         ]))
@@ -5190,7 +5228,8 @@ def _dedup_replacement_entry(existing_entry, new_entry):
     return replacement
 
 
-def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
+def skip_duplicate_entries(glossary, dry_run=False, output_dir=None, glossary_path=None,
+                           gender_tracker=None):
     """
     Skip entries with duplicate raw names and translated names using 2-pass deduplication.
     
@@ -5201,6 +5240,8 @@ def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
         glossary: List of entry dicts with 'raw_name', 'translated_name', etc.
         dry_run: If True, return (original_entries, dedup_log) without modifying the list.
         output_dir: Accepted for caller compatibility; no report file is written.
+        glossary_path: Optional glossary path used to load its gender tracker.
+        gender_tracker: Optional already-loaded tracker data.
     
     Returns:
         list: Deduplicated entries (when dry_run=False)
@@ -5277,6 +5318,12 @@ def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
     
     total_removed = original_count - len(final_results)
     final_results = _harmonize_gender_variant_translations(_harmonize_alias_name_translations(final_results))
+    final_results, gender_variants_collapsed = resolve_glossary_gender_variants(
+        final_results,
+        output_path=glossary_path,
+        tracker=gender_tracker,
+    )
+    total_removed += gender_variants_collapsed
     print(f"[Dedup] ✨ Deduplication complete: {total_removed} total duplicates removed, {len(final_results)} unique entries kept")
     
     if dry_run:
@@ -8191,7 +8238,7 @@ def main(log_callback=None, stop_callback=None):
                 # Apply deduplication before stopping
                 if glossary:
                     print("\U0001F500 Applying deduplication and sorting before exit...")
-                    glossary[:] = skip_duplicate_entries(glossary)
+                    glossary[:] = skip_duplicate_entries(glossary, glossary_path=args.output)
                     save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
                     save_glossary_json(glossary, args.output)
                     save_glossary_csv(glossary, args.output)
@@ -8203,7 +8250,7 @@ def main(log_callback=None, stop_callback=None):
                 # Apply deduplication before stopping
                 if glossary:
                     print("\U0001F500 Applying deduplication and sorting before exit...")
-                    glossary[:] = skip_duplicate_entries(glossary)
+                    glossary[:] = skip_duplicate_entries(glossary, glossary_path=args.output)
                     
                     custom_types = get_custom_entry_types()
                     type_order = {'book': -1, 'character': 0, 'term': 1}
@@ -8227,7 +8274,7 @@ def main(log_callback=None, stop_callback=None):
                 # Apply deduplication before stopping
                 if glossary:
                     print("🔀 Applying deduplication and sorting before exit...")
-                    glossary[:] = skip_duplicate_entries(glossary)
+                    glossary[:] = skip_duplicate_entries(glossary, glossary_path=args.output)
                     
                     # Sort glossary
                     custom_types = get_custom_entry_types()
@@ -8963,7 +9010,7 @@ def main(log_callback=None, stop_callback=None):
                 original_size = len(glossary)
                 
                 # Apply deduplication to entire glossary
-                glossary[:] = skip_duplicate_entries(glossary)
+                glossary[:] = skip_duplicate_entries(glossary, glossary_path=args.output)
                 
                 # Sort glossary by type and name
                 custom_types = get_custom_entry_types()
@@ -9001,7 +9048,7 @@ def main(log_callback=None, stop_callback=None):
                 if glossary:
                     print(f"\n🔀 Deduplicating {len(glossary)} entries before exit...")
                     original_size = len(glossary)
-                    glossary[:] = skip_duplicate_entries(glossary)
+                    glossary[:] = skip_duplicate_entries(glossary, glossary_path=args.output)
                     
                     custom_types = get_custom_entry_types()
                     type_order = {'book': -1, 'character': 0, 'term': 1}
@@ -9038,7 +9085,7 @@ def main(log_callback=None, stop_callback=None):
                     if glossary:
                         print("🔀 Applying deduplication and sorting before exit...")
                         original_size = len(glossary)
-                        glossary[:] = skip_duplicate_entries(glossary)
+                        glossary[:] = skip_duplicate_entries(glossary, glossary_path=args.output)
                         
                         # Sort glossary
                         custom_types = get_custom_entry_types()
@@ -9781,7 +9828,7 @@ def main(log_callback=None, stop_callback=None):
                             chapter_file=_chapter_filenames.get(tracker_idx, ""),
                         )
                     glossary.extend(data)
-                    glossary[:] = skip_duplicate_entries(glossary)
+                    glossary[:] = skip_duplicate_entries(glossary, glossary_path=args.output)
                     current_extracted_entry_updates.setdefault(int(idx), list(data or []))
                     completed.append(idx)
                     

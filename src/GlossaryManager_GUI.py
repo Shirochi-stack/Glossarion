@@ -28,6 +28,74 @@ from glossary_usage import (
     prepare_translated_output_text,
 )
 from language_options import TARGET_LANGUAGES
+from gender_tracking import (
+    BINARY_GENDERS,
+    collapse_tracked_gender_variants,
+    editor_gender_status,
+    normalize_bias,
+    normalize_gender,
+    normalize_threshold,
+    occurrence_bounds,
+    resolved_storage_gender,
+    tracker_entry_for_raw,
+    tracker_path_for_glossary,
+)
+
+
+_EDITOR_GENDER_STATUS_ROLE = int(Qt.UserRole) + 20
+
+
+def _apply_editor_gender_presentation(item, status, gender_column=None):
+    """Apply the tracker label and unresolved-row color to one editor item."""
+    item.setData(0, _EDITOR_GENDER_STATUS_ROLE, status)
+    if isinstance(status, dict) and gender_column is not None:
+        item.setText(gender_column, status.get("label", item.text(gender_column)))
+        if status.get("conflict"):
+            stats = status.get("stats", {})
+            item.setToolTip(
+                gender_column,
+                f"Tracked conflict: Male {stats.get('male', {}).get('count', 0)}, "
+                f"Female {stats.get('female', {}).get('count', 0)}. "
+                "Double-click to review or resolve.",
+            )
+
+    unresolved = isinstance(status, dict) and bool(status.get("unresolved"))
+    pink = QColor("#ec4899")
+    pink.setAlpha(72)
+    brush = QBrush(pink)
+    for column in range(item.columnCount()):
+        if unresolved:
+            item.setBackground(column, brush)
+        else:
+            item.setData(column, Qt.BackgroundRole, None)
+
+
+def _gender_resolution_summary(tracker_entry, stored_gender, threshold, bias):
+    """Build the resolution-dialog history model from shared tracker rules."""
+    automatic_entry = dict(tracker_entry or {})
+    automatic_entry["decision"] = "auto"
+    status = editor_gender_status(automatic_entry, stored_gender, threshold, bias)
+    stats = status.get("stats", {})
+    total = sum(int(values.get("count", 0) or 0) for values in stats.values())
+    genders = {}
+    for gender in BINARY_GENDERS:
+        values = stats.get(gender, {})
+        first, last = occurrence_bounds(automatic_entry, gender)
+        genders[gender] = {
+            "count": int(values.get("count", 0) or 0),
+            "ratio": float(values.get("ratio", 0.0) or 0.0),
+            "first": first,
+            "last": last,
+        }
+    changes = [change for change in automatic_entry.get("changes", []) if isinstance(change, dict)]
+    return {
+        "status": status,
+        "calculated_auto_gender": resolved_storage_gender(automatic_entry, stored_gender),
+        "total": total,
+        "genders": genders,
+        "flip_count": len(changes),
+        "latest_flips": changes[-5:],
+    }
 
 
 def _collect_glossary_filter_values(value_states, *, restrict_to_visible=False):
@@ -43,6 +111,52 @@ def _collect_glossary_filter_values(value_states, *, restrict_to_visible=False):
         for raw_value, is_visible, is_checked in value_states
         if is_checked and (is_visible or not restrict_to_visible)
     }
+
+
+def _load_editor_gender_tracker(glossary_path):
+    """Load an associated tracker without making editor-open mutate it."""
+    tracker_path = tracker_path_for_glossary(glossary_path)
+    if not tracker_path or not os.path.exists(tracker_path):
+        return None, tracker_path
+    try:
+        with open(tracker_path, "r", encoding="utf-8") as tracker_file:
+            tracker = json.load(tracker_file)
+        if isinstance(tracker, dict) and isinstance(tracker.get("entries"), dict):
+            return tracker, tracker_path
+    except Exception:
+        pass
+    return None, tracker_path
+
+
+def _editor_entry_has_gender(entry, custom_types):
+    if not isinstance(entry, dict):
+        return False
+    entry_type = str(entry.get("type", "character") or "character").strip()
+    config = custom_types.get(entry_type) if isinstance(custom_types, dict) else None
+    if isinstance(config, dict):
+        return bool(config.get("has_gender", False))
+    return entry_type.casefold() == "character"
+
+
+def _prepare_editor_gender_tracking(entries, glossary_path, custom_types, tracking_disabled=False):
+    env_disabled = str(os.getenv('GLOSSARY_SKIP_GENDER_TRACKING', '0')).strip().lower() in {
+        '1', 'true', 'yes', 'on'
+    }
+    if tracking_disabled or env_disabled:
+        return list(entries or []), None, tracker_path_for_glossary(glossary_path), 0
+    tracker, tracker_path = _load_editor_gender_tracker(glossary_path)
+    if not tracker:
+        return list(entries or []), None, tracker_path, 0
+    prepared, collapsed = collapse_tracked_gender_variants(
+        entries,
+        tracker,
+        has_gender=lambda entry: _editor_entry_has_gender(entry, custom_types),
+        score_entry=lambda entry: sum(
+            1 for key, value in entry.items()
+            if not str(key).startswith("_") and value not in (None, "", [], {})
+        ),
+    )
+    return prepared, tracker, tracker_path, collapsed
 
 
 def _recent_glossary_filter_dismissal(
@@ -872,6 +986,10 @@ class GlossaryManagerMixin:
         self._editor_glossary_epub_map = {}
         self.current_glossary_data = None
         self.current_glossary_format = None
+        self.current_gender_tracker_data = None
+        self.current_gender_tracker_path = ''
+        self._pending_gender_decisions = {}
+        self._gender_variants_pending_save = 0
         self._glossary_editor_base_stats_text = "No glossary loaded"
         self._glossary_editor_view_stats_text = "No glossary loaded"
         self._glossary_column_filters = {}
@@ -1290,6 +1408,25 @@ class GlossaryManagerMixin:
                         all_fields.update(item.keys())
                         entries.append(item)
 
+        gender_tracker = None
+        gender_tracker_path = tracker_path_for_glossary(path)
+        gender_variants_collapsed = 0
+        if current_format in ['list', 'token_csv']:
+            custom_types = getattr(self, 'custom_entry_types', None) or self.config.get('custom_entry_types', {})
+            entries, gender_tracker, gender_tracker_path, gender_variants_collapsed = (
+                _prepare_editor_gender_tracking(
+                    entries,
+                    path,
+                    custom_types,
+                    tracking_disabled=bool(self.config.get('glossary_skip_gender_tracking', False)),
+                )
+            )
+            current_data = entries
+            all_fields = set()
+            for entry in entries:
+                if isinstance(entry, dict):
+                    all_fields.update(entry.keys())
+
         if current_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
             column_fields = []
             if any('_section' in e for e in entries):
@@ -1317,6 +1454,11 @@ class GlossaryManagerMixin:
             chars = sum(1 for e in entries if 'original_name' in e or 'name' in e)
             locs = sum(1 for e in entries if 'locations' in e and e['locations'])
             stats.append(f"Characters: {chars}, Locations: {locs}")
+        if gender_variants_collapsed:
+            stats.append(
+                f"{gender_variants_collapsed} tracked gender duplicate"
+                f"{'s' if gender_variants_collapsed != 1 else ''} pending save"
+            )
 
         return {
             'path': path,
@@ -1326,6 +1468,9 @@ class GlossaryManagerMixin:
             'sections': sections,
             'column_fields': column_fields,
             'stats_text': " | ".join(stats),
+            'gender_tracker': gender_tracker,
+            'gender_tracker_path': gender_tracker_path,
+            'gender_variants_collapsed': gender_variants_collapsed,
         }
     
     @staticmethod
@@ -6393,6 +6538,10 @@ Do not stop after the glossary."""
 
         self.current_glossary_data = None
         self.current_glossary_format = None
+        self.current_gender_tracker_data = None
+        self.current_gender_tracker_path = ''
+        self._pending_gender_decisions = {}
+        self._gender_variants_pending_save = 0
         self.glossary_column_fields = []
         self._glossary_column_filters = {}
         self._glossary_editor_view_stats_text = "No glossary loaded"
@@ -6423,14 +6572,56 @@ Do not stop after the glossary."""
 
         # Row highlight helpers
         orange_brush = QBrush(QColor("#f97316"))
-        default_brush = QBrush()
+        gender_status_role = _EDITOR_GENDER_STATUS_ROLE
+
+        def _gender_settings():
+            threshold = getattr(
+                self,
+                'glossary_gender_noise_threshold_var',
+                self.config.get('glossary_gender_noise_threshold', 10),
+            )
+            bias = getattr(
+                self,
+                'glossary_gender_tracking_bias_var',
+                self.config.get('glossary_gender_tracking_bias', 'none'),
+            )
+            return threshold, bias
+
+        def _gender_tracker_entry(entry):
+            if not isinstance(entry, dict):
+                return None
+            return tracker_entry_for_raw(
+                getattr(self, 'current_gender_tracker_data', None),
+                entry.get('raw_name', ''),
+            )
+
+        def _gender_status(entry):
+            tracker_entry = _gender_tracker_entry(entry)
+            if not tracker_entry:
+                return None
+            threshold, bias = _gender_settings()
+            return editor_gender_status(
+                tracker_entry,
+                entry.get('gender', '') if isinstance(entry, dict) else '',
+                threshold,
+                bias,
+            )
+
+        def _apply_tracker_highlight(item):
+            status = item.data(0, gender_status_role) if item is not None else None
+            _apply_editor_gender_presentation(item, status)
 
         def mark_row_updated(item, updated):
             for c in range(item.columnCount()):
                 if updated:
                     item.setBackground(c, orange_brush)
-                else:
-                    item.setData(c, Qt.BackgroundRole, None)
+            if not updated:
+                _apply_tracker_highlight(item)
+
+        def _decorate_gender_item(item, entry, column_fields):
+            status = _gender_status(entry)
+            gender_column = column_fields.index('gender') + 1 if 'gender' in column_fields else None
+            _apply_editor_gender_presentation(item, status, gender_column)
 
         def get_baseline_translated(item, col_key):
             if col_key not in ['translated_name', 'translated']:
@@ -6451,6 +6642,8 @@ Do not stop after the glossary."""
             if baseline is None:
                 return
             mark_row_updated(item, new_val != baseline)
+
+        self._mark_glossary_row_updated = mark_row_updated
 
         def _editor_data_row_specs():
             specs = []
@@ -6901,6 +7094,7 @@ Do not stop after the glossary."""
                 values.append(_editor_display_value(entry, field))
             item = QTreeWidgetItem(values)
             item.setData(0, Qt.UserRole, source_ref)
+            _decorate_gender_item(item, entry, column_fields)
             item.setHidden(not _tree_item_matches_glossary_filters(item))
             return item
 
@@ -7029,6 +7223,10 @@ Do not stop after the glossary."""
             self.current_glossary_data = payload.get('current_data')
             self.current_glossary_format = payload.get('current_format')
             self.current_glossary_sections = payload.get('sections', [])
+            self.current_gender_tracker_data = payload.get('gender_tracker')
+            self.current_gender_tracker_path = payload.get('gender_tracker_path', '')
+            self._pending_gender_decisions = {}
+            self._gender_variants_pending_save = int(payload.get('gender_variants_collapsed', 0) or 0)
             self.glossary_column_fields = list(column_fields)
             if self.current_glossary_format in ['list', 'token_csv']:
                 self._original_translated_map = {
@@ -7597,6 +7795,26 @@ Do not stop after the glossary."""
            if not path or self.current_glossary_data is None:
                return False
            try:
+               if self.current_glossary_format in ['list', 'token_csv']:
+                   from extract_glossary_from_epub import (
+                       _load_gender_tracker,
+                       resolve_glossary_gender_variants,
+                       set_gender_tracker_decisions,
+                       sync_gender_tracker_with_glossary,
+                   )
+                   pending_decisions = dict(getattr(self, '_pending_gender_decisions', {}) or {})
+                   if pending_decisions:
+                       set_gender_tracker_decisions(path, pending_decisions)
+                   tracker_path = tracker_path_for_glossary(path)
+                   tracker = _load_gender_tracker(tracker_path) if os.path.exists(tracker_path) else None
+                   if tracker:
+                       self.current_gender_tracker_data = tracker
+                       self.current_gender_tracker_path = tracker_path
+                       self.current_glossary_data, _collapsed = resolve_glossary_gender_variants(
+                           self.current_glossary_data,
+                           output_path=path,
+                           tracker=tracker,
+                       )
                if path.endswith('.csv'):
                    if getattr(self, 'current_glossary_format', '') == 'token_csv':
                        def save_token_csv(entries, path_out):
@@ -7697,6 +7915,10 @@ Do not stop after the glossary."""
                else:
                    with open(path, 'w', encoding='utf-8') as f:
                        json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+               if self.current_glossary_format in ['list', 'token_csv']:
+                   sync_gender_tracker_with_glossary(self.current_glossary_data, path)
+               self._pending_gender_decisions = {}
+               self._gender_variants_pending_save = 0
                return True
            except Exception as e:
                QMessageBox.critical(parent, "Error", f"Failed to save: {e}")
@@ -7809,7 +8031,11 @@ Do not stop after the glossary."""
                     os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'
                     
                     original_count = len(self.current_glossary_data)
-                    self.current_glossary_data = skip_duplicate_entries(self.current_glossary_data)
+                    self.current_glossary_data = skip_duplicate_entries(
+                        self.current_glossary_data,
+                        glossary_path=self.editor_file_entry.text(),
+                        gender_tracker=getattr(self, 'current_gender_tracker_data', None),
+                    )
                     duplicates_removed = original_count - len(self.current_glossary_data)
                     
                     if duplicates_removed > 0:
@@ -9059,7 +9285,11 @@ Do not stop after the glossary."""
                elif self.current_glossary_format == 'dict':
                    self._original_translated_map = dict((self.current_glossary_data or {}).get('entries', {}))
                for i in range(self.glossary_tree.topLevelItemCount()):
-                   mark_row_updated(self.glossary_tree.topLevelItem(i), False)
+                   tree_item = self.glossary_tree.topLevelItem(i)
+                   data_entry = _editor_entry_for_item(tree_item)
+                   if data_entry:
+                       _decorate_gender_item(tree_item, data_entry, self.glossary_column_fields)
+                   mark_row_updated(tree_item, False)
                if (
                    getattr(self, 'hide_unused_entries_checkbox', None) is not None
                    and self.hide_unused_entries_checkbox.isChecked()
@@ -9416,7 +9646,12 @@ Do not stop after the glossary."""
             """Snapshot current glossary data onto the undo stack (call BEFORE mutation)."""
             if self.current_glossary_data is None:
                 return
-            snap = {'kind': 'glossary', 'data': _copy.deepcopy(self.current_glossary_data)}
+            snap = {
+                'kind': 'glossary',
+                'data': _copy.deepcopy(self.current_glossary_data),
+                'gender_tracker': _copy.deepcopy(getattr(self, 'current_gender_tracker_data', None)),
+                'pending_gender_decisions': _copy.deepcopy(getattr(self, '_pending_gender_decisions', {})),
+            }
             self._undo_stack.append(snap)
             _trim_undo_stack()
             self._redo_stack.clear()
@@ -9460,8 +9695,24 @@ Do not stop after the glossary."""
                 # Nothing to restore into; put it back and bail
                 self._undo_stack.append(entry)
                 return
-            self._redo_stack.append({'kind': 'glossary', 'data': _copy.deepcopy(self.current_glossary_data)})
+            self._redo_stack.append({
+                'kind': 'glossary',
+                'data': _copy.deepcopy(self.current_glossary_data),
+                'gender_tracker': _copy.deepcopy(getattr(self, 'current_gender_tracker_data', None)),
+                'pending_gender_decisions': _copy.deepcopy(getattr(self, '_pending_gender_decisions', {})),
+            })
             self.current_glossary_data = entry.get('data') if isinstance(entry, dict) else entry
+            if isinstance(entry, dict):
+                self.current_gender_tracker_data = entry.get('gender_tracker')
+                restored_pending = dict(entry.get('pending_gender_decisions', {}) or {})
+                tracker_entries = (self.current_gender_tracker_data or {}).get('entries', {})
+                for tracker_item in tracker_entries.values() if isinstance(tracker_entries, dict) else []:
+                    if isinstance(tracker_item, dict) and tracker_item.get('raw_name'):
+                        restored_pending.setdefault(
+                            tracker_item['raw_name'],
+                            tracker_item.get('decision', 'auto'),
+                        )
+                self._pending_gender_decisions = restored_pending
             load_glossary_for_editing(skip_file_read=True)
             _update_undo_redo_state()
 
@@ -9482,8 +9733,24 @@ Do not stop after the glossary."""
             if self.current_glossary_data is None:
                 self._redo_stack.append(entry)
                 return
-            self._undo_stack.append({'kind': 'glossary', 'data': _copy.deepcopy(self.current_glossary_data)})
+            self._undo_stack.append({
+                'kind': 'glossary',
+                'data': _copy.deepcopy(self.current_glossary_data),
+                'gender_tracker': _copy.deepcopy(getattr(self, 'current_gender_tracker_data', None)),
+                'pending_gender_decisions': _copy.deepcopy(getattr(self, '_pending_gender_decisions', {})),
+            })
             self.current_glossary_data = entry.get('data') if isinstance(entry, dict) else entry
+            if isinstance(entry, dict):
+                self.current_gender_tracker_data = entry.get('gender_tracker')
+                restored_pending = dict(entry.get('pending_gender_decisions', {}) or {})
+                tracker_entries = (self.current_gender_tracker_data or {}).get('entries', {})
+                for tracker_item in tracker_entries.values() if isinstance(tracker_entries, dict) else []:
+                    if isinstance(tracker_item, dict) and tracker_item.get('raw_name'):
+                        restored_pending.setdefault(
+                            tracker_item['raw_name'],
+                            tracker_item.get('decision', 'auto'),
+                        )
+                self._pending_gender_decisions = restored_pending
             load_glossary_for_editing(skip_file_read=True)
             _update_undo_redo_state()
 
@@ -9644,6 +9911,169 @@ Do not stop after the glossary."""
                                    f"Could not open editor:\n{_e}",
                                    parent=getattr(self, 'dialog', self))
 
+        def _editor_entry_for_item(item):
+            if item is None:
+                return None
+            if self.current_glossary_format in ['list', 'token_csv']:
+                try:
+                    source_index = int(item.data(0, Qt.UserRole))
+                except (TypeError, ValueError):
+                    return None
+                if 0 <= source_index < len(self.current_glossary_data or []):
+                    entry = self.current_glossary_data[source_index]
+                    return entry if isinstance(entry, dict) else None
+            return None
+
+        def _can_resolve_gender(item):
+            status = item.data(0, gender_status_role) if item is not None else None
+            return isinstance(status, dict) and bool(status.get('conflict'))
+
+        def _format_tracker_location(occurrence):
+            if not isinstance(occurrence, dict):
+                return "—"
+            chapter = occurrence.get('chapter_num')
+            chapter_file = str(occurrence.get('chapter_file', '') or '').strip()
+            parts = []
+            if chapter not in (None, ''):
+                parts.append(f"chapter {chapter}")
+            if chapter_file:
+                parts.append(chapter_file)
+            return " · ".join(parts) or "—"
+
+        def _open_gender_resolution(item, column_idx=None, require_gender_column=False):
+            if item is None or not _can_resolve_gender(item):
+                return False
+            try:
+                gender_column = self.glossary_column_fields.index('gender') + 1
+            except (ValueError, AttributeError):
+                return False
+            if require_gender_column and column_idx != gender_column:
+                return False
+
+            data_entry = _editor_entry_for_item(item)
+            tracker_entry = _gender_tracker_entry(data_entry)
+            if not data_entry or not tracker_entry:
+                return False
+
+            raw_name = str(data_entry.get('raw_name', '') or '').strip()
+            translated_name = str(data_entry.get('translated_name', '') or '').strip()
+            current_decision = normalize_gender(tracker_entry.get('decision', 'auto'))
+            if current_decision not in {'auto', *BINARY_GENDERS}:
+                current_decision = 'auto'
+            threshold, bias = _gender_settings()
+            summary = _gender_resolution_summary(
+                tracker_entry,
+                data_entry.get('gender', ''),
+                threshold,
+                bias,
+            )
+            automatic_status = summary['status']
+            total = summary['total']
+
+            resolution_dialog = QDialog(self.dialog)
+            resolution_dialog.setWindowTitle("Resolve Tracked Gender")
+            resolution_dialog.setMinimumWidth(620)
+            layout = QVBoxLayout(resolution_dialog)
+            layout.setContentsMargins(18, 16, 18, 16)
+            layout.setSpacing(10)
+
+            heading = QLabel(
+                f"<b>{translated_name or raw_name}</b>"
+                + (f" <span style='color:#888'>({raw_name})</span>" if translated_name and raw_name else "")
+            )
+            heading.setTextFormat(Qt.RichText)
+            layout.addWidget(heading)
+
+            threshold_pct = normalize_threshold(threshold) * 100
+            bias_label = normalize_bias(bias).replace('_', ' ').title()
+            if bias_label == 'None':
+                bias_label = 'No Bias'
+            overview = QLabel(
+                f"Calculated Auto result: <b>{summary['calculated_auto_gender'].title()}</b> "
+                f"&nbsp;·&nbsp; Editor display: <b>{automatic_status.get('label', '')}</b><br>"
+                f"Ignore rare flips: {threshold_pct:.0f}% &nbsp;·&nbsp; Bias: {bias_label}"
+            )
+            overview.setTextFormat(Qt.RichText)
+            overview.setWordWrap(True)
+            layout.addWidget(overview)
+
+            history_group = QGroupBox("Tracking history")
+            history_layout = QVBoxLayout(history_group)
+            for gender in BINARY_GENDERS:
+                values = summary['genders'][gender]
+                count = values['count']
+                ratio = values['ratio'] * 100
+                history_layout.addWidget(QLabel(
+                    f"{gender.title()}: {count}/{total} ({ratio:.1f}%)  ·  "
+                    f"first {_format_tracker_location(values['first'])}  ·  "
+                    f"last {_format_tracker_location(values['last'])}"
+                ))
+
+            history_layout.addWidget(QLabel(f"Gender flips: {summary['flip_count']}"))
+            if summary['latest_flips']:
+                latest_lines = []
+                for change in reversed(summary['latest_flips']):
+                    source = normalize_gender(change.get('from', '')).title() or '?'
+                    target = normalize_gender(change.get('to', '')).title() or '?'
+                    latest_lines.append(f"• {source} → {target} · {_format_tracker_location(change)}")
+                latest = QLabel("Latest flips:\n" + "\n".join(latest_lines))
+                latest.setWordWrap(True)
+                history_layout.addWidget(latest)
+            note = QLabel("Counts are unique chapter/file tracker observations, not textual mention counts.")
+            note.setStyleSheet("color: #888; font-style: italic;")
+            note.setWordWrap(True)
+            history_layout.addWidget(note)
+            layout.addWidget(history_group)
+
+            choice_group = QGroupBox("Decision")
+            choice_layout = QHBoxLayout(choice_group)
+            buttons = QButtonGroup(choice_group)
+            radios = {}
+            for decision, label in (("auto", "Auto"), ("male", "Male"), ("female", "Female")):
+                radio = QRadioButton(label)
+                radio.setChecked(current_decision == decision)
+                buttons.addButton(radio)
+                radios[decision] = radio
+                choice_layout.addWidget(radio)
+            choice_layout.addStretch()
+            layout.addWidget(choice_group)
+
+            button_row = QHBoxLayout()
+            button_row.addStretch()
+            apply_button = QPushButton("Apply")
+            cancel_button = QPushButton("Cancel")
+            button_row.addWidget(apply_button)
+            button_row.addWidget(cancel_button)
+            layout.addLayout(button_row)
+
+            def apply_resolution():
+                selected = next((key for key, radio in radios.items() if radio.isChecked()), 'auto')
+                if hasattr(self, '_push_undo_snapshot'):
+                    self._push_undo_snapshot()
+                tracker_entry['decision'] = selected
+                self._pending_gender_decisions[raw_name] = selected
+                data_entry['gender'] = resolved_storage_gender(
+                    tracker_entry,
+                    data_entry.get('gender', ''),
+                )
+                _decorate_gender_item(item, data_entry, self.glossary_column_fields)
+                mark_row_updated(item, True)
+                if hasattr(self, '_apply_glossary_column_filters'):
+                    self._apply_glossary_column_filters()
+                resolution_dialog.accept()
+
+            apply_button.clicked.connect(apply_resolution)
+            cancel_button.clicked.connect(resolution_dialog.reject)
+            try:
+                from dialog_animations import exec_dialog_with_fade
+                exec_dialog_with_fade(resolution_dialog, duration=200)
+            except Exception:
+                resolution_dialog.exec()
+            return True
+
+        self._open_gender_resolution_for_item = _open_gender_resolution
+        self._can_resolve_gender_item = _can_resolve_gender
+
         def show_tree_context_menu(pos):
             menu = QMenu(self.glossary_tree)
             menu.addAction("Save Changes", save_edited_glossary)
@@ -9659,6 +10089,11 @@ Do not stop after the glossary."""
                 self.glossary_tree.setCurrentItem(current_item)
             # Edit selected entry using existing inline editor
             current_col = self.glossary_tree.columnAt(pos.x())
+            if current_item and _can_resolve_gender(current_item):
+                menu.addAction(
+                    "Resolve Gender…",
+                    lambda: _open_gender_resolution(current_item),
+                )
             if current_item and current_col > 0:
                 menu.addAction("Edit", lambda: self._on_tree_double_click(current_item, current_col))
             else:
@@ -10865,8 +11300,7 @@ Do not stop after the glossary."""
                                 for idx in _flash_idx_list:
                                     item = self.glossary_tree.topLevelItem(idx)
                                     if item:
-                                        for c in range(item.columnCount()):
-                                            item.setData(c, Qt.BackgroundRole, None)
+                                        mark_row_updated(item, False)
                                 # Restore selection only if user hasn't clicked something new
                                 if not self.glossary_tree.selectedItems() and _saved_sel:
                                     for idx in _saved_sel:
@@ -10913,6 +11347,14 @@ Do not stop after the glossary."""
     def _on_tree_double_click(self, item, column_idx):
        """Handle double-click on treeview item for inline editing"""
        if not item or column_idx <= 0:
+           return
+
+       gender_resolver = getattr(self, '_open_gender_resolution_for_item', None)
+       if callable(gender_resolver) and gender_resolver(
+           item,
+           column_idx,
+           require_gender_column=True,
+       ):
            return
        
        if not self.glossary_column_fields or column_idx - 1 >= len(self.glossary_column_fields):
@@ -11036,11 +11478,19 @@ Do not stop after the glossary."""
                        baseline = self._original_translated_map.get(item.data(0, Qt.UserRole), '')
                    if baseline is not None:
                        if new_value != baseline:
-                           for c in range(item.columnCount()):
-                               item.setBackground(c, orange)
+                           mark_updated = getattr(self, '_mark_glossary_row_updated', None)
+                           if callable(mark_updated):
+                               mark_updated(item, True)
+                           else:
+                               for c in range(item.columnCount()):
+                                   item.setBackground(c, orange)
                        else:
-                           for c in range(item.columnCount()):
-                               item.setData(c, Qt.BackgroundRole, None)
+                           mark_updated = getattr(self, '_mark_glossary_row_updated', None)
+                           if callable(mark_updated):
+                               mark_updated(item, False)
+                           else:
+                               for c in range(item.columnCount()):
+                                   item.setData(c, Qt.BackgroundRole, None)
                except Exception:
                    pass
 

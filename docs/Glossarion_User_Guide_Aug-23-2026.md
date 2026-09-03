@@ -500,10 +500,12 @@ Open it with **Glossary Manager** / **Extract Glossary**.
 
 #### The gender tracker (`*_gender_tracker.json`)
 
-When gender features are on, Glossarion keeps a small sidecar file next to your glossary named **`<glossary>_gender_tracker.json`**. It remembers what gender was decided for each name across chapters so the choice stays consistent, and it powers the **Male/Female dedupe protection** — that protection stops two same-spelled names of *different* genders (e.g. a male "Yuki" and a female "Yuki") from being merged into one entry by mistake.
+When gender features are on, Glossarion keeps a small sidecar file next to your glossary named **`<glossary>_gender_tracker.json`**. It retains each chapter/file gender observation while the glossary itself keeps one row for the name. The plain `male` or `female` value saved in that row is the most frequently observed gender; a tie keeps the existing value. Glossary compression still selects the chapter-appropriate gender from the sidecar, so the one-row format does not remove automatic gender tracking.
 
-- There's a setting to **not create/use the gender tracker** ("Do not create or use the `*_gender_tracker.json` sidecar"). Turning that on also **disables the Male/Female dedupe protection**, so same-name entries will dedupe normally.
+- There's a setting to **not create/use the gender tracker** ("Do not create or use the `*_gender_tracker.json` sidecar"). When it is enabled, tracked conflict consolidation and chapter-aware gender selection are disabled.
 - A **gender-bias preference** (No Bias / Prefer Female / Prefer Male) controls whether rare gender readings get suppressed: *No Bias* suppresses a rare variant below the flip threshold; *Prefer Female/Male* never suppresses that side's rare readings.
+- In the **Glossary Editor**, an unresolved tracked conflict is shown with a translucent pink row. `Male*` or `Female*` means Auto suppressed the rarer reading under the current threshold and bias; `Male / Female` means both readings remain viable. These decorations are display-only and are never written to the glossary or sent to the model.
+- Double-click the **Gender** cell, or right-click the row and choose **Resolve Gender…**, to review observation counts, first/last chapters, and recent flips. Choose **Auto** to retain chapter-aware behavior, or lock the name globally to **Male** or **Female**. Tracker frequency counts unique chapter/file observations, not every textual mention of the name.
 
 > **✅ Leave the gender tracker ON for character-heavy novels** — it's the thing that keeps a character's gender (and pronouns) consistent from chapter 1 to the end.
 
