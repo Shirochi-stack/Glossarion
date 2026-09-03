@@ -107,6 +107,44 @@ def extract_epub_metadata_file(source_path: str) -> Dict[str, Any]:
     return metadata
 
 
+def merge_source_epub_metadata(
+    workspace_metadata: Any,
+    source_metadata: Any,
+) -> tuple[Dict[str, Any], Set[str]]:
+    """Restore source OPF fields without replacing translated workspace data.
+
+    Extraction caches may leave ``metadata.json`` containing only structural
+    chapter fields. The source OPF remains authoritative for missing source
+    values, while an existing ``*_translated`` marker keeps its translated
+    value and receives the source value as ``original_*`` instead.
+    """
+    metadata = (
+        deepcopy(workspace_metadata)
+        if isinstance(workspace_metadata, dict)
+        else {}
+    )
+    if not isinstance(source_metadata, dict):
+        return metadata, set()
+
+    restored_fields: Set[str] = set()
+    for field, value in source_metadata.items():
+        translated_key = f"{field}_translated"
+        original_key = f"original_{field}"
+        if metadata.get(translated_key):
+            if original_key not in metadata:
+                metadata[original_key] = deepcopy(value)
+                restored_fields.add(original_key)
+            continue
+        if field not in metadata:
+            metadata[field] = deepcopy(value)
+            restored_fields.add(field)
+
+    restored_fields.update(
+        restore_truncated_repeatable_metadata(metadata, source_metadata)
+    )
+    return metadata, restored_fields
+
+
 def extract_dc_metadata(soup) -> Dict[str, Any]:
     """Extract Dublin Core metadata while preserving repeatable fields.
 

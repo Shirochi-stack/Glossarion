@@ -300,6 +300,7 @@ from metadata_progress import (
     metadata_field_complete,
     resolve_metadata_field_settings,
 )
+from epub_metadata_utils import merge_source_epub_metadata
 from translation_artifacts import (
     TRANSLATION_ARTIFACT_SPECS,
     apply_translation_artifact_response,
@@ -24896,6 +24897,7 @@ def main(log_callback=None, stop_callback=None):
         print("📄 Continuing normal PDF extraction/translation after OCR source generation")
         
     metadata_only_existing = {}
+    source_epub_metadata = {}
     if metadata_only:
         if not input_path.lower().endswith(".epub"):
             print("❌ Metadata-only translation requires an EPUB source")
@@ -24920,6 +24922,7 @@ def main(log_callback=None, stop_callback=None):
                     metadata_only_existing = {}
             with zipfile.ZipFile(input_path, "r") as zf:
                 metadata = Chapter_Extractor._extract_epub_metadata(zf)
+            source_epub_metadata = dict(metadata)
             chapters = []
             print(
                 f"✅ Read {len(metadata)} metadata field(s) directly from "
@@ -25426,13 +25429,32 @@ def main(log_callback=None, stop_callback=None):
             
             sync_loaded_css_and_fonts_to_output(out)
 
+            # The worker result contains the source OPF metadata even when its
+            # chapter cache returns before refreshing metadata.json. Merge it
+            # with durable translated values instead of preferring a stale,
+            # structural-only metadata.json.
+            extracted_metadata = extraction_result["result"].get(
+                "metadata", {}
+            )
+            source_epub_metadata = (
+                dict(extracted_metadata)
+                if isinstance(extracted_metadata, dict)
+                else {}
+            )
+
             # Load the extracted data
             metadata_path = os.path.join(out, "metadata.json")
             if os.path.exists(metadata_path):
                 with open(metadata_path, 'r', encoding='utf-8') as f:
-                    metadata = json.load(f)
+                    workspace_metadata = json.load(f)
+                metadata, _restored_metadata_fields = (
+                    merge_source_epub_metadata(
+                        workspace_metadata,
+                        source_epub_metadata,
+                    )
+                )
             else:
-                metadata = extraction_result["result"].get("metadata", {})
+                metadata = dict(source_epub_metadata)
             
             # The async extraction should have saved chapters directly, similar to the sync version
             # We need to reconstruct the chapters list with body content
@@ -25534,7 +25556,10 @@ def main(log_callback=None, stop_callback=None):
         else:
             print("🚀 Using comprehensive chapter extraction with resource handling...")
             with zipfile.ZipFile(input_path, 'r') as zf:
-                metadata = Chapter_Extractor._extract_epub_metadata(zf)
+                source_epub_metadata = Chapter_Extractor._extract_epub_metadata(
+                    zf
+                )
+                metadata = dict(source_epub_metadata)
                 chapters = Chapter_Extractor.extract_chapters(zf, out, progress_callback=chapter_progress_callback)
             sync_loaded_css_and_fonts_to_output(out)
 
@@ -25581,7 +25606,19 @@ def main(log_callback=None, stop_callback=None):
     metadata_path = os.path.join(out, "metadata.json")
     if not metadata_only and os.path.exists(metadata_path):
         with open(metadata_path, 'r', encoding='utf-8') as mf:
-            metadata = json.load(mf)
+            workspace_metadata = json.load(mf)
+        if input_path.lower().endswith('.epub'):
+            metadata, restored_metadata_fields = merge_source_epub_metadata(
+                workspace_metadata,
+                source_epub_metadata,
+            )
+            if restored_metadata_fields:
+                print(
+                    "📋 Restored source EPUB metadata for translation: "
+                    + ", ".join(sorted(restored_metadata_fields))
+                )
+        else:
+            metadata = workspace_metadata
     if is_pdf_file:
         # PDF extraction is routed through TextFileProcessor, whose legacy
         # metadata used to omit the title and label the source as text. Restore

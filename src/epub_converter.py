@@ -33,7 +33,7 @@ from epub_package import (
 )
 from epub_metadata_utils import (
     extract_epub_metadata_file,
-    restore_truncated_repeatable_metadata,
+    merge_source_epub_metadata,
 )
 from metadata_progress import resolve_metadata_field_settings
 from pdf_bookmarks import (
@@ -5242,23 +5242,9 @@ class EPUBCompiler:
         if source_path and os.path.isfile(source_path):
             try:
                 source_metadata = extract_epub_metadata_file(source_path)
-                restored_fields = set()
-                for field, value in source_metadata.items():
-                    translated_key = f'{field}_translated'
-                    original_key = f'original_{field}'
-                    if metadata.get(translated_key):
-                        if original_key not in metadata:
-                            metadata[original_key] = value
-                            restored_fields.add(original_key)
-                        continue
-                    if field not in metadata:
-                        metadata[field] = value
-                        restored_fields.add(field)
-                restored_fields.update(
-                    restore_truncated_repeatable_metadata(
-                        metadata,
-                        source_metadata,
-                    )
+                metadata, restored_fields = merge_source_epub_metadata(
+                    metadata,
+                    source_metadata,
                 )
                 if restored_fields:
                     self.log(

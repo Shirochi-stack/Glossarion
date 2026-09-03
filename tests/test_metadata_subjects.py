@@ -8,6 +8,7 @@ from Chapter_Extractor import _extract_epub_metadata
 from epub_converter import EPUBCompiler
 from epub_metadata_utils import (
     extract_epub_metadata_file,
+    merge_source_epub_metadata,
     restore_truncated_repeatable_metadata,
 )
 from metadata_batch_translator import (
@@ -82,6 +83,37 @@ def test_shared_epub_metadata_reader_preserves_source_fields(tmp_path):
 
     assert metadata["title"] == "아포칼립스 속 방구석 마탑주"
     assert metadata["subject"] == SUBJECTS
+
+
+def test_source_metadata_merge_repairs_structural_cache_without_clobbering_translation():
+    workspace_metadata = {
+        "language": "en",
+        "chapter_count": 108,
+        "description": "Existing translated description",
+        "description_translated": True,
+    }
+    source_metadata = {
+        "language": "ko",
+        "title": "아포칼립스 속 방구석 마탑주",
+        "description": "원본 설명",
+        "subject": SUBJECTS,
+    }
+
+    merged, restored = merge_source_epub_metadata(
+        workspace_metadata,
+        source_metadata,
+    )
+
+    assert merged["language"] == "en"
+    assert merged["title"] == "아포칼립스 속 방구석 마탑주"
+    assert merged["subject"] == SUBJECTS
+    assert merged["description"] == "Existing translated description"
+    assert merged["original_description"] == "원본 설명"
+    assert restored == {
+        "title",
+        "subject",
+        "original_description",
+    }
 
 
 def test_epub_compiler_restores_and_sends_missing_source_metadata(
