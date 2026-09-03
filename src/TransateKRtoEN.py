@@ -4437,8 +4437,6 @@ class ProgressManager:
             if isinstance(entry, dict) and is_metadata_progress_entry(key, entry)
         }
         legacy_entry = old_entries.get(self.METADATA_PROGRESS_KEY)
-        for key in old_entries:
-            chapters.pop(key, None)
 
         plan = build_metadata_progress_plan(
             mode,
@@ -4447,6 +4445,14 @@ class ProgressManager:
             title_allowed=title_allowed,
             source_path=source_path,
         )
+        # Structural-only metadata snapshots cannot describe an API phase.
+        # Keep any durable metadata row instead of silently deleting its
+        # status/model/retry history; the GUI can then offer regeneration from
+        # the original source file.
+        if not plan and old_entries:
+            return plan
+        for key in old_entries:
+            chapters.pop(key, None)
         reset_fields = {str(field) for field in (reset_fields or set())}
         metadata_exists = bool(metadata_path and os.path.isfile(metadata_path))
         content_hash = self._metadata_content_hash(metadata_path)

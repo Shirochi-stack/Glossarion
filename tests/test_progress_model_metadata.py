@@ -2155,6 +2155,126 @@ def test_disabled_epub_metadata_row_is_still_shown_as_skipped(tmp_path):
     assert rows[0]["status"] == "skipped"
 
 
+def test_progress_manager_recovers_metadata_row_from_structural_snapshot(
+    tmp_path,
+):
+    source = tmp_path / "book.epub"
+    output_dir = tmp_path / "book"
+    output_dir.mkdir()
+    (output_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "language": "en",
+                "chapter_count": 12,
+                "chapter_titles": {"1": "Chapter 1"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    gui = RetranslationMixin()
+    gui.config = {
+        "translate_book_title": True,
+        "translate_metadata_fields": {
+            "title": True,
+            "description": True,
+            "subject": True,
+        },
+    }
+    prog = {"chapters": {}, "version": "2.1"}
+
+    assert gui._ensure_metadata_progress_entry(
+        prog,
+        str(output_dir),
+        str(source),
+    ) is True
+
+    entry = prog["chapters"]["__metadata__"]
+    assert entry["status"] == "pending"
+    assert entry["metadata_phase"] == "recovery"
+    assert entry["metadata_regeneration_requested"] is True
+    assert entry["metadata_fields"] == ["title", "description", "subject"]
+
+    rows = []
+    gui._append_metadata_display_info(
+        {
+            "file_path": str(source),
+            "output_dir": str(output_dir),
+            "prog": prog,
+        },
+        rows,
+    )
+    assert len(rows) == 1
+    assert rows[0]["special_type"] == "metadata"
+    assert rows[0]["status"] == "pending"
+
+
+def test_structural_metadata_snapshot_preserves_existing_progress_history(
+    tmp_path,
+):
+    source = tmp_path / "book.epub"
+    output_dir = tmp_path / "book"
+    output_dir.mkdir()
+    (output_dir / "metadata.json").write_text(
+        json.dumps({"language": "en", "chapter_count": 12}),
+        encoding="utf-8",
+    )
+    existing = {
+        "actual_num": -1,
+        "output_file": "metadata.json",
+        "status": "completed",
+        "special_type": "metadata",
+        "metadata_progress_key": "__metadata__",
+        "metadata_fields": ["title", "description"],
+        "model_name": "test-model",
+    }
+    prog = {
+        "chapters": {"__metadata__": dict(existing)},
+        "version": "2.1",
+    }
+    gui = RetranslationMixin()
+    gui.config = {
+        "translate_book_title": True,
+        "translate_metadata_fields": {
+            "title": True,
+            "description": True,
+        },
+    }
+
+    assert gui._ensure_metadata_progress_entry(
+        prog,
+        str(output_dir),
+        str(source),
+    ) is False
+    assert prog["chapters"]["__metadata__"] == existing
+
+
+def test_progress_backend_does_not_delete_metadata_history_for_empty_plan(
+    tmp_path,
+):
+    progress = ProgressManager(str(tmp_path))
+    existing = {
+        "actual_num": -1,
+        "output_file": "metadata.json",
+        "status": "completed",
+        "special_type": "metadata",
+        "metadata_progress_key": "__metadata__",
+        "metadata_fields": ["title"],
+        "model_name": "test-model",
+    }
+    progress.prog["chapters"]["__metadata__"] = dict(existing)
+
+    plan = progress.configure_metadata_progress(
+        "together",
+        {"language": "en", "chapter_count": 12},
+        {"title": True},
+        str(tmp_path / "metadata.json"),
+        source_path=str(tmp_path / "book.epub"),
+    )
+
+    assert plan == []
+    assert progress.prog["chapters"]["__metadata__"] == existing
+
+
 def test_progress_update_captures_actual_request_model(tmp_path):
     progress = ProgressManager(str(tmp_path))
     set_current_thread_actual_request_model("deepseek-v4", "FALLBACK KEY (deepseek-v4)")

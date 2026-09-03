@@ -31,6 +31,11 @@ from epub_package import (
     find_epub_opf_member,
     find_opf_path as find_workspace_opf_path,
 )
+from epub_metadata_utils import (
+    extract_epub_metadata_file,
+    restore_truncated_repeatable_metadata,
+)
+from metadata_progress import resolve_metadata_field_settings
 from pdf_bookmarks import (
     remove_pdf_source_page_break_markers,
     replace_with_chapter_bookmarks,
@@ -341,6 +346,54 @@ def is_stop_requested() -> bool:
     """Check if stop has been requested"""
     global _stop_flag
     return _stop_flag
+
+
+def reset_stop_state_for_new_compilation(api_client: Any = None) -> None:
+    """Clear cancellation state inherited from an earlier EPUB run.
+
+    EPUB header, TOC, and metadata requests use the translation module and the
+    unified API client in addition to this module's local stop flag.  A hard or
+    graceful stop therefore has to be reset at all three boundaries before a
+    new client is constructed or a supplied client is reused.
+    """
+    set_stop_flag(False)
+    os.environ.pop('TRANSLATION_CANCELLED', None)
+    os.environ['GRACEFUL_STOP'] = '0'
+    os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+    os.environ['WAIT_FOR_CHUNKS'] = '0'
+    os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
+    os.environ['GRACEFUL_STOP_HTTP_SUPPRESS'] = '0'
+
+    try:
+        from TransateKRtoEN import set_stop_flag as set_translation_stop_flag
+        set_translation_stop_flag(False)
+    except Exception:
+        pass
+
+    try:
+        import unified_api_client
+        if hasattr(unified_api_client, 'set_stop_flag'):
+            unified_api_client.set_stop_flag(False)
+        elif hasattr(unified_api_client, 'UnifiedClient'):
+            unified_api_client.UnifiedClient.set_global_cancellation(False)
+    except Exception:
+        pass
+
+    if api_client is not None:
+        # ``hard_cancel_all()`` marks existing instances as cancelled.  The
+        # compiler can be given one of those instances by the translation or
+        # Library rebuild path, so clear its instance latch as well.
+        try:
+            if hasattr(api_client, '_cancelled'):
+                api_client._cancelled = False
+        except Exception:
+            pass
+        try:
+            reset_cleanup = getattr(api_client, 'reset_cleanup_state', None)
+            if callable(reset_cleanup):
+                reset_cleanup()
+        except Exception:
+            pass
 
 
 def set_global_log_callback(callback: Optional[Callable]):
@@ -2773,38 +2826,193 @@ class EPUBCompiler:
             
             # Load metadata
             metadata = self._load_metadata()
+            metadata_source_path = _read_compile_source_reference(
+                self.output_dir
+            )
+            raw_metadata_fields = getattr(
+                self, 'translate_metadata_fields', {}
+            )
+            configured_metadata_fields = (
+                resolve_metadata_field_settings(
+                    raw_metadata_fields,
+                    metadata_source_path,
+                )
+                if self.translate_titles and raw_metadata_fields
+                else {}
+            )
+            metadata_progress_manager = None
+            metadata_progress_plan = []
 
             # Translate metadata if configured (skip in image output passthrough mode —
             # content is not translated, only images are edited)
             _image_passthrough = os.environ.get('IMAGE_MODE_EPUB_PASSTHROUGH', '0') == '1'
             if hasattr(self, 'metadata_translator') and self.metadata_translator and not _image_passthrough:
-                if hasattr(self, 'translate_metadata_fields') and any(self.translate_metadata_fields.values()):
+                if any(configured_metadata_fields.values()):
                     self.log("🌐 Translating metadata fields...")
-                    
+
                     try:
-                        translated_metadata = self.metadata_translator.translate_metadata(
-                            metadata,
-                            self.translate_metadata_fields,
-                            mode=getattr(self, 'metadata_translation_mode', 'together')
+                        from TransateKRtoEN import ProgressManager
+
+                        metadata_progress_manager = ProgressManager(
+                            self.output_dir
                         )
-                        
-                        # Preserve original values and mark fields as translated so we don't
-                        # keep re-translating metadata on every EPUB rebuild.
-                        for field, should_translate in self.translate_metadata_fields.items():
-                            if not should_translate:
+                        metadata_progress_plan = (
+                            metadata_progress_manager.configure_metadata_progress(
+                                getattr(
+                                    self,
+                                    'metadata_translation_mode',
+                                    'together',
+                                ),
+                                metadata,
+                                configured_metadata_fields,
+                                self.metadata_path,
+                                source_path=metadata_source_path,
+                            )
+                        )
+                        metadata_progress_manager.save()
+                    except Exception as progress_error:
+                        metadata_progress_manager = None
+                        metadata_progress_plan = []
+                        self.log(
+                            "⚠️ Could not initialize metadata progress: "
+                            f"{progress_error}"
+                        )
+
+                    fields_to_translate = {}
+                    for field, should_translate in (
+                        configured_metadata_fields.items()
+                    ):
+                        if not should_translate or field not in metadata:
+                            continue
+                        translated_key = (
+                            'title_translated'
+                            if field == 'title'
+                            else f'{field}_translated'
+                        )
+                        if metadata.get(translated_key, False):
+                            continue
+                        fields_to_translate[field] = True
+
+                    try:
+                        if metadata_progress_manager is not None:
+                            for phase in metadata_progress_plan:
+                                if set(phase['fields']).intersection(
+                                    fields_to_translate
+                                ):
+                                    metadata_progress_manager.update_metadata_status(
+                                        'in_progress',
+                                        self.metadata_path,
+                                        key=phase['key'],
+                                    )
+                            metadata_progress_manager.save()
+
+                        if not fields_to_translate:
+                            self.log(
+                                "✓ Selected metadata fields are already translated"
+                            )
+                            translated_metadata = metadata
+                        else:
+                            translated_metadata = self.metadata_translator.translate_metadata(
+                                metadata,
+                                fields_to_translate,
+                                mode=getattr(
+                                    self,
+                                    'metadata_translation_mode',
+                                    'together',
+                                ),
+                            )
+
+                        completed_fields = set(
+                            getattr(
+                                self.metadata_translator,
+                                'last_completed_fields',
+                                set(),
+                            )
+                        )
+
+                        # Preserve original values and mark successful fields even
+                        # when the service validly returns the same text. This keeps
+                        # direct EPUB rebuilds from repeatedly sending metadata.
+                        for field in completed_fields:
+                            if field not in fields_to_translate:
                                 continue
-                            if field in metadata and field in translated_metadata:
-                                if metadata[field] != translated_metadata[field]:
-                                    # Store original value (if not already present)
-                                    original_key = f'original_{field}'
-                                    if original_key not in translated_metadata:
-                                        translated_metadata[original_key] = metadata[field]
-                                    # Mark as translated so future runs can detect it
-                                    translated_metadata[f'{field}_translated'] = True
-                        
+                            if field not in translated_metadata:
+                                continue
+                            original_value = metadata.get(field)
+                            translated_value = translated_metadata.get(field)
+                            if translated_value != original_value:
+                                original_key = f'original_{field}'
+                                translated_metadata.setdefault(
+                                    original_key,
+                                    original_value,
+                                )
+                            translated_key = (
+                                'title_translated'
+                                if field == 'title'
+                                else f'{field}_translated'
+                            )
+                            translated_metadata[translated_key] = True
+
+                        unresolved_fields = (
+                            set(fields_to_translate) - completed_fields
+                        )
                         metadata = translated_metadata
+
+                        # Persist API work before the rest of EPUB compilation.
+                        # A later cover/resource failure must not discard a
+                        # successful metadata request or leave its progress row
+                        # pointing at an unsaved result.
+                        self._save_metadata(metadata)
+
+                        if metadata_progress_manager is not None:
+                            for phase in metadata_progress_plan:
+                                pending_phase_fields = set(
+                                    phase['fields']
+                                ).intersection(fields_to_translate)
+                                if not pending_phase_fields:
+                                    continue
+                                incomplete = sorted(
+                                    pending_phase_fields.intersection(
+                                        unresolved_fields
+                                    )
+                                )
+                                if incomplete:
+                                    metadata_progress_manager.update_metadata_status(
+                                        'failed',
+                                        self.metadata_path,
+                                        error=(
+                                            "Metadata fields did not complete: "
+                                            + ", ".join(incomplete)
+                                        ),
+                                        key=phase['key'],
+                                    )
+                                else:
+                                    metadata_progress_manager.update_metadata_status(
+                                        'completed',
+                                        self.metadata_path,
+                                        key=phase['key'],
+                                    )
+                            metadata_progress_manager.save()
+
+                        if unresolved_fields:
+                            self.log(
+                                "⚠️ Metadata fields did not complete: "
+                                + ", ".join(sorted(unresolved_fields))
+                            )
                     except Exception as e:
                         self.log(f"⚠️ Metadata translation failed: {e}")
+                        if metadata_progress_manager is not None:
+                            for phase in metadata_progress_plan:
+                                if set(phase['fields']).intersection(
+                                    fields_to_translate
+                                ):
+                                    metadata_progress_manager.update_metadata_status(
+                                        'failed',
+                                        self.metadata_path,
+                                        error=e,
+                                        key=phase['key'],
+                                    )
+                            metadata_progress_manager.save()
                         # Continue with original metadata
 
             # Decide language for EPUB based primarily on GUI's OUTPUT_LANGUAGE
@@ -3188,6 +3396,13 @@ class EPUBCompiler:
             # Persist updated metadata (including translated fields/language)
             try:
                 self._save_metadata(metadata)
+                if (
+                    metadata_progress_manager is not None
+                    and metadata_progress_manager.refresh_metadata_content_hash(
+                        self.metadata_path
+                    )
+                ):
+                    metadata_progress_manager.save()
             except Exception as e:
                 self.log(f"[WARNING] Failed to save updated metadata.json: {e}")
             
@@ -5009,20 +5224,53 @@ class EPUBCompiler:
         return None
     
     def _load_metadata(self) -> dict:
-        """Load metadata from JSON file"""
+        """Load workspace metadata and restore missing fields from the OPF."""
+        metadata = {}
         if os.path.exists(self.metadata_path):
             try:
-                import html
                 with open(self.metadata_path, 'r', encoding='utf-8') as f:
                     metadata = json.load(f)
+                if not isinstance(metadata, dict):
+                    metadata = {}
                 self.log("[DEBUG] Metadata loaded successfully")
-                return metadata
             except Exception as e:
                 self.log(f"[WARNING] Failed to load metadata.json: {e}")
         else:
             self.log("[WARNING] metadata.json not found, using defaults")
-        
-        return {}
+
+        source_path = _read_compile_source_reference(self.output_dir)
+        if source_path and os.path.isfile(source_path):
+            try:
+                source_metadata = extract_epub_metadata_file(source_path)
+                restored_fields = set()
+                for field, value in source_metadata.items():
+                    translated_key = f'{field}_translated'
+                    original_key = f'original_{field}'
+                    if metadata.get(translated_key):
+                        if original_key not in metadata:
+                            metadata[original_key] = value
+                            restored_fields.add(original_key)
+                        continue
+                    if field not in metadata:
+                        metadata[field] = value
+                        restored_fields.add(field)
+                restored_fields.update(
+                    restore_truncated_repeatable_metadata(
+                        metadata,
+                        source_metadata,
+                    )
+                )
+                if restored_fields:
+                    self.log(
+                        "📋 Restored source OPF metadata for translation: "
+                        + ", ".join(sorted(restored_fields))
+                    )
+            except Exception as e:
+                self.log(
+                    f"[WARNING] Failed to restore metadata from source EPUB: {e}"
+                )
+
+        return metadata
     
     def _save_metadata(self, metadata: dict) -> None:
         """Persist metadata.json alongside the translated HTML output.
@@ -9377,8 +9625,10 @@ def compile_epub(
     api_client: Any = None,
 ):
     """Compile translated HTML files into EPUB"""
-    # Reset stop flag for new compilation
-    set_stop_flag(False)
+    # This is a new operation. Reset every stop source used by the compiler's
+    # local work and its metadata/header/TOC API requests before constructing
+    # the compiler (which may construct a new UnifiedClient).
+    reset_stop_state_for_new_compilation(api_client)
     
     compiler = EPUBCompiler(base_dir, log_callback, api_client=api_client)
     return compiler.compile()

@@ -5,7 +5,11 @@ import zipfile
 import pytest
 
 from Chapter_Extractor import _extract_epub_metadata
-from epub_metadata_utils import restore_truncated_repeatable_metadata
+from epub_converter import EPUBCompiler
+from epub_metadata_utils import (
+    extract_epub_metadata_file,
+    restore_truncated_repeatable_metadata,
+)
 from metadata_batch_translator import (
     BatchHeaderTranslator,
     MetadataBatchTranslatorUI,
@@ -68,6 +72,115 @@ def test_metadata_configuration_reader_sees_all_subjects(tmp_path):
     metadata = ui._detect_all_metadata_fields_for_epub(str(epub_path))
 
     assert metadata["subject"] == SUBJECTS
+
+
+def test_shared_epub_metadata_reader_preserves_source_fields(tmp_path):
+    epub_path = tmp_path / "book.epub"
+    _write_epub(epub_path)
+
+    metadata = extract_epub_metadata_file(str(epub_path))
+
+    assert metadata["title"] == "아포칼립스 속 방구석 마탑주"
+    assert metadata["subject"] == SUBJECTS
+
+
+def test_epub_compiler_restores_and_sends_missing_source_metadata(
+    tmp_path, monkeypatch
+):
+    source_epub = tmp_path / "metadata_source_regression.epub"
+    _write_epub(source_epub)
+    output_dir = tmp_path / "metadata_source_regression"
+    output_dir.mkdir()
+    (output_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "language": "en",
+                "chapter_count": 1,
+                "chapter_titles": ["Chapter 1"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "source_epub.txt").write_text(
+        str(source_epub), encoding="utf-8"
+    )
+
+    # Avoid constructing a live client; this test supplies a recording
+    # translator after the compiler has loaded its normal settings.
+    monkeypatch.setenv("TRANSLATE_BOOK_TITLE", "0")
+    monkeypatch.setenv("BATCH_TRANSLATE_HEADERS", "0")
+    monkeypatch.setenv("TRANSLATE_TOC_NCX", "0")
+    compiler = EPUBCompiler(str(output_dir), log_callback=lambda _msg: None)
+    compiler.translate_titles = True
+    compiler.translate_metadata_fields = {
+        "_per_epub": {
+            "metadata_source_regression.epub": {
+                "title": True,
+                "subject": True,
+            },
+        }
+    }
+
+    calls = []
+
+    class RecordingTranslator:
+        last_completed_fields = set()
+
+        def translate_metadata(self, metadata, fields, mode):
+            calls.append((dict(metadata), dict(fields), mode))
+            self.last_completed_fields = set(fields)
+            result = dict(metadata)
+            result["title"] = "The Shut-In Tower Master in the Apocalypse"
+            result["subject"] = [f"Subject {index}" for index in range(10)]
+            return result
+
+    compiler.metadata_translator = RecordingTranslator()
+    monkeypatch.setattr(compiler, "_preflight_check", lambda: True)
+    monkeypatch.setattr(compiler, "_analyze_chapters", lambda: {})
+    monkeypatch.setattr(compiler, "_find_html_files", lambda: ["chapter.html"])
+    monkeypatch.setattr(
+        compiler, "_detect_primary_language_from_html", lambda _files: None
+    )
+
+    captured_metadata = {}
+
+    class TranslationReached(Exception):
+        pass
+
+    def stop_after_metadata(metadata):
+        captured_metadata.update(metadata)
+        raise TranslationReached
+
+    monkeypatch.setattr(compiler, "_create_book", stop_after_metadata)
+
+    with pytest.raises(TranslationReached):
+        compiler.compile()
+
+    assert len(calls) == 1
+    sent_metadata, sent_fields, sent_mode = calls[0]
+    assert sent_metadata["language"] == "en"
+    assert sent_metadata["title"] == "아포칼립스 속 방구석 마탑주"
+    assert sent_metadata["subject"] == SUBJECTS
+    assert sent_fields == {"title": True, "subject": True}
+    assert sent_mode == "together"
+    assert captured_metadata["title_translated"] is True
+    assert captured_metadata["subject_translated"] is True
+
+    saved_metadata = json.loads(
+        (output_dir / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert saved_metadata["title"] == (
+        "The Shut-In Tower Master in the Apocalypse"
+    )
+    assert saved_metadata["original_title"] == (
+        "아포칼립스 속 방구석 마탑주"
+    )
+
+    progress = json.loads(
+        (output_dir / "translation_progress.json").read_text(encoding="utf-8")
+    )
+    assert progress["chapters"]["__metadata__"]["status"] == "completed"
 
 
 def test_cached_single_subject_is_restored_and_marked_for_retranslation():

@@ -62,6 +62,7 @@ from metadata_progress import (
     build_metadata_progress_plan,
     is_metadata_progress_entry,
     metadata_field_complete,
+    resolve_metadata_field_settings,
 )
 from pdf_output_naming import (
     move_pdf_output_to_readable_name,
@@ -18579,6 +18580,45 @@ class RetranslationMixin:
             source_path=file_path,
         )
 
+        # A compiler-created metadata.json may temporarily contain only
+        # structural bookkeeping (language/chapter_count/chapter_titles).  In
+        # that state there is no source field from which to build an API phase,
+        # but removing the existing phase rows makes Metadata disappear from
+        # Progress Manager and loses its retry history.  Preserve existing rows
+        # until source metadata is available again.  For an already affected
+        # workspace, seed one pending recovery row so the user can select it and
+        # regenerate metadata from the source EPUB/PDF.
+        if not plan:
+            if old_entries:
+                return False
+            resolved_fields = resolve_metadata_field_settings(
+                field_settings,
+                file_path,
+            )
+            requested_fields = [
+                str(field)
+                for field, enabled in resolved_fields.items()
+                if str(field) != '_per_epub' and bool(enabled)
+            ]
+            chapters[METADATA_PROGRESS_KEY] = {
+                'actual_num': -1,
+                'content_hash': '',
+                'output_file': 'metadata.json',
+                'original_basename': 'metadata.json',
+                'status': 'pending',
+                'last_updated': time.time(),
+                'is_special': True,
+                'special_type': 'metadata',
+                'metadata_progress_key': METADATA_PROGRESS_KEY,
+                'metadata_mode': mode,
+                'metadata_phase': 'recovery',
+                'metadata_fields': requested_fields,
+                'metadata_label': 'Metadata',
+                'metadata_index': 0,
+                'metadata_regeneration_requested': True,
+            }
+            return True
+
         legacy_entry = old_entries.get(METADATA_PROGRESS_KEY)
         for key in old_entries:
             chapters.pop(key, None)
@@ -18896,9 +18936,41 @@ class RetranslationMixin:
                 data
             )
             entries = list(entries)
+            if not entries:
+                # The managed-entry cache is intentionally keyed by progress
+                # snapshot identity.  A non-read-only refresh can add the
+                # recovery row to that same dictionary, so fall back to a tiny
+                # direct lookup rather than hiding Metadata until the dialog is
+                # reopened.
+                chapters = (
+                    data.get('prog', {}).get('chapters', {})
+                    if isinstance(data.get('prog'), dict)
+                    else {}
+                )
+                entries = [
+                    (key, entry)
+                    for key, entry in chapters.items()
+                    if isinstance(entry, dict)
+                    and is_metadata_progress_entry(key, entry)
+                ]
             entries.sort(key=lambda item: (item[1].get('metadata_index', 999), str(item[0])))
             if not entries:
-                return
+                # Read-only background snapshots do not mutate progress files.
+                # Still render a pending row so an enabled metadata phase never
+                # vanishes from the Progress Manager between refreshes.
+                entry = {
+                    'actual_num': -1,
+                    'output_file': 'metadata.json',
+                    'original_basename': 'metadata.json',
+                    'status': 'pending',
+                    'is_special': True,
+                    'special_type': 'metadata',
+                    'metadata_progress_key': METADATA_PROGRESS_KEY,
+                    'metadata_translation_enabled': True,
+                    'metadata_label': 'Metadata',
+                    'metadata_regeneration_requested': True,
+                }
+                entries = [(METADATA_PROGRESS_KEY, entry)]
         else:
             # Disabled metadata is a display-only skipped special file. It does
             # not belong in translation_progress.json until translation is on.

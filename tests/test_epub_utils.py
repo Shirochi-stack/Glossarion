@@ -2688,6 +2688,88 @@ def test_epub_compile_accepts_live_client_from_standalone_rebuild(
     }
 
 
+def test_epub_compile_resets_stale_stop_state_before_batch_setup(
+    tmp_path, monkeypatch
+):
+    import TransateKRtoEN as translation_module
+    import unified_api_client
+
+    class ReusedClient:
+        def __init__(self):
+            self._cancelled = True
+            self.cleanup_resets = 0
+
+        def reset_cleanup_state(self):
+            self.cleanup_resets += 1
+            self._cancelled = False
+
+    client = ReusedClient()
+    observed = {}
+
+    class RecordingCompiler:
+        def __init__(self, base_dir, log_callback=None, api_client=None):
+            observed.update({
+                "epub_stopped": epub_converter.is_stop_requested(),
+                "translation_stopped": translation_module.is_stop_requested(),
+                "api_stopped": unified_api_client.is_stop_requested(),
+                "api_global_cancelled": (
+                    unified_api_client.UnifiedClient.is_globally_cancelled()
+                ),
+                "client_cancelled": api_client._cancelled,
+                "environment": {
+                    name: os.environ.get(name)
+                    for name in (
+                        "TRANSLATION_CANCELLED",
+                        "GRACEFUL_STOP",
+                        "GRACEFUL_STOP_COMPLETED",
+                        "WAIT_FOR_CHUNKS",
+                        "GRACEFUL_STOP_API_ACTIVE",
+                        "GRACEFUL_STOP_HTTP_SUPPRESS",
+                    )
+                },
+            })
+
+        def compile(self):
+            return "rebuilt.epub"
+
+    epub_converter.set_stop_flag(True)
+    translation_module.set_stop_flag(True)
+    unified_api_client.set_stop_flag(True)
+    monkeypatch.setenv("TRANSLATION_CANCELLED", "1")
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "1")
+    monkeypatch.setenv("WAIT_FOR_CHUNKS", "1")
+    monkeypatch.setenv("GRACEFUL_STOP_API_ACTIVE", "1")
+    monkeypatch.setenv("GRACEFUL_STOP_HTTP_SUPPRESS", "1")
+    monkeypatch.setattr(epub_converter, "EPUBCompiler", RecordingCompiler)
+
+    try:
+        assert epub_converter.compile_epub(
+            str(tmp_path),
+            api_client=client,
+        ) == "rebuilt.epub"
+        assert observed == {
+            "epub_stopped": False,
+            "translation_stopped": False,
+            "api_stopped": False,
+            "api_global_cancelled": False,
+            "client_cancelled": False,
+            "environment": {
+                "TRANSLATION_CANCELLED": None,
+                "GRACEFUL_STOP": "0",
+                "GRACEFUL_STOP_COMPLETED": "0",
+                "WAIT_FOR_CHUNKS": "0",
+                "GRACEFUL_STOP_API_ACTIVE": "0",
+                "GRACEFUL_STOP_HTTP_SUPPRESS": "0",
+            },
+        }
+        assert client.cleanup_resets == 1
+    finally:
+        epub_converter.set_stop_flag(False)
+        translation_module.set_stop_flag(False)
+        unified_api_client.set_stop_flag(False)
+
+
 def test_failed_toc_cache_entries_are_retranslated_and_replaced(tmp_path):
     toc_path = tmp_path / "TOC.txt"
     toc_path.write_text(

@@ -14,12 +14,9 @@ import os
 import sys
 import threading
 import traceback
-import zipfile
 from typing import Any, Callable, Mapping
-from xml.etree import ElementTree
 
-from epub_metadata_utils import DC_ELEMENTS, REPEATABLE_DC_ELEMENTS
-from epub_package import find_epub_opf_member
+from epub_metadata_utils import extract_epub_metadata_file
 from metadata_progress import (
     normalize_metadata_mode,
     resolve_metadata_field_settings,
@@ -59,79 +56,9 @@ def _int_setting(env: Mapping[str, Any], key: str, default: int) -> int:
         return default
 
 
-def _local_name(value: str) -> str:
-    return str(value or "").rsplit("}", 1)[-1].split(":")[-1]
-
-
 def _extract_epub_metadata(source_path: str) -> dict:
-    """Read OPF metadata without importing the chapter extraction stack."""
-    with zipfile.ZipFile(source_path, "r") as archive:
-        opf_name = find_epub_opf_member(archive)
-        if not opf_name:
-            raise ValueError("The EPUB does not contain an OPF package file")
-        root = ElementTree.fromstring(archive.read(opf_name))
-
-    metadata: dict[str, Any] = {}
-    dc_values: dict[str, list[str]] = {
-        field: [] for field in DC_ELEMENTS
-    }
-    meta_elements = []
-    for element in root.iter():
-        local_name = _local_name(element.tag).lower()
-        if local_name in dc_values:
-            text = "".join(element.itertext()).strip()
-            if text:
-                dc_values[local_name].append(text)
-        if local_name == "meta":
-            meta_elements.append(element)
-
-    for field, values in dc_values.items():
-        if not values:
-            continue
-        if field in REPEATABLE_DC_ELEMENTS and len(values) > 1:
-            metadata[field] = values
-        else:
-            metadata[field] = values[0]
-
-    for element in meta_elements:
-        name = element.attrib.get("name") or element.attrib.get("property", "")
-        content = element.attrib.get("content", "")
-        if not name or not content:
-            continue
-        cleaned_name = str(name)
-        for prefix in ("calibre:", "dc:", "opf:"):
-            if cleaned_name.startswith(prefix):
-                cleaned_name = cleaned_name[len(prefix):]
-                break
-        cleaned_name = cleaned_name.replace("-", "_")
-        metadata.setdefault(cleaned_name, content)
-
-    if "series" not in metadata:
-        for element in meta_elements:
-            name = (
-                element.attrib.get("name")
-                or element.attrib.get("property", "")
-            )
-            if "series" in str(name).lower():
-                series_name = element.attrib.get("content", "")
-                if series_name:
-                    metadata["series"] = series_name
-                    break
-
-    for element in meta_elements:
-        if "refines" not in element.attrib:
-            continue
-        property_name = element.attrib.get("property", "")
-        content = (
-            "".join(element.itertext()).strip()
-            or element.attrib.get("content", "")
-        )
-        if not property_name or not content:
-            continue
-        property_name = _local_name(property_name).replace("-", "_")
-        metadata.setdefault(property_name, content)
-
-    return metadata
+    """Keep existing callers on the shared lightweight OPF parser."""
+    return extract_epub_metadata_file(source_path)
 
 
 def _load_metadata(path: str) -> dict:
