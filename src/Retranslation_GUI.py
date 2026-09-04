@@ -22212,6 +22212,12 @@ class RetranslationMixin:
                 self._show_message('error', 'Refinement Preview Failed', str(exc), parent=parent)
                 return False
 
+            from PySide6.QtWidgets import QAbstractSpinBox, QStyle, QStyleOptionButton, QToolButton
+
+            selection_state = {
+                'types': list(selected_types),
+                'plan': automatic_plan,
+            }
             preview = QDialog(parent)
             preview.setObjectName('glossaryRefinementPreview')
             preview.setWindowTitle('Confirm Glossary Refinement')
@@ -22222,15 +22228,15 @@ class RetranslationMixin:
             screen = screen or QApplication.primaryScreen()
             if screen is not None:
                 available_geometry = screen.availableGeometry()
-                minimum_width = max(1, round(available_geometry.width() * 0.24))
-                minimum_height = max(1, round(available_geometry.height() * 0.30))
+                minimum_width = max(1, round(available_geometry.width() * 0.20))
+                minimum_height = max(1, round(available_geometry.height() * 0.26))
                 dialog_width = max(
                     minimum_width,
-                    round(available_geometry.width() * 0.26),
+                    round(available_geometry.width() * 0.22),
                 )
                 dialog_height = max(
                     minimum_height,
-                    round(available_geometry.height() * 0.42),
+                    round(available_geometry.height() * 0.37),
                 )
                 preview.setMinimumSize(minimum_width, minimum_height)
                 preview.resize(dialog_width, dialog_height)
@@ -22277,7 +22283,7 @@ class RetranslationMixin:
                 }
                 QLabel#refinementHeroTitle {
                     color: #f3f8fb;
-                    font-size: 13pt;
+                    font-size: 12pt;
                     font-weight: 700;
                 }
                 QLabel#refinementHeroSubtitle,
@@ -22312,6 +22318,25 @@ class RetranslationMixin:
                 }
                 QLabel#refinementTypeStatsEmpty {
                     color: #737f8e;
+                }
+                QToolButton#refinementTypePicker {
+                    color: #e8eef5;
+                    background-color: #202936;
+                    border: 1px solid #415168;
+                    border-radius: 7px;
+                    padding: 7px 34px 7px 10px;
+                    text-align: left;
+                    font-weight: 650;
+                }
+                QToolButton#refinementTypePicker:hover,
+                QToolButton#refinementTypePicker:pressed {
+                    background-color: #293646;
+                    border-color: #60758a;
+                }
+                QToolButton#refinementTypePicker::menu-indicator {
+                    subcontrol-origin: padding;
+                    subcontrol-position: center right;
+                    right: 8px;
                 }
                 QFrame#refinementMetricCard {
                     background-color: #202b38;
@@ -22444,14 +22469,14 @@ class RetranslationMixin:
             """)
 
             preview_layout = QVBoxLayout(preview)
-            preview_layout.setContentsMargins(14, 14, 14, 12)
-            preview_layout.setSpacing(8)
+            preview_layout.setContentsMargins(10, 10, 10, 9)
+            preview_layout.setSpacing(6)
 
             hero = QFrame(preview)
             hero.setObjectName('refinementHero')
             hero_layout = QHBoxLayout(hero)
-            hero_layout.setContentsMargins(13, 10, 13, 10)
-            hero_layout.setSpacing(10)
+            hero_layout.setContentsMargins(10, 7, 10, 7)
+            hero_layout.setSpacing(8)
             hero_icon = QLabel('✨')
             hero_icon.setObjectName('refinementHeroIcon')
             hero_icon.setAlignment(Qt.AlignCenter)
@@ -22460,9 +22485,7 @@ class RetranslationMixin:
             hero_copy.setSpacing(3)
             hero_title = QLabel('Ready to refine glossary entries')
             hero_title.setObjectName('refinementHeroTitle')
-            hero_subtitle = QLabel(
-                'Review the selected scope and request plan before starting the refinement pass.'
-            )
+            hero_subtitle = QLabel('Confirm the scope and request plan.')
             hero_subtitle.setObjectName('refinementHeroSubtitle')
             hero_subtitle.setWordWrap(True)
             hero_copy.addWidget(hero_title)
@@ -22479,40 +22502,118 @@ class RetranslationMixin:
             content.setObjectName('glossaryRefinementBody')
             content_layout = QVBoxLayout(content)
             content_layout.setContentsMargins(0, 0, 4, 0)
-            content_layout.setSpacing(8)
+            content_layout.setSpacing(6)
 
             scope_card = QFrame(content)
             scope_card.setObjectName('refinementScopeCard')
             scope_layout = QVBoxLayout(scope_card)
-            scope_layout.setContentsMargins(11, 9, 11, 10)
-            scope_layout.setSpacing(6)
+            scope_layout.setContentsMargins(9, 7, 9, 8)
+            scope_layout.setSpacing(5)
             scope_title = QLabel('SELECTED ENTRY TYPES')
             scope_title.setObjectName('refinementSectionTitle')
-            scope_hint = QLabel('Empty types remain visible but will not generate an API request.')
+            scope_hint = QLabel('Choose one or more active types. Empty types are skipped.')
             scope_hint.setObjectName('refinementSectionHint')
             scope_hint.setWordWrap(True)
             scope_layout.addWidget(scope_title)
             scope_layout.addWidget(scope_hint)
-            for entry_type in selected_types:
-                count = automatic_plan.per_type_counts.get(entry_type, 0)
-                tokens = automatic_plan.per_type_tokens.get(entry_type, 0)
-                scope_row = QFrame(scope_card)
-                scope_row.setObjectName('refinementScopeRow')
-                scope_row_layout = QHBoxLayout(scope_row)
-                scope_row_layout.setContentsMargins(9, 6, 9, 6)
-                scope_name = QLabel(entry_type)
-                scope_name.setObjectName('refinementTypeName')
-                scope_name.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                scope_row_layout.addWidget(scope_name, 1)
-                if count:
-                    scope_stats = QLabel(f'{count:,} entries  •  {tokens:,} tokens')
-                    scope_stats.setObjectName('refinementTypeStats')
-                else:
-                    scope_stats = QLabel('NO ENTRIES  •  SKIPPED')
-                    scope_stats.setObjectName('refinementTypeStatsEmpty')
-                scope_stats.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                scope_row_layout.addWidget(scope_stats, 0, Qt.AlignRight)
-                scope_layout.addWidget(scope_row)
+
+            type_picker = QToolButton(scope_card)
+            type_picker.setObjectName('refinementTypePicker')
+            type_picker.setPopupMode(QToolButton.InstantPopup)
+            type_picker.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            type_picker.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            type_selection_menu = QMenu(type_picker)
+            type_selection_menu.setObjectName('refinementTypeSelectionMenu')
+            type_selection_menu.setStyleSheet("""
+                QMenu {
+                    color: #e7edf5;
+                    background-color: #1b222c;
+                    border: 1px solid #465568;
+                    border-radius: 6px;
+                    padding: 5px;
+                }
+                QCheckBox {
+                    color: #e7edf5;
+                    spacing: 8px;
+                    padding: 6px 10px;
+                }
+                QCheckBox::indicator {
+                    width: 18px;
+                    height: 18px;
+                    border: 1px solid #5f7388;
+                    border-radius: 4px;
+                    background-color: #12171d;
+                }
+                QCheckBox::indicator:checked {
+                    background-color: #52a8dc;
+                    border-color: #6fbae7;
+                }
+                QLabel#refinementTypeChoiceCheckmark {
+                    color: #07131b;
+                    background-color: transparent;
+                    font-size: 12pt;
+                    font-weight: 900;
+                }
+                QCheckBox:hover {
+                    background-color: #293646;
+                    border-radius: 4px;
+                }
+            """)
+            type_choice_widgets = {}
+            type_choice_checkmark_syncs = []
+
+            def _attach_styled_checkmark(checkbox, object_name):
+                checkmark = QLabel('✓', checkbox)
+                checkmark.setObjectName(object_name)
+                checkmark.setAlignment(Qt.AlignCenter)
+                checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+                checkmark.hide()
+
+                def _sync_checkmark(*_args):
+                    try:
+                        style_option = QStyleOptionButton()
+                        checkbox.initStyleOption(style_option)
+                        indicator_rect = checkbox.style().subElementRect(
+                            QStyle.SE_CheckBoxIndicator,
+                            style_option,
+                            checkbox,
+                        )
+                        checkmark.setGeometry(indicator_rect)
+                        checkmark.setVisible(checkbox.isChecked())
+                    except RuntimeError:
+                        pass
+
+                checkbox.toggled.connect(_sync_checkmark)
+                QTimer.singleShot(0, _sync_checkmark)
+                return _sync_checkmark
+
+            selected_type_keys = {_refinement_type_key(name) for name in selected_types}
+            for entry_type in active_types:
+                entry_count = entry_counts.get(_refinement_type_key(entry_type), 0)
+                choice_suffix = f'{entry_count:,} entries' if entry_count else 'no entries'
+                type_choice = QCheckBox(f'{entry_type}   —   {choice_suffix}', type_selection_menu)
+                type_choice.setChecked(_refinement_type_key(entry_type) in selected_type_keys)
+                choice_action = QWidgetAction(type_selection_menu)
+                choice_action.setDefaultWidget(type_choice)
+                type_selection_menu.addAction(choice_action)
+                type_choice_widgets[entry_type] = type_choice
+                type_choice_checkmark_syncs.append(
+                    _attach_styled_checkmark(type_choice, 'refinementTypeChoiceCheckmark')
+                )
+
+            def _sync_type_choice_checkmarks():
+                for sync_checkmark in type_choice_checkmark_syncs:
+                    sync_checkmark()
+
+            type_selection_menu.aboutToShow.connect(
+                lambda: QTimer.singleShot(0, _sync_type_choice_checkmarks)
+            )
+            type_picker.setMenu(type_selection_menu)
+            scope_layout.addWidget(type_picker)
+            selection_stats = QLabel()
+            selection_stats.setObjectName('refinementTypeStats')
+            selection_stats.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            scope_layout.addWidget(selection_stats)
             content_layout.addWidget(scope_card)
 
             mode_name = 'Send all selected types together' if request_mode == 'all' else 'Send each type separately'
@@ -22523,57 +22624,51 @@ class RetranslationMixin:
             metric_grid.setColumnStretch(0, 1)
             metric_grid.setColumnStretch(1, 1)
             metric_values = (
-                ('PAYLOAD TOKENS', f'{automatic_plan.total_payload_tokens:,}', 'Tokenizer estimate'),
-                ('AUTOMATIC CHUNKS', f'{automatic_plan.total_chunks:,}', 'Using the saved split logic'),
-                ('SAFE BUDGET', f'{safe_budget:,}', 'Input tokens per chunk'),
-                ('REQUEST MODE', request_mode.upper(), mode_name),
+                ('payload_tokens', 'PAYLOAD TOKENS', f'{automatic_plan.total_payload_tokens:,}', 'Tokenizer estimate'),
+                ('automatic_chunks', 'AUTO CHUNKS', f'{automatic_plan.total_chunks:,}', 'Using the saved split logic'),
+                ('safe_budget', 'SAFE BUDGET', f'{safe_budget:,}', 'Input tokens per chunk'),
+                ('request_mode', 'REQUEST MODE', request_mode.upper(), mode_name),
             )
-            for metric_index, (metric_label_text, metric_value_text, metric_hint_text) in enumerate(metric_values):
+            metric_value_widgets = {}
+            for metric_index, (metric_key, metric_label_text, metric_value_text, metric_tooltip) in enumerate(metric_values):
                 metric_card = QFrame(content)
                 metric_card.setObjectName('refinementMetricCard')
+                metric_card.setToolTip(metric_tooltip)
                 metric_layout = QVBoxLayout(metric_card)
-                metric_layout.setContentsMargins(10, 7, 10, 8)
+                metric_layout.setContentsMargins(9, 6, 9, 7)
                 metric_layout.setSpacing(1)
                 metric_label = QLabel(metric_label_text)
                 metric_label.setObjectName('refinementMetricLabel')
                 metric_value = QLabel(metric_value_text)
                 metric_value.setObjectName('refinementMetricValue')
                 metric_value.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                metric_hint = QLabel(metric_hint_text)
-                metric_hint.setObjectName('refinementMetricHint')
-                metric_hint.setWordWrap(True)
                 metric_layout.addWidget(metric_label)
                 metric_layout.addWidget(metric_value)
-                metric_layout.addWidget(metric_hint)
+                metric_value_widgets[metric_key] = metric_value
                 metric_grid.addWidget(metric_card, metric_index // 2, metric_index % 2)
             content_layout.addLayout(metric_grid)
 
             completed_lc = {_refinement_type_key(name) for name in completed_types or []}
-            already_refined = [name for name in selected_types if _refinement_type_key(name) in completed_lc]
-            if already_refined:
-                warning_card = QFrame(content)
-                warning_card.setObjectName('refinementWarningCard')
-                warning_layout = QHBoxLayout(warning_card)
-                warning_layout.setContentsMargins(10, 8, 10, 8)
-                warning = QLabel(
-                    '⚠️ Already refined: ' + ', '.join(already_refined)
-                    + '. This explicit action will replace those types with fresh refinement results.'
-                )
-                warning.setObjectName('refinementWarningText')
-                warning.setWordWrap(True)
-                warning_layout.addWidget(warning)
-                content_layout.addWidget(warning_card)
+            warning_card = QFrame(content)
+            warning_card.setObjectName('refinementWarningCard')
+            warning_layout = QHBoxLayout(warning_card)
+            warning_layout.setContentsMargins(8, 6, 8, 6)
+            warning = QLabel()
+            warning.setObjectName('refinementWarningText')
+            warning.setWordWrap(True)
+            warning_layout.addWidget(warning)
+            warning_card.hide()
+            content_layout.addWidget(warning_card)
 
             override_card = QFrame(content)
             override_card.setObjectName('refinementOverrideCard')
             override_layout = QVBoxLayout(override_card)
-            override_layout.setContentsMargins(11, 9, 11, 10)
-            override_layout.setSpacing(6)
+            override_layout.setContentsMargins(9, 7, 9, 8)
+            override_layout.setSpacing(4)
             override_header = QHBoxLayout()
             override_checkbox = QCheckBox('Override automatic split', override_card)
             override_checkbox.setObjectName('refinementOverrideCheckbox')
             override_checkbox.setChecked(False)
-            from PySide6.QtWidgets import QAbstractSpinBox, QStyle, QStyleOptionButton, QToolButton
 
             override_checkmark = QLabel('✓', override_checkbox)
             override_checkmark.setObjectName('refinementOverrideCheckmark')
@@ -22604,7 +22699,7 @@ class RetranslationMixin:
             override_header.addWidget(one_run_badge)
             override_layout.addLayout(override_header)
             override_hint = QLabel(
-                'Leave this off to use automatic splitting, or choose the exact total number of chunks for this run.'
+                'Off uses automatic splitting. Turn on to choose an exact chunk count.'
             )
             override_hint.setObjectName('refinementOverrideHint')
             override_hint.setWordWrap(True)
@@ -22672,12 +22767,109 @@ class RetranslationMixin:
             refine_button.setDefault(True)
             cancel_button = buttons.button(QDialogButtonBox.Cancel)
             cancel_button.setObjectName('refinementCancelButton')
+
+            def _selected_preview_types():
+                return [
+                    entry_type for entry_type in active_types
+                    if type_choice_widgets[entry_type].isChecked()
+                ]
+
+            def _refresh_refinement_preview(*_args):
+                current_types = _selected_preview_types()
+                try:
+                    current_plan = plan_refinement(
+                        entries,
+                        selected_types=current_types,
+                        chunking_mode=request_mode,
+                        chapter_splitter=splitter,
+                        available_tokens=safe_budget,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                    )
+                except Exception as exc:
+                    selection_stats.setText(f'Unable to calculate refinement plan: {exc}')
+                    refine_button.setEnabled(False)
+                    return
+
+                selection_state['types'] = list(current_types)
+                selection_state['plan'] = current_plan
+                non_empty_current = [
+                    entry_type for entry_type in current_types
+                    if current_plan.per_type_counts.get(entry_type, 0) > 0
+                ]
+                total_entries = sum(
+                    current_plan.per_type_counts.get(entry_type, 0)
+                    for entry_type in current_types
+                )
+
+                if not current_types:
+                    type_picker.setText('Choose entry types…')
+                    selection_stats.setText('No entry types selected.')
+                else:
+                    if len(current_types) <= 2:
+                        picker_summary = ', '.join(current_types)
+                    else:
+                        picker_summary = f'{current_types[0]} + {len(current_types) - 1} more'
+                    type_picker.setText(f'{picker_summary}  ({len(current_types)} selected)')
+                    empty_count = len(current_types) - len(non_empty_current)
+                    empty_suffix = f'  •  {empty_count} empty' if empty_count else ''
+                    selection_stats.setText(
+                        f'{total_entries:,} entries  •  '
+                        f'{current_plan.total_payload_tokens:,} tokens{empty_suffix}'
+                    )
+
+                metric_value_widgets['payload_tokens'].setText(
+                    f'{current_plan.total_payload_tokens:,}'
+                )
+                metric_value_widgets['automatic_chunks'].setText(
+                    f'{current_plan.total_chunks:,}'
+                )
+
+                already_refined = [
+                    name for name in current_types
+                    if _refinement_type_key(name) in completed_lc
+                ]
+                if already_refined:
+                    warning.setText(
+                        '⚠️ Already refined: ' + ', '.join(already_refined)
+                        + '. This run will replace them with fresh results.'
+                    )
+                    warning_card.show()
+                else:
+                    warning_card.hide()
+
+                minimum_chunks = 1 if request_mode == 'all' else max(1, len(non_empty_current))
+                maximum_chunks = max(1, total_entries)
+                previous_chunks = chunk_count.value()
+                chunk_count.blockSignals(True)
+                chunk_count.setRange(minimum_chunks, maximum_chunks)
+                chunk_count.setValue(max(
+                    minimum_chunks,
+                    min(previous_chunks or current_plan.total_chunks or minimum_chunks, maximum_chunks),
+                ))
+                chunk_count.blockSignals(False)
+                chunk_range.setText(
+                    f'Allowed range: {chunk_count.minimum():,}–{chunk_count.maximum():,}'
+                )
+                has_refinable_entries = bool(non_empty_current)
+                refine_button.setEnabled(has_refinable_entries)
+                _set_manual_chunk_controls_enabled(
+                    override_checkbox.isChecked() and has_refinable_entries
+                )
+
+            for type_choice in type_choice_widgets.values():
+                type_choice.toggled.connect(_refresh_refinement_preview)
+            _refresh_refinement_preview()
             buttons.accepted.connect(preview.accept)
             buttons.rejected.connect(preview.reject)
             preview_layout.addWidget(buttons)
             if preview.exec() != QDialog.Accepted:
                 return False
 
+            selected_types = list(selection_state.get('types') or [])
+            automatic_plan = selection_state.get('plan') or automatic_plan
+            if not selected_types or not automatic_plan.total_chunks:
+                return False
             target_count = chunk_count.value() if override_checkbox.isChecked() else None
             execution_plan = automatic_plan
             if target_count is not None:
