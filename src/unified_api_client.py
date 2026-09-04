@@ -17303,6 +17303,9 @@ class UnifiedClient:
                 ct = u.get('output_tokens', u.get('completion_tokens', 0))
                 tt = u.get('total_tokens', (pt or 0) + (ct or 0))
                 usage = {'prompt_tokens': pt or 0, 'completion_tokens': ct or 0, 'total_tokens': tt or 0}
+                details = u.get('output_tokens_details', u.get('completion_tokens_details'))
+                if isinstance(details, dict):
+                    usage['completion_tokens_details'] = details
         except Exception:
             usage = None
 
@@ -17824,11 +17827,16 @@ class UnifiedClient:
             return "Glossarion"
 
     def _get_openai_compatible_reasoning_effort(self, provider: str, effective_model: str = "") -> Optional[str]:
-        """Return GPT-effort reasoning_effort for OpenAI-compatible opt-in routes."""
+        """Return the selected effort for native GPT-6 and compatible opt-in routes."""
         try:
             if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
                 return None
             effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
+            provider = (provider or '').strip().lower()
+            if provider == 'openai' and self._is_gpt6_model_name(effective_model):
+                if effort == 'none':
+                    return None
+                return effort if effort in ('low', 'medium', 'high', 'xhigh', 'max') else 'medium'
             if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
                 effort = 'medium'
             if effort == 'none':
@@ -17880,6 +17888,9 @@ class UnifiedClient:
         """Return True when we should explicitly pass a disabled thinking state."""
         try:
             provider = (provider or '').strip().lower()
+            if provider == 'openai' and self._is_gpt6_model_name(effective_model):
+                # GPT-6 does not accept the provider-specific thinking toggle.
+                return False
             if provider in {'deepseek', 'gemini-openai', 'openrouter', 'nanogpt', 'anthropic'}:
                 return False
             if 'claude' in (effective_model or '').lower() or 'anthropic' in (effective_model or '').lower():
@@ -19686,6 +19697,13 @@ class UnifiedClient:
     @staticmethod
     def _is_gpt6_model_name(model: str) -> bool:
         return bool(re.search(r'(?:^|/)gpt-?6(?:[.-]|$)', str(model or '').strip().lower()))
+
+    @staticmethod
+    def _uses_astra_responses_api(provider: str, model: str, base_url: str) -> bool:
+        """Astra accepts max effort on public Responses, but rejects it on Chat Completions."""
+        return (provider == 'openai'
+                and str(base_url or '').rstrip('/') == 'https://api.openai.com/v1'
+                and bool(re.fullmatch(r'gpt-6-astra(?:-.*)?', str(model or '').split('/')[-1].lower())))
 
     @classmethod
     def _apply_gpt6_openai_constraints(cls, params: dict, use_responses_api: bool = False):
@@ -23439,12 +23457,15 @@ class UnifiedClient:
                         import re as _re
                         if provider == 'deepseek' and os.getenv('DEEPSEEK_USE_RESPONSES_API', '0') == '1':
                             use_responses_api = True
+                        elif self._uses_astra_responses_api(provider, effective_model, base_url):
+                            use_responses_api = True
                         elif provider == 'openai' and model_leaf.startswith("gpt-") and _re.match(r"^gpt-\d+(?:\.\d+)*-pro(?:$|[-_])", model_leaf):
                             use_responses_api = True
                     except Exception:
                         use_responses_api = False
 
                     if use_responses_api:
+                        self._log_once(f"📝 [{provider}] Using /v1/responses for model '{effective_model}'.")
                         # Build Responses API payload
                         instructions_parts: list = []
                         input_items: list = []
@@ -23702,7 +23723,11 @@ class UnifiedClient:
 
                     generic_reasoning_effort = self._get_openai_compatible_reasoning_effort(provider, effective_model)
                     if generic_reasoning_effort:
-                        if not use_responses_api:
+                        if use_responses_api:
+                            params.setdefault("reasoning", {}).setdefault("effort", generic_reasoning_effort)
+                            if self._uses_astra_responses_api(provider, effective_model, base_url):
+                                params["reasoning"].setdefault("summary", "auto")
+                        else:
                             params.setdefault("reasoning_effort", generic_reasoning_effort)
                         try:
                             tls = self._get_thread_local_client()
@@ -23860,6 +23885,8 @@ class UnifiedClient:
                     log_stream = self._stream_logging_enabled(use_streaming)
                     if use_streaming:
                         call_kwargs["stream"] = True
+                        if provider == 'openai' and self._is_gpt6_model_name(effective_model) and not use_responses_api:
+                            call_kwargs["stream_options"] = {"include_usage": True}
 
                     # Avoid infinite retry loops when we need to auto-adjust max_tokens
                     context_retry_done = False
@@ -24323,6 +24350,7 @@ class UnifiedClient:
                         _in_think_tag = False  # track <think>...</think> inline reasoning
                         _think_tag_buf = ""  # buffer for partial tag detection
                         stream_read_error = None
+                        stream_usage = None
 
                         def _check_cancel_during_stream():
                             if self._is_stop_requested():
@@ -24411,6 +24439,9 @@ class UnifiedClient:
                         for event in _iter_stream_events():
                             _check_cancel_during_stream()
                             try:
+                                event_usage = event.get('usage') if isinstance(event, dict) else getattr(event, 'usage', None)
+                                if event_usage is not None:
+                                    stream_usage = event_usage.model_dump() if hasattr(event_usage, 'model_dump') else event_usage
                                 frag_collected = False
                                 # Responses API streams semantic events rather than Chat Completion chunks.
                                 if use_responses_api:
@@ -24419,7 +24450,7 @@ class UnifiedClient:
                                         event_type = event.get("type") or event.get("event")
                                     event_type = str(event_type or "")
 
-                                    if event_type == "response.reasoning_text.delta":
+                                    if event_type in ("response.reasoning_text.delta", "response.reasoning_summary_text.delta"):
                                         event_delta = getattr(event, "delta", None)
                                         if event_delta is None and isinstance(event, dict):
                                             event_delta = event.get("delta")
@@ -24441,14 +24472,17 @@ class UnifiedClient:
                                             _append_responses_output(full_text)
                                         continue
 
-                                    if event_type == "response.completed":
-                                        finish_reason = "stop"
-                                        continue
-                                    if event_type == "response.incomplete":
-                                        finish_reason = "length"
-                                        continue
-                                    if event_type == "response.failed":
-                                        finish_reason = "error"
+                                    if event_type in ("response.completed", "response.incomplete", "response.failed"):
+                                        body = event.get('response') if isinstance(event, dict) else getattr(event, 'response', None)
+                                        if hasattr(body, 'model_dump'):
+                                            body = body.model_dump()
+                                        if isinstance(body, dict):
+                                            final_text, finish_reason, stream_usage = self._extract_openai_responses_json(body)
+                                            if not text_parts:
+                                                _append_responses_output(final_text)
+                                        else:
+                                            finish_reason = {'response.completed': 'stop', 'response.incomplete': 'length',
+                                                             'response.failed': 'error'}[event_type]
                                         continue
                                     if event_type.startswith("response."):
                                         continue
@@ -24792,8 +24826,14 @@ class UnifiedClient:
                             pass
                         stream_cleanup_done = True
                         
-                        # Count thinking tokens from accumulated text
-                        if oai_thinking_chunks > 0 and not self._is_stop_requested():
+                        # Prefer API usage: OpenAI does not stream its raw reasoning text.
+                        usage_details = (stream_usage.get('completion_tokens_details') if isinstance(stream_usage, dict)
+                                         else getattr(stream_usage, 'completion_tokens_details', None))
+                        reported_reasoning_tokens = (usage_details.get('reasoning_tokens') if isinstance(usage_details, dict)
+                                                     else getattr(usage_details, 'reasoning_tokens', None))
+                        if reported_reasoning_tokens is not None and not self._is_stop_requested():
+                            print(f"   💭 Thinking tokens used: {reported_reasoning_tokens:,} (reported by API)")
+                        elif oai_thinking_chunks > 0 and not self._is_stop_requested():
                             thinking_dur = _t.time() - oai_thinking_start_ts if oai_thinking_start_ts else 0
                             full_thinking_text = "".join(oai_thinking_text_parts)
                             thinking_tokens = 0
@@ -24812,6 +24852,7 @@ class UnifiedClient:
                         _stream_resp = UnifiedResponse(
                             content=content,
                             finish_reason=finish_reason,
+                            usage=stream_usage,
                             raw_response=None
                         )
                         _stream_resp._streaming_thinking_chunks = oai_thinking_chunks
@@ -25493,7 +25534,10 @@ class UnifiedClient:
                 model_leaf = ml.split("/")[-1]
                 # NOTE: Do not use the name `re` here; this function has conditional `import re` statements
                 # in other branches which make `re` a local variable and can trigger UnboundLocalError.
+                import re as _re
                 if provider == 'deepseek' and os.getenv('DEEPSEEK_USE_RESPONSES_API', '0') == '1':
+                    use_responses_api = True
+                elif self._uses_astra_responses_api(provider, effective_model, base_url):
                     use_responses_api = True
                 elif provider == 'openai' and model_leaf.startswith("gpt-") and _re.match(r"^gpt-\d+(?:\.\d+)*-pro(?:$|[-_])", model_leaf):
                     use_responses_api = True
@@ -25689,6 +25733,12 @@ class UnifiedClient:
                     data.setdefault("thinking", {"type": "disabled"})
             
             anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=None, log=False)
+            if provider == 'openai' and use_responses_api:
+                effort = self._get_openai_compatible_reasoning_effort(provider, effective_model)
+                if effort:
+                    data.setdefault("reasoning", {}).setdefault("effort", effort)
+                    if self._uses_astra_responses_api(provider, effective_model, base_url):
+                        data["reasoning"].setdefault("summary", "auto")
             if req_temperature is None:
                 data.pop("temperature", None)
             anti_dupe_min_p_params = self._get_anti_duplicate_min_p_params(
