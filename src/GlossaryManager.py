@@ -15,7 +15,11 @@ from bs4 import BeautifulSoup
 from bs4 import MarkupResemblesLocatorWarning
 import PatternManager as PM
 import duplicate_detection_config as ddc
-from glossary_refinement import refine_glossary_entries, refinement_enabled as _glossary_refinement_enabled
+from glossary_refinement import (
+    refine_glossary_entries,
+    refinement_enabled as _glossary_refinement_enabled,
+    refinement_waits_for_completion as _glossary_refinement_waits_for_completion,
+)
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from epub_package import find_epub_opf_member
 
@@ -1000,6 +1004,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     if not chapter_split_enabled:
         print("📑 Chapter splitting disabled (GLOSSARY_ENABLE_CHAPTER_SPLIT=0) - processing without pre-splitting")
     
+    _minimal_scheduled_requests_complete = True
     if needs_chunking:
         # Prepare chunk processing
         incremental_dir = os.path.join(output_dir, "incremental_glossary")
@@ -1159,7 +1164,13 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                 entries.sort(key=_csv_sort_key)
             all_csv_lines = [header] + entries
 
-            all_csv_lines = _refine_csv_lines_if_enabled(all_csv_lines, output_dir)
+            all_csv_lines = _refine_csv_lines_if_enabled(
+                all_csv_lines,
+                output_dir,
+                extraction_complete=bool(
+                    getattr(_process_chunks_batch_api, 'last_run_complete', False)
+                ),
+            )
             
             # Save
             # Check format preference
@@ -1205,6 +1216,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             return _parse_csv_to_dict(csv_content)
         else:
             # Strict sequential processing (one API call at a time)
+            sequential_requests_completed = 0
+            sequential_requests_failed = 0
             _prev_defer = os.getenv("GLOSSARY_DEFER_SAVE")
             _prev_filtered = os.getenv("_CHUNK_ALREADY_FILTERED")
             _prev_force_disable = os.getenv("GLOSSARY_FORCE_DISABLE_SMART_FILTER")
@@ -1220,18 +1233,25 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                     print(f"📑 Processing chunk {chunk_idx}/{len(chunks_to_process)} ({len(chunk_text):,} chars)...")
                     
                     if custom_prompt:
-                        chunk_glossary = _extract_with_custom_prompt(
-                            custom_prompt, chunk_text, language, 
-                            min_frequency, max_names, max_titles, 
-                            None, output_dir,  # Don't pass existing glossary to chunks
-                            strip_honorifics, fuzzy_threshold, filter_mode, max_sentences, log_callback,
-                            chunk_pos=pos,
-                            total_chunks=len(chunks_to_process),
-                        )
+                        try:
+                            chunk_glossary = _extract_with_custom_prompt(
+                                custom_prompt, chunk_text, language,
+                                min_frequency, max_names, max_titles,
+                                None, output_dir,  # Don't pass existing glossary to chunks
+                                strip_honorifics, fuzzy_threshold, filter_mode, max_sentences, log_callback,
+                                chunk_pos=pos,
+                                total_chunks=len(chunks_to_process),
+                                raise_on_failure=True,
+                            )
+                        except Exception as exc:
+                            sequential_requests_failed += 1
+                            print(f"⚠️ API call for chunk {chunk_idx} failed: {exc}")
+                            continue
                     else:
                         # Pattern fallback disabled
                         print("📑 AUTO_GLOSSARY_PROMPT is empty - skipping chunk glossary extraction (pattern fallback disabled)")
                         chunk_glossary = {}
+                    sequential_requests_completed += 1
                     
                     # Normalize to CSV lines and aggregate
                     chunk_lines = []
@@ -1267,6 +1287,11 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                     os.environ.pop("GLOSSARY_FORCE_DISABLE_SMART_FILTER", None)
                 else:
                     os.environ["GLOSSARY_FORCE_DISABLE_SMART_FILTER"] = _prev_force_disable
+            _minimal_scheduled_requests_complete = bool(
+                sequential_requests_completed == len(chunks_to_process)
+                and sequential_requests_failed == 0
+                and not is_stop_requested()
+            )
         
         # Build CSV from aggregated entries
         print(f"📑 DEBUG: all_glossary_entries count before merge: {len(all_glossary_entries)}")
@@ -1359,7 +1384,11 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         entries.sort(key=_csv_sort_key)
         csv_lines = [header] + entries
 
-        csv_lines = _refine_csv_lines_if_enabled(csv_lines, output_dir)
+        csv_lines = _refine_csv_lines_if_enabled(
+            csv_lines,
+            output_dir,
+            extraction_complete=_minimal_scheduled_requests_complete,
+        )
         
         # Token-efficient format if enabled
         use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
@@ -1769,6 +1798,8 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
     all_csv_lines = []  # Collect all entries as CSV lines
     total_chunks = len(chunks_to_process)
     completed_chunks = 0
+    failed_chunks = 0
+    _process_chunks_batch_api.last_run_complete = False
     
     # Ensure per-chunk smart filtering is disabled globally during batch processing
     _prev_filtered = os.getenv("_CHUNK_ALREADY_FILTERED")
@@ -1903,6 +1934,7 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
             log_callback=None,
             chunk_pos=pos,
             total_chunks=total_chunks,
+            raise_on_failure=True,
         )
         return fut
 
@@ -2024,6 +2056,7 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
                     print(f"📑 Chunk {chunk_idx} completed and aggregated")
 
                 except Exception as e:
+                    failed_chunks += 1
                     print(f"⚠️ API call for chunk {chunk_idx} failed: {e}")
                     completed_chunks += 1
                     progress_percent = (completed_chunks / total_chunks) * 100 if total_chunks else 100
@@ -2078,6 +2111,12 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
         except Exception:
             pass
     
+    _process_chunks_batch_api.last_run_complete = bool(
+        total_chunks > 0
+        and completed_chunks_local == total_chunks
+        and failed_chunks == 0
+        and not is_stop_requested()
+    )
     return all_csv_lines
 
 def _incremental_update_glossary(output_dir, chunk_idx, chunk_lines, strip_honorifics, language, filter_mode):
@@ -2455,9 +2494,17 @@ def _custom_entry_types_for_refinement():
     from extract_glossary_from_epub import get_custom_entry_types
     return get_custom_entry_types()
 
-def _refine_csv_lines_if_enabled(csv_lines, output_dir):
+def _refine_csv_lines_if_enabled(csv_lines, output_dir, *, extraction_complete=True):
     """Run the shared glossary refinement step for the minimal glossary path."""
     if not _glossary_refinement_enabled():
+        return csv_lines
+    if _glossary_refinement_waits_for_completion() and (
+        not extraction_complete or is_stop_requested()
+    ):
+        print(
+            "⏸️ Glossary refinement deferred until extraction reaches 100%: "
+            "one or more scheduled requests failed or were cancelled."
+        )
         return csv_lines
 
     entries, _header_line, header_parts = _csv_lines_to_refinement_entries(csv_lines)
@@ -4594,7 +4641,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                               min_frequency, max_names, max_titles, 
                               existing_glossary, output_dir, 
                               strip_honorifics=True, fuzzy_threshold=0.90, filter_mode='all', max_sentences=200, log_callback=None,
-                              chunk_pos=None, total_chunks=None):
+                              chunk_pos=None, total_chunks=None, raise_on_failure=False):
     """Extract glossary using custom AI prompt with proper filtering"""
     # Redirect stdout to GUI log if callback provided (but not in subprocess - worker handles it)
     import sys
@@ -4623,11 +4670,15 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
         if is_traditional_translation_api(MODEL):
             # Pattern fallback disabled; traditional translation APIs can't run AI extraction.
             print("📑 Traditional translation API selected - skipping automatic glossary extraction (pattern fallback disabled)")
+            if raise_on_failure:
+                raise RuntimeError("traditional translation APIs cannot run glossary extraction")
             return {}
         
         elif not API_KEY and not _model_uses_own_auth(MODEL):
             # Pattern fallback disabled; without an API key we can't run AI extraction.
             print("📑 No API key found - skipping automatic glossary extraction (pattern fallback disabled)")
+            if raise_on_failure:
+                raise RuntimeError("no API key is available for glossary extraction")
             return {}
         else:
             print(f"📑 Using AI-assisted extraction with custom prompt")
@@ -4668,6 +4719,8 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 # Check if cancelled during delay
                 if hasattr(client, '_cancelled') and client._cancelled:
                     print("📑 ❌ Glossary extraction stopped during delay")
+                    if raise_on_failure:
+                        raise RuntimeError("glossary extraction was cancelled during request delay")
                     return {}
                 
             # Check if text is already filtered (from chunking or cache)
@@ -4972,16 +5025,22 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
             except UnifiedClientError as e:
                 if "stopped by user" in str(e).lower():
                     print(f"📑 ❌ AI extraction interrupted by user")
+                    if raise_on_failure:
+                        raise
                     return {}
                 else:
                     print(f"⚠️ AI extraction failed: {e}")
                     print("📑 ❌ Glossary generation failed - returning empty glossary")
+                    if raise_on_failure:
+                        raise
                     return {}
             except Exception as e:
                 print(f"⚠️ AI extraction failed: {e}")
                 import traceback
                 traceback.print_exc()
                 print("📑 ❌ Glossary generation failed - returning empty glossary")
+                if raise_on_failure:
+                    raise
                 return {}
                 
     except Exception as e:
@@ -4989,6 +5048,8 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
         import traceback
         traceback.print_exc()
         print("📑 ❌ Glossary generation failed - returning empty glossary")
+        if raise_on_failure:
+            raise
         return {}
 
 def _filter_csv_by_mode(csv_lines, filter_mode):

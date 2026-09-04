@@ -2263,6 +2263,10 @@ class GlossaryManagerMixin:
                     skip_refinement_dedupe = self.glossary_refinement_skip_dedupe_checkbox.isChecked()
                     self.config['glossary_refinement_skip_dedupe'] = bool(skip_refinement_dedupe)
                     self.glossary_refinement_skip_dedupe_var = bool(skip_refinement_dedupe)
+                if hasattr(self, 'glossary_refinement_wait_for_completion_checkbox'):
+                    wait_for_completion = self.glossary_refinement_wait_for_completion_checkbox.isChecked()
+                    self.config['glossary_refinement_wait_for_completion'] = bool(wait_for_completion)
+                    self.glossary_refinement_wait_for_completion_var = bool(wait_for_completion)
 
                 # Gender tracker false-positive controls
                 if hasattr(self, 'gender_noise_threshold_slider'):
@@ -6097,6 +6101,18 @@ Do not stop after the glossary."""
             pass
         refinement_enable_layout.addStretch()
         layout.addWidget(refinement_enable_row)
+
+        self.glossary_refinement_wait_for_completion_checkbox = self._create_styled_checkbox(
+            "Do not refine until glossary completion is 100%"
+        )
+        self.glossary_refinement_wait_for_completion_checkbox.setChecked(
+            bool(self.config.get('glossary_refinement_wait_for_completion', False))
+        )
+        self.glossary_refinement_wait_for_completion_checkbox.setToolTip(
+            "Gate automatic refinement until every glossary extraction chapter is complete, "
+            "structurally skipped, or merged. Manual Refine this actions remain available."
+        )
+        layout.addWidget(self.glossary_refinement_wait_for_completion_checkbox)
 
         options_box = QGroupBox("Refinement Scope")
         options_layout = QVBoxLayout(options_box)

@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
                                 QPlainTextEdit, QTextBrowser, QStackedWidget, QComboBox, QInputDialog,
                                 QLineEdit, QProgressBar, QGraphicsOpacityEffect, QWidgetAction,
-                                QApplication)
+                                QApplication, QSpinBox, QDialogButtonBox)
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent, QObject, QFileSystemWatcher
 from PySide6.QtGui import QFont, QFontMetricsF, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut
 import xml.etree.ElementTree as ET
@@ -1612,6 +1612,7 @@ def _combine_glossary_progress_legend_stats(
         normalized_refinement.get('completed', 0)
         + normalized_refinement.get('refined', 0)
     )
+    result['skipped'] += normalized_refinement.get('skipped', 0)
     result['in_progress'] += normalized_refinement.get('in_progress', 0)
     result['not_refined'] = normalized_refinement.get('not_refined', 0)
     result['refine_failed'] = (
@@ -1620,6 +1621,41 @@ def _combine_glossary_progress_legend_stats(
         + normalized_refinement.get('error', 0)
     )
     return result
+
+
+def _glossary_refinement_type_key(value):
+    key = str(value or '').strip().casefold()
+    return 'terms' if key in ('term', 'terms') else key
+
+
+def _normalize_glossary_refinement_selection(refinement_keys, active_types):
+    """Resolve selected row keys, with the aggregate row taking precedence."""
+    keys = [str(key or '') for key in refinement_keys or [] if str(key or '')]
+    active = [str(entry_type or '').strip() for entry_type in active_types or [] if str(entry_type or '').strip()]
+    if any(key.startswith('all::') for key in keys):
+        return active
+    requested = {
+        _glossary_refinement_type_key(key.split('::', 1)[1])
+        for key in keys
+        if key.startswith('type::') and '::' in key
+    }
+    return [
+        entry_type for entry_type in active
+        if _glossary_refinement_type_key(entry_type) in requested
+    ]
+
+
+def _derive_glossary_refinement_aggregate_status(statuses):
+    normalized = [str(status or 'not_refined').strip().lower() for status in statuses or []]
+    if any(status in ('failed', 'error', 'refine_failed') for status in normalized):
+        return 'failed'
+    if any(status == 'in_progress' for status in normalized):
+        return 'in_progress'
+    if any(status in ('not_refined', 'unknown', '') for status in normalized):
+        return 'not_refined'
+    if normalized and all(status == 'skipped' for status in normalized):
+        return 'skipped'
+    return 'completed'
 
 
 def _progress_entry_model_for_display(entry):
@@ -16044,6 +16080,189 @@ class RetranslationMixin:
         "pending",
     }
 
+    def _start_manual_glossary_refinement(
+        self,
+        glossary_path,
+        progress_path,
+        options,
+        plan,
+    ):
+        """Start an explicit refinement pass in the normal glossary worker slot."""
+        if hasattr(self, '_is_any_process_running') and self._is_any_process_running():
+            self._show_message(
+                'warning',
+                'Process Running',
+                'Please wait for the current translation, glossary, or refinement process to finish.',
+                parent=self,
+            )
+            return False
+        if not glossary_path or not os.path.isfile(glossary_path):
+            self._show_message(
+                'warning',
+                'Glossary Not Found',
+                'No saved glossary file was found for this progress entry.',
+                parent=self,
+            )
+            return False
+
+        self.stop_requested = False
+        self.graceful_stop_active = False
+        try:
+            import extract_glossary_from_epub as extractor
+            extractor.set_stop_flag(False)
+        except Exception:
+            extractor = None
+
+        def _worker():
+            try:
+                self._run_manual_glossary_refinement(
+                    glossary_path,
+                    progress_path,
+                    options,
+                    plan,
+                )
+            except Exception as exc:
+                if hasattr(self, 'append_log'):
+                    self.append_log(f"❌ Manual glossary refinement failed: {exc}")
+            finally:
+                if getattr(self, 'stop_requested', False):
+                    self._glossary_stop_was_requested = True
+                self.stop_requested = False
+                try:
+                    import extract_glossary_from_epub as _manual_refinement_extractor
+                    _manual_refinement_extractor.set_stop_flag(False)
+                except Exception:
+                    pass
+                self.glossary_thread = None
+                if hasattr(self, 'glossary_future'):
+                    self.glossary_future = None
+                try:
+                    self.thread_complete_signal.emit()
+                except Exception:
+                    pass
+
+        if hasattr(self, 'append_log'):
+            scope = ', '.join(options.selected_types or [])
+            self.append_log(f"\n✨ Starting manual glossary refinement: {scope}")
+        try:
+            if hasattr(self, '_ensure_executor'):
+                self._ensure_executor()
+        except Exception:
+            pass
+        executor = getattr(self, 'executor', None)
+        if executor is not None:
+            self.glossary_future = executor.submit(_worker)
+        else:
+            self.glossary_thread = threading.Thread(
+                target=_worker,
+                name=f"GlossaryRefinementThread_{int(time.time())}",
+                daemon=True,
+            )
+            self.glossary_thread.start()
+        try:
+            self.update_run_button()
+        except Exception:
+            pass
+        return True
+
+    def _run_manual_glossary_refinement(
+        self,
+        glossary_path,
+        progress_path,
+        options,
+        plan,
+    ):
+        """Execute and atomically persist one explicit refinement plan."""
+        import extract_glossary_from_epub as extractor
+        from chapter_splitter import ChapterSplitter
+        from glossary_refinement import refine_glossary_entries
+
+        config = getattr(self, 'config', {}) or {}
+        custom_types = getattr(self, 'custom_entry_types', None) or config.get('custom_entry_types', {}) or {}
+        custom_fields = config.get('custom_glossary_fields', config.get('manual_custom_fields', [])) or []
+        if isinstance(custom_fields, str):
+            try:
+                custom_fields = json.loads(custom_fields)
+            except Exception:
+                custom_fields = []
+        env_updates = {
+            'GLOSSARY_CUSTOM_ENTRY_TYPES': json.dumps(custom_types),
+            'GLOSSARY_CUSTOM_FIELDS': json.dumps(custom_fields),
+            'GLOSSARY_REFINEMENT_SYSTEM_PROMPT': config.get('glossary_refinement_system_prompt') or extractor.DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT,
+            'GLOSSARY_REFINEMENT_USER_PROMPT': config.get('glossary_refinement_user_prompt', ''),
+            'GLOSSARY_REFINEMENT_CHUNKING_MODE': options.chunking_mode or 'all',
+            'GLOSSARY_REFINEMENT_SKIP_DEDUPE': '1' if config.get('glossary_refinement_skip_dedupe', False) else '0',
+            'GLOSSARY_OUTPUT_LEGACY_JSON': '1' if config.get('glossary_output_legacy_json', False) else '0',
+        }
+        os.environ.update({key: str(value or '') for key, value in env_updates.items()})
+
+        entries = parse_glossary_file(glossary_path)
+        if not entries:
+            raise RuntimeError('The selected glossary contains no readable entries.')
+        model = str(getattr(self, 'model_var', None) or config.get('model') or os.getenv('MODEL') or 'gemini-2.0-flash')
+        api_key_widget = getattr(self, 'api_key_entry', None)
+        api_key = api_key_widget.text().strip() if api_key_widget is not None else str(config.get('api_key') or '')
+        output_dir = os.path.dirname(os.path.abspath(glossary_path))
+        client = extractor.create_client_with_multi_key_support(
+            api_key,
+            model,
+            output_dir,
+            config,
+            context='glossary_refinement',
+        )
+        effective_output_tokens = extractor._effective_glossary_output_limit(config, model)
+        compression_factor = float(os.getenv(
+            'GLOSSARY_REFINEMENT_COMPRESSION_FACTOR',
+            os.getenv('COMPRESSION_FACTOR', str(config.get('compression_factor', 1.0))),
+        ))
+        available_tokens = extractor._compute_safe_input_tokens(
+            effective_output_tokens,
+            compression_factor,
+        )
+        splitter = ChapterSplitter(model_name=model, compression_factor=compression_factor)
+        retry_timeout = os.getenv('RETRY_TIMEOUT', '1').strip().lower() not in ('0', 'false', 'off', '')
+        try:
+            timeout_value = float(os.getenv('CHUNK_TIMEOUT', str(config.get('chunk_timeout', 1800))))
+            chunk_timeout = timeout_value if retry_timeout and timeout_value > 0 else None
+        except (TypeError, ValueError):
+            chunk_timeout = None
+
+        def _check_stop():
+            return bool(getattr(self, 'stop_requested', False)) or extractor.is_stop_requested()
+
+        refined = refine_glossary_entries(
+            entries,
+            client=client,
+            temp=float(os.getenv('GLOSSARY_TEMPERATURE', str(config.get('temperature', 0.1)))),
+            mtoks=effective_output_tokens,
+            check_stop=_check_stop,
+            chapter_splitter=splitter,
+            available_tokens=available_tokens,
+            chunk_timeout=chunk_timeout,
+            parse_response_fn=extractor.parse_api_response,
+            dedupe_fn=extractor.skip_duplicate_entries,
+            custom_entry_types_fn=extractor.get_custom_entry_types,
+            send_fn=extractor.send_with_interrupt,
+            progress_file=progress_path,
+            output_path=glossary_path,
+            atomic_replace_fn=extractor._atomic_replace_file,
+            log=self.append_log if hasattr(self, 'append_log') else print,
+            options=options,
+            plan=plan,
+        )
+        if _check_stop():
+            if hasattr(self, 'append_log'):
+                self.append_log('⏹️ Manual glossary refinement stopped; the saved glossary was left unchanged.')
+            return
+
+        json_path = glossary_path if glossary_path.lower().endswith('.json') else os.path.splitext(glossary_path)[0] + '.json'
+        extractor.save_glossary_csv(refined, json_path)
+        save_json = bool(config.get('glossary_output_legacy_json', False)) or os.getenv('GLOSSARY_OUTPUT_LEGACY_JSON', '0') == '1'
+        if save_json:
+            extractor.save_glossary_json(refined, json_path)
+        if hasattr(self, 'append_log'):
+            self.append_log(f"✅ Manual glossary refinement saved: {os.path.splitext(json_path)[0] + '.csv'}")
+
     @staticmethod
     def _sdlxliff_autogen_output_path(output_dir, output_file):
         if not output_dir or not output_file:
@@ -21791,21 +22010,18 @@ class RetranslationMixin:
                 return value.strip().lower() in ('1', 'true', 'yes', 'on')
             return bool(value)
 
-        def _glossary_refinement_settings_enabled():
-            try:
-                cfg = getattr(self, 'config', {}) or {}
-                if _bool_setting(cfg.get('glossary_refinement_enabled', False)):
-                    return True
-                return os.getenv('GLOSSARY_REFINEMENT_ENABLED', '').strip().lower() in ('1', 'true', 'yes', 'on')
-            except Exception:
-                return False
+        def _refinement_type_key(value):
+            return _glossary_refinement_type_key(value)
 
-        def _glossary_refinement_expected_entries():
-            if not _glossary_refinement_settings_enabled():
-                return {}
+        def _active_glossary_refinement_types():
             cfg = getattr(self, 'config', {}) or {}
-            custom_types = getattr(self, 'custom_entry_types', None) or cfg.get('custom_entry_types', {}) or {}
-            if not isinstance(custom_types, dict) or not custom_types:
+            raw_custom_types = (
+                getattr(self, 'custom_entry_types', None)
+                or cfg.get('custom_entry_types', {})
+                or {}
+            )
+            custom_types = dict(raw_custom_types) if isinstance(raw_custom_types, dict) else {}
+            if not custom_types:
                 custom_types = {
                     'character': {'enabled': True},
                     'terms': {'enabled': True},
@@ -21814,6 +22030,10 @@ class RetranslationMixin:
                     'locations': {'enabled': True},
                     'nicknames': {'enabled': True},
                 }
+            if 'term' in custom_types and 'terms' not in custom_types:
+                custom_types['terms'] = custom_types.pop('term')
+            elif 'term' in custom_types:
+                custom_types.pop('term', None)
 
             active_types = []
             for type_name, type_cfg in custom_types.items():
@@ -21822,40 +22042,272 @@ class RetranslationMixin:
                 type_name = str(type_name or '').strip()
                 if type_name:
                     active_types.append(type_name)
+            return sorted(
+                active_types,
+                key=lambda name: (name not in ('character', 'terms'), name),
+            )
 
-            type_mode = str(cfg.get('glossary_refinement_type_mode', 'all') or 'all').lower()
-            if type_mode == 'selected':
-                selected = cfg.get('glossary_refinement_selected_types', [])
-                if isinstance(selected, str):
-                    selected = [t.strip() for t in selected.split(',') if t.strip()]
-                selected_lc = {str(t).strip().lower() for t in selected if str(t).strip()}
-                active_types = [t for t in active_types if t.lower() in selected_lc]
-
+        def _glossary_refinement_expected_entries(glossary_entries=None):
+            """Return the always-visible aggregate and active type row model."""
+            active_types = _active_glossary_refinement_types()
             if not active_types:
                 return {}
-
-            chunking_mode = str(cfg.get('glossary_refinement_chunking_mode', 'all') or 'all').lower()
-            if chunking_mode in ('all', 'all_types', 'all_in_one'):
-                entry_type = 'all selected entry types'
-                return {
-                    f"all::{','.join(active_types)}": {
-                        'entry_type': entry_type,
-                        'status': 'not_refined',
-                        'chunking_mode': 'all',
-                    }
+            counts = Counter(
+                _refinement_type_key(entry.get('type'))
+                for entry in (glossary_entries or [])
+                if isinstance(entry, dict) and str(entry.get('type') or '').strip()
+            )
+            chunking_mode = str(
+                (getattr(self, 'config', {}) or {}).get(
+                    'glossary_refinement_chunking_mode', 'all'
+                ) or 'all'
+            ).lower()
+            chunking_mode = 'all' if chunking_mode in ('all', 'all_types', 'all_in_one') else 'separate'
+            aggregate_key = f"all::{','.join(active_types)}"
+            aggregate_count = sum(counts.get(_refinement_type_key(t), 0) for t in active_types)
+            expected = {
+                aggregate_key: {
+                    'entry_type': 'All Entry Types',
+                    'status': 'not_refined' if aggregate_count else 'skipped',
+                    'chunking_mode': chunking_mode,
+                    'entry_count_before': aggregate_count,
+                    'is_aggregate': True,
+                    'selected_types': list(active_types),
+                    'reason': 'no_entries' if not aggregate_count else '',
                 }
-
-            return {
-                f"type::{entry_type}": {
-                    'entry_type': entry_type,
-                    'status': 'not_refined',
-                    'chunking_mode': 'separate',
-                }
-                for entry_type in active_types
             }
+            for entry_type in active_types:
+                entry_count = counts.get(_refinement_type_key(entry_type), 0)
+                expected[f"type::{entry_type}"] = {
+                    'entry_type': entry_type,
+                    'status': 'not_refined' if entry_count else 'skipped',
+                    'chunking_mode': chunking_mode,
+                    'entry_count_before': entry_count,
+                    'entry_count_after': 0 if not entry_count else None,
+                    'reason': 'no_entries' if not entry_count else '',
+                }
+            return expected
 
-        if _glossary_refinement_settings_enabled():
-            glossary_progress_btn.setVisible(True)
+        def _find_glossary_for_refinement(source_path, progress_path=None):
+            base = os.path.splitext(os.path.basename(source_path or ''))[0]
+            directories = []
+            if progress_path:
+                directories.append(os.path.dirname(os.path.abspath(progress_path)))
+            directories.extend(_glossary_progress_search_dirs(base))
+            seen = set()
+            for directory in directories:
+                directory_key = os.path.normcase(os.path.abspath(directory))
+                if directory_key in seen:
+                    continue
+                seen.add(directory_key)
+                for extension in ('.csv', '.json', '.txt', '.md'):
+                    for filename in (
+                        f'{base}_glossary{extension}',
+                        f'{base}{extension}',
+                        f'glossary{extension}',
+                    ):
+                        candidate = os.path.join(directory, filename)
+                        if os.path.isfile(candidate):
+                            return candidate
+            return None
+
+        def _confirm_manual_glossary_refinement(
+            parent,
+            source_path,
+            progress_path,
+            selected_types,
+            completed_types=None,
+        ):
+            if hasattr(self, '_is_any_process_running') and self._is_any_process_running():
+                self._show_message(
+                    'warning',
+                    'Process Running',
+                    'Please wait for the current translation, glossary, or refinement process to finish.',
+                    parent=parent,
+                )
+                return False
+            glossary_path = _find_glossary_for_refinement(source_path, progress_path)
+            if not glossary_path:
+                self._show_message(
+                    'warning',
+                    'Glossary Not Found',
+                    'No saved glossary file was found for this book.',
+                    parent=parent,
+                )
+                return False
+            try:
+                entries = parse_glossary_file(glossary_path)
+            except Exception as exc:
+                self._show_message('error', 'Glossary Read Failed', str(exc), parent=parent)
+                return False
+
+            active_types = _active_glossary_refinement_types()
+            requested_lc = {
+                _refinement_type_key(entry_type)
+                for entry_type in selected_types or []
+                if str(entry_type or '').strip()
+            }
+            selected_types = [
+                entry_type for entry_type in active_types
+                if _refinement_type_key(entry_type) in requested_lc
+            ]
+            entry_counts = Counter(
+                _refinement_type_key(entry.get('type'))
+                for entry in entries or []
+                if isinstance(entry, dict)
+            )
+            non_empty_types = [
+                entry_type for entry_type in selected_types
+                if entry_counts.get(_refinement_type_key(entry_type), 0) > 0
+            ]
+            if not non_empty_types:
+                self._show_message(
+                    'info',
+                    'Nothing to Refine',
+                    'The selected entry type(s) contain no glossary entries.',
+                    parent=parent,
+                )
+                return False
+
+            try:
+                import extract_glossary_from_epub as extractor
+                from chapter_splitter import ChapterSplitter
+                from glossary_refinement import (
+                    RefinementRunOptions,
+                    plan_refinement,
+                )
+                config = getattr(self, 'config', {}) or {}
+                model = str(getattr(self, 'model_var', None) or config.get('model') or os.getenv('MODEL') or 'gemini-2.0-flash')
+                effective_output_tokens = extractor._effective_glossary_output_limit(config, model)
+                compression_factor = float(os.getenv(
+                    'GLOSSARY_REFINEMENT_COMPRESSION_FACTOR',
+                    os.getenv('COMPRESSION_FACTOR', str(config.get('compression_factor', 1.0))),
+                ))
+                safe_budget = extractor._compute_safe_input_tokens(
+                    effective_output_tokens,
+                    compression_factor,
+                )
+                splitter = ChapterSplitter(model_name=model, compression_factor=compression_factor)
+                request_mode = str(config.get('glossary_refinement_chunking_mode', 'all') or 'all').lower()
+                request_mode = 'all' if request_mode in ('all', 'all_types', 'all_in_one') else 'separate'
+                system_prompt = config.get('glossary_refinement_system_prompt') or extractor.DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
+                user_prompt = config.get('glossary_refinement_user_prompt', '')
+                custom_fields = config.get('custom_glossary_fields', config.get('manual_custom_fields', [])) or []
+                if isinstance(custom_fields, str):
+                    try:
+                        custom_fields = json.loads(custom_fields)
+                    except Exception:
+                        custom_fields = []
+                os.environ['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(custom_fields)
+                automatic_plan = plan_refinement(
+                    entries,
+                    selected_types=selected_types,
+                    chunking_mode=request_mode,
+                    chapter_splitter=splitter,
+                    available_tokens=safe_budget,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                )
+            except Exception as exc:
+                self._show_message('error', 'Refinement Preview Failed', str(exc), parent=parent)
+                return False
+
+            preview = QDialog(parent)
+            preview.setWindowTitle('Confirm Glossary Refinement')
+            preview.setModal(True)
+            preview.resize(600, 430)
+            preview_layout = QVBoxLayout(preview)
+            heading = QLabel('The following glossary entries are about to be refined:')
+            heading.setStyleSheet('font-size: 11pt; font-weight: bold; color: #d8f3dc;')
+            preview_layout.addWidget(heading)
+
+            scope_lines = []
+            for entry_type in selected_types:
+                count = automatic_plan.per_type_counts.get(entry_type, 0)
+                tokens = automatic_plan.per_type_tokens.get(entry_type, 0)
+                suffix = ' (no entries; skipped)' if count == 0 else ''
+                scope_lines.append(f'• {entry_type}: {count:,} entries, {tokens:,} tokens{suffix}')
+            scope_label = QLabel('\n'.join(scope_lines))
+            scope_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            scope_label.setStyleSheet('color: #cbd5e1; padding: 6px;')
+            preview_layout.addWidget(scope_label)
+
+            mode_name = 'Send all selected types together' if request_mode == 'all' else 'Send each type separately'
+            summary = QLabel(
+                f'<b>Total glossary payload:</b> {automatic_plan.total_payload_tokens:,} tokens<br>'
+                f'<b>Saved request mode:</b> {request_mode} — {mode_name}<br>'
+                f'<b>Automatic safe token budget:</b> {safe_budget:,} tokens per chunk<br>'
+                f'<b>Automatic chunk count:</b> {automatic_plan.total_chunks:,}'
+            )
+            summary.setStyleSheet('color: #e2e8f0; padding: 6px; background: #263445; border-radius: 4px;')
+            preview_layout.addWidget(summary)
+
+            completed_lc = {_refinement_type_key(name) for name in completed_types or []}
+            already_refined = [name for name in selected_types if _refinement_type_key(name) in completed_lc]
+            if already_refined:
+                warning = QLabel(
+                    '⚠️ Already refined: ' + ', '.join(already_refined)
+                    + '. This explicit action will replace those types with fresh refinement results.'
+                )
+                warning.setWordWrap(True)
+                warning.setStyleSheet('color: #fbbf24; font-weight: bold; padding: 6px;')
+                preview_layout.addWidget(warning)
+
+            override_checkbox = QCheckBox('Override automatic split')
+            override_checkbox.setChecked(False)
+            preview_layout.addWidget(override_checkbox)
+            chunk_row = QHBoxLayout()
+            chunk_row.addWidget(QLabel('Exact total chunk count:'))
+            chunk_count = QSpinBox(preview)
+            minimum_chunks = 1 if request_mode == 'all' else len(non_empty_types)
+            maximum_chunks = sum(automatic_plan.per_type_counts.get(name, 0) for name in non_empty_types)
+            chunk_count.setRange(max(1, minimum_chunks), max(1, maximum_chunks))
+            chunk_count.setValue(max(chunk_count.minimum(), min(automatic_plan.total_chunks, chunk_count.maximum())))
+            chunk_count.setEnabled(False)
+            chunk_count.setToolTip('This one-run override never changes the saved Refinement settings.')
+            override_checkbox.toggled.connect(chunk_count.setEnabled)
+            chunk_row.addWidget(chunk_count)
+            chunk_row.addStretch()
+            preview_layout.addLayout(chunk_row)
+
+            note = QLabel('Chunks always split between complete glossary entries; a CSV row is never divided.')
+            note.setWordWrap(True)
+            note.setStyleSheet('color: #94a3b8; font-size: 9pt; font-style: italic;')
+            preview_layout.addWidget(note)
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=preview)
+            buttons.button(QDialogButtonBox.Ok).setText('Refine Now')
+            buttons.accepted.connect(preview.accept)
+            buttons.rejected.connect(preview.reject)
+            preview_layout.addWidget(buttons)
+            if preview.exec() != QDialog.Accepted:
+                return False
+
+            target_count = chunk_count.value() if override_checkbox.isChecked() else None
+            execution_plan = automatic_plan
+            if target_count is not None:
+                execution_plan = plan_refinement(
+                    entries,
+                    selected_types=selected_types,
+                    chunking_mode=request_mode,
+                    chapter_splitter=splitter,
+                    available_tokens=safe_budget,
+                    target_chunk_count=target_count,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                )
+            options = RefinementRunOptions(
+                selected_types=list(selected_types),
+                chunking_mode=request_mode,
+                force=True,
+                run_when_disabled=True,
+                target_chunk_count=target_count,
+            )
+            return self._start_manual_glossary_refinement(
+                glossary_path,
+                progress_path,
+                options,
+                execution_plan,
+            )
         
         def _build_gp_panel(fp, gp_path, parent_widget, pump_loading=None):
             """Build a glossary progress panel for a single EPUB. Returns (panel_widget, refresh_func)."""
@@ -22384,15 +22836,105 @@ class RetranslationMixin:
                     display += f" | {issues_display}"
                 return display, status
 
+            def _gp_glossary_entries(_d):
+                """Load the canonical glossary associated with this progress file."""
+                gp_dir = os.path.dirname(gp_path)
+                candidates = []
+                recorded = str((_d or {}).get('glossary_output_file') or '').strip()
+                if recorded:
+                    recorded_path = recorded if os.path.isabs(recorded) else os.path.join(gp_dir, os.path.basename(recorded))
+                    candidates.extend([
+                        recorded_path,
+                        os.path.splitext(recorded_path)[0] + '.csv',
+                        os.path.splitext(recorded_path)[0] + '.json',
+                    ])
+                source_bases = [
+                    os.path.splitext(os.path.basename(fp or ''))[0],
+                    os.path.splitext(os.path.basename(gp_path or ''))[0].replace('_glossary_progress', ''),
+                ]
+                for source_base in source_bases:
+                    if not source_base:
+                        continue
+                    for extension in ('.csv', '.json', '.txt', '.md'):
+                        candidates.extend([
+                            os.path.join(gp_dir, f'{source_base}_glossary{extension}'),
+                            os.path.join(gp_dir, f'{source_base}{extension}'),
+                        ])
+                for extension in ('.csv', '.json', '.txt', '.md'):
+                    candidates.append(os.path.join(gp_dir, f'glossary{extension}'))
+
+                seen_paths = set()
+                for candidate in candidates:
+                    normalized = os.path.normcase(os.path.abspath(candidate))
+                    if normalized in seen_paths or not os.path.isfile(candidate):
+                        continue
+                    seen_paths.add(normalized)
+                    try:
+                        stat = os.stat(candidate)
+                        signature = (normalized, stat.st_mtime_ns, stat.st_size)
+                    except OSError:
+                        signature = (normalized,)
+                    if signature == panel_state.get('_glossary_entries_signature'):
+                        return list(panel_state.get('_glossary_entries_cache') or [])
+                    try:
+                        entries = parse_glossary_file(candidate)
+                    except Exception:
+                        continue
+                    panel_state['_glossary_entries_signature'] = signature
+                    panel_state['_glossary_entries_cache'] = list(entries or [])
+                    panel_state['_glossary_path'] = candidate
+                    return list(entries or [])
+                panel_state['_glossary_entries_signature'] = None
+                panel_state['_glossary_entries_cache'] = []
+                panel_state['_glossary_path'] = None
+                return []
+
             def _gp_refinement_rows(_d):
                 refinement = _d.get('refinement', {}) if isinstance(_d, dict) else {}
                 if not isinstance(refinement, dict):
                     refinement = {}
-                refinement = dict(refinement)
-                for expected_key, expected_info in _glossary_refinement_expected_entries().items():
-                    refinement.setdefault(expected_key, expected_info)
+                expected = _glossary_refinement_expected_entries(_gp_glossary_entries(_d))
+                merged_rows = {}
+                for expected_key, expected_info in expected.items():
+                    info = dict(expected_info)
+                    saved_info = refinement.get(expected_key)
+                    if not isinstance(saved_info, dict) and expected_key.startswith('type::'):
+                        expected_name = _refinement_type_key(expected_key.split('::', 1)[1])
+                        saved_info = next(
+                            (
+                                candidate_info
+                                for candidate_key, candidate_info in refinement.items()
+                                if isinstance(candidate_info, dict)
+                                and str(candidate_key).startswith('type::')
+                                and _refinement_type_key(str(candidate_key).split('::', 1)[1]) == expected_name
+                            ),
+                            None,
+                        )
+                    if isinstance(saved_info, dict):
+                        info.update(saved_info)
+                    if expected_info.get('is_aggregate'):
+                        info['entry_type'] = 'All Entry Types'
+                        info['is_aggregate'] = True
+                        info['selected_types'] = list(expected_info.get('selected_types') or [])
+                    if expected_info.get('reason') == 'no_entries':
+                        info.update(expected_info)
+                    merged_rows[expected_key] = info
+
+                individual_infos = [
+                    info for key, info in merged_rows.items() if key.startswith('type::')
+                ]
+                aggregate_key = next((key for key in merged_rows if key.startswith('all::')), None)
+                if aggregate_key:
+                    statuses = [str(info.get('status') or 'not_refined').lower() for info in individual_infos]
+                    aggregate_status = _derive_glossary_refinement_aggregate_status(statuses)
+                    merged_rows[aggregate_key]['status'] = aggregate_status
+                    merged_rows[aggregate_key]['entry_count_before'] = sum(
+                        int(info.get('entry_count_before') or 0) for info in individual_infos
+                    )
+                    if aggregate_status == 'skipped':
+                        merged_rows[aggregate_key]['reason'] = 'no_entries'
                 rows = []
-                for key, info in sorted(refinement.items()):
+                for key, info in merged_rows.items():
                     if not isinstance(info, dict):
                         continue
                     entry_type = str(info.get('entry_type') or key.replace('type::', '')).strip() or 'entry type'
@@ -22410,6 +22952,7 @@ class RetranslationMixin:
                         detail = f" | chunks {completed_chunks or 0}/{total_chunks}"
                     icon_map = {
                         'completed': '\u2705',
+                        'skipped': '⏭️',
                         'failed': '\u274c',
                         'qa_failed': '\u274c',
                         'refine_failed': '💀',
@@ -22417,8 +22960,13 @@ class RetranslationMixin:
                         'not_refined': '\u2728',
                     }
                     icon = icon_map.get(status, '\u2b1c')
-                    status_label = 'Refine Failed' if status == 'refine_failed' else status.replace('_', ' ').title()
-                    display = f"Refinement | {icon} {status_label:14s} | {entry_type} -> {model_name}{detail}"
+                    if status == 'skipped' and str(info.get('reason') or '').lower() == 'no_entries':
+                        status_label = 'Skipped - No Entries'
+                        model_suffix = ''
+                    else:
+                        status_label = 'Refine Failed' if status == 'refine_failed' else status.replace('_', ' ').title()
+                        model_suffix = f" -> {model_name}" if status not in ('skipped', 'not_refined') else ''
+                    display = f"Refinement | {icon} {status_label:20s} | {entry_type}{model_suffix}{detail}"
                     rows.append((key, display, status))
                 return rows
 
@@ -23160,7 +23708,9 @@ class RetranslationMixin:
                     if not isinstance(refinement, dict):
                         refinement = {}
                         _d['refinement'] = refinement
-                    expected_refinement = _glossary_refinement_expected_entries()
+                    expected_refinement = _glossary_refinement_expected_entries(
+                        _gp_glossary_entries(_d)
+                    )
                     for ref_key in sorted(refinement_keys):
                         ref_info = refinement.get(ref_key)
                         if not isinstance(ref_info, dict):
@@ -24065,6 +24615,7 @@ class RetranslationMixin:
                 removable_targets = []
                 mark_completed_targets = []
                 footnote_targets = []
+                refinement_targets = []
                 for it in selected:
                     status = it.data(Qt.UserRole)
                     refinement_key = it.data(Qt.UserRole + 3)
@@ -24072,6 +24623,7 @@ class RetranslationMixin:
                     target = None
                     if refinement_key:
                         target = ('refinement', refinement_key)
+                        refinement_targets.append((it, refinement_key, status))
                     elif chapter_index is not None:
                         target = ('chapter', chapter_index)
                     if not target:
@@ -24082,7 +24634,7 @@ class RetranslationMixin:
                         removable_targets.append((it, target))
                     if status != 'completed':
                         mark_completed_targets.append((it, target))
-                if not removable_targets and not mark_completed_targets and not footnote_targets:
+                if not removable_targets and not mark_completed_targets and not footnote_targets and not refinement_targets:
                     return
                 
                 from PySide6.QtWidgets import QMenu
@@ -24091,10 +24643,39 @@ class RetranslationMixin:
                     "QMenu { background-color: #2d2d2d; color: white; border: 1px solid #555; padding: 4px 8px 4px 4px; }"
                     "QMenu::item { padding: 6px 24px 6px 6px; }"
                     "QMenu::item:selected { background-color: #c0392b; }"
+                    "QMenu::item:disabled { color: #6b7280; background-color: transparent; }"
                 )
                 
+                refine_action = None
+                normalized_refinement_types = []
+                if refinement_targets:
+                    active_refinement_types = _active_glossary_refinement_types()
+                    aggregate_selected = any(str(key).startswith('all::') for _it, key, _status in refinement_targets)
+                    normalized_refinement_types = _normalize_glossary_refinement_selection(
+                        [key for _it, key, _status in refinement_targets],
+                        active_refinement_types,
+                    )
+                    current_counts = Counter(
+                        _refinement_type_key(entry.get('type'))
+                        for entry in _gp_glossary_entries(gp_data)
+                        if isinstance(entry, dict)
+                    )
+                    eligible_count = sum(
+                        current_counts.get(_refinement_type_key(entry_type), 0)
+                        for entry_type in normalized_refinement_types
+                    )
+                    if aggregate_selected or len(refinement_targets) == 1:
+                        refine_action = menu.addAction('✨ Refine this')
+                    else:
+                        refine_action = menu.addAction(
+                            f'✨ Refine selected entry types ({len(normalized_refinement_types)})'
+                        )
+                    refine_action.setEnabled(eligible_count > 0)
+
                 mark_action = None
                 if mark_completed_targets:
+                    if refine_action is not None:
+                        menu.addSeparator()
                     mark_action = menu.addAction("✅ Mark as Completed")
 
                 footnote_action = None
@@ -24126,6 +24707,25 @@ class RetranslationMixin:
                         remove_action = menu.addAction(f"🗑️ Remove {n} chapters from progress")
                 
                 chosen = menu.exec(gp_listbox.viewport().mapToGlobal(pos))
+                if refine_action is not None and chosen == refine_action:
+                    refinement_progress = gp_data.get('refinement', {}) if isinstance(gp_data, dict) else {}
+                    completed_types = []
+                    if isinstance(refinement_progress, dict):
+                        for key, info in refinement_progress.items():
+                            if (
+                                str(key).startswith('type::')
+                                and isinstance(info, dict)
+                                and str(info.get('status') or '').lower() == 'completed'
+                            ):
+                                completed_types.append(str(info.get('entry_type') or str(key).split('::', 1)[1]))
+                    _confirm_manual_glossary_refinement(
+                        dialog,
+                        fp,
+                        _find_gp_for_file(fp) or gp_path,
+                        normalized_refinement_types,
+                        completed_types=completed_types,
+                    )
+                    return
                 if mark_action is not None and chosen == mark_action:
                     _gp_mark_targets_completed(mark_completed_targets)
                     return
@@ -24894,17 +25494,20 @@ class RetranslationMixin:
                     empty_icon.setAlignment(Qt.AlignCenter)
                     empty_icon.setStyleSheet("font-size: 36pt;")
                     p_layout.addWidget(empty_icon)
-                    
-                    expected_refinement = _glossary_refinement_expected_entries()
+
+                    glossary_path = _find_glossary_for_refinement(fp)
+                    try:
+                        empty_glossary_entries = parse_glossary_file(glossary_path) if glossary_path else []
+                    except Exception:
+                        empty_glossary_entries = []
+                    expected_refinement = _glossary_refinement_expected_entries(empty_glossary_entries)
                     empty_label = QLabel(f"No glossary extraction progress found for:\n{epub_base}")
                     empty_label.setAlignment(Qt.AlignCenter)
                     empty_label.setStyleSheet("color: #7a8a9e; font-size: 11pt;")
                     empty_label.setWordWrap(True)
                     p_layout.addWidget(empty_label)
                     
-                    hint_text = "Run glossary extraction to see progress here."
-                    if expected_refinement:
-                        hint_text = "Glossary refinement is enabled; expected refinement entry types are listed below."
+                    hint_text = "Run glossary extraction to see chapter progress. Refinement entry types are listed below."
                     hint_label = QLabel(hint_text)
                     hint_label.setAlignment(Qt.AlignCenter)
                     hint_label.setStyleSheet("color: #555; font-size: 9pt; font-style: italic;")
@@ -24912,7 +25515,8 @@ class RetranslationMixin:
 
                     if expected_refinement:
                         ref_list = QListWidget(panel)
-                        ref_list.setSelectionMode(QAbstractItemView.NoSelection)
+                        ref_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+                        ref_list.setContextMenuPolicy(Qt.CustomContextMenu)
                         ref_list.setSpacing(0)
                         ref_list.setUniformItemSizes(True)
                         ref_list.setStyleSheet("""
@@ -24929,11 +25533,73 @@ class RetranslationMixin:
                             }
                         """)
                         ref_list.setMaximumHeight(160)
-                        for _ref_key, ref_info in sorted(expected_refinement.items()):
+                        for _ref_key, ref_info in expected_refinement.items():
                             entry_type = str(ref_info.get('entry_type') or _ref_key.replace('type::', '')).strip() or 'entry type'
-                            item = QListWidgetItem(f"Refinement | \u2728 Not Refined    | {entry_type}")
-                            item.setForeground(QColor('#5a9fd4'))
+                            ref_status = str(ref_info.get('status') or 'not_refined')
+                            if ref_status == 'skipped':
+                                display = f"Refinement | ⏭️ Skipped - No Entries | {entry_type}"
+                                color = '#94a3b8'
+                            else:
+                                display = f"Refinement | \u2728 Not Refined          | {entry_type}"
+                                color = '#5a9fd4'
+                            item = QListWidgetItem(display)
+                            item.setForeground(QColor(color))
+                            item.setData(Qt.UserRole, ref_status)
+                            item.setData(Qt.UserRole + 3, _ref_key)
                             self._add_compact_inline_list_item(ref_list, item)
+
+                        def _empty_refinement_menu(pos):
+                            clicked = ref_list.itemAt(pos)
+                            if clicked is not None and not clicked.isSelected():
+                                ref_list.clearSelection()
+                                clicked.setSelected(True)
+                            selected_items = [
+                                item for item in ref_list.selectedItems()
+                                if item.data(Qt.UserRole + 3)
+                            ]
+                            if not selected_items:
+                                return
+                            selected_keys = [str(item.data(Qt.UserRole + 3)) for item in selected_items]
+                            aggregate_selected = any(key.startswith('all::') for key in selected_keys)
+                            active_types = _active_glossary_refinement_types()
+                            selected_types = _normalize_glossary_refinement_selection(
+                                selected_keys,
+                                active_types,
+                            )
+                            counts = Counter(
+                                _refinement_type_key(entry.get('type'))
+                                for entry in empty_glossary_entries
+                                if isinstance(entry, dict)
+                            )
+                            eligible = sum(counts.get(_refinement_type_key(name), 0) for name in selected_types)
+                            context_menu = QMenu(ref_list)
+                            context_menu.setStyleSheet(
+                                "QMenu { background-color: #2d2d2d; color: white; border: 1px solid #555; padding: 4px 8px 4px 4px; }"
+                                "QMenu::item { padding: 6px 24px 6px 6px; }"
+                                "QMenu::item:selected { background-color: #c0392b; }"
+                                "QMenu::item:disabled { color: #6b7280; background-color: transparent; }"
+                            )
+                            if aggregate_selected or len(selected_items) == 1:
+                                refine_action = context_menu.addAction('✨ Refine this')
+                            else:
+                                refine_action = context_menu.addAction(
+                                    f'✨ Refine selected entry types ({len(selected_types)})'
+                                )
+                            refine_action.setEnabled(eligible > 0)
+                            if context_menu.exec(ref_list.viewport().mapToGlobal(pos)) != refine_action:
+                                return
+                            target_progress = os.path.join(
+                                os.path.dirname(glossary_path),
+                                f'{epub_base}_glossary_progress.json',
+                            ) if glossary_path else None
+                            _confirm_manual_glossary_refinement(
+                                panel,
+                                fp,
+                                target_progress,
+                                selected_types,
+                            )
+
+                        ref_list.customContextMenuRequested.connect(_empty_refinement_menu)
                         p_layout.addWidget(ref_list)
                     
                     p_layout.addStretch()
@@ -25300,7 +25966,6 @@ class RetranslationMixin:
                 gp_results = {fp: _find_gp_for_file(fp) for fp in all_epubs}
                 found_paths = {fp: gp for fp, gp in gp_results.items() if gp}
                 any_exists = bool(found_paths)
-                refinement_expected = _glossary_refinement_settings_enabled()
                 glossary_progress_btn.setVisible(True)
                 if any_exists:
                     count = len(found_paths)
@@ -25309,8 +25974,6 @@ class RetranslationMixin:
                         glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{gp}")
                     else:
                         glossary_progress_btn.setToolTip(f"View glossary extraction progress ({count}/{len(all_epubs)} files)")
-                elif refinement_expected:
-                    glossary_progress_btn.setToolTip("View glossary extraction and refinement progress")
                 elif is_multi:
                     glossary_progress_btn.setToolTip(f"View glossary extraction progress ({len(all_epubs)} files)")
                 else:

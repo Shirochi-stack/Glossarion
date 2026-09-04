@@ -27,6 +27,7 @@ from extract_glossary_from_epub import (
     DEFAULT_GLOSSARY_PROMPT,
     extract_chapters_from_epub,
     extract_chapters_from_subtitle,
+    glossary_progress_completion,
     is_subtitle_glossary_source,
     parse_api_response,
     skip_duplicate_entries,
@@ -44,7 +45,9 @@ from parallel_epub_glossary import (
     write_parallel_epub,
 )
 from glossary_refinement import (
+    RefinementRunOptions,
     load_refinement_progress,
+    plan_refinement,
     refine_glossary_entries,
     refinement_chunking_mode,
 )
@@ -123,6 +126,168 @@ def test_glossary_refinement_gui_only_applies_explicit_request_mode():
     assert combo_index({"glossary_refinement_chunking_mode": "unknown"}) == 1
     assert combo_index({"glossary_refinement_chunking_mode": "separate"}) == 0
     assert combo_index({"glossary_refinement_chunking_mode": "all"}) == 1
+
+
+def test_exact_combined_refinement_plan_keeps_whole_rows():
+    entries = [
+        {"type": "character", "raw_name": f"raw-{index}", "translated_name": f"name-{index}"}
+        for index in range(7)
+    ]
+
+    plan = plan_refinement(
+        entries,
+        selected_types=["character"],
+        chunking_mode="all",
+        chapter_splitter=_RefinementTestSplitter(),
+        available_tokens=10,
+        target_chunk_count=3,
+    )
+
+    assert plan.total_chunks == 3
+    assert sum(len(chunk.payload.splitlines()) for chunk in plan.chunks) == 7
+    assert all(chunk.payload.count("\n") + 1 >= 1 for chunk in plan.chunks)
+    assert plan.per_chunk_token_estimates == [chunk.token_count for chunk in plan.chunks]
+
+
+def test_exact_separate_refinement_plan_distributes_total_and_caps_at_entries():
+    entries = [
+        {"type": "character", "raw_name": f"c-{index}", "translated_name": "C" * 20}
+        for index in range(5)
+    ] + [
+        {"type": "terms", "raw_name": f"t-{index}", "translated_name": "T"}
+        for index in range(2)
+    ]
+
+    plan = plan_refinement(
+        entries,
+        selected_types=["character", "terms"],
+        chunking_mode="separate",
+        chapter_splitter=_RefinementTestSplitter(),
+        available_tokens=100000,
+        target_chunk_count=5,
+    )
+    capped = plan_refinement(
+        entries,
+        selected_types=["character", "terms"],
+        chunking_mode="separate",
+        chapter_splitter=_RefinementTestSplitter(),
+        available_tokens=100000,
+        target_chunk_count=99,
+    )
+
+    assert plan.total_chunks == 5
+    assert {chunk.entry_type for chunk in plan.chunks} == {"character", "terms"}
+    assert sum(chunk.entry_type == "character" for chunk in plan.chunks) > sum(
+        chunk.entry_type == "terms" for chunk in plan.chunks
+    )
+    assert capped.total_chunks == len(entries)
+
+
+def test_manual_refinement_options_force_run_while_automatic_toggle_is_disabled(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_ENABLED", "0")
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_SKIP_DEDUPE", "1")
+    entries = [
+        {"type": "character", "raw_name": "Alice", "translated_name": "Alice"},
+        {"type": "terms", "raw_name": "mana", "translated_name": "mana"},
+    ]
+    calls = []
+
+    result = refine_glossary_entries(
+        entries,
+        client=None,
+        temp=0.1,
+        mtoks=4096,
+        check_stop=lambda: False,
+        chapter_splitter=_RefinementTestSplitter(),
+        available_tokens=100000,
+        chunk_timeout=None,
+        parse_response_fn=lambda _response: [
+            {"type": "character", "raw_name": "Alice", "translated_name": "Alicia"}
+        ],
+        dedupe_fn=lambda value: value,
+        custom_entry_types_fn=lambda: {
+            "character": {"enabled": True},
+            "terms": {"enabled": True},
+        },
+        send_fn=lambda *_args, **_kwargs: (calls.append("sent") or "ignored", "stop", None),
+        progress_file=str(tmp_path / "progress.json"),
+        output_path=str(tmp_path / "glossary.csv"),
+        log=lambda _message: None,
+        options=RefinementRunOptions(
+            selected_types=["character"],
+            chunking_mode="all",
+            force=True,
+            run_when_disabled=True,
+        ),
+    )
+
+    assert calls == ["sent"]
+    assert next(entry for entry in result if entry["type"] == "character")["translated_name"] == "Alicia"
+    assert next(entry for entry in result if entry["type"] == "terms")["translated_name"] == "mana"
+
+
+def test_refinement_no_entry_progress_uses_skipped_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_ENABLED", "0")
+    progress_file = tmp_path / "progress.json"
+
+    result = refine_glossary_entries(
+        [{"type": "terms", "raw_name": "mana", "translated_name": "mana"}],
+        client=None,
+        temp=0.1,
+        mtoks=4096,
+        check_stop=lambda: False,
+        chapter_splitter=_RefinementTestSplitter(),
+        available_tokens=100000,
+        chunk_timeout=None,
+        parse_response_fn=lambda _response: [],
+        dedupe_fn=lambda value: value,
+        custom_entry_types_fn=lambda: {"character": {"enabled": True}},
+        send_fn=lambda *_args, **_kwargs: pytest.fail("empty type must not make a request"),
+        progress_file=str(progress_file),
+        output_path=str(tmp_path / "glossary.csv"),
+        log=lambda _message: None,
+        options=RefinementRunOptions(
+            selected_types=["character"],
+            run_when_disabled=True,
+        ),
+    )
+
+    assert result[0]["type"] == "terms"
+    no_entries = load_refinement_progress(str(progress_file))["type::character"]
+    assert no_entries["status"] == "skipped"
+    assert no_entries["reason"] == "no_entries"
+
+
+@pytest.mark.parametrize(
+    ("updates", "expected_complete", "reason_fragment"),
+    [
+        ({}, True, "complete"),
+        ({"failed": [2], "completed": [0, 1]}, False, "failed"),
+        ({"in_progress": [2], "completed": [0, 1]}, False, "in progress"),
+        ({"manual_removed_indices": [2], "completed": [0, 1]}, False, "manually reset"),
+        ({"completed": [0]}, False, "not represented"),
+    ],
+)
+def test_glossary_refinement_completion_guard(updates, expected_complete, reason_fragment):
+    progress = {
+        "chapter_count": 3,
+        "completed": [0, 1, 2],
+        "skipped": [],
+        "merged_indices": [],
+        "failed": [],
+        "in_progress": [],
+    }
+    progress.update(updates)
+
+    complete, represented, total, reason = glossary_progress_completion(progress)
+
+    assert complete is expected_complete
+    assert total == 3
+    assert 0 <= represented <= total
+    assert reason_fragment in reason
 
 
 def test_glossary_filter_apply_uses_all_checked_values_without_a_search():

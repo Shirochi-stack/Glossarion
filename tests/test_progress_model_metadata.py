@@ -33,11 +33,13 @@ from Retranslation_GUI import (
     _clear_missing_image_qa_markers,
     _clear_refinement_progress_fields,
     _combine_glossary_progress_legend_stats,
+    _derive_glossary_refinement_aggregate_status,
     _filter_glossary_source_chapter_map,
     _glossary_progress_filename_keys,
     _index_epub_html_members,
     _match_epub_html_member_basename,
     _map_zero_based_glossary_progress_index,
+    _normalize_glossary_refinement_selection,
     _normalize_progress_match_name,
     _parallel_glossary_progress_filename_aliases,
     _persist_progress_manager_source_link,
@@ -2841,13 +2843,14 @@ def test_glossary_progress_legend_includes_refinement_rows():
             "in_progress": 6,
             "not_refined": 2,
             "refine_failed": 1,
+            "skipped": 2,
         },
     )
 
     assert stats == {
-        "total": 687,
+        "total": 689,
         "completed": 113,
-        "skipped": 3,
+        "skipped": 5,
         "in_progress": 6,
         "failed": 0,
         "merged": 565,
@@ -2855,6 +2858,27 @@ def test_glossary_progress_legend_includes_refinement_rows():
         "not_refined": 2,
         "refine_failed": 1,
     }
+
+
+def test_glossary_refinement_aggregate_status_precedence():
+    assert _derive_glossary_refinement_aggregate_status(["completed", "failed"]) == "failed"
+    assert _derive_glossary_refinement_aggregate_status(["completed", "in_progress"]) == "in_progress"
+    assert _derive_glossary_refinement_aggregate_status(["completed", "not_refined"]) == "not_refined"
+    assert _derive_glossary_refinement_aggregate_status(["skipped", "skipped"]) == "skipped"
+    assert _derive_glossary_refinement_aggregate_status(["completed", "skipped"]) == "completed"
+
+
+def test_glossary_refinement_aggregate_selection_wins_over_specific_types():
+    active = ["character", "term", "locations"]
+
+    assert _normalize_glossary_refinement_selection(
+        ["type::character", "all::character,term,locations", "type::locations"],
+        active,
+    ) == active
+    assert _normalize_glossary_refinement_selection(
+        ["type::terms", "type::locations"],
+        active,
+    ) == ["term", "locations"]
 
 
 def test_glossary_progress_index_uses_filename_before_full_spine_row():

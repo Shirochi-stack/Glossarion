@@ -39,6 +39,7 @@ from glossary_refinement import (
     locked_progress_file as _locked_glossary_progress_file,
     refine_glossary_entries,
     refinement_enabled as _glossary_refinement_enabled,
+    refinement_waits_for_completion as _glossary_refinement_waits_for_completion,
 )
 from glossary_usage import compact_extracted_entries
 from epub_package import find_epub_opf_member
@@ -1936,6 +1937,82 @@ def _parse_glossary_chapter_range(value):
     if re.match(r"^\d+\s*-\s*\d+$", value):
         return tuple(map(int, re.split(r"\s*-\s*", value, 1)))
     return None
+
+
+def glossary_progress_completion(progress_data):
+    """Return ``(complete, represented, total, reason)`` for refinement gating.
+
+    Completion is deliberately stricter than the progress bar: every zero-based
+    chapter slot must be represented by a successful, structural-skip, or
+    merged state, and no retry/reset state may remain.
+    """
+    data = progress_data if isinstance(progress_data, dict) else {}
+    try:
+        total = max(0, int(data.get("chapter_count", 0) or 0))
+    except (TypeError, ValueError):
+        total = 0
+
+    def _indices(values):
+        if isinstance(values, dict):
+            values = values.keys()
+        if isinstance(values, (str, int, float)):
+            values = [values]
+        result = set()
+        for value in values or []:
+            if isinstance(value, dict):
+                value = value.get("chapter_index", value.get("index"))
+            try:
+                result.add(int(value))
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    completed = _indices(data.get("completed", []))
+    skipped = _indices(data.get("skipped", []))
+    merged = _indices(data.get("merged_indices", []))
+    failed = _indices(data.get("failed", []))
+    in_progress = _indices(data.get("in_progress", []))
+    manually_removed = _indices(data.get("manual_removed_indices", []))
+
+    chapters = data.get("chapters", {})
+    if isinstance(chapters, dict):
+        for key, info in chapters.items():
+            if not isinstance(info, dict):
+                continue
+            try:
+                index = int(info.get("chapter_index", key))
+            except (TypeError, ValueError):
+                continue
+            status = str(info.get("status") or "").strip().lower()
+            if status == "completed":
+                completed.add(index)
+            elif status in _GLOSSARY_STRUCTURAL_SKIP_STATUSES or status.startswith("skipped"):
+                skipped.add(index)
+            elif status == "merged":
+                merged.add(index)
+            elif status in ("failed", "qa_failed", "error"):
+                failed.add(index)
+            elif status == "in_progress":
+                in_progress.add(index)
+
+    valid_range = set(range(total))
+    done = (completed | skipped | merged) & valid_range
+    failed &= valid_range
+    in_progress &= valid_range
+    manually_removed &= valid_range
+    represented = len(done)
+    if total <= 0:
+        return False, represented, total, "chapter count is unavailable"
+    if failed:
+        return False, represented, total, f"{len(failed)} chapter(s) failed"
+    if in_progress:
+        return False, represented, total, f"{len(in_progress)} chapter(s) are still in progress"
+    if manually_removed:
+        return False, represented, total, f"{len(manually_removed)} chapter(s) were manually reset"
+    missing = valid_range - done
+    if missing:
+        return False, represented, total, f"{len(missing)} chapter(s) are not represented in progress"
+    return True, represented, total, "complete"
 
 def _glossary_chapter_key(idx: int) -> str:
     """Build a stable zero-based progress key.
@@ -7413,6 +7490,7 @@ def main(log_callback=None, stop_callback=None):
         "GLOSSARY_REFINEMENT_SELECTED_TYPES": ",".join(config.get("glossary_refinement_selected_types", [])),
         "GLOSSARY_REFINEMENT_CHUNKING_MODE": config.get("glossary_refinement_chunking_mode", "all"),
         "GLOSSARY_REFINEMENT_SKIP_DEDUPE": "1" if config.get("glossary_refinement_skip_dedupe", False) else "0",
+        "GLOSSARY_REFINEMENT_WAIT_FOR_COMPLETION": "1" if config.get("glossary_refinement_wait_for_completion", False) else "0",
     }
     for _env_key, _env_value in refinement_env_defaults.items():
         if os.getenv(_env_key) is None:
@@ -10003,7 +10081,24 @@ def main(log_callback=None, stop_callback=None):
             )
         save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
 
-    if _glossary_refinement_enabled() and not check_stop():
+    refinement_allowed = _glossary_refinement_enabled() and not check_stop()
+    if refinement_allowed and _glossary_refinement_waits_for_completion():
+        try:
+            with open(_resolved_glossary_progress_file(progress_context), "r", encoding="utf-8") as progress_f:
+                completion_data = json.load(progress_f)
+        except Exception:
+            completion_data = {}
+        is_complete, represented_count, completion_total, completion_reason = glossary_progress_completion(
+            completion_data
+        )
+        if not is_complete:
+            print(
+                "⏸️ Glossary refinement deferred until extraction reaches 100%: "
+                f"{represented_count}/{completion_total} complete ({completion_reason})."
+            )
+            refinement_allowed = False
+
+    if refinement_allowed:
         print(
             f"📊 Glossary refinement chunk budget: {refinement_available_tokens:,} tokens "
             f"(output limit {effective_output_tokens:,}, margin 500, compression {refinement_compression_factor})"

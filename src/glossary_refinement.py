@@ -18,6 +18,7 @@ import time
 import unicodedata
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field as dataclass_field
 from typing import Callable, Dict, Iterable, List, Optional
 
 DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT = """You are refining an already extracted translation glossary.
@@ -54,6 +55,13 @@ def refinement_enabled() -> bool:
     return os.getenv("GLOSSARY_REFINEMENT_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
+def refinement_waits_for_completion() -> bool:
+    """Whether automatic refinement must wait for complete extraction progress."""
+    return os.getenv("GLOSSARY_REFINEMENT_WAIT_FOR_COMPLETION", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def selected_refinement_types(active_types: Iterable[str]) -> List[str]:
     active = [str(t).strip() for t in active_types if str(t).strip()]
     mode = os.getenv("GLOSSARY_REFINEMENT_TYPE_MODE", "all").strip().lower()
@@ -61,8 +69,8 @@ def selected_refinement_types(active_types: Iterable[str]) -> List[str]:
         return active
     raw = os.getenv("GLOSSARY_REFINEMENT_SELECTED_TYPES", "")
     selected = [t.strip() for t in raw.split(",") if t.strip()]
-    selected_lc = {t.lower() for t in selected}
-    return [t for t in active if t.lower() in selected_lc]
+    selected_lc = {_refinement_type_key(t) for t in selected}
+    return [t for t in active if _refinement_type_key(t) in selected_lc]
 
 
 def refinement_chunking_mode() -> str:
@@ -78,6 +86,308 @@ def refinement_chunking_mode() -> str:
     if raw_mode in ("all", "all_types", "all_in_one", "all_entries", "combined"):
         return "all"
     return "separate"
+
+
+@dataclass
+class RefinementRunOptions:
+    """One-run overrides for automatic or user-triggered refinement."""
+
+    selected_types: Optional[List[str]] = None
+    chunking_mode: Optional[str] = None
+    force: bool = False
+    run_when_disabled: bool = False
+    target_chunk_count: Optional[int] = None
+
+
+@dataclass
+class RefinementPlannedChunk:
+    """A serialized request payload whose boundaries are whole glossary rows."""
+
+    payload: str
+    entry_type: str
+    selected_types: List[str]
+    columns: List[str]
+    token_count: int
+    whole_type_chunk: bool = False
+
+
+@dataclass
+class RefinementPlan:
+    """Pure preview/execution contract for a glossary refinement run."""
+
+    selected_types: List[str]
+    chunking_mode: str
+    chunks: List[RefinementPlannedChunk] = dataclass_field(default_factory=list)
+    per_type_counts: Dict[str, int] = dataclass_field(default_factory=dict)
+    per_type_tokens: Dict[str, int] = dataclass_field(default_factory=dict)
+    total_payload_tokens: int = 0
+    per_chunk_token_estimates: List[int] = dataclass_field(default_factory=list)
+    available_tokens: int = 0
+    requested_chunk_count: Optional[int] = None
+
+    @property
+    def total_chunks(self) -> int:
+        return len(self.chunks)
+
+
+def _canonical_refinement_mode(value: Optional[str]) -> str:
+    raw_mode = str(value or "").strip().lower()
+    if raw_mode in ("all", "all_types", "all_in_one", "all_entries", "combined"):
+        return "all"
+    return "separate"
+
+
+def _refinement_type_key(value: str) -> str:
+    """Normalize legacy singular/plural names used for the built-in term type."""
+    key = str(value or "").strip().casefold()
+    return "terms" if key in ("term", "terms") else key
+
+
+def _count_with_splitter(chapter_splitter, text: str) -> int:
+    try:
+        return max(0, int(chapter_splitter.count_tokens(text)))
+    except Exception:
+        return max(0, len(str(text or "")) // 3)
+
+
+def _partition_entries_for_budget(
+    entries: List[Dict],
+    columns: List[str],
+    delimiter: str,
+    available_tokens: int,
+    chapter_splitter,
+) -> List[List[Dict]]:
+    """Greedily split on row boundaries while respecting the token budget."""
+    if not entries:
+        return []
+    budget = max(1, int(available_tokens or 1))
+    partitions: List[List[Dict]] = []
+    current: List[Dict] = []
+    current_tokens = 0
+    for entry in entries:
+        row_payload = _entry_payload([entry], columns, delimiter)
+        row_tokens = max(1, _count_with_splitter(chapter_splitter, row_payload))
+        separator_tokens = 1 if current else 0
+        if current and current_tokens + separator_tokens + row_tokens > budget:
+            partitions.append(current)
+            current = [entry]
+            current_tokens = row_tokens
+        else:
+            current.append(entry)
+            current_tokens += separator_tokens + row_tokens
+    if current:
+        partitions.append(current)
+    return partitions
+
+
+def _partition_entries_exact(
+    entries: List[Dict],
+    chunk_count: int,
+    columns: List[str],
+    delimiter: str,
+    chapter_splitter,
+) -> List[List[Dict]]:
+    """Token-balance ordered entries into exactly ``chunk_count`` non-empty parts."""
+    if not entries:
+        return []
+    requested = max(1, min(int(chunk_count or 1), len(entries)))
+    if requested == 1:
+        return [list(entries)]
+    if requested == len(entries):
+        return [[entry] for entry in entries]
+
+    row_tokens = [
+        max(1, _count_with_splitter(
+            chapter_splitter,
+            _entry_payload([entry], columns, delimiter),
+        ))
+        for entry in entries
+    ]
+    result: List[List[Dict]] = []
+    cursor = 0
+    remaining_tokens = sum(row_tokens)
+    for part_index in range(requested):
+        remaining_parts = requested - part_index
+        remaining_entries = len(entries) - cursor
+        if remaining_parts == 1:
+            result.append(list(entries[cursor:]))
+            break
+        max_take = remaining_entries - (remaining_parts - 1)
+        target = remaining_tokens / float(remaining_parts)
+        taken = 0
+        part_tokens = 0
+        while taken < max_take:
+            next_tokens = row_tokens[cursor + taken]
+            if taken and abs(part_tokens - target) <= abs((part_tokens + next_tokens) - target):
+                break
+            part_tokens += next_tokens
+            taken += 1
+        if taken <= 0:
+            taken = 1
+            part_tokens = row_tokens[cursor]
+        result.append(list(entries[cursor:cursor + taken]))
+        cursor += taken
+        remaining_tokens -= part_tokens
+    return result
+
+
+def _separate_exact_allocations(
+    selected_types: List[str],
+    entries_by_type: Dict[str, List[Dict]],
+    per_type_tokens: Dict[str, int],
+    target_chunk_count: int,
+) -> Dict[str, int]:
+    """Allocate an exact total proportionally, with one chunk per non-empty type."""
+    non_empty = [entry_type for entry_type in selected_types if entries_by_type.get(entry_type)]
+    if not non_empty:
+        return {}
+    minimum = len(non_empty)
+    maximum = sum(len(entries_by_type[entry_type]) for entry_type in non_empty)
+    target = max(minimum, min(int(target_chunk_count or minimum), maximum))
+    allocations = {entry_type: 1 for entry_type in non_empty}
+    remaining = target - minimum
+    capacities = {
+        entry_type: max(0, len(entries_by_type[entry_type]) - 1)
+        for entry_type in non_empty
+    }
+    while remaining > 0:
+        candidates = [entry_type for entry_type in non_empty if capacities[entry_type] > 0]
+        if not candidates:
+            break
+        total_weight = sum(max(1, per_type_tokens.get(entry_type, 0)) for entry_type in candidates)
+        ideal = {
+            entry_type: remaining * max(1, per_type_tokens.get(entry_type, 0)) / float(total_weight or 1)
+            for entry_type in candidates
+        }
+        # Assign at least one at a time so capacity caps are naturally respected.
+        chosen = max(
+            candidates,
+            key=lambda entry_type: (
+                ideal[entry_type] / max(1, allocations[entry_type]),
+                per_type_tokens.get(entry_type, 0),
+                -selected_types.index(entry_type),
+            ),
+        )
+        allocations[chosen] += 1
+        capacities[chosen] -= 1
+        remaining -= 1
+    return allocations
+
+
+def plan_refinement(
+    glossary: List[Dict],
+    *,
+    selected_types: Iterable[str],
+    chunking_mode: str,
+    chapter_splitter,
+    available_tokens: int,
+    target_chunk_count: Optional[int] = None,
+    system_prompt: str = "",
+    user_prompt: str = "",
+) -> RefinementPlan:
+    """Build the exact row-safe payload plan used by preview and execution."""
+    ordered_types: List[str] = []
+    seen = set()
+    for entry_type in selected_types or []:
+        clean = str(entry_type or "").strip()
+        if clean and _refinement_type_key(clean) not in seen:
+            ordered_types.append(clean)
+            seen.add(_refinement_type_key(clean))
+    canonical_mode = _canonical_refinement_mode(chunking_mode)
+    delimiter = "\x1F" if _prompt_requests_unit_separator(system_prompt, user_prompt) else ","
+    entries_by_type = {
+        entry_type: [
+            dict(entry) for entry in glossary or []
+            if isinstance(entry, dict)
+            and _refinement_type_key(entry.get("type", "")) == _refinement_type_key(entry_type)
+        ]
+        for entry_type in ordered_types
+    }
+    per_type_counts = {
+        entry_type: len(entries_by_type[entry_type]) for entry_type in ordered_types
+    }
+    per_type_tokens: Dict[str, int] = {}
+    for entry_type in ordered_types:
+        typed_entries = entries_by_type[entry_type]
+        columns = _entry_columns(typed_entries)
+        payload = _entry_payload(typed_entries, columns, delimiter)
+        per_type_tokens[entry_type] = _count_with_splitter(chapter_splitter, payload) if typed_entries else 0
+
+    chunks: List[RefinementPlannedChunk] = []
+    total_payload_tokens = sum(per_type_tokens.values())
+    if canonical_mode == "all":
+        combined_entries = [
+            entry
+            for entry_type in ordered_types
+            for entry in entries_by_type[entry_type]
+        ]
+        if combined_entries:
+            columns = _entry_columns(combined_entries)
+            combined_payload = _entry_payload(combined_entries, columns, delimiter)
+            total_payload_tokens = _count_with_splitter(chapter_splitter, combined_payload)
+            if target_chunk_count is None:
+                partitions = _partition_entries_for_budget(
+                    combined_entries, columns, delimiter, available_tokens, chapter_splitter
+                )
+            else:
+                partitions = _partition_entries_exact(
+                    combined_entries, target_chunk_count, columns, delimiter, chapter_splitter
+                )
+            for partition in partitions:
+                payload = _entry_payload(partition, columns, delimiter)
+                chunks.append(RefinementPlannedChunk(
+                    payload=payload,
+                    entry_type="selected glossary entries",
+                    selected_types=list(ordered_types),
+                    columns=list(columns),
+                    token_count=_count_with_splitter(chapter_splitter, payload),
+                    whole_type_chunk=len(partitions) == 1,
+                ))
+    else:
+        allocations = None
+        if target_chunk_count is not None:
+            allocations = _separate_exact_allocations(
+                ordered_types, entries_by_type, per_type_tokens, target_chunk_count
+            )
+        for entry_type in ordered_types:
+            typed_entries = entries_by_type[entry_type]
+            if not typed_entries:
+                continue
+            columns = _entry_columns(typed_entries)
+            if allocations is None:
+                partitions = _partition_entries_for_budget(
+                    typed_entries, columns, delimiter, available_tokens, chapter_splitter
+                )
+            else:
+                partitions = _partition_entries_exact(
+                    typed_entries,
+                    allocations.get(entry_type, 1),
+                    columns,
+                    delimiter,
+                    chapter_splitter,
+                )
+            for partition in partitions:
+                payload = _entry_payload(partition, columns, delimiter)
+                chunks.append(RefinementPlannedChunk(
+                    payload=payload,
+                    entry_type=entry_type,
+                    selected_types=[entry_type],
+                    columns=list(columns),
+                    token_count=_count_with_splitter(chapter_splitter, payload),
+                    whole_type_chunk=len(partitions) == 1,
+                ))
+
+    return RefinementPlan(
+        selected_types=ordered_types,
+        chunking_mode=canonical_mode,
+        chunks=chunks,
+        per_type_counts=per_type_counts,
+        per_type_tokens=per_type_tokens,
+        total_payload_tokens=total_payload_tokens,
+        per_chunk_token_estimates=[chunk.token_count for chunk in chunks],
+        available_tokens=max(0, int(available_tokens or 0)),
+        requested_chunk_count=(int(target_chunk_count) if target_chunk_count is not None else None),
+    )
 
 
 def _batch_translation_enabled() -> bool:
@@ -703,8 +1013,11 @@ def refine_glossary_entries(
     output_path: Optional[str] = None,
     atomic_replace_fn: Optional[Callable[[str, str], None]] = None,
     log: Callable[[str], None] = print,
+    options: Optional[RefinementRunOptions] = None,
+    plan: Optional[RefinementPlan] = None,
 ) -> List[Dict]:
-    if not refinement_enabled():
+    options = options or RefinementRunOptions()
+    if not refinement_enabled() and not options.run_when_disabled:
         return glossary
     if not glossary:
         log("Glossary refinement enabled, but glossary is empty; skipping.")
@@ -713,7 +1026,18 @@ def refine_glossary_entries(
 
     custom_types = custom_entry_types_fn()
     active_types = [t for t, cfg in custom_types.items() if not isinstance(cfg, dict) or cfg.get("enabled", True)]
-    selected_types = selected_refinement_types(active_types)
+    if options.selected_types is None:
+        selected_types = selected_refinement_types(active_types)
+    else:
+        requested_lc = {
+            _refinement_type_key(entry_type)
+            for entry_type in options.selected_types
+            if str(entry_type or "").strip()
+        }
+        selected_types = [
+            entry_type for entry_type in active_types
+            if _refinement_type_key(entry_type) in requested_lc
+        ]
     if not selected_types:
         log("Glossary refinement enabled, but no active/selected entry types matched; skipping.")
         return glossary
@@ -722,7 +1046,9 @@ def refine_glossary_entries(
     if not str(system_prompt or "").strip() or _is_legacy_default_refinement_prompt(system_prompt):
         system_prompt = DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
     user_prompt = os.getenv("GLOSSARY_REFINEMENT_USER_PROMPT", DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT)
-    canonical_mode = refinement_chunking_mode()
+    canonical_mode = _canonical_refinement_mode(
+        options.chunking_mode if options.chunking_mode is not None else refinement_chunking_mode()
+    )
     send_all_types = canonical_mode == "all"
     skip_dedupe = os.getenv("GLOSSARY_REFINEMENT_SKIP_DEDUPE", "0").strip().lower() in ("1", "true", "yes", "on")
     payload_delimiter = "\x1F" if _prompt_requests_unit_separator(system_prompt, user_prompt) else ","
@@ -732,7 +1058,7 @@ def refine_glossary_entries(
     log(f"\n🧹 Glossary refinement enabled for: {', '.join(selected_types)}")
     refined_by_type = {}
     progress = load_refinement_progress(progress_file)
-    selected_lc = {t.lower() for t in selected_types}
+    selected_lc = {_refinement_type_key(t) for t in selected_types}
 
     def _count_payload_tokens(text: str) -> int:
         try:
@@ -743,7 +1069,7 @@ def refine_glossary_entries(
 
     all_selected_entries = [
         dict(e) for e in glossary
-        if str(e.get("type", "")).strip().lower() in selected_lc
+        if _refinement_type_key(e.get("type", "")) in selected_lc
     ]
 
     broad_type_key = f"all::{','.join(selected_types)}"
@@ -762,7 +1088,7 @@ def refine_glossary_entries(
     entries_by_type = {
         entry_type: [
             e for e in all_selected_entries
-            if str(e.get("type", "")).strip().lower() == entry_type.lower()
+            if _refinement_type_key(e.get("type", "")) == _refinement_type_key(entry_type)
         ]
         for entry_type in selected_types
     }
@@ -783,7 +1109,11 @@ def refine_glossary_entries(
         type_hash = type_hashes.get(entry_type) or _entry_hash(entry_type, entries, hash_mode)
         type_identity_hash = type_identity_hashes[entry_type]
         type_progress = progress.get(type_key, {})
-        if isinstance(type_progress, dict) and type_progress.get("status") == "completed":
+        if (
+            not options.force
+            and isinstance(type_progress, dict)
+            and type_progress.get("status") == "completed"
+        ):
             completed_identity_hashes = {
                 str(type_progress.get("input_identity_hash") or ""),
                 str(type_progress.get("output_identity_hash") or ""),
@@ -825,7 +1155,7 @@ def refine_glossary_entries(
         if not entries:
             no_entries_update = {
                 "entry_type": entry_type,
-                "status": "completed",
+                "status": "skipped",
                 "input_hash": type_hash,
                 "output_hash": type_hash,
                 "identity_hash_version": _IDENTITY_HASH_VERSION,
@@ -865,7 +1195,7 @@ def refine_glossary_entries(
         return glossary
 
     selected_types = pending_types
-    selected_lc = {t.lower() for t in selected_types}
+    selected_lc = {_refinement_type_key(t) for t in selected_types}
     all_selected_entries = [
         e for entry_type in selected_types for e in entries_by_type.get(entry_type, [])
     ]
@@ -891,16 +1221,37 @@ def refine_glossary_entries(
         groups = [("selected glossary entries", all_selected_entries, broad_type_key, selected_lc)]
     else:
         groups = [
-            (entry_type, entries_by_type.get(entry_type, []), type_keys[entry_type], {entry_type.lower()})
+            (entry_type, entries_by_type.get(entry_type, []), type_keys[entry_type], {_refinement_type_key(entry_type)})
             for entry_type in selected_types
         ]
+
+    effective_plan = plan
+    plan_types_lc = {
+        _refinement_type_key(entry_type)
+        for entry_type in getattr(effective_plan, "selected_types", []) or []
+    }
+    if (
+        effective_plan is None
+        or plan_types_lc != {_refinement_type_key(entry_type) for entry_type in selected_types}
+        or _canonical_refinement_mode(getattr(effective_plan, "chunking_mode", "")) != canonical_mode
+    ):
+        effective_plan = plan_refinement(
+            glossary,
+            selected_types=selected_types,
+            chunking_mode=canonical_mode,
+            chapter_splitter=chapter_splitter,
+            available_tokens=available_tokens,
+            target_chunk_count=options.target_chunk_count,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
 
     def _original_mapping_for_group(entry_type, entries):
         if send_all_types:
             return {
                 selected_type: [
                     e for e in entries
-                    if str(e.get("type", "")).strip().lower() == selected_type.lower()
+                    if _refinement_type_key(e.get("type", "")) == _refinement_type_key(selected_type)
                 ]
                 for selected_type in selected_types
             }
@@ -917,56 +1268,24 @@ def refine_glossary_entries(
         planned_chunks = []
         group_selected_types = selected_types if send_all_types else [entry_type]
 
-        if send_all_types:
-            combined_payload = _entry_payload(entries, payload_columns, payload_delimiter)
-            token_count = _count_payload_tokens(combined_payload)
-            if token_count <= available_tokens:
-                log(f"Glossary refinement keeping all selected entry types as one fitted chunk ({token_count:,} tokens, {budget_label}).")
-                planned_chunks.append((combined_payload, entry_type, True))
-            else:
-                split_chunks = [
-                    chunk_text
-                    for chunk_html, _local_idx, _local_total in chapter_splitter.split_chapter(
-                        combined_payload,
-                        available_tokens,
-                        filename="glossary_refinement_selected_types.txt",
-                    )
-                    for chunk_text in [str(chunk_html or "").strip()]
-                    if chunk_text
-                ]
-                if not split_chunks:
-                    split_chunks = [combined_payload]
-                log(f"🪓 Glossary refinement split all selected entry types into {len(split_chunks)} token-budgeted chunk(s) ({token_count:,} tokens, {budget_label}).")
-                planned_chunks.extend((chunk_text, entry_type, False) for chunk_text in split_chunks)
-        else:
-            for selected_type in group_selected_types:
-                type_entries = [
-                    e for e in entries
-                    if str(e.get("type", "")).strip().lower() == selected_type.lower()
-                ]
-                if not type_entries:
-                    continue
-                type_payload = _entry_payload(type_entries, payload_columns, payload_delimiter)
-                token_count = _count_payload_tokens(type_payload)
-                if token_count <= available_tokens:
-                    log(f"Glossary refinement keeping {selected_type} entries as one fitted type chunk ({token_count:,} tokens, {budget_label}).")
-                    planned_chunks.append((type_payload, selected_type, True))
-                    continue
-
-                split_chunks = [
-                    chunk_text
-                    for chunk_html, _local_idx, _local_total in chapter_splitter.split_chapter(
-                        type_payload,
-                        available_tokens,
-                        filename=f"glossary_refinement_{selected_type}.txt",
-                    )
-                    for chunk_text in [str(chunk_html or "").strip()]
-                    if chunk_text
-                ]
-                if not split_chunks:
-                    split_chunks = [type_payload]
-                log(f"🪓 Glossary refinement split oversized {selected_type} entries into {len(split_chunks)} token-budgeted chunk(s) ({token_count:,} tokens, {budget_label}).")
-                planned_chunks.extend((chunk_text, selected_type, False) for chunk_text in split_chunks)
+        matching_plan_chunks = [
+            chunk for chunk in effective_plan.chunks
+            if send_all_types or _refinement_type_key(chunk.entry_type) == _refinement_type_key(entry_type)
+        ]
+        if matching_plan_chunks:
+            payload_columns = list(matching_plan_chunks[0].columns)
+            planned_chunks.extend(
+                (chunk.payload, chunk.entry_type, chunk.whole_type_chunk)
+                for chunk in matching_plan_chunks
+            )
+            token_count = sum(chunk.token_count for chunk in matching_plan_chunks)
+            scope_label = "all selected entry types" if send_all_types else entry_type
+            split_kind = "exact user-selected" if effective_plan.requested_chunk_count is not None else "token-budgeted"
+            log(
+                f"🪓 Glossary refinement planned {scope_label} as "
+                f"{len(matching_plan_chunks)} {split_kind} chunk(s) "
+                f"({token_count:,} tokens, {budget_label})."
+            )
 
         if not planned_chunks:
             payload = _entry_payload(entries, payload_columns, payload_delimiter)
@@ -1078,7 +1397,7 @@ def refine_glossary_entries(
             parsed = parse_response_fn(response_text)
             parsed = [
                 entry for entry in parsed
-                if isinstance(entry, dict) and str(entry.get("type", "")).strip().lower() in allowed_types_lc
+                if isinstance(entry, dict) and _refinement_type_key(entry.get("type", "")) in allowed_types_lc
             ]
             parsed = _strip_inactive_description(parsed)
             if not parsed:
@@ -1384,11 +1703,11 @@ def refine_glossary_entries(
                 for selected_type in group_selected_types:
                     typed_refined = [
                         e for e in refined_entries
-                        if str(e.get("type", "")).strip().lower() == selected_type.lower()
+                        if _refinement_type_key(e.get("type", "")) == _refinement_type_key(selected_type)
                     ]
                     result_mapping[selected_type] = typed_refined or [
                         e for e in entries
-                        if str(e.get("type", "")).strip().lower() == selected_type.lower()
+                        if _refinement_type_key(e.get("type", "")) == _refinement_type_key(selected_type)
                     ]
             else:
                 result_mapping = {entry_type: refined_entries}
@@ -1488,8 +1807,8 @@ def refine_glossary_entries(
     if not refined_by_type:
         return glossary
 
-    selected_lc = {t.lower() for t in refined_by_type}
-    rebuilt = [entry for entry in glossary if str(entry.get("type", "")).strip().lower() not in selected_lc]
+    selected_lc = {_refinement_type_key(t) for t in refined_by_type}
+    rebuilt = [entry for entry in glossary if _refinement_type_key(entry.get("type", "")) not in selected_lc]
     for entry_type in selected_types:
         rebuilt.extend(refined_by_type.get(entry_type, []))
     rebuilt = _strip_inactive_description(rebuilt)
