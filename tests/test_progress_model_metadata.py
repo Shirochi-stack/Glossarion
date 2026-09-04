@@ -2870,6 +2870,10 @@ def test_glossary_refinement_aggregate_status_precedence():
     assert _derive_glossary_refinement_aggregate_status(["completed", "not_refined"]) == "not_refined"
     assert _derive_glossary_refinement_aggregate_status(["skipped", "skipped"]) == "skipped"
     assert _derive_glossary_refinement_aggregate_status(["completed", "skipped"]) == "completed"
+    assert _derive_glossary_refinement_aggregate_status(
+        ["completed", "skipped"],
+        [True, False],
+    ) == "not_refined"
 
 
 def test_glossary_refinement_aggregate_selection_wins_over_specific_types():

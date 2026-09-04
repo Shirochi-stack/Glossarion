@@ -1648,7 +1648,7 @@ def _normalize_glossary_refinement_selection(refinement_keys, active_types):
     ]
 
 
-def _derive_glossary_refinement_aggregate_status(statuses):
+def _derive_glossary_refinement_aggregate_status(statuses, represented=None):
     normalized = [str(status or 'not_refined').strip().lower() for status in statuses or []]
     if any(status in ('failed', 'error', 'refine_failed') for status in normalized):
         return 'failed'
@@ -1661,6 +1661,10 @@ def _derive_glossary_refinement_aggregate_status(statuses):
         return 'not_refined'
     if normalized and all(status == 'skipped' for status in normalized):
         return 'skipped'
+    if represented is not None and any(not bool(value) for value in represented):
+        # A newly enabled type has joined the aggregate scope but has not yet
+        # acquired its own persisted refinement result.
+        return 'not_refined'
     return 'completed'
 
 
@@ -23567,6 +23571,7 @@ class RetranslationMixin:
                             ),
                             None,
                         )
+                    info['_has_saved_progress'] = isinstance(saved_info, dict)
                     if isinstance(saved_info, dict):
                         info.update(saved_info)
                     if expected_info.get('is_aggregate'):
@@ -23583,15 +23588,19 @@ class RetranslationMixin:
                 aggregate_key = next((key for key in merged_rows if key.startswith('all::')), None)
                 if aggregate_key:
                     statuses = [str(info.get('status') or 'not_refined').lower() for info in individual_infos]
-                    aggregate_status = _derive_glossary_refinement_aggregate_status(statuses)
+                    aggregate_status = _derive_glossary_refinement_aggregate_status(
+                        statuses,
+                        [info.get('_has_saved_progress') for info in individual_infos],
+                    )
+                    aggregate_entry_count = sum(
+                        int(info.get('entry_count_before') or 0) for info in individual_infos
+                    )
                     merged_rows[aggregate_key]['status'] = aggregate_status
                     merged_rows[aggregate_key]['active_type_count'] = sum(
                         status == 'in_progress' for status in statuses
                     )
                     merged_rows[aggregate_key]['total_type_count'] = len(statuses)
-                    merged_rows[aggregate_key]['entry_count_before'] = sum(
-                        int(info.get('entry_count_before') or 0) for info in individual_infos
-                    )
+                    merged_rows[aggregate_key]['entry_count_before'] = aggregate_entry_count
                     if aggregate_status == 'skipped':
                         merged_rows[aggregate_key]['reason'] = 'no_entries'
                 rows = []

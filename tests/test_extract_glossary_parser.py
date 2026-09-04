@@ -540,6 +540,90 @@ def test_completed_refinement_uses_stable_identities_and_only_reopens_for_new_en
     assert completed["output_identity_hash"]
 
 
+def test_automatic_all_scope_skips_completed_types_but_manual_force_resends_selection(
+    tmp_path,
+    monkeypatch,
+):
+    _enable_refinement(monkeypatch)
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", "all")
+    progress_file = tmp_path / "glossary_progress.json"
+    active_types = ["character", "terms", "locations", "nicknames", "titles"]
+    custom_types = {entry_type: {"enabled": True} for entry_type in active_types}
+    initial_entries = [
+        {
+            "type": entry_type,
+            "raw_name": f"{entry_type}-original",
+            "translated_name": f"{entry_type}-translated",
+        }
+        for entry_type in active_types
+    ]
+    response_entries = [dict(entry) for entry in initial_entries]
+    sent_payloads = []
+
+    def send_fn(*_args, **kwargs):
+        messages = kwargs.get("messages") or (_args[0] if _args else [])
+        user_message = next(message for message in messages if message.get("role") == "user")
+        sent_payloads.append(user_message.get("content", ""))
+        return "ignored", "stop", None
+
+    def run(entries, options=None):
+        return refine_glossary_entries(
+            entries,
+            client=None,
+            temp=0.1,
+            mtoks=4096,
+            check_stop=lambda: False,
+            chapter_splitter=_RefinementTestSplitter(),
+            available_tokens=100000,
+            chunk_timeout=None,
+            parse_response_fn=lambda _response: [dict(entry) for entry in response_entries],
+            dedupe_fn=lambda value: value,
+            custom_entry_types_fn=lambda: custom_types,
+            send_fn=send_fn,
+            progress_file=str(progress_file),
+            output_path=str(tmp_path / "glossary.csv"),
+            log=lambda _message: None,
+            options=options,
+        )
+
+    completed_glossary = run(initial_entries)
+    assert len(sent_payloads) == 1
+
+    updated_glossary = completed_glossary + [
+        {
+            "type": "titles",
+            "raw_name": "titles-new",
+            "translated_name": "titles-new",
+        }
+    ]
+    response_entries[:] = [
+        dict(entry) for entry in updated_glossary if entry["type"] == "titles"
+    ]
+    sent_payloads.clear()
+    run(updated_glossary)
+
+    assert len(sent_payloads) == 1
+    assert "titles-new" in sent_payloads[0]
+    for completed_type in active_types[:-1]:
+        assert f"{completed_type}-original" not in sent_payloads[0]
+
+    response_entries[:] = [dict(entry) for entry in updated_glossary]
+    sent_payloads.clear()
+    run(
+        updated_glossary,
+        RefinementRunOptions(
+            selected_types=active_types,
+            chunking_mode="all",
+            force=True,
+            run_when_disabled=True,
+        ),
+    )
+
+    assert len(sent_payloads) == 1
+    for selected_type in active_types:
+        assert f"{selected_type}-original" in sent_payloads[0]
+
+
 def test_legacy_completed_refinement_is_migrated_without_resending(tmp_path, monkeypatch):
     _enable_refinement(monkeypatch)
     progress_file = tmp_path / "glossary_progress.json"
