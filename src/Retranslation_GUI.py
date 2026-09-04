@@ -1747,6 +1747,31 @@ def _normalize_glossary_refinement_selection(refinement_keys, active_types):
     ]
 
 
+def _find_matching_glossary_refinement_aggregate(refinement, selected_types):
+    """Find an aggregate progress record regardless of saved type ordering."""
+    if not isinstance(refinement, dict):
+        return None
+    expected_scope = {
+        _glossary_refinement_type_key(entry_type)
+        for entry_type in selected_types or []
+        if str(entry_type or '').strip()
+    }
+    if not expected_scope:
+        return None
+    for raw_key, info in refinement.items():
+        key = str(raw_key or '')
+        if not key.startswith('all::') or not isinstance(info, dict):
+            continue
+        saved_scope = {
+            _glossary_refinement_type_key(entry_type)
+            for entry_type in key.split('::', 1)[1].split(',')
+            if str(entry_type or '').strip()
+        }
+        if saved_scope == expected_scope:
+            return info
+    return None
+
+
 def _resolve_dialog_window_parent(parent):
     """Return the top-level window that owns a dialog-triggering child widget."""
     if parent is None:
@@ -23690,6 +23715,11 @@ class RetranslationMixin:
                 merged_rows = {}
                 for expected_key, expected_info in expected.items():
                     saved_info = refinement.get(expected_key)
+                    if expected_info.get('is_aggregate') and not isinstance(saved_info, dict):
+                        saved_info = _find_matching_glossary_refinement_aggregate(
+                            refinement,
+                            expected_info.get('selected_types'),
+                        )
                     if not isinstance(saved_info, dict) and expected_key.startswith('type::'):
                         expected_name = _refinement_type_key(expected_key.split('::', 1)[1])
                         saved_info = next(

@@ -35,6 +35,7 @@ from Retranslation_GUI import (
     _combine_glossary_progress_legend_stats,
     _derive_glossary_refinement_aggregate_status,
     _filter_glossary_source_chapter_map,
+    _find_matching_glossary_refinement_aggregate,
     _glossary_progress_filename_keys,
     _glossary_refinement_row_detail,
     _glossary_refinement_type_key,
@@ -2969,6 +2970,31 @@ def test_glossary_refinement_aggregate_selection_wins_over_specific_types():
         ["type::terms", "type::locations"],
         active,
     ) == ["term", "locations"]
+
+
+def test_glossary_refinement_aggregate_history_matches_scope_without_type_order():
+    exact = {
+        "status": "completed",
+        "entry_count_before": 813,
+        "entry_count_after": 653,
+    }
+    refinement = {
+        "all::titles,character,terms": exact,
+        "all::character,terms": {
+            "status": "completed",
+            "entry_count_before": 700,
+            "entry_count_after": 600,
+        },
+    }
+
+    assert _find_matching_glossary_refinement_aggregate(
+        refinement,
+        ["character", "terms", "titles"],
+    ) is exact
+    assert _find_matching_glossary_refinement_aggregate(
+        refinement,
+        ["character", "terms", "titles", "locations"],
+    ) is None
 
 
 def test_refinement_dialog_uses_triggering_panels_top_level_window():
