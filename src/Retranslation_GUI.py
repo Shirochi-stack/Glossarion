@@ -22403,6 +22403,8 @@ class RetranslationMixin:
                 }
                 QCheckBox#refinementOverrideCheckbox {
                     color: #edf3f8;
+                    background-color: transparent;
+                    border: none;
                     font-weight: 650;
                     spacing: 8px;
                 }

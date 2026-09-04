@@ -3742,3 +3742,12 @@ def test_manual_glossary_refinement_has_no_hidden_model_fallback():
     assert "or 'gemini-2.0-flash'" not in source
     assert "config.get('model') or os.getenv('MODEL')" not in source
     assert "_require_model_selection" in source
+
+
+def test_refinement_override_checkbox_label_background_is_transparent():
+    source = inspect.getsource(RetranslationMixin)
+    selector = "QCheckBox#refinementOverrideCheckbox {"
+    checkbox_style = source.split(selector, 1)[1].split("}", 1)[0]
+
+    assert "background-color: transparent;" in checkbox_style
+    assert "border: none;" in checkbox_style
