@@ -22222,18 +22222,17 @@ class RetranslationMixin:
             screen = screen or QApplication.primaryScreen()
             if screen is not None:
                 available_geometry = screen.availableGeometry()
-                dialog_height = max(1, round(available_geometry.height() * 0.62))
+                minimum_width = max(1, round(available_geometry.width() * 0.24))
+                minimum_height = max(1, round(available_geometry.height() * 0.30))
                 dialog_width = max(
-                    1,
-                    round(min(
-                        available_geometry.width() * 0.48,
-                        dialog_height * 1.46,
-                    )),
+                    minimum_width,
+                    round(available_geometry.width() * 0.26),
                 )
-                preview.setMinimumSize(
-                    max(1, round(available_geometry.width() * 0.30)),
-                    max(1, round(available_geometry.height() * 0.40)),
+                dialog_height = max(
+                    minimum_height,
+                    round(available_geometry.height() * 0.42),
                 )
+                preview.setMinimumSize(minimum_width, minimum_height)
                 preview.resize(dialog_width, dialog_height)
                 preview_frame = preview.frameGeometry()
                 if parent is not None:
@@ -22354,17 +22353,45 @@ class RetranslationMixin:
                     background-color: #52b788;
                     border-color: #74c69d;
                 }
+                QLabel#refinementOverrideCheckmark {
+                    color: #07150f;
+                    background-color: transparent;
+                    font-size: 12pt;
+                    font-weight: 900;
+                }
                 QSpinBox#refinementChunkCount {
                     color: #edf3f8;
                     background-color: #11171e;
                     border: 1px solid #435267;
                     border-radius: 6px;
-                    padding: 5px 8px;
+                    padding: 6px 12px;
                 }
                 QSpinBox#refinementChunkCount:disabled {
                     color: #687687;
                     background-color: #171d25;
                     border-color: #2b3440;
+                }
+                QToolButton#refinementStepButton {
+                    color: #dce8f2;
+                    background-color: #27313d;
+                    border: 1px solid #465668;
+                    border-radius: 6px;
+                    padding: 5px 10px;
+                    font-size: 12pt;
+                    font-weight: 700;
+                }
+                QToolButton#refinementStepButton:hover {
+                    color: #ffffff;
+                    background-color: #344252;
+                    border-color: #60758a;
+                }
+                QToolButton#refinementStepButton:pressed {
+                    background-color: #1d2630;
+                }
+                QToolButton#refinementStepButton:disabled {
+                    color: #596574;
+                    background-color: #1b222b;
+                    border-color: #2b3541;
                 }
                 QLabel#refinementOneRunBadge {
                     color: #76cfa4;
@@ -22546,6 +22573,30 @@ class RetranslationMixin:
             override_checkbox = QCheckBox('Override automatic split', override_card)
             override_checkbox.setObjectName('refinementOverrideCheckbox')
             override_checkbox.setChecked(False)
+            from PySide6.QtWidgets import QAbstractSpinBox, QStyle, QStyleOptionButton, QToolButton
+
+            override_checkmark = QLabel('✓', override_checkbox)
+            override_checkmark.setObjectName('refinementOverrideCheckmark')
+            override_checkmark.setAlignment(Qt.AlignCenter)
+            override_checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+            override_checkmark.hide()
+
+            def _sync_override_checkmark(*_args):
+                try:
+                    style_option = QStyleOptionButton()
+                    override_checkbox.initStyleOption(style_option)
+                    indicator_rect = override_checkbox.style().subElementRect(
+                        QStyle.SE_CheckBoxIndicator,
+                        style_option,
+                        override_checkbox,
+                    )
+                    override_checkmark.setGeometry(indicator_rect)
+                    override_checkmark.setVisible(override_checkbox.isChecked())
+                except RuntimeError:
+                    pass
+
+            override_checkbox.toggled.connect(_sync_override_checkmark)
+            QTimer.singleShot(0, _sync_override_checkmark)
             override_header.addWidget(override_checkbox)
             override_header.addStretch()
             one_run_badge = QLabel('ONE RUN ONLY')
@@ -22562,19 +22613,46 @@ class RetranslationMixin:
             chunk_row.addWidget(QLabel('Exact total chunk count:'))
             chunk_count = QSpinBox(override_card)
             chunk_count.setObjectName('refinementChunkCount')
+            chunk_count.setButtonSymbols(QAbstractSpinBox.NoButtons)
+            chunk_count.setAlignment(Qt.AlignCenter)
             minimum_chunks = 1 if request_mode == 'all' else len(non_empty_types)
             maximum_chunks = sum(automatic_plan.per_type_counts.get(name, 0) for name in non_empty_types)
             chunk_count.setRange(max(1, minimum_chunks), max(1, maximum_chunks))
             chunk_count.setValue(max(chunk_count.minimum(), min(automatic_plan.total_chunks, chunk_count.maximum())))
-            chunk_count.setEnabled(False)
             chunk_count.setToolTip('This one-run override never changes the saved Refinement settings.')
-            override_checkbox.toggled.connect(chunk_count.setEnabled)
             chunk_row.addWidget(chunk_count)
-            chunk_range = QLabel(f'Allowed range: {chunk_count.minimum():,}–{chunk_count.maximum():,}')
-            chunk_range.setObjectName('refinementSectionHint')
-            chunk_row.addWidget(chunk_range)
+
+            decrement_chunk = QToolButton(override_card)
+            decrement_chunk.setObjectName('refinementStepButton')
+            decrement_chunk.setText('−')
+            decrement_chunk.setToolTip('Use one fewer chunk')
+            decrement_chunk.setAutoRepeat(True)
+            decrement_chunk.clicked.connect(chunk_count.stepDown)
+            chunk_row.addWidget(decrement_chunk)
+
+            increment_chunk = QToolButton(override_card)
+            increment_chunk.setObjectName('refinementStepButton')
+            increment_chunk.setText('+')
+            increment_chunk.setToolTip('Use one more chunk')
+            increment_chunk.setAutoRepeat(True)
+            increment_chunk.clicked.connect(chunk_count.stepUp)
+            chunk_row.addWidget(increment_chunk)
+
+            def _set_manual_chunk_controls_enabled(enabled):
+                chunk_count.setEnabled(enabled)
+                decrement_chunk.setEnabled(enabled and chunk_count.value() > chunk_count.minimum())
+                increment_chunk.setEnabled(enabled and chunk_count.value() < chunk_count.maximum())
+
+            override_checkbox.toggled.connect(_set_manual_chunk_controls_enabled)
+            chunk_count.valueChanged.connect(
+                lambda _value: _set_manual_chunk_controls_enabled(override_checkbox.isChecked())
+            )
+            _set_manual_chunk_controls_enabled(False)
             chunk_row.addStretch()
             override_layout.addLayout(chunk_row)
+            chunk_range = QLabel(f'Allowed range: {chunk_count.minimum():,}–{chunk_count.maximum():,}')
+            chunk_range.setObjectName('refinementSectionHint')
+            override_layout.addWidget(chunk_range)
             content_layout.addWidget(override_card)
 
             note = QLabel('ℹ️ Chunk boundaries always fall between complete glossary entries; CSV rows are never divided.')
