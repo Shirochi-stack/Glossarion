@@ -2267,7 +2267,7 @@ def test_gui_auto_poll_log_counts_models_not_already_displayed(
     ]
 
 
-def test_model_field_border_tracks_automatic_poll_only(monkeypatch):
+def test_model_field_border_tracks_automatic_and_manual_catalog_polls(monkeypatch):
     import translator_gui
 
     border_states = []
@@ -2293,7 +2293,7 @@ def test_model_field_border_tracks_automatic_poll_only(monkeypatch):
         model_catalog_updated_signal=FakeSignal(),
         _provider_model_catalog_signal_connected=True,
         _normalize_custom_prefix_routes=lambda _routes: [],
-        _set_model_auto_poll_border_active=border_states.append,
+        _set_model_poll_border_active=border_states.append,
         append_log=lambda _message: None,
     )
 
@@ -2313,7 +2313,13 @@ def test_model_field_border_tracks_automatic_poll_only(monkeypatch):
     gui._provider_model_catalog_thread = None
     border_states.clear()
     assert translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(gui)
-    assert True not in border_states
+    assert border_states == [True]
+
+    translator_gui.TranslatorGUI._apply_provider_model_catalog_refresh(
+        gui,
+        SimpleNamespace(models=[]),
+    )
+    assert border_states == [True, False]
 
 
 def test_automatic_poll_scope_is_always_resolved_from_current_model(monkeypatch):
@@ -2338,7 +2344,7 @@ def test_automatic_poll_scope_is_always_resolved_from_current_model(monkeypatch)
         model_catalog_updated_signal=SimpleNamespace(connect=lambda _callback: None),
         _provider_model_catalog_signal_connected=True,
         _normalize_custom_prefix_routes=lambda _routes: [],
-        _set_model_auto_poll_border_active=lambda _active: None,
+        _set_model_poll_border_active=lambda _active: None,
         append_log=lambda _message: None,
     )
 
@@ -2358,7 +2364,7 @@ def test_automatic_poll_scope_is_always_resolved_from_current_model(monkeypatch)
     assert len(worker_calls) == 1
 
 
-def test_model_auto_poll_border_animation_starts_and_stops(monkeypatch):
+def test_model_catalog_poll_border_animation_starts_and_stops(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     qt_widgets = pytest.importorskip("PySide6.QtWidgets")
     import translator_gui
@@ -2367,7 +2373,7 @@ def test_model_auto_poll_border_animation_starts_and_stops(monkeypatch):
     combo = qt_widgets.QComboBox()
     combo.resize(320, 34)
     combo.show()
-    border = translator_gui._ModelAutoPollBorder(combo)
+    border = translator_gui._ModelCatalogPollBorder(combo)
 
     border.start()
     app.processEvents()

@@ -718,8 +718,8 @@ class _ModelPollMarkerDelegate(QStyledItemDelegate):
             painter.restore()
 
 
-class _ModelAutoPollBorder(QWidget):
-    """Animated perimeter shown while the selected provider is auto-polled."""
+class _ModelCatalogPollBorder(QWidget):
+    """Animated perimeter shown while an online model catalog is being polled."""
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -20774,16 +20774,16 @@ Recent translations to summarize:
         self._replace_model_combo_catalog(model_values)
         return True
 
-    def _set_model_auto_poll_border_active(self, active):
-        """Start or stop the model field's automatic catalog-poll indicator."""
+    def _set_model_poll_border_active(self, active):
+        """Start or stop the model field's catalog-poll indicator."""
         try:
             combo = getattr(self, 'model_combo', None)
             if combo is None:
                 return
-            border = getattr(self, '_model_auto_poll_border', None)
+            border = getattr(self, '_model_catalog_poll_border', None)
             if border is None:
-                border = _ModelAutoPollBorder(combo)
-                self._model_auto_poll_border = border
+                border = _ModelCatalogPollBorder(combo)
+                self._model_catalog_poll_border = border
             if active:
                 border.start()
             else:
@@ -21086,10 +21086,10 @@ Recent translations to summarize:
             custom_routes=custom_routes,
             only_provider=only_provider,
         )
-        self._provider_model_catalog_active_automatic = bool(automatic)
-        set_poll_border = getattr(self, '_set_model_auto_poll_border_active', None)
+        self._provider_model_catalog_poll_active = True
+        set_poll_border = getattr(self, '_set_model_poll_border_active', None)
         if callable(set_poll_border):
-            set_poll_border(bool(automatic))
+            set_poll_border(True)
         return True
 
     def _restore_removed_model_choices(
@@ -21395,12 +21395,12 @@ Recent translations to summarize:
 
     def _apply_provider_model_catalog_refresh(self, result):
         """Apply a completed catalog refresh on Qt's GUI thread."""
-        automatic_poll_finished = bool(
-            getattr(self, '_provider_model_catalog_active_automatic', False)
+        catalog_poll_finished = bool(
+            getattr(self, '_provider_model_catalog_poll_active', False)
         )
-        self._provider_model_catalog_active_automatic = False
-        if automatic_poll_finished:
-            set_poll_border = getattr(self, '_set_model_auto_poll_border_active', None)
+        self._provider_model_catalog_poll_active = False
+        if catalog_poll_finished:
+            set_poll_border = getattr(self, '_set_model_poll_border_active', None)
             if callable(set_poll_border):
                 set_poll_border(False)
         explicit_poll = bool(
