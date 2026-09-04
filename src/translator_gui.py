@@ -534,7 +534,7 @@ try:
                                     QGraphicsOpacityEffect, QStyledItemDelegate,
                                     QStyleOptionViewItem)
     from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QRect, QEvent, QPropertyAnimation, QEasingCurve, Property, QObject, QEventLoop, QMetaObject
-    from PySide6.QtGui import QFont, QFontMetrics, QColor, QIcon, QPixmap, QPainter, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform, QShortcut
+    from PySide6.QtGui import QFont, QFontMetrics, QColor, QIcon, QPixmap, QPainter, QPen, QBrush, QConicalGradient, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform, QShortcut
     try:
         dpi_setup.install_qt_message_filter()
     except Exception:
@@ -716,6 +716,71 @@ class _ModelPollMarkerDelegate(QStyledItemDelegate):
             painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, rendered)
         finally:
             painter.restore()
+
+
+class _ModelAutoPollBorder(QWidget):
+    """Animated perimeter shown while the selected provider is auto-polled."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._phase = 0
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setGeometry(parent.rect())
+        parent.installEventFilter(self)
+        self._timer = QTimer(self)
+        self._timer.setInterval(40)
+        self._timer.timeout.connect(self._advance)
+        self.hide()
+
+    def eventFilter(self, watched, event):
+        if watched is self.parentWidget() and event.type() in (QEvent.Resize, QEvent.Show):
+            self.setGeometry(watched.rect())
+        return super().eventFilter(watched, event)
+
+    def start(self):
+        parent = self.parentWidget()
+        if parent is not None:
+            self.setGeometry(parent.rect())
+        self.show()
+        self.raise_()
+        if not self._timer.isActive():
+            self._timer.start()
+        self.update()
+
+    def stop(self):
+        self._timer.stop()
+        self.hide()
+
+    def isAnimating(self):
+        return self._timer.isActive() and self.isVisible()
+
+    def _advance(self):
+        self._phase = (self._phase + 5) % 360
+        self.update()
+
+    def paintEvent(self, _event):
+        if self.width() < 4 or self.height() < 4:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setBrush(Qt.NoBrush)
+        rect = self.rect().adjusted(1, 1, -2, -2)
+
+        # A dim under-stroke keeps the perimeter legible while the brighter
+        # cyan/violet segment travels around it.
+        painter.setPen(QPen(QColor(56, 189, 248, 72), 3))
+        painter.drawRoundedRect(rect, 5, 5)
+
+        gradient = QConicalGradient(rect.center(), self._phase)
+        gradient.setColorAt(0.00, QColor(103, 232, 249, 235))
+        gradient.setColorAt(0.16, QColor(167, 139, 250, 230))
+        gradient.setColorAt(0.38, QColor(59, 130, 246, 95))
+        gradient.setColorAt(0.70, QColor(30, 41, 59, 55))
+        gradient.setColorAt(0.88, QColor(34, 211, 238, 210))
+        gradient.setColorAt(1.00, QColor(103, 232, 249, 235))
+        painter.setPen(QPen(QBrush(gradient), 2))
+        painter.drawRoundedRect(rect, 5, 5)
 
 
 def _update_model_field_poll_marker(combo):
@@ -20709,6 +20774,24 @@ Recent translations to summarize:
         self._replace_model_combo_catalog(model_values)
         return True
 
+    def _set_model_auto_poll_border_active(self, active):
+        """Start or stop the model field's automatic catalog-poll indicator."""
+        try:
+            combo = getattr(self, 'model_combo', None)
+            if combo is None:
+                return
+            border = getattr(self, '_model_auto_poll_border', None)
+            if border is None:
+                border = _ModelAutoPollBorder(combo)
+                self._model_auto_poll_border = border
+            if active:
+                border.start()
+            else:
+                border.stop()
+        except RuntimeError:
+            # The window may be closing as a daemon catalog worker reports back.
+            pass
+
     def _schedule_current_provider_catalog_refresh(self, delay_ms=1200):
         """Debounce automatic polling until model/key typing has settled."""
         timer = getattr(self, '_current_provider_catalog_timer', None)
@@ -20950,14 +21033,6 @@ Recent translations to summarize:
                     )
             return False
 
-        if show_feedback:
-            self.append_log("🌐 Polling online provider model catalogs in the background…")
-        elif automatic and only_provider:
-            self.append_log(
-                f"🌐 Auto-polling {only_provider} model catalog "
-                "(24-hour refresh)…"
-            )
-
         try:
             active_model = self.model_combo.currentText().strip()
         except Exception:
@@ -20972,6 +21047,24 @@ Recent translations to summarize:
             )
         except Exception:
             custom_routes = []
+
+        if automatic:
+            # Never allow an automatic refresh to degrade into a full catalog
+            # sweep. Resolve the scope again from the live field so even a
+            # stale or missing caller hint can target only the current model's
+            # provider.
+            current_provider = catalog_provider_for_model(active_model, custom_routes)
+            if not current_provider:
+                return False
+            only_provider = current_provider
+
+        if show_feedback:
+            self.append_log("🌐 Polling online provider model catalogs in the background…")
+        elif automatic:
+            self.append_log(
+                f"🌐 Auto-polling {only_provider} model catalog "
+                "(24-hour refresh)…"
+            )
 
         if not getattr(self, '_provider_model_catalog_signal_connected', False):
             self.model_catalog_updated_signal.connect(self._apply_provider_model_catalog_refresh)
@@ -20993,6 +21086,10 @@ Recent translations to summarize:
             custom_routes=custom_routes,
             only_provider=only_provider,
         )
+        self._provider_model_catalog_active_automatic = bool(automatic)
+        set_poll_border = getattr(self, '_set_model_auto_poll_border_active', None)
+        if callable(set_poll_border):
+            set_poll_border(bool(automatic))
         return True
 
     def _restore_removed_model_choices(
@@ -21298,6 +21395,14 @@ Recent translations to summarize:
 
     def _apply_provider_model_catalog_refresh(self, result):
         """Apply a completed catalog refresh on Qt's GUI thread."""
+        automatic_poll_finished = bool(
+            getattr(self, '_provider_model_catalog_active_automatic', False)
+        )
+        self._provider_model_catalog_active_automatic = False
+        if automatic_poll_finished:
+            set_poll_border = getattr(self, '_set_model_auto_poll_border_active', None)
+            if callable(set_poll_border):
+                set_poll_border(False)
         explicit_poll = bool(
             getattr(result, 'restore_removed_models', False)
         )

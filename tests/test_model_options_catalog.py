@@ -2267,6 +2267,122 @@ def test_gui_auto_poll_log_counts_models_not_already_displayed(
     ]
 
 
+def test_model_field_border_tracks_automatic_poll_only(monkeypatch):
+    import translator_gui
+
+    border_states = []
+
+    class FakeSignal:
+        def connect(self, _callback):
+            pass
+
+    class FakeThread:
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr(
+        translator_gui,
+        "start_provider_model_catalog_refresh",
+        lambda *_args, **_kwargs: FakeThread(),
+    )
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: "electronhub/model-a"),
+        api_key_entry=SimpleNamespace(text=lambda: "key"),
+        custom_prefix_routes=[],
+        model_catalog_updated_signal=FakeSignal(),
+        _provider_model_catalog_signal_connected=True,
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _set_model_auto_poll_border_active=border_states.append,
+        append_log=lambda _message: None,
+    )
+
+    assert translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(
+        gui,
+        only_provider="electronhub",
+        automatic=True,
+    )
+    assert border_states == [True]
+
+    translator_gui.TranslatorGUI._apply_provider_model_catalog_refresh(
+        gui,
+        SimpleNamespace(models=[]),
+    )
+    assert border_states == [True, False]
+
+    gui._provider_model_catalog_thread = None
+    border_states.clear()
+    assert translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(gui)
+    assert True not in border_states
+
+
+def test_automatic_poll_scope_is_always_resolved_from_current_model(monkeypatch):
+    import translator_gui
+
+    worker_calls = []
+
+    class FakeThread:
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr(
+        translator_gui,
+        "start_provider_model_catalog_refresh",
+        lambda *_args, **kwargs: worker_calls.append(kwargs) or FakeThread(),
+    )
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: "electronhub/model-a"),
+        api_key_entry=SimpleNamespace(text=lambda: "key"),
+        custom_prefix_routes=[],
+        model_catalog_updated_signal=SimpleNamespace(connect=lambda _callback: None),
+        _provider_model_catalog_signal_connected=True,
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _set_model_auto_poll_border_active=lambda _active: None,
+        append_log=lambda _message: None,
+    )
+
+    assert translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(
+        gui,
+        only_provider="openrouter",
+        automatic=True,
+    )
+    assert worker_calls[0]["only_provider"] == "electronhub"
+
+    gui._provider_model_catalog_thread = None
+    gui.model_combo = SimpleNamespace(currentText=lambda: "fixed-local-model")
+    assert not translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(
+        gui,
+        automatic=True,
+    )
+    assert len(worker_calls) == 1
+
+
+def test_model_auto_poll_border_animation_starts_and_stops(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    combo.resize(320, 34)
+    combo.show()
+    border = translator_gui._ModelAutoPollBorder(combo)
+
+    border.start()
+    app.processEvents()
+    assert border.isAnimating()
+    assert border.geometry() == combo.rect()
+
+    border.stop()
+    app.processEvents()
+    assert not border.isAnimating()
+    assert not border.isVisible()
+
+    combo.deleteLater()
+    app.processEvents()
+
+
 def test_glm_proxy_ready_auto_polls_the_selected_numbered_account(monkeypatch):
     import translator_gui
 
