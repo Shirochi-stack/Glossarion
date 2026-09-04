@@ -20555,6 +20555,66 @@ Recent translations to summarize:
             text = getattr(self, 'model_var', '')
         self._on_model_text_changed(text)
 
+    def _current_model_field_text(self):
+        """Return the live model field, without falling back to saved state."""
+        combo = getattr(self, 'model_combo', None)
+        if combo is not None:
+            try:
+                return str(combo.currentText() or '').strip()
+            except (AttributeError, RuntimeError):
+                pass
+        return str(getattr(self, 'model_var', '') or '').strip()
+
+    def _create_model_selection_required_message_box(self, message, parent=None):
+        """Build the centered, wide-button warning used by model preflight."""
+        from PySide6.QtWidgets import QDialogButtonBox
+
+        owner = parent if parent is not None else self
+        message_box = QMessageBox(owner)
+        message_box.setWindowTitle("No Model Selected")
+        message_box.setIcon(QMessageBox.Warning)
+        message_box.setText(str(message or ''))
+        message_box.setStandardButtons(QMessageBox.Ok)
+        message_box.setDefaultButton(QMessageBox.Ok)
+        message_box.setEscapeButton(QMessageBox.Ok)
+
+        button_box = message_box.findChild(QDialogButtonBox)
+        if button_box is not None:
+            button_box.setCenterButtons(True)
+        ok_button = message_box.button(QMessageBox.Ok)
+        if ok_button is not None:
+            ok_button.setMinimumSize(160, 44)
+        return message_box
+
+    def _require_model_selection(self, action='continuing', parent=None):
+        """Block model-backed work when the editable model field is blank."""
+        model = self._current_model_field_text()
+        if model:
+            # Keep workers, which read model_var, synchronized with the exact
+            # text that was visible when the user started the action.
+            self.model_var = model
+            return model
+
+        message = f"Select or enter a model before {action}."
+        try:
+            self.append_log(f"❌ {message}")
+        except Exception:
+            pass
+        self._create_model_selection_required_message_box(
+            message,
+            parent=parent,
+        ).exec()
+
+        try:
+            editor = self.model_combo.lineEdit()
+            target = editor if editor is not None else self.model_combo
+            target.setFocus()
+            if editor is not None:
+                editor.selectAll()
+        except (AttributeError, RuntimeError):
+            pass
+        return ''
+
     def _apply_pending_model_text_change(self):
         """Refresh provider-dependent controls once model typing pauses."""
         self.on_model_change()
@@ -30808,9 +30868,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except Exception:
                 pass
             return
+
+        if not self._require_model_selection('starting translation'):
+            return
         
         # Check if files are selected
-        _model_name = str(getattr(self, 'model_var', ''))
+        _model_name = str(getattr(self, 'model_var', '')).strip()
         _is_generative_model = self._model_is_image_gen(_model_name) or self._model_is_video_gen(_model_name) or self._is_generative_output_mode()
 
         if not hasattr(self, 'selected_files') or not self.selected_files:
@@ -31583,6 +31646,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
         backend_glossary_callback_installed = False
         try:
+            if not str(getattr(self, 'model_var', '') or '').strip():
+                self.append_log("❌ Translation stopped: no model is selected.")
+                return False
+
             self._export_multipass_runtime_env()
 
             if getattr(self, '_input_output_run_active', False):
@@ -35214,6 +35281,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
         if self.glossary_thread and self.glossary_thread.is_alive():
             self.stop_glossary_extraction()
             return
+
+        if not self._require_model_selection('extracting a glossary'):
+            return
         
         # Check if files are selected
         if not hasattr(self, 'selected_files') or not self.selected_files:
@@ -35303,6 +35373,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def run_glossary_extraction_direct(self, force_balanced_request_merging=False):
         """Run glossary extraction directly - handles multiple files and different file types"""
         try:
+            if not str(getattr(self, 'model_var', '') or '').strip():
+                self.append_log("❌ Glossary extraction stopped: no model is selected.")
+                return False
+
             # Re-attach GUI logging handlers FIRST to reclaim logs from standalone header translation
             try:
                 self._attach_gui_logging_handlers()
@@ -36496,7 +36570,10 @@ Important rules:
         # Skip glossary extraction for traditional APIs
         try:
             api_key = self.api_key_entry.text()
-            model = self.model_var
+            model = str(getattr(self, 'model_var', '') or '').strip()
+            if not model:
+                self.append_log("❌ Glossary extraction stopped: no model is selected.")
+                return False
             if is_traditional_translation_api(model):
                self.append_log("ℹ️ Skipping automatic glossary extraction (not supported by Google Translate / DeepL translation APIs)")
                return {}

@@ -229,6 +229,82 @@ def test_manual_refinement_options_force_run_while_automatic_toggle_is_disabled(
     assert next(entry for entry in result if entry["type"] == "terms")["translated_name"] == "mana"
 
 
+def test_refinement_replaces_stale_model_before_first_request_finishes(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_ENABLED", "0")
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_SKIP_DEDUPE", "1")
+    progress_file = tmp_path / "progress.json"
+    progress_file.write_text(
+        json.dumps(
+            {
+                "refinement": {
+                    "type::nicknames": {
+                        "entry_type": "nicknames",
+                        "status": "failed",
+                        "model_name": "gemini-2.0-flash",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeClient:
+        model = "authnd/moonshotai/kimi-k3"
+
+    def send_fn(*_args, **_kwargs):
+        in_progress = load_refinement_progress(str(progress_file))["type::nicknames"]
+        assert in_progress["status"] == "in_progress"
+        assert in_progress["completed_chunks"] == 0
+        assert in_progress["model_name"] == "authnd/moonshotai/kimi-k3"
+        return "ignored", "stop", None
+
+    try:
+        result = refine_glossary_entries(
+            [
+                {
+                    "type": "nicknames",
+                    "raw_name": "별명",
+                    "translated_name": "Nickname",
+                }
+            ],
+            client=FakeClient(),
+            temp=0.1,
+            mtoks=4096,
+            check_stop=lambda: False,
+            chapter_splitter=_RefinementTestSplitter(),
+            available_tokens=100000,
+            chunk_timeout=None,
+            parse_response_fn=lambda _response: [
+                {
+                    "type": "nicknames",
+                    "raw_name": "별명",
+                    "translated_name": "Nickname",
+                }
+            ],
+            dedupe_fn=lambda value: value,
+            custom_entry_types_fn=lambda: {"nicknames": {"enabled": True}},
+            send_fn=send_fn,
+            progress_file=str(progress_file),
+            output_path=str(tmp_path / "glossary.csv"),
+            log=lambda _message: None,
+            options=RefinementRunOptions(
+                selected_types=["nicknames"],
+                chunking_mode="separate",
+                force=True,
+                run_when_disabled=True,
+            ),
+        )
+    finally:
+        from unified_api_client import set_current_thread_actual_request_model
+
+        set_current_thread_actual_request_model()
+
+    assert result[0]["translated_name"] == "Nickname"
+
+
 def test_refinement_no_entry_progress_uses_skipped_status(tmp_path, monkeypatch):
     monkeypatch.setenv("GLOSSARY_REFINEMENT_ENABLED", "0")
     progress_file = tmp_path / "progress.json"

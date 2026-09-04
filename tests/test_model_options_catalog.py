@@ -2585,3 +2585,124 @@ def test_model_manager_save_persists_hide_unpolled_preference():
 
     assert gui.config['model_manager_hide_unpolled_models'] is True
     assert saved_orders == [(list_widget, dialog)]
+
+
+def test_model_preflight_rejects_live_empty_field_even_with_stale_model_var(
+    monkeypatch,
+):
+    import translator_gui
+
+    warnings = []
+    log = []
+
+    class FakeEditor:
+        def __init__(self):
+            self.focused = False
+            self.selected = False
+
+        def setFocus(self):
+            self.focused = True
+
+        def selectAll(self):
+            self.selected = True
+
+    class FakeCombo:
+        def __init__(self):
+            self.editor = FakeEditor()
+
+        def currentText(self):
+            return "   "
+
+        def lineEdit(self):
+            return self.editor
+
+    class Harness:
+        _current_model_field_text = (
+            translator_gui.TranslatorGUI._current_model_field_text
+        )
+        _require_model_selection = (
+            translator_gui.TranslatorGUI._require_model_selection
+        )
+
+    class FakeMessageBox:
+        def exec(self):
+            warnings.append("executed")
+
+    gui = Harness()
+    gui.model_combo = FakeCombo()
+    gui.model_var = "gemini-2.0-flash"
+    gui.append_log = log.append
+    gui._create_model_selection_required_message_box = (
+        lambda message, parent=None: (
+            warnings.append((message, parent)) or FakeMessageBox()
+        )
+    )
+
+    assert gui._require_model_selection("starting translation") == ""
+    assert warnings == [
+        ("Select or enter a model before starting translation.", None),
+        "executed",
+    ]
+    assert log == ["❌ Select or enter a model before starting translation."]
+    assert gui.model_combo.editor.focused is True
+    assert gui.model_combo.editor.selected is True
+
+
+def test_model_preflight_normalizes_and_synchronizes_live_model_field(monkeypatch):
+    import translator_gui
+
+    warnings = []
+
+    class Harness:
+        _current_model_field_text = (
+            translator_gui.TranslatorGUI._current_model_field_text
+        )
+        _require_model_selection = (
+            translator_gui.TranslatorGUI._require_model_selection
+        )
+
+    gui = Harness()
+    gui.model_combo = SimpleNamespace(
+        currentText=lambda: "  authnd/deepseek-ai/deepseek-v4  "
+    )
+    gui.model_var = "old/model"
+    gui.append_log = lambda _message: None
+    monkeypatch.setattr(
+        translator_gui.QMessageBox,
+        "warning",
+        lambda *args: warnings.append(args),
+    )
+
+    assert (
+        gui._require_model_selection("extracting a glossary")
+        == "authnd/deepseek-ai/deepseek-v4"
+    )
+    assert gui.model_var == "authnd/deepseek-ai/deepseek-v4"
+    assert warnings == []
+
+
+def test_no_model_warning_centers_and_widens_ok_button(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    parent = qt_widgets.QWidget()
+    message_box = (
+        translator_gui.TranslatorGUI._create_model_selection_required_message_box(
+            SimpleNamespace(),
+            "Select or enter a model before refining glossary entries.",
+            parent=parent,
+        )
+    )
+    button_box = message_box.findChild(qt_widgets.QDialogButtonBox)
+    ok_button = message_box.button(qt_widgets.QMessageBox.Ok)
+
+    assert button_box is not None
+    assert button_box.centerButtons() is True
+    assert ok_button.minimumWidth() >= 160
+    assert ok_button.minimumHeight() >= 44
+
+    message_box.deleteLater()
+    parent.deleteLater()
+    app.processEvents()

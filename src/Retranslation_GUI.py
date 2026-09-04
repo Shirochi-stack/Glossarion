@@ -16222,7 +16222,9 @@ class RetranslationMixin:
         entries = parse_glossary_file(glossary_path)
         if not entries:
             raise RuntimeError('The selected glossary contains no readable entries.')
-        model = str(getattr(self, 'model_var', None) or config.get('model') or os.getenv('MODEL') or 'gemini-2.0-flash')
+        model = str(getattr(self, 'model_var', '') or '').strip()
+        if not model:
+            raise RuntimeError('Glossary refinement stopped because no model is selected.')
         api_key_widget = getattr(self, 'api_key_entry', None)
         api_key = api_key_widget.text().strip() if api_key_widget is not None else str(config.get('api_key') or '')
         output_dir = os.path.dirname(os.path.abspath(glossary_path))
@@ -22150,6 +22152,20 @@ class RetranslationMixin:
                     parent=parent,
                 )
                 return False
+            require_model = getattr(self, '_require_model_selection', None)
+            if callable(require_model):
+                model = require_model('refining glossary entries', parent=parent)
+            else:
+                model = str(getattr(self, 'model_var', '') or '').strip()
+                if not model:
+                    self._show_message(
+                        'warning',
+                        'No Model Selected',
+                        'Select or enter a model before refining glossary entries.',
+                        parent=parent,
+                    )
+            if not model:
+                return False
             glossary_path = _find_glossary_for_refinement(source_path, progress_path)
             if not glossary_path:
                 self._show_message(
@@ -22201,7 +22217,6 @@ class RetranslationMixin:
                     plan_refinement,
                 )
                 config = getattr(self, 'config', {}) or {}
-                model = str(getattr(self, 'model_var', None) or config.get('model') or os.getenv('MODEL') or 'gemini-2.0-flash')
                 effective_output_tokens = extractor._effective_glossary_output_limit(config, model)
                 compression_factor = float(os.getenv(
                     'GLOSSARY_REFINEMENT_COMPRESSION_FACTOR',

@@ -1060,6 +1060,28 @@ def refine_glossary_entries(
     progress = load_refinement_progress(progress_file)
     selected_lc = {_refinement_type_key(t) for t in selected_types}
 
+    # Progress updates are merged with the previous run.  Stamp the newly
+    # requested client model before the first API response so an old model_name
+    # cannot remain visible while this run is still at chunks 0/N.  Successful
+    # and failed request results may replace this with the provider-resolved
+    # model later.
+    try:
+        requested_model_name = str(getattr(client, "model", "") or "").strip()
+    except Exception:
+        requested_model_name = ""
+    if not requested_model_name:
+        try:
+            thread_client = (
+                client._get_thread_local_client()
+                if client is not None and hasattr(client, "_get_thread_local_client")
+                else None
+            )
+            requested_model_name = str(
+                getattr(thread_client, "model", "") or ""
+            ).strip()
+        except Exception:
+            requested_model_name = ""
+
     def _count_payload_tokens(text: str) -> int:
         try:
             return chapter_splitter.count_tokens(text)
@@ -1176,6 +1198,7 @@ def refine_glossary_entries(
         placeholder = {
             "entry_type": entry_type,
             "status": "not_refined",
+            "model_name": requested_model_name,
             "input_hash": type_hash,
             "identity_hash_version": _IDENTITY_HASH_VERSION,
             "input_identity_hash": type_identity_hash,
@@ -1205,6 +1228,7 @@ def refine_glossary_entries(
         broad_placeholder = {
             "entry_type": "all selected entry types",
             "status": "not_refined",
+            "model_name": requested_model_name,
             "input_hash": broad_input_hash,
             "identity_hash_version": _IDENTITY_HASH_VERSION,
             "input_identity_hash": broad_input_identity_hash,
@@ -1323,6 +1347,7 @@ def refine_glossary_entries(
             update_refinement_progress(progress_file, broad_type_key, {
                 "entry_type": "all selected entry types",
                 "status": "in_progress",
+                "model_name": requested_model_name,
                 "input_hash": broad_input_hash,
                 "identity_hash_version": _IDENTITY_HASH_VERSION,
                 "input_identity_hash": broad_input_identity_hash,
@@ -1341,6 +1366,7 @@ def refine_glossary_entries(
             update_refinement_progress(progress_file, type_keys[selected_type], {
                 "entry_type": selected_type,
                 "status": "in_progress",
+                "model_name": requested_model_name,
                 "input_hash": type_hashes.get(selected_type) or _entry_hash(selected_type, type_entries, hash_mode),
                 "identity_hash_version": _IDENTITY_HASH_VERSION,
                 "input_identity_hash": type_identity_hashes[selected_type],

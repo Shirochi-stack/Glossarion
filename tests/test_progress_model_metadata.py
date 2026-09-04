@@ -3734,3 +3734,11 @@ def test_streamed_progress_reconcile_applies_only_latest_deferred_snapshot():
 
     assert "_deferred_prefetched_progress_payload" in stream_source
     assert "_apply_prefetched_progress_payload" in stream_source
+
+
+def test_manual_glossary_refinement_has_no_hidden_model_fallback():
+    source = inspect.getsource(RetranslationMixin)
+
+    assert "or 'gemini-2.0-flash'" not in source
+    assert "config.get('model') or os.getenv('MODEL')" not in source
+    assert "_require_model_selection" in source
