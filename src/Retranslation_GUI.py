@@ -22232,11 +22232,11 @@ class RetranslationMixin:
                 minimum_height = max(1, round(available_geometry.height() * 0.26))
                 dialog_width = max(
                     minimum_width,
-                    round(available_geometry.width() * 0.22),
+                    round(available_geometry.width() * 0.26),
                 )
                 dialog_height = max(
                     minimum_height,
-                    round(available_geometry.height() * 0.37),
+                    round(available_geometry.height() * 0.42),
                 )
                 preview.setMinimumSize(minimum_width, minimum_height)
                 preview.resize(dialog_width, dialog_height)
@@ -22548,6 +22548,14 @@ class RetranslationMixin:
                     background-color: #52a8dc;
                     border-color: #6fbae7;
                 }
+                QCheckBox::indicator:indeterminate {
+                    background-color: #3d789b;
+                    border-color: #5da5d0;
+                }
+                QCheckBox#refinementSelectAllCheckbox {
+                    color: #8bd3ae;
+                    font-weight: 700;
+                }
                 QLabel#refinementTypeChoiceCheckmark {
                     color: #07131b;
                     background-color: transparent;
@@ -22578,14 +22586,37 @@ class RetranslationMixin:
                             style_option,
                             checkbox,
                         )
+                        check_state = checkbox.checkState()
+                        checkmark.setText('−' if check_state == Qt.PartiallyChecked else '✓')
                         checkmark.setGeometry(indicator_rect)
-                        checkmark.setVisible(checkbox.isChecked())
+                        checkmark.setVisible(check_state != Qt.Unchecked)
                     except RuntimeError:
                         pass
 
                 checkbox.toggled.connect(_sync_checkmark)
                 QTimer.singleShot(0, _sync_checkmark)
                 return _sync_checkmark
+
+            total_active_entry_count = sum(
+                entry_counts.get(_refinement_type_key(entry_type), 0)
+                for entry_type in active_types
+            )
+            select_all_types_checkbox = QCheckBox(
+                f'Select all - {total_active_entry_count:,}',
+                type_selection_menu,
+            )
+            select_all_types_checkbox.setObjectName('refinementSelectAllCheckbox')
+            select_all_types_checkbox.setTristate(True)
+            select_all_widget_action = QWidgetAction(type_selection_menu)
+            select_all_widget_action.setDefaultWidget(select_all_types_checkbox)
+            type_selection_menu.addAction(select_all_widget_action)
+            type_choice_checkmark_syncs.append(
+                _attach_styled_checkmark(
+                    select_all_types_checkbox,
+                    'refinementTypeChoiceCheckmark',
+                )
+            )
+            type_selection_menu.addSeparator()
 
             selected_type_keys = {_refinement_type_key(name) for name in selected_types}
             for entry_type in active_types:
@@ -22601,7 +22632,24 @@ class RetranslationMixin:
                     _attach_styled_checkmark(type_choice, 'refinementTypeChoiceCheckmark')
                 )
 
+            def _sync_select_all_checkbox():
+                checked_count = sum(
+                    type_choice.isChecked()
+                    for type_choice in type_choice_widgets.values()
+                )
+                if checked_count == 0:
+                    master_state = Qt.Unchecked
+                elif checked_count == len(type_choice_widgets):
+                    master_state = Qt.Checked
+                else:
+                    master_state = Qt.PartiallyChecked
+                select_all_types_checkbox.blockSignals(True)
+                select_all_types_checkbox.setCheckState(master_state)
+                select_all_types_checkbox.blockSignals(False)
+                type_choice_checkmark_syncs[0]()
+
             def _sync_type_choice_checkmarks():
+                _sync_select_all_checkbox()
                 for sync_checkmark in type_choice_checkmark_syncs:
                     sync_checkmark()
 
@@ -22856,9 +22904,24 @@ class RetranslationMixin:
                 _set_manual_chunk_controls_enabled(
                     override_checkbox.isChecked() and has_refinable_entries
                 )
+                _sync_select_all_checkbox()
 
             for type_choice in type_choice_widgets.values():
                 type_choice.toggled.connect(_refresh_refinement_preview)
+
+            def _toggle_all_preview_types():
+                select_everything = not all(
+                    type_choice.isChecked()
+                    for type_choice in type_choice_widgets.values()
+                )
+                for type_choice in type_choice_widgets.values():
+                    type_choice.blockSignals(True)
+                    type_choice.setChecked(select_everything)
+                    type_choice.blockSignals(False)
+                _sync_type_choice_checkmarks()
+                _refresh_refinement_preview()
+
+            select_all_types_checkbox.clicked.connect(_toggle_all_preview_types)
             _refresh_refinement_preview()
             buttons.accepted.connect(preview.accept)
             buttons.rejected.connect(preview.reject)
