@@ -22602,7 +22602,7 @@ class RetranslationMixin:
                 for entry_type in active_types
             )
             select_all_types_checkbox = QCheckBox(
-                f'Select all - {total_active_entry_count:,}',
+                f'Select all — {total_active_entry_count:,} entries',
                 type_selection_menu,
             )
             select_all_types_checkbox.setObjectName('refinementSelectAllCheckbox')
@@ -25574,6 +25574,64 @@ class RetranslationMixin:
 
             select_all_btn.clicked.connect(_select_all_gp_visible)
             path_row.addWidget(select_all_btn)
+
+            refinement_btn = QPushButton("✨ Refinement")
+            refinement_btn.setCursor(Qt.PointingHandCursor)
+            refinement_btn.setStyleSheet(
+                "QPushButton { background-color: #2d2645; color: #e9d5ff; border: 1px solid #8b5cf6; "
+                "border-radius: 3px; padding: 2px 8px; font-size: 8pt; } "
+                "QPushButton:hover { background-color: #4c3575; } "
+                "QPushButton:disabled { background-color: #24242a; color: #666; border-color: #444; }"
+            )
+            refinement_btn.setFixedHeight(22)
+            refinement_btn.setToolTip(
+                "Refine selected refinement rows. If none are selected, refine all active entry types."
+            )
+
+            def _run_gp_refinement(_checked=False):
+                active_refinement_types = _active_glossary_refinement_types()
+                selected_refinement_keys = [
+                    str(item.data(Qt.UserRole + 3))
+                    for item in gp_listbox.selectedItems()
+                    if item.data(Qt.UserRole + 3)
+                ]
+                refinement_types = (
+                    _normalize_glossary_refinement_selection(
+                        selected_refinement_keys,
+                        active_refinement_types,
+                    )
+                    if selected_refinement_keys
+                    else active_refinement_types
+                )
+                refinement_progress = (
+                    gp_data.get('refinement', {})
+                    if isinstance(gp_data, dict)
+                    else {}
+                )
+                completed_types = []
+                if isinstance(refinement_progress, dict):
+                    for refinement_key, refinement_info in refinement_progress.items():
+                        if (
+                            str(refinement_key).startswith('type::')
+                            and isinstance(refinement_info, dict)
+                            and str(refinement_info.get('status') or '').lower() == 'completed'
+                        ):
+                            completed_types.append(
+                                str(
+                                    refinement_info.get('entry_type')
+                                    or str(refinement_key).split('::', 1)[1]
+                                )
+                            )
+                _confirm_manual_glossary_refinement(
+                    dialog,
+                    fp,
+                    _find_gp_for_file(fp) or gp_path,
+                    refinement_types,
+                    completed_types=completed_types,
+                )
+
+            refinement_btn.clicked.connect(_run_gp_refinement)
+            path_row.addWidget(refinement_btn)
             
             _gp_folder = os.path.dirname(gp_path)
             open_folder_btn = QPushButton("📂 Open Folder")
