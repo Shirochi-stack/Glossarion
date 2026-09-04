@@ -3290,8 +3290,8 @@ def _create_response_handling_section(self, parent):
     self.gpt_effort_label = QLabel("Effort:")
     gpt_h1.addWidget(self.gpt_effort_label)
     self.gpt_effort_combo = QComboBox()
-    # GPT thinking effort now supports "none" (disable) and "xhigh" in addition to low/medium/high
-    self.gpt_effort_combo.addItems(["none", "low", "medium", "high", "xhigh"])
+    # GPT thinking effort includes "none" (disable) through "max".
+    self.gpt_effort_combo.addItems(["none", "low", "medium", "high", "xhigh", "max"])
     self.gpt_effort_combo.setFixedWidth(80)
     self.gpt_effort_combo.setStyleSheet(_THINKING_COMBO_STYLE)
     self._add_combobox_arrow(self.gpt_effort_combo)
