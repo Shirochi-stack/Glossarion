@@ -2844,14 +2844,15 @@ def test_glossary_progress_legend_includes_refinement_rows():
             "not_refined": 2,
             "refine_failed": 1,
             "skipped": 2,
+            "partially_in_progress": 1,
         },
     )
 
     assert stats == {
-        "total": 689,
+        "total": 690,
         "completed": 113,
         "skipped": 5,
-        "in_progress": 6,
+        "in_progress": 7,
         "failed": 0,
         "merged": 565,
         "remaining": 0,
@@ -2862,7 +2863,10 @@ def test_glossary_progress_legend_includes_refinement_rows():
 
 def test_glossary_refinement_aggregate_status_precedence():
     assert _derive_glossary_refinement_aggregate_status(["completed", "failed"]) == "failed"
-    assert _derive_glossary_refinement_aggregate_status(["completed", "in_progress"]) == "in_progress"
+    assert _derive_glossary_refinement_aggregate_status(["completed", "in_progress"]) == "partially_in_progress"
+    assert _derive_glossary_refinement_aggregate_status(["not_refined", "in_progress"]) == "partially_in_progress"
+    assert _derive_glossary_refinement_aggregate_status(["in_progress", "in_progress"]) == "in_progress"
+    assert _derive_glossary_refinement_aggregate_status(["in_progress", "skipped"]) == "in_progress"
     assert _derive_glossary_refinement_aggregate_status(["completed", "not_refined"]) == "not_refined"
     assert _derive_glossary_refinement_aggregate_status(["skipped", "skipped"]) == "skipped"
     assert _derive_glossary_refinement_aggregate_status(["completed", "skipped"]) == "completed"

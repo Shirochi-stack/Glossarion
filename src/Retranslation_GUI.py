@@ -1613,7 +1613,10 @@ def _combine_glossary_progress_legend_stats(
         + normalized_refinement.get('refined', 0)
     )
     result['skipped'] += normalized_refinement.get('skipped', 0)
-    result['in_progress'] += normalized_refinement.get('in_progress', 0)
+    result['in_progress'] += (
+        normalized_refinement.get('in_progress', 0)
+        + normalized_refinement.get('partially_in_progress', 0)
+    )
     result['not_refined'] = normalized_refinement.get('not_refined', 0)
     result['refine_failed'] = (
         normalized_refinement.get('refine_failed', 0)
@@ -1650,7 +1653,10 @@ def _derive_glossary_refinement_aggregate_status(statuses):
     if any(status in ('failed', 'error', 'refine_failed') for status in normalized):
         return 'failed'
     if any(status == 'in_progress' for status in normalized):
-        return 'in_progress'
+        actionable_statuses = [status for status in normalized if status != 'skipped']
+        if actionable_statuses and all(status == 'in_progress' for status in actionable_statuses):
+            return 'in_progress'
+        return 'partially_in_progress'
     if any(status in ('not_refined', 'unknown', '') for status in normalized):
         return 'not_refined'
     if normalized and all(status == 'skipped' for status in normalized):
@@ -23579,6 +23585,10 @@ class RetranslationMixin:
                     statuses = [str(info.get('status') or 'not_refined').lower() for info in individual_infos]
                     aggregate_status = _derive_glossary_refinement_aggregate_status(statuses)
                     merged_rows[aggregate_key]['status'] = aggregate_status
+                    merged_rows[aggregate_key]['active_type_count'] = sum(
+                        status == 'in_progress' for status in statuses
+                    )
+                    merged_rows[aggregate_key]['total_type_count'] = len(statuses)
                     merged_rows[aggregate_key]['entry_count_before'] = sum(
                         int(info.get('entry_count_before') or 0) for info in individual_infos
                     )
@@ -23597,7 +23607,12 @@ class RetranslationMixin:
                     completed_chunks = info.get('completed_chunks')
                     model_name = str(info.get('model_name') or info.get('model') or '').strip() or '(model unknown)'
                     detail = ""
-                    if before is not None and after is not None:
+                    if status == 'partially_in_progress':
+                        detail = (
+                            f" | {int(info.get('active_type_count') or 0)}/"
+                            f"{int(info.get('total_type_count') or 0)} types active"
+                        )
+                    elif before is not None and after is not None:
                         detail = f" | {before} -> {after} entries"
                     elif total_chunks:
                         detail = f" | chunks {completed_chunks or 0}/{total_chunks}"
@@ -23608,6 +23623,7 @@ class RetranslationMixin:
                         'qa_failed': '\u274c',
                         'refine_failed': '💀',
                         'in_progress': '\U0001f504',
+                        'partially_in_progress': '\U0001f504',
                         'not_refined': '\u2728',
                     }
                     icon = icon_map.get(status, '\u2b1c')
@@ -23616,7 +23632,11 @@ class RetranslationMixin:
                         model_suffix = ''
                     else:
                         status_label = 'Refine Failed' if status == 'refine_failed' else status.replace('_', ' ').title()
-                        model_suffix = f" -> {model_name}" if status not in ('skipped', 'not_refined') else ''
+                        model_suffix = (
+                            f" -> {model_name}"
+                            if status not in ('skipped', 'not_refined') and not info.get('is_aggregate')
+                            else ''
+                        )
                     display = f"Refinement | {icon} {status_label:20s} | {entry_type}{model_suffix}{detail}"
                     rows.append((key, display, status))
                 return rows
@@ -23640,7 +23660,7 @@ class RetranslationMixin:
                     return '#94a3b8'
                 if status == 'merged':
                     return '#17a2b8'
-                if status == 'in_progress':
+                if status in ('in_progress', 'partially_in_progress'):
                     return '#f59e0b'
                 if status == 'refine_failed':
                     return '#7f5f00'
@@ -25259,6 +25279,7 @@ class RetranslationMixin:
                     'skipped_title_header_only',
                     'merged',
                     'in_progress',
+                    'partially_in_progress',
                     'failed',
                     'qa_failed',
                     'not_refined',
@@ -25526,7 +25547,10 @@ class RetranslationMixin:
                 'skipped_image_only',
                 'skipped_title_header_only',
             ), gp_listbox)
-            lbl_gp_in_progress.mousePressEvent = _gp_make_cycle(('in_progress',), gp_listbox)
+            lbl_gp_in_progress.mousePressEvent = _gp_make_cycle(
+                ('in_progress', 'partially_in_progress'),
+                gp_listbox,
+            )
             lbl_gp_failed.mousePressEvent = _gp_make_cycle(('failed', 'qa_failed'), gp_listbox)
             lbl_gp_merged.mousePressEvent = _gp_make_cycle(('merged',), gp_listbox)
             lbl_gp_remaining.mousePressEvent = _gp_make_cycle(('not_completed', 'not_translated', 'no_tts'), gp_listbox)
