@@ -36,9 +36,12 @@ from Retranslation_GUI import (
     _derive_glossary_refinement_aggregate_status,
     _filter_glossary_source_chapter_map,
     _glossary_progress_filename_keys,
+    _glossary_refinement_row_detail,
+    _glossary_refinement_type_key,
     _index_epub_html_members,
     _match_epub_html_member_basename,
     _map_zero_based_glossary_progress_index,
+    _merge_glossary_refinement_row_info,
     _normalize_glossary_refinement_selection,
     _normalize_progress_match_name,
     _parallel_glossary_progress_filename_aliases,
@@ -416,6 +419,83 @@ def test_glossary_progress_reactivates_a_manually_removed_chapter(tmp_path):
     assert completed["manual_removed_indices"] == [1]
 
 
+@pytest.mark.parametrize(
+    ("configured_type", "section_type"),
+    [
+        ("concept", "concepts"),
+        ("equipment", "equipments"),
+        ("item", "items"),
+        ("skill", "skills"),
+        ("category", "categories"),
+        ("class", "classes"),
+    ],
+)
+def test_refinement_progress_matches_plural_section_headings(
+    configured_type,
+    section_type,
+):
+    assert _glossary_refinement_type_key(configured_type) == (
+        _glossary_refinement_type_key(section_type)
+    )
+
+
+def test_live_refinement_entries_invalidate_saved_no_entries_state():
+    merged = _merge_glossary_refinement_row_info(
+        {
+            "entry_type": "concept",
+            "status": "not_refined",
+            "entry_count_before": 181,
+            "current_entry_count": 181,
+            "entry_count_after": None,
+            "reason": "",
+        },
+        {
+            "entry_type": "concept",
+            "status": "skipped",
+            "entry_count_before": 0,
+            "entry_count_after": 0,
+            "reason": "no_entries",
+        },
+    )
+
+    assert merged["status"] == "not_refined"
+    assert merged["entry_count_before"] == 181
+    assert merged["current_entry_count"] == 181
+    assert merged["entry_count_after"] is None
+    assert merged["reason"] == ""
+    assert merged["_has_saved_progress"] is False
+
+
+@pytest.mark.parametrize(
+    ("info", "status", "expected"),
+    [
+        ({"current_entry_count": 181}, "not_refined", " | 181 entries"),
+        ({"current_entry_count": 1}, "not_refined", " | 1 entry"),
+        ({"current_entry_count": 0}, "skipped", " | 0 entries"),
+        (
+            {
+                "current_entry_count": 26,
+                "completed_chunks": 0,
+                "total_chunks": 2,
+            },
+            "in_progress",
+            " | 26 entries | chunks 0/2",
+        ),
+        (
+            {
+                "current_entry_count": 20,
+                "entry_count_before": 26,
+                "entry_count_after": 20,
+            },
+            "completed",
+            " | 20 entries | refined 26 -> 20",
+        ),
+    ],
+)
+def test_refinement_rows_always_show_live_entry_counts(info, status, expected):
+    assert _glossary_refinement_row_detail(info, status) == expected
+
+
 def test_glossary_progress_persists_structural_skips_separately(tmp_path):
     progress_file = tmp_path / "book_glossary_progress.json"
     context = make_glossary_progress_context(
@@ -497,7 +577,8 @@ def test_glossary_structural_skip_ui_and_default_toggle_are_wired():
     assert "'skipped_title_header_only': 'Title/Header Only (Skipped)'" in progress_gui
     assert 'lbl_gp_skipped = QLabel(f"⏭️ Skipped:' in progress_gui
     assert "lbl_gp_skipped.setVisible(True)" in progress_gui
-    assert "width_ratio=0.37" in progress_gui
+    assert "width_ratio=0.39" in progress_gui
+    assert "gp_stats_font = QFont('Arial', 9)" in progress_gui
     assert "'entries_by_ci': entries_by_ci" in progress_gui
     assert "cached_entries = cache.get('entries_by_ci', {}).get(ci, [])" in progress_gui
     assert "'skipped': len(_skip)" in progress_gui

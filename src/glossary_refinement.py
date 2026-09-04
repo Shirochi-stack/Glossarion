@@ -138,9 +138,17 @@ def _canonical_refinement_mode(value: Optional[str]) -> str:
 
 
 def _refinement_type_key(value: str) -> str:
-    """Normalize legacy singular/plural names used for the built-in term type."""
+    """Normalize configured types and plural section-heading names."""
     key = str(value or "").strip().casefold()
-    return "terms" if key in ("term", "terms") else key
+    if key in ("term", "terms"):
+        return "terms"
+    if len(key) > 3 and key.endswith("ies"):
+        return key[:-3] + "y"
+    if key.endswith(("sses", "xes", "ches", "shes", "zes")):
+        return key[:-2]
+    if len(key) > 1 and key.endswith("s") and not key.endswith(("ss", "us", "is")):
+        return key[:-1]
+    return key
 
 
 def _count_with_splitter(chapter_splitter, text: str) -> int:

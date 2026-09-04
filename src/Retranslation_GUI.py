@@ -1627,8 +1627,107 @@ def _combine_glossary_progress_legend_stats(
 
 
 def _glossary_refinement_type_key(value):
+    """Return a comparison key that accepts section-heading plurals."""
     key = str(value or '').strip().casefold()
-    return 'terms' if key in ('term', 'terms') else key
+    if key in ('term', 'terms'):
+        return 'terms'
+    if len(key) > 3 and key.endswith('ies'):
+        return key[:-3] + 'y'
+    if key.endswith(('sses', 'xes', 'ches', 'shes', 'zes')):
+        return key[:-2]
+    if len(key) > 1 and key.endswith('s') and not key.endswith(('ss', 'us', 'is')):
+        return key[:-1]
+    return key
+
+
+def _merge_glossary_refinement_row_info(expected_info, saved_info):
+    """Reconcile persisted refinement state with the live glossary counts."""
+    expected = dict(expected_info) if isinstance(expected_info, dict) else {}
+    saved = dict(saved_info) if isinstance(saved_info, dict) else None
+    represented = saved is not None
+    info = dict(expected)
+    if saved is not None:
+        info.update(saved)
+
+    expected_count = expected.get('entry_count_before')
+    try:
+        expected_count = int(expected_count or 0)
+    except (TypeError, ValueError):
+        expected_count = 0
+    saved_status = str((saved or {}).get('status') or '').strip().lower()
+    saved_reason = str((saved or {}).get('reason') or '').strip().lower()
+
+    def _zero_count(value):
+        try:
+            return int(value or 0) == 0
+        except (TypeError, ValueError):
+            return False
+
+    saved_no_entries = saved_reason == 'no_entries' or (
+        saved_status == 'skipped'
+        and _zero_count((saved or {}).get('entry_count_before'))
+        and _zero_count((saved or {}).get('entry_count_after'))
+    )
+
+    if expected_count > 0 and saved_no_entries:
+        # The former empty-state record is no longer a valid refinement result.
+        info = dict(expected)
+        represented = False
+    elif str(expected.get('reason') or '').strip().lower() == 'no_entries':
+        # Live emptiness always wins over a stale completed/in-progress record.
+        info.update(expected)
+
+    if 'current_entry_count' in expected:
+        # This is live glossary state, never historical progress metadata.
+        info['current_entry_count'] = expected.get('current_entry_count')
+    info['_has_saved_progress'] = represented
+    return info
+
+
+def _glossary_refinement_row_detail(info, status):
+    """Format live entry totals plus useful run-specific progress details."""
+    info = info if isinstance(info, dict) else {}
+    status = str(status or '').strip().lower()
+    parts = []
+
+    current_count = info.get('current_entry_count')
+    try:
+        current_count = int(current_count)
+    except (TypeError, ValueError):
+        current_count = None
+    if current_count is not None:
+        noun = 'entry' if current_count == 1 else 'entries'
+        parts.append(f'{current_count:,} {noun}')
+
+    if status == 'partially_in_progress':
+        parts.append(
+            f"{int(info.get('active_type_count') or 0)}/"
+            f"{int(info.get('total_type_count') or 0)} types active"
+        )
+
+    total_chunks = info.get('total_chunks')
+    if total_chunks and status in (
+        'in_progress',
+        'partially_in_progress',
+        'failed',
+        'refine_failed',
+    ):
+        parts.append(
+            f"chunks {int(info.get('completed_chunks') or 0)}/"
+            f"{int(total_chunks)}"
+        )
+
+    before = info.get('entry_count_before')
+    after = info.get('entry_count_after')
+    try:
+        before = int(before) if before is not None else None
+        after = int(after) if after is not None else None
+    except (TypeError, ValueError):
+        before = after = None
+    if status == 'completed' and before is not None and after is not None and before != after:
+        parts.append(f'refined {before:,} -> {after:,}')
+
+    return ''.join(f' | {part}' for part in parts)
 
 
 def _normalize_glossary_refinement_selection(refinement_keys, active_types):
@@ -22096,6 +22195,7 @@ class RetranslationMixin:
                     'status': 'not_refined' if aggregate_count else 'skipped',
                     'chunking_mode': chunking_mode,
                     'entry_count_before': aggregate_count,
+                    'current_entry_count': aggregate_count,
                     'is_aggregate': True,
                     'selected_types': list(active_types),
                     'reason': 'no_entries' if not aggregate_count else '',
@@ -22108,6 +22208,7 @@ class RetranslationMixin:
                     'status': 'not_refined' if entry_count else 'skipped',
                     'chunking_mode': chunking_mode,
                     'entry_count_before': entry_count,
+                    'current_entry_count': entry_count,
                     'entry_count_after': 0 if not entry_count else None,
                     'reason': 'no_entries' if not entry_count else '',
                 }
@@ -23588,7 +23689,6 @@ class RetranslationMixin:
                 expected = _glossary_refinement_expected_entries(_gp_glossary_entries(_d))
                 merged_rows = {}
                 for expected_key, expected_info in expected.items():
-                    info = dict(expected_info)
                     saved_info = refinement.get(expected_key)
                     if not isinstance(saved_info, dict) and expected_key.startswith('type::'):
                         expected_name = _refinement_type_key(expected_key.split('::', 1)[1])
@@ -23602,15 +23702,14 @@ class RetranslationMixin:
                             ),
                             None,
                         )
-                    info['_has_saved_progress'] = isinstance(saved_info, dict)
-                    if isinstance(saved_info, dict):
-                        info.update(saved_info)
+                    info = _merge_glossary_refinement_row_info(
+                        expected_info,
+                        saved_info,
+                    )
                     if expected_info.get('is_aggregate'):
                         info['entry_type'] = 'All Entry Types'
                         info['is_aggregate'] = True
                         info['selected_types'] = list(expected_info.get('selected_types') or [])
-                    if expected_info.get('reason') == 'no_entries':
-                        info.update(expected_info)
                     merged_rows[expected_key] = info
 
                 individual_infos = [
@@ -23624,14 +23723,14 @@ class RetranslationMixin:
                         [info.get('_has_saved_progress') for info in individual_infos],
                     )
                     aggregate_entry_count = sum(
-                        int(info.get('entry_count_before') or 0) for info in individual_infos
+                        int(info.get('current_entry_count') or 0) for info in individual_infos
                     )
                     merged_rows[aggregate_key]['status'] = aggregate_status
                     merged_rows[aggregate_key]['active_type_count'] = sum(
                         status == 'in_progress' for status in statuses
                     )
                     merged_rows[aggregate_key]['total_type_count'] = len(statuses)
-                    merged_rows[aggregate_key]['entry_count_before'] = aggregate_entry_count
+                    merged_rows[aggregate_key]['current_entry_count'] = aggregate_entry_count
                     if aggregate_status == 'skipped':
                         merged_rows[aggregate_key]['reason'] = 'no_entries'
                 rows = []
@@ -23641,21 +23740,8 @@ class RetranslationMixin:
                     entry_type = str(info.get('entry_type') or key.replace('type::', '')).strip() or 'entry type'
                     raw_status = str(info.get('status') or 'unknown').lower()
                     status = 'refine_failed' if raw_status in ('failed', 'error') else raw_status
-                    before = info.get('entry_count_before')
-                    after = info.get('entry_count_after')
-                    total_chunks = info.get('total_chunks')
-                    completed_chunks = info.get('completed_chunks')
                     model_name = str(info.get('model_name') or info.get('model') or '').strip() or '(model unknown)'
-                    detail = ""
-                    if status == 'partially_in_progress':
-                        detail = (
-                            f" | {int(info.get('active_type_count') or 0)}/"
-                            f"{int(info.get('total_type_count') or 0)} types active"
-                        )
-                    elif before is not None and after is not None:
-                        detail = f" | {before} -> {after} entries"
-                    elif total_chunks:
-                        detail = f" | chunks {completed_chunks or 0}/{total_chunks}"
+                    detail = _glossary_refinement_row_detail(info, status)
                     icon_map = {
                         'completed': '\u2705',
                         'skipped': '⏭️',
@@ -23975,7 +24061,7 @@ class RetranslationMixin:
             gp_stats_frame = QWidget()
             gp_stats_layout = QHBoxLayout(gp_stats_frame)
             gp_stats_layout.setContentsMargins(0, 5, 0, 5)
-            gp_stats_font = QFont('Arial', 10)
+            gp_stats_font = QFont('Arial', 9)
             
             lbl_total = QLabel(f"Total: {_legend_stats_init['total']} | ")
             lbl_total.setFont(gp_stats_font)
@@ -26201,7 +26287,7 @@ class RetranslationMixin:
                     pass
                 gp_dialog, gp_main_layout, loading_widget, loading_label = self._create_retranslation_shell_dialog(
                     gp_title_text,
-                    width_ratio=0.37,
+                    width_ratio=0.39,
                     height_ratio=0.45,
                 )
                 gp_dialog.setAttribute(Qt.WA_DeleteOnClose, False)

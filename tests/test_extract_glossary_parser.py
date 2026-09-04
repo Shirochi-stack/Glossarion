@@ -337,6 +337,65 @@ def test_refinement_no_entry_progress_uses_skipped_status(tmp_path, monkeypatch)
     assert no_entries["reason"] == "no_entries"
 
 
+def test_refinement_matches_plural_token_sections_to_singular_custom_types(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_ENABLED", "0")
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_SKIP_DEDUPE", "1")
+    configured_types = ["concept", "equipment", "item", "skill"]
+    entries = [
+        {
+            "type": section_type,
+            "raw_name": configured_type,
+            "translated_name": configured_type.title(),
+        }
+        for configured_type, section_type in zip(
+            configured_types,
+            ["concepts", "equipments", "items", "skills"],
+        )
+    ]
+    calls = []
+
+    result = refine_glossary_entries(
+        entries,
+        client=None,
+        temp=0.1,
+        mtoks=4096,
+        check_stop=lambda: False,
+        chapter_splitter=_RefinementTestSplitter(),
+        available_tokens=100000,
+        chunk_timeout=None,
+        parse_response_fn=lambda _response: [dict(entry) for entry in entries],
+        dedupe_fn=lambda value: value,
+        custom_entry_types_fn=lambda: {
+            entry_type: {"enabled": True} for entry_type in configured_types
+        },
+        send_fn=lambda *_args, **_kwargs: (
+            calls.append("sent") or "ignored",
+            "stop",
+            None,
+        ),
+        progress_file=str(tmp_path / "progress.json"),
+        output_path=str(tmp_path / "glossary.csv"),
+        log=lambda _message: None,
+        options=RefinementRunOptions(
+            selected_types=configured_types,
+            chunking_mode="all",
+            force=True,
+            run_when_disabled=True,
+        ),
+    )
+
+    assert calls == ["sent"]
+    assert len(result) == 4
+    progress = load_refinement_progress(str(tmp_path / "progress.json"))
+    assert all(
+        progress[f"type::{entry_type}"]["status"] == "completed"
+        for entry_type in configured_types
+    )
+
+
 @pytest.mark.parametrize(
     ("updates", "expected_complete", "reason_fragment"),
     [
