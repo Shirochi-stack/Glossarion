@@ -724,7 +724,12 @@ def _build_responses_body(
     The /backend-api/codex/responses endpoint expects:
       - "instructions": system-level instructions (required)
       - "input": list of {type, role, content:[{type, text}]} message objects
-      - "model", "store", and optional temperature / max_output_tokens
+      - "model", "store", "stream", and optional "reasoning"
+
+    Temperature is accepted for caller compatibility and omitted. A supplied
+    max_tokens is sent as max_output_tokens except for gpt-6-astra, which
+    rejects it. For other models, the send layer retries without it, with
+    an explicit log message, only if the backend rejects the field.
     """
     instructions = ""
     input_items: List[Dict[str, Any]] = []
@@ -817,7 +822,7 @@ def _build_responses_body(
         "stream": True,
     }
 
-    if max_tokens is not None:
+    if max_tokens is not None and model.strip().lower() != "gpt-6-astra":
         body["max_output_tokens"] = max_tokens
 
     if reasoning:
@@ -1329,6 +1334,26 @@ def _new_stream_state() -> Dict:
 # httpx-based SSE reader (preferred — real-time, no buffering)
 # ---------------------------------------------------------------------------
 
+class _UnsupportedOutputLimitError(RuntimeError):
+    """The backend rejected max_output_tokens before generation began."""
+
+
+def _is_unsupported_output_limit(status_code: int, error_body: str) -> bool:
+    if status_code != 400:
+        return False
+    try:
+        data = json.loads(error_body)
+        message = data.get("detail") or data.get("error") or data
+        if isinstance(message, dict):
+            message = message.get("message", "")
+    except (ValueError, AttributeError):
+        message = error_body
+    return bool(re.fullmatch(
+        r"\s*Unsupported parameter:\s*['\"]?max_output_tokens['\"]?\.?\s*",
+        str(message), re.IGNORECASE,
+    ))
+
+
 def _stream_with_httpx(
     _httpx,
     url: str,
@@ -1354,6 +1379,8 @@ def _stream_with_httpx(
     ) as resp:
         if resp.status_code >= 400:
             error_body = resp.read().decode("utf-8", errors="replace")
+            if "max_output_tokens" in body and _is_unsupported_output_limit(resp.status_code, error_body):
+                raise _UnsupportedOutputLimitError("AuthGPT: backend rejects max_output_tokens")
             reason = getattr(resp, "reason_phrase", "") or ""
             detail = error_body
             try:
@@ -1407,6 +1434,9 @@ def _stream_with_requests(
             error_body = resp.text
         except Exception:
             error_body = ""
+        if "max_output_tokens" in body and _is_unsupported_output_limit(resp.status_code, error_body):
+            resp.close()
+            raise _UnsupportedOutputLimitError("AuthGPT: backend rejects max_output_tokens")
         try:
             reason = resp.reason or ""
         except Exception:
@@ -1469,9 +1499,12 @@ def send_chat_completion(
     model : str
         Model name without the ``authgpt/`` prefix.
     temperature : float or None
-        Sampling temperature.
+        Accepted for caller compatibility; not sent to the Codex backend.
     max_tokens : int or None
-        Maximum response tokens.
+        Maximum response tokens. Omitted for gpt-6-astra with a note. For
+        other models, send as max_output_tokens; if the backend explicitly
+        rejects it, retry once without it and log that the limit cannot be
+        enforced.
     timeout : int
         Request timeout in seconds.
     base_url : str or None
@@ -1510,7 +1543,13 @@ def send_chat_completion(
     _log = log_fn or print
     logger.info("AuthGPT: POST %s  model=%s", url, model)
     if max_tokens is not None:
-        _log(f"📏 AuthGPT max_output_tokens={max_tokens}")
+        if "max_output_tokens" in body:
+            _log(f"📏 AuthGPT max_output_tokens={max_tokens}")
+        else:
+            _log(
+                f"📝 AuthGPT ({model}): max_output_tokens is omitted because the backend does not support it. "
+                f"The configured output limit ({max_tokens}) does not apply."
+            )
 
     # AuthGPT always streams (the API requires it), so streaming log is on
     # by default.  During batch translation, silence it unless the user
@@ -1527,13 +1566,30 @@ def send_chat_completion(
     # This is the same HTTP stack the official openai Python SDK uses.
     try:
         import httpx as _httpx
-        return _stream_with_httpx(
-            _httpx, url, body, headers, timeout, t_start,
-            _log, log_stream, connect_timeout=connect_timeout,
-        )
     except ImportError:
+        _httpx = None
         _log("⚠️ AuthGPT: httpx not installed, falling back to requests (streaming may be buffered)")
+
+    def _send(request_body):
+        if _httpx is not None:
+            return _stream_with_httpx(
+                _httpx, url, request_body, headers, timeout, t_start,
+                _log, log_stream, connect_timeout=connect_timeout,
+            )
         return _stream_with_requests(
-            url, body, headers, timeout, t_start,
+            url, request_body, headers, timeout, t_start,
             _log, log_stream,
         )
+
+    try:
+        return _send(body)
+    except _UnsupportedOutputLimitError:
+        if is_cancelled():
+            raise RuntimeError("AuthGPT: stream cancelled by user")
+        retry_body = dict(body)
+        retry_body.pop("max_output_tokens")
+        _log(
+            f"⚠️ AuthGPT ({model}): backend rejects max_output_tokens; retrying without it. "
+            f"The configured output limit ({max_tokens}) cannot be enforced for this request."
+        )
+        return _send(retry_body)

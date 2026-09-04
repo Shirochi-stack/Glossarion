@@ -116,6 +116,8 @@ tests/**
 !tests/test_shutdown_utils_cleanup.py
 !tests/test_authnd_captcha_navigation.py
 !tests/test_authgrok_auth.py
+!tests/test_authgpt_request.py
+!tests/test_openai_token_compatibility.py
 !tests/test_antigravity_proxy.py
 !tests/test_ocagy_cli.py
 !tests/test_epub_utils.py

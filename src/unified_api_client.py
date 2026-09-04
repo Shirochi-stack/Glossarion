@@ -2907,7 +2907,7 @@ class UnifiedClient:
     MODEL_CONSTRAINTS = {
         'temperature_fixed': ['o4-mini', 'o1-mini', 'o1-preview', 'o3-mini', 'o3', 'o3-pro', 'o4-mini', 'gpt-5-mini','gpt-5','gpt-5-nano'],
         'no_system_message': ['o1', 'o1-preview', 'o3', 'o3-pro'],
-        'max_completion_tokens': ['o4', 'o1', 'o3', 'gpt-5-mini','gpt-5','gpt-5-nano'],
+        'max_completion_tokens': ['o4', 'o1', 'o3', 'gpt-5-mini','gpt-5','gpt-5-nano', 'gpt-6'],
         'chinese_optimized': ['qwen', 'yi', 'glm', 'chatglm', 'baichuan', 'ernie', 'hunyuan'],
     }
     
@@ -16260,6 +16260,7 @@ class UnifiedClient:
           - Gemini / Gemma              → thinking level (Gemini 3) or thinking budget (2.x)
           - vertex/ / authgem / authgem-vertex (+ numbered variants) → treated as Gemini
           - GPT / OpenAI                → effort
+          - or/                         → reasoning tokens or effort
           - Anthropic                   → extended thinking (budget or adaptive effort)
           - Other wrapper prefixes      → '' (authgpt*, authza*, antigravity, za/)
           - Anything else               → ''
@@ -16392,14 +16393,14 @@ class UnifiedClient:
             return f" (reasoning_effort: {effort})" if effort else ""
 
         _openai_prefixes = ('gpt', 'o1', 'o3', 'o4', 'codex', 'chatgpt')
-        if any(model_lower.startswith(p) for p in _openai_prefixes):
+        if model_lower.startswith('or/') or any(model_lower.startswith(p) for p in _openai_prefixes):
             if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
                 return ""
             tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
-            if tokens_str.isdigit() and int(tokens_str) > 0:
+            if model_lower.startswith('or/') and tokens_str.isdigit() and int(tokens_str) > 0:
                 return f" (reasoning tokens: {int(tokens_str):,})"
             effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
-            if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
+            if effort not in ('none', 'low', 'medium', 'high', 'xhigh', 'max'):
                 effort = 'medium'
             return f" (effort: {effort})"
 
@@ -16925,6 +16926,15 @@ class UnifiedClient:
             status = resp.status_code
             if status in expected_status:
                 return resp
+            if (url.split('?', 1)[0].rstrip('/').endswith('/chat/completions')
+                    and self._repair_chat_completion_token_limit(json, status, resp.text)):
+                print(f"📝 [{provider}] Retrying with max_completion_tokens={json['max_completion_tokens']} instead of max_tokens.")
+                resp.close()
+                return self._http_request_with_retries(
+                    method, url, headers=headers, json=json,
+                    expected_status=expected_status, max_retries=max_retries - attempt,
+                    provider_name=provider_name, use_session=use_session,
+                )
             # Verbose retry notice so retries are never silent
             if attempt < max_retries - 1:
                 try:
@@ -17904,7 +17914,7 @@ class UnifiedClient:
             if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
                 return {"effort": "none"}
             effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
-            if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
+            if effort not in ('none', 'low', 'medium', 'high', 'xhigh', 'max'):
                 effort = 'medium'
             reasoning = {"effort": effort}
             if effort != 'none':
@@ -19673,6 +19683,54 @@ class UnifiedClient:
         
         raise UnifiedClientError("OpenAI API failed after all retries")
     
+    @staticmethod
+    def _is_gpt6_model_name(model: str) -> bool:
+        return bool(re.search(r'(?:^|/)gpt-?6(?:[.-]|$)', str(model or '').strip().lower()))
+
+    @classmethod
+    def _apply_gpt6_openai_constraints(cls, params: dict, use_responses_api: bool = False):
+        """Apply GPT-6's endpoint-specific token and sampling parameters."""
+        if not cls._is_gpt6_model_name(params.get('model')):
+            return
+        if not use_responses_api and 'max_tokens' in params:
+            limit = params.pop('max_tokens')
+            params.setdefault('max_completion_tokens', limit)
+        for key in ('temperature', 'top_p', 'top_logprobs', 'logprobs'):
+            params.pop(key, None)
+
+    @staticmethod
+    def _repair_chat_completion_token_limit(params: dict, status: int, error) -> bool:
+        """Rename a rejected max_tokens field only on an explicit server instruction."""
+        if status != 400 or not isinstance(params, dict) or 'max_tokens' not in params:
+            return False
+        if isinstance(error, dict):
+            error = error.get('error', error)
+            if isinstance(error, dict):
+                error = error.get('message', '')
+        message = str(error).lower().replace("'", '').replace('"', '')
+        if not (re.search(r'\bmax_tokens\b', message)
+                and ('unsupported parameter' in message or 'not supported' in message)
+                and re.search(r'\buse\s+max_completion_tokens\s+instead\b', message)):
+            return False
+        limit = params.pop('max_tokens')
+        params.setdefault('max_completion_tokens', limit)
+        return True
+
+    def _create_chat_completion_with_token_retry(self, create, call_kwargs: dict, provider: str):
+        """Retry a rejected Chat Completions request once with the required token field."""
+        try:
+            return create(**call_kwargs)
+        except Exception as exc:
+            if not self._repair_chat_completion_token_limit(
+                call_kwargs, self._extract_http_status_from_exception(exc),
+                getattr(exc, 'body', None) or str(exc),
+            ):
+                raise
+            if self._is_stop_requested():
+                raise UnifiedClientError("Operation cancelled", error_type="cancelled") from exc
+            print(f"📝 [{provider}] Retrying with max_completion_tokens={call_kwargs['max_completion_tokens']} instead of max_tokens.")
+            return create(**call_kwargs)
+
     def _build_openai_params(self, messages, temperature, max_tokens, max_completion_tokens=None):
         """Build parameters for OpenAI API call"""
         params = {
@@ -19696,6 +19754,7 @@ class UnifiedClient:
             if max_tokens is not None:
                 params["max_tokens"] = max_tokens
                 
+        self._apply_gpt6_openai_constraints(params)
         return params
     
     def _is_gemini_3_model(self) -> bool:
@@ -23792,6 +23851,9 @@ class UnifiedClient:
                     if extra_body:
                         call_kwargs["extra_body"] = extra_body
 
+                    if provider == 'openai':
+                        self._apply_gpt6_openai_constraints(call_kwargs, use_responses_api)
+
                     # Optional streaming toggle (text-only aggregation) - honor env, config, or runtime var
                     use_streaming = self._streaming_enabled()
                     # Streaming log toggle (must be defined before streaming extraction)
@@ -23822,7 +23884,9 @@ class UnifiedClient:
                         if use_responses_api:
                             resp = client.responses.create(**call_kwargs)
                         else:
-                            resp = client.chat.completions.create(**call_kwargs)
+                            resp = self._create_chat_completion_with_token_retry(
+                                client.chat.completions.create, call_kwargs, provider,
+                            )
                         # Register streaming response for proper cleanup
                         if use_streaming:
                             with self._active_streams_lock:
@@ -25644,6 +25708,8 @@ class UnifiedClient:
 
             # Apply safety flags
             self._apply_openai_safety(provider, disable_safety, data, headers)
+            if provider == 'openai':
+                self._apply_gpt6_openai_constraints(data, use_responses_api)
             # Save OpenRouter config if requested
             if provider == 'openrouter' and os.getenv("SAVE_PAYLOAD", "1") == "1":
                 cfg = {
@@ -30154,7 +30220,7 @@ class UnifiedClient:
         return self._send_vertex_model_garden(messages_with_image, temperature, max_tokens, response_name=response_name)
 
     def _is_o_series_model(self) -> bool:
-        """Check if the current model is an o-series model (o1, o3, o4, etc.) or GPT-5"""
+        """Check for o-series, GPT-5, or GPT-6 token-parameter handling."""
         if not self.model:
             return False
         
@@ -30174,6 +30240,9 @@ class UnifiedClient:
         
         # Check for GPT-5 models (including variants)
         if 'gpt-5' in model_lower or 'gpt5' in model_lower:
+            return True
+
+        if self._is_gpt6_model_name(model_lower):
             return True
         
         # Check if it starts with o followed by a digit
