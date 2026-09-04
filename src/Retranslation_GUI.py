@@ -1648,6 +1648,19 @@ def _normalize_glossary_refinement_selection(refinement_keys, active_types):
     ]
 
 
+def _resolve_dialog_window_parent(parent):
+    """Return the top-level window that owns a dialog-triggering child widget."""
+    if parent is None:
+        return None
+    try:
+        owner = parent.window()
+        if owner is not None:
+            return owner
+    except (AttributeError, RuntimeError):
+        pass
+    return parent
+
+
 def _derive_glossary_refinement_aggregate_status(statuses, represented=None):
     normalized = [str(status or 'not_refined').strip().lower() for status in statuses or []]
     if any(status in ('failed', 'error', 'refine_failed') for status in normalized):
@@ -22128,6 +22141,7 @@ class RetranslationMixin:
             selected_types,
             completed_types=None,
         ):
+            parent = _resolve_dialog_window_parent(parent)
             if hasattr(self, '_is_any_process_running') and self._is_any_process_running():
                 self._show_message(
                     'warning',
@@ -22231,7 +22245,7 @@ class RetranslationMixin:
             preview = QDialog(parent)
             preview.setObjectName('glossaryRefinementPreview')
             preview.setWindowTitle('Confirm Glossary Refinement')
-            preview.setModal(True)
+            preview.setWindowModality(Qt.WindowModal)
 
             # Keep the dialog proportional across resolutions and DPI settings.
             screen = parent.screen() if parent is not None and hasattr(parent, 'screen') else None
@@ -25400,7 +25414,7 @@ class RetranslationMixin:
                             ):
                                 completed_types.append(str(info.get('entry_type') or str(key).split('::', 1)[1]))
                     _confirm_manual_glossary_refinement(
-                        dialog,
+                        panel,
                         fp,
                         _find_gp_for_file(fp) or gp_path,
                         normalized_refinement_types,
@@ -25656,7 +25670,7 @@ class RetranslationMixin:
                                 )
                             )
                 _confirm_manual_glossary_refinement(
-                    dialog,
+                    panel,
                     fp,
                     _find_gp_for_file(fp) or gp_path,
                     refinement_types,

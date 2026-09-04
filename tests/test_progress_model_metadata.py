@@ -53,6 +53,7 @@ from Retranslation_GUI import (
     _progress_status_hides_model_for_display,
     _progress_item_is_html,
     _repair_empty_attribute_qa_file,
+    _resolve_dialog_window_parent,
     _snapshot_progress_output_dir,
     _select_progress_entry_for_display,
 )
@@ -2887,6 +2888,14 @@ def test_glossary_refinement_aggregate_selection_wins_over_specific_types():
         ["type::terms", "type::locations"],
         active,
     ) == ["term", "locations"]
+
+
+def test_refinement_dialog_uses_triggering_panels_top_level_window():
+    glossary_window = object()
+    glossary_panel = types.SimpleNamespace(window=lambda: glossary_window)
+
+    assert _resolve_dialog_window_parent(glossary_panel) is glossary_window
+    assert _resolve_dialog_window_parent(None) is None
 
 
 def test_glossary_progress_index_uses_filename_before_full_spine_row():

@@ -37,7 +37,7 @@ def _get_static_model_options() -> List[str]:
         # - gemini-3-pro-preview shut down March 9 2026, removed
         # - gemini-pro / gemini-pro-vision are legacy 1.0 models, removed
         # - gemini-2.0-flash/lite scheduled shutdown June 1 2026, still available
-        "gemini-3.6-flash","gemini-3.5-flash","gemini-3-flash-preview",
+        "gemini-3.8-flash","gemini-3.7-flash","gemini-3.6-flash","gemini-3.5-flash","gemini-3-flash-preview",
         "gemini-3.1-pro-preview","gemini-3.5-flash-lite","gemini-3.1-flash-lite",
         "gemini-3.1-flash-image-preview",
         "gemini-3-pro-image-preview",
@@ -336,6 +336,9 @@ def _get_static_model_options() -> List[str]:
         "antigravity/gemini-3.7-flash-low",
         "antigravity/gemini-3.7-flash-medium",
         "antigravity/gemini-3.7-flash-high",
+        "antigravity/gemini-3.8-flash-low",
+        "antigravity/gemini-3.8-flash-medium",
+        "antigravity/gemini-3.8-flash-high",
         "antigravity/gemini-3.5-flash-extra-low",
         "antigravity/gemini-3.5-flash-low",
         "antigravity/gemini-3.5-flash-medium",
