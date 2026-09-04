@@ -22213,52 +22213,355 @@ class RetranslationMixin:
                 return False
 
             preview = QDialog(parent)
+            preview.setObjectName('glossaryRefinementPreview')
             preview.setWindowTitle('Confirm Glossary Refinement')
             preview.setModal(True)
-            preview.resize(600, 430)
-            preview_layout = QVBoxLayout(preview)
-            heading = QLabel('The following glossary entries are about to be refined:')
-            heading.setStyleSheet('font-size: 11pt; font-weight: bold; color: #d8f3dc;')
-            preview_layout.addWidget(heading)
 
-            scope_lines = []
+            # Keep the dialog proportional across resolutions and DPI settings.
+            screen = parent.screen() if parent is not None and hasattr(parent, 'screen') else None
+            screen = screen or QApplication.primaryScreen()
+            if screen is not None:
+                available_geometry = screen.availableGeometry()
+                dialog_height = max(1, round(available_geometry.height() * 0.62))
+                dialog_width = max(
+                    1,
+                    round(min(
+                        available_geometry.width() * 0.48,
+                        dialog_height * 1.46,
+                    )),
+                )
+                preview.setMinimumSize(
+                    max(1, round(available_geometry.width() * 0.30)),
+                    max(1, round(available_geometry.height() * 0.40)),
+                )
+                preview.resize(dialog_width, dialog_height)
+                preview_frame = preview.frameGeometry()
+                if parent is not None:
+                    preview_frame.moveCenter(parent.window().frameGeometry().center())
+                else:
+                    preview_frame.moveCenter(available_geometry.center())
+                target_x = min(
+                    max(preview_frame.left(), available_geometry.left()),
+                    available_geometry.right() - preview_frame.width() + 1,
+                )
+                target_y = min(
+                    max(preview_frame.top(), available_geometry.top()),
+                    available_geometry.bottom() - preview_frame.height() + 1,
+                )
+                preview.move(target_x, target_y)
+
+            preview.setStyleSheet("""
+                QDialog#glossaryRefinementPreview {
+                    background-color: #151a21;
+                    color: #e7edf5;
+                }
+                QWidget#glossaryRefinementBody {
+                    background-color: transparent;
+                }
+                QScrollArea#glossaryRefinementScroll {
+                    background-color: transparent;
+                    border: none;
+                }
+                QScrollArea#glossaryRefinementScroll > QWidget > QWidget {
+                    background-color: transparent;
+                }
+                QFrame#refinementHero {
+                    background-color: #1c2632;
+                    border: 1px solid #33475d;
+                    border-radius: 10px;
+                }
+                QLabel#refinementHeroIcon {
+                    background-color: #263c4b;
+                    border: 1px solid #3f6574;
+                    border-radius: 8px;
+                    padding: 6px;
+                }
+                QLabel#refinementHeroTitle {
+                    color: #f3f8fb;
+                    font-size: 13pt;
+                    font-weight: 700;
+                }
+                QLabel#refinementHeroSubtitle,
+                QLabel#refinementSectionHint,
+                QLabel#refinementMetricHint,
+                QLabel#refinementOverrideHint,
+                QLabel#refinementNote {
+                    color: #91a0b3;
+                }
+                QLabel#refinementSectionTitle {
+                    color: #dce8f2;
+                    font-size: 10pt;
+                    font-weight: 700;
+                }
+                QFrame#refinementScopeCard,
+                QFrame#refinementOverrideCard {
+                    background-color: #1a2029;
+                    border: 1px solid #303b49;
+                    border-radius: 9px;
+                }
+                QFrame#refinementScopeRow {
+                    background-color: #202936;
+                    border: 1px solid #334052;
+                    border-radius: 7px;
+                }
+                QLabel#refinementTypeName {
+                    color: #e8eef5;
+                    font-weight: 650;
+                }
+                QLabel#refinementTypeStats {
+                    color: #9fb2c8;
+                }
+                QLabel#refinementTypeStatsEmpty {
+                    color: #737f8e;
+                }
+                QFrame#refinementMetricCard {
+                    background-color: #202b38;
+                    border: 1px solid #34465a;
+                    border-radius: 8px;
+                }
+                QLabel#refinementMetricLabel {
+                    color: #8ea2b8;
+                    font-size: 8pt;
+                    font-weight: 700;
+                }
+                QLabel#refinementMetricValue {
+                    color: #f0f6fb;
+                    font-size: 13pt;
+                    font-weight: 700;
+                }
+                QFrame#refinementWarningCard {
+                    background-color: #302918;
+                    border: 1px solid #755d20;
+                    border-radius: 8px;
+                }
+                QLabel#refinementWarningText {
+                    color: #f2c75c;
+                    font-weight: 600;
+                }
+                QCheckBox#refinementOverrideCheckbox {
+                    color: #edf3f8;
+                    font-weight: 650;
+                    spacing: 8px;
+                }
+                QCheckBox#refinementOverrideCheckbox::indicator {
+                    width: 18px;
+                    height: 18px;
+                    border: 1px solid #5f7388;
+                    border-radius: 4px;
+                    background-color: #12171d;
+                }
+                QCheckBox#refinementOverrideCheckbox::indicator:checked {
+                    background-color: #52b788;
+                    border-color: #74c69d;
+                }
+                QSpinBox#refinementChunkCount {
+                    color: #edf3f8;
+                    background-color: #11171e;
+                    border: 1px solid #435267;
+                    border-radius: 6px;
+                    padding: 5px 8px;
+                }
+                QSpinBox#refinementChunkCount:disabled {
+                    color: #687687;
+                    background-color: #171d25;
+                    border-color: #2b3440;
+                }
+                QLabel#refinementOneRunBadge {
+                    color: #76cfa4;
+                    background-color: #1d3b32;
+                    border: 1px solid #315e4e;
+                    border-radius: 7px;
+                    padding: 3px 7px;
+                    font-size: 8pt;
+                    font-weight: 700;
+                }
+                QPushButton#refinementPrimaryButton {
+                    color: #07150f;
+                    background-color: #74c69d;
+                    border: 1px solid #8bd3ae;
+                    border-radius: 7px;
+                    padding: 10px 26px;
+                    font-weight: 700;
+                }
+                QPushButton#refinementPrimaryButton:hover {
+                    background-color: #8bd3ae;
+                }
+                QPushButton#refinementPrimaryButton:pressed {
+                    background-color: #52b788;
+                }
+                QPushButton#refinementCancelButton {
+                    color: #dce5ee;
+                    background-color: #252d38;
+                    border: 1px solid #465363;
+                    border-radius: 7px;
+                    padding: 10px 26px;
+                }
+                QPushButton#refinementCancelButton:hover {
+                    background-color: #313b48;
+                    border-color: #5b6a7d;
+                }
+                QScrollBar:vertical {
+                    background: #151a21;
+                    width: 9px;
+                    margin: 2px;
+                }
+                QScrollBar::handle:vertical {
+                    background: #445267;
+                    border-radius: 4px;
+                    min-height: 28px;
+                }
+                QScrollBar::add-line:vertical,
+                QScrollBar::sub-line:vertical {
+                    height: 0px;
+                }
+            """)
+
+            preview_layout = QVBoxLayout(preview)
+            preview_layout.setContentsMargins(14, 14, 14, 12)
+            preview_layout.setSpacing(8)
+
+            hero = QFrame(preview)
+            hero.setObjectName('refinementHero')
+            hero_layout = QHBoxLayout(hero)
+            hero_layout.setContentsMargins(13, 10, 13, 10)
+            hero_layout.setSpacing(10)
+            hero_icon = QLabel('✨')
+            hero_icon.setObjectName('refinementHeroIcon')
+            hero_icon.setAlignment(Qt.AlignCenter)
+            hero_layout.addWidget(hero_icon, 0, Qt.AlignTop)
+            hero_copy = QVBoxLayout()
+            hero_copy.setSpacing(3)
+            hero_title = QLabel('Ready to refine glossary entries')
+            hero_title.setObjectName('refinementHeroTitle')
+            hero_subtitle = QLabel(
+                'Review the selected scope and request plan before starting the refinement pass.'
+            )
+            hero_subtitle.setObjectName('refinementHeroSubtitle')
+            hero_subtitle.setWordWrap(True)
+            hero_copy.addWidget(hero_title)
+            hero_copy.addWidget(hero_subtitle)
+            hero_layout.addLayout(hero_copy, 1)
+            preview_layout.addWidget(hero)
+
+            content_scroll = QScrollArea(preview)
+            content_scroll.setObjectName('glossaryRefinementScroll')
+            content_scroll.setWidgetResizable(True)
+            content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            content_scroll.setFrameShape(QFrame.NoFrame)
+            content = QWidget(content_scroll)
+            content.setObjectName('glossaryRefinementBody')
+            content_layout = QVBoxLayout(content)
+            content_layout.setContentsMargins(0, 0, 4, 0)
+            content_layout.setSpacing(8)
+
+            scope_card = QFrame(content)
+            scope_card.setObjectName('refinementScopeCard')
+            scope_layout = QVBoxLayout(scope_card)
+            scope_layout.setContentsMargins(11, 9, 11, 10)
+            scope_layout.setSpacing(6)
+            scope_title = QLabel('SELECTED ENTRY TYPES')
+            scope_title.setObjectName('refinementSectionTitle')
+            scope_hint = QLabel('Empty types remain visible but will not generate an API request.')
+            scope_hint.setObjectName('refinementSectionHint')
+            scope_hint.setWordWrap(True)
+            scope_layout.addWidget(scope_title)
+            scope_layout.addWidget(scope_hint)
             for entry_type in selected_types:
                 count = automatic_plan.per_type_counts.get(entry_type, 0)
                 tokens = automatic_plan.per_type_tokens.get(entry_type, 0)
-                suffix = ' (no entries; skipped)' if count == 0 else ''
-                scope_lines.append(f'• {entry_type}: {count:,} entries, {tokens:,} tokens{suffix}')
-            scope_label = QLabel('\n'.join(scope_lines))
-            scope_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            scope_label.setStyleSheet('color: #cbd5e1; padding: 6px;')
-            preview_layout.addWidget(scope_label)
+                scope_row = QFrame(scope_card)
+                scope_row.setObjectName('refinementScopeRow')
+                scope_row_layout = QHBoxLayout(scope_row)
+                scope_row_layout.setContentsMargins(9, 6, 9, 6)
+                scope_name = QLabel(entry_type)
+                scope_name.setObjectName('refinementTypeName')
+                scope_name.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                scope_row_layout.addWidget(scope_name, 1)
+                if count:
+                    scope_stats = QLabel(f'{count:,} entries  •  {tokens:,} tokens')
+                    scope_stats.setObjectName('refinementTypeStats')
+                else:
+                    scope_stats = QLabel('NO ENTRIES  •  SKIPPED')
+                    scope_stats.setObjectName('refinementTypeStatsEmpty')
+                scope_stats.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                scope_row_layout.addWidget(scope_stats, 0, Qt.AlignRight)
+                scope_layout.addWidget(scope_row)
+            content_layout.addWidget(scope_card)
 
             mode_name = 'Send all selected types together' if request_mode == 'all' else 'Send each type separately'
-            summary = QLabel(
-                f'<b>Total glossary payload:</b> {automatic_plan.total_payload_tokens:,} tokens<br>'
-                f'<b>Saved request mode:</b> {request_mode} — {mode_name}<br>'
-                f'<b>Automatic safe token budget:</b> {safe_budget:,} tokens per chunk<br>'
-                f'<b>Automatic chunk count:</b> {automatic_plan.total_chunks:,}'
+            metric_grid = QGridLayout()
+            metric_grid.setContentsMargins(0, 0, 0, 0)
+            metric_grid.setHorizontalSpacing(8)
+            metric_grid.setVerticalSpacing(8)
+            metric_grid.setColumnStretch(0, 1)
+            metric_grid.setColumnStretch(1, 1)
+            metric_values = (
+                ('PAYLOAD TOKENS', f'{automatic_plan.total_payload_tokens:,}', 'Tokenizer estimate'),
+                ('AUTOMATIC CHUNKS', f'{automatic_plan.total_chunks:,}', 'Using the saved split logic'),
+                ('SAFE BUDGET', f'{safe_budget:,}', 'Input tokens per chunk'),
+                ('REQUEST MODE', request_mode.upper(), mode_name),
             )
-            summary.setStyleSheet('color: #e2e8f0; padding: 6px; background: #263445; border-radius: 4px;')
-            preview_layout.addWidget(summary)
+            for metric_index, (metric_label_text, metric_value_text, metric_hint_text) in enumerate(metric_values):
+                metric_card = QFrame(content)
+                metric_card.setObjectName('refinementMetricCard')
+                metric_layout = QVBoxLayout(metric_card)
+                metric_layout.setContentsMargins(10, 7, 10, 8)
+                metric_layout.setSpacing(1)
+                metric_label = QLabel(metric_label_text)
+                metric_label.setObjectName('refinementMetricLabel')
+                metric_value = QLabel(metric_value_text)
+                metric_value.setObjectName('refinementMetricValue')
+                metric_value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                metric_hint = QLabel(metric_hint_text)
+                metric_hint.setObjectName('refinementMetricHint')
+                metric_hint.setWordWrap(True)
+                metric_layout.addWidget(metric_label)
+                metric_layout.addWidget(metric_value)
+                metric_layout.addWidget(metric_hint)
+                metric_grid.addWidget(metric_card, metric_index // 2, metric_index % 2)
+            content_layout.addLayout(metric_grid)
 
             completed_lc = {_refinement_type_key(name) for name in completed_types or []}
             already_refined = [name for name in selected_types if _refinement_type_key(name) in completed_lc]
             if already_refined:
+                warning_card = QFrame(content)
+                warning_card.setObjectName('refinementWarningCard')
+                warning_layout = QHBoxLayout(warning_card)
+                warning_layout.setContentsMargins(10, 8, 10, 8)
                 warning = QLabel(
                     '⚠️ Already refined: ' + ', '.join(already_refined)
                     + '. This explicit action will replace those types with fresh refinement results.'
                 )
+                warning.setObjectName('refinementWarningText')
                 warning.setWordWrap(True)
-                warning.setStyleSheet('color: #fbbf24; font-weight: bold; padding: 6px;')
-                preview_layout.addWidget(warning)
+                warning_layout.addWidget(warning)
+                content_layout.addWidget(warning_card)
 
-            override_checkbox = QCheckBox('Override automatic split')
+            override_card = QFrame(content)
+            override_card.setObjectName('refinementOverrideCard')
+            override_layout = QVBoxLayout(override_card)
+            override_layout.setContentsMargins(11, 9, 11, 10)
+            override_layout.setSpacing(6)
+            override_header = QHBoxLayout()
+            override_checkbox = QCheckBox('Override automatic split', override_card)
+            override_checkbox.setObjectName('refinementOverrideCheckbox')
             override_checkbox.setChecked(False)
-            preview_layout.addWidget(override_checkbox)
+            override_header.addWidget(override_checkbox)
+            override_header.addStretch()
+            one_run_badge = QLabel('ONE RUN ONLY')
+            one_run_badge.setObjectName('refinementOneRunBadge')
+            override_header.addWidget(one_run_badge)
+            override_layout.addLayout(override_header)
+            override_hint = QLabel(
+                'Leave this off to use automatic splitting, or choose the exact total number of chunks for this run.'
+            )
+            override_hint.setObjectName('refinementOverrideHint')
+            override_hint.setWordWrap(True)
+            override_layout.addWidget(override_hint)
             chunk_row = QHBoxLayout()
             chunk_row.addWidget(QLabel('Exact total chunk count:'))
-            chunk_count = QSpinBox(preview)
+            chunk_count = QSpinBox(override_card)
+            chunk_count.setObjectName('refinementChunkCount')
             minimum_chunks = 1 if request_mode == 'all' else len(non_empty_types)
             maximum_chunks = sum(automatic_plan.per_type_counts.get(name, 0) for name in non_empty_types)
             chunk_count.setRange(max(1, minimum_chunks), max(1, maximum_chunks))
@@ -22267,15 +22570,30 @@ class RetranslationMixin:
             chunk_count.setToolTip('This one-run override never changes the saved Refinement settings.')
             override_checkbox.toggled.connect(chunk_count.setEnabled)
             chunk_row.addWidget(chunk_count)
+            chunk_range = QLabel(f'Allowed range: {chunk_count.minimum():,}–{chunk_count.maximum():,}')
+            chunk_range.setObjectName('refinementSectionHint')
+            chunk_row.addWidget(chunk_range)
             chunk_row.addStretch()
-            preview_layout.addLayout(chunk_row)
+            override_layout.addLayout(chunk_row)
+            content_layout.addWidget(override_card)
 
-            note = QLabel('Chunks always split between complete glossary entries; a CSV row is never divided.')
+            note = QLabel('ℹ️ Chunk boundaries always fall between complete glossary entries; CSV rows are never divided.')
+            note.setObjectName('refinementNote')
             note.setWordWrap(True)
-            note.setStyleSheet('color: #94a3b8; font-size: 9pt; font-style: italic;')
-            preview_layout.addWidget(note)
+            content_layout.addWidget(note)
+            content_layout.addStretch()
+            content_scroll.setWidget(content)
+            preview_layout.addWidget(content_scroll, 1)
+
             buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=preview)
-            buttons.button(QDialogButtonBox.Ok).setText('Refine Now')
+            buttons.setCenterButtons(True)
+            buttons.layout().setSpacing(18)
+            refine_button = buttons.button(QDialogButtonBox.Ok)
+            refine_button.setObjectName('refinementPrimaryButton')
+            refine_button.setText('✨  Refine Now')
+            refine_button.setDefault(True)
+            cancel_button = buttons.button(QDialogButtonBox.Cancel)
+            cancel_button.setObjectName('refinementCancelButton')
             buttons.accepted.connect(preview.accept)
             buttons.rejected.connect(preview.reject)
             preview_layout.addWidget(buttons)
