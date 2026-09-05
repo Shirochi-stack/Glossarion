@@ -23054,13 +23054,21 @@ Recent translations to summarize:
         autofill_checkbox = self._create_styled_checkbox("Enable profile name autofill")
         autofill_checkbox.setObjectName("profile_name_autofill_checkbox")
         autofill_checkbox.setChecked(bool(self.config.get('profile_name_autofill', True)))
-        autofill_checkbox.setToolTip("Complete existing profile names as you type in the main profile field. On by default.")
+        autofill_checkbox.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Complete existing profile names as you type in the main profile field. On by default."
+            "</p></qt>"
+        )
         layout.addWidget(autofill_checkbox)
 
         wheel_lock_checkbox = self._create_styled_checkbox("Lock mouse wheel")
         wheel_lock_checkbox.setObjectName("profile_mousewheel_lock_checkbox")
         wheel_lock_checkbox.setChecked(bool(self.config.get('profile_mousewheel_locked', False)))
-        wheel_lock_checkbox.setToolTip("Prevent the mouse wheel from changing the main profile selection. Off by default.")
+        wheel_lock_checkbox.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Prevent the mouse wheel from changing the main profile selection. Off by default."
+            "</p></qt>"
+        )
         layout.addWidget(wheel_lock_checkbox)
         
         # Horizontal layout for list and buttons
@@ -23783,15 +23791,21 @@ Recent translations to summarize:
             self.config.get('model_manager_hide_unpolled_models', False)
         ))
         hide_unpolled_toggle.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
             "Show only models marked ✓ by successful provider catalog polls. "
             "This also filters model search dropdowns without changing the saved model list."
+            "</p></qt>"
         )
         button_column.addWidget(hide_unpolled_toggle)
 
         wheel_lock_toggle = self._create_styled_checkbox("Lock mouse wheel")
         wheel_lock_toggle.setObjectName("model_mousewheel_lock_checkbox")
         wheel_lock_toggle.setChecked(bool(self.config.get('model_mousewheel_locked', True)))
-        wheel_lock_toggle.setToolTip("Prevent the mouse wheel from changing the main model selection. On by default.")
+        wheel_lock_toggle.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Prevent the mouse wheel from changing the main model selection. On by default."
+            "</p></qt>"
+        )
         button_column.addWidget(wheel_lock_toggle)
         dialog._model_mousewheel_lock_toggle = wheel_lock_toggle
 
