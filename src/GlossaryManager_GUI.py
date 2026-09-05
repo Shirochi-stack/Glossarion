@@ -586,9 +586,9 @@ class GlossaryManagerMixin:
         """Persist profile changes through the main config saver when available."""
         try:
             if hasattr(self, 'save_config'):
-                self.save_config(show_message=False)
+                return self.save_config(show_message=False)
         except Exception:
-            pass
+            return False
 
     def _refresh_glossary_prompt_profile_combo(self, profile_key, selected_name=None):
         widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
@@ -649,16 +649,13 @@ class GlossaryManagerMixin:
         if combo is None or editor is None:
             return
         name = combo.currentText().strip()
-        if not name or self._is_default_glossary_prompt_profile(name):
-            self._set_default_glossary_prompt_profile_text(profile_key, self._glossary_prompt_text(editor))
-            self._set_active_glossary_prompt_profile(profile_key, '')
-            self._sync_glossary_prompt_profile_current_prompt(profile_key)
-            return
         profiles = self._glossary_prompt_profiles_for(profile_key)
         active = self._active_glossary_prompt_profile_for(profile_key)
-        if name in profiles and active == name:
-            profiles[name] = self._glossary_prompt_text(editor)
-            self.config['glossary_prompt_profiles'][profile_key] = profiles
+        if active in profiles:
+            profiles[active] = self._glossary_prompt_text(editor)
+        elif not name or self._is_default_glossary_prompt_profile(name):
+            self._set_default_glossary_prompt_profile_text(profile_key, self._glossary_prompt_text(editor))
+            self._set_active_glossary_prompt_profile(profile_key, '')
         self._sync_glossary_prompt_profile_current_prompt(profile_key)
 
     def _new_glossary_prompt_profile(self, profile_key):
@@ -698,6 +695,15 @@ class GlossaryManagerMixin:
             QMessageBox.warning(self, "Profile Name Required", "Enter a profile name before saving.")
             return
 
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        active = self._active_glossary_prompt_profile_for(profile_key)
+        if self._is_default_glossary_prompt_profile(name) and active:
+            QMessageBox.warning(self, "Default Profile", "Default is reserved. Choose another profile name.")
+            return
+        if name in profiles and name != active:
+            QMessageBox.warning(self, "Profile Name Exists", "A profile with this name already exists. Choose another name.")
+            return
+
         if self._is_default_glossary_prompt_profile(name):
             self._set_default_glossary_prompt_profile_text(profile_key, self._glossary_prompt_text(editor))
             self._set_active_glossary_prompt_profile(profile_key, '')
@@ -708,13 +714,26 @@ class GlossaryManagerMixin:
                 self.append_log("✅ Saved default glossary prompt profile")
             return
 
-        profiles = self._glossary_prompt_profiles_for(profile_key)
-        profiles[name] = self._glossary_prompt_text(editor)
+        previous_profiles = dict(profiles)
+        text = self._glossary_prompt_text(editor)
+        if active in profiles and name != active:
+            profiles = {
+                (name if key == active else key): (text if key == active else value)
+                for key, value in profiles.items()
+            }
+        else:
+            profiles[name] = text
         self.config['glossary_prompt_profiles'][profile_key] = profiles
         self._set_active_glossary_prompt_profile(profile_key, name)
         self._refresh_glossary_prompt_profile_combo(profile_key, name)
         self._sync_glossary_prompt_profile_current_prompt(profile_key)
-        self._persist_glossary_prompt_profiles()
+        if self._persist_glossary_prompt_profiles() is False:
+            self.config['glossary_prompt_profiles'][profile_key] = previous_profiles
+            self._set_active_glossary_prompt_profile(profile_key, active)
+            self._refresh_glossary_prompt_profile_combo(profile_key, active)
+            combo.setEditText(name)
+            QMessageBox.warning(self, "Save Failed", "Could not save the glossary prompt profile. Please try again.")
+            return
         if hasattr(self, 'append_log'):
             self.append_log(f"✅ Saved glossary prompt profile: '{name}'")
 

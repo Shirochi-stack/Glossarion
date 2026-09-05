@@ -8,6 +8,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+import tiktoken
 
 pytest.importorskip("PySide6")
 
@@ -82,7 +83,7 @@ def qapp():
 def _bind_production_methods():
     for name, method in _production_methods(
         "translator_gui.py", "TranslatorGUI",
-        ["show_assistant_prompt_dialog", "_add_combobox_arrow"],
+        ["show_assistant_prompt_dialog", "_add_combobox_arrow", "_count_assistant_prompt_tokens"],
     ).items():
         setattr(_PromptHarness, name, method)
     for name, method in _production_methods(
@@ -143,12 +144,13 @@ def _select(combo, name):
     combo.setCurrentIndex(index)
 
 
-def _assert_count(window, expected):
+def _assert_count(window, text):
+    expected = len(tiktoken.get_encoding("cl100k_base").encode(text, disallowed_special=()))
     labels = [
         label.text() for label in window._assistant_prompt_dialog.findChildren(QLabel)
-        if label.text().startswith("Characters:")
+        if label.text().startswith("Tokens:")
     ]
-    assert labels == [f"Characters: {expected}"]
+    assert labels == [f"Tokens: {expected:,}"]
 
 
 def _profiles_config():
@@ -229,7 +231,7 @@ def test_popup_clicks_to_and_from_default_survive_suppressed_mouse_release(make_
 
 
 def test_legacy_prompt_opens_as_plain_text_default_and_reuses_nonmodal_dialog(make_harness):
-    prompt = "<analysis>Keep & preserve <b>literal tags</b></analysis>\nSecond line"
+    prompt = "<analysis>Keep & preserve <b>literal tags</b></analysis>\nSecond line\n<|endoftext|>"
     config = {"assistant_prompt": prompt}
     window = make_harness(config)
     dialog, combo, editor = _widgets(window)
@@ -239,7 +241,7 @@ def test_legacy_prompt_opens_as_plain_text_default_and_reuses_nonmodal_dialog(ma
     assert combo.isEditable()
     assert combo.itemText(0) == combo.currentText() == "Default"
     assert editor.toPlainText() == prompt
-    _assert_count(window, len(prompt))
+    _assert_count(window, prompt)
     assert window.config == config
     assert window.saved_configs == []
 
@@ -259,7 +261,7 @@ def test_profile_switching_preserves_drafts_but_cancel_discards_them(make_harnes
     editor.setPlainText("Alpha draft")
     _select(combo, "Beta")
     assert editor.toPlainText() == "Beta saved"
-    _assert_count(window, len("Beta saved"))
+    _assert_count(window, "Beta saved")
     editor.setPlainText("Beta draft with <tags>")
     _select(combo, "Default")
     assert editor.toPlainText() == "Default saved"
@@ -268,7 +270,7 @@ def test_profile_switching_preserves_drafts_but_cancel_discards_them(make_harnes
     assert editor.toPlainText() == "Alpha draft"
     _select(combo, "Beta")
     assert editor.toPlainText() == "Beta draft with <tags>"
-    _assert_count(window, len("Beta draft with <tags>"))
+    _assert_count(window, "Beta draft with <tags>")
     assert window.config == config
     assert window.assistant_prompt == "Alpha saved"
     assert window.saved_configs == []
@@ -329,7 +331,7 @@ def test_new_profile_uses_first_unused_number_and_saves_empty_prompt(make_harnes
     assert window._assistant_prompt_dialog is dialog
     assert combo.currentText() == "New Profile #2"
     assert editor.toPlainText() == ""
-    _assert_count(window, 0)
+    _assert_count(window, "")
     assert window.config["assistant_prompt_profiles"] == {
         "New Profile #1": "One", "New Profile #2": "", "New Profile #3": "Three",
     }
@@ -337,15 +339,66 @@ def test_new_profile_uses_first_unused_number_and_saves_empty_prompt(make_harnes
     assert window.saved_configs[-1]["assistant_prompt"] == window.assistant_prompt == ""
 
 
+@pytest.mark.parametrize("save_button", ["💾 Save Profile", "Save"])
+def test_rename_replaces_selected_profile_and_preserves_order(make_harness, save_button):
+    window = make_harness(_profiles_config())
+    _, combo, editor = _widgets(window)
+    combo.setEditText("  Renamed  ")
+    editor.setPlainText("Updated prefill")
+    _click(window, save_button)
+
+    assert list(window.config["assistant_prompt_profiles"]) == ["Renamed", "Beta"]
+    assert window.config["assistant_prompt_profiles"] == {
+        "Renamed": "Updated prefill", "Beta": "Beta saved",
+    }
+    assert window.config["active_assistant_prompt_profile"] == "Renamed"
+    assert window.assistant_prompt == "Updated prefill"
+    if window._assistant_prompt_dialog is not None:
+        _click(window, "Cancel")
+    window.assistant_prompt_button.click()
+    _, combo, editor = _widgets(window)
+    assert combo.currentText() == "Renamed"
+    assert combo.findText("Alpha") == -1
+    assert editor.toPlainText() == "Updated prefill"
+
+
+@pytest.mark.parametrize("name", ["Beta", "dEfAuLt"])
+def test_rename_cannot_overwrite_another_profile(make_harness, name):
+    window = make_harness(_profiles_config())
+    _, combo, editor = _widgets(window)
+    combo.setEditText(name)
+    editor.setPlainText("Must not overwrite destination")
+    _click(window, "💾 Save Profile")
+    assert window.config == _profiles_config()
+    assert window.saved_configs == []
+    _select(combo, "Default")
+    assert editor.toPlainText() == "Default saved"
+
+
+def test_failed_rename_can_be_retried_without_leaving_a_duplicate(make_harness, monkeypatch):
+    window = make_harness(_profiles_config())
+    _, combo, _ = _widgets(window)
+    combo.setEditText("Renamed")
+    monkeypatch.setattr(window, "save_config", lambda **kwargs: False)
+    _click(window, "Save")
+    assert window.config == _profiles_config()
+    assert window._assistant_prompt_dialog is not None
+
+    monkeypatch.setattr(window, "save_config", _PromptHarness.save_config.__get__(window))
+    _click(window, "Save")
+    assert list(window.config["assistant_prompt_profiles"]) == ["Renamed", "Beta"]
+    assert window.config["active_assistant_prompt_profile"] == "Renamed"
+
+
 def test_delete_confirmation_and_fallback_update_runtime_prompt(make_harness, monkeypatch):
     window = make_harness(_profiles_config())
     _, combo, editor = _widgets(window)
-    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.No)
+    monkeypatch.setattr(QMessageBox, "exec", lambda *args, **kwargs: QMessageBox.No)
     _click(window, "🗑 Delete Profile")
     assert window.config == _profiles_config()
     assert window.saved_configs == []
 
-    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    monkeypatch.setattr(QMessageBox, "exec", lambda *args, **kwargs: QMessageBox.Yes)
     _click(window, "🗑 Delete Profile")
     assert combo.currentText() == "Beta"
     assert editor.toPlainText() == "Beta saved"
@@ -366,7 +419,7 @@ def test_default_name_is_case_insensitive_and_cannot_be_deleted(make_harness, mo
     _, combo, editor = _widgets(window)
     confirmations = []
     monkeypatch.setattr(
-        QMessageBox, "question",
+        QMessageBox, "exec",
         lambda *args, **kwargs: confirmations.append(args) or QMessageBox.Yes,
     )
     combo.setEditText("  dEfAuLt  ")
@@ -409,7 +462,7 @@ def test_clear_is_staged_until_save_and_disables_runtime_prefill(make_harness):
     _, _, editor = _widgets(window)
     _click(window, "Clear")
     assert editor.toPlainText() == ""
-    _assert_count(window, 0)
+    _assert_count(window, "")
     assert window.assistant_prompt == "Alpha saved"
     assert window.saved_configs == []
 
@@ -454,6 +507,6 @@ def test_saved_profile_text_wins_over_stale_flat_runtime_prompt(make_harness, ac
     expected = "Alpha saved" if active == "Alpha" else ""
     assert combo.currentText() == ("Alpha" if active == "Alpha" else "Default")
     assert editor.toPlainText() == expected
-    _assert_count(window, len(expected))
+    _assert_count(window, expected)
     assert window.config == config
     assert window.saved_configs == []

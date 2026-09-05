@@ -16910,12 +16910,23 @@ Recent translations to summarize:
         """Handle vertex location text changes"""
         self.vertex_location_var = text.strip()
 
+    def _count_assistant_prompt_tokens(self, text):
+        """Count prefill text using the same base encoding as glossary prompts."""
+        try:
+            import tiktoken
+            encoder = tiktoken.get_encoding('cl100k_base')
+            return len(encoder.encode(text or '', disallowed_special=()))
+        except Exception:
+            return None
+
     def _update_assistant_prompt_button_style(self):
         """Update the assistant prompt button style based on whether a prompt is set"""
         if hasattr(self, 'assistant_prompt') and self.assistant_prompt and self.assistant_prompt.strip():
             # Prompt is set - use active style (green)
             self.assistant_prompt_button.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
-            self.assistant_prompt_button.setToolTip(f"Assistant prompt is active ({len(self.assistant_prompt)} chars)")
+            token_count = self._count_assistant_prompt_tokens(self.assistant_prompt)
+            count_text = f"{token_count:,} tokens" if token_count is not None else "token count unavailable"
+            self.assistant_prompt_button.setToolTip(f"Assistant prompt is active ({count_text})")
         else:
             # No prompt set - use neutral style
             self.assistant_prompt_button.setStyleSheet("background-color: #6c757d; color: white; font-weight: bold;")
@@ -17757,7 +17768,7 @@ Recent translations to summarize:
 
     def show_assistant_prompt_dialog(self):
         """Edit assistant prefill with the same profile controls as glossary prompts."""
-        from PySide6.QtWidgets import QComboBox, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QMessageBox
+        from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QMessageBox
         
         # Store dialog as instance attribute so it persists and can be reused
         if hasattr(self, '_assistant_prompt_dialog') and self._assistant_prompt_dialog is not None:
@@ -17818,7 +17829,7 @@ Recent translations to summarize:
         profile_combo.setCompleter(None)
         profile_combo.setMinimumWidth(220)
         profile_combo.setMaximumWidth(420)
-        profile_combo.setToolTip("Create a profile for the assistant prefill prompt")
+        profile_combo.setToolTip("Select a profile, or edit its name and save to rename it.")
         profile_combo.lineEdit().setPlaceholderText("Profile name")
         self._disable_combobox_mousewheel(profile_combo)
         # Startup replaces this helper with other_settings' implementation.
@@ -17845,11 +17856,17 @@ Recent translations to summarize:
         prompt_edit.setPlainText(current_prompt)
         layout.addWidget(prompt_edit)
         
-        # Character count label
-        char_count_label = QLabel(f"Characters: {len(prompt_edit.toPlainText())}")
-        char_count_label.setStyleSheet("color: #6c757d; font-size: 9pt;")
-        prompt_edit.textChanged.connect(lambda: char_count_label.setText(f"Characters: {len(prompt_edit.toPlainText())}"))
-        layout.addWidget(char_count_label)
+        token_count_label = QLabel()
+        token_count_label.setStyleSheet("color: #6c757d; font-size: 9pt;")
+        token_count_label.setToolTip("Prompt text tokens counted with tiktoken (cl100k_base).")
+
+        def update_token_count():
+            count = self._count_assistant_prompt_tokens(prompt_edit.toPlainText())
+            token_count_label.setText(f"Tokens: {count:,}" if count is not None else "Tokens: unavailable")
+
+        prompt_edit.textChanged.connect(update_token_count)
+        update_token_count()
+        layout.addWidget(token_count_label)
 
         def refresh_profiles():
             profile_combo.blockSignals(True)
@@ -17866,10 +17883,11 @@ Recent translations to summarize:
             nonlocal default_prompt
             name = profile_combo.currentText().strip()
             text = prompt_edit.toPlainText().strip()
-            if not name or name.casefold() == 'default':
+            if active_name in profiles:
+                # Editing the name does not change which profile owns this draft.
+                profiles[active_name] = text
+            elif not name or name.casefold() == 'default':
                 default_prompt = text
-            elif name == active_name and name in profiles:
-                profiles[name] = text
 
         def select_profile(name=None):
             nonlocal active_name
@@ -17898,7 +17916,7 @@ Recent translations to summarize:
                 prompt_edit.setPlainText(text)
             finally:
                 prompt_edit.blockSignals(False)
-            char_count_label.setText(f"Characters: {len(prompt_edit.toPlainText())}")
+            update_token_count()
 
         def persist_profiles():
             updates = {
@@ -17940,17 +17958,30 @@ Recent translations to summarize:
                 self.append_log(f"✅ Created assistant prompt profile: '{active_name}'")
 
         def save_profile():
-            nonlocal active_name, default_prompt
+            nonlocal active_name, default_prompt, profiles
             name = profile_combo.currentText().strip()
             if not name:
                 QMessageBox.warning(dialog, "Profile Name Required", "Enter a profile name before saving.")
+                return False
+            if name.casefold() == 'default' and active_name:
+                QMessageBox.warning(dialog, "Default Profile", "Default is reserved. Choose another profile name.")
+                return False
+            if name in profiles and name != active_name:
+                QMessageBox.warning(dialog, "Profile Name Exists", "A profile with this name already exists. Choose another name.")
                 return False
             text = prompt_edit.toPlainText().strip()
             if name.casefold() == 'default':
                 default_prompt = text
                 active_name = ''
             else:
-                profiles[name] = text
+                if active_name in profiles and name != active_name:
+                    # Replace the key in place, preserving the dropdown order.
+                    profiles = {
+                        (name if key == active_name else key): (text if key == active_name else value)
+                        for key, value in profiles.items()
+                    }
+                else:
+                    profiles[name] = text
                 active_name = name
             refresh_profiles()
             if not persist_profiles():
@@ -17967,10 +17998,18 @@ Recent translations to summarize:
             if not name or name not in profiles:
                 QMessageBox.warning(dialog, "Profile Not Found", "Select an existing profile to delete.")
                 return
-            reply = QMessageBox.question(
-                dialog, "Delete Profile", f"Delete assistant prompt profile '{name}'?",
-                QMessageBox.Yes | QMessageBox.No,
-            )
+            confirmation = QMessageBox(dialog)
+            confirmation.setWindowTitle("Delete Profile")
+            confirmation.setIcon(QMessageBox.Question)
+            confirmation.setText(f"Delete assistant prompt profile '{name}'?")
+            confirmation.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            button_box = confirmation.findChild(QDialogButtonBox)
+            if button_box is not None:
+                button_box.setCenterButtons(True)
+                button_box.layout().setSpacing(12)
+                for button in button_box.buttons():
+                    button.setMinimumWidth(button.sizeHint().width() + 12)
+            reply = confirmation.exec()
             if reply != QMessageBox.Yes:
                 return
             del profiles[name]
@@ -18069,13 +18108,18 @@ Recent translations to summarize:
             if not save_profile():
                 return
             if self.assistant_prompt:
-                self.append_log(f"✅ Assistant prompt set ({len(self.assistant_prompt)} characters)")
+                token_count = self._count_assistant_prompt_tokens(self.assistant_prompt)
+                count_text = f" ({token_count:,} tokens)" if token_count is not None else ''
+                self.append_log(f"✅ Assistant prompt set{count_text}")
             else:
                 self.append_log("ℹ️ Assistant prompt cleared (disabled)")
             dialog.accept()
         
         save_btn.clicked.connect(save_prompt)
         button_layout.addWidget(save_btn)
+
+        for button in (cancel_btn, save_btn):
+            button.setMinimumWidth(button.sizeHint().width() + 12)
         
         layout.addLayout(button_layout)
         
@@ -22664,6 +22708,22 @@ Recent translations to summarize:
         # provider-scoped 24-hour policy is used at startup.
         QTimer.singleShot(0, lambda: self._schedule_current_provider_catalog_refresh(750))
     
+    def _apply_profile_name_autofill(self):
+        """Apply the saved opt-in for inline completion of main profile names."""
+        from PySide6.QtWidgets import QCompleter
+
+        combo = self.profile_menu
+        if not self.config.get('profile_name_autofill', False):
+            combo.setCompleter(None)
+            return
+        completer = combo.completer()
+        if completer is None:
+            completer = QCompleter(combo.model(), combo)
+            combo.setCompleter(completer)
+        completer.setCompletionColumn(combo.modelColumn())
+        completer.setCompletionMode(QCompleter.InlineCompletion)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+
     def _create_profile_section(self):
         """Create profile/profile section"""
         # Profile label
@@ -22675,6 +22735,7 @@ Recent translations to summarize:
         self.profile_menu.setEditable(True)
         self.profile_menu.addItems(list(self.prompt_profiles.keys()))
         self.profile_menu.setCurrentText(self.profile_var)
+        self._apply_profile_name_autofill()
         self.profile_menu.setMaximumWidth(450)
         # Add custom styling with Halgakos arrow and left padding for cog overlay
         profile_icon_path = f"{self.base_dir}/Halgakos.ico".replace('\\', '/')
@@ -22915,7 +22976,7 @@ Recent translations to summarize:
     
     def _open_profile_manager(self):
         """Open a dialog for managing profile order with drag-and-drop."""
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton, QLabel, QApplication
+        from PySide6.QtWidgets import QCheckBox, QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton, QLabel, QApplication
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QIcon
 
@@ -22973,6 +23034,12 @@ Recent translations to summarize:
         info.setCursor(Qt.IBeamCursor)
         info.setStyleSheet("color: #cbd5e1; font-size: 9pt; margin-bottom: 10px;")
         layout.addWidget(info)
+
+        autofill_checkbox = QCheckBox("Enable profile name autofill")
+        autofill_checkbox.setObjectName("profile_name_autofill_checkbox")
+        autofill_checkbox.setChecked(bool(self.config.get('profile_name_autofill', False)))
+        autofill_checkbox.setToolTip("Complete existing profile names as you type in the main profile field. Off by default.")
+        layout.addWidget(autofill_checkbox)
         
         # Horizontal layout for list and buttons
         content_layout = QHBoxLayout()
@@ -23159,9 +23226,9 @@ Recent translations to summarize:
         button_layout.addWidget(cancel_btn)
         
         # Save button
-        save_btn = QPushButton("Save Order")
+        save_btn = QPushButton("Save Changes")
         save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
-        save_btn.clicked.connect(lambda: self._save_profile_order(list_widget, dialog))
+        save_btn.clicked.connect(lambda: self._save_profile_order(list_widget, dialog, autofill_checkbox.isChecked()))
         button_layout.addWidget(save_btn)
         
         layout.addLayout(button_layout)
@@ -23220,8 +23287,12 @@ Recent translations to summarize:
                 list_widget.addItem(item)
                 item.setSelected(True)
     
-    def _save_profile_order(self, list_widget, dialog):
-        """Save the new profile order from the list widget."""
+    def _save_profile_order(self, list_widget, dialog, autofill_enabled=None):
+        """Save profile order and the optional main-profile autofill preference."""
+        previous_profiles = self.prompt_profiles
+        previous_autofill = self.config.get('profile_name_autofill')
+        had_autofill_setting = 'profile_name_autofill' in self.config
+        previous_index = self.profile_menu.currentIndex()
         # Get new order from list widget
         new_order = []
         for i in range(list_widget.count()):
@@ -23235,6 +23306,8 @@ Recent translations to summarize:
         # Update profiles
         self.prompt_profiles = new_profiles
         self.config['prompt_profiles'] = new_profiles
+        if autofill_enabled is not None:
+            self.config['profile_name_autofill'] = bool(autofill_enabled)
         
         # Get currently selected profile before refresh
         current_profile = self.profile_menu.currentText()
@@ -23243,13 +23316,32 @@ Recent translations to summarize:
         self.profile_menu.blockSignals(True)
         self.profile_menu.clear()
         self.profile_menu.addItems(list(new_profiles.keys()))
+        index = self.profile_menu.findText(current_profile)
+        if index >= 0:
+            self.profile_menu.setCurrentIndex(index)
         self.profile_menu.setCurrentText(current_profile)
         self.profile_menu.blockSignals(False)
         
         # Save changes
-        self.save_profiles()
+        if self.save_profiles() is False:
+            self.prompt_profiles = previous_profiles
+            self.config['prompt_profiles'] = previous_profiles
+            if had_autofill_setting:
+                self.config['profile_name_autofill'] = previous_autofill
+            else:
+                self.config.pop('profile_name_autofill', None)
+            self.profile_menu.blockSignals(True)
+            try:
+                self.profile_menu.clear()
+                self.profile_menu.addItems(list(previous_profiles))
+                self.profile_menu.setCurrentIndex(previous_index)
+                self.profile_menu.setCurrentText(current_profile)
+            finally:
+                self.profile_menu.blockSignals(False)
+            return
+        self._apply_profile_name_autofill()
         
-        self.append_log("✓ Profile order updated")
+        self.append_log("✓ Profile order and settings updated")
         dialog.accept()
     
     def _show_model_context_menu(self, position):

@@ -16157,7 +16157,7 @@ def on_profile_select(self, event=None):
             pass
 
 def save_profile(self):
-    """Save current prompt under selected profile and persist."""
+    """Save the current prompt, renaming the selected custom profile if needed."""
     from PySide6.QtWidgets import QMessageBox
     
     # Get name from combobox or profile_var
@@ -16167,35 +16167,72 @@ def save_profile(self):
         QMessageBox.critical(None, "Error", "Profile cannot be empty.")
         return
 
-    # Check if we need to revert changes to the previous profile
-    # This happens if the user edited a profile but then changed the name to save as a new profile
-    if hasattr(self, '_active_profile_for_autosave') and self._active_profile_for_autosave and name != self._active_profile_for_autosave:
-        if hasattr(self, '_original_profile_content') and self._active_profile_for_autosave in self._original_profile_content:
-            # Revert the previous profile to its original content
-            original = self._original_profile_content[self._active_profile_for_autosave]
-            self.prompt_profiles[self._active_profile_for_autosave] = original
-            # Note: We don't update self.config here as it will be updated when save_profiles() is called
+    source_name = getattr(self, '_active_profile_for_autosave', None) or self.profile_var
+    if name in self.prompt_profiles and name != source_name:
+        QMessageBox.warning(None, "Profile Name Exists", "A profile with this name already exists. Choose another name.")
+        return
+    get_protected = getattr(self, '_get_protected_prompt_profiles', None)
+    protected = set(get_protected() if callable(get_protected) else getattr(self, 'default_prompts', {}))
+    renaming = source_name in self.prompt_profiles and name != source_name and source_name not in protected
+    previous_profiles = dict(self.prompt_profiles)
+    previous_originals = dict(getattr(self, '_original_profile_content', {}))
+    previous_profile_var = self.profile_var
+    previous_autosave = getattr(self, '_active_profile_for_autosave', None)
+    previous_active = self.config.get('active_profile', previous_profile_var)
     
     # PySide6: Get text from QTextEdit
     content = self.prompt_text.toPlainText().strip()
     
-    self.prompt_profiles[name] = content
+    if renaming:
+        self.prompt_profiles = {
+            (name if key == source_name else key): (content if key == source_name else value)
+            for key, value in self.prompt_profiles.items()
+        }
+    else:
+        # Built-in profiles retain their required names; saving one under a new
+        # name creates a custom copy, as it does for the glossary Default.
+        if name != source_name and source_name in previous_originals:
+            self.prompt_profiles[source_name] = previous_originals[source_name]
+        self.prompt_profiles[name] = content
     self.config['prompt_profiles'] = self.prompt_profiles
     self.config['active_profile'] = name
+    self.profile_var = name
+    self._active_profile_for_autosave = name
     
     # Update the original content to match the saved content
     if not hasattr(self, '_original_profile_content'):
         self._original_profile_content = {}
+    if renaming:
+        self._original_profile_content.pop(source_name, None)
     self._original_profile_content[name] = content
     
-    # Update combobox items only if the profile is new
-    current_items = [self.profile_menu.itemText(i) for i in range(self.profile_menu.count())]
-    if name not in current_items:
-        # Only rebuild if it's a new profile
-        self.profile_menu.addItem(name)
-    
-    # Ensure the current selection is set to the saved profile
-    self.profile_menu.setCurrentText(name)
+    # Rebuild without selection callbacks loading old saved content mid-rename.
+    if hasattr(self, 'profile_menu'):
+        self.profile_menu.blockSignals(True)
+        try:
+            self.profile_menu.clear()
+            self.profile_menu.addItems(list(self.prompt_profiles))
+            self.profile_menu.setCurrentIndex(self.profile_menu.findText(name))
+        finally:
+            self.profile_menu.blockSignals(False)
+
+    if self.save_profiles() is False:
+        self.prompt_profiles = previous_profiles
+        self.config['prompt_profiles'] = previous_profiles
+        self.config['active_profile'] = previous_active
+        self._original_profile_content = previous_originals
+        self.profile_var = previous_profile_var
+        self._active_profile_for_autosave = previous_autosave
+        if hasattr(self, 'profile_menu'):
+            self.profile_menu.blockSignals(True)
+            try:
+                self.profile_menu.clear()
+                self.profile_menu.addItems(list(previous_profiles))
+                self.profile_menu.setCurrentIndex(self.profile_menu.findText(source_name))
+                self.profile_menu.setEditText(name)
+            finally:
+                self.profile_menu.blockSignals(False)
+        return
 
     try:
         update_profile_action = getattr(self, '_update_profile_delete_button_label', None)
@@ -16261,7 +16298,6 @@ def save_profile(self):
         
         # Store timer reference to prevent garbage collection
         self._save_profile_timer = timer
-    self.save_profiles()
 
 def delete_profile(self):
     """Delete the selected profile (or reset built-in profiles to defaults)."""
@@ -16378,7 +16414,7 @@ def delete_profile(self):
             pass
 
 def save_profiles(self):
-    """Persist only the prompt profiles and active profile."""
+    """Persist prompt profiles, the active profile, and profile-name autofill."""
     from PySide6.QtWidgets import QMessageBox
     try:
         data = {}
@@ -16386,14 +16422,17 @@ def save_profiles(self):
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         data['prompt_profiles'] = self.prompt_profiles
+        data['profile_name_autofill'] = bool(self.config.get('profile_name_autofill', False))
         
         # Get current profile from combobox or profile_var
         data['active_profile'] = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var
         
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
     except Exception as e:
         QMessageBox.critical(None, "Error", f"Failed to save profiles: {e}")
+        return False
 
 def import_profiles(self):
     """Import profiles from a JSON file, merging into existing ones."""

@@ -114,6 +114,7 @@ tests/**
 !tests/test_openrouter_thinking.py
 !tests/test_model_options_catalog.py
 !tests/test_assistant_prompt_profiles.py
+!tests/test_prompt_profile_renaming.py
 !tests/test_shutdown_utils_cleanup.py
 !tests/test_authnd_captcha_navigation.py
 !tests/test_authgrok_auth.py
