@@ -503,6 +503,7 @@ class ModelCatalogRefreshResult:
 
 _MODEL_CATALOG_CACHE_VERSION = 3
 _MODEL_CATALOG_CACHE_TTL_SECONDS = 24 * 60 * 60
+_MODEL_POLL_MARKER_TTL_SECONDS = 7 * 24 * 60 * 60
 _MODEL_CATALOG_LOCK = threading.RLock()
 _MODEL_CATALOG_MEMORY_CACHE: Optional[dict] = None
 
@@ -841,6 +842,9 @@ def _load_model_catalog_cache(*, force_disk: bool = False) -> dict:
 
 def _write_model_catalog_cache(cache: dict) -> None:
     global _MODEL_CATALOG_MEMORY_CACHE
+    # Keep successful polls usable for this session even if persistence fails.
+    with _MODEL_CATALOG_LOCK:
+        _MODEL_CATALOG_MEMORY_CACHE = json.loads(json.dumps(cache))
     path = _model_catalog_cache_path()
     directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
@@ -908,8 +912,9 @@ def _cached_provider_models(*, max_age: int = _MODEL_CATALOG_CACHE_TTL_SECONDS) 
     return result
 
 
-def get_last_successful_provider_models() -> Dict[str, List[str]]:
-    """Return each provider's last successful catalog, regardless of age."""
+def get_last_successful_provider_models(*, max_age: Optional[int] = None) -> Dict[str, List[str]]:
+    """Return each provider's last success, optionally limited by its age."""
+    now = time.time()
     records = _load_model_catalog_cache().get("last_successful", {})
     result: Dict[str, List[str]] = {}
     for name, record in records.items():
@@ -919,6 +924,12 @@ def get_last_successful_provider_models() -> Dict[str, List[str]]:
             continue
         if not _catalog_record_matches_variant(str(name), record):
             continue
+        if max_age is not None:
+            try:
+                if now - float(record.get("fetched_at", 0)) >= max_age:
+                    continue
+            except (TypeError, ValueError):
+                continue
         models = record.get("models")
         if not isinstance(models, list):
             continue
@@ -932,8 +943,8 @@ def get_last_successful_provider_models() -> Dict[str, List[str]]:
 
 
 def get_current_polled_provider_models() -> Dict[str, List[str]]:
-    """Return fresh successful catalogs that currently supply dropdown models."""
-    return _cached_provider_models()
+    """Return models confirmed within seven days, surviving temporary failures."""
+    return get_last_successful_provider_models(max_age=_MODEL_POLL_MARKER_TTL_SECONDS)
 
 
 def _deduplicate_models(models: Iterable[str]) -> List[str]:

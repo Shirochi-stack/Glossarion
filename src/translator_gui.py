@@ -792,10 +792,10 @@ def _update_model_field_poll_marker(combo):
         marker = getattr(combo, "_model_poll_marker_label", None)
         if marker is None:
             return
-        current_index = combo.currentIndex()
-        has_check = bool(
-            current_index >= 0
-            and combo.itemData(current_index, _MODEL_POLL_MARKER_ROLE)
+        # Editable combos can display a model that differs from currentIndex()
+        # after completion, typing, or a catalog rebuild on a focus change.
+        has_check = model_has_polled_marker(
+            line_edit.text(), getattr(combo, '_model_poll_marker_keys', set())
         )
         marker.move(0, max(0, (line_edit.height() - marker.height()) // 2))
         marker.setVisible(has_check)
@@ -848,6 +848,9 @@ def _install_model_field_poll_marker(combo, checked_icon):
         if not getattr(combo, "_model_poll_marker_connected", False):
             combo.currentIndexChanged.connect(
                 lambda _index, target=combo: _update_model_field_poll_marker(target)
+            )
+            line_edit.textChanged.connect(
+                lambda _text, target=combo: _update_model_field_poll_marker(target)
             )
             combo._model_poll_marker_connected = True
         _update_model_field_poll_marker(combo)
@@ -20987,9 +20990,11 @@ Recent translations to summarize:
         )
 
         blocked = combo.blockSignals(True)
+        line_blocked = line_edit.blockSignals(True) if line_edit is not None else False
         try:
             combo.clear()
             combo.addItems(model_values)
+            combo.setCurrentIndex(combo.findText(current_text))
             combo.setCurrentText(current_text)
             self._install_model_completer(model_values)
 
@@ -21007,7 +21012,10 @@ Recent translations to summarize:
                         max(0, min(cursor_position, len(current_text)))
                     )
         finally:
+            if line_edit is not None:
+                line_edit.blockSignals(line_blocked)
             combo.blockSignals(blocked)
+        _update_model_field_poll_marker(combo)
 
     def _update_active_model_combo_catalog(self, model_values):
         """Update a focused/open model picker without rebuilding the widget.
@@ -21098,6 +21106,7 @@ Recent translations to summarize:
             if line_edit is not None:
                 line_edit.blockSignals(line_edit_blocked)
             combo.blockSignals(blocked)
+        _update_model_field_poll_marker(combo)
 
     def _refresh_model_combo_catalog(self, model_values, force=False):
         """Queue catalog changes while typing, then apply the newest one."""
@@ -21593,15 +21602,12 @@ Recent translations to summarize:
             item.setIcon(checked_icon if is_polled else empty_icon)
             item.setHidden(hide_unpolled and not is_polled)
             item.setToolTip(
-                "✓ Confirmed by the latest successful online provider poll"
+                "✓ Confirmed by a successful provider poll within the past 7 days"
                 if is_polled else ""
             )
 
     def _ensure_polled_model_marker_state(self):
-        """Load fresh successful catalogs currently supplying dropdown models."""
-        existing = getattr(self, '_polled_online_models_by_provider', None)
-        if isinstance(existing, dict):
-            return existing
+        """Reload seven-day confirmation state, including expiry while open."""
         try:
             catalogs = get_current_polled_provider_models()
         except Exception:
@@ -21618,7 +21624,19 @@ Recent translations to summarize:
             for models in by_provider.values()
             for model in models
         }
+        if isinstance(self, QObject) and not hasattr(self, '_model_poll_marker_expiry_timer'):
+            self._model_poll_marker_expiry_timer = QTimer(self)
+            self._model_poll_marker_expiry_timer.setInterval(60_000)
+            self._model_poll_marker_expiry_timer.timeout.connect(self._expire_polled_model_markers)
+            self._model_poll_marker_expiry_timer.start()
         return by_provider
+
+    def _expire_polled_model_markers(self):
+        """Refresh visible markers only when a confirmation actually expires."""
+        previous = set(getattr(self, '_polled_online_model_ids', set()))
+        self._ensure_polled_model_marker_state()
+        if previous != self._polled_online_model_ids:
+            self._refresh_model_search_poll_state()
 
     @staticmethod
     def _create_polled_model_icon():
@@ -21643,6 +21661,7 @@ Recent translations to summarize:
         """Decorate/filter a combo popup without changing any stored model text."""
         if combo is None:
             return
+        combo._model_poll_marker_keys = set(polled_model_keys or ())
         empty_icon = QIcon()
         line_edit = combo.lineEdit() if combo.isEditable() else None
         current_index = combo.currentIndex()
@@ -21693,6 +21712,9 @@ Recent translations to summarize:
         if callable(ensure_state):
             ensure_state()
         polled_model_keys = set(getattr(self, '_polled_online_model_ids', set()) or set())
+        TranslatorGUI._apply_polled_model_icons(
+            getattr(self, '_model_manager_dialog', None), polled_model_keys,
+        )
         hide_unpolled = bool(
             getattr(self, 'config', {}).get('model_manager_hide_unpolled_models', False)
         )
@@ -21817,25 +21839,13 @@ Recent translations to summarize:
         )
         requested_provider = getattr(result, 'requested_provider', None)
         polled_by_provider = dict(self._ensure_polled_model_marker_state())
-        if requested_provider:
-            # A scoped failure displays that provider's static fallback, so
-            # its previous success must no longer decorate those fallback rows.
-            polled_by_provider.pop(requested_provider, None)
-            if requested_provider in online:
-                polled_by_provider[requested_provider] = {
-                    str(model).casefold()
-                    for model in (provider_models.get(requested_provider, []) or [])
-                }
-        else:
-            # A full refresh's provider_models contains successes only. Build
-            # marker state solely from those current polled catalogs rather
-            # than retaining IDs for providers now shown via static fallback.
-            polled_by_provider = {}
-            for name in online:
-                polled_by_provider[name] = {
-                    str(model).casefold()
-                    for model in (provider_models.get(name, []) or [])
-                }
+        # Failures retain unexpired confirmations. A successful catalog fully
+        # replaces that provider's confirmations, removing omitted model IDs.
+        for name in online:
+            polled_by_provider[name] = {
+                str(model).casefold()
+                for model in (provider_models.get(name, []) or [])
+            }
         self._polled_online_models_by_provider = polled_by_provider
         polled_model_keys = {
             model
@@ -22129,7 +22139,7 @@ Recent translations to summarize:
                     if role == Qt.DecorationRole:
                         return self._checked_icon if is_polled else QIcon()
                     return (
-                        "✓ Confirmed by the latest successful online provider poll"
+                        "✓ Confirmed by a successful provider poll within the past 7 days"
                         if is_polled else ""
                     )
                 return super().data(index, role)
@@ -23794,7 +23804,7 @@ Recent translations to summarize:
         ))
         hide_unpolled_toggle.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
-            "Show only models marked ✓ by successful provider catalog polls. "
+            "Show only models confirmed by provider catalog polls within the past 7 days. "
             "This also filters model search dropdowns without changing the saved model list."
             "</p></qt>"
         )
@@ -23827,7 +23837,7 @@ Recent translations to summarize:
         )
         button_column.addWidget(poll_btn)
 
-        poll_status = QLabel("Ready to poll online catalogs\n✓ marks models confirmed online")
+        poll_status = QLabel("Ready to poll online catalogs\n✓ marks models confirmed within 7 days")
         poll_status.setWordWrap(True)
         poll_status.setStyleSheet("color: #8fa8bd; font-size: 8pt;")
         button_column.addWidget(poll_status)

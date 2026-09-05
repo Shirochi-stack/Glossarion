@@ -1294,11 +1294,14 @@ def test_model_catalog_cache_uses_macos_caches_directory(monkeypatch):
     )
 
 
-def test_last_successful_catalog_history_survives_failure_without_marking_fallback(
+def test_seven_day_markers_survive_failure_and_restart_without_extending_daily_catalog_cache(
     tmp_path,
     monkeypatch,
 ):
     _isolated_cache(tmp_path, monkeypatch)
+
+    now = 1_800_000_000.0
+    monkeypatch.setattr(model_options.time, "time", lambda: now)
 
     monkeypatch.setattr(
         model_options,
@@ -1318,6 +1321,11 @@ def test_last_successful_catalog_history_survives_failure_without_marking_fallba
         "grok-confirmed"
     ]
 
+    now += 24 * 60 * 60 + 1
+    assert model_options.provider_model_catalog_refresh_due("xai")
+    assert "xai" not in model_options._cached_provider_models()
+    assert model_options.get_current_polled_provider_models()["xai"] == ["grok-confirmed"]
+
     monkeypatch.setattr(
         model_options,
         "_http_get_json",
@@ -1330,14 +1338,17 @@ def test_last_successful_catalog_history_survives_failure_without_marking_fallba
         timeout=0.1,
     )
     assert failed.provider_models == {}
-    assert "xai" not in model_options.get_current_polled_provider_models()
+    assert model_options.get_current_polled_provider_models()["xai"] == ["grok-confirmed"]
 
-    # Historical success remains available for diagnostics, but it is no
-    # longer marker state once the provider falls back to its static list.
+    # The last success survives restart; a failed poll does not renew its age.
     monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
     assert model_options.get_last_successful_provider_models()["xai"] == [
         "grok-confirmed"
     ]
+    assert model_options.get_current_polled_provider_models()["xai"] == ["grok-confirmed"]
+    now = 1_800_000_000.0 + 7 * 24 * 60 * 60 - 1
+    assert model_options.get_current_polled_provider_models()["xai"] == ["grok-confirmed"]
+    now += 1
     assert "xai" not in model_options.get_current_polled_provider_models()
 
     monkeypatch.setattr(
@@ -1354,6 +1365,62 @@ def test_last_successful_catalog_history_survives_failure_without_marking_fallba
     assert model_options.get_last_successful_provider_models()["xai"] == [
         "grok-replacement"
     ]
+    assert model_options.get_current_polled_provider_models()["xai"] == ["grok-replacement"]
+
+
+def test_successful_poll_immediately_removes_omitted_model_markers(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    ids = ['grok-old', 'grok-kept']
+    monkeypatch.setattr(model_options, '_http_get_json', lambda *args, **kwargs: {
+        'data': [{'id': value} for value in ids],
+    })
+    def refresh():
+        return model_options.refresh_provider_model_catalogs(
+            active_model='grok-kept', active_api_key='fake', only_provider='xai', timeout=0.1,
+        )
+    refresh()
+    assert model_options.get_current_polled_provider_models()['xai'] == ids
+    ids = ['grok-kept']
+    refresh()
+    monkeypatch.setattr(model_options, '_MODEL_CATALOG_MEMORY_CACHE', None)
+    assert model_options.get_current_polled_provider_models()['xai'] == ['grok-kept']
+
+
+def test_successful_markers_remain_in_memory_if_cache_write_fails(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(model_options, '_http_get_json', lambda *args, **kwargs: {
+        'data': [{'id': 'grok-confirmed'}],
+    })
+    def fail_replace(*args):
+        raise OSError('simulated read-only cache')
+    monkeypatch.setattr(model_options.os, 'replace', fail_replace)
+    result = model_options.refresh_provider_model_catalogs(
+        active_model='grok-confirmed', active_api_key='fake', only_provider='xai', timeout=0.1,
+    )
+    assert result.statuses['cache'].startswith('memory only')
+    assert model_options.get_current_polled_provider_models()['xai'] == ['grok-confirmed']
+
+
+def test_open_session_marker_expiry_only_refreshes_when_state_changes(tmp_path, monkeypatch):
+    import translator_gui
+    _isolated_cache(tmp_path, monkeypatch)
+    now = 1_800_000_000.0
+    monkeypatch.setattr(model_options.time, 'time', lambda: now)
+    cache = model_options._empty_model_catalog_cache()
+    cache['last_successful'] = {'xai': {'fetched_at': now, 'models': ['grok-confirmed']}}
+    model_options._write_model_catalog_cache(cache)
+    refreshed = []
+    gui = SimpleNamespace()
+    gui._ensure_polled_model_marker_state = lambda: translator_gui.TranslatorGUI._ensure_polled_model_marker_state(gui)
+    gui._refresh_model_search_poll_state = lambda: refreshed.append(set(gui._polled_online_model_ids))
+    gui._ensure_polled_model_marker_state()
+    translator_gui.TranslatorGUI._expire_polled_model_markers(gui)
+    assert not refreshed
+    now += 7 * 24 * 60 * 60
+    translator_gui.TranslatorGUI._expire_polled_model_markers(gui)
+    assert refreshed == [set()]
+    translator_gui.TranslatorGUI._expire_polled_model_markers(gui)
+    assert refreshed == [set()]
 
 
 def test_gui_catalog_refresh_updates_stealthily_while_model_editor_is_active(monkeypatch):
@@ -1528,6 +1595,60 @@ def test_model_completer_ranks_matches_without_python_sort_proxy(monkeypatch):
     completion_model.set_search_text("authgrok12/grok")
     assert completion_model.stringList() == ["authgrok12/grok-4.6"]
     app.processEvents()
+
+
+def test_model_field_check_survives_focus_and_catalog_changes(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLineEdit
+    import translator_gui
+
+    app = QApplication.instance() or QApplication([])
+    combo = QComboBox()
+    combo.setEditable(True)
+    models = ["provider/unpolled", "authgpt/confirmed"]
+    combo.addItems(models)
+    combo.setCurrentIndex(1)
+    harness = SimpleNamespace(
+        model_combo=combo, config={},
+        _polled_online_model_ids={"authgpt/confirmed"},
+        _model_polled_icon=translator_gui.TranslatorGUI._create_polled_model_icon(),
+    )
+    harness._install_model_completer = lambda values: translator_gui.TranslatorGUI._install_model_completer(harness, values)
+    harness._install_model_completer(models)
+    combo.show()
+    marker = combo._model_poll_marker_label
+    assert not marker.isHidden()
+
+    # Moving focus to Manage Models must not change the indicator, including
+    # when a pending catalog refresh rebuilds the now-unfocused model field.
+    manager = QDialog()
+    QLineEdit(manager).setFocus()
+    manager.show()
+    manager.activateWindow()
+    app.processEvents()
+    translator_gui.TranslatorGUI._replace_model_combo_catalog(harness, models)
+    assert combo.currentIndex() == 1
+    assert combo.currentText() == "authgpt/confirmed"
+    assert not marker.isHidden()
+    manager.close()
+    app.processEvents()
+    assert not marker.isHidden()
+
+    # Editable text and numbered-account aliases need not have a matching row.
+    combo.setCurrentIndex(0)
+    combo.setEditText("authgpt4/confirmed")
+    assert not marker.isHidden()
+    combo.setEditText("provider/unpolled")
+    assert marker.isHidden()
+    combo.setEditText("authgpt/confirmed")
+    assert not marker.isHidden()
+    translator_gui.TranslatorGUI._apply_polled_model_combo_rows(
+        combo, set(), harness._model_polled_icon, False,
+    )
+    assert marker.isHidden()
+    combo.close()
+    combo.deleteLater()
+    manager.deleteLater()
 
 
 def test_main_model_search_marks_polled_rows_and_hides_unpolled_without_changing_ids(
@@ -2491,7 +2612,8 @@ def test_manage_models_poll_uses_one_full_refresh_for_non_authnd_selection(activ
     assert starts == [{"show_feedback": True}]
 
 
-def test_gui_static_fallback_models_do_not_keep_checkmarks_from_older_poll():
+@pytest.mark.parametrize('requested_provider', [None, 'xai'])
+def test_gui_static_fallback_keeps_unexpired_checkmarks(requested_provider):
     import translator_gui
 
     displayed_models = ["or/router/current", "grok-static-fallback"]
@@ -2517,15 +2639,16 @@ def test_gui_static_fallback_models_do_not_keep_checkmarks_from_older_poll():
             "xai": "static fallback (OSError — offline)",
         },
         provider_models={"openrouter": ["or/router/current"]},
-        requested_provider=None,
+        requested_provider=requested_provider,
     )
 
     translator_gui.TranslatorGUI._apply_provider_model_catalog_refresh(gui, result)
 
     assert gui._polled_online_models_by_provider == {
-        "openrouter": {"or/router/current"}
+        "openrouter": {"or/router/current"},
+        "xai": {"grok-static-fallback"},
     }
-    assert gui._polled_online_model_ids == {"or/router/current"}
+    assert gui._polled_online_model_ids == {"or/router/current", "grok-static-fallback"}
 
 
 def test_model_manager_unpolled_filter_is_off_by_default_and_reversible(monkeypatch):

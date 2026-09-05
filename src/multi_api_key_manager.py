@@ -8266,7 +8266,7 @@ class MultiAPIKeyDialog(QDialog):
                     if role == Qt.DecorationRole:
                         return self._checked_icon if is_polled else QIcon()
                     return (
-                        "✓ Confirmed by the latest successful online provider poll"
+                        "✓ Confirmed by a successful provider poll within the past 7 days"
                         if is_polled else ""
                     )
                 return super().data(index, role)
