@@ -237,16 +237,16 @@ def test_model_wheel_lock_defaults_on_and_can_be_saved_off(gui, monkeypatch):
     assert combo.currentIndex() == 3
 
 
-def test_main_autofill_off_by_default_and_cancel_preserves_it(gui):
+def test_main_autofill_on_by_default_and_cancel_preserves_it(gui):
     editor = type_profile_name(gui, "al")
-    assert editor.text() == "al"
-    assert not editor.hasSelectedText()
+    assert editor.text().lower() == "alpha"
+    assert editor.selectedText().lower() == "pha"
     dialog, checkbox, buttons = manager_controls(gui)
-    assert not checkbox.isChecked()
-    checkbox.setChecked(True)
+    assert checkbox.isChecked()
+    checkbox.setChecked(False)
     buttons["Cancel"].click()
-    assert gui.profile_menu.completer() is None
-    assert not saved(gui).get("profile_name_autofill", False)
+    assert gui.profile_menu.completer() is not None
+    assert saved(gui).get("profile_name_autofill", True)
 
 
 def test_main_autofill_opt_in_persists_and_can_be_disabled(gui):
@@ -269,6 +269,8 @@ def test_main_autofill_opt_in_persists_and_can_be_disabled(gui):
     checkbox.setChecked(False)
     buttons["Save Changes"].click()
     assert saved(gui)["profile_name_autofill"] is False
+    gui.config = saved(gui)
+    gui._apply_profile_name_autofill()
     assert type_profile_name(gui, "al").text() == "al"
 
 
@@ -288,6 +290,9 @@ def test_main_autofill_tracks_renamed_and_reordered_profiles(gui):
 
 
 def test_failed_manager_save_keeps_autofill_setting_and_allows_retry(gui, monkeypatch):
+    gui.config['profile_name_autofill'] = False
+    gui._apply_profile_name_autofill()
+    gui.save_config()
     before = saved(gui)
     dialog, checkbox, buttons = manager_controls(gui)
     checkbox.setChecked(True)

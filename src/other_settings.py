@@ -16422,7 +16422,7 @@ def save_profiles(self):
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         data['prompt_profiles'] = self.prompt_profiles
-        data['profile_name_autofill'] = bool(self.config.get('profile_name_autofill', False))
+        data['profile_name_autofill'] = bool(self.config.get('profile_name_autofill', True))
         data['profile_mousewheel_locked'] = bool(self.config.get('profile_mousewheel_locked', False))
         
         # Get current profile from combobox or profile_var

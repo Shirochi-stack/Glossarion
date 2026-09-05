@@ -22724,11 +22724,11 @@ Recent translations to summarize:
         combo._mousewheel_locked = bool(self.config.get(config_key, default))
 
     def _apply_profile_name_autofill(self):
-        """Apply the saved opt-in for inline completion of main profile names."""
+        """Apply the saved preference for inline completion of main profile names."""
         from PySide6.QtWidgets import QCompleter
 
         combo = self.profile_menu
-        if not self.config.get('profile_name_autofill', False):
+        if not self.config.get('profile_name_autofill', True):
             combo.setCompleter(None)
             return
         completer = combo.completer()
@@ -22992,7 +22992,7 @@ Recent translations to summarize:
     
     def _open_profile_manager(self):
         """Open a dialog for managing profile order with drag-and-drop."""
-        from PySide6.QtWidgets import QCheckBox, QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton, QLabel, QApplication
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton, QLabel, QApplication
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QIcon
 
@@ -23051,13 +23051,13 @@ Recent translations to summarize:
         info.setStyleSheet("color: #cbd5e1; font-size: 9pt; margin-bottom: 10px;")
         layout.addWidget(info)
 
-        autofill_checkbox = QCheckBox("Enable profile name autofill")
+        autofill_checkbox = self._create_styled_checkbox("Enable profile name autofill")
         autofill_checkbox.setObjectName("profile_name_autofill_checkbox")
-        autofill_checkbox.setChecked(bool(self.config.get('profile_name_autofill', False)))
-        autofill_checkbox.setToolTip("Complete existing profile names as you type in the main profile field. Off by default.")
+        autofill_checkbox.setChecked(bool(self.config.get('profile_name_autofill', True)))
+        autofill_checkbox.setToolTip("Complete existing profile names as you type in the main profile field. On by default.")
         layout.addWidget(autofill_checkbox)
 
-        wheel_lock_checkbox = QCheckBox("Lock mouse wheel")
+        wheel_lock_checkbox = self._create_styled_checkbox("Lock mouse wheel")
         wheel_lock_checkbox.setObjectName("profile_mousewheel_lock_checkbox")
         wheel_lock_checkbox.setChecked(bool(self.config.get('profile_mousewheel_locked', False)))
         wheel_lock_checkbox.setToolTip("Prevent the mouse wheel from changing the main profile selection. Off by default.")
