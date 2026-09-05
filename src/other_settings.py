@@ -16423,6 +16423,7 @@ def save_profiles(self):
                 data = json.load(f)
         data['prompt_profiles'] = self.prompt_profiles
         data['profile_name_autofill'] = bool(self.config.get('profile_name_autofill', False))
+        data['profile_mousewheel_locked'] = bool(self.config.get('profile_mousewheel_locked', False))
         
         # Get current profile from combobox or profile_var
         data['active_profile'] = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var

@@ -9,9 +9,10 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QCompleter, QListWidget, QMainWindow, QMessageBox, QPushButton, QTextEdit
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QCompleter, QDialog, QListWidget, QMainWindow, QMessageBox, QPushButton, QTextEdit
 
 import other_settings
 from GlossaryManager_GUI import GlossaryManagerMixin
@@ -44,6 +45,7 @@ class ProfileHarness(GlossaryManagerMixin, QMainWindow):
         self.profile_menu.addItems(list(self.prompt_profiles))
         self.profile_menu.setCurrentIndex(self.profile_menu.findText("Alpha"))
         self._apply_profile_name_autofill()
+        self._apply_combobox_mousewheel_lock(self.profile_menu, 'profile_mousewheel_locked', False)
         self.prompt_text = QTextEdit(self)
         self.profile_menu.currentIndexChanged.connect(lambda _: self.on_profile_select())
         self.prompt_text.textChanged.connect(self._auto_save_system_prompt)
@@ -80,6 +82,7 @@ method_names = {
     "_auto_save_system_prompt", "_quick_new_profile", "_get_protected_prompt_profiles",
     "_apply_profile_name_autofill", "_open_profile_manager", "_save_profile_order",
     "_get_list_order", "_restore_list_order", "_move_profile_in_list",
+    "_apply_combobox_mousewheel_lock", "_save_model_order",
 }
 methods = [n for n in gui_class.body if isinstance(n, ast.FunctionDef) and n.name in method_names]
 namespace = {"Qt": Qt, "os": os}
@@ -133,6 +136,105 @@ def type_profile_name(gui, text):
     editor.selectAll()
     QTest.keyClicks(editor, text)
     return editor
+
+
+def wheel_down(widget):
+    event = QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(), QPoint(0, -120),
+                        Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+    QApplication.sendEvent(widget, event)
+
+
+def test_profile_wheel_lock_defaults_off_and_saves_from_manager(gui):
+    combo = gui.profile_menu
+    wheel_down(combo)
+    assert combo.currentText() == "Beta"
+    dialog, _, buttons = manager_controls(gui)
+    toggle = dialog.findChild(QCheckBox, "profile_mousewheel_lock_checkbox")
+    assert not toggle.isChecked()
+    toggle.setChecked(True)
+    buttons["Save Changes"].click()
+    assert saved(gui)["profile_mousewheel_locked"] is True
+    combo.setCurrentIndex(0)
+    wheel_down(combo)
+    assert combo.currentIndex() == 0
+
+    # Saved settings also apply to a newly created dropdown after restart.
+    fresh = QComboBox(gui)
+    fresh.addItems(["First", "Second"])
+    gui.config = saved(gui)
+    gui._apply_combobox_mousewheel_lock(fresh, 'profile_mousewheel_locked', False)
+    wheel_down(fresh)
+    assert fresh.currentIndex() == 0
+
+    dialog, _, buttons = manager_controls(gui)
+    toggle = dialog.findChild(QCheckBox, "profile_mousewheel_lock_checkbox")
+    assert toggle.isChecked()
+    toggle.setChecked(False)
+    buttons["Save Changes"].click()
+    wheel_down(combo)
+    assert combo.currentIndex() == 1
+    assert saved(gui)["profile_mousewheel_locked"] is False
+
+
+def test_profile_wheel_lock_cancel_and_failed_save_leave_it_off(gui, monkeypatch):
+    dialog, _, buttons = manager_controls(gui)
+    dialog.findChild(QCheckBox, "profile_mousewheel_lock_checkbox").setChecked(True)
+    with monkeypatch.context() as patch:
+        patch.setattr(gui, "save_profiles", lambda: False)
+        buttons["Save Changes"].click()
+    assert not gui.config.get('profile_mousewheel_locked', False)
+    assert not gui.profile_menu._mousewheel_locked
+    buttons["Cancel"].click()
+    assert not saved(gui).get('profile_mousewheel_locked', False)
+
+
+def test_model_wheel_lock_defaults_on_and_can_be_saved_off(gui, monkeypatch):
+    combo = gui.model_combo = QComboBox(gui)
+    combo.setEditable(True)
+    combo.addItems([f"model-{i}" for i in range(30)])
+    gui._apply_combobox_mousewheel_lock(combo, 'model_mousewheel_locked', True)
+    wheel_down(combo)
+    assert combo.currentIndex() == 0
+    wheel_down(combo.lineEdit())
+    assert combo.currentIndex() == 0
+
+    # The lock does not consume wheel events in the open popup list.
+    combo.setMaxVisibleItems(5)
+    combo.showPopup()
+    QApplication.processEvents()
+    view = combo.view()
+    before_scroll = view.verticalScrollBar().value()
+    wheel_down(view.viewport())
+    assert view.verticalScrollBar().value() > before_scroll
+    combo.hidePopup()
+    QTest.keyClick(combo, Qt.Key_Down)
+    assert combo.currentIndex() == 1
+
+    dialog = QDialog(gui)
+    toggle = dialog._model_mousewheel_lock_toggle = QCheckBox(dialog)
+    toggle.setChecked(False)
+    models = QListWidget(dialog)
+    models.addItems([combo.itemText(i) for i in range(combo.count())])
+    monkeypatch.setattr(gui, '_refresh_model_combo_catalog', lambda *args, **kwargs: None, raising=False)
+    gui._save_model_order(models, dialog)
+    assert saved(gui)['model_mousewheel_locked'] is False
+    wheel_down(combo)
+    assert combo.currentIndex() == 2
+
+    gui.config = saved(gui)
+    gui._apply_combobox_mousewheel_lock(combo, 'model_mousewheel_locked', True)
+    wheel_down(combo)
+    assert combo.currentIndex() == 3
+    toggle.setChecked(True)
+    with monkeypatch.context() as patch:
+        patch.setattr(gui, 'save_config', lambda **kwargs: False)
+        gui._save_model_order(models, dialog)
+    assert gui.config['model_mousewheel_locked'] is False
+    assert not combo._mousewheel_locked
+    gui._save_model_order(models, dialog)
+    assert saved(gui)['model_mousewheel_locked'] is True
+    wheel_down(combo)
+    assert combo.currentIndex() == 3
 
 
 def test_main_autofill_off_by_default_and_cancel_preserves_it(gui):

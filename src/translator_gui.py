@@ -22271,6 +22271,7 @@ Recent translations to summarize:
         self.model_combo.setEditable(True)
         self.model_combo.addItems(models)
         self.model_combo.setCurrentText(default_model)
+        self._apply_combobox_mousewheel_lock(self.model_combo, 'model_mousewheel_locked', True)
         self.model_combo.setMaximumWidth(450)
         # Add custom styling with Halgakos arrow and left padding for cog overlay
         model_icon_path = f"{self.base_dir}/Halgakos.ico".replace('\\', '/')
@@ -22708,6 +22709,20 @@ Recent translations to summarize:
         # provider-scoped 24-hour policy is used at startup.
         QTimer.singleShot(0, lambda: self._schedule_current_provider_catalog_refresh(750))
     
+    def _apply_combobox_mousewheel_lock(self, combo, config_key, default):
+        """Prevent wheel selection changes while leaving popup scrolling available."""
+        if not hasattr(combo, '_unlocked_wheel_event'):
+            combo._unlocked_wheel_event = combo.wheelEvent
+
+            def wheel_event(event):
+                if combo._mousewheel_locked:
+                    event.ignore()
+                else:
+                    combo._unlocked_wheel_event(event)
+
+            combo.wheelEvent = wheel_event
+        combo._mousewheel_locked = bool(self.config.get(config_key, default))
+
     def _apply_profile_name_autofill(self):
         """Apply the saved opt-in for inline completion of main profile names."""
         from PySide6.QtWidgets import QCompleter
@@ -22736,6 +22751,7 @@ Recent translations to summarize:
         self.profile_menu.addItems(list(self.prompt_profiles.keys()))
         self.profile_menu.setCurrentText(self.profile_var)
         self._apply_profile_name_autofill()
+        self._apply_combobox_mousewheel_lock(self.profile_menu, 'profile_mousewheel_locked', False)
         self.profile_menu.setMaximumWidth(450)
         # Add custom styling with Halgakos arrow and left padding for cog overlay
         profile_icon_path = f"{self.base_dir}/Halgakos.ico".replace('\\', '/')
@@ -23040,6 +23056,12 @@ Recent translations to summarize:
         autofill_checkbox.setChecked(bool(self.config.get('profile_name_autofill', False)))
         autofill_checkbox.setToolTip("Complete existing profile names as you type in the main profile field. Off by default.")
         layout.addWidget(autofill_checkbox)
+
+        wheel_lock_checkbox = QCheckBox("Lock mouse wheel")
+        wheel_lock_checkbox.setObjectName("profile_mousewheel_lock_checkbox")
+        wheel_lock_checkbox.setChecked(bool(self.config.get('profile_mousewheel_locked', False)))
+        wheel_lock_checkbox.setToolTip("Prevent the mouse wheel from changing the main profile selection. Off by default.")
+        layout.addWidget(wheel_lock_checkbox)
         
         # Horizontal layout for list and buttons
         content_layout = QHBoxLayout()
@@ -23228,7 +23250,9 @@ Recent translations to summarize:
         # Save button
         save_btn = QPushButton("Save Changes")
         save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
-        save_btn.clicked.connect(lambda: self._save_profile_order(list_widget, dialog, autofill_checkbox.isChecked()))
+        save_btn.clicked.connect(lambda: self._save_profile_order(
+            list_widget, dialog, autofill_checkbox.isChecked(), wheel_lock_checkbox.isChecked()
+        ))
         button_layout.addWidget(save_btn)
         
         layout.addLayout(button_layout)
@@ -23287,11 +23311,13 @@ Recent translations to summarize:
                 list_widget.addItem(item)
                 item.setSelected(True)
     
-    def _save_profile_order(self, list_widget, dialog, autofill_enabled=None):
+    def _save_profile_order(self, list_widget, dialog, autofill_enabled=None, mousewheel_locked=None):
         """Save profile order and the optional main-profile autofill preference."""
         previous_profiles = self.prompt_profiles
         previous_autofill = self.config.get('profile_name_autofill')
         had_autofill_setting = 'profile_name_autofill' in self.config
+        previous_wheel_lock = self.config.get('profile_mousewheel_locked')
+        had_wheel_lock_setting = 'profile_mousewheel_locked' in self.config
         previous_index = self.profile_menu.currentIndex()
         # Get new order from list widget
         new_order = []
@@ -23308,6 +23334,8 @@ Recent translations to summarize:
         self.config['prompt_profiles'] = new_profiles
         if autofill_enabled is not None:
             self.config['profile_name_autofill'] = bool(autofill_enabled)
+        if mousewheel_locked is not None:
+            self.config['profile_mousewheel_locked'] = bool(mousewheel_locked)
         
         # Get currently selected profile before refresh
         current_profile = self.profile_menu.currentText()
@@ -23330,6 +23358,10 @@ Recent translations to summarize:
                 self.config['profile_name_autofill'] = previous_autofill
             else:
                 self.config.pop('profile_name_autofill', None)
+            if had_wheel_lock_setting:
+                self.config['profile_mousewheel_locked'] = previous_wheel_lock
+            else:
+                self.config.pop('profile_mousewheel_locked', None)
             self.profile_menu.blockSignals(True)
             try:
                 self.profile_menu.clear()
@@ -23340,6 +23372,7 @@ Recent translations to summarize:
                 self.profile_menu.blockSignals(False)
             return
         self._apply_profile_name_autofill()
+        self._apply_combobox_mousewheel_lock(self.profile_menu, 'profile_mousewheel_locked', False)
         
         self.append_log("✓ Profile order and settings updated")
         dialog.accept()
@@ -23754,6 +23787,13 @@ Recent translations to summarize:
             "This also filters model search dropdowns without changing the saved model list."
         )
         button_column.addWidget(hide_unpolled_toggle)
+
+        wheel_lock_toggle = self._create_styled_checkbox("Lock mouse wheel")
+        wheel_lock_toggle.setObjectName("model_mousewheel_lock_checkbox")
+        wheel_lock_toggle.setChecked(bool(self.config.get('model_mousewheel_locked', True)))
+        wheel_lock_toggle.setToolTip("Prevent the mouse wheel from changing the main model selection. On by default.")
+        button_column.addWidget(wheel_lock_toggle)
+        dialog._model_mousewheel_lock_toggle = wheel_lock_toggle
 
         button_column.addSpacing(4)
 
@@ -24324,6 +24364,11 @@ Recent translations to summarize:
         old_custom_models = self.config.get('custom_model_list')
         had_removed_models = 'model_manager_removed_models' in self.config
         old_removed_models = self.config.get('model_manager_removed_models')
+        wheel_lock_toggle = getattr(dialog, '_model_mousewheel_lock_toggle', None)
+        had_wheel_lock_setting = 'model_mousewheel_locked' in self.config
+        previous_wheel_lock = self.config.get('model_mousewheel_locked')
+        if wheel_lock_toggle is not None:
+            self.config['model_mousewheel_locked'] = wheel_lock_toggle.isChecked()
         self.config['custom_model_list'] = new_order
         self.config['model_manager_removed_models'] = sorted(removed_keys)
         self._model_all_values = list(new_order)
@@ -24347,6 +24392,10 @@ Recent translations to summarize:
                 self.config['model_manager_removed_models'] = old_removed_models
             else:
                 self.config.pop('model_manager_removed_models', None)
+            if had_wheel_lock_setting:
+                self.config['model_mousewheel_locked'] = previous_wheel_lock
+            else:
+                self.config.pop('model_mousewheel_locked', None)
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(
                 dialog,
@@ -24357,6 +24406,8 @@ Recent translations to summarize:
             self.append_log("❌ Model list was not saved; config.json write failed")
             return
 
+        if wheel_lock_toggle is not None:
+            self._apply_combobox_mousewheel_lock(self.model_combo, 'model_mousewheel_locked', True)
         self.append_log("✓ Model list updated")
         dialog._model_manager_saved = True
         dialog._model_manager_draft_active = False
