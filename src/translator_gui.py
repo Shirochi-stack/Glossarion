@@ -17756,8 +17756,8 @@ Recent translations to summarize:
         dialog.activateWindow()
 
     def show_assistant_prompt_dialog(self):
-        """Show dialog to edit the optional assistant prompt"""
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QMessageBox
+        """Edit assistant prefill with the same profile controls as glossary prompts."""
+        from PySide6.QtWidgets import QComboBox, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QMessageBox
         
         # Store dialog as instance attribute so it persists and can be reused
         if hasattr(self, '_assistant_prompt_dialog') and self._assistant_prompt_dialog is not None:
@@ -17790,11 +17790,57 @@ Recent translations to summarize:
         )
         desc_label.setWordWrap(True)
         layout.addWidget(desc_label)
+
+        # Keep drafts local so Cancel discards edits since the last explicit save.
+        # Seed Default from the existing prefill when upgrading an older config.
+        current_prompt = str(getattr(self, 'assistant_prompt', '') or '')
+        stored_profiles = self.config.get('assistant_prompt_profiles', {})
+        profiles = {
+            name: text for name, text in stored_profiles.items()
+            if isinstance(name, str) and name.strip()
+            and name.strip().casefold() != 'default' and isinstance(text, str)
+        } if isinstance(stored_profiles, dict) else {}
+        default_prompt = str(self.config.get('assistant_prompt_profile_default', current_prompt) or '')
+        active_name = self.config.get('active_assistant_prompt_profile', '')
+        if not isinstance(active_name, str) or active_name not in profiles:
+            active_name = ''
+
+        # Match the glossary manager's editable combo, mascot, and button styles.
+        profile_layout = QHBoxLayout()
+        profile_layout.setContentsMargins(0, 0, 0, 6)
+        profile_layout.setSpacing(8)
+        profile_layout.addWidget(QLabel("Assistant Profile:"))
+        profile_combo = QComboBox()
+        profile_combo.setEditable(True)
+        profile_combo.setInsertPolicy(QComboBox.NoInsert)
+        # Use one popup for selection; editable names do not need a competing
+        # autocomplete popup that can intercept clicks intended for the list.
+        profile_combo.setCompleter(None)
+        profile_combo.setMinimumWidth(220)
+        profile_combo.setMaximumWidth(420)
+        profile_combo.setToolTip("Create a profile for the assistant prefill prompt")
+        profile_combo.lineEdit().setPlaceholderText("Profile name")
+        profile_combo.setStyleSheet("""
+            QComboBox {
+                padding-right: 28px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 26px;
+                border-left: 1px solid #4a5568;
+            }
+        """)
+        self._disable_combobox_mousewheel(profile_combo)
+        self._add_combobox_arrow(profile_combo)
+        profile_layout.addWidget(profile_combo)
+        layout.addLayout(profile_layout)
         
         # Text edit for the prompt
         prompt_edit = QTextEdit()
         prompt_edit.setPlaceholderText("Enter assistant prefill prompt here... (leave empty to disable)")
-        prompt_edit.setText(self.assistant_prompt if hasattr(self, 'assistant_prompt') else '')
+        prompt_edit.setAcceptRichText(False)
+        prompt_edit.setPlainText(current_prompt)
         layout.addWidget(prompt_edit)
         
         # Character count label
@@ -17802,12 +17848,191 @@ Recent translations to summarize:
         char_count_label.setStyleSheet("color: #6c757d; font-size: 9pt;")
         prompt_edit.textChanged.connect(lambda: char_count_label.setText(f"Characters: {len(prompt_edit.toPlainText())}"))
         layout.addWidget(char_count_label)
+
+        def refresh_profiles():
+            profile_combo.blockSignals(True)
+            try:
+                profile_combo.clear()
+                profile_combo.addItem("Default")
+                profile_combo.addItems(list(profiles))
+                profile_combo.setCurrentIndex(profile_combo.findText(active_name or "Default"))
+                self._apply_halgakos_combo_icons(profile_combo)
+            finally:
+                profile_combo.blockSignals(False)
+
+        def stage_prompt():
+            nonlocal default_prompt
+            name = profile_combo.currentText().strip()
+            text = prompt_edit.toPlainText().strip()
+            if not name or name.casefold() == 'default':
+                default_prompt = text
+            elif name == active_name and name in profiles:
+                profiles[name] = text
+
+        def select_profile(name=None):
+            nonlocal active_name
+            name = (profile_combo.currentText() if name is None else name).strip()
+            if name.casefold() == 'default':
+                active_name = ''
+                text = default_prompt
+            elif name in profiles:
+                active_name = name
+                text = profiles[name]
+            else:
+                return
+            # A typed name can resolve to a profile without Qt changing its
+            # current index. Keep the editor, selected row, and displayed name
+            # together, without rebuilding the popup during a mouse selection.
+            selected_name = active_name or "Default"
+            profile_combo.blockSignals(True)
+            try:
+                profile_combo.setCurrentIndex(profile_combo.findText(selected_name))
+                profile_combo.setEditText(selected_name)
+            finally:
+                profile_combo.blockSignals(False)
+            # Loading a profile must not stage its text into the previous one.
+            prompt_edit.blockSignals(True)
+            try:
+                prompt_edit.setPlainText(text)
+            finally:
+                prompt_edit.blockSignals(False)
+            char_count_label.setText(f"Characters: {len(prompt_edit.toPlainText())}")
+
+        def persist_profiles():
+            updates = {
+                'assistant_prompt_profiles': dict(profiles),
+                'assistant_prompt_profile_default': default_prompt,
+                'active_assistant_prompt_profile': active_name,
+                'assistant_prompt': prompt_edit.toPlainText().strip(),
+            }
+            previous = {key: self.config[key] for key in updates if key in self.config}
+            previous_prompt = self.assistant_prompt
+            self.config.update(updates)
+            # save_config reads the live attribute for the flat runtime setting.
+            self.assistant_prompt = updates['assistant_prompt']
+            if self.save_config(show_message=False) is False:
+                for key in updates:
+                    if key in previous:
+                        self.config[key] = previous[key]
+                    else:
+                        self.config.pop(key, None)
+                self.assistant_prompt = previous_prompt
+                QMessageBox.warning(
+                    dialog, "Save Failed",
+                    "Could not save the assistant prompt profiles. Your edits are still open; please try saving again.",
+                )
+                return False
+            self._update_assistant_prompt_button_style()
+            return True
+
+        def new_profile():
+            nonlocal active_name
+            n = 1
+            while f"New Profile #{n}" in profiles:
+                n += 1
+            active_name = f"New Profile #{n}"
+            profiles[active_name] = ''
+            refresh_profiles()
+            select_profile()
+            if persist_profiles():
+                self.append_log(f"✅ Created assistant prompt profile: '{active_name}'")
+
+        def save_profile():
+            nonlocal active_name, default_prompt
+            name = profile_combo.currentText().strip()
+            if not name:
+                QMessageBox.warning(dialog, "Profile Name Required", "Enter a profile name before saving.")
+                return False
+            text = prompt_edit.toPlainText().strip()
+            if name.casefold() == 'default':
+                default_prompt = text
+                active_name = ''
+            else:
+                profiles[name] = text
+                active_name = name
+            refresh_profiles()
+            if not persist_profiles():
+                return False
+            self.append_log(f"✅ Saved assistant prompt profile: '{active_name or 'Default'}'")
+            return True
+
+        def delete_profile():
+            nonlocal active_name
+            name = profile_combo.currentText().strip()
+            if name.casefold() == 'default':
+                QMessageBox.warning(dialog, "Default Profile", "The Default assistant prompt profile cannot be deleted.")
+                return
+            if not name or name not in profiles:
+                QMessageBox.warning(dialog, "Profile Not Found", "Select an existing profile to delete.")
+                return
+            reply = QMessageBox.question(
+                dialog, "Delete Profile", f"Delete assistant prompt profile '{name}'?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            del profiles[name]
+            active_name = next(iter(profiles), '')
+            refresh_profiles()
+            select_profile()
+            if persist_profiles():
+                self.append_log(f"🗑️ Deleted assistant prompt profile: '{name}'")
+
+        profile_buttons = (
+            ("+ New Profile", "Create a new empty assistant prompt profile", new_profile, None,
+             '#2d5a2d', '#3a7a3a', '#3a7a3a', '#4a9a4a', '#1e3e1e'),
+            ("💾 Save Profile", "Save the selected assistant prompt profile", save_profile, 120,
+             '#2f5f8f', '#4a78a8', '#3f78ad', '#5a91c8', '#244766'),
+            ("🗑 Delete Profile", "Delete the selected custom assistant prompt profile", delete_profile, 128,
+             '#6f2f2f', '#944545', '#8a3a3a', '#b65252', '#512424'),
+        )
+        for label, tooltip, callback, width, background, border, hover, hover_border, pressed in profile_buttons:
+            button = QPushButton(label)
+            button.setAutoDefault(False)
+            button.setFixedHeight(28)
+            if width is not None:
+                button.setFixedWidth(width)
+            button.setToolTip(tooltip)
+            button.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {background};
+                    color: #ffffff;
+                    font-size: 11px;
+                    font-weight: bold;
+                    border: 1px solid {border};
+                    border-radius: 4px;
+                    padding: 0px 8px;
+                }}
+                QPushButton:hover {{
+                    background-color: {hover};
+                    border-color: {hover_border};
+                }}
+                QPushButton:pressed {{
+                    background-color: {pressed};
+                }}
+            """)
+            button.clicked.connect(lambda _checked=False, action=callback: action())
+            profile_layout.addWidget(button)
+        profile_layout.addStretch()
+
+        refresh_profiles()
+        select_profile()
+        profile_combo.currentIndexChanged.connect(
+            lambda index: select_profile(profile_combo.itemText(index))
+        )
+        # activated also fires when the user chooses the current row again.
+        profile_combo.activated.connect(
+            lambda index: select_profile(profile_combo.itemText(index))
+        )
+        profile_combo.lineEdit().returnPressed.connect(select_profile)
+        prompt_edit.textChanged.connect(stage_prompt)
         
         # Button layout
         button_layout = QHBoxLayout()
         
         # Clear button
         clear_btn = QPushButton("Clear")
+        clear_btn.setAutoDefault(False)
         clear_btn.setStyleSheet("background-color: #dc3545; color: white;")
         clear_btn.clicked.connect(lambda: prompt_edit.clear())
         button_layout.addWidget(clear_btn)
@@ -17816,17 +18041,18 @@ Recent translations to summarize:
         
         # Cancel button
         cancel_btn = QPushButton("Cancel")
+        cancel_btn.setAutoDefault(False)
         cancel_btn.clicked.connect(dialog.reject)
         button_layout.addWidget(cancel_btn)
         
         # Save button
         save_btn = QPushButton("Save")
+        save_btn.setAutoDefault(False)
         save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
         
         def save_prompt():
-            self.assistant_prompt = prompt_edit.toPlainText().strip()
-            self._update_assistant_prompt_button_style()
-            self.save_config()
+            if not save_profile():
+                return
             if self.assistant_prompt:
                 self.append_log(f"✅ Assistant prompt set ({len(self.assistant_prompt)} characters)")
             else:
@@ -17839,8 +18065,10 @@ Recent translations to summarize:
         layout.addLayout(button_layout)
         
         # Store reference and clean up when closed
+        dialog.setMinimumSize(dialog.minimumSize().expandedTo(layout.minimumSize()))
         self._assistant_prompt_dialog = dialog
         dialog.finished.connect(lambda: setattr(self, '_assistant_prompt_dialog', None))
+        dialog.finished.connect(dialog.deleteLater)
         
         dialog.show()  # Non-blocking show instead of exec()
 
