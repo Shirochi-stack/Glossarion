@@ -11,17 +11,189 @@ import threading
 import concurrent.futures
 import time
 import re
+from html.parser import HTMLParser
 from typing import Optional, Dict, Tuple, List
 from packaging import version
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QRadioButton, QButtonGroup, QGroupBox, QTabWidget, QWidget,
-    QTextEdit, QProgressBar, QMessageBox, QApplication
+    QTextBrowser, QGridLayout, QProgressBar, QMessageBox, QApplication
 )
-from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal, Slot, QUrl
+from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal, Slot, QUrl, QRunnable, QThreadPool
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
-from PySide6.QtGui import QFont, QIcon, QPixmap, QTextCursor
+from PySide6.QtGui import QFont, QIcon, QPixmap, QTextCursor, QTextDocument, QImage
 from datetime import datetime
+
+
+class _ReleaseImageSignals(QObject):
+    finished = Signal(str, QImage)
+
+
+class _ReleaseImageTag(HTMLParser):
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() == 'img':
+            self.attrs = dict(attrs)
+
+
+class _ReleaseImageDownload(QRunnable):
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+        self.signals = _ReleaseImageSignals()
+
+    def run(self):
+        image = QImage()
+        try:
+            # requests also works in packaged builds without a Qt SSL backend.
+            with requests.get(self.url, stream=True, timeout=(5, 15)) as response:
+                response.raise_for_status()
+                data = bytearray()
+                for chunk in response.iter_content(65536):
+                    data.extend(chunk)
+                    if len(data) > 10 * 1024 * 1024:
+                        raise ValueError("Release image exceeds 10 MB")
+                image = QImage.fromData(bytes(data))
+        except Exception:
+            pass  # Keep the document's missing-image/alt-text fallback.
+        self.signals.finished.emit(self.url, image)
+
+
+class ReleaseNotesBrowser(QTextBrowser):
+    """Rich GitHub release notes with asynchronous, viewport-sized images."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setOpenExternalLinks(True)
+        self._images = {}
+        self._pending_images = set()
+        self._image_sizes = {}
+        self._declared_image_sizes = {}
+        self._rendered_image_sizes = {}
+        # Outlive individual tabs: closing a dialog must not wait for downloads.
+        app = QApplication.instance()
+        if not hasattr(app, '_release_image_pool'):
+            app._release_image_pool = QThreadPool(app)
+            app._release_image_pool.setMaxThreadCount(3)
+        self._image_pool = app._release_image_pool
+
+    def set_release_notes(self, markdown):
+        # Qt treats standalone raw HTML images as inline content, even after a
+        # blank line. Convert GitHub's image tags to proper Markdown paragraphs.
+        self._image_sizes.clear()
+        self._declared_image_sizes.clear()
+        self._rendered_image_sizes.clear()
+        lines = []
+        fence = None
+        for line in (markdown or '').splitlines():
+            stripped = line.strip()
+            marker = re.match(r'^(`{3,}|~{3,})', stripped)
+            if marker:
+                token = marker.group(1)
+                if fence is None:
+                    fence = token
+                elif token[0] == fence[0] and len(token) >= len(fence):
+                    fence = None
+                lines.append(line)
+                continue
+            if fence is None and re.fullmatch(r'<img\b[^>]*>', stripped, re.IGNORECASE):
+                parser = _ReleaseImageTag()
+                parser.feed(stripped)
+                attrs = getattr(parser, 'attrs', {})
+                source = attrs.get('src')
+                if source:
+                    url = self.document().baseUrl().resolved(QUrl(source)).toString()
+                    try:
+                        width = max(0, float(attrs.get('width') or 0))
+                        height = max(0, float(attrs.get('height') or 0))
+                        self._declared_image_sizes[url] = (width, height)
+                    except ValueError:
+                        pass
+                    alt = (attrs.get('alt') or '').replace('[', '\\[').replace(']', '\\]')
+                    lines.extend(['', f'![{alt}](<{source}>)', ''])
+                    continue
+            lines.append(line)
+        self.setMarkdown('\n'.join(lines))
+        self._fit_images()
+
+    def loadResource(self, resource_type, url):
+        if resource_type != QTextDocument.ImageResource:
+            return super().loadResource(resource_type, url)
+        if url.scheme() not in ('https', 'http'):
+            return QImage()
+        key = url.toString()
+        if key in self._images:
+            return self._images[key]
+        if key not in self._pending_images:
+            self._pending_images.add(key)
+            task = _ReleaseImageDownload(key)
+            task.signals.finished.connect(self._image_loaded)
+            self._image_pool.start(task)
+        return QImage()
+
+    @Slot(str, QImage)
+    def _image_loaded(self, url, image):
+        self._pending_images.discard(url)
+        self._images[url] = image
+        if image.isNull():
+            return
+        self.document().addResource(QTextDocument.ImageResource, QUrl(url), image)
+        self._fit_images()
+        self.document().markContentsDirty(0, self.document().characterCount())
+        self.viewport().update()
+
+    def _fit_images(self):
+        document = self.document()
+        available = max(1, self.viewport().width() - 2 * document.documentMargin() - 12)
+        pixel_ratio = max(1.0, self.devicePixelRatioF())
+        block = document.begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid() and fragment.charFormat().isImageFormat():
+                    fmt = fragment.charFormat().toImageFormat()
+                    url = document.baseUrl().resolved(QUrl(fmt.name())).toString()
+                    image = self._images.get(url)
+                    if image is not None and not image.isNull():
+                        position = fragment.position()
+                        if position not in self._image_sizes:
+                            declared_width, declared_height = self._declared_image_sizes.get(url, (0, 0))
+                            width = declared_width or fmt.width() or image.width()
+                            height = declared_height or fmt.height() or image.height() * width / image.width()
+                            self._image_sizes[position] = (width, height)
+                        width, height = self._image_sizes[position]
+                        aspect = image.width() / image.height()
+                        # Compact previews, with no enlargement beyond the
+                        # source's physical pixels on high-DPI displays.
+                        width = min(width, height * aspect, available, 560,
+                                    320 * aspect, image.width() / pixel_ratio)
+                        height = width / aspect
+                        pixels = (max(1, round(width * pixel_ratio)),
+                                  max(1, round(height * pixel_ratio)), pixel_ratio)
+                        if self._rendered_image_sizes.get(url) != pixels:
+                            # Always resample the original, never an already
+                            # reduced preview, so repeated resizing stays sharp.
+                            preview = image.scaled(pixels[0], pixels[1],
+                                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                            preview.setDevicePixelRatio(pixel_ratio)
+                            document.addResource(QTextDocument.ImageResource, QUrl(url), preview)
+                            self._rendered_image_sizes[url] = pixels
+                        if fmt.width() != width or fmt.height() != height or not fmt.isAnchor():
+                            fmt.setWidth(width)
+                            fmt.setHeight(height)
+                            fmt.setAnchor(True)
+                            fmt.setAnchorHref(url)
+                            fmt.setToolTip("Click to open the full-size image")
+                            cursor = QTextCursor(document)
+                            cursor.setPosition(position)
+                            cursor.setPosition(position + fragment.length(), QTextCursor.KeepAnchor)
+                            cursor.setCharFormat(fmt)
+                iterator += 1
+            block = block.next()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_images()
 
 class UpdateCheckWorker(QThread):
     """Worker thread for checking updates in background"""
@@ -733,82 +905,15 @@ class UpdateManager(QObject):
             print(f"[DEBUG] Failed to save last check time: {e}")
     
     def format_markdown_to_qt(self, text_widget, markdown_text):
-        """Convert GitHub markdown to formatted Qt text - simplified version
-        
-        Args:
-            text_widget: The QTextEdit widget to insert formatted text into
-            markdown_text: The markdown source text
-        """
-        # Set default font
+        """Render Markdown and embedded GitHub HTML images as rich text."""
         default_font = QFont()
         default_font.setPointSize(10)
         text_widget.setFont(default_font)
-        
-        # Process text line by line with minimal formatting
-        lines = markdown_text.split('\n')
+        text_widget.set_release_notes(markdown_text or '')
         cursor = text_widget.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        
-        for line in lines:
-            # Strip any weird unicode characters that might cause display issues
-            line = ''.join(char for char in line if ord(char) < 65536)
-            
-            # Handle headings
-            if line.startswith('#'):
-                # Remove all # symbols and get the heading text
-                heading_text = line.lstrip('#').strip()
-                if heading_text:
-                    cursor.insertText(heading_text + '\n')
-                    # Make it bold by moving back and applying format
-                    cursor.movePosition(QTextCursor.PreviousBlock)
-                    cursor.select(QTextCursor.BlockUnderCursor)
-                    fmt = cursor.charFormat()
-                    font = QFont()
-                    font.setBold(True)
-                    font.setPointSize(12)
-                    fmt.setFont(font)
-                    cursor.mergeCharFormat(fmt)
-                    cursor.movePosition(QTextCursor.End)
-            
-            # Handle bullet points
-            elif line.strip().startswith(('- ', '* ')):
-                # Get the text after the bullet
-                bullet_text = line.strip()[2:].strip()
-                # Clean the text of markdown formatting
-                bullet_text = self._clean_markdown_text(bullet_text)
-                cursor.insertText('    • ' + bullet_text + '\n')
-            
-            # Handle numbered lists  
-            elif re.match(r'^\s*\d+\.\s', line):
-                # Extract number and text
-                match = re.match(r'^(\s*)(\d+)\.\s(.+)', line)
-                if match:
-                    indent, num, text = match.groups()
-                    clean_text = self._clean_markdown_text(text.strip())
-                    cursor.insertText(f'    {num}. {clean_text}\n')
-            
-            # Handle separator lines
-            elif line.strip() in ['---', '***', '___']:
-                cursor.insertText('─' * 40 + '\n')
-            
-            # Handle code blocks - just skip the markers
-            elif line.strip().startswith('```'):
-                continue  # Skip code fence markers
-            
-            # Regular text
-            elif line.strip():
-                # Clean and insert the line
-                clean_text = self._clean_markdown_text(line)
-                cursor.insertText(clean_text + '\n')
-            
-            # Empty lines
-            else:
-                cursor.insertText('\n')
-        
-        # Move cursor to start and scroll to top
         cursor.movePosition(QTextCursor.Start)
         text_widget.setTextCursor(cursor)
-    
+
     def _clean_markdown_text(self, text):
         """Remove markdown formatting from text
         
@@ -1026,9 +1131,9 @@ class UpdateManager(QObject):
         print(f"[DEBUG] Dialog created successfully with dark theme")
         
         # Get screen dimensions and calculate size
-        screen = app.primaryScreen().geometry()
-        dialog_width = int(screen.width() * 0.23)
-        dialog_height = int(screen.height() * 0.67) 
+        screen = (reference_widget.screen() if reference_widget else app.primaryScreen()).availableGeometry()
+        dialog_width = min(screen.width() - 40, max(1000, int(screen.width() * 0.55)))
+        dialog_height = min(screen.height() - 40, max(720, int(screen.height() * 0.82)))
         dialog.resize(dialog_width, dialog_height)
         
         # Set icon if available
@@ -1236,8 +1341,11 @@ class UpdateManager(QObject):
                 
                 asset_group = QGroupBox(frame_title)
                 asset_group.setObjectName("asset_group")
-                asset_layout = QVBoxLayout()
+                asset_layout = QGridLayout()
                 asset_layout.setContentsMargins(10, 10, 10, 10)
+                asset_layout.setHorizontalSpacing(24)
+                asset_layout.setColumnStretch(0, 1)
+                asset_layout.setColumnStretch(1, 1)
                 
                 if len(all_installable) > 1:
                     # Multiple files - show radio buttons to choose
@@ -1294,20 +1402,21 @@ class UpdateManager(QObject):
                         else:
                             platform_tag = ""
 
-                        variant_label = f"{variant_type}{current_tag}{platform_tag} — {filename} ({size_mb:.1f} MB)"
+                        variant_label = f"{variant_type}{current_tag}{platform_tag} — {size_mb:.1f} MB"
                         
                         rb = QRadioButton(variant_label)
+                        rb.setToolTip(filename)
                         rb.setProperty("asset_index", i)
                         self.asset_button_group.addButton(rb, i)
-                        asset_layout.addWidget(rb)
+                        asset_layout.addWidget(rb, i // 2, i % 2)
 
                         # Disable cross-platform assets so user can't accidentally select them
                         if not is_native:
                             rb.setEnabled(False)
-                            rb.setToolTip(f"This build is for {asset_plat.replace('macos','macOS').replace('windows','Windows').replace('linux','Linux')} — not your current platform")
+                            rb.setToolTip(f"{filename}\nThis build is for {asset_plat.replace('macos','macOS').replace('windows','Windows').replace('linux','Linux')} — not your current platform")
                         elif not is_native_arch:
                             rb.setEnabled(False)
-                            rb.setToolTip(f"This build is for {asset_arch}; your current architecture is {current_arch}.")
+                            rb.setToolTip(f"{filename}\nThis build is for {asset_arch}; your current architecture is {current_arch}.")
                         
                         # Auto-select: exact variant match on current platform wins;
                         # otherwise first native asset is the default
@@ -1333,7 +1442,8 @@ class UpdateManager(QObject):
                     filename = asset['name']
                     size_mb = asset['size'] / (1024 * 1024)
                     asset_label = QLabel(f"{filename} ({size_mb:.1f} MB)")
-                    asset_layout.addWidget(asset_label)
+                    asset_label.setWordWrap(True)
+                    asset_layout.addWidget(asset_label, 0, 0, 1, 2)
                 
                 asset_group.setLayout(asset_layout)
                 main_layout.addWidget(asset_group)
@@ -1341,6 +1451,16 @@ class UpdateManager(QObject):
         # Create tab widget for version history
         tab_widget = QTabWidget()
         tab_widget.setMinimumHeight(300)
+
+        date_label = QLabel()
+        date_label.setObjectName("release_date_label")
+        date_font = QFont()
+        date_font.setItalic(True)
+        date_font.setPointSize(9)
+        date_label.setFont(date_font)
+        date_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        date_label.setContentsMargins(12, 0, 8, 0)
+        tab_widget.setCornerWidget(date_label, Qt.TopRightCorner)
         
         # Add tabs for different versions
         if self.all_releases:
@@ -1364,23 +1484,16 @@ class UpdateManager(QObject):
                 tab_layout = QVBoxLayout(tab_widget_container)
                 tab_layout.setContentsMargins(10, 10, 10, 10)
                 
-                # Add release date
-                if 'published_at' in release:
-                    date_str = release['published_at'][:10]  # Get YYYY-MM-DD
-                    date_label = QLabel(f"Released: {date_str}")
-                    date_font = QFont()
-                    date_font.setItalic(True)
-                    date_font.setPointSize(9)
-                    date_label.setFont(date_font)
-                    tab_layout.addWidget(date_label)
+                tab_widget_container.setProperty("release_date", (release.get('published_at') or '')[:10])
                 
                 # Create text widget for release notes
-                notes_text = QTextEdit()
+                notes_text = ReleaseNotesBrowser()
                 notes_text.setReadOnly(True)
                 notes_text.setMinimumHeight(200)
                 
                 # Format and insert release notes with markdown support
                 release_notes = release.get('body', 'No release notes available')
+                notes_text.document().setBaseUrl(QUrl(release.get('html_url', '')))
                 self.format_markdown_to_qt(notes_text, release_notes)
                 
                 tab_layout.addWidget(notes_text)
@@ -1391,12 +1504,14 @@ class UpdateManager(QObject):
             tab_layout = QVBoxLayout(tab_widget_container)
             tab_layout.setContentsMargins(10, 10, 10, 10)
             
-            notes_text = QTextEdit()
+            notes_text = ReleaseNotesBrowser()
             notes_text.setReadOnly(True)
             notes_text.setMinimumHeight(200)
             
             if self.latest_release:
+                tab_widget_container.setProperty("release_date", (self.latest_release.get('published_at') or '')[:10])
                 release_notes = self.latest_release.get('body', 'No release notes available')
+                notes_text.document().setBaseUrl(QUrl(self.latest_release.get('html_url', '')))
                 self.format_markdown_to_qt(notes_text, release_notes)
             else:
                 notes_text.setPlainText('Unable to fetch release notes.')
@@ -1404,7 +1519,15 @@ class UpdateManager(QObject):
             tab_layout.addWidget(notes_text)
             tab_widget.addTab(tab_widget_container, "Release Notes")
         
-        main_layout.addWidget(tab_widget)
+        def update_release_date(index):
+            page = tab_widget.widget(index)
+            date = page.property("release_date") if page is not None else ''
+            date_label.setText(f"Released: {date}" if date else '')
+            date_label.setVisible(bool(date))
+
+        tab_widget.currentChanged.connect(update_release_date)
+        update_release_date(tab_widget.currentIndex())
+        main_layout.addWidget(tab_widget, 1)
         
         # Download progress (initially hidden)
         self.progress_widget = QWidget()

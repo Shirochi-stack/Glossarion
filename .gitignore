@@ -117,6 +117,7 @@ tests/**
 !tests/test_prompt_profile_renaming.py
 !tests/test_shutdown_utils_cleanup.py
 !tests/test_config_backup_restore.py
+!tests/test_update_manager_notes.py
 !tests/test_authnd_captcha_navigation.py
 !tests/test_authgrok_auth.py
 !tests/test_authgpt_request.py

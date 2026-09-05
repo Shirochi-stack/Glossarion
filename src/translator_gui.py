@@ -22753,7 +22753,7 @@ Recent translations to summarize:
         self.profile_menu.addItems(list(self.prompt_profiles.keys()))
         self.profile_menu.setCurrentText(self.profile_var)
         self._apply_profile_name_autofill()
-        self._apply_combobox_mousewheel_lock(self.profile_menu, 'profile_mousewheel_locked', False)
+        self._apply_combobox_mousewheel_lock(self.profile_menu, 'profile_mousewheel_locked', True)
         self.profile_menu.setMaximumWidth(450)
         # Add custom styling with Halgakos arrow and left padding for cog overlay
         profile_icon_path = f"{self.base_dir}/Halgakos.ico".replace('\\', '/')
@@ -23065,10 +23065,10 @@ Recent translations to summarize:
 
         wheel_lock_checkbox = self._create_styled_checkbox("Lock mouse wheel")
         wheel_lock_checkbox.setObjectName("profile_mousewheel_lock_checkbox")
-        wheel_lock_checkbox.setChecked(bool(self.config.get('profile_mousewheel_locked', False)))
+        wheel_lock_checkbox.setChecked(bool(self.config.get('profile_mousewheel_locked', True)))
         wheel_lock_checkbox.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
-            "Prevent the mouse wheel from changing the main profile selection. Off by default."
+            "Prevent the mouse wheel from changing the main profile selection. On by default."
             "</p></qt>"
         )
         layout.addWidget(wheel_lock_checkbox)
@@ -23382,7 +23382,7 @@ Recent translations to summarize:
                 self.profile_menu.blockSignals(False)
             return
         self._apply_profile_name_autofill()
-        self._apply_combobox_mousewheel_lock(self.profile_menu, 'profile_mousewheel_locked', False)
+        self._apply_combobox_mousewheel_lock(self.profile_menu, 'profile_mousewheel_locked', True)
         
         self.append_log("✓ Profile order and settings updated")
         dialog.accept()

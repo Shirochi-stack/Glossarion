@@ -45,7 +45,7 @@ class ProfileHarness(GlossaryManagerMixin, QMainWindow):
         self.profile_menu.addItems(list(self.prompt_profiles))
         self.profile_menu.setCurrentIndex(self.profile_menu.findText("Alpha"))
         self._apply_profile_name_autofill()
-        self._apply_combobox_mousewheel_lock(self.profile_menu, 'profile_mousewheel_locked', False)
+        self._apply_combobox_mousewheel_lock(self.profile_menu, 'profile_mousewheel_locked', True)
         self.prompt_text = QTextEdit(self)
         self.profile_menu.currentIndexChanged.connect(lambda _: self.on_profile_select())
         self.prompt_text.textChanged.connect(self._auto_save_system_prompt)
@@ -144,14 +144,13 @@ def wheel_down(widget):
     QApplication.sendEvent(widget, event)
 
 
-def test_profile_wheel_lock_defaults_off_and_saves_from_manager(gui):
+def test_profile_wheel_lock_defaults_on_and_saves_from_manager(gui):
     combo = gui.profile_menu
     wheel_down(combo)
-    assert combo.currentText() == "Beta"
+    assert combo.currentText() == "Alpha"
     dialog, _, buttons = manager_controls(gui)
     toggle = dialog.findChild(QCheckBox, "profile_mousewheel_lock_checkbox")
-    assert not toggle.isChecked()
-    toggle.setChecked(True)
+    assert toggle.isChecked()
     buttons["Save Changes"].click()
     assert saved(gui)["profile_mousewheel_locked"] is True
     combo.setCurrentIndex(0)
@@ -162,7 +161,7 @@ def test_profile_wheel_lock_defaults_off_and_saves_from_manager(gui):
     fresh = QComboBox(gui)
     fresh.addItems(["First", "Second"])
     gui.config = saved(gui)
-    gui._apply_combobox_mousewheel_lock(fresh, 'profile_mousewheel_locked', False)
+    gui._apply_combobox_mousewheel_lock(fresh, 'profile_mousewheel_locked', True)
     wheel_down(fresh)
     assert fresh.currentIndex() == 0
 
@@ -177,6 +176,9 @@ def test_profile_wheel_lock_defaults_off_and_saves_from_manager(gui):
 
 
 def test_profile_wheel_lock_cancel_and_failed_save_leave_it_off(gui, monkeypatch):
+    gui.config['profile_mousewheel_locked'] = False
+    gui._apply_combobox_mousewheel_lock(gui.profile_menu, 'profile_mousewheel_locked', True)
+    gui.save_config()
     dialog, _, buttons = manager_controls(gui)
     dialog.findChild(QCheckBox, "profile_mousewheel_lock_checkbox").setChecked(True)
     with monkeypatch.context() as patch:
