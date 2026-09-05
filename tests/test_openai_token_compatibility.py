@@ -6,6 +6,10 @@ import pytest
 
 import unified_api_client as api
 from unified_api_client import UnifiedClient, UnifiedClientError
+from reasoning_compatibility import (
+    ReasoningEffortRejected, normalize_none_effort, supported_reasoning_efforts,
+    repair_reasoning_effort, call_with_reasoning_retry,
+)
 
 
 ERROR = {
@@ -240,7 +244,7 @@ def test_gpt6_does_not_send_unsupported_thinking_toggle(monkeypatch):
     monkeypatch.setenv("ENABLE_GPT_THINKING", "0")
     monkeypatch.setenv("PASS_THINKING_TO_OPENAI_COMPATIBLE", "1")
     client = bare_client()
-    assert client._get_openai_compatible_reasoning_effort("openai", "gpt-6-astra") is None
+    assert client._get_openai_compatible_reasoning_effort("openai", "gpt-6-astra") == "low"
     assert not client._get_openai_compatible_thinking_disabled("openai", "gpt-6-astra")
 
 
@@ -297,3 +301,159 @@ def test_http_path_sends_native_gpt6_effort(monkeypatch, tmp_path, model):
 ])
 def test_astra_responses_route_is_limited_to_public_openai(provider, model, url, expected):
     assert UnifiedClient._uses_astra_responses_api(provider, model, url) is expected
+
+
+@pytest.mark.parametrize('endpoint', ['chat/completions', 'responses'])
+@pytest.mark.parametrize('fails_twice', [False, True])
+def test_http_reasoning_retry_is_corrected_and_bounded(monkeypatch, endpoint, fails_twice):
+    client = bare_client('custom-model')
+    client._bind_thread_run_id_for_request = lambda: None
+    client._get_send_interval = lambda: 0
+    client._get_thread_directory = lambda: None
+    client._ignore_graceful_stop = False
+    client.request_timeout = 30
+    monkeypatch.delenv('GRACEFUL_STOP', raising=False)
+    monkeypatch.setattr(api, '_save_outgoing_request', lambda *args, **kwargs: None)
+    monkeypatch.setattr(api, '_save_incoming_response', lambda *args, **kwargs: None)
+    calls = []
+    error = {'error': {'param': 'reasoning_effort', 'message':
+                      "Unsupported value: 'max'. Supported values are: 'low', 'medium', 'high', 'xhigh'."}}
+
+    def request(*args, **kwargs):
+        calls.append(copy.deepcopy(kwargs['json']))
+        status = 400 if len(calls) == 1 or fails_twice else 200
+        return SimpleNamespace(status_code=status, headers={}, text=json.dumps(error),
+                               json=lambda: error, close=lambda: None)
+
+    monkeypatch.setattr(api.requests, 'request', request)
+    payload = {'model': 'custom-model', 'reasoning_effort': 'max'} if endpoint == 'chat/completions' else {
+        'model': 'custom-model', 'reasoning': {'effort': 'max'}}
+    def send():
+        return client._http_request_with_retries('POST', 'https://example.test/v1/' + endpoint,
+                                                json=payload, max_retries=7)
+    if fails_twice:
+        with pytest.raises(UnifiedClientError):
+            send()
+    else:
+        assert send().status_code == 200
+    assert len(calls) == 2
+    assert (calls[1].get('reasoning_effort') or calls[1]['reasoning']['effort']) == 'xhigh'
+
+
+@pytest.mark.parametrize('responses', [False, True])
+def test_sdk_reasoning_retry_preserves_other_parameters(responses):
+    client = bare_client('custom-model')
+    error = ParameterError('Unsupported reasoning effort')
+    error.body = {'error': {'param': 'reasoning_effort', 'message':
+                           "Unsupported value: 'max'. Supported values are: 'low', 'high'."}}
+    calls = []
+    def create(**kwargs):
+        calls.append(copy.deepcopy(kwargs))
+        if len(calls) == 1:
+            raise error
+        return 'OK'
+    payload = {'model': 'custom-model', 'max_output_tokens' if responses else 'max_completion_tokens': 128000}
+    payload.update({'reasoning': {'effort': 'max'}} if responses else {'reasoning_effort': 'max'})
+    send = client._create_with_reasoning_retry if responses else client._create_chat_completion_with_token_retry
+    assert send(create, payload, 'openai') == 'OK'
+    assert len(calls) == 2
+    assert (calls[1].get('reasoning_effort') or calls[1]['reasoning']['effort']) == 'high'
+    assert calls[1]['max_output_tokens' if responses else 'max_completion_tokens'] == 128000
+
+
+def rejection(supported, param='reasoning_effort'):
+    return {'error': {'param': param, 'code': 'unsupported_value',
+                     'message': f"Unsupported value for {param}. Supported values are: "
+                     + ', '.join(repr(value) for value in supported) + '.'}}
+
+
+class Rejected(Exception):
+    status_code = 400
+
+    def __init__(self, supported):
+        self.body = rejection(supported)
+        super().__init__(str(self.body))
+
+
+@pytest.mark.parametrize('requested,supported,expected', [
+    ('max', ['low', 'medium', 'high', 'xhigh'], 'xhigh'),
+    ('max', ['low', 'medium', 'high'], 'high'),
+    ('none', ['low', 'medium', 'high'], 'low'),
+    ('medium', ['low', 'high'], 'low'),
+    ('low', ['medium', 'high'], 'medium'),
+])
+@pytest.mark.parametrize('shape', ['chat', 'responses', 'extra_body'])
+def test_nearest_supported_effort(requested, supported, expected, shape):
+    body = {'reasoning_effort': requested} if shape == 'chat' else {'reasoning': {'effort': requested, 'summary': 'auto'}}
+    if shape == 'extra_body':
+        body = {'extra_body': body}
+    body.update(model='custom-model', max_tokens=128000)
+    logs = []
+    calls = []
+
+    def create(payload):
+        calls.append(copy.deepcopy(payload))
+        if len(calls) == 1:
+            raise Rejected(supported)
+        return 'OK'
+
+    assert call_with_reasoning_retry(create, body, logs.append, lambda: None) == 'OK'
+    assert len(calls) == 2
+    final = calls[1].get('extra_body', calls[1])
+    assert (final['reasoning_effort'] if shape == 'chat' else final['reasoning']['effort']) == expected
+    assert calls[1]['max_tokens'] == 128000
+    assert logs[0].startswith('📝')
+
+
+def test_corrective_retry_is_bounded():
+    calls = []
+
+    def create(payload):
+        calls.append(copy.deepcopy(payload))
+        raise Rejected(['low', 'high'])
+
+    with pytest.raises(ReasoningEffortRejected):
+        call_with_reasoning_retry(create, {'reasoning_effort': 'max'}, print, lambda: None)
+    assert len(calls) == 2
+
+
+def test_cancellation_prevents_corrective_retry():
+    def cancel():
+        raise RuntimeError('cancelled')
+    body = {'reasoning_effort': 'max'}
+    with pytest.raises(RuntimeError, match='cancelled'):
+        call_with_reasoning_retry(lambda payload: (_ for _ in ()).throw(Rejected(['high'])), body, print, cancel)
+    assert body['reasoning_effort'] == 'max'
+
+
+@pytest.mark.parametrize('status,error', [
+    (429, rejection(['low'])), (401, rejection(['low'])),
+    (400, rejection(['high'], 'temperature')),
+    (400, {'error': {'param': 'reasoning_effort', 'message': 'Request timed out'}}),
+])
+def test_unrelated_errors_are_not_repaired(status, error):
+    assert supported_reasoning_efforts(status, error) is None
+
+
+@pytest.mark.parametrize('model', ['gpt-6-astra', 'authgpt/gpt-6-astra', 'or/openai/gpt-6-astra', 'gpt-6-sol'])
+def test_none_preflight(model):
+    body = {'model': model, 'reasoning': {'effort': 'none'}, 'thinking': {'type': 'disabled'}}
+    logs = []
+    normalize_none_effort(body, logs.append)
+    assert body['reasoning']['effort'] == 'low'
+    assert 'thinking' not in body
+    assert len(logs) == 1
+    if 'astra' in model:
+        assert logs == ['📝 Astra does not support none, using low instead']
+
+
+def test_other_models_none_unchanged():
+    body = {'model': 'gpt-5.6-sol', 'reasoning_effort': 'none'}
+    normalize_none_effort(body)
+    assert body['reasoning_effort'] == 'none'
+
+
+def test_no_advertised_values_does_not_guess():
+    error = {'error': {'param': 'reasoning.effort', 'message': "Unsupported value: 'max'"}}
+    assert supported_reasoning_efforts(400, error) == []
+    assert not repair_reasoning_effort({'reasoning_effort': 'max'}, [], print)

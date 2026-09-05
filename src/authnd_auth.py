@@ -24,6 +24,9 @@ import uuid
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import requests
+from reasoning_compatibility import (
+    ReasoningEffortRejected, normalize_none_effort, call_with_reasoning_retry,
+)
 
 
 BUILD_BASE_URL = "https://build.nvidia.com"
@@ -2012,17 +2015,21 @@ def _log_non_stream_summary(
         _log(log_fn, "   💭 Thinking tokens used: 0")
 
 
+class _AuthNDHTTPError(RuntimeError):
+    def __init__(self, status_code, headers, body, reason=''):
+        super().__init__(_authnd_http_error_message(status_code, headers, body, reason))
+        self.status_code = status_code
+        self.body = body
+
+
 def _raise_for_status(response: requests.Response) -> None:
     if 200 <= response.status_code < 300:
         return
-    raise RuntimeError(
-        _authnd_http_error_message(
-            response.status_code,
-            response.headers,
-            response.text or "",
-            response.reason,
-        )
+    error = _AuthNDHTTPError(
+        response.status_code, response.headers, response.text or "", response.reason,
     )
+    response.close()
+    raise error
 
 
 def _httpx_status_error(resp: Any) -> RuntimeError:
@@ -2032,7 +2039,7 @@ def _httpx_status_error(resp: Any) -> RuntimeError:
         body = resp.read().decode("utf-8", errors="replace").strip()
     except Exception:
         body = ""
-    return RuntimeError(_authnd_http_error_message(resp.status_code, headers, body, reason))
+    return _AuthNDHTTPError(resp.status_code, headers, body, reason)
 
 
 def _post_prediction(
@@ -2076,6 +2083,7 @@ def _post_prediction(
     if presence_penalty is not None:
         payload["presence_penalty"] = float(presence_penalty)
     _apply_reasoning_payload(payload, model_path)
+    normalize_none_effort(payload, lambda message: _log(log_fn, message))
     if suppress_chat_template_kwargs:
         payload.pop("chat_template_kwargs", None)
 
@@ -2137,6 +2145,27 @@ def _post_prediction(
         debug_only=True,
     )
 
+    def check_retry_cancel():
+        if _is_cancelled() or os.getenv("GRACEFUL_STOP") == "1":
+            raise RuntimeError("stream cancelled")
+
+    return call_with_reasoning_retry(
+        lambda request: _send_prediction_payload(
+            request, url=url, headers=headers, timeout=timeout,
+            connect_timeout=connect_timeout, stream=stream, log_fn=log_fn,
+            log_stream=log_stream, progress_label=progress_label, max_tokens=max_tokens,
+        ),
+        payload, lambda message: _log(log_fn, message), check_retry_cancel,
+    )
+
+
+def _send_prediction_payload(
+    payload: Dict[str, Any], *, url: str, headers: Dict[str, str],
+    timeout: int, connect_timeout: Optional[float], stream: bool,
+    log_fn: Optional[Callable[[str], None]], log_stream: Optional[bool],
+    progress_label: Optional[str], max_tokens: Optional[int],
+) -> Dict[str, Any]:
+    """Send the prepared payload, preserving HTTP error details for effort repair."""
     request_started = time.time()
     if _is_cancelled():
         raise RuntimeError("stream cancelled")
@@ -2377,6 +2406,8 @@ def send_chat_completion(
         except RuntimeError as exc:
             last_error = exc
             message = str(exc).lower()
+            if isinstance(exc, ReasoningEffortRejected):
+                raise
             if (
                 _is_chat_template_unsupported_error(exc)
                 and _reasoning_control_configured()

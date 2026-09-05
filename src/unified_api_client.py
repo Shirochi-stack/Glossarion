@@ -128,6 +128,10 @@ based on your region or deployment.
 """
 import sys
 import os
+from reasoning_compatibility import (
+    ReasoningEffortRejected, normalize_none_effort, supported_reasoning_efforts,
+    repair_reasoning_effort, call_with_reasoning_retry,
+)
 import json
 import requests
 import contextvars
@@ -16817,7 +16821,8 @@ class UnifiedClient:
 
     def _http_request_with_retries(self, method: str, url: str, headers: dict = None, json: dict = None,
                                    expected_status: tuple = (200,), max_retries: int = 3,
-                                   provider_name: str = None, use_session: bool = False):
+                                   provider_name: str = None, use_session: bool = False,
+                                   _reasoning_retried: bool = False):
         """
         Generic HTTP requester with standardized retry behavior.
         - Handles cancellation, rate limits (429 with Retry-After), 5xx with backoff, and generic errors.
@@ -16826,6 +16831,9 @@ class UnifiedClient:
         self._bind_thread_run_id_for_request()
         api_delay = self._get_send_interval()
         provider = provider_name or "HTTP"
+        reasoning_endpoint = url.split('?', 1)[0].rstrip('/').endswith(('/chat/completions', '/responses'))
+        if reasoning_endpoint and isinstance(json, dict):
+            normalize_none_effort(json, print)
         
         # Debug: track max_tokens across retries (wired to GUI debug toggle)
         debug_max_tokens = os.getenv("SHOW_DEBUG_BUTTONS", "0") == "1"
@@ -16926,6 +16934,18 @@ class UnifiedClient:
             status = resp.status_code
             if status in expected_status:
                 return resp
+            supported = supported_reasoning_efforts(status, resp.text) if reasoning_endpoint else None
+            if supported is not None:
+                resp.close()
+                if self._is_stop_requested():
+                    raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+                if _reasoning_retried or not repair_reasoning_effort(json, supported, print):
+                    raise UnifiedClientError(f"{provider}: {resp.text}", error_type="validation", http_status=400)
+                return self._http_request_with_retries(
+                    method, url, headers=headers, json=json,
+                    expected_status=expected_status, max_retries=max_retries - attempt,
+                    provider_name=provider_name, use_session=use_session, _reasoning_retried=True,
+                )
             if (url.split('?', 1)[0].rstrip('/').endswith('/chat/completions')
                     and self._repair_chat_completion_token_limit(json, status, resp.text)):
                 print(f"📝 [{provider}] Retrying with max_completion_tokens={json['max_completion_tokens']} instead of max_tokens.")
@@ -16934,6 +16954,7 @@ class UnifiedClient:
                     method, url, headers=headers, json=json,
                     expected_status=expected_status, max_retries=max_retries - attempt,
                     provider_name=provider_name, use_session=use_session,
+                    _reasoning_retried=_reasoning_retried,
                 )
             # Verbose retry notice so retries are never silent
             if attempt < max_retries - 1:
@@ -17829,15 +17850,16 @@ class UnifiedClient:
     def _get_openai_compatible_reasoning_effort(self, provider: str, effective_model: str = "") -> Optional[str]:
         """Return the selected effort for native GPT-6 and compatible opt-in routes."""
         try:
+            if provider == 'openai' and self._is_gpt6_model_name(effective_model):
+                selected = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower() if os.getenv('ENABLE_GPT_THINKING', '0') == '1' else 'none'
+                request = {'model': effective_model, 'reasoning_effort': selected}
+                normalize_none_effort(request, self._log_once)
+                return request['reasoning_effort'] if request['reasoning_effort'] in ('low', 'medium', 'high', 'xhigh', 'max') else 'medium'
             if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
                 return None
             effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
             provider = (provider or '').strip().lower()
-            if provider == 'openai' and self._is_gpt6_model_name(effective_model):
-                if effort == 'none':
-                    return None
-                return effort if effort in ('low', 'medium', 'high', 'xhigh', 'max') else 'medium'
-            if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
+            if effort not in ('none', 'low', 'medium', 'high', 'xhigh', 'max'):
                 effort = 'medium'
             if effort == 'none':
                 return None
@@ -17919,15 +17941,17 @@ class UnifiedClient:
         payload["thinking"] = {"type": "disabled"}
         return True
 
-    def _get_authgpt_reasoning_param(self) -> dict:
+    def _get_authgpt_reasoning_param(self, effective_model=None) -> dict:
         """Return the Responses API reasoning object for AuthGPT/Codex OAuth."""
         try:
-            if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
-                return {"effort": "none"}
-            effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
+            effort = ((os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
+                      if os.getenv('ENABLE_GPT_THINKING', '0') == '1' else 'none')
             if effort not in ('none', 'low', 'medium', 'high', 'xhigh', 'max'):
                 effort = 'medium'
             reasoning = {"effort": effort}
+            model = effective_model or (self._get_active_request_model() if self is not None else '')
+            normalize_none_effort({'model': model, 'reasoning': reasoning}, self._log_once if self is not None else print)
+            effort = reasoning['effort']
             if effort != 'none':
                 summary = (
                     os.getenv('AUTHGPT_REASONING_SUMMARY')
@@ -19735,6 +19759,18 @@ class UnifiedClient:
         return True
 
     def _create_chat_completion_with_token_retry(self, create, call_kwargs: dict, provider: str):
+        def create_with_tokens(**kwargs):
+            return self._create_chat_completion_with_token_repair(create, kwargs, provider)
+        return self._create_with_reasoning_retry(create_with_tokens, call_kwargs, provider)
+
+    def _create_with_reasoning_retry(self, create, call_kwargs: dict, provider: str):
+        normalize_none_effort(call_kwargs, print)
+        def check_cancel():
+            if self._is_stop_requested():
+                raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+        return call_with_reasoning_retry(lambda payload: create(**payload), call_kwargs, print, check_cancel)
+
+    def _create_chat_completion_with_token_repair(self, create, call_kwargs: dict, provider: str):
         """Retry a rejected Chat Completions request once with the required token field."""
         try:
             return create(**call_kwargs)
@@ -23909,7 +23945,7 @@ class UnifiedClient:
                         if use_streaming and self._should_show_api_lifecycle_logs():
                             print(f"🛰️ [{provider}] SDK stream start (model={effective_model}, base_url={base_url})", flush=True)
                         if use_responses_api:
-                            resp = client.responses.create(**call_kwargs)
+                            resp = self._create_with_reasoning_retry(client.responses.create, call_kwargs, provider)
                         else:
                             resp = self._create_chat_completion_with_token_retry(
                                 client.chat.completions.create, call_kwargs, provider,
@@ -24150,9 +24186,9 @@ class UnifiedClient:
                                                 import time as _t
                                                 start_ts = _t.time()
                                                 if use_responses_api:
-                                                    resp = client.responses.create(**call_kwargs)
+                                                    resp = self._create_with_reasoning_retry(client.responses.create, call_kwargs, provider)
                                                 else:
-                                                    resp = client.chat.completions.create(**call_kwargs)
+                                                    resp = self._create_chat_completion_with_token_retry(client.chat.completions.create, call_kwargs, provider)
                                                 context_auto_adjust_succeeded = True
                                                 if use_streaming:
                                                     with self._active_streams_lock:
@@ -24206,9 +24242,9 @@ class UnifiedClient:
                                     if not self._is_stop_requested():
                                         print(f"🛰️ [{provider}] Retrying with streaming enabled...")
                                     if use_responses_api:
-                                        resp = client.responses.create(**call_kwargs)
+                                        resp = self._create_with_reasoning_retry(client.responses.create, call_kwargs, provider)
                                     else:
-                                        resp = client.chat.completions.create(**call_kwargs)
+                                        resp = self._create_chat_completion_with_token_retry(client.chat.completions.create, call_kwargs, provider)
                                     dur = _t.time() - start_ts
                                     if use_streaming:
                                         with self._active_streams_lock:
@@ -25159,6 +25195,8 @@ class UnifiedClient:
                             stream_cleanup_done = True  # Prevent double-close in finally
                     except Exception:
                         pass
+                    if isinstance(e, ReasoningEffortRejected):
+                        raise UnifiedClientError(str(e), error_type="validation", http_status=400) from e
                     # Check for stop request after API call returns
                     if self._is_stop_requested():
                         self._cancelled = True
@@ -26475,7 +26513,7 @@ class UnifiedClient:
                 if _authgpt_reset_cancel is not None:
                     _authgpt_reset_cancel()
 
-                authgpt_reasoning = self._get_authgpt_reasoning_param()
+                authgpt_reasoning = self._get_authgpt_reasoning_param(actual_model)
                 try:
                     tls = self._get_thread_local_client()
                     if not hasattr(tls, 'authgpt_reasoning_logged'):
@@ -26531,6 +26569,8 @@ class UnifiedClient:
 
             except RuntimeError as exc:
                 error_str = str(exc)
+                if isinstance(exc, ReasoningEffortRejected):
+                    raise UnifiedClientError(error_str, error_type="validation", http_status=400) from exc
 
                 # Stream cancelled by force-stop — deduplicate across threads
                 if "stream cancelled" in error_str.lower():
@@ -28285,6 +28325,8 @@ class UnifiedClient:
             except RuntimeError as exc:
                 error_str = str(exc)
                 error_l = error_str.lower()
+                if isinstance(exc, ReasoningEffortRejected):
+                    raise UnifiedClientError(error_str, error_type="validation", http_status=400) from exc
                 if "stream cancelled" in error_str.lower():
                     if (
                         not getattr(self, '_ignore_graceful_stop', False)

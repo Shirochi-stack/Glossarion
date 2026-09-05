@@ -1,4 +1,5 @@
 import json
+import copy
 import sys
 import types
 
@@ -79,6 +80,47 @@ def test_authgpt_preserves_selected_reasoning_effort(monkeypatch, effort):
     assert body["reasoning"]["effort"] == effort
 
 
+@pytest.mark.parametrize('enabled', ['0', '1'])
+def test_authgpt_lightweight_none_uses_low(monkeypatch, enabled):
+    from unified_api_client import UnifiedClient
+    client = UnifiedClient.__new__(UnifiedClient)
+    client._get_active_request_model = lambda: 'authgpt/gpt-6-astra'
+    logs = []
+    client._log_once = logs.append
+    monkeypatch.setenv('ENABLE_GPT_THINKING', enabled)
+    monkeypatch.setenv('GPT_EFFORT', 'none')
+    assert client._get_authgpt_reasoning_param()['effort'] == 'low'
+    assert logs == ['📝 Astra does not support none, using low instead']
+
+
+def test_authgpt_reasoning_error_retries_nearest(fake_transport):
+    responses, bodies, Response = fake_transport
+    responses.extend([
+        Response(400, {'error': {'param': 'reasoning.effort', 'code': 'unsupported_value',
+                               'message': "Unsupported value: 'max'. Supported values are: 'low', 'medium', 'high'."}}),
+        Response(200, {'type': 'response.completed', 'response': {'status': 'completed', 'output': [
+            {'type': 'message', 'content': [{'type': 'output_text', 'text': 'OK'}]}]}}),
+    ])
+    result = authgpt_auth.send_chat_completion('test-token', [{'role': 'user', 'content': 'Hello'}],
+                                             model='custom-model', reasoning={'effort': 'max'})
+    assert result['content'] == 'OK'
+    assert [body['reasoning']['effort'] for body in bodies] == ['max', 'high']
+    assert responses[0].closed
+
+
+def test_authgpt_none_preflight_reaches_transport_as_low(fake_transport):
+    responses, bodies, Response = fake_transport
+    responses.append(Response(200, {'type': 'response.completed', 'response': {
+        'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': 'OK'}]}]}}))
+    requested = {'effort': 'none'}
+    logs = []
+    authgpt_auth.send_chat_completion('test-token', [{'role': 'user', 'content': 'Hello'}],
+                                     model='gpt-6-astra', reasoning=requested, log_fn=logs.append)
+    assert [body['reasoning']['effort'] for body in bodies] == ['low']
+    assert requested == {'effort': 'none'}
+    assert '📝 Astra does not support none, using low instead' in logs
+
+
 @pytest.fixture(params=["httpx", "requests"])
 def fake_transport(request, monkeypatch):
     responses = []
@@ -112,7 +154,7 @@ def fake_transport(request, monkeypatch):
             yield line if request.param == "httpx" else line.encode()
 
     def send(*args, **kwargs):
-        bodies.append(dict(kwargs["json"]))
+        bodies.append(copy.deepcopy(kwargs["json"]))
         return responses[len(bodies) - 1]
 
     monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(

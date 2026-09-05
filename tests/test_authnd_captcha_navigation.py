@@ -1,4 +1,6 @@
 import json
+import copy
+import os
 import re
 import sys
 import types
@@ -530,12 +532,143 @@ def test_authnd_uses_buildapi_prediction_gateway():
 
 
 def test_authnd_rejects_redirect_before_stream_parsing():
+    closed = []
     response = types.SimpleNamespace(
         status_code=302,
         headers={"location": "https://ngc.nvidia.com/404"},
         text="",
         reason="Found",
+        close=lambda: closed.append(True),
     )
 
     with pytest.raises(RuntimeError, match=r"redirected to https://ngc\.nvidia\.com/404"):
         authnd._raise_for_status(response)
+    assert closed == [True]
+
+
+@pytest.fixture(params=['httpx', 'requests_stream', 'requests_json'])
+def reasoning_transport(request, monkeypatch):
+    calls, responses, logs = [], [], []
+    state = {'cancelled': False, 'cancel_after_failure': False}
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+    monkeypatch.delenv('AUTHND_ENABLE_THINKING', raising=False)
+    monkeypatch.delenv('AUTHND_REASONING_EFFORT', raising=False)
+    monkeypatch.delenv('GRACEFUL_STOP', raising=False)
+    monkeypatch.setattr(authnd, '_is_cancelled', lambda: state['cancelled'])
+    monkeypatch.setattr(authnd, '_resolve_model_metadata', lambda page: {
+        'namespace': 'test-org', 'endpoint_id': 'test-endpoint',
+        'payload_model': 'deepseek-ai/deepseek-v4-flash',
+    })
+
+    class Response:
+        def __init__(self, status, body):
+            self.status_code = status
+            self.text = json.dumps(body)
+            self.headers = {'content-type': 'application/json'}
+            self.reason = self.reason_phrase = 'Bad Request' if status == 400 else 'OK'
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+
+        def read(self):
+            return self.text.encode()
+
+        def json(self):
+            return json.loads(self.text)
+
+        def iter_raw(self):
+            yield ('data: ' + self.text + '\n\ndata: [DONE]\n\n').encode()
+
+        def iter_content(self, **kwargs):
+            return self.iter_raw()
+
+    def post(*args, **kwargs):
+        calls.append(copy.deepcopy(kwargs['json']))
+        response = responses[len(calls) - 1]
+        if response.status_code >= 400 and state['cancel_after_failure']:
+            state['cancelled'] = True
+        return response
+
+    monkeypatch.setitem(sys.modules, 'httpx', types.SimpleNamespace(
+        Timeout=lambda *args, **kwargs: None, stream=post,
+    ) if request.param == 'httpx' else None)
+    monkeypatch.setattr(authnd, '_get_session', lambda: object())
+    monkeypatch.setattr(authnd, '_post_with_cancel', post)
+
+    def send():
+        return authnd._post_prediction(
+            messages=[{'role': 'user', 'content': 'Reply OK.'}],
+            model_id='deepseek-v4-flash', model_path='deepseek-ai/deepseek-v4-flash',
+            page_url='https://build.nvidia.com/deepseek-ai/deepseek-v4-flash',
+            captcha_token='test-token', temperature=0.5, max_tokens=1234,
+            top_p=None, frequency_penalty=None, presence_penalty=None,
+            timeout=30, connect_timeout=10, stream=request.param != 'requests_json',
+            log_stream=False, log_fn=logs.append,
+        )
+
+    return send, calls, responses, logs, state, Response
+
+
+def _reasoning_error(values):
+    return {'error': {'param': 'reasoning_effort', 'code': 'unsupported_value',
+                     'message': 'Unsupported value for reasoning_effort. Supported values are: '
+                     + ', '.join(repr(value) for value in values) + '.'}}
+
+
+@pytest.mark.parametrize('requested,supported,expected', [
+    ('max', ['low', 'medium', 'high', 'xhigh'], 'xhigh'),
+    ('max', ['low', 'medium', 'high'], 'high'),
+    ('none', ['low', 'medium', 'high'], 'low'),
+])
+def test_authnd_retries_nearest_effort(reasoning_transport, monkeypatch, requested, supported, expected):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    monkeypatch.setenv('GPT_EFFORT', requested)
+    responses.extend([
+        Response(400, _reasoning_error(supported)),
+        Response(200, {'choices': [{'message': {'content': 'OK'}, 'delta': {'content': 'OK'},
+                                    'finish_reason': 'stop'}]}),
+    ])
+    assert send()['content'] == 'OK'
+    assert [call['reasoning_effort'] for call in calls] == [requested, expected]
+    assert calls[1] == {**calls[0], 'reasoning_effort': expected}
+    assert os.environ['GPT_EFFORT'] == requested
+    assert responses[0].closed
+    assert any(line.startswith('📝') and f'retrying with {expected}' in line for line in logs)
+
+
+def test_authnd_reasoning_retry_stops_after_second_rejection(reasoning_transport, monkeypatch):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    monkeypatch.setenv('GPT_EFFORT', 'max')
+    responses.extend([Response(400, _reasoning_error(['high'])) for _ in range(2)])
+    with pytest.raises(authnd.ReasoningEffortRejected):
+        send()
+    assert len(calls) == 2
+    assert all(response.closed for response in responses)
+
+
+def test_authnd_cancellation_prevents_reasoning_retry(reasoning_transport, monkeypatch):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    monkeypatch.setenv('GPT_EFFORT', 'max')
+    state['cancel_after_failure'] = True
+    responses.append(Response(400, _reasoning_error(['high'])))
+    with pytest.raises(RuntimeError, match='stream cancelled'):
+        send()
+    assert len(calls) == 1
+    assert responses[0].closed
+
+
+def test_authnd_unrelated_error_does_not_change_effort(reasoning_transport, monkeypatch):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    monkeypatch.setenv('GPT_EFFORT', 'max')
+    responses.append(Response(400, {'error': {'param': 'temperature', 'message': 'Unsupported value'}}))
+    with pytest.raises(RuntimeError):
+        send()
+    assert len(calls) == 1
+    assert calls[0]['reasoning_effort'] == 'max'

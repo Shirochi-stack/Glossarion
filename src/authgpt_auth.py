@@ -30,6 +30,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 from typing import Optional, Dict, List, Tuple, Any
 
 import requests
+from reasoning_compatibility import normalize_none_effort, call_with_reasoning_retry
 
 logger = logging.getLogger(__name__)
 
@@ -826,7 +827,7 @@ def _build_responses_body(
         body["max_output_tokens"] = max_tokens
 
     if reasoning:
-        body["reasoning"] = reasoning
+        body["reasoning"] = dict(reasoning)
 
     return body
 
@@ -1334,6 +1335,13 @@ def _new_stream_state() -> Dict:
 # httpx-based SSE reader (preferred — real-time, no buffering)
 # ---------------------------------------------------------------------------
 
+class _AuthGPTHTTPError(RuntimeError):
+    def __init__(self, message, status_code, body):
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
+
+
 class _UnsupportedOutputLimitError(RuntimeError):
     """The backend rejected max_output_tokens before generation began."""
 
@@ -1396,8 +1404,8 @@ def _stream_with_httpx(
                 suppress = False
             if not suppress:
                 _log(f"❌ AuthGPT HTTP {resp.status_code}. {summary}")
-            raise RuntimeError(
-                f"AuthGPT: {resp.status_code} – {summary} [reason={reason}]"
+            raise _AuthGPTHTTPError(
+                f"AuthGPT: {resp.status_code} – {summary} [reason={reason}]", resp.status_code, error_body
             )
 
         # iter_lines() in httpx yields str lines as they arrive
@@ -1455,8 +1463,9 @@ def _stream_with_requests(
             suppress = False
         if not suppress:
             _log(f"❌ AuthGPT HTTP {resp.status_code}. {summary}")
-        raise RuntimeError(
-            f"AuthGPT: {resp.status_code} – {summary} [reason={reason}]"
+        resp.close()
+        raise _AuthGPTHTTPError(
+            f"AuthGPT: {resp.status_code} – {summary} [reason={reason}]", resp.status_code, error_body
         )
 
     for raw_line in resp.iter_lines(chunk_size=1):
@@ -1541,6 +1550,7 @@ def send_chat_completion(
     }
 
     _log = log_fn or print
+    normalize_none_effort(body, _log)
     logger.info("AuthGPT: POST %s  model=%s", url, model)
     if max_tokens is not None:
         if "max_output_tokens" in body:
@@ -1570,7 +1580,7 @@ def send_chat_completion(
         _httpx = None
         _log("⚠️ AuthGPT: httpx not installed, falling back to requests (streaming may be buffered)")
 
-    def _send(request_body):
+    def _send_once(request_body):
         if _httpx is not None:
             return _stream_with_httpx(
                 _httpx, url, request_body, headers, timeout, t_start,
@@ -1580,6 +1590,13 @@ def send_chat_completion(
             url, request_body, headers, timeout, t_start,
             _log, log_stream,
         )
+
+    def _check_retry_cancel():
+        if is_cancelled() or os.getenv('GRACEFUL_STOP') == '1':
+            raise RuntimeError("AuthGPT: stream cancelled by user")
+
+    def _send(request_body):
+        return call_with_reasoning_retry(_send_once, request_body, _log, _check_retry_cancel)
 
     try:
         return _send(body)
