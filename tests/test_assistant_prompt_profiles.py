@@ -11,7 +11,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -59,6 +59,8 @@ class _PromptHarness(QMainWindow):
         self.logs = []
         self.style_updates = 0
         self.base_dir = str(SRC)
+        self.assistant_prompt_button = QPushButton("Asst. Prompt", self)
+        self.assistant_prompt_button.clicked.connect(self.show_assistant_prompt_dialog)
 
     def save_config(self, show_message=True):
         self.config["assistant_prompt"] = self.assistant_prompt
@@ -91,8 +93,8 @@ def _bind_production_methods():
         setattr(_PromptHarness, name, method)
 
 
-@pytest.fixture
-def make_harness(qapp, monkeypatch):
+@pytest.fixture(params=["class_helpers", "runtime_helpers"])
+def make_harness(qapp, monkeypatch, request):
     windows = []
     # Profile feedback must not start a modal event loop in a headless test.
     monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
@@ -100,8 +102,11 @@ def make_harness(qapp, monkeypatch):
 
     def make(config=None):
         window = _PromptHarness(config or {})
+        if request.param == "runtime_helpers":
+            from other_settings import setup_other_settings_methods
+            setup_other_settings_methods(window)
         windows.append(window)
-        window.show_assistant_prompt_dialog()
+        window.assistant_prompt_button.click()
         qapp.processEvents()
         return window
 
@@ -194,6 +199,28 @@ def test_popup_selection_applies_on_first_click_after_editing_name(make_harness,
 
     for name, expected in (("Beta", "Beta saved"), ("Alpha", "Alpha draft"),
                            ("Default", "Default saved"), ("Beta", "Beta saved")):
+        _click_profile_option(combo, name, qapp)
+        assert combo.currentText() == name
+        assert editor.toPlainText() == expected
+        assert combo.currentIndex() == combo.findText(name)
+    assert window.saved_configs == []
+
+
+def test_popup_clicks_to_and_from_default_survive_suppressed_mouse_release(make_harness, qapp):
+    # Qt's combo popup can suppress a release during its opening guard. Model
+    # that condition rather than relying on native popup timing in headless CI.
+    class SuppressRelease(QObject):
+        def eventFilter(self, watched, event):
+            return event.type() == QEvent.MouseButtonRelease
+
+    window = make_harness(_profiles_config())
+    _, combo, editor = _widgets(window)
+    editor.setPlainText("Alpha draft")
+    release_filter = SuppressRelease(combo)
+    combo.view().viewport().installEventFilter(release_filter)
+
+    for name, expected in (("Default", "Default saved"), ("Beta", "Beta saved"),
+                           ("Default", "Default saved"), ("Alpha", "Alpha draft")):
         _click_profile_option(combo, name, qapp)
         assert combo.currentText() == name
         assert editor.toPlainText() == expected

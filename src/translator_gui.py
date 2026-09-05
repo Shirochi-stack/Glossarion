@@ -17820,9 +17820,13 @@ Recent translations to summarize:
         profile_combo.setMaximumWidth(420)
         profile_combo.setToolTip("Create a profile for the assistant prefill prompt")
         profile_combo.lineEdit().setPlaceholderText("Profile name")
-        profile_combo.setStyleSheet("""
+        self._disable_combobox_mousewheel(profile_combo)
+        # Startup replaces this helper with other_settings' implementation.
+        # Preserve its one-widget contract and apply local sizing afterwards.
+        self._add_combobox_arrow(profile_combo)
+        profile_combo.setStyleSheet(profile_combo.styleSheet() + """
             QComboBox {
-                padding-right: 28px;
+                padding-right: 12px;
             }
             QComboBox::drop-down {
                 subcontrol-origin: padding;
@@ -17831,8 +17835,6 @@ Recent translations to summarize:
                 border-left: 1px solid #4a5568;
             }
         """)
-        self._disable_combobox_mousewheel(profile_combo)
-        self._add_combobox_arrow(profile_combo)
         profile_layout.addWidget(profile_combo)
         layout.addLayout(profile_layout)
         
@@ -18024,6 +18026,19 @@ Recent translations to summarize:
         profile_combo.activated.connect(
             lambda index: select_profile(profile_combo.itemText(index))
         )
+        def select_clicked_profile(index):
+            # The native combo popup can suppress a mouse release while its
+            # opening guard is active. Commit an explicit left press on a row
+            # immediately, including row zero (Default), instead of waiting
+            # for that release to produce the activated signal.
+            if not index.isValid() or not (QApplication.mouseButtons() & Qt.LeftButton):
+                return
+            if not (index.flags() & Qt.ItemIsEnabled and index.flags() & Qt.ItemIsSelectable):
+                return
+            profile_combo.hidePopup()
+            select_profile(profile_combo.itemText(index.row()))
+
+        profile_combo.view().pressed.connect(select_clicked_profile)
         profile_combo.lineEdit().returnPressed.connect(select_profile)
         prompt_edit.textChanged.connect(stage_prompt)
         
