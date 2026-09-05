@@ -1764,6 +1764,7 @@ def force_shutdown(
     cleanup_fns: Optional[Iterable[Callable[[], None]]] = None,
     *,
     cleanup_epub_reader_caches: bool = True,
+    restart_command: Optional[Iterable[str]] = None,
 ) -> None:
     """
     Best-effort cleanup then forcefully exit the current process.
@@ -1780,6 +1781,8 @@ def force_shutdown(
     ``cleanup_epub_reader_caches`` defaults to true for the desktop app's
     direct shutdown calls. CLI helper processes explicitly disable it so a
     worker cannot remove cache files while the main reader is still open.
+
+    ``restart_command`` launches a replacement after cleanup and before exit.
     """
     code = _normalize_exit_code(exit_code)
     epub_cache_roots = (
@@ -1811,7 +1814,15 @@ def force_shutdown(
     # interrupt Qt/PySide/native DLL teardown at an arbitrary instruction and
     # show Windows' "memory could not be read" dialog. Child processes are
     # already handled above; this remains available as an opt-in last resort.
-    _taskkill_self_tree()
+    if not restart_command:
+        _taskkill_self_tree()
+    if restart_command:
+        # Launch only after descendant cleanup, otherwise the replacement
+        # process would be killed along with translation workers and proxies.
+        restart_env = os.environ.copy()
+        if getattr(sys, 'frozen', False):
+            restart_env['PYINSTALLER_RESET_ENVIRONMENT'] = '1'
+        subprocess.Popen(list(restart_command), env=restart_env)
     try:
         os._exit(code)
     except Exception:

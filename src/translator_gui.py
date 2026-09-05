@@ -14734,8 +14734,10 @@ Text to analyze:
             
             # Save all settings before shutdown so they persist across restarts
             try:
-                self.save_config(show_message=False)
-                print("[CLOSE] Config saved successfully")
+                if getattr(self, '_config_restore_pending', False):
+                    print("[CLOSE] Preserving restored config for restart")
+                elif self.save_config(show_message=False) is not False:
+                    print("[CLOSE] Config saved successfully")
             except Exception as e:
                 print(f"[CLOSE] Warning: Could not save config on close: {e}")
             
@@ -46175,6 +46177,8 @@ Important rules:
 
     def save_config(self, show_message=True):
         """Persist all settings to config.json."""
+        if getattr(self, '_config_restore_pending', False):
+            return False
         try:
             # Add comprehensive environment variable debugging for all saves (only when debug mode is enabled)
             debug_enabled = getattr(self, 'config', {}).get('show_debug_buttons', False)
@@ -48547,8 +48551,17 @@ if __name__ == "__main__":
                         kill_child_processes=False))
             except Exception:
                 pass
-            force_shutdown(exit_code, cleanup_fns=cleanup_fns)
+            force_shutdown(
+                exit_code, cleanup_fns=cleanup_fns,
+                restart_command=getattr(main_window, '_restart_command', None),
+            )
         except Exception:
+            if getattr(main_window, '_restart_command', None):
+                QMessageBox.critical(
+                    None, "Restart Failed",
+                    "The configuration was restored, but the application could not restart. "
+                    "Please open Glossarion again manually.",
+                )
             try:
                 import os
                 os._exit(exit_code)

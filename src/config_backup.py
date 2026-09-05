@@ -9,6 +9,7 @@ import sys
 import time
 import shutil
 import json
+import tempfile
 try:
     import dpi_setup
     dpi_setup.configure()
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QMessageBox, QFrame, QGroupBox,
     QApplication
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon, QFont
 
 # Import required from translator_gui
@@ -219,9 +220,45 @@ def _open_backup_folder(self):
         msg_box.setWindowIcon(icon)
         msg_box.exec()
 
+def _restore_config_backup_file(self, backup_path):
+    """Validate and atomically restore a backup before requesting a restart."""
+    # Read first: creating a safety backup may prune the selected old backup.
+    with open(backup_path, 'rb') as source:
+        contents = source.read()
+    if not isinstance(json.loads(contents), dict):
+        raise ValueError("The backup must contain a configuration object.")
+    self._backup_config_file()
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=os.path.dirname(os.path.abspath(CONFIG_FILE)), delete=False,
+            prefix='.config_restore_', suffix='.tmp',
+        ) as target:
+            temp_path = target.name
+            target.write(contents)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temp_path, CONFIG_FILE)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+    # Modal messages process timers too; prevent pending saves from overwriting
+    # the restored file while the user acknowledges the restart message.
+    self._config_restore_pending = True
+    self._restart_command = (
+        [sys.executable, *sys.argv[1:]] if getattr(sys, 'frozen', False)
+        else [sys.executable, *sys.argv]
+    )
+
+
 def _manual_restore_config(self):
     """Show dialog to manually select and restore a config backup."""
     try:
+        existing = getattr(self, '_backup_dialog', None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
         # Ensure QApplication exists
         app = QApplication.instance()
         if not app:
@@ -267,7 +304,9 @@ def _manual_restore_config(self):
         backups.sort(key=lambda x: os.path.getmtime(os.path.join(backup_dir, x)), reverse=True)
         
         # Create PySide6 dialog
-        dialog = QDialog(None)
+        dialog = QDialog(self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.finished.connect(lambda *_: setattr(self, '_backup_dialog', None))
         dialog.setWindowTitle("Config Backup Manager")
         dialog.setWindowIcon(icon)
         
@@ -413,11 +452,7 @@ def _manual_restore_config(self):
             
             if confirm.exec() == QMessageBox.Yes:
                 try:
-                    # Create backup of current config before restore
-                    self._backup_config_file()
-                    
-                    # Copy backup to config file
-                    shutil.copy2(backup_path, CONFIG_FILE)
+                    _restore_config_backup_file(self, backup_path)
                     
                     msg = QMessageBox(dialog)
                     msg.setIcon(QMessageBox.Information)
@@ -428,11 +463,9 @@ def _manual_restore_config(self):
                     msg.exec()
                     dialog.close()
                     
-                    # Restart application
-                    import sys
-                    import subprocess
-                    subprocess.Popen([sys.executable] + sys.argv)
-                    sys.exit(0)
+                    # Let Qt unwind this callback and run normal shutdown.
+                    # The replacement is launched only after child cleanup.
+                    QTimer.singleShot(0, self.close)
                     
                 except Exception as e:
                     msg = QMessageBox(dialog)
@@ -625,16 +658,11 @@ def _manual_restore_config(self):
         # Set dialog layout and show
         dialog.setLayout(main_layout)
         
-        # Run dialog in separate thread to avoid GIL conflicts
-        import threading
-        def run_dialog():
-            dialog.exec()
-        
-        thread = threading.Thread(target=run_dialog, daemon=True)
-        thread.start()
-        
-        # Keep reference to prevent garbage collection
+        # All Qt widgets and their event loops must stay on the GUI thread.
         self._backup_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
         
     except Exception as e:
         msg = QMessageBox()

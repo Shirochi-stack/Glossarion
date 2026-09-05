@@ -16415,6 +16415,8 @@ def delete_profile(self):
 
 def save_profiles(self):
     """Persist prompt profiles, the active profile, and profile-name autofill."""
+    if getattr(self, '_config_restore_pending', False):
+        return False
     from PySide6.QtWidgets import QMessageBox
     try:
         data = {}
