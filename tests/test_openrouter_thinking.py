@@ -63,7 +63,8 @@ def test_deepseek_v4_effort_options_and_normalization_include_none_and_low():
     assert UnifiedClient._normalize_deepseek_v4_effort("low") == "low"
     assert UnifiedClient._normalize_deepseek_v4_effort("high") == "high"
     assert UnifiedClient._normalize_deepseek_v4_effort("max") == "max"
-    assert UnifiedClient._normalize_deepseek_v4_effort("xhigh") == "max"
+    assert UnifiedClient._normalize_deepseek_v4_effort("medium") == "low"
+    assert UnifiedClient._normalize_deepseek_v4_effort("xhigh") == "high"
 
 
 def test_deepseek_responses_toggle_routes_and_passes_none(monkeypatch, tmp_path):

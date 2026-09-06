@@ -21,9 +21,9 @@ import authnd_auth as authnd
     [
         ("none", "none"),
         ("low", "low"),
-        ("medium", "high"),
+        ("medium", "low"),
         ("high", "high"),
-        ("xhigh", "max"),
+        ("xhigh", "high"),
     ],
 )
 def test_deepseek_v4_reasoning_effort_mapping(selected, expected):
@@ -705,8 +705,8 @@ def test_authnd_max_status_matches_payload(monkeypatch, model, expected):
 
 
 @pytest.mark.parametrize('selected,expected', [
-    ('none', 'low'), ('low', 'low'), ('medium', 'high'),
-    ('high', 'high'), ('xhigh', 'max'), ('max', 'max'),
+    ('none', 'low'), ('low', 'low'), ('medium', 'low'),
+    ('high', 'high'), ('xhigh', 'high'), ('max', 'max'),
 ])
 def test_kimi_k3_uses_documented_effort_with_note(monkeypatch, selected, expected):
     monkeypatch.setenv('ENABLE_GPT_THINKING', '1')

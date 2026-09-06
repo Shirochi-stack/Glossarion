@@ -74,8 +74,8 @@ def repair_reasoning_effort(payload, supported, log):
         if requested not in EFFORT_ORDER or requested in supported or not supported:
             continue
         index = EFFORT_ORDER.index(requested)
-        # Prefer more thinking when supported levels are equally close.
-        selected = min(supported, key=lambda value: (abs(EFFORT_ORDER.index(value) - index), -EFFORT_ORDER.index(value)))
+        # Prefer less thinking when supported levels are equally close.
+        selected = min(supported, key=lambda value: (abs(EFFORT_ORDER.index(value) - index), EFFORT_ORDER.index(value)))
         target[key] = selected
         if selected != 'none' and container.get('thinking') == {'type': 'disabled'}:
             container.pop('thinking')

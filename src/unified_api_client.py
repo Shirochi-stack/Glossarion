@@ -17877,7 +17877,9 @@ class UnifiedClient:
         normalized = str(effort or 'high').strip().lower()
         if normalized in ('none', 'low'):
             return normalized
-        if normalized in ('xhigh', 'max', 'heavy'):
+        if normalized == 'medium':
+            return 'low'
+        if normalized in ('max', 'heavy'):
             return 'max'
         return 'high'
 
