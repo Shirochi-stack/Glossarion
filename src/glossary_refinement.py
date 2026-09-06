@@ -188,6 +188,79 @@ def _partition_entries_for_budget(
     return partitions
 
 
+def _partition_prioritized_types(
+    ordered_types, entries_by_type, columns, delimiter, available_tokens,
+    chapter_splitter, custom_entry_types,
+):
+    """Pack whole types by priority; split a type only when it cannot fit alone."""
+    budget = max(1, int(available_tokens or 1))
+    if custom_entry_types is None:
+        try:
+            custom_entry_types = json.loads(os.getenv("GLOSSARY_CUSTOM_ENTRY_TYPES", "{}"))
+        except (TypeError, ValueError):
+            custom_entry_types = {}
+    if not isinstance(custom_entry_types, dict) or not custom_entry_types:
+        custom_entry_types = {
+            name: {'enabled': True, 'has_gender': True}
+            for name in ('character', 'titles', 'nicknames')
+        }
+    metadata = {
+        _refinement_type_key(name): cfg
+        for name, cfg in custom_entry_types.items() if isinstance(cfg, dict)
+    }
+
+    def priority(entry_type):
+        key = _refinement_type_key(entry_type)
+        if key == 'character':
+            return 0
+        if key == 'surname':
+            return 1
+        cfg = metadata.get(key, {})
+        return 2 if cfg.get('enabled', True) and cfg.get('has_gender', False) else 3
+
+    def tokens(entries):
+        return _count_with_splitter(chapter_splitter, _entry_payload(entries, columns, delimiter))
+
+    def fit_rows(entries):
+        # Validate serialized payloads too: row token estimates are not additive
+        # for every tokenizer, especially around CSV quoting and delimiters.
+        if tokens(entries) <= budget:
+            return [entries]
+        if len(entries) == 1:
+            raise ValueError(
+                f"A {entries[0].get('type', 'glossary')} entry exceeds the refinement "
+                f"chunk budget of {budget:,} tokens. Increase the budget or shorten the entry."
+            )
+        middle = len(entries) // 2
+        return fit_rows(entries[:middle]) + fit_rows(entries[middle:])
+
+    partitions = []
+    for entry_type in sorted(ordered_types, key=priority):
+        entries = entries_by_type[entry_type]
+        if not entries:
+            continue
+        if tokens(entries) <= budget:
+            groups = [entries]
+        else:
+            groups = [
+                group
+                for part in _partition_entries_for_budget(
+                    entries, columns, delimiter, budget, chapter_splitter
+                )
+                for group in fit_rows(part)
+            ]
+        for group in groups:
+            # First fit lets a smaller gendered type join characters/surnames
+            # even when an earlier, larger gendered type needs its own request.
+            for partition in partitions:
+                if tokens(partition + group) <= budget:
+                    partition.extend(group)
+                    break
+            else:
+                partitions.append(list(group))
+    return partitions
+
+
 def _partition_entries_exact(
     entries: List[Dict],
     chunk_count: int,
@@ -292,6 +365,7 @@ def plan_refinement(
     target_chunk_count: Optional[int] = None,
     system_prompt: str = "",
     user_prompt: str = "",
+    custom_entry_types: Optional[Dict] = None,
 ) -> RefinementPlan:
     """Build the exact row-safe payload plan used by preview and execution."""
     ordered_types: List[str] = []
@@ -334,9 +408,13 @@ def plan_refinement(
             combined_payload = _entry_payload(combined_entries, columns, delimiter)
             total_payload_tokens = _count_with_splitter(chapter_splitter, combined_payload)
             if target_chunk_count is None:
-                partitions = _partition_entries_for_budget(
-                    combined_entries, columns, delimiter, available_tokens, chapter_splitter
-                )
+                if total_payload_tokens <= max(1, int(available_tokens or 1)):
+                    partitions = [combined_entries]
+                else:
+                    partitions = _partition_prioritized_types(
+                        ordered_types, entries_by_type, columns, delimiter,
+                        available_tokens, chapter_splitter, custom_entry_types,
+                    )
             else:
                 partitions = _partition_entries_exact(
                     combined_entries, target_chunk_count, columns, delimiter, chapter_splitter
@@ -1276,6 +1354,7 @@ def refine_glossary_entries(
             target_chunk_count=options.target_chunk_count,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            custom_entry_types=custom_types,
         )
 
     def _original_mapping_for_group(entry_type, entries):

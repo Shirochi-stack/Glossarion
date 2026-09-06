@@ -6490,6 +6490,11 @@ Do not stop after the glossary."""
         request_layout.addWidget(QLabel("Request mode:"))
         self.glossary_refinement_chunking_combo = QComboBox()
         self.glossary_refinement_chunking_combo.addItems(["Send each entry type in a separate request", "Send all entry types"])
+        self.glossary_refinement_chunking_combo.setToolTip(
+            "<qt>Send all entry types combines them within the token budget. If splitting is needed, "
+            "characters and surnames are grouped first, followed by enabled gendered types, then other types. "
+            "A type that exceeds the budget on its own is split into smaller requests.</qt>"
+        )
         self._apply_halgakos_combo_icons(self.glossary_refinement_chunking_combo)
         self.glossary_refinement_chunking_combo.setCurrentIndex(
             self._glossary_refinement_chunking_combo_index(self.config)

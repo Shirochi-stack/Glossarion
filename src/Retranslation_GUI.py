@@ -22364,6 +22364,7 @@ class RetranslationMixin:
                     except Exception:
                         custom_fields = []
                 os.environ['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(custom_fields)
+                refinement_type_config = config.get('custom_entry_types') or extractor.get_custom_entry_types()
                 automatic_plan = plan_refinement(
                     entries,
                     selected_types=selected_types,
@@ -22372,6 +22373,7 @@ class RetranslationMixin:
                     available_tokens=safe_budget,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
+                    custom_entry_types=refinement_type_config,
                 )
             except Exception as exc:
                 self._show_message('error', 'Refinement Preview Failed', str(exc), parent=parent)
@@ -23000,6 +23002,7 @@ class RetranslationMixin:
                         available_tokens=safe_budget,
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
+                        custom_entry_types=refinement_type_config,
                     )
                 except Exception as exc:
                     selection_stats.setText(f'Unable to calculate refinement plan: {exc}')
@@ -23112,6 +23115,7 @@ class RetranslationMixin:
                     target_chunk_count=target_count,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
+                    custom_entry_types=refinement_type_config,
                 )
             options = RefinementRunOptions(
                 selected_types=list(selected_types),

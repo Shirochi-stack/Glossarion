@@ -1,4 +1,6 @@
+import csv
 import inspect
+import io
 import json
 import os
 import threading
@@ -147,6 +149,150 @@ def test_exact_combined_refinement_plan_keeps_whole_rows():
     assert sum(len(chunk.payload.splitlines()) for chunk in plan.chunks) == 7
     assert all(chunk.payload.count("\n") + 1 >= 1 for chunk in plan.chunks)
     assert plan.per_chunk_token_estimates == [chunk.token_count for chunk in plan.chunks]
+
+
+def _priority_entries(*types):
+    return [{'type': name, 'raw_name': 'raw', 'translated_name': 'name'} for name in types]
+
+
+def _priority_plan(entries, budget, monkeypatch, metadata=None, **kwargs):
+    monkeypatch.setenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+    monkeypatch.delenv('GLOSSARY_CUSTOM_ENTRY_TYPES', raising=False)
+    return plan_refinement(
+        entries, selected_types=list(dict.fromkeys(e['type'] for e in entries)),
+        chunking_mode='all', chapter_splitter=_RefinementTestSplitter(),
+        available_tokens=budget, custom_entry_types=metadata, **kwargs,
+    )
+
+
+def _priority_budget(entries):
+    return len('\n'.join(','.join(e[key] for key in ('type', 'raw_name', 'translated_name')) for e in entries))
+
+
+def _priority_chunk_rows(plan):
+    return [list(csv.reader(io.StringIO(chunk.payload))) for chunk in plan.chunks]
+
+
+@pytest.mark.parametrize('types,preferred,metadata', [
+    (['terms', 'character', 'surnames'], ['character', 'surnames'], None),
+    (['terms', 'titles', 'surnames', 'character'], ['character', 'surnames', 'titles'], None),
+    (['terms', 'spirits', 'surnames', 'character'], ['character', 'surnames', 'spirits'],
+     {'spirits': {'enabled': True, 'has_gender': True}}),
+    (['terms', 'Spirits', 'Surname', 'Characters'], ['Characters', 'Surname', 'Spirits'],
+     {'spirit': {'enabled': True, 'has_gender': True}}),
+])
+def test_combined_refinement_prioritizes_related_whole_types(monkeypatch, types, preferred, metadata):
+    entries = _priority_entries(*types)
+    budget = _priority_budget(_priority_entries(*preferred))
+    plan = _priority_plan(entries, budget, monkeypatch, metadata)
+    rows = _priority_chunk_rows(plan)
+    assert [row[0] for row in rows[0]] == preferred
+    assert all(chunk.token_count <= budget for chunk in plan.chunks)
+    assert sorted(row for chunk in rows for row in chunk) == sorted(
+        [e['type'], e['raw_name'], e['translated_name']] for e in entries
+    )
+
+
+@pytest.mark.parametrize('metadata', [
+    {'spirits': {'enabled': False, 'has_gender': True}},
+    {'spirits': {'enabled': True, 'has_gender': False}},
+])
+def test_refinement_gender_priority_requires_enabled_gender_flag(monkeypatch, metadata):
+    entries = _priority_entries('terms', 'spirits', 'surnames', 'character')
+    budget = _priority_budget(_priority_entries('character', 'surnames', 'terms'))
+    plan = _priority_plan(entries, budget, monkeypatch, metadata)
+    assert [row[0] for row in _priority_chunk_rows(plan)[0]] == ['character', 'surnames', 'terms']
+
+
+def test_smaller_gendered_type_fills_priority_chunk_when_larger_type_cannot(monkeypatch):
+    entries = _priority_entries('terms', 'titles', 'spirits', 'surnames', 'character')
+    entries[1]['raw_name'] = 'long-title' * 3
+    budget = _priority_budget(_priority_entries('character', 'surnames', 'spirits'))
+    plan = _priority_plan(entries, budget, monkeypatch, {
+        'titles': {'enabled': True, 'has_gender': True},
+        'spirits': {'enabled': True, 'has_gender': True},
+    })
+    assert [row[0] for row in _priority_chunk_rows(plan)[0]] == ['character', 'surnames', 'spirits']
+    assert all(chunk.token_count <= budget for chunk in plan.chunks)
+
+
+def test_priority_splits_oversized_types_without_losing_rows(monkeypatch):
+    entries = _priority_entries('terms', 'surnames', *(['character'] * 7))
+    for index, entry in enumerate(entries):
+        entry['raw_name'] = f'name-{index}'
+    plan = _priority_plan(entries, 65, monkeypatch)
+    rows = _priority_chunk_rows(plan)
+    assert all(chunk.token_count <= 65 for chunk in plan.chunks)
+    assert sorted(row[1] for chunk in rows for row in chunk) == sorted(e['raw_name'] for e in entries)
+
+
+def test_priority_does_not_split_a_whole_type_to_fill_leftover_space(monkeypatch):
+    entries = _priority_entries('terms', 'titles', 'titles', 'surnames', 'character')
+    budget = _priority_budget(_priority_entries('character', 'surnames', 'titles'))
+    plan = _priority_plan(entries, budget, monkeypatch)
+    rows = _priority_chunk_rows(plan)
+    assert sum(row[0] == 'titles' for row in rows[0]) == 0
+    assert any(sum(row[0] == 'titles' for row in chunk) == 2 for chunk in rows)
+
+
+def test_priority_keeps_original_order_when_everything_fits(monkeypatch):
+    entries = _priority_entries('terms', 'titles', 'surnames', 'character')
+    plan = _priority_plan(entries, 10000, monkeypatch)
+    assert plan.total_chunks == 1
+    assert [row[0] for row in _priority_chunk_rows(plan)[0]] == [e['type'] for e in entries]
+
+
+def test_priority_rejects_individual_row_larger_than_budget(monkeypatch):
+    with pytest.raises(ValueError, match='entry exceeds the refinement chunk budget'):
+        _priority_plan(_priority_entries('character', 'surnames'), 5, monkeypatch)
+
+
+def test_priority_preserves_quoted_csv_and_unit_separator_rows(monkeypatch):
+    entries = _priority_entries('terms', 'character', 'surnames')
+    entries[1]['raw_name'] = 'Name, "quoted"'
+    plan = _priority_plan(entries, 64, monkeypatch)
+    assert all(chunk.token_count <= 64 for chunk in plan.chunks)
+    assert sorted(row[1] for chunk in _priority_chunk_rows(plan) for row in chunk) == sorted(e['raw_name'] for e in entries)
+    plan = _priority_plan(entries, 64, monkeypatch, system_prompt='{fields1}')
+    assert all(chunk.token_count <= 64 for chunk in plan.chunks)
+    assert all('\x1f' in chunk.payload for chunk in plan.chunks)
+
+
+def test_refinement_execution_uses_configured_gender_priority(tmp_path, monkeypatch):
+    _enable_refinement(monkeypatch)
+    monkeypatch.setenv('GLOSSARY_REFINEMENT_USER_PROMPT', '')
+    monkeypatch.setenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+    monkeypatch.setenv('BATCH_TRANSLATION', '0')
+    # The runtime callback's metadata must win over any stale environment value.
+    monkeypatch.setenv('GLOSSARY_CUSTOM_ENTRY_TYPES', '{}')
+    entries = _priority_entries('terms', 'spirits', 'surnames', 'character')
+    calls = []
+
+    def send(messages, *_args, **_kwargs):
+        payload = messages[-1]['content']
+        calls.append(payload)
+        return payload, 'stop', None
+
+    result = refine_glossary_entries(
+        entries, client=None, temp=0.1, mtoks=4096, check_stop=lambda: False,
+        chapter_splitter=_RefinementTestSplitter(),
+        available_tokens=_priority_budget(_priority_entries('character', 'surnames', 'spirits')),
+        chunk_timeout=None,
+        parse_response_fn=lambda payload: [
+            dict(zip(('type', 'raw_name', 'translated_name'), row))
+            for row in csv.reader(io.StringIO(payload))
+        ],
+        dedupe_fn=lambda values: values,
+        custom_entry_types_fn=lambda: {
+            name: {'enabled': True, 'has_gender': name == 'spirits'}
+            for name in ('terms', 'spirits', 'surnames', 'character')
+        },
+        send_fn=send, progress_file=str(tmp_path / 'progress.json'),
+        output_path=str(tmp_path / 'glossary.csv'), log=lambda _: None,
+        options=RefinementRunOptions(chunking_mode='all', force=True),
+    )
+    assert [row[0] for row in csv.reader(io.StringIO(calls[0]))] == ['character', 'surnames', 'spirits']
+    assert sorted(e['type'] for e in result) == sorted(e['type'] for e in entries)
 
 
 def test_exact_separate_refinement_plan_distributes_total_and_caps_at_entries():
