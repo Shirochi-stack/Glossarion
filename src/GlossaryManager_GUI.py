@@ -3790,6 +3790,242 @@ class GlossaryManagerMixin:
         except Exception:
             return ""
 
+    def _create_refinement_prompt_profile_controls(self, system_editor, user_editor):
+        """Prefill-style profiles storing a refinement system/user prompt pair."""
+        from copy import deepcopy
+        from PySide6.QtWidgets import QDialogButtonBox
+
+        profiles_key = 'glossary_refinement_prompt_profiles'
+        default_key = 'glossary_refinement_prompt_profile_default'
+        active_key = 'active_glossary_refinement_prompt_profile'
+        system_key = 'glossary_refinement_system_prompt'
+        user_key = 'glossary_refinement_user_prompt'
+        keys = (profiles_key, default_key, active_key, system_key, user_key)
+
+        def read_pair():
+            return {'system': self._glossary_prompt_text(system_editor),
+                    'user': self._glossary_prompt_text(user_editor)}
+
+        def clean_pair(value, fallback):
+            if not isinstance(value, dict):
+                return dict(fallback)
+            return {key: str(value.get(key, fallback[key]) or '') for key in ('system', 'user')}
+
+        initial = read_pair()
+        raw_profiles = self.config.get(profiles_key, {})
+        profiles = {
+            name: clean_pair(pair, initial)
+            for name, pair in (raw_profiles.items() if isinstance(raw_profiles, dict) else ())
+            if isinstance(name, str) and name.strip() and name.strip().casefold() != 'default'
+            and isinstance(pair, dict)
+        }
+        default_pair = clean_pair(self.config.get(default_key), initial)
+        active = self.config.get(active_key, '')
+        if not isinstance(active, str) or active not in profiles:
+            active = ''
+
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 6)
+        layout.setSpacing(8)
+        layout.addWidget(QLabel("Refinement Profile:"))
+        combo = QComboBox()
+        combo.setObjectName("refinement_prompt_profile_combo")
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        combo.setCompleter(None)
+        combo.setMinimumWidth(220)
+        combo.setMaximumWidth(420)
+        combo.lineEdit().setPlaceholderText("Profile name")
+        combo.setToolTip("Select a profile, or edit its name and save to rename it. Each profile stores both prompts.")
+        self._disable_combobox_mousewheel(combo)
+        self._add_combobox_arrow(combo)
+        combo.setStyleSheet(combo.styleSheet() + """
+            QComboBox { padding-right: 12px; }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 26px;
+                border-left: 1px solid #4a5568;
+            }
+        """)
+        layout.addWidget(combo)
+
+        def sync_config():
+            pair = read_pair()
+            self.config[profiles_key] = deepcopy(profiles)
+            self.config[default_key] = dict(default_pair)
+            self.config[active_key] = active
+            # Retain the runtime keys consumed by glossary_refinement.py.
+            self.glossary_refinement_system_prompt = pair['system'] or self._default_glossary_refinement_system_prompt()
+            self.glossary_refinement_user_prompt = pair['user']
+            self.config[system_key] = self.glossary_refinement_system_prompt
+            self.config[user_key] = self.glossary_refinement_user_prompt
+
+        def refresh():
+            blocked = combo.blockSignals(True)
+            try:
+                combo.clear()
+                combo.addItem("Default")
+                combo.addItems(list(profiles))
+                combo.setCurrentIndex(combo.findText(active or "Default"))
+                self._apply_halgakos_combo_icons(combo)
+            finally:
+                combo.blockSignals(blocked)
+
+        def set_pair(pair):
+            self._set_glossary_prompt_editor_text(system_editor, pair['system'])
+            self._set_glossary_prompt_editor_text(user_editor, pair['user'])
+
+        def stage():
+            nonlocal default_pair
+            if active in profiles:
+                profiles[active] = read_pair()
+            elif combo.currentText().strip().casefold() in ('', 'default'):
+                default_pair = read_pair()
+            sync_config()
+
+        def select(name=None):
+            nonlocal active
+            name = combo.currentText().strip() if name is None else name
+            if name.casefold() == 'default':
+                active = ''
+            elif name in profiles:
+                active = name
+            else:
+                return
+            refresh()
+            set_pair(profiles[active] if active else default_pair)
+            sync_config()
+
+        def snapshot():
+            return (deepcopy(profiles), dict(default_pair), active, read_pair(), combo.currentText(),
+                    {key: (key in self.config, deepcopy(self.config.get(key))) for key in keys})
+
+        def persist(before):
+            nonlocal profiles, default_pair, active
+            sync_config()
+            if self._persist_glossary_prompt_profiles() is not False:
+                return True
+            profiles, default_pair, active, pair, name, saved_config = before
+            refresh()
+            set_pair(pair)
+            combo.setEditText(name)
+            sync_config()
+            for key, (present, value) in saved_config.items():
+                if present:
+                    self.config[key] = value
+                else:
+                    self.config.pop(key, None)
+            QMessageBox.warning(row, "Save Failed", "Could not save the refinement prompt profiles. Please try again.")
+            return False
+
+        def new_profile():
+            nonlocal active
+            before = snapshot()
+            number = 1
+            while f"New Profile #{number}" in profiles:
+                number += 1
+            active = f"New Profile #{number}"
+            profiles[active] = {'system': '', 'user': ''}
+            refresh()
+            set_pair(profiles[active])
+            if persist(before) and hasattr(self, 'append_log'):
+                self.append_log(f"✅ Created refinement prompt profile: '{active}'")
+
+        def save_profile():
+            nonlocal profiles, default_pair, active
+            name = combo.currentText().strip()
+            if not name:
+                QMessageBox.warning(row, "Profile Name Required", "Enter a profile name before saving.")
+                return
+            if name.casefold() == 'default' and active:
+                QMessageBox.warning(row, "Default Profile", "Default is reserved. Choose another profile name.")
+                return
+            if name in profiles and name != active:
+                QMessageBox.warning(row, "Profile Name Exists", "A profile with this name already exists. Choose another name.")
+                return
+            before = snapshot()
+            pair = read_pair()
+            if name.casefold() == 'default':
+                default_pair = pair
+                active = ''
+            else:
+                if active in profiles and name != active:
+                    profiles = {(name if key == active else key): (pair if key == active else value)
+                                for key, value in profiles.items()}
+                else:
+                    profiles[name] = pair
+                active = name
+            refresh()
+            if persist(before) and hasattr(self, 'append_log'):
+                self.append_log(f"✅ Saved refinement prompt profile: '{active or 'Default'}'")
+
+        def delete_profile():
+            nonlocal active
+            name = combo.currentText().strip()
+            if name.casefold() == 'default':
+                QMessageBox.warning(row, "Default Profile", "The Default refinement prompt profile cannot be deleted.")
+                return
+            if name not in profiles:
+                QMessageBox.warning(row, "Profile Not Found", "Select an existing profile to delete.")
+                return
+            confirmation = QMessageBox(row)
+            confirmation.setWindowTitle("Delete Profile")
+            confirmation.setIcon(QMessageBox.Question)
+            confirmation.setText(f"Delete refinement prompt profile '{name}'?")
+            confirmation.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            button_box = confirmation.findChild(QDialogButtonBox)
+            if button_box is not None:
+                button_box.setCenterButtons(True)
+                button_box.layout().setSpacing(12)
+                for button in button_box.buttons():
+                    button.setMinimumWidth(button.sizeHint().width() + 12)
+            if confirmation.exec() != QMessageBox.Yes:
+                return
+            before = snapshot()
+            del profiles[name]
+            active = next(iter(profiles), '')
+            select(active or 'Default')
+            if persist(before) and hasattr(self, 'append_log'):
+                self.append_log(f"🗑️ Deleted refinement prompt profile: '{name}'")
+
+        actions = (
+            ("+ New Profile", new_profile, None, '#2d5a2d', '#3a7a3a', '#3a7a3a', '#4a9a4a', '#1e3e1e'),
+            ("💾 Save Profile", save_profile, 120, '#2f5f8f', '#4a78a8', '#3f78ad', '#5a91c8', '#244766'),
+            ("🗑 Delete Profile", delete_profile, 128, '#6f2f2f', '#944545', '#8a3a3a', '#b65252', '#512424'),
+        )
+        for label, callback, width, background, border, hover, hover_border, pressed in actions:
+            button = QPushButton(label)
+            button.setAutoDefault(False)
+            button.setFixedHeight(28)
+            if width is not None:
+                button.setFixedWidth(width)
+            button.setStyleSheet(f"""
+                QPushButton {{ background-color: {background}; color: #ffffff;
+                    font-size: 11px; font-weight: bold; border: 1px solid {border};
+                    border-radius: 4px; padding: 0px 8px; }}
+                QPushButton:hover {{ background-color: {hover}; border-color: {hover_border}; }}
+                QPushButton:pressed {{ background-color: {pressed}; }}
+            """)
+            button.clicked.connect(lambda _checked=False, action=callback: action())
+            layout.addWidget(button)
+        layout.addStretch()
+
+        select(active or 'Default')
+        combo.currentIndexChanged.connect(lambda index: select(combo.itemText(index)))
+        combo.activated.connect(lambda index: select(combo.itemText(index)))
+        combo.lineEdit().returnPressed.connect(select)
+        def select_clicked(index):
+            if (index.isValid() and QApplication.mouseButtons() & Qt.LeftButton
+                    and index.flags() & Qt.ItemIsEnabled and index.flags() & Qt.ItemIsSelectable):
+                combo.hidePopup()
+                select(combo.itemText(index.row()))
+        combo.view().pressed.connect(select_clicked)
+        system_editor.textChanged.connect(stage)
+        user_editor.textChanged.connect(stage)
+        return row
+
     def _default_single_pass_header_prompt(self):
         return """You have two tasks for this request.
 
@@ -6306,6 +6542,11 @@ Do not stop after the glossary."""
         self.glossary_refinement_user_prompt_text.setPlainText(self._sep_for_display(self.config.get('glossary_refinement_user_prompt', default_user)))
         self.glossary_refinement_user_prompt_text.setPlaceholderText("Leave empty to send only the glossary content.")
         prompt_layout.addWidget(self.glossary_refinement_user_prompt_text)
+
+        prompt_layout.insertWidget(1, self._create_refinement_prompt_profile_controls(
+            self.glossary_refinement_system_prompt_text,
+            self.glossary_refinement_user_prompt_text,
+        ))
 
         btn_row = QWidget()
         btn_layout = QHBoxLayout(btn_row)
