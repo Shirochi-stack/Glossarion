@@ -389,7 +389,9 @@ class Rejected(Exception):
     ('max', ['low', 'medium', 'high', 'xhigh'], 'xhigh'),
     ('max', ['low', 'medium', 'high'], 'high'),
     ('none', ['low', 'medium', 'high'], 'low'),
-    ('medium', ['low', 'high'], 'low'),
+    ('medium', ['low', 'high'], 'high'),
+    ('medium', ['low'], 'low'),
+    ('xhigh', ['high', 'max'], 'max'),
     ('low', ['medium', 'high'], 'medium'),
 ])
 @pytest.mark.parametrize('shape', ['chat', 'responses', 'extra_body'])

@@ -904,8 +904,8 @@ def _apply_reasoning_payload(
     if re.search(r'(?:^|/)kimi-k3(?:$|[-_])', model_lower):
         # https://docs.api.nvidia.com/nim/reference/moonshotai-kimi-k3-infer
         # Map unsupported shared selections to the nearest documented level,
-        # preferring the lower level on a tie. K3 cannot disable reasoning.
-        selected = {'none': 'low', 'medium': 'low', 'xhigh': 'high', 'heavy': 'max'}.get(effort, effort)
+        # preferring the higher level on a tie. K3 cannot disable reasoning.
+        selected = {'none': 'low', 'medium': 'high', 'xhigh': 'max', 'heavy': 'max'}.get(effort, effort)
         payload['reasoning_effort'] = selected
         if selected != effort:
             _log(log_fn, f'📝 Kimi K3 does not support {effort}, using {selected} instead')
