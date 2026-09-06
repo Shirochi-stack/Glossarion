@@ -884,12 +884,16 @@ def _remember_chat_template_unsupported_model(model_path: str) -> None:
         _chat_template_unsupported_models.add(key)
 
 
-def _apply_reasoning_payload(payload: Dict[str, Any], model_path: str) -> None:
+def _apply_reasoning_payload(
+    payload: Dict[str, Any], model_path: str,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> None:
     """
     NVIDIA NIM uses model-specific reasoning controls:
     - GPT-OSS supports top-level reasoning_effort: low/medium/high.
     - Nemotron 3 Nano supports chat_template_kwargs.parallel_reasoning_mode.
     - DeepSeek V4 supports top-level reasoning_effort: none/low/high/max.
+    - Kimi K3 supports top-level reasoning_effort: low/high/max.
     - Other thinking models generally use chat_template_kwargs.enable_thinking.
     """
     if not _reasoning_control_configured():
@@ -897,6 +901,15 @@ def _apply_reasoning_payload(payload: Dict[str, Any], model_path: str) -> None:
 
     model_lower = (model_path or "").lower()
     effort = _reasoning_effort()
+    if re.search(r'(?:^|/)kimi-k3(?:$|[-_])', model_lower):
+        # https://docs.api.nvidia.com/nim/reference/moonshotai-kimi-k3-infer
+        # Map unsupported shared selections to the nearest documented level,
+        # preferring the lower level on a tie. K3 cannot disable reasoning.
+        selected = {'none': 'low', 'medium': 'low', 'xhigh': 'high', 'heavy': 'max'}.get(effort, effort)
+        payload['reasoning_effort'] = selected
+        if selected != effort:
+            _log(log_fn, f'📝 Kimi K3 does not support {effort}, using {selected} instead')
+        return
     reasoning_disabled = not _reasoning_toggle_enabled() or (
         effort == "none" and "deepseek-v4" not in model_lower
     )
@@ -933,6 +946,27 @@ def _apply_reasoning_payload(payload: Dict[str, Any], model_path: str) -> None:
     kwargs.setdefault("enable_thinking", True)
     kwargs.setdefault("clear_thinking", False)
     payload["chat_template_kwargs"] = kwargs
+
+
+def _reasoning_payload_status(payload: Dict[str, Any]) -> str:
+    """Describe controls present in the request, without inventing an effort."""
+    if 'reasoning_effort' in payload:
+        return f" (reasoning_effort: {payload['reasoning_effort']})"
+    kwargs = payload.get('chat_template_kwargs') or {}
+    if kwargs.get('enable_thinking') is False:
+        return " (thinking disabled)"
+    if 'parallel_reasoning_mode' in kwargs:
+        return f" (parallel reasoning: {kwargs['parallel_reasoning_mode']})"
+    if kwargs.get('enable_thinking') is True:
+        return " (thinking enabled)"
+    return ""
+
+
+def reasoning_status_label(model_path: str) -> str:
+    payload = {'model': model_path}
+    _apply_reasoning_payload(payload, model_path)
+    normalize_none_effort(payload)
+    return _reasoning_payload_status(payload)
 
 
 def _get_session() -> requests.Session:
@@ -2082,7 +2116,7 @@ def _post_prediction(
         payload["frequency_penalty"] = float(frequency_penalty)
     if presence_penalty is not None:
         payload["presence_penalty"] = float(presence_penalty)
-    _apply_reasoning_payload(payload, model_path)
+    _apply_reasoning_payload(payload, model_path, log_fn=log_fn)
     normalize_none_effort(payload, lambda message: _log(log_fn, message))
     if suppress_chat_template_kwargs:
         payload.pop("chat_template_kwargs", None)
@@ -2166,6 +2200,13 @@ def _send_prediction_payload(
     progress_label: Optional[str], max_tokens: Optional[int],
 ) -> Dict[str, Any]:
     """Send the prepared payload, preserving HTTP error details for effort repair."""
+    if progress_label:
+        # Replace the earlier status with the controls actually being sent,
+        # including any adjustment made by the reasoning compatibility retry.
+        progress_label = re.sub(
+            r" \((?:thinking (?:enabled|disabled)|reasoning_effort:|parallel reasoning:)[^)]*\)$",
+            "", progress_label,
+        ) + _reasoning_payload_status(payload)
     request_started = time.time()
     if _is_cancelled():
         raise RuntimeError("stream cancelled")

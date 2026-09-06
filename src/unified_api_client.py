@@ -1512,11 +1512,13 @@ try:
     from authnd_auth import send_chat_completion as _authnd_send
     from authnd_auth import cancel_stream as _authnd_cancel_stream
     from authnd_auth import reset_cancel as _authnd_reset_cancel
+    from authnd_auth import reasoning_status_label as _authnd_reasoning_status_label
     AUTHND_AVAILABLE = True
 except ImportError:
     _authnd_send = None
     _authnd_cancel_stream = None
     _authnd_reset_cancel = None
+    _authnd_reasoning_status_label = None
     AUTHND_AVAILABLE = False
 
 # Search/Gemini Free - Google Search browser-backed route (optional, no API key)
@@ -16296,23 +16298,7 @@ class UnifiedClient:
             else:
                 authnd_model = authnd_model[len('authnd'):].lstrip('/')
 
-            if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
-                return " (thinking disabled)"
-            effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
-            if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
-                effort = 'medium'
-            if effort == 'none':
-                if 'deepseek-v4' in authnd_model:
-                    return " (reasoning_effort: none)"
-                return " (thinking disabled)"
-            if 'gpt-oss' in authnd_model:
-                return f" (reasoning_effort: {'high' if effort == 'xhigh' else effort})"
-            if 'nemotron-3-nano' in authnd_model:
-                mode = 'heavy' if effort in ('high', 'xhigh') else effort
-                return f" (parallel reasoning: {mode})"
-            if 'deepseek-v4' in authnd_model:
-                return f" (reasoning_effort: {self._normalize_deepseek_v4_effort(effort)})"
-            return f" (thinking enabled, effort: {effort})"
+            return _authnd_reasoning_status_label(authnd_model) if _authnd_reasoning_status_label else ""
 
         if model_lower.startswith('authgrok'):
             reasoning = self._get_authgrok_reasoning_param()

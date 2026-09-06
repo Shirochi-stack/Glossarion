@@ -36,6 +36,16 @@ def bare_client(model="gpt-6-astra"):
     return client
 
 
+@pytest.mark.parametrize('prefix', ['authnd/', 'authnd2/'])
+def test_authnd_progress_uses_actual_kimi_effort(monkeypatch, prefix):
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+    monkeypatch.setenv('GPT_EFFORT', 'max')
+    monkeypatch.delenv('AUTHND_ENABLE_THINKING', raising=False)
+    monkeypatch.delenv('AUTHND_REASONING_EFFORT', raising=False)
+    client = bare_client(prefix + 'moonshotai/kimi-k3')
+    assert client._get_thinking_status_label() == ' (reasoning_effort: max)'
+
+
 @pytest.mark.parametrize("model", ["gpt-6-astra", "openai/gpt-6-astra", "gpt-6", "gpt6-astra", "gpt-6-astra-2026-09-05"])
 def test_gpt6_uses_completion_token_limit(model):
     client = bare_client(model)

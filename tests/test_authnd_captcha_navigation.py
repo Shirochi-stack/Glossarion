@@ -549,7 +549,7 @@ def test_authnd_rejects_redirect_before_stream_parsing():
 @pytest.fixture(params=['httpx', 'requests_stream', 'requests_json'])
 def reasoning_transport(request, monkeypatch):
     calls, responses, logs = [], [], []
-    state = {'cancelled': False, 'cancel_after_failure': False}
+    state = {'cancelled': False, 'cancel_after_failure': False, 'model': 'deepseek-ai/deepseek-v4-flash'}
     monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
     monkeypatch.delenv('AUTHND_ENABLE_THINKING', raising=False)
     monkeypatch.delenv('AUTHND_REASONING_EFFORT', raising=False)
@@ -557,7 +557,7 @@ def reasoning_transport(request, monkeypatch):
     monkeypatch.setattr(authnd, '_is_cancelled', lambda: state['cancelled'])
     monkeypatch.setattr(authnd, '_resolve_model_metadata', lambda page: {
         'namespace': 'test-org', 'endpoint_id': 'test-endpoint',
-        'payload_model': 'deepseek-ai/deepseek-v4-flash',
+        'payload_model': state['model'],
     })
 
     class Response:
@@ -605,12 +605,13 @@ def reasoning_transport(request, monkeypatch):
     def send():
         return authnd._post_prediction(
             messages=[{'role': 'user', 'content': 'Reply OK.'}],
-            model_id='deepseek-v4-flash', model_path='deepseek-ai/deepseek-v4-flash',
-            page_url='https://build.nvidia.com/deepseek-ai/deepseek-v4-flash',
+            model_id=state['model'].split('/')[-1], model_path=state['model'],
+            page_url='https://build.nvidia.com/' + state['model'],
             captcha_token='test-token', temperature=0.5, max_tokens=1234,
             top_p=None, frequency_penalty=None, presence_penalty=None,
             timeout=30, connect_timeout=10, stream=request.param != 'requests_json',
             log_stream=False, log_fn=logs.append,
+            progress_label='Chapter 1 API call in progress (reasoning_effort: max)',
         )
 
     return send, calls, responses, logs, state, Response
@@ -620,6 +621,20 @@ def _reasoning_error(values):
     return {'error': {'param': 'reasoning_effort', 'code': 'unsupported_value',
                      'message': 'Unsupported value for reasoning_effort. Supported values are: '
                      + ', '.join(repr(value) for value in values) + '.'}}
+
+
+def test_kimi_k3_max_reaches_transport(reasoning_transport, monkeypatch):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    monkeypatch.setenv('GPT_EFFORT', 'max')
+    state['model'] = 'moonshotai/kimi-k3'
+    responses.append(Response(200, {'choices': [{'message': {'content': 'OK'},
+                                                 'delta': {'content': 'OK'}, 'finish_reason': 'stop'}]}))
+    assert send()['content'] == 'OK'
+    assert len(calls) == 1
+    assert calls[0]['reasoning_effort'] == 'max'
+    assert 'chat_template_kwargs' not in calls[0]
+    if calls[0]['stream']:
+        assert 'Chapter 1 API call in progress (reasoning_effort: max)' in logs
 
 
 @pytest.mark.parametrize('requested,supported,expected', [
@@ -641,6 +656,54 @@ def test_authnd_retries_nearest_effort(reasoning_transport, monkeypatch, request
     assert os.environ['GPT_EFFORT'] == requested
     assert responses[0].closed
     assert any(line.startswith('📝') and f'retrying with {expected}' in line for line in logs)
+    progress = [line for line in logs if 'API call in progress' in line]
+    if calls[1]['stream']:
+        assert progress == [f'Chapter 1 API call in progress (reasoning_effort: {expected})']
+
+
+@pytest.mark.parametrize('model,expected', [
+    ('moonshotai/kimi-k3', ' (reasoning_effort: max)'),
+    ('moonshotai/kimi-k2.5', ' (thinking enabled)'),
+    ('openai/gpt-oss-120b', ' (reasoning_effort: high)'),
+    ('deepseek-ai/deepseek-v4-flash', ' (reasoning_effort: max)'),
+    ('nvidia/nemotron-3-nano', ' (parallel reasoning: heavy)'),
+])
+def test_authnd_max_status_matches_payload(monkeypatch, model, expected):
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+    monkeypatch.setenv('GPT_EFFORT', 'max')
+    monkeypatch.delenv('AUTHND_ENABLE_THINKING', raising=False)
+    monkeypatch.delenv('AUTHND_REASONING_EFFORT', raising=False)
+    assert authnd._reasoning_effort() == 'max'
+    assert authnd.reasoning_status_label(model) == expected
+    if model == 'moonshotai/kimi-k3':
+        payload = {}
+        authnd._apply_reasoning_payload(payload, model)
+        assert payload == {'reasoning_effort': 'max'}
+
+
+@pytest.mark.parametrize('selected,expected', [
+    ('none', 'low'), ('low', 'low'), ('medium', 'low'),
+    ('high', 'high'), ('xhigh', 'high'), ('max', 'max'),
+])
+def test_kimi_k3_uses_documented_effort_with_note(monkeypatch, selected, expected):
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+    monkeypatch.setenv('GPT_EFFORT', selected)
+    monkeypatch.delenv('AUTHND_ENABLE_THINKING', raising=False)
+    monkeypatch.delenv('AUTHND_REASONING_EFFORT', raising=False)
+    logs = []
+    payload = {}
+    authnd._apply_reasoning_payload(payload, 'moonshotai/kimi-k3', log_fn=logs.append)
+    assert payload == {'reasoning_effort': expected}
+    assert authnd.reasoning_status_label('moonshotai/kimi-k3') == f' (reasoning_effort: {expected})'
+    assert logs == ([f'📝 Kimi K3 does not support {selected}, using {expected} instead'] if selected != expected else [])
+
+
+def test_authnd_status_honors_provider_override(monkeypatch):
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+    monkeypatch.setenv('GPT_EFFORT', 'max')
+    monkeypatch.setenv('AUTHND_REASONING_EFFORT', 'low')
+    monkeypatch.delenv('AUTHND_ENABLE_THINKING', raising=False)
+    assert authnd.reasoning_status_label('openai/gpt-oss-120b') == ' (reasoning_effort: low)'
 
 
 def test_authnd_reasoning_retry_stops_after_second_rejection(reasoning_transport, monkeypatch):
