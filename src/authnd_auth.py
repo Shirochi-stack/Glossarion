@@ -12,6 +12,7 @@ import argparse
 import codecs
 import html as html_lib
 import json
+import math
 import os
 import queue
 import re
@@ -21,6 +22,7 @@ import sys
 import threading
 import time
 import uuid
+from urllib.parse import quote
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import requests
@@ -56,6 +58,7 @@ _cancel_event = threading.Event()
 _thread_local = threading.local()
 _metadata_cache: Dict[str, Dict[str, str]] = {}
 _metadata_lock = threading.Lock()
+_endpoint_output_limits: Dict[str, int] = {}
 _chat_template_unsupported_models: set = set()
 _chat_template_unsupported_lock = threading.Lock()
 _configured_gate_lock = threading.Lock()
@@ -455,6 +458,102 @@ def _select_payload_model(metadata_payload_model: str, model_path: str, log_fn: 
         return requested_payload_model
 
     return scraped_payload_model
+
+
+def _schema_output_token_limit(spec: Dict[str, Any]) -> Optional[int]:
+    """Read the chat POST input constraint, never examples or default values."""
+    def resolve(node, seen=()):
+        if not isinstance(node, dict):
+            return {}
+        ref = node.get('$ref')
+        if not ref:
+            return node
+        if not isinstance(ref, str) or not ref.startswith('#/') or ref in seen:
+            return {}
+        target = spec
+        for part in ref[2:].split('/'):
+            target = target.get(part.replace('~1', '/').replace('~0', '~'), {}) if isinstance(target, dict) else {}
+        return resolve(target, (*seen, ref))
+
+    def ceiling(node):
+        node = resolve(node)
+        bounds = []
+        maximum = node.get('maximum')
+        exclusive = node.get('exclusiveMaximum')
+        if isinstance(maximum, (int, float)) and not isinstance(maximum, bool) and math.isfinite(maximum):
+            bounds.append(math.ceil(maximum) - 1 if exclusive is True else math.floor(maximum))
+        if isinstance(exclusive, (int, float)) and not isinstance(exclusive, bool) and math.isfinite(exclusive):
+            bounds.append(math.ceil(exclusive) - 1)
+        for key in ('anyOf', 'oneOf'):
+            if isinstance(node.get(key), list):
+                branches = [resolve(branch) for branch in node[key]]
+                limits = [ceiling(branch) for branch in branches if branch.get('type') != 'null']
+                if limits and all(limit is not None for limit in limits):
+                    bounds.append(max(limits))
+        for branch in node.get('allOf', []):
+            limit = ceiling(branch)
+            if limit is not None:
+                bounds.append(limit)
+        return min(bounds) if bounds else None
+
+    def input_limit(node):
+        node = resolve(node)
+        limits = []
+        field = node.get('properties', {}).get('max_tokens')
+        if isinstance(field, dict):
+            limit = ceiling(field)
+            if limit is not None:
+                limits.append(limit)
+        for branch in node.get('allOf', []):
+            limit = input_limit(branch)
+            if limit is not None:
+                limits.append(limit)
+        return min(limits) if limits else None
+
+    for path, operation in spec.get('paths', {}).items():
+        if path.rstrip('/').endswith('/chat/completions'):
+            body = resolve(operation.get('post', {}).get('requestBody', {}))
+            schema = body.get('content', {}).get('application/json', {}).get('schema', {})
+            limit = input_limit(schema)
+            if limit is not None and limit > 0:
+                return limit
+    return None
+
+
+def _endpoint_output_token_limit(metadata, *, fetch=False, log_fn=None):
+    """Fetch the spec for the same namespace/artifact used by /predict."""
+    namespace = metadata.get('namespace') or DEFAULT_ORG_ID
+    endpoint = metadata.get('endpoint_id')
+    if not endpoint:
+        return None
+    url = f'{API_BASE_URL}/v2/endpoints/{quote(namespace, safe="")}/{quote(endpoint, safe="")}/spec'
+    with _metadata_lock:
+        cached = _endpoint_output_limits.get(url)
+    if cached is not None or not fetch:
+        return cached
+    try:
+        response = requests.get(url, headers={'accept': 'application/json', 'user-agent': USER_AGENT}, timeout=30)
+        try:
+            response.raise_for_status()
+            data = response.json()
+        finally:
+            response.close()
+        if data.get('namespace') != namespace or data.get('artifactName') != endpoint:
+            raise ValueError('endpoint spec identity does not match the prediction route')
+        spec = data.get('openAPISpec')
+        if isinstance(spec, str):
+            spec = json.loads(spec)
+        limit = _schema_output_token_limit(spec) if isinstance(spec, dict) else None
+    except (requests.RequestException, ValueError, TypeError, AttributeError, RecursionError) as error:
+        _log(log_fn, f'📝 AuthND: could not read the endpoint output limit: {_short_error(error)}')
+        return None
+    if limit is not None:
+        with _metadata_lock:
+            _endpoint_output_limits[url] = limit
+        _log(log_fn, f'📏 AuthND: endpoint {namespace}/{endpoint} declares max_tokens maximum={limit:,}')
+    else:
+        _log(log_fn, '📝 AuthND: endpoint schema does not declare a max_tokens maximum; keeping the original error.')
+    return limit
 
 
 def _resolve_model_metadata(page_url: str) -> Dict[str, str]:
@@ -2095,6 +2194,7 @@ def _post_prediction(
     progress_label: Optional[str] = None,
     log_fn: Optional[Callable[[str], None]] = None,
     suppress_chat_template_kwargs: bool = False,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     metadata = _resolve_model_metadata(page_url)
     org_id = metadata.get("namespace") or DEFAULT_ORG_ID
@@ -2110,6 +2210,11 @@ def _post_prediction(
         payload["temperature"] = temperature
     if max_tokens:
         payload["max_tokens"] = int(max_tokens)
+        known_limit = _endpoint_output_token_limit(metadata)
+        if known_limit is not None and payload['max_tokens'] > known_limit:
+            _log(log_fn, f'📝 AuthND: using endpoint max_tokens maximum={known_limit:,} '
+                 f'instead of {payload["max_tokens"]:,}.')
+            payload['max_tokens'] = known_limit
     if top_p is not None:
         payload["top_p"] = float(top_p)
     if frequency_penalty is not None:
@@ -2180,15 +2285,52 @@ def _post_prediction(
     )
 
     def check_retry_cancel():
-        if _is_cancelled() or os.getenv("GRACEFUL_STOP") == "1":
+        if _is_cancelled() or os.getenv("GRACEFUL_STOP") == "1" or (callable(cancel_check) and cancel_check()):
             raise RuntimeError("stream cancelled")
 
-    return call_with_reasoning_retry(
-        lambda request: _send_prediction_payload(
-            request, url=url, headers=headers, timeout=timeout,
+    sent = False
+    limit_retried = False
+
+    def send(request):
+        nonlocal sent
+        check_retry_cancel()
+        request_headers = dict(headers)
+        if sent:
+            # A rejected prediction consumes its captcha token too.
+            request_headers['nv-captcha-token'] = _get_captcha_token_for_request(
+                page_url, _env_int('AUTHND_TOKEN_TIMEOUT', min(max(timeout, 60), 180)),
+                log_fn=log_fn, cancel_check=cancel_check,
+            )
+        check_retry_cancel()
+        sent = True
+        return _send_prediction_payload(
+            request, url=url, headers=request_headers, timeout=timeout,
             connect_timeout=connect_timeout, stream=stream, log_fn=log_fn,
-            log_stream=log_stream, progress_label=progress_label, max_tokens=max_tokens,
-        ),
+            log_stream=log_stream, progress_label=progress_label, max_tokens=request.get('max_tokens'),
+        )
+
+    def send_with_endpoint_limit(request):
+        nonlocal limit_retried
+        try:
+            return send(request)
+        except _AuthNDHTTPError as error:
+            message = str(error).lower()
+            if (error.status_code != 400 or limit_retried or not request.get('max_tokens')
+                    or any(marker in message for marker in ('captcha', 'token is invalid', 'reasoning', 'chat_template'))):
+                raise
+            check_retry_cancel()
+            limit = _endpoint_output_token_limit(metadata, fetch=True, log_fn=log_fn)
+            check_retry_cancel()
+            if limit is None or request['max_tokens'] <= limit:
+                raise
+            limit_retried = True
+            _log(log_fn, f'📝 AuthND: HTTP 400 with max_tokens={request["max_tokens"]:,}; '
+                 f'retrying with the endpoint-declared maximum of {limit:,}.')
+            request['max_tokens'] = limit
+            return send(request)
+
+    return call_with_reasoning_retry(
+        send_with_endpoint_limit,
         payload, lambda message: _log(log_fn, message), check_retry_cancel,
     )
 
@@ -2440,6 +2582,7 @@ def send_chat_completion(
                 progress_label=post_progress_label,
                 log_fn=log_fn,
                 suppress_chat_template_kwargs=suppress_chat_template_kwargs,
+                cancel_check=cancel_check,
             )
             result["model"] = model_id
             result["page_url"] = page_url
@@ -2479,6 +2622,7 @@ def send_chat_completion(
                     progress_label=post_progress_label,
                     log_fn=log_fn,
                     suppress_chat_template_kwargs=True,
+                    cancel_check=cancel_check,
                 )
                 result["model"] = model_id
                 result["page_url"] = page_url

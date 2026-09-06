@@ -550,6 +550,16 @@ def test_authnd_rejects_redirect_before_stream_parsing():
 def reasoning_transport(request, monkeypatch):
     calls, responses, logs = [], [], []
     state = {'cancelled': False, 'cancel_after_failure': False, 'model': 'deepseek-ai/deepseek-v4-flash'}
+    monkeypatch.setattr(authnd, '_endpoint_output_limits', {})
+    state.update(tokens=[], spec_calls=[], spec_limit=None)
+    token_number = 0
+
+    def mint_token(*args, **kwargs):
+        nonlocal token_number
+        token_number += 1
+        return f'token-{token_number}'
+
+    monkeypatch.setattr(authnd, '_get_captcha_token_for_request', mint_token)
     monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
     monkeypatch.delenv('AUTHND_ENABLE_THINKING', raising=False)
     monkeypatch.delenv('AUTHND_REASONING_EFFORT', raising=False)
@@ -590,6 +600,9 @@ def reasoning_transport(request, monkeypatch):
             return self.iter_raw()
 
     def post(*args, **kwargs):
+        token = kwargs['headers']['nv-captcha-token']
+        assert token not in state['tokens'], 'A single-use captcha token was reused'
+        state['tokens'].append(token)
         calls.append(copy.deepcopy(kwargs['json']))
         response = responses[len(calls) - 1]
         if response.status_code >= 400 and state['cancel_after_failure']:
@@ -602,12 +615,22 @@ def reasoning_transport(request, monkeypatch):
     monkeypatch.setattr(authnd, '_get_session', lambda: object())
     monkeypatch.setattr(authnd, '_post_with_cancel', post)
 
+    def get_spec(url, **kwargs):
+        state['spec_calls'].append(url)
+        return types.SimpleNamespace(
+            raise_for_status=lambda: None, close=lambda: None,
+            json=lambda: {'namespace': 'test-org', 'artifactName': 'test-endpoint',
+                          'openAPISpec': json.dumps(_chat_spec({'type': 'integer', 'maximum': state['spec_limit']}))},
+        )
+
+    monkeypatch.setattr(authnd.requests, 'get', get_spec)
+
     def send():
         return authnd._post_prediction(
             messages=[{'role': 'user', 'content': 'Reply OK.'}],
             model_id=state['model'].split('/')[-1], model_path=state['model'],
             page_url='https://build.nvidia.com/' + state['model'],
-            captcha_token='test-token', temperature=0.5, max_tokens=1234,
+            captcha_token=mint_token(), temperature=0.5, max_tokens=1234,
             top_p=None, frequency_penalty=None, presence_penalty=None,
             timeout=30, connect_timeout=10, stream=request.param != 'requests_json',
             log_stream=False, log_fn=logs.append,
@@ -735,3 +758,110 @@ def test_authnd_unrelated_error_does_not_change_effort(reasoning_transport, monk
         send()
     assert len(calls) == 1
     assert calls[0]['reasoning_effort'] == 'max'
+
+
+def _chat_spec(field):
+    return {
+        'paths': {'/chat/completions': {'post': {'requestBody': {'content': {
+            'application/json': {'schema': {'$ref': '#/components/schemas/ChatInput'}}
+        }}}}},
+        'components': {'schemas': {'ChatInput': {'properties': {'max_tokens': field}}}},
+    }
+
+
+@pytest.mark.parametrize('field,expected', [
+    ({'type': 'integer', 'maximum': 8192, 'default': 512}, 8192),
+    ({'anyOf': [{'type': 'integer', 'maximum': 32768}, {'type': 'null'}]}, 32768),
+    ({'type': 'integer', 'exclusiveMaximum': 32768}, 32767),
+    ({'type': 'integer', 'maximum': 32768, 'exclusiveMaximum': True}, 32767),
+    ({'allOf': [{'maximum': 32768}, {'maximum': 8192}]}, 8192),
+    ({'anyOf': [{'type': 'integer', 'maximum': 8192}, {'type': 'integer'}]}, None),
+    ({'type': 'integer', 'default': 32768, 'examples': [32768]}, None),
+    ({'type': 'integer', 'maximum': None}, None),
+])
+def test_endpoint_schema_reads_constraints_only(field, expected):
+    spec = _chat_spec(field)
+    spec['components']['schemas']['UnrelatedResponse'] = {'properties': {'max_tokens': {'maximum': 99}}}
+    assert authnd._schema_output_token_limit(spec) == expected
+
+
+def test_endpoint_schema_resolves_field_reference():
+    spec = _chat_spec({'$ref': '#/components/schemas/TokenCount'})
+    spec['components']['schemas']['TokenCount'] = {'type': 'integer', 'maximum': 4096}
+    assert authnd._schema_output_token_limit(spec) == 4096
+
+
+def _opaque_400(Response):
+    response = Response(400, {})
+    response.text = 'data:' + json.dumps({'type': 'about:blank', 'title': 'Bad Request',
+        'status': 400, 'detail': '400 Bad Request from POST https://grpc.nvcf.nvidia.com/v1/chat/completions'})
+    return response
+
+
+def _ok_response(Response):
+    return Response(200, {'choices': [{'message': {'content': 'OK'}, 'delta': {'content': 'OK'},
+                                       'finish_reason': 'stop'}]})
+
+
+def test_authnd_400_uses_real_endpoint_schema_and_caches_limit(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = 1000
+    responses.extend([_opaque_400(Response), _ok_response(Response), _ok_response(Response)])
+    assert send()['content'] == 'OK'
+    assert calls[1] == {**calls[0], 'max_tokens': 1000}
+    assert responses[0].closed
+    assert send()['content'] == 'OK'
+    assert [call['max_tokens'] for call in calls] == [1234, 1000, 1000]
+    assert state['spec_calls'] == ['https://api.ngc.nvidia.com/v2/endpoints/test-org/test-endpoint/spec']
+    assert any('endpoint-declared maximum of 1,000' in line for line in logs)
+
+
+@pytest.mark.parametrize('limit', [None, 1234, 9999])
+def test_authnd_400_does_not_guess_when_schema_cannot_reduce_limit(reasoning_transport, limit):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = limit
+    responses.append(_opaque_400(Response))
+    with pytest.raises(authnd._AuthNDHTTPError):
+        send()
+    assert len(calls) == 1
+
+
+def test_authnd_schema_limit_retry_is_bounded(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = 1000
+    responses.extend([_opaque_400(Response), _opaque_400(Response)])
+    with pytest.raises(authnd._AuthNDHTTPError):
+        send()
+    assert [call['max_tokens'] for call in calls] == [1234, 1000]
+
+
+def test_authnd_cancellation_prevents_schema_lookup(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['cancel_after_failure'] = True
+    responses.append(_opaque_400(Response))
+    with pytest.raises(RuntimeError, match='stream cancelled'):
+        send()
+    assert len(calls) == 1
+    assert state['spec_calls'] == []
+
+
+def test_authnd_captcha_error_does_not_trigger_limit_retry(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    responses.append(Response(400, {'detail': 'Token is invalid'}))
+    with pytest.raises(authnd._AuthNDHTTPError):
+        send()
+    assert state['spec_calls'] == []
+
+
+def test_authnd_rejects_mismatched_endpoint_spec(reasoning_transport, monkeypatch):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    monkeypatch.setattr(authnd.requests, 'get', lambda *args, **kwargs: types.SimpleNamespace(
+        raise_for_status=lambda: None, close=lambda: None,
+        json=lambda: {'namespace': 'test-org', 'artifactName': 'different-model',
+                      'openAPISpec': _chat_spec({'maximum': 500})},
+    ))
+    responses.append(_opaque_400(Response))
+    with pytest.raises(authnd._AuthNDHTTPError):
+        send()
+    assert len(calls) == 1
+    assert authnd._endpoint_output_limits == {}
