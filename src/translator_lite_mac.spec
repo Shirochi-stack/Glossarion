@@ -102,6 +102,7 @@ app_files = [
     # File processors
     ('epub_converter.py', '.'),
     ('image_archive_epub.py', '.'),
+    ('html_archive_epub.py', '.'),
     ('html_tag_entities.py', '.'),
     ('emoticon_patterns.py', '.'),
     ('qa_scan_runtime.py', '.'),
@@ -267,6 +268,7 @@ app_modules = [
     'PatternManager',
     'epub_converter',
     'image_archive_epub',
+    'html_archive_epub',
     'html_tag_entities',
     'emoticon_patterns',
     'qa_scan_runtime',

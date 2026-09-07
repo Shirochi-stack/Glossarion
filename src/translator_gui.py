@@ -9235,6 +9235,7 @@ class _InputOutputDialog(QDialog):
                 'current_file_index',
                 '_single_chapter_filter',
                 '_zip_inputs_resolved_for_current_run',
+                '_html_epub_source_paths',
                 '_direct_text_archive_conversion_dir',
                 '_direct_text_force_multipass_off',
                 '_direct_text_force_no_glossary',
@@ -16753,7 +16754,7 @@ Recent translations to summarize:
                 return
             paths = []
             supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.sdlxliff', '.srt', '.ass', '.lrc',
-                                    '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif',
+                                    '.html', '.htm', '.xhtml', '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif',
                                     '.bmp', '.webp', '.mp4'}
             for url in urls:
                 local = url.toLocalFile()
@@ -30964,14 +30965,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
         """
         source_files = list(file_list or [])
 
-        # An EPUB is the package container, not an item in another package's
+        # An EPUB/ZIP is the package container, not an item in another package's
         # spine.  Looking for an OPF below the EPUB's parent directory can pick
         # up an unrelated extracted book, then incorrectly compare outer
         # ``*.epub`` names with that book's internal ``*.html`` spine entries.
         # Preserve the user's batch order here; each EPUB is opened later and
         # its own internal OPF controls its chapter order.
+        # Standalone HTML selections are prepared as individual EPUBs too.
         if any(
-            os.path.splitext(os.fspath(path))[1].casefold() == '.epub'
+            os.path.splitext(os.fspath(path))[1].casefold() in {'.epub', '.zip', '.cbz', '.html', '.htm', '.xhtml'}
             for path in source_files
         ):
             return source_files
@@ -31554,8 +31556,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         return
                     self.append_log("✅ Modules loaded")
 
-                if any(str(f).lower().endswith(('.zip', '.cbz')) for f in getattr(self, 'selected_files', []) or []):
-                    self.append_log("📦 Preparing image archive input(s) in translation worker...")
+                if self._has_epub_conversion_inputs():
+                    self.append_log("📦 Preparing archive/HTML input(s) in translation worker...")
                     self._resolve_zip_inputs_for_translation()
                     if self.stop_requested:
                         return
@@ -32196,10 +32198,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             # ========== NEW: APPLY OPF-BASED SORTING ==========
             if (
-                any(str(f).lower().endswith(('.zip', '.cbz')) for f in getattr(self, 'selected_files', []) or [])
+                self._has_epub_conversion_inputs()
                 and not getattr(self, '_zip_inputs_resolved_for_current_run', False)
             ):
-                self.append_log("📦 Preparing image archive input(s) before file processing...")
+                self.append_log("📦 Preparing archive/HTML input(s) before file processing...")
                 self._resolve_zip_inputs_for_translation()
                 if self.stop_requested:
                     return False
@@ -32361,7 +32363,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.append_log(f"{'='*60}")
 
                 if (
-                    str(file_path).lower().endswith(('.zip', '.cbz'))
+                    str(file_path).lower().endswith(('.zip', '.cbz', '.html', '.htm', '.xhtml'))
                     and not getattr(self, '_zip_inputs_resolved_for_current_run', False)
                 ):
                     old_file_path = file_path
@@ -35915,13 +35917,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self._apply_direct_text_runtime_environment()
 
             if (
-                any(str(f).lower().endswith('.zip') for f in getattr(self, 'selected_files', []) or [])
+                self._has_epub_conversion_inputs()
                 and not getattr(self, '_zip_inputs_resolved_for_current_run', False)
             ):
-                self.append_log("📦 Preparing ZIP input(s) for glossary extraction...")
+                self.append_log("📦 Preparing archive/HTML input(s) for glossary extraction...")
                 self._resolve_zip_inputs_for_translation()
                 if self.stop_requested:
-                    self.append_log("⏹️ Glossary extraction cancelled during ZIP conversion")
+                    self.append_log("⏹️ Glossary extraction cancelled during input preparation")
                     return
 
             # Create Glossary folder
@@ -40793,6 +40795,7 @@ Important rules:
         paths = []
         supported_extensions = {
             '.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md',
+            '.html', '.htm', '.xhtml',
             '.sdlxliff', '.srt', '.ass', '.lrc', '.png', '.jpg', '.jpeg', '.gif',
             '.bmp', '.webp', '.mp4',
         }
@@ -41466,12 +41469,13 @@ Important rules:
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
         file_filter = (
-            "Supported files (*.epub *.zip *.cbz *.pdf *.txt *.json *.csv *.md *.sdlxliff *.srt *.ass *.lrc *.png *.jpg *.jpeg *.gif *.bmp *.webp *.mp4 *.exe);;"
+            "Supported files (*.epub *.zip *.cbz *.pdf *.html *.htm *.xhtml *.txt *.json *.csv *.md *.sdlxliff *.srt *.ass *.lrc *.png *.jpg *.jpeg *.gif *.bmp *.webp *.mp4 *.exe);;"
             "EPUB/ZIP/CBZ (*.epub *.zip *.cbz);;"
             "EPUB files (*.epub);;"
             "ZIP files (*.zip);;"
             "Comic Book Zip (*.cbz);;"
             "PDF files (*.pdf);;"
+            "HTML files (*.html *.htm *.xhtml);;"
             "Text files (*.txt *.json *.csv *.md);;"
             "Subtitle and lyric files (*.srt *.ass *.lrc);;"
             "SDLXLIFF files (*.sdlxliff);;"
@@ -41505,7 +41509,7 @@ Important rules:
         )
         if folder_path:
             # Find all supported files in the folder
-            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md', '.sdlxliff', '.srt', '.ass', '.lrc', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.mp4', '.exe'}
+            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.html', '.htm', '.xhtml', '.txt', '.json', '.csv', '.md', '.sdlxliff', '.srt', '.ass', '.lrc', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.mp4', '.exe'}
             files = []
             
             # Recursively find files if deep scan is enabled
@@ -41529,11 +41533,12 @@ Important rules:
                 self.append_log(f"📁 Found {len(files)} supported files in: {os.path.basename(folder_path)}")
             else:
                 QMessageBox.warning(self, "No Files Found", 
-                                     f"No supported files found in:\n{folder_path}\n\nSupported formats: EPUB, SDLXLIFF, SRT, ASS, LRC, TXT, MD, PNG, JPG, JPEG, GIF, BMP, WebP, MP4")
+                                     f"No supported files found in:\n{folder_path}\n\nSupported formats: EPUB, HTML, HTM, XHTML, SDLXLIFF, SRT, ASS, LRC, TXT, MD, PNG, JPG, JPEG, GIF, BMP, WebP, MP4")
 
     def clear_file_selection(self):
         """Clear all selected files"""
         self._reset_parallel_epub_pair_for_input_change()
+        self._html_epub_source_paths = {}
         self.entry_epub.clear()
         self.entry_epub.setText("No file selected")
         self.entry_epub.setToolTip("")
@@ -41710,11 +41715,27 @@ Important rules:
             )
             return []
 
+    def _has_epub_conversion_inputs(self):
+        """Include original HTML sources when a previous run prepared EPUBs."""
+        html_sources = getattr(self, '_html_epub_source_paths', {}) or {}
+        return any(
+            str(html_sources.get(path, path)).lower().endswith(
+                ('.zip', '.cbz', '.html', '.htm', '.xhtml')
+            )
+            for path in getattr(self, 'selected_files', []) or []
+        )
+
     def _convert_zip_input_to_epub_if_needed(self, path):
-        """Resolve a selected ZIP/CBZ image archive to EPUB in a worker-safe way."""
-        if not path or not str(path).lower().endswith(('.zip', '.cbz')):
+        """Resolve archives and standalone HTML documents to EPUB in the worker."""
+        if not path or not str(path).lower().endswith(('.zip', '.cbz', '.html', '.htm', '.xhtml')):
             return path
 
+        is_html_file = str(path).lower().endswith(('.html', '.htm', '.xhtml'))
+        # Keep book.html and book.xhtml distinct and never overwrite book.epub.
+        output_name = (
+            os.path.basename(path) + '.epub'
+            if is_html_file else os.path.splitext(os.path.basename(path))[0] + '.epub'
+        )
         conversion_dir = str(
             getattr(self, '_direct_text_archive_conversion_dir', '') or ''
         ).strip()
@@ -41722,10 +41743,10 @@ Important rules:
             os.makedirs(conversion_dir, exist_ok=True)
             epub_path = os.path.join(
                 conversion_dir,
-                os.path.splitext(os.path.basename(path))[0] + '.epub',
+                output_name,
             )
         else:
-            epub_path = os.path.splitext(path)[0] + '.epub'
+            epub_path = os.path.join(os.path.dirname(path), output_name)
         should_stop = lambda: bool(getattr(self, 'stop_requested', False))
         try:
             import shutil
@@ -41740,6 +41761,27 @@ Important rules:
             )
 
             self._zip_conversion_active = True
+            if is_html_file:
+                from html_archive_epub import (
+                    convert_html_file_to_epub,
+                    generated_html_epub_chapter_count,
+                )
+
+                # Preserve unrelated EPUBs even at the standalone wrapper name.
+                candidate_base = os.path.splitext(epub_path)[0]
+                suffix = 1
+                while os.path.exists(epub_path) and not generated_html_epub_chapter_count(epub_path):
+                    epub_path = f'{candidate_base}.{suffix}.epub'
+                    suffix += 1
+                self.append_log(f"📄 Preparing HTML document: {os.path.basename(path)}")
+                # Referenced images/styles can change independently of the HTML.
+                result = convert_html_file_to_epub(path, epub_path, should_stop=should_stop)
+                self.append_log(
+                    f"📄 Prepared HTML document {os.path.basename(path)} → "
+                    f"{os.path.basename(result.epub_path)}"
+                )
+                return result.epub_path
+
             if is_epub_zip(path):
                 if should_stop():
                     raise ImageArchiveConversionCancelled()
@@ -41761,6 +41803,32 @@ Important rules:
                 return epub_path
 
             self.append_log(f"📦 Inspecting ZIP input in background: {os.path.basename(path)}")
+            from html_archive_epub import (
+                convert_html_archive_to_epub,
+                generated_html_epub_chapter_count,
+                is_html_archive,
+            )
+
+            if is_html_archive(path, should_stop=should_stop):
+                needs_rebuild = (
+                    not generated_html_epub_chapter_count(epub_path)
+                    or os.path.getmtime(epub_path) < os.path.getmtime(path)
+                )
+                if needs_rebuild:
+                    self.append_log(f"📦 Converting HTML chapter ZIP in background: {os.path.basename(path)}")
+                    result = convert_html_archive_to_epub(
+                        path,
+                        epub_path,
+                        should_stop=should_stop,
+                    )
+                    self.append_log(
+                        f"📦 Converted HTML chapter ZIP {os.path.basename(path)} → "
+                        f"{os.path.basename(result.epub_path)} ({result.chapter_count} chapter(s))"
+                    )
+                else:
+                    self.append_log(f"✅ Using existing HTML chapter EPUB {os.path.basename(epub_path)}")
+                return epub_path
+
             scan = scan_image_archive(path, should_stop=should_stop)
             nested_image_bundle = bool(scan.image_count and scan.nested_archive_count)
             if scan.is_image_archive or nested_image_bundle:
@@ -41818,12 +41886,18 @@ Important rules:
                 return epub_path
 
             self.append_log(
-                f"⚠️ ZIP is not an EPUB or image-only archive: {os.path.basename(path)}"
+                f"⚠️ ZIP is not an EPUB, HTML chapter archive, or image-only archive: {os.path.basename(path)}"
             )
+            if scan.unsupported_entries:
+                self.append_log(
+                    "   Unsupported archive entries: "
+                    + ", ".join(scan.unsupported_entries[:5])
+                )
         except Exception as e:
             cancel_cls = locals().get('ImageArchiveConversionCancelled')
             if cancel_cls is not None and isinstance(e, cancel_cls):
-                self.append_log(f"⏹️ ZIP conversion cancelled: {os.path.basename(path)}")
+                input_label = 'HTML' if is_html_file else 'ZIP'
+                self.append_log(f"⏹️ {input_label} conversion cancelled: {os.path.basename(path)}")
             else:
                 self.append_log(f"⚠️ Could not convert {os.path.basename(path)} to .epub: {e}")
         finally:
@@ -41832,7 +41906,7 @@ Important rules:
         return path
 
     def _resolve_zip_inputs_for_translation(self):
-        """Expand subtitle ZIPs or convert image/EPUB ZIPs before processing."""
+        """Expand subtitle ZIPs and prepare archives or standalone HTML for processing."""
         files = list(getattr(self, 'selected_files', []) or [])
         if not files:
             self._zip_inputs_resolved_for_current_run = True
@@ -41842,7 +41916,10 @@ Important rules:
         persisted_inputs = []
         replacement_pairs = []
         changed = False
-        for path in files:
+        for selected_path in files:
+            path = (getattr(self, '_html_epub_source_paths', {}) or {}).get(
+                selected_path, selected_path
+            )
             if getattr(self, 'stop_requested', False):
                 resolved.append(path)
                 persisted_inputs.append(path)
@@ -41866,10 +41943,15 @@ Important rules:
                 continue
 
             new_path = self._convert_zip_input_to_epub_if_needed(path)
+            is_html_file = str(path).lower().endswith(('.html', '.htm', '.xhtml'))
+            if is_html_file and new_path != path:
+                html_sources = dict(getattr(self, '_html_epub_source_paths', {}) or {})
+                html_sources[new_path] = path
+                self._html_epub_source_paths = html_sources
             resolved.append(new_path)
-            persisted_inputs.append(new_path)
+            persisted_inputs.append(path if is_html_file else new_path)
             replacement_pairs.append((path, new_path))
-            changed = changed or (new_path != path)
+            changed = changed or (new_path != selected_path)
 
         if changed:
             self.selected_files = resolved
@@ -41926,6 +42008,7 @@ Important rules:
         if not paths:
             return
         self._reset_parallel_epub_pair_for_input_change()
+        self._html_epub_source_paths = {}
         paths = self._normalize_windows_input_filenames(paths)
         renamed_paths = []
         for path in paths:
@@ -42057,6 +42140,7 @@ Important rules:
             images = [p for p in processed_paths if os.path.splitext(p)[1].lower() in image_extensions]
             epubs = [p for p in processed_paths if p.lower().endswith('.epub')]
             zips = [p for p in processed_paths if p.lower().endswith('.zip')]
+            htmls = [p for p in processed_paths if p.lower().endswith(('.html', '.htm', '.xhtml'))]
             txts = [p for p in processed_paths if p.lower().endswith('.txt') and p not in self.json_conversions and p not in self.pdf_conversions]
             jsons = [p for p in self.json_conversions.values()]  # Count original JSON files
             pdfs = [p for p in processed_paths if p.lower().endswith('.pdf')]  # Count PDF files
@@ -42069,6 +42153,8 @@ Important rules:
                 summary_parts.append(f"{len(epubs)} EPUB")
             if zips:
                 summary_parts.append(f"{len(zips)} ZIP")
+            if htmls:
+                summary_parts.append(f"{len(htmls)} HTML")
             if pdfs:
                 summary_parts.append(f"{len(pdfs)} PDF")
             if txts:
@@ -43213,7 +43299,7 @@ Important rules:
                 pass
             try:
                 self.config['last_input_files'] = normalized
-                source_files = [p for p in normalized if isinstance(p, str) and p.lower().endswith(('.epub', '.txt', '.pdf', '.md', '.sdlxliff', '.srt', '.ass', '.lrc'))]
+                source_files = [p for p in normalized if isinstance(p, str) and p.lower().endswith(('.epub', '.html', '.htm', '.xhtml', '.txt', '.pdf', '.md', '.sdlxliff', '.srt', '.ass', '.lrc'))]
                 if source_files:
                     self.config['last_epub_path'] = source_files[0]
                 self.save_config(show_message=False)
