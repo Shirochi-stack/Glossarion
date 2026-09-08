@@ -1,6 +1,7 @@
 # extract_glossary_from_epub.py
 import os
 import json
+import hashlib
 import re
 import argparse
 import zipfile
@@ -42,7 +43,7 @@ from glossary_refinement import (
     refinement_waits_for_completion as _glossary_refinement_waits_for_completion,
 )
 from glossary_usage import compact_extracted_entries
-from epub_package import find_epub_opf_member
+from epub_package import find_epub_opf_member, source_epub_content_fingerprint
 from gender_tracking import (
     BINARY_GENDERS,
     collapse_tracked_gender_variants,
@@ -3610,10 +3611,118 @@ def _glossary_structural_progress_statuses(
     return statuses
 
 
+# Bump when text extraction, document ordering, or structural classification changes.
+_GLOSSARY_EPUB_TEXT_CACHE_VERSION = 1
+
+
+def _glossary_epub_extraction_settings():
+    """Capture only settings applied while building glossary document records."""
+    keywords = os.getenv('SPECIAL_FILE_KEYWORDS', '')
+    exact = os.getenv('SPECIAL_FILE_EXACT', '')
+    translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
+    return {
+        'parser': 'html.parser',
+        'translate_special_files': translate_special,
+        'special_file_keywords': [] if translate_special else sorted(set(
+            [k.strip().lower() for k in keywords.split(',') if k.strip()]
+            if keywords else [
+                'title', 'toc', 'copyright', 'preface', 'nav',
+                'message', 'notice', 'colophon', 'dedication', 'epigraph',
+                'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography',
+            ]
+        )),
+        'special_file_exact': [] if translate_special else sorted(set(
+            [k.strip().lower() for k in exact.split(',') if k.strip()]
+            if exact else ['index', 'glossary', 'glossary_extension']
+        )),
+    }
+
+
+def _glossary_epub_documents_digest(documents):
+    payload = json.dumps(
+        documents, ensure_ascii=False, sort_keys=True, separators=(',', ':'),
+    ).encode('utf-8')
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _load_glossary_epub_text_cache(cache_path, source_fingerprint, signature):
+    """Validate a complete glossary snapshot against the current EPUB bytes."""
+    try:
+        with open(cache_path, 'r', encoding='utf-8') as handle:
+            cache = json.load(handle)
+    except FileNotFoundError:
+        return None, 'no saved cache'
+    except (OSError, ValueError):
+        return None, 'saved cache is unreadable'
+    if not isinstance(cache, dict):
+        return None, 'saved cache is invalid'
+    if cache.get('version') != _GLOSSARY_EPUB_TEXT_CACHE_VERSION:
+        return None, 'cache format changed'
+    if cache.get('source_epub') != source_fingerprint:
+        return None, 'source EPUB fingerprint changed'
+    if cache.get('signature') != signature:
+        return None, 'glossary extraction settings changed'
+    documents = cache.get('documents')
+    if not isinstance(documents, list) or not all(
+        isinstance(document, dict)
+        and isinstance(document.get('text'), str)
+        and isinstance(document.get('filename'), str)
+        and document.get('structural_kind') in ('', 'image_only', 'title_header_only', 'empty')
+        for document in documents
+    ):
+        return None, 'cached document records are invalid'
+    try:
+        if cache.get('documents_sha256') != _glossary_epub_documents_digest(documents):
+            return None, 'cached document checksum changed'
+    except (TypeError, ValueError, UnicodeError):
+        return None, 'cached document records are invalid'
+    return documents, ''
+
+
+def _save_glossary_epub_text_cache(
+    cache_path, source_fingerprint, signature, documents, stop_check,
+):
+    """Publish one complete snapshot atomically; cache failures are nonfatal."""
+    temporary_path = None
+    try:
+        cache_dir = os.path.dirname(os.path.abspath(cache_path))
+        os.makedirs(cache_dir, exist_ok=True)
+        cache = {
+            'version': _GLOSSARY_EPUB_TEXT_CACHE_VERSION,
+            'source_epub': source_fingerprint,
+            'signature': signature,
+            'documents': documents,
+            'documents_sha256': _glossary_epub_documents_digest(documents),
+        }
+        with tempfile.NamedTemporaryFile(
+            mode='w', encoding='utf-8', dir=cache_dir, delete=False, suffix='.tmp',
+        ) as handle:
+            temporary_path = handle.name
+            json.dump(cache, handle, ensure_ascii=False, separators=(',', ':'))
+            handle.flush()
+            os.fsync(handle.fileno())
+        if stop_check():
+            return False
+        os.replace(temporary_path, cache_path)
+        return True
+    except (OSError, TypeError, ValueError) as error:
+        print(f"[Warning] Could not save glossary EPUB text cache: {error}")
+        return False
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
+
+
 def extract_chapters_from_epub(
     epub_path: str,
     return_metadata: bool = False,
     return_document_metadata: bool = False,
+    *,
+    cache_path=None,
+    stop_check=None,
 ) -> List:
     """Extract chapters from EPUB for glossary extraction.
     
@@ -3623,10 +3732,50 @@ def extract_chapters_from_epub(
                         If False (default), returns list of text strings for backward compat.
         return_document_metadata: If True, retains every spine document and
             returns dictionaries with its text, filename, and structural kind.
+        cache_path: Optional per-book cache for validated glossary text records.
+        stop_check: Optional cancellation callback used during preparation.
     """
     chapters = []
     items = []
     preparation_started = time.monotonic()
+    should_stop = stop_check if callable(stop_check) else is_stop_requested
+    signature = _glossary_epub_extraction_settings()
+    source_fingerprint = None
+    cacheable = True
+
+    def format_chapters(documents):
+        if return_document_metadata:
+            return documents
+        return [
+            (document['text'], document['filename']) if return_metadata else document['text']
+            for document in documents if document['text']
+        ]
+
+    if should_stop():
+        return []
+    if cache_path:
+        print("🔐 Validating glossary source EPUB fingerprint...", flush=True)
+        source_fingerprint = source_epub_content_fingerprint(epub_path)
+        if should_stop():
+            return []
+        if source_fingerprint is not None:
+            cached_documents, cache_reason = _load_glossary_epub_text_cache(
+                cache_path, source_fingerprint, signature,
+            )
+            if should_stop():
+                return []
+            if cached_documents is not None:
+                chapters = format_chapters(cached_documents)
+                print(
+                    f"📦 Glossary EPUB fingerprint and extraction settings match; "
+                    f"loaded {len(chapters):,} chapters from text cache "
+                    f"without reparsing the EPUB ({time.monotonic() - preparation_started:.1f}s).",
+                    flush=True,
+                )
+                return chapters
+            print(f"♻️ Glossary EPUB text cache unavailable ({cache_reason}); extracting...", flush=True)
+        else:
+            print("[Warning] Could not fingerprint source EPUB; preparing text without cache.")
     
     # Add this helper function
     def is_html_document(item):
@@ -3646,7 +3795,7 @@ def extract_chapters_from_epub(
     
     try:
         # Add stop check before reading
-        if is_stop_requested():
+        if should_stop():
             return []
 
         print("📖 Reading EPUB archive and chapter list...", flush=True)
@@ -3655,6 +3804,7 @@ def extract_chapters_from_epub(
         try:
             spine_ids = [sid for (sid, _linear) in (book.spine or [])]
         except Exception:
+            cacheable = False
             spine_ids = []
         spine_items = []
         if spine_ids:
@@ -3663,6 +3813,8 @@ def extract_chapters_from_epub(
                     it = book.get_item_with_id(sid)
                 except Exception:
                     it = None
+                if it is None:
+                    cacheable = False
                 if it and is_html_document(it):
                     spine_items.append(it)
             items = spine_items
@@ -3670,14 +3822,15 @@ def extract_chapters_from_epub(
             # Fallback to manifest order
             items = [item for item in book.get_items() if is_html_document(item)]
     except Exception as e:
+        cacheable = False
         print(f"[Warning] Manifest load failed, falling back to raw EPUB scan: {e}")
         try:
             with zipfile.ZipFile(epub_path, 'r') as zf:
                 names = [n for n in zf.namelist() if n.lower().endswith(('.html', '.xhtml'))]
                 for name in names:
                     # Add stop check in loop
-                    if is_stop_requested():
-                        return chapters
+                    if should_stop():
+                        return format_chapters(chapters)
                         
                     try:
                         data = zf.read(name)
@@ -3690,27 +3843,20 @@ def extract_chapters_from_epub(
                         print(f"[Warning] Could not read zip file entry: {name}")
         except Exception as ze:
             print(f"[Fatal] Cannot open EPUB as zip: {ze}")
-            return chapters
+            return format_chapters(chapters)
             
     # Check if special files should be skipped (same logic as TransateKRtoEN)
-    translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
-    _kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
-    special_keywords = [k.strip().lower() for k in _kw_env.split(',') if k.strip()] if _kw_env else [
-        'title', 'toc', 'copyright', 'preface', 'nav',
-        'message', 'notice', 'colophon', 'dedication', 'epigraph',
-        'foreword', 'acknowledgment', 'author', 'appendix',
-        'bibliography'
-    ]
-    _exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
-    special_exact = [k.strip().lower() for k in _exact_env.split(',') if k.strip()] if _exact_env else ['index', 'glossary', 'glossary_extension']
+    translate_special = signature['translate_special_files']
+    special_keywords = signature['special_file_keywords']
+    special_exact = signature['special_file_exact']
     skipped_special = []
 
     print(f"📚 Extracting text from {len(items):,} EPUB documents...", flush=True)
     last_progress_log = time.monotonic()
     for item_index, item in enumerate(items):
         # Add stop check before processing each chapter
-        if is_stop_requested():
-            return chapters
+        if should_stop():
+            return format_chapters(chapters)
 
         now = time.monotonic()
         if now - last_progress_log >= 2.0:
@@ -3749,24 +3895,31 @@ def extract_chapters_from_epub(
             document = _classify_glossary_html_document(raw)
             text = document["text"]
             filename = os.path.basename(item_name) if item_name else ""
-            if return_document_metadata:
-                chapters.append({
-                    "text": text,
-                    "filename": filename,
-                    "structural_kind": document["structural_kind"],
-                })
-            elif text:
-                if return_metadata:
-                    chapters.append((text, filename))
-                else:
-                    chapters.append(text)
+            chapters.append({
+                "text": text,
+                "filename": filename,
+                "structural_kind": document["structural_kind"],
+            })
         except Exception as e:
+            cacheable = False
             name = item.get_name() if hasattr(item, 'get_name') else repr(item)
             print(f"[Warning] Skipped corrupted chapter {name}: {e}")
 
     if skipped_special:
         print(f"⏭️ Skipped {len(skipped_special)} special file(s) for glossary extraction: {', '.join(skipped_special)}")
 
+    if should_stop():
+        return format_chapters(chapters)
+    if cache_path and source_fingerprint is not None and cacheable:
+        # Avoid publishing text from a source that changed during preparation.
+        if source_epub_content_fingerprint(epub_path) != source_fingerprint:
+            print("[Warning] Source EPUB changed during preparation; text cache was not saved.")
+        elif not should_stop() and _save_glossary_epub_text_cache(
+            cache_path, source_fingerprint, signature, chapters, should_stop,
+        ):
+            print("💾 Saved validated glossary EPUB text cache.", flush=True)
+
+    chapters = format_chapters(chapters)
     print(
         f"✅ EPUB text extraction complete: {len(chapters):,} chapters ready "
         f"in {time.monotonic() - preparation_started:.1f}s.",
@@ -7712,6 +7865,8 @@ def main(log_callback=None, stop_callback=None):
         _raw_chapters = extract_chapters_from_epub(
             args.epub,
             return_document_metadata=True,
+            cache_path=os.path.join(glossary_dir, '.cache', 'epub_text.json'),
+            stop_check=check_stop,
         )
         chapters = [item["text"] for item in _raw_chapters]
         _chapter_filenames = {

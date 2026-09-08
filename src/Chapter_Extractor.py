@@ -49,7 +49,11 @@ from epub_metadata_utils import (
     extract_dc_metadata,
     restore_truncated_repeatable_metadata,
 )
-from epub_package import find_epub_opf_member, find_opf_path
+from epub_package import (
+    find_epub_opf_member,
+    find_opf_path,
+    source_epub_content_fingerprint as _source_epub_content_fingerprint,
+)
 from title_tag_translation import should_translate_title_tags
 
 _DEFAULT_SPECIAL_KEYWORDS = [
@@ -2597,57 +2601,6 @@ _RESOURCE_MARKER_DIRECTORIES = {
     'other': '',
 }
 _RESOURCE_MARKER_TYPES = tuple(_RESOURCE_MARKER_DIRECTORIES)
-
-
-def _source_epub_content_fingerprint(zf):
-    """Return a SHA-256 fingerprint of every byte in the source EPUB.
-
-    Hashing the complete archive, rather than mtimes or ZIP member metadata,
-    makes even a one-byte edit outside a member payload invalidate the marker.
-    ``ZipFile`` instances backed by an in-memory stream are supported for
-    tests and non-path callers by hashing their underlying file object while
-    restoring its original position afterwards.
-    """
-    source_path = getattr(zf, 'filename', None)
-    try:
-        source_path = os.fspath(source_path) if source_path is not None else ''
-    except TypeError:
-        source_path = ''
-
-    hasher = hashlib.sha256()
-    total_size = 0
-
-    def _consume(stream):
-        nonlocal total_size
-        while True:
-            chunk = stream.read(_RESOURCE_FINGERPRINT_CHUNK_SIZE)
-            if not chunk:
-                break
-            hasher.update(chunk)
-            total_size += len(chunk)
-
-    try:
-        if source_path and os.path.isfile(source_path):
-            with open(source_path, 'rb') as source:
-                _consume(source)
-        else:
-            source = getattr(zf, 'fp', None)
-            if source is None or not hasattr(source, 'seek'):
-                return None
-            original_position = source.tell()
-            try:
-                source.seek(0)
-                _consume(source)
-            finally:
-                source.seek(original_position)
-    except (OSError, ValueError, AttributeError):
-        return None
-
-    return {
-        'algorithm': 'sha256',
-        'sha256': hasher.hexdigest(),
-        'size': total_size,
-    }
 
 
 def _env_flag(name, default='0'):

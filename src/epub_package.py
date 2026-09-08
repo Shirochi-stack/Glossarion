@@ -1,4 +1,4 @@
-"""Shared discovery helpers for EPUB OPF package documents.
+"""Shared EPUB source validation and OPF package discovery helpers.
 
 ``content.opf`` is a common filename, not an EPUB requirement.  The package
 document selected by ``META-INF/container.xml`` is authoritative; filename
@@ -7,11 +7,66 @@ and extension searches below are deliberately recovery fallbacks.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import posixpath
 import xml.etree.ElementTree as ET
 from typing import Optional
 from urllib.parse import unquote
+
+
+def source_epub_content_fingerprint(source):
+    """Return SHA-256 and size for every byte of an EPUB path or ZipFile.
+
+    Hashing the complete archive, rather than mtimes or ZIP member metadata,
+    detects even a one-byte change outside a member payload. In-memory
+    ZipFiles are supported by hashing their underlying stream and restoring
+    its position. Unreadable sources return ``None`` so callers rebuild
+    instead of trusting an unvalidated cache.
+    """
+    try:
+        source_path = os.fspath(source)
+    except TypeError:
+        source_path = getattr(source, "filename", None)
+        try:
+            source_path = os.fspath(source_path) if source_path is not None else ""
+        except TypeError:
+            source_path = ""
+
+    hasher = hashlib.sha256()
+    total_size = 0
+
+    def consume(stream):
+        nonlocal total_size
+        while True:
+            chunk = stream.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+            total_size += len(chunk)
+
+    try:
+        if source_path and os.path.isfile(source_path):
+            with open(source_path, "rb") as stream:
+                consume(stream)
+        else:
+            stream = getattr(source, "fp", None)
+            if stream is None or not hasattr(stream, "seek"):
+                return None
+            original_position = stream.tell()
+            try:
+                stream.seek(0)
+                consume(stream)
+            finally:
+                stream.seek(original_position)
+    except (OSError, TypeError, ValueError, AttributeError):
+        return None
+
+    return {
+        "algorithm": "sha256",
+        "sha256": hasher.hexdigest(),
+        "size": total_size,
+    }
 
 
 def _local_name(tag: object) -> str:
