@@ -3626,6 +3626,7 @@ def extract_chapters_from_epub(
     """
     chapters = []
     items = []
+    preparation_started = time.monotonic()
     
     # Add this helper function
     def is_html_document(item):
@@ -3647,7 +3648,8 @@ def extract_chapters_from_epub(
         # Add stop check before reading
         if is_stop_requested():
             return []
-            
+
+        print("📖 Reading EPUB archive and chapter list...", flush=True)
         book = epub.read_epub(epub_path)
         # Prefer spine order to match content.opf reading order
         try:
@@ -3703,10 +3705,21 @@ def extract_chapters_from_epub(
     special_exact = [k.strip().lower() for k in _exact_env.split(',') if k.strip()] if _exact_env else ['index', 'glossary', 'glossary_extension']
     skipped_special = []
 
-    for item in items:
+    print(f"📚 Extracting text from {len(items):,} EPUB documents...", flush=True)
+    last_progress_log = time.monotonic()
+    for item_index, item in enumerate(items):
         # Add stop check before processing each chapter
         if is_stop_requested():
             return chapters
+
+        now = time.monotonic()
+        if now - last_progress_log >= 2.0:
+            print(
+                f"📖 EPUB text extraction: {item_index:,}/{len(items):,} documents "
+                f"({now - preparation_started:.1f}s elapsed)...",
+                flush=True,
+            )
+            last_progress_log = now
             
         try:
             # Skip special files when TRANSLATE_SPECIAL_FILES is disabled
@@ -3753,7 +3766,12 @@ def extract_chapters_from_epub(
 
     if skipped_special:
         print(f"⏭️ Skipped {len(skipped_special)} special file(s) for glossary extraction: {', '.join(skipped_special)}")
-            
+
+    print(
+        f"✅ EPUB text extraction complete: {len(chapters):,} chapters ready "
+        f"in {time.monotonic() - preparation_started:.1f}s.",
+        flush=True,
+    )
     return chapters
 
 def trim_context_history(history: List[Dict], limit: int, rolling_window: bool = False) -> List[Dict]:
@@ -7248,167 +7266,9 @@ def main(log_callback=None, stop_callback=None):
     is_pdf_file = epub_path.lower().endswith('.pdf')
     is_sdlxliff_file = epub_path.lower().endswith('.sdlxliff')
     is_subtitle_source = is_subtitle_glossary_source(epub_path)
-    _chapter_structural_kinds = {}
-    
-    if is_subtitle_source:
-        _raw_chapters = extract_chapters_from_subtitle(
-            epub_path,
-            return_metadata=True,
-            stop_check=check_stop,
-        )
-        chapters = [text for text, _fn in _raw_chapters]
-        _chapter_filenames = {
-            idx: fn for idx, (_text, fn) in enumerate(_raw_chapters)
-        }
-        file_base = os.path.splitext(os.path.basename(epub_path))[0]
-    elif is_sdlxliff_file:
-        chapters = _extract_sdlxliff_chapters_for_glossary(epub_path, check_stop)
-        _chapter_filenames = {}
-        file_base = os.path.splitext(os.path.basename(epub_path))[0]
-    elif is_text_file:
-        # Import text processor
-        from extract_glossary_from_txt import extract_chapters_from_txt
-        chapters = extract_chapters_from_txt(epub_path)
-        _chapter_filenames = {}  # No filename metadata for txt files
-        file_base = os.path.splitext(os.path.basename(epub_path))[0]
-    elif is_pdf_file:
-        # PDF: extract page-by-page using subprocess to prevent GUI lag
-        chapters = _extract_pdf_chapters_for_glossary(epub_path, check_stop)
-        _chapter_filenames = {}  # No filename metadata for PDF files
-
-        file_base = os.path.splitext(os.path.basename(epub_path))[0]
-    else:
-        # Keep structural metadata so image-only and empty spine documents stay
-        # represented in glossary progress without entering the API queue.
-        _raw_chapters = extract_chapters_from_epub(
-            epub_path,
-            return_document_metadata=True,
-        )
-        chapters = [item["text"] for item in _raw_chapters]
-        _chapter_filenames = {
-            idx: item["filename"] for idx, item in enumerate(_raw_chapters)
-        }
-        _chapter_structural_kinds = {
-            idx: item["structural_kind"]
-            for idx, item in enumerate(_raw_chapters)
-            if item.get("structural_kind")
-        }
-        epub_base = os.path.splitext(os.path.basename(epub_path))[0]
-        file_base = epub_base
-
-    # ── Build chapter position mapping ──────────────────────────────────
-    # Maps idx → chapter_number matching the same numbering TransateKRtoEN.py uses.
-    # This ensures CHAPTER_RANGE selects the same chapters in both scripts.
-    _chapter_positions = {}  # idx → chapter number for range filtering
+    # Source paths are enough for setup; parse chapter contents once below.
+    file_base = os.path.splitext(os.path.basename(epub_path))[0]
     use_spine_order = os.getenv("USE_SPINE_ORDER", "0") == "1"
-
-    if (
-        _chapter_filenames
-        and not is_text_file
-        and not is_pdf_file
-        and not is_sdlxliff_file
-        and not is_subtitle_source
-    ):
-        if use_spine_order:
-            # ── Spine order mode: build OPF offset positions from within the EPUB ──
-            # Same logic as TransateKRtoEN.py's _spine_pos_by_idx
-            try:
-                import xml.etree.ElementTree as _ET
-                import zipfile as _zf
-                translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
-
-                with _zf.ZipFile(epub_path, 'r') as zf:
-                    opf_member = find_epub_opf_member(zf)
-                    opf_content = (
-                        zf.read(opf_member).decode('utf-8')
-                        if opf_member else None
-                    )
-
-                if opf_content:
-                    _opf_root = _ET.fromstring(opf_content)
-                    _ns = {'opf': 'http://www.idpf.org/2007/opf'}
-                    if _opf_root.tag.startswith('{'):
-                        _default_ns = _opf_root.tag[1:_opf_root.tag.index('}')]
-                        _ns = {'opf': _default_ns}
-
-                    _manifest = {}
-                    for _item in _opf_root.findall('.//opf:manifest/opf:item', _ns):
-                        _iid = _item.get('id')
-                        _href = _item.get('href')
-                        _mtype = _item.get('media-type', '')
-                        if _iid and _href and (
-                            'html' in _mtype.lower() or
-                            _href.endswith(('.html', '.xhtml', '.htm'))
-                        ):
-                            _manifest[_iid] = os.path.basename(_href)
-
-                    _spine_el = _opf_root.find('.//opf:spine', _ns)
-                    _all_spine_basenames = []
-                    if _spine_el is not None:
-                        for _iref in _spine_el.findall('opf:itemref', _ns):
-                            _idref = _iref.get('idref')
-                            if _idref and _idref in _manifest:
-                                _all_spine_basenames.append(_manifest[_idref])
-
-                    _sp_kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
-                    _sp_keywords = [k.strip().lower() for k in _sp_kw_env.split(',') if k.strip()] if _sp_kw_env else [
-                        'title', 'toc', 'copyright', 'preface', 'nav',
-                        'message', 'notice', 'colophon', 'dedication', 'epigraph',
-                        'foreword', 'acknowledgment', 'author', 'appendix',
-                        'bibliography'
-                    ]
-                    _sp_exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
-                    _sp_exact = [k.strip().lower() for k in _sp_exact_env.split(',') if k.strip()] if _sp_exact_env else ['index', 'glossary', 'glossary_extension']
-
-                    # Build offset positions, skipping only configured special files.
-                    # Non-numbered files like info.xhtml may display as Ch.000 in the GUI,
-                    # but they must remain normal OPF entries here.
-                    def _is_special_spine(fname):
-                        fnoext = os.path.splitext(os.path.basename(str(fname or '')).lower())[0]
-                        if not fnoext:
-                            return False
-                        return fnoext in _sp_exact or any(kw in fnoext for kw in _sp_keywords)
-
-                    _offset_by_basename = {}  # basename → offset pos (1-based)
-                    _tpos = 0
-                    for _sb in _all_spine_basenames:
-                        _special = _is_special_spine(_sb)
-                        _skip = (not translate_special and _special)
-                        if not _skip:
-                            _tpos += 1
-                            _offset_by_basename[_sb] = _tpos
-                            _offset_by_basename[os.path.splitext(_sb)[0]] = _tpos
-
-                    # Map each glossary chapter to its spine offset
-                    for _ci, _fn in _chapter_filenames.items():
-                        _bn_noext = os.path.splitext(_fn)[0] if _fn else ''
-                        _pos = _offset_by_basename.get(_fn) or _offset_by_basename.get(_bn_noext)
-                        if _pos is not None:
-                            _chapter_positions[_ci] = _pos
-
-                    if _chapter_positions:
-                        print(f"📊 Spine order: mapped {len(_chapter_positions)}/{len(chapters)} chapters to OPF positions")
-                    else:
-                        print("⚠️ Spine order: could not map chapters to OPF positions, falling back to filename numbering")
-            except Exception as _e:
-                print(f"⚠️ Spine order: failed to read content.opf from EPUB: {_e}")
-
-        # ── Normal mode (or spine order fallback): extract number from filename ──
-        # Same logic as extract_chapter_number_from_filename in TransateKRtoEN.py:
-        # use the rightmost digit sequence in the filename stem.
-        if not _chapter_positions:
-            for _ci, _fn in _chapter_filenames.items():
-                if _fn:
-                    _stem = os.path.splitext(_fn)[0]
-                    _nums = re.findall(r'[0-9]+', _stem)
-                    if _nums:
-                        _chapter_positions[_ci] = int(_nums[-1])
-                    else:
-                        _chapter_positions[_ci] = _ci + 1  # fallback
-
-    # For txt/pdf, positions are just 1-based index
-    if not _chapter_positions:
-        _chapter_positions = {i: i + 1 for i in range(len(chapters))}
 
     # If user didn't override --output, derive it from the EPUB filename:
     if args.output == 'glossary.json':
@@ -7823,12 +7683,20 @@ def main(log_callback=None, stop_callback=None):
     else:
         print("📑 Using default extraction prompt")
 
+    # Keep one source snapshot for progress mapping and glossary processing.
+    if check_stop():
+        return
     _chapter_structural_kinds = {}
     if is_subtitle_source:
-        # Subtitle input was already read above. ZIP extraction uses a
-        # temporary directory, so retain the in-memory chapters and filenames
-        # instead of extracting the archive a second time.
-        pass
+        _raw_chapters = extract_chapters_from_subtitle(
+            args.epub,
+            return_metadata=True,
+            stop_check=check_stop,
+        )
+        chapters = [text for text, _fn in _raw_chapters]
+        _chapter_filenames = {
+            idx: fn for idx, (_text, fn) in enumerate(_raw_chapters)
+        }
     elif is_sdlxliff_file:
         chapters = _extract_sdlxliff_chapters_for_glossary(args.epub, check_stop)
         _chapter_filenames = {}
@@ -7855,8 +7723,8 @@ def main(log_callback=None, stop_callback=None):
             if item.get("structural_kind")
         }
     
-    # Rebuild chapter positions from the final chapter list
-    # (this is the definitive load used for processing)
+    # Map the single chapter snapshot to the numbering used for processing.
+    _chapter_positions = {}
     if (
         _chapter_filenames
         and not is_text_file
@@ -7864,10 +7732,8 @@ def main(log_callback=None, stop_callback=None):
         and not is_sdlxliff_file
         and not is_subtitle_source
     ):
-        _chapter_positions = {}
         if use_spine_order:
-            # Spine order positions were already built from OPF above
-            # Rebuild from current filenames using same OPF logic
+            # Resolve chapter positions from the EPUB's OPF reading order.
             try:
                 import xml.etree.ElementTree as _ET2
                 import zipfile as _zf2
@@ -7924,9 +7790,13 @@ def main(log_callback=None, stop_callback=None):
                         _pos = _off2.get(_fn) or _off2.get(_bn)
                         if _pos is not None:
                             _chapter_positions[_ci] = _pos
-            except Exception:
-                pass
-        # Fallback: extract number from filename (same as first load)
+                if _chapter_positions:
+                    print(f"📊 Spine order: mapped {len(_chapter_positions)}/{len(chapters)} chapters to OPF positions")
+                else:
+                    print("⚠️ Spine order: could not map chapters to OPF positions, falling back to filename numbering")
+            except Exception as exc:
+                print(f"⚠️ Spine order: failed to read content.opf from EPUB: {exc}")
+        # Fallback: use the rightmost number in each filename.
         if not _chapter_positions:
             for _ci, _fn in _chapter_filenames.items():
                 if _fn:

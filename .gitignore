@@ -109,6 +109,7 @@ tests/**
 !tests/test_glossary_dedup_logging.py
 !tests/test_gender_tracking.py
 !tests/test_extract_glossary_parser.py
+!tests/test_glossary_source_preparation.py
 !tests/test_manga_ocr_io.py
 !tests/test_manga_drag_drop.py
 !tests/test_openrouter_thinking.py
