@@ -183,6 +183,7 @@ app_files = [
 	('pdf_fast_extractor.py', '.'),
 	('pdf_workspace_compiler.py', '.'),
 	('workspace_reader.py', '.'),
+	('reader_overlay.py', '.'),
 	('pdf_output_naming.py', '.'),
 	('installer_utils.py', '.'),
 	
@@ -318,6 +319,7 @@ app_modules = [
 	'pdf_fast_extractor',
 	'pdf_workspace_compiler',
 	'workspace_reader',
+	'reader_overlay',
 	'pdf_output_naming',
 	'installer_utils',
 	'multi_api_key_manager.py',
