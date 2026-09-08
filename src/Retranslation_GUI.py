@@ -29878,6 +29878,17 @@ class RetranslationMixin:
             parent_dialog = data.get('dialog') or self
             try:
                 from epub_library import EpubReaderDialog
+                from reader_overlay import make_epub_overlay_provider
+
+                # Readers outlive the visible Progress Manager page. Poll the
+                # workspace directly so newly completed chapters appear even
+                # while the manager's own row refresh is paused or hidden.
+                overlay_provider = make_epub_overlay_provider(
+                    data['output_dir'], member_names, initial_overlay=overlay,
+                )
+                refreshed_overlay = overlay_provider()
+                if refreshed_overlay is not None:
+                    overlay, extra_image_dirs = refreshed_overlay
 
                 reader = EpubReaderDialog(
                     epub_path,
@@ -29885,6 +29896,7 @@ class RetranslationMixin:
                     parent=parent_dialog,
                     initial_chapter_filename=initial_filename,
                     translated_overlay=overlay,
+                    overlay_provider=overlay_provider,
                     extra_image_dirs=extra_image_dirs or None,
                     translated_css_dirs=translated_css_dirs or None,
                     window_title=(

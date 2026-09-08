@@ -18259,11 +18259,22 @@ class BookDetailsDialog(QDialog):
                 overlay: dict[str, dict] = {}
                 extra_dirs: list[str] = []
                 translated_css_dirs: list[str] = []
+                overlay_provider = None
                 window_title = None
-                # Only offer the translated overlay when the book is actually an
-                # in-progress novel with at least one translated chapter on disk.
+                # Start polling even before the first translated chapter lands.
                 if not raw_only and self._book.get("is_in_progress"):
                     overlay, extra_dirs = self._build_translated_overlay()
+                    if output_folder:
+                        from reader_overlay import make_epub_overlay_provider
+
+                        overlay_provider = make_epub_overlay_provider(
+                            output_folder,
+                            [ci.get("filename") for ci in self._chapters_info],
+                            initial_overlay=overlay,
+                        )
+                        refreshed_overlay = overlay_provider()
+                        if refreshed_overlay is not None:
+                            overlay, extra_dirs = refreshed_overlay
                     translated_css_dirs = self._translated_css_dirs()
                     if overlay:
                         # Derive the displayed title from the metadata.json /
@@ -18297,34 +18308,8 @@ class BookDetailsDialog(QDialog):
                             alt_for_reader = raw_source
                     except Exception:
                         alt_for_reader = ""
-                # Auto-refresh provider: only wired up in overlay mode
-                # (in-progress novels). Calls ``_build_translated_overlay``
-                # via a ``sip``-safe guard so the reader doesn't crash
-                # when the details dialog is closed before it. The
-                # reader ticks this on a :class:`QTimer` and re-merges
-                # only when the returned overlay actually changed, so
-                # the user can read a chapter while the translator
-                # keeps filling in later ones in the background.
-                overlay_provider = None
-                if overlay:
-                    def overlay_provider():  # noqa: E306
-                        # Returning ``None`` rather than ``({}, [])`` on
-                        # failure is deliberate: the reader treats a
-                        # ``None`` return as "no change" and skips the
-                        # tick, whereas an empty overlay would be diffed
-                        # as a legitimate change \u2014 wiping every
-                        # translated chapter out of the reader until the
-                        # next successful tick. This matters because the
-                        # BookDetails dialog uses ``WA_DeleteOnClose``,
-                        # so ``self`` may be a deleted QObject by the
-                        # time the timer fires.
-                        try:
-                            return self._build_translated_overlay()
-                        except Exception:
-                            logger.debug(
-                                "Overlay refresh rebuild failed: %s",
-                                traceback.format_exc())
-                            return None
+                # The provider owns only workspace paths and source filenames;
+                # hidden Book Details rows cannot leave the reader stale.
                 reader = EpubReaderDialog(
                     epub_for_reader,
                     config=self._config,
@@ -18832,6 +18817,26 @@ class _EpubCacheLoaderThread(QThread):
             self.miss.emit()
 
 
+def _reader_overlay_signature(overlay: dict) -> tuple:
+    """Snapshot the files a reader merge is about to consume."""
+    signature = []
+    for key in sorted(overlay):
+        entry = overlay[key] or {}
+        path = entry.get("path") or ""
+        try:
+            stat = os.stat(path)
+            file_signature = (
+                stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino,
+            )
+        except OSError:
+            file_signature = None
+        signature.append((
+            key, path, file_signature, entry.get("title") or "",
+            str(entry.get("status") or "").strip().lower(),
+        ))
+    return tuple(signature)
+
+
 class _OverlayMergeThread(QThread):
     """Off-UI-thread merge of the reader's loaded chapters against the
     translated-chapter overlay.
@@ -18856,7 +18861,8 @@ class _OverlayMergeThread(QThread):
     done = Signal(object, object, bool)
 
     def __init__(self, raw_chapters, images, filenames, overlay_map,
-                 extra_image_dirs, config: dict | None = None, parent=None):
+                 extra_image_dirs, config: dict | None = None, parent=None,
+                 previous_chapters=None):
         super().__init__(parent)
         self.setObjectName("OverlayMergeThread")
         self._raw_chapters = list(raw_chapters or [])
@@ -18865,6 +18871,10 @@ class _OverlayMergeThread(QThread):
         self._overlay = dict(overlay_map or {})
         self._extra_dirs = list(extra_image_dirs or [])
         self._config = dict(config or {})
+        self._previous_chapters = list(previous_chapters or [])
+        self._read_signature = None
+        self._retry_required = False
+        self._result_ready = False
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -18882,6 +18892,9 @@ class _OverlayMergeThread(QThread):
     def run(self):
         if self._should_stop():
             return
+        # Keep the snapshot from BEFORE reading. Comparing two freshly-statted
+        # overlay maps later would miss every rewrite at an unchanged path.
+        self._read_signature = _reader_overlay_signature(self._overlay)
         raw = self._raw_chapters
         overlaid = raw
         overlay_applied = False
@@ -18898,24 +18911,37 @@ class _OverlayMergeThread(QThread):
             def _fetch_overlay(idx_title_content):
                 idx, (title, content) = idx_title_content
                 if self._should_stop():
-                    return (idx, title, content, False)
+                    return (idx, title, content, False, False)
                 fname = filenames[idx] if idx < len(filenames) else ""
                 key = os.path.basename(fname).lower() if fname else ""
                 ov = overlay.get(key) if key else None
                 if not ov:
-                    return (idx, title, content, False)
+                    return (idx, title, content, False, False)
                 path = ov.get("path") or ""
                 if not (path and os.path.isfile(path)):
-                    return (idx, title, content, False)
+                    return (idx, title, content, False, False)
+
+                def retry_later():
+                    # A writer may briefly lock or truncate a response. Keep
+                    # the last readable translation while a later tick retries.
+                    previous = (
+                        self._previous_chapters[idx]
+                        if idx < len(self._previous_chapters) else (title, content)
+                    )
+                    return (idx, previous[0], previous[1],
+                            previous != (title, content), True)
+
                 try:
                     with open(path, "rb") as f:
                         data = f.read()
                 except OSError:
                     logger.debug("Overlay read failed: %s",
                                  traceback.format_exc())
-                    return (idx, title, content, False)
+                    return retry_later()
                 if self._should_stop():
-                    return (idx, title, content, False)
+                    return (idx, title, content, False, False)
+                if not data.strip():
+                    return retry_later()
                 translated_html = data.decode("utf-8", errors="replace")
                 new_title = title
                 if ov.get("title"):
@@ -18929,7 +18955,7 @@ class _OverlayMergeThread(QThread):
                     extracted_title = _extract_html_title_fast(data)
                     if extracted_title:
                         new_title = extracted_title
-                return (idx, new_title, translated_html, True)
+                return (idx, new_title, translated_html, True, False)
 
             try:
                 items = list(enumerate(raw))
@@ -18949,10 +18975,12 @@ class _OverlayMergeThread(QThread):
             if self._should_stop():
                 return
             merged = [None] * len(raw)
-            for idx, title, content, applied in results:
+            for idx, title, content, applied, retry in results:
                 merged[idx] = (title, content)
                 if applied:
                     overlay_applied = True
+                if retry:
+                    self._retry_required = True
             overlaid = merged
 
         # Extra image directories stay as paths and are resolved lazily by the
@@ -18962,6 +18990,9 @@ class _OverlayMergeThread(QThread):
         images = self._images
 
         if not self._should_stop():
+            if _reader_overlay_signature(self._overlay) != self._read_signature:
+                self._retry_required = True
+            self._result_ready = True
             self.done.emit(overlaid, images, overlay_applied)
 
 
@@ -20215,6 +20246,9 @@ class EpubReaderDialog(QDialog):
         self._overlay_provider = overlay_provider if callable(overlay_provider) else None
         self._auto_refresh_interval_ms = max(500, int(auto_refresh_interval_ms or 0))
         self._overlay_refresh_timer: QTimer | None = None
+        self._overlay_loaded_signature = None
+        self._overlay_retry_required = False
+        self._overlay_merge_pending = False
         self._current_row = 0
         self._current_page = 0  # viewport-based page for single/double page modes
         # Page-count cache + currently-rendered-chapter sentinel need to
@@ -21116,6 +21150,9 @@ class EpubReaderDialog(QDialog):
         # Fast path: nothing to merge. Extra image directories are resolved
         # lazily per chapter and no longer require a startup worker.
         if not self._translated_overlay:
+            self._overlay_loaded_signature = ()
+            self._overlay_retry_required = False
+            self._overlay_merge_pending = False
             if self._start_epub_load_image_preload(
                     raw_chapters, images or {}, filenames):
                 return
@@ -21147,20 +21184,22 @@ class EpubReaderDialog(QDialog):
             config=self._config,
             parent=self,
         )
+        worker = self._overlay_thread
+        self._overlay_merge_pending = True
         # Lambda-wrap so PySide6 routes the delivery directly instead
         # of going through Qt's meta-object slot-lookup — the same
         # build quirk that hits ``_rotate_spinner`` also surfaces here
         # as ``AttributeError: Slot 'EpubReaderDialog::
         # _on_overlay_merge_done(...)' not found``.
         self._overlay_thread.done.connect(
-            lambda overlaid, imgs, applied:
-                self._on_overlay_merge_done(overlaid, imgs, applied)
+            lambda overlaid, imgs, applied, worker=worker:
+                self._on_overlay_merge_done(overlaid, imgs, applied, worker=worker)
         )
         self._overlay_thread.start()
 
     @Slot(object, object, bool)
     def _on_overlay_merge_done(self, overlaid_chapters, merged_images,
-                               overlay_applied: bool):
+                               overlay_applied: bool, worker=None):
         if getattr(self, "_closing", False):
             return
         """Merge worker finished: hand off to the main-thread finalizer.
@@ -21171,6 +21210,12 @@ class EpubReaderDialog(QDialog):
         try (and fail) to look up a ``(QVariantList, QVariantMap, bool)``
         slot on ``EpubReaderDialog``.
         """
+        if worker is not None:
+            if worker is not self._overlay_thread:
+                return
+            self._overlay_loaded_signature = worker._read_signature
+            self._overlay_retry_required = worker._retry_required
+        self._overlay_merge_pending = False
         raw_chapters = getattr(self, "_pending_raw_chapters", []) or []
         filenames = getattr(self, "_pending_filenames", []) or []
         self._pending_raw_chapters = []
@@ -21562,6 +21607,20 @@ class EpubReaderDialog(QDialog):
             pass
         # Don't stack refresh merges on top of each other or on top of
         # the initial loader.
+        if getattr(self, "_overlay_merge_pending", False):
+            worker = getattr(self, "_overlay_thread", None)
+            try:
+                if worker is not None and (
+                        worker.isRunning() or worker._result_ready):
+                    # A finished worker can still have its result queued for
+                    # the GUI thread. Do not start a second merge in that gap.
+                    return
+            except RuntimeError:
+                pass
+            # A cancelled/failed worker that emitted no result must not leave
+            # refresh permanently disabled.
+            self._overlay_merge_pending = False
+            self._overlay_retry_required = True
         for attr in ("_overlay_thread", "_loader_thread",
                      "_cache_loader_thread"):
             t = getattr(self, attr, None)
@@ -21602,30 +21661,12 @@ class EpubReaderDialog(QDialog):
             elif isinstance(v, dict) and v.get("path"):
                 normalised[key] = dict(v)
 
-        def _sig(overlay: dict) -> tuple:
-            sig = []
-            for k in sorted(overlay.keys()):
-                entry = overlay[k] or {}
-                p = entry.get("path", "") or ""
-                try:
-                    m = (os.path.getmtime(p)
-                         if p and os.path.isfile(p) else 0.0)
-                except OSError:
-                    m = 0.0
-                sig.append((
-                    k,
-                    p,
-                    m,
-                    entry.get("title", "") or "",
-                    str(entry.get("status") or "").strip().lower(),
-                ))
-            return tuple(sig)
-
-        new_sig = _sig(normalised)
-        old_sig = _sig(self._translated_overlay)
+        new_sig = _reader_overlay_signature(normalised)
+        old_sig = getattr(self, "_overlay_loaded_signature", None)
         extras_changed = (list(new_extra_dirs or [])
                           != list(self._extra_image_dirs or []))
-        if new_sig == old_sig and not extras_changed:
+        if (new_sig == old_sig and not extras_changed
+                and not getattr(self, "_overlay_retry_required", False)):
             return
         # Swap in the new overlay + extra dirs, then kick a merge thread
         # that reuses the already-loaded raw chapters + images.
@@ -21647,23 +21688,27 @@ class EpubReaderDialog(QDialog):
             filenames=filenames,
             overlay_map=self._translated_overlay,
             extra_image_dirs=self._extra_image_dirs,
+            config=self._config,
             parent=self,
+            previous_chapters=self._chapters_overlaid,
         )
+        worker = self._overlay_thread
+        self._overlay_merge_pending = True
         # Route the ``done`` signal to the in-place updater rather than
         # :meth:`_on_overlay_merge_done` \u2014 the latter re-runs the
         # full finalize pass (with its priming-mode render), which
         # would blank the reader on every tick.
         self._overlay_thread.done.connect(
-            lambda overlaid, imgs, applied:
+            lambda overlaid, imgs, applied, worker=worker:
                 self._on_auto_refresh_merge_done(
-                    overlaid, imgs, applied)
+                    overlaid, imgs, applied, worker=worker)
         )
         self._overlay_thread.start()
 
     @Slot(object, object, bool)
     def _on_auto_refresh_merge_done(self, overlaid_chapters,
                                     merged_images,
-                                    overlay_applied: bool):
+                                    overlay_applied: bool, worker=None):
         if getattr(self, "_closing", False):
             return
         """Swap refreshed chapters into the UI without a full re-render.
@@ -21681,14 +21726,16 @@ class EpubReaderDialog(QDialog):
             the finalizer rehydrates it to the same proportional
             page rather than jumping back to page 1.
         """
+        if worker is not None:
+            if worker is not self._overlay_thread:
+                return
+            self._overlay_loaded_signature = worker._read_signature
+            self._overlay_retry_required = worker._retry_required
+        self._overlay_merge_pending = False
         pending_raw = getattr(self, "_pending_raw_chapters", []) or []
         self._pending_raw_chapters = []
         self._pending_filenames = []
-        # Snapshot the active chapter's content BEFORE we swap the
-        # backing list so we can detect whether it changed.
-        prev_current = None
-        if 0 <= self._current_row < len(self._chapters):
-            prev_current = self._chapters[self._current_row]
+        previous_chapters = self._chapters
         self._chapters_raw = pending_raw or self._chapters_raw
         self._chapters_overlaid = overlaid_chapters or []
         self._set_reader_images(merged_images or self._images)
@@ -21696,8 +21743,22 @@ class EpubReaderDialog(QDialog):
             new_chapters = self._chapters_raw
         else:
             new_chapters = self._chapters_overlaid or self._chapters_raw
+        changed_rows = {
+            idx for idx in range(max(len(previous_chapters), len(new_chapters)))
+            if idx >= len(previous_chapters) or idx >= len(new_chapters)
+            or previous_chapters[idx] != new_chapters[idx]
+        }
+        render_changed = self._current_row in changed_rows or (
+            self._layout_mode == LAYOUT_ALL and bool(changed_rows)
+        )
+        # Capture the old position before invalidating counts or swapping text.
+        position_hint = self._capture_position_hint() if render_changed else None
+        for idx in changed_rows:
+            self._chapter_page_cache.pop(idx, None)
         prev_row = self._current_row
         self._chapters = new_chapters
+        if changed_rows:
+            self._refresh_search_for_active_chapters()
         # Rebuild the TOC, preserving the current selection. Chapter
         # count can grow (new translated chapters surface with
         # translated titles) but never shrinks during a refresh.
@@ -21717,15 +21778,18 @@ class EpubReaderDialog(QDialog):
         if getattr(self, "_raw_btn", None) is not None:
             self._raw_btn.setVisible(
                 bool(overlay_applied) or has_dual_path)
+            if overlay_applied:
+                # The first translation can arrive after an all-raw startup,
+                # when the hidden pill had no translated view to compare.
+                self._raw_btn.blockSignals(True)
+                self._raw_btn.setChecked(bool(self._show_raw))
+                self._raw_btn.blockSignals(False)
         # If the active chapter's content changed, re-render it with a
         # position hint so the user lands back near where they were.
         # If unchanged, leave the viewport alone \u2014 this keeps
         # scroll position + paginated page rock steady across ticks.
-        if (prev_current is not None
-                and 0 <= self._current_row < len(new_chapters)
-                and new_chapters[self._current_row] != prev_current):
-            self._pending_page_hint = self._capture_position_hint()
-            self._chapter_page_cache.pop(self._current_row, None)
+        if render_changed and new_chapters:
+            self._pending_page_hint = position_hint
             self._loaded_chapter = -1
             self._render_current()
         else:
@@ -23451,6 +23515,11 @@ class EpubReaderDialog(QDialog):
                 _set_html(self._reader, self._wrap_html(html, paginated=False))
                 self._loaded_chapter = row
 
+        if not _HAS_WEBENGINE and self._layout_mode in (LAYOUT_SCROLL, LAYOUT_ALL):
+            # QTextBrowser installs its document synchronously; WebEngine uses
+            # the loadFinished hook below after the replacement page is ready.
+            self._apply_pending_scroll_hint()
+
         # Let Chromium begin the current page load before starting background
         # work for the following chapter.
         QTimer.singleShot(0, self._schedule_next_chapter_image_preload)
@@ -23605,6 +23674,7 @@ class EpubReaderDialog(QDialog):
             return
         if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
             if self.sender() is self._reader:
+                self._apply_pending_scroll_hint()
                 self._reveal_initial_reader_shell()
             if (self._layout_mode in (LAYOUT_SCROLL, LAYOUT_ALL)
                     and self.sender() is self._reader
@@ -25210,6 +25280,8 @@ class EpubReaderDialog(QDialog):
           * ``proportion``   — relative progress through the chapter
             [0, 1], used when ``was_last_page`` is False to pick the
             closest equivalent page in the new pagination.
+          * ``scroll_x`` / ``scroll_y`` and ``layout`` — viewport position
+            for scroll layouts, whose page counters do not track scrolling.
         """
         row = int(getattr(self, '_current_row', 0) or 0)
         page = int(getattr(self, '_current_page', 0) or 0)
@@ -25219,11 +25291,43 @@ class EpubReaderDialog(QDialog):
             proportion = max(0.0, min(1.0, page / (pages - 1)))
         else:
             proportion = 0.0
-        return {
+        hint = {
             "row": row,
             "was_last_page": bool(was_last),
             "proportion": float(proportion),
         }
+        layout = getattr(self, "_layout_mode", LAYOUT_SINGLE)
+        if layout in (LAYOUT_SCROLL, LAYOUT_ALL):
+            try:
+                if _HAS_WEBENGINE:
+                    position = self._reader.page().scrollPosition()
+                    x, y = position.x(), position.y()
+                else:
+                    x = self._reader.horizontalScrollBar().value()
+                    y = self._reader.verticalScrollBar().value()
+                hint.update(layout=layout, scroll_x=float(x), scroll_y=float(y))
+            except (AttributeError, RuntimeError):
+                pass
+        return hint
+
+    def _apply_pending_scroll_hint(self) -> None:
+        """Restore a refreshed scroll document without overriding navigation."""
+        hint = getattr(self, "_pending_page_hint", None)
+        if not hint or self._layout_mode not in (LAYOUT_SCROLL, LAYOUT_ALL):
+            return
+        self._pending_page_hint = None
+        if (hint.get("row") != self._current_row
+                or hint.get("layout") != self._layout_mode
+                or "scroll_y" not in hint):
+            return
+        x = max(0.0, float(hint.get("scroll_x") or 0.0))
+        y = max(0.0, float(hint.get("scroll_y") or 0.0))
+        if _HAS_WEBENGINE:
+            self._reader.page().runJavaScript(
+                f"window.scrollTo({{left: {x}, top: {y}, behavior: 'instant'}});")
+        else:
+            self._reader.horizontalScrollBar().setValue(round(x))
+            self._reader.verticalScrollBar().setValue(round(y))
 
     def _reload_epub_from_active_path(self):
         if getattr(self, "_closing", False):

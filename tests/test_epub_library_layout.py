@@ -1360,6 +1360,368 @@ def test_overlay_worker_extracts_translated_title_from_path_only_entry(tmp_path)
     ]
 
 
+@pytest.fixture
+def overlay_reader(qapp, tmp_path, monkeypatch):
+    """Exercise real loading/refresh/TOC logic without a browser or threads."""
+    readers = []
+    workers = []
+
+    class SynchronousOverlayWorker(_OverlayMergeThread):
+        def start(self):
+            workers.append(self)
+            self.run()
+
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    monkeypatch.setattr(epub_library, "_OverlayMergeThread", SynchronousOverlayWorker)
+    monkeypatch.setattr(epub_library, "_load_reader_native_toc", lambda *args: [])
+    monkeypatch.setattr(epub_library, "_epub_reader_webengine_is_warmed", lambda: False)
+    monkeypatch.setattr(EpubReaderDialog, "_start_loading", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        EpubReaderDialog, "_start_epub_load_image_preload", lambda *args: False)
+    for method in (
+        "_ensure_overlay_refresh_timer", "_reveal_initial_reader_shell",
+        "_finish_raw_toggle", "_update_nav_buttons",
+    ):
+        monkeypatch.setattr(EpubReaderDialog, method, lambda self: None)
+
+    def make(overlay, *, show_raw=False):
+        reader = EpubReaderDialog(
+            os.fspath(tmp_path / "source.epub"),
+            config={},
+            translated_overlay=overlay,
+            overlay_provider=lambda: (overlay, []),
+            initial_show_raw=show_raw,
+        )
+        readers.append(reader)
+        reader.renders = []
+        monkeypatch.setattr(reader, "isVisible", lambda: True)
+        monkeypatch.setattr(
+            reader, "_render_current",
+            lambda: reader.renders.append(reader._chapters[reader._current_row]),
+        )
+        monkeypatch.setattr(
+            reader, "_capture_position_hint",
+            lambda: {"row": reader._current_row, "proportion": 0.5},
+        )
+        reader._on_epub_loaded_from_cache(
+            [("Raw one", "<p>Source one.</p>"),
+             ("Raw two", "<p>Source two.</p>")],
+            {},
+            ["chapter0001.xhtml", "chapter0002.xhtml"],
+        )
+        reader.renders.clear()
+        return reader
+
+    yield make, workers
+
+    for reader in readers:
+        reader.close()
+        reader.deleteLater()
+    qapp.processEvents()
+
+
+def _write_reader_translation(path, title, body):
+    previous = path.stat() if path.exists() else None
+    html = f"<html><body><h1>{title}</h1><p>{body}</p></body></html>"
+    path.write_text(html, encoding="utf-8")
+    if previous is not None:
+        # Deterministic on filesystems with coarse timestamp granularity.
+        stamp = max(time.time_ns(), previous.st_mtime_ns + 2_000_000_000)
+        os.utime(path, ns=(stamp, stamp))
+    return html
+
+
+def test_reader_refresh_same_path_updates_body_title_and_keeps_position(
+    overlay_reader, tmp_path,
+):
+    make_reader, workers = overlay_reader
+    translated = tmp_path / "response_chapter0001.html"
+    _write_reader_translation(translated, "First title", "First version.")
+    overlay = {"chapter0001.xhtml": {"path": os.fspath(translated)}}
+    reader = make_reader(overlay)
+    assert reader._chapters[0][0] == "First title"
+    assert len(workers) == 1
+    reader._chapter_page_cache = {0: 3, 1: 4}
+
+    updated = _write_reader_translation(translated, "Revised title", "Revised body.")
+    reader._on_overlay_refresh_tick()
+
+    assert reader._chapters[0] == ("Revised title", updated)
+    assert reader._toc_list.item(0).text() == "Revised title"
+    assert reader.renders == [("Revised title", updated)]
+    assert reader._current_row == 0
+    assert reader._pending_page_hint == {"row": 0, "proportion": 0.5}
+    assert reader._chapter_page_cache == {1: 4}
+    assert len(workers) == 2
+
+    reader._on_overlay_refresh_tick()
+    assert len(workers) == 2
+    assert len(reader.renders) == 1
+
+
+def test_reader_refresh_loads_previously_missing_translation(
+    overlay_reader, tmp_path,
+):
+    make_reader, workers = overlay_reader
+    translated = tmp_path / "response_chapter0001.html"
+    overlay = {"chapter0001.xhtml": {"path": os.fspath(translated)}}
+    reader = make_reader(overlay)
+    assert reader._chapters[0][0] == "Raw one"
+
+    updated = _write_reader_translation(translated, "Completed chapter", "Translation.")
+    reader._on_overlay_refresh_tick()
+
+    assert reader._chapters[0] == ("Completed chapter", updated)
+    assert reader._toc_list.item(0).text() == "Completed chapter"
+    assert reader.renders == [("Completed chapter", updated)]
+    assert len(workers) == 2
+
+
+@pytest.mark.parametrize("show_raw", [False, True])
+def test_reader_refresh_discovers_first_translation_after_raw_only_load(
+    overlay_reader, tmp_path, show_raw,
+):
+    make_reader, workers = overlay_reader
+    overlay = {}
+    reader = make_reader(overlay, show_raw=show_raw)
+    assert reader._chapters == reader._chapters_raw
+    assert workers == []
+
+    translated = tmp_path / "response_chapter0001.html"
+    expected = _write_reader_translation(translated, "First translation", "Translation.")
+    overlay["chapter0001.xhtml"] = {"path": os.fspath(translated)}
+    reader._on_overlay_refresh_tick()
+
+    assert reader._chapters_overlaid[0] == ("First translation", expected)
+    displayed_title = "Raw one" if show_raw else "First translation"
+    assert reader._chapters[0][0] == displayed_title
+    assert reader._toc_list.item(0).text() == displayed_title
+    assert reader._raw_btn.isHidden() is False
+    assert reader._raw_btn.isChecked() == show_raw
+    assert len(workers) == 1
+
+    reader._raw_btn.click()
+    assert reader._show_raw == (not show_raw)
+    assert reader._raw_btn.isChecked() == (not show_raw)
+    assert reader._chapters == (
+        reader._chapters_overlaid if show_raw else reader._chapters_raw)
+
+
+def test_reader_refresh_retries_transient_read_failure_without_stat_change(
+    overlay_reader, tmp_path, monkeypatch,
+):
+    import builtins
+
+    make_reader, workers = overlay_reader
+    translated = tmp_path / "response_chapter0001.html"
+    expected = _write_reader_translation(translated, "Completed chapter", "Translation.")
+    overlay = {"chapter0001.xhtml": {"path": os.fspath(translated)}}
+    actual_open = builtins.open
+    attempts = []
+
+    def temporarily_locked_open(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(translated):
+            attempts.append(path)
+            if len(attempts) == 1:
+                raise PermissionError("The translator is replacing the response file")
+        return actual_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(epub_library, "open", temporarily_locked_open, raising=False)
+    before = translated.stat()
+    reader = make_reader(overlay)
+    assert reader._chapters[0][0] == "Raw one"
+
+    reader._on_overlay_refresh_tick()
+
+    after = translated.stat()
+    assert (after.st_mtime_ns, after.st_ctime_ns, after.st_size, after.st_ino) == (
+        before.st_mtime_ns, before.st_ctime_ns, before.st_size, before.st_ino)
+    assert len(attempts) == 2
+    assert reader._chapters[0] == ("Completed chapter", expected)
+    assert reader._toc_list.item(0).text() == "Completed chapter"
+    assert len(workers) == 2
+    reader._on_overlay_refresh_tick()
+    assert len(workers) == 2
+
+
+def test_reader_refresh_read_failure_keeps_last_translation_until_retry(
+    overlay_reader, tmp_path, monkeypatch,
+):
+    import builtins
+
+    make_reader, workers = overlay_reader
+    translated = tmp_path / "response_chapter0001.html"
+    previous = _write_reader_translation(translated, "Readable translation", "Previous body.")
+    overlay = {"chapter0001.xhtml": {"path": os.fspath(translated)}}
+    reader = make_reader(overlay)
+    actual_open = builtins.open
+    attempts = []
+
+    def temporarily_locked_open(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(translated):
+            attempts.append(path)
+            if len(attempts) == 1:
+                raise PermissionError("The response file is temporarily locked")
+        return actual_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(epub_library, "open", temporarily_locked_open, raising=False)
+    expected = _write_reader_translation(translated, "Updated translation", "Updated body.")
+    before = translated.stat()
+    reader._on_overlay_refresh_tick()
+
+    assert len(attempts) == 1
+    assert reader._chapters[0] == ("Readable translation", previous)
+    assert reader.renders == []
+    assert len(workers) == 2
+
+    reader._on_overlay_refresh_tick()
+
+    after = translated.stat()
+    assert (after.st_mtime_ns, after.st_ctime_ns, after.st_size, after.st_ino) == (
+        before.st_mtime_ns, before.st_ctime_ns, before.st_size, before.st_ino)
+    assert len(attempts) == 2
+    assert reader._chapters[0] == ("Updated translation", expected)
+    assert reader.renders == [("Updated translation", expected)]
+    assert len(workers) == 3
+
+
+def test_reader_refresh_inactive_chapter_updates_toc_and_invalidates_its_pages(
+    overlay_reader, tmp_path,
+):
+    make_reader, workers = overlay_reader
+    translated = tmp_path / "response_chapter0002.html"
+    _write_reader_translation(translated, "Old second title", "Old second body.")
+    overlay = {"chapter0002.xhtml": {"path": os.fspath(translated)}}
+    reader = make_reader(overlay)
+    reader._chapter_page_cache = {0: 3, 1: 4}
+
+    updated = _write_reader_translation(translated, "New second title", "Longer new body.")
+    reader._on_overlay_refresh_tick()
+
+    assert reader._chapters[1] == ("New second title", updated)
+    assert reader._toc_list.item(1).text() == "New second title"
+    assert reader._chapter_page_cache == {0: 3}
+    assert reader._current_row == 0
+    assert reader._toc_list.currentRow() == 0
+    assert reader.renders == []
+    assert len(workers) == 2
+
+
+def test_reader_refresh_keeps_explicit_raw_view_while_translation_updates(
+    overlay_reader, tmp_path,
+):
+    make_reader, workers = overlay_reader
+    translated = tmp_path / "response_chapter0001.html"
+    _write_reader_translation(translated, "Old translation", "Old translated body.")
+    overlay = {"chapter0001.xhtml": {"path": os.fspath(translated)}}
+    reader = make_reader(overlay, show_raw=True)
+    raw_chapters = list(reader._chapters)
+    assert reader._show_raw is True
+
+    updated = _write_reader_translation(translated, "New translation", "New translated body.")
+    reader._on_overlay_refresh_tick()
+
+    assert reader._chapters_overlaid[0] == ("New translation", updated)
+    assert reader._chapters == raw_chapters == reader._chapters_raw
+    assert reader._toc_list.item(0).text() == "Raw one"
+    assert reader._show_raw is True
+    assert reader.renders == []
+    assert len(workers) == 2
+
+
+def test_reader_refresh_does_not_merge_unchanged_files(overlay_reader, tmp_path):
+    make_reader, workers = overlay_reader
+    translated = tmp_path / "response_chapter0001.html"
+    _write_reader_translation(translated, "Completed chapter", "Translation.")
+    overlay = {"chapter0001.xhtml": {"path": os.fspath(translated)}}
+    reader = make_reader(overlay)
+
+    for _ in range(3):
+        reader._on_overlay_refresh_tick()
+
+    assert len(workers) == 1
+    assert reader.renders == []
+
+
+@pytest.fixture
+def scroll_refresh_reader(monkeypatch):
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", True)
+
+    class BrowserStub:
+        def __init__(self):
+            self.scripts = []
+
+        def page(self):
+            return self
+
+        def scrollPosition(self):
+            return QPoint(19, 724)
+
+        def runJavaScript(self, script):
+            self.scripts.append(script)
+
+    class ReaderStub:
+        _chapters = [("One", "<p>One</p>"), ("Two", "<p>Two</p>")]
+        _current_row = 1
+        _current_page = 0
+
+        def __init__(self):
+            self._reader = BrowserStub()
+
+        def sender(self):
+            return self._reader
+
+        def _get_chapter_pages(self, row):
+            return 4
+
+        def _apply_pending_scroll_hint(self):
+            EpubReaderDialog._apply_pending_scroll_hint(self)
+
+        def _reveal_initial_reader_shell(self):
+            pass
+
+        def _finish_raw_toggle(self):
+            pass
+
+    return ReaderStub()
+
+
+@pytest.mark.parametrize("layout", [epub_library.LAYOUT_SCROLL, epub_library.LAYOUT_ALL])
+def test_reader_scroll_refresh_restores_position_once_after_load(
+    scroll_refresh_reader, layout,
+):
+    reader = scroll_refresh_reader
+    reader._layout_mode = layout
+    reader._pending_page_hint = EpubReaderDialog._capture_position_hint(reader)
+
+    EpubReaderDialog._on_reader_load_finished(reader, True)
+
+    assert reader._reader.scripts == [
+        "window.scrollTo({left: 19.0, top: 724.0, behavior: 'instant'});"]
+    assert reader._pending_page_hint is None
+
+    EpubReaderDialog._on_reader_load_finished(reader, True)
+    assert len(reader._reader.scripts) == 1
+
+
+@pytest.mark.parametrize("navigation", ["chapter", "layout"])
+def test_reader_scroll_refresh_discards_hint_after_user_navigation(
+    scroll_refresh_reader, navigation,
+):
+    reader = scroll_refresh_reader
+    reader._layout_mode = epub_library.LAYOUT_SCROLL
+    reader._pending_page_hint = EpubReaderDialog._capture_position_hint(reader)
+    if navigation == "chapter":
+        reader._current_row = 0
+    else:
+        reader._layout_mode = epub_library.LAYOUT_ALL
+
+    EpubReaderDialog._on_reader_load_finished(reader, True)
+
+    assert reader._reader.scripts == []
+    assert reader._pending_page_hint is None
+
+
 def test_reader_paints_shell_before_creating_browser_views(
     qapp, monkeypatch,
 ):

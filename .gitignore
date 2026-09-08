@@ -134,6 +134,7 @@ tests/**
 !tests/test_html_file_selection.py
 !tests/test_zip_input_routing.py
 !tests/test_epub_library_layout.py
+!tests/test_reader_overlay.py
 !tests/test_metadata_subjects.py
 !tests/test_epub_library_search.py
 !tests/test_pdf_toc_extraction.py
