@@ -116,6 +116,9 @@ tests/**
 !tests/test_assistant_prompt_profiles.py
 !tests/test_prompt_profile_renaming.py
 !tests/test_refinement_prompt_profiles.py
+!tests/test_glossary_refinement_cancellation.py
+!tests/test_glossary_refinement_status_display.py
+!tests/test_glossary_refinement_resume.py
 !tests/test_shutdown_utils_cleanup.py
 !tests/test_config_backup_restore.py
 !tests/test_update_manager_notes.py

@@ -816,7 +816,7 @@ def test_completed_refinement_uses_stable_identities_and_only_reopens_for_new_en
     assert calls == ["sent", "sent"]
     completed = load_refinement_progress(str(progress_file))["type::character"]
     assert completed["status"] == "completed"
-    assert completed["identity_hash_version"] == "raw-name-v1"
+    assert completed["identity_hash_version"] == "raw-name-v2"
     assert completed["input_identity_hash"]
     assert completed["output_identity_hash"]
 
@@ -938,7 +938,7 @@ def test_legacy_completed_refinement_is_migrated_without_resending(tmp_path, mon
     assert result == entries
     migrated = load_refinement_progress(str(progress_file))["type::character"]
     assert migrated["status"] == "completed"
-    assert migrated["identity_hash_version"] == "raw-name-v1"
+    assert migrated["identity_hash_version"] == "raw-name-v2"
     assert migrated["input_identity_hash"] == migrated["output_identity_hash"]
 
 

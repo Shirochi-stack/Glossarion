@@ -1730,6 +1730,60 @@ def _glossary_refinement_row_detail(info, status):
     return ''.join(f' | {part}' for part in parts)
 
 
+def _glossary_refinement_manual_completion_info(
+    entry_type, entries, saved_info, config, *, output_path=None, completed_at=None,
+):
+    """Accept the current source entries as this type's completed refinement."""
+    from glossary_refinement import (
+        DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT,
+        _IDENTITY_HASH_VERSION,
+        _canonical_refinement_mode,
+        _entry_hash,
+        _entry_identity_hash,
+        _prompt_requests_unit_separator,
+    )
+
+    info = dict(saved_info) if isinstance(saved_info, dict) else {}
+    config = config if isinstance(config, dict) else {}
+    entries = list(entries or [])
+    mode = _canonical_refinement_mode(config.get('glossary_refinement_chunking_mode', 'all'))
+    system_prompt = config.get('glossary_refinement_system_prompt') or DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
+    user_prompt = config.get('glossary_refinement_user_prompt', '')
+    delimiter = 'unit_separator' if _prompt_requests_unit_separator(system_prompt, user_prompt) else 'comma'
+    hash_mode = f'{mode}:{delimiter}'
+    hash_type = 'all selected entry types' if info.get('is_aggregate') else entry_type
+    content_hash = _entry_hash(hash_type, entries, hash_mode)
+    identity_hash = _entry_identity_hash(hash_type, entries, hash_mode)
+    now = time.time() if completed_at is None else completed_at
+    info.update({
+        'entry_type': entry_type,
+        'status': 'completed',
+        'manually_marked_completed': True,
+        'completed_at': now,
+        'last_updated': now,
+        'entry_count_before': len(entries),
+        'entry_count_after': len(entries),
+        'current_entry_count': len(entries),
+        'input_hash': content_hash,
+        'output_hash': content_hash,
+        'identity_hash_version': _IDENTITY_HASH_VERSION,
+        'input_identity_hash': identity_hash,
+        'output_identity_hash': identity_hash,
+        'chunking_mode': mode,
+        'payload_delimiter': delimiter,
+    })
+    if output_path:
+        info['output_file'] = os.path.basename(output_path)
+    if info.get('total_chunks') is not None:
+        info['completed_chunks'] = info['total_chunks']
+    for field in (
+        'error', 'error_message', 'failure_reason', 'qa_issues_found', 'reason',
+        'legacy_identity_hashes', 'legacy_identity_entry_type', 'legacy_identity_hash_mode',
+    ):
+        info.pop(field, None)
+    return info
+
+
 def _normalize_glossary_refinement_selection(refinement_keys, active_types):
     """Resolve selected row keys, with the aggregate row taking precedence."""
     keys = [str(key or '') for key in refinement_keys or [] if str(key or '')]
@@ -16379,6 +16433,7 @@ class RetranslationMixin:
         def _check_stop():
             return bool(getattr(self, 'stop_requested', False)) or extractor.is_stop_requested()
 
+        original_entries = copy.deepcopy(entries)
         refined = refine_glossary_entries(
             entries,
             client=client,
@@ -16399,7 +16454,8 @@ class RetranslationMixin:
             options=options,
             plan=plan,
         )
-        if _check_stop():
+        stopped = _check_stop()
+        if stopped and refined == original_entries:
             if hasattr(self, 'append_log'):
                 self.append_log('⏹️ Manual glossary refinement stopped; the saved glossary was left unchanged.')
             return
@@ -16410,7 +16466,10 @@ class RetranslationMixin:
         if save_json:
             extractor.save_glossary_json(refined, json_path)
         if hasattr(self, 'append_log'):
-            self.append_log(f"✅ Manual glossary refinement saved: {os.path.splitext(json_path)[0] + '.csv'}")
+            if stopped:
+                self.append_log(f"⏹️ Manual glossary refinement stopped; completed entry types saved: {os.path.splitext(json_path)[0] + '.csv'}")
+            else:
+                self.append_log(f"✅ Manual glossary refinement saved: {os.path.splitext(json_path)[0] + '.csv'}")
 
     @staticmethod
     def _sdlxliff_autogen_output_path(output_dir, output_file):
@@ -23712,6 +23771,8 @@ class RetranslationMixin:
                 return []
 
             def _gp_refinement_rows(_d):
+                from glossary_refinement import _find_type_refinement_progress
+
                 refinement = _d.get('refinement', {}) if isinstance(_d, dict) else {}
                 if not isinstance(refinement, dict):
                     refinement = {}
@@ -23724,18 +23785,11 @@ class RetranslationMixin:
                             refinement,
                             expected_info.get('selected_types'),
                         )
-                    if not isinstance(saved_info, dict) and expected_key.startswith('type::'):
-                        expected_name = _refinement_type_key(expected_key.split('::', 1)[1])
-                        saved_info = next(
-                            (
-                                candidate_info
-                                for candidate_key, candidate_info in refinement.items()
-                                if isinstance(candidate_info, dict)
-                                and str(candidate_key).startswith('type::')
-                                and _refinement_type_key(str(candidate_key).split('::', 1)[1]) == expected_name
-                            ),
-                            None,
+                    if expected_key.startswith('type::'):
+                        _saved_key, saved_info = _find_type_refinement_progress(
+                            refinement, expected_key.split('::', 1)[1],
                         )
+                        saved_info = saved_info or None
                     info = _merge_glossary_refinement_row_info(
                         expected_info,
                         saved_info,
@@ -24535,26 +24589,35 @@ class RetranslationMixin:
                             changed = True
 
                 if refinement_keys:
-                    refinement = _d.get('refinement', {})
+                    refinement = _d.setdefault('refinement', {})
                     if not isinstance(refinement, dict):
                         refinement = {}
                         _d['refinement'] = refinement
-                    expected_refinement = _glossary_refinement_expected_entries(
-                        _gp_glossary_entries(_d)
-                    )
+                    glossary_entries = _gp_glossary_entries(_d)
+                    expected_refinement = _glossary_refinement_expected_entries(glossary_entries)
+                    if any(str(key).startswith('all::') for key in refinement_keys):
+                        refinement_keys.update(expected_refinement)
                     for ref_key in sorted(refinement_keys):
-                        ref_info = refinement.get(ref_key)
-                        if not isinstance(ref_info, dict):
-                            ref_info = dict(expected_refinement.get(ref_key, {}))
-                            refinement[ref_key] = ref_info
-                        ref_info['status'] = 'completed'
-                        ref_info['completed_at'] = now
-                        ref_info['last_updated'] = now
-                        total_chunks = ref_info.get('total_chunks')
-                        if total_chunks is not None:
-                            ref_info['completed_chunks'] = total_chunks
-                        for field in ('error', 'error_message', 'failure_reason', 'qa_issues_found'):
-                            ref_info.pop(field, None)
+                        expected_info = expected_refinement.get(ref_key, {})
+                        ref_info = dict(expected_info)
+                        saved_info = refinement.get(ref_key)
+                        if isinstance(saved_info, dict):
+                            ref_info.update(saved_info)
+                        entry_type = expected_info.get('entry_type') or str(ref_key).split('::', 1)[-1]
+                        target_types = expected_info.get('selected_types') if expected_info.get('is_aggregate') else [entry_type]
+                        target_types = {_refinement_type_key(value) for value in target_types or []}
+                        target_entries = [
+                            entry for entry in glossary_entries
+                            if isinstance(entry, dict) and _refinement_type_key(entry.get('type')) in target_types
+                        ]
+                        refinement[ref_key] = _glossary_refinement_manual_completion_info(
+                            entry_type,
+                            target_entries,
+                            ref_info,
+                            getattr(self, 'config', {}) or {},
+                            output_path=panel_state.get('_glossary_path'),
+                            completed_at=now,
+                        )
                         changed = True
 
                 if changed:
@@ -24565,6 +24628,7 @@ class RetranslationMixin:
                     'changed': changed,
                     'data': _d,
                     'row_updates': _gp_row_updates_for_targets(_d, target_specs),
+                    'refresh_refinement_rows': bool(refinement_keys),
                     'stats': _gp_stats_for_dict(_d),
                 }
 
@@ -24583,6 +24647,8 @@ class RetranslationMixin:
 
                 def _finish_row_updates():
                     try:
+                        if payload.get('refresh_refinement_rows') and _d:
+                            _refresh_refinement_rows(_d, keep_updates_disabled=True)
                         gp_listbox.setUpdatesEnabled(updates_were_enabled['value'])
                         gp_listbox.viewport().update()
                     except RuntimeError:
