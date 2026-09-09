@@ -1,4 +1,4 @@
-"""Resume completed categories by source identities, independent of request setup."""
+"""Preserve completed categories unless source-change reopening is enabled."""
 
 import hashlib
 import json
@@ -39,6 +39,7 @@ def v1_identity(entry_type, entries, mode):
 
 @pytest.fixture
 def resume(monkeypatch, tmp_path):
+    monkeypatch.delenv("GLOSSARY_REFINEMENT_REOPEN_ON_SOURCE_CHANGE", raising=False)
     monkeypatch.setenv("GLOSSARY_REFINEMENT_ENABLED", "1")
     monkeypatch.setenv("GLOSSARY_REFINEMENT_TYPE_MODE", "all")
     monkeypatch.setenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", "all")
@@ -94,6 +95,11 @@ def resume(monkeypatch, tmp_path):
     return run
 
 
+@pytest.fixture
+def reopen_on_source_change(resume, monkeypatch):
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_REOPEN_ON_SOURCE_CHANGE", "1")
+
+
 @pytest.mark.parametrize(
     "old_mode,new_mode,change_delimiter",
     [("separate", "all", False), ("all", "separate", False), ("all", "all", True)],
@@ -140,7 +146,8 @@ def test_configured_type_alias_finds_previously_completed_progress(resume):
     ids=["newer-alias-failed", "newer-alias-completed", "legacy-manual-completion-newest"],
 )
 def test_latest_type_alias_state_controls_resume(
-    resume, exact_status, alias_status, alias_updated, alias_completed, expected_requests,
+    resume, reopen_on_source_change, exact_status, alias_status, alias_updated,
+    alias_completed, expected_requests,
 ):
     persisted = resume([entry("terms")], selected_types=["terms"])
     completed = resume.progress()["type::terms"]
@@ -173,7 +180,9 @@ def test_latest_type_alias_state_controls_resume(
 
 
 @pytest.mark.parametrize("matching_hash", ["input_identity_hash", "output_identity_hash"])
-def test_v1_completed_hash_uses_saved_alias_mode_and_delimiter_then_migrates(resume, matching_hash):
+def test_v1_completed_hash_uses_saved_alias_mode_and_delimiter_then_migrates(
+    resume, reopen_on_source_change, matching_hash,
+):
     current_entries = [entry("terms")]
     old_hash = v1_identity("term", current_entries, "separate:unit_separator")
     record = {
@@ -208,7 +217,9 @@ def test_v1_completed_hash_uses_saved_alias_mode_and_delimiter_then_migrates(res
 
 
 @pytest.mark.parametrize("reverted_shape", ["input", "output"])
-def test_v1_migration_preserves_both_source_shapes_until_a_new_run(resume, reverted_shape):
+def test_v1_migration_preserves_both_source_shapes_until_a_new_run(
+    resume, reopen_on_source_change, reverted_shape,
+):
     original_entries = [
         entry("terms", raw_name="old first source"),
         entry("terms", raw_name="old duplicate source"),
@@ -247,7 +258,7 @@ def test_v1_migration_preserves_both_source_shapes_until_a_new_run(resume, rever
     assert len(resume.calls) == 2
 
 
-def test_legacy_manual_completion_replaces_stale_hashes_once(resume):
+def test_legacy_manual_completion_replaces_stale_hashes_once(resume, reopen_on_source_change):
     current_entries = [entry("terms")]
     resume.seed({"type::terms": {
         "entry_type": "terms",
@@ -276,7 +287,9 @@ def test_legacy_manual_completion_replaces_stale_hashes_once(resume):
     assert len(resume.calls) == 1
 
 
-def test_v1_hash_mismatch_does_not_skip_same_count_source_replacement(resume):
+def test_v1_hash_mismatch_does_not_skip_same_count_source_replacement(
+    resume, reopen_on_source_change,
+):
     original_hash = v1_identity("terms", [entry("terms")], "separate:comma")
     resume.seed({"type::terms": {
         "entry_type": "terms",
@@ -297,7 +310,9 @@ def test_v1_hash_mismatch_does_not_skip_same_count_source_replacement(resume):
 
 
 @pytest.mark.parametrize("change", ["add", "replace"])
-def test_new_or_replaced_source_reopens_only_affected_completed_type(resume, change):
+def test_new_or_replaced_source_reopens_only_affected_completed_type(
+    resume, reopen_on_source_change, change,
+):
     persisted = resume()
     assert len(resume.calls) == 1
     updated = [dict(row) for row in persisted]
@@ -315,6 +330,89 @@ def test_new_or_replaced_source_reopens_only_affected_completed_type(resume, cha
     for unaffected_type in TYPES[1:]:
         assert f"source {unaffected_type}" not in resume.calls[0]
     assert any("source" in line.lower() and "chang" in line.lower() for line in resume.logs)
+
+
+@pytest.mark.parametrize("setting", [None, "0"], ids=["default-off", "explicitly-off"])
+@pytest.mark.parametrize("completion", ["automatic", "manual", "legacy"])
+def test_new_chapter_entries_keep_completed_types_and_original_identity_metadata(
+    resume, monkeypatch, setting, completion,
+):
+    persisted = resume()
+    records = resume.progress()
+    if completion == "manual":
+        for record in records.values():
+            record["manually_marked_completed"] = True
+            record["completed_at"] = 1700000000
+    elif completion == "legacy":
+        for record in records.values():
+            record.pop("identity_hash_version", None)
+            record.pop("input_identity_hash", None)
+            record.pop("output_identity_hash", None)
+    resume.seed(records)
+    if setting is not None:
+        monkeypatch.setenv("GLOSSARY_REFINEMENT_REOPEN_ON_SOURCE_CHANGE", setting)
+    updated = persisted + [
+        entry("character", "character first seen in chapter 447"),
+        entry("surnames", "surname first seen in chapter 447"),
+    ]
+    resume.calls.clear()
+
+    result = resume(updated)
+
+    assert resume.calls == []
+    assert result == updated
+    assert resume.progress() == records
+
+
+@pytest.mark.parametrize("change", ["add", "replace"])
+def test_enabling_reopening_later_detects_changes_skipped_while_disabled(
+    resume, monkeypatch, change,
+):
+    persisted = resume()
+    records = resume.progress()
+    updated = [dict(row) for row in persisted]
+    if change == "add":
+        updated.append(entry("character", "new chapter character"))
+    else:
+        next(row for row in updated if row["type"] == "character")["raw_name"] = (
+            "replacement character"
+        )
+    resume.calls.clear()
+
+    assert resume(updated) == updated
+    assert resume.calls == []
+    assert resume.progress() == records
+
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_REOPEN_ON_SOURCE_CHANGE", "1")
+    resume(updated)
+
+    assert len(resume.calls) == 1
+    assert "character" in resume.calls[0]
+    for unaffected_type in ("terms", "item", "surnames"):
+        assert f"source {unaffected_type}" not in resume.calls[0]
+    assert resume.progress()["type::character"]["input_identity_hash"] != (
+        records["type::character"]["input_identity_hash"]
+    )
+
+
+@pytest.mark.parametrize("status", [None, "failed", "stopped", "not_refined"])
+def test_reopening_disabled_still_processes_types_without_completion(resume, status):
+    persisted = resume()
+    records = resume.progress()
+    if status is None:
+        records.pop("type::character")
+    else:
+        records["type::character"]["status"] = status
+    resume.seed(records)
+    resume.calls.clear()
+
+    resume(persisted)
+
+    assert len(resume.calls) == 1
+    assert "source character" in resume.calls[0]
+    for unaffected_type in ("terms", "item", "surnames"):
+        assert f"source {unaffected_type}" not in resume.calls[0]
+    assert resume.progress()["type::character"]["status"] == "completed"
 
 
 def test_manual_force_resends_completed_selection(resume):

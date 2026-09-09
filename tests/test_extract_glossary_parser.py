@@ -751,6 +751,7 @@ def test_completed_refinement_uses_stable_identities_and_only_reopens_for_new_en
     monkeypatch,
 ):
     _enable_refinement(monkeypatch)
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_REOPEN_ON_SOURCE_CHANGE", "1")
     progress_file = tmp_path / "glossary_progress.json"
     calls = []
     parsed_entries = [
@@ -826,6 +827,7 @@ def test_automatic_all_scope_skips_completed_types_but_manual_force_resends_sele
     monkeypatch,
 ):
     _enable_refinement(monkeypatch)
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_REOPEN_ON_SOURCE_CHANGE", "1")
     monkeypatch.setenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", "all")
     progress_file = tmp_path / "glossary_progress.json"
     active_types = ["character", "terms", "locations", "nicknames", "titles"]
@@ -907,6 +909,7 @@ def test_automatic_all_scope_skips_completed_types_but_manual_force_resends_sele
 
 def test_legacy_completed_refinement_is_migrated_without_resending(tmp_path, monkeypatch):
     _enable_refinement(monkeypatch)
+    monkeypatch.setenv("GLOSSARY_REFINEMENT_REOPEN_ON_SOURCE_CHANGE", "1")
     progress_file = tmp_path / "glossary_progress.json"
     progress_file.write_text(
         json.dumps(

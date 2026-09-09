@@ -62,6 +62,13 @@ def refinement_waits_for_completion() -> bool:
     )
 
 
+def refinement_reopens_on_source_change() -> bool:
+    """Whether source-name changes can reopen completed refinement types."""
+    return os.getenv("GLOSSARY_REFINEMENT_REOPEN_ON_SOURCE_CHANGE", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def selected_refinement_types(active_types: Iterable[str]) -> List[str]:
     active = [str(t).strip() for t in active_types if str(t).strip()]
     mode = os.getenv("GLOSSARY_REFINEMENT_TYPE_MODE", "all").strip().lower()
@@ -1311,6 +1318,7 @@ def refine_glossary_entries(
     pending_types = []
     completed_types = []
     empty_types = []
+    reopen_on_source_change = refinement_reopens_on_source_change()
 
     for entry_type in selected_types:
         entries = entries_by_type.get(entry_type) or []
@@ -1319,6 +1327,11 @@ def refine_glossary_entries(
         type_identity_hash = type_identity_hashes[entry_type]
         saved_type_key, type_progress = _find_type_refinement_progress(progress, entry_type)
         if not options.force:
+            if type_progress.get("status") == "completed" and not reopen_on_source_change:
+                # Preserve the completion hashes so enabling this option later
+                # still detects changes since the last actual refinement.
+                completed_types.append(entry_type)
+                continue
             migration_update = _completed_refinement_migration(
                 entry_type, entries, type_progress, hash_mode, output_path,
             )

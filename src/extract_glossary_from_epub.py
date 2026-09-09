@@ -7504,6 +7504,7 @@ def main(log_callback=None, stop_callback=None):
         "GLOSSARY_REFINEMENT_CHUNKING_MODE": config.get("glossary_refinement_chunking_mode", "all"),
         "GLOSSARY_REFINEMENT_SKIP_DEDUPE": "1" if config.get("glossary_refinement_skip_dedupe", False) else "0",
         "GLOSSARY_REFINEMENT_WAIT_FOR_COMPLETION": "1" if config.get("glossary_refinement_wait_for_completion", False) else "0",
+        "GLOSSARY_REFINEMENT_REOPEN_ON_SOURCE_CHANGE": "1" if config.get("glossary_refinement_reopen_on_source_change", False) else "0",
     }
     for _env_key, _env_value in refinement_env_defaults.items():
         if os.getenv(_env_key) is None:

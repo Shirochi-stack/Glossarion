@@ -16393,6 +16393,7 @@ class RetranslationMixin:
             'GLOSSARY_REFINEMENT_USER_PROMPT': config.get('glossary_refinement_user_prompt', ''),
             'GLOSSARY_REFINEMENT_CHUNKING_MODE': options.chunking_mode or 'all',
             'GLOSSARY_REFINEMENT_SKIP_DEDUPE': '1' if config.get('glossary_refinement_skip_dedupe', False) else '0',
+            'GLOSSARY_REFINEMENT_REOPEN_ON_SOURCE_CHANGE': '1' if config.get('glossary_refinement_reopen_on_source_change', False) else '0',
             'GLOSSARY_OUTPUT_LEGACY_JSON': '1' if config.get('glossary_output_legacy_json', False) else '0',
         }
         os.environ.update({key: str(value or '') for key, value in env_updates.items()})

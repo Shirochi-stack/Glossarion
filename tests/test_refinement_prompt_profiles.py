@@ -1,6 +1,11 @@
 """Refinement prompt pairs through the real tab and runtime combo helpers."""
 
+import ast
 import copy
+import inspect
+import sys
+import textwrap
+from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt
@@ -8,6 +13,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QComboBox, QDialog, QMessageBox, QPushButton
 
 from test_prompt_profile_renaming import gui, qapp, saved
+import GlossaryManager_GUI as glossary_manager
 
 
 PROFILES = 'glossary_refinement_prompt_profiles'
@@ -53,6 +59,52 @@ def create_named(gui, combo, buttons, name, system, user):
     edit_pair(gui, system, user)
     combo.setEditText(name)
     buttons['💾 Save Profile'].click()
+
+
+@pytest.mark.parametrize('initial_value', [None, False, True])
+def test_reopen_completed_types_setting_defaults_and_save_round_trip(gui, monkeypatch, initial_value):
+    setting = 'glossary_refinement_reopen_on_source_change'
+    gui.config['glossary_refinement_enabled'] = True
+    if initial_value is not None:
+        gui.config[setting] = initial_value
+    tab, _, _ = open_tab(gui)
+    checkbox = gui.glossary_refinement_reopen_on_source_change_checkbox
+    assert checkbox.isChecked() is bool(initial_value)
+    assert checkbox.isEnabled()
+
+    # Use the real Save All Settings callback without constructing unrelated tabs.
+    manager_method = ast.parse(textwrap.dedent(inspect.getsource(
+        glossary_manager.GlossaryManagerMixin.glossary_manager
+    )))
+    callback = next(node for node in ast.walk(manager_method)
+                    if isinstance(node, ast.FunctionDef) and node.name == 'save_glossary_settings')
+    namespace = dict(vars(glossary_manager), self=gui, dialog=tab)
+    exec(compile(ast.Module(body=[callback], type_ignores=[]), '<save_glossary_settings>', 'exec'), namespace)
+    monkeypatch.setitem(sys.modules, 'translator_gui', SimpleNamespace(CONFIG_FILE=str(gui.path)))
+
+    # Save both states, checking the config reload and subsequent tab creation.
+    for value in (True, False):
+        gui.glossary_refinement_reopen_on_source_change_checkbox.setChecked(value)
+        namespace['save_glossary_settings']()
+        assert saved(gui)[setting] is value
+        assert gui.config[setting] is value
+        assert gui.glossary_refinement_reopen_on_source_change_var is value
+        assert not any('Failed to save settings' in message for message in gui.logs)
+        open_tab(gui)
+        assert gui.glossary_refinement_reopen_on_source_change_checkbox.isChecked() is value
+
+
+def test_reopen_completed_types_setting_follows_refinement_enable_state(gui):
+    gui.config['glossary_refinement_reopen_on_source_change'] = True
+    open_tab(gui)
+    checkbox = gui.glossary_refinement_reopen_on_source_change_checkbox
+    assert checkbox.isChecked()
+    assert not checkbox.isEnabled()
+    gui.glossary_refinement_enabled_checkbox.setChecked(True)
+    assert checkbox.isEnabled()
+    gui.glossary_refinement_enabled_checkbox.setChecked(False)
+    assert not checkbox.isEnabled()
+    assert checkbox.isChecked()
 
 
 def test_legacy_pair_becomes_default_and_round_trips(gui, refinement):

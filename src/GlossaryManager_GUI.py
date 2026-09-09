@@ -8,6 +8,7 @@ import sys
 import json
 import threading
 import time
+import html as _html
 from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton, 
                                 QCheckBox, QRadioButton, QTextEdit, QListWidget, QListWidgetItem,
                                 QTreeWidget, QTreeWidgetItem, QScrollArea, QTabWidget, QTabBar,
@@ -45,6 +46,17 @@ from gender_tracking import (
 _EDITOR_GENDER_STATUS_ROLE = int(Qt.UserRole) + 20
 
 
+def _wrapped_tooltip_html(text, width=430):
+    """Wrap plain tooltip text while preserving line breaks and literal tags."""
+    if not text:
+        return ""
+    safe_text = _html.escape(str(text)).replace("\n", "<br>")
+    return (
+        "<qt><p style='white-space: normal; margin: 0; "
+        f"width: {int(width)}px;'>{safe_text}</p></qt>"
+    )
+
+
 def _apply_editor_gender_presentation(item, status, gender_column=None):
     """Apply the tracker label and unresolved-row color to one editor item."""
     item.setData(0, _EDITOR_GENDER_STATUS_ROLE, status)
@@ -54,9 +66,11 @@ def _apply_editor_gender_presentation(item, status, gender_column=None):
             stats = status.get("stats", {})
             item.setToolTip(
                 gender_column,
-                f"Tracked conflict: Male {stats.get('male', {}).get('count', 0)}, "
-                f"Female {stats.get('female', {}).get('count', 0)}. "
-                "Double-click to review or resolve.",
+                _wrapped_tooltip_html(
+                    f"Tracked conflict: Male {stats.get('male', {}).get('count', 0)}, "
+                    f"Female {stats.get('female', {}).get('count', 0)}. "
+                    "Double-click to review or resolve."
+                ),
             )
 
     unresolved = isinstance(status, dict) and bool(status.get("unresolved"))
@@ -789,7 +803,7 @@ class GlossaryManagerMixin:
         combo.setEditable(True)
         combo.setMinimumWidth(220)
         combo.setMaximumWidth(420)
-        combo.setToolTip(meta['empty_tip'])
+        combo.setToolTip(_wrapped_tooltip_html(meta['empty_tip']))
         try:
             combo.lineEdit().setPlaceholderText("Profile name")
         except Exception:
@@ -811,7 +825,7 @@ class GlossaryManagerMixin:
 
         new_btn = QPushButton("+ New Profile")
         new_btn.setFixedHeight(28)
-        new_btn.setToolTip("Create a new empty glossary prompt profile")
+        new_btn.setToolTip(_wrapped_tooltip_html("Create a new empty glossary prompt profile"))
         new_btn.setStyleSheet("""
             QPushButton {
                 background-color: #2d5a2d;
@@ -836,7 +850,7 @@ class GlossaryManagerMixin:
         save_btn = QPushButton("💾 Save Profile")
         save_btn.setFixedWidth(120)
         save_btn.setFixedHeight(28)
-        save_btn.setToolTip("Save the selected glossary prompt profile")
+        save_btn.setToolTip(_wrapped_tooltip_html("Save the selected glossary prompt profile"))
         save_btn.setStyleSheet("""
             QPushButton {
                 background-color: #2f5f8f;
@@ -861,7 +875,7 @@ class GlossaryManagerMixin:
         delete_btn = QPushButton("🗑 Delete Profile")
         delete_btn.setFixedWidth(128)
         delete_btn.setFixedHeight(28)
-        delete_btn.setToolTip("Delete the selected custom glossary prompt profile")
+        delete_btn.setToolTip(_wrapped_tooltip_html("Delete the selected custom glossary prompt profile"))
         delete_btn.setStyleSheet("""
             QPushButton {
                 background-color: #6f2f2f;
@@ -2286,6 +2300,10 @@ class GlossaryManagerMixin:
                     wait_for_completion = self.glossary_refinement_wait_for_completion_checkbox.isChecked()
                     self.config['glossary_refinement_wait_for_completion'] = bool(wait_for_completion)
                     self.glossary_refinement_wait_for_completion_var = bool(wait_for_completion)
+                if hasattr(self, 'glossary_refinement_reopen_on_source_change_checkbox'):
+                    reopen_on_source_change = self.glossary_refinement_reopen_on_source_change_checkbox.isChecked()
+                    self.config['glossary_refinement_reopen_on_source_change'] = bool(reopen_on_source_change)
+                    self.glossary_refinement_reopen_on_source_change_var = bool(reopen_on_source_change)
 
                 # Gender tracker false-positive controls
                 if hasattr(self, 'gender_noise_threshold_slider'):
@@ -2736,23 +2754,23 @@ class GlossaryManagerMixin:
         filter_combo_layout.addSpacing(15)
         self.skip_identical_entries_checkbox = self._create_styled_checkbox("Skip identical entries (translated = raw)")
         self.skip_identical_entries_checkbox.setChecked(self.config.get('glossary_skip_identical_entries', True))
-        self.skip_identical_entries_checkbox.setToolTip(
+        self.skip_identical_entries_checkbox.setToolTip(_wrapped_tooltip_html(
             "Skip glossary entries where the translated name is identical to the raw name.\n"
             "These typically indicate the AI returned the name unchanged (e.g. Amazon → Amazon)."
-        )
+        ))
         filter_combo_layout.addWidget(self.skip_identical_entries_checkbox)
 
         # CJK script filter toggle (right of skip identical)
         filter_combo_layout.addSpacing(15)
         self.cjk_script_filter_checkbox = self._create_styled_checkbox("Filter CJK script entries")
         self.cjk_script_filter_checkbox.setChecked(self.config.get('glossary_cjk_script_filter', False))
-        self.cjk_script_filter_checkbox.setToolTip(
+        self.cjk_script_filter_checkbox.setToolTip(_wrapped_tooltip_html(
             "Auto-detect CJK source text and reject entries where:\n"
             "• translated_name still contains CJK characters (untranslated)\n"
             "• raw_name has no CJK characters (not actual source text)\n\n"
             "Only activates when the output language is a known non-CJK language\n"
             "(English, Spanish, etc.) and the source is auto-detected as CJK."
-        )
+        ))
         filter_combo_layout.addWidget(self.cjk_script_filter_checkbox)
         filter_combo_layout.addStretch()
 
@@ -3067,28 +3085,28 @@ class GlossaryManagerMixin:
         if not hasattr(self, 'partial_ratio_gender_only_checkbox'):
             self.partial_ratio_gender_only_checkbox = self._create_styled_checkbox("Limit substring matcher to gendered active types")
             self.partial_ratio_gender_only_checkbox.setChecked(self.config.get('glossary_partial_ratio_gender_only', False))
-        self.partial_ratio_gender_only_checkbox.setToolTip(
+        self.partial_ratio_gender_only_checkbox.setToolTip(_wrapped_tooltip_html(
             "When enabled, the partial-ratio substring matcher only applies when both compared entries belong to active entry types with a gender field.\n"
             "Other duplicate algorithms still run normally for terms, locations, items, and non-gendered custom types."
-        )
+        ))
         duplicate_frame_layout.addWidget(self.partial_ratio_gender_only_checkbox)
 
         if not hasattr(self, 'alias_aware_name_matching_checkbox'):
             self.alias_aware_name_matching_checkbox = self._create_styled_checkbox("Alias-aware name matching")
             self.alias_aware_name_matching_checkbox.setChecked(self.config.get('glossary_alias_aware_name_matching', False))
-        self.alias_aware_name_matching_checkbox.setToolTip(
+        self.alias_aware_name_matching_checkbox.setToolTip(_wrapped_tooltip_html(
             "Uses raw-name containment to identify given-name/full-name aliases.\n"
             "Keeps both raw forms for glossary matching, but normalizes the shorter translated alias when the full name reveals the better romanization."
-        )
+        ))
         duplicate_frame_layout.addWidget(self.alias_aware_name_matching_checkbox)
 
         if not hasattr(self, 'alias_aware_gender_only_checkbox'):
             self.alias_aware_gender_only_checkbox = self._create_styled_checkbox("Limit alias-aware matching to gendered active types")
             self.alias_aware_gender_only_checkbox.setChecked(self.config.get('glossary_alias_aware_gender_only', True))
-        self.alias_aware_gender_only_checkbox.setToolTip(
+        self.alias_aware_gender_only_checkbox.setToolTip(_wrapped_tooltip_html(
             "When enabled, alias-aware matching only applies when both compared entries belong to active entry types with a gender field.\n"
             "Disable this if you want raw-name alias matching for non-gendered active types too."
-        )
+        ))
         duplicate_frame_layout.addWidget(self.alias_aware_gender_only_checkbox)
         
         # Honorifics filter toggle
@@ -3480,7 +3498,7 @@ class GlossaryManagerMixin:
             lbl.setFixedWidth(label_width)
             lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             if tooltip:
-                lbl.setToolTip(tooltip)
+                lbl.setToolTip(_wrapped_tooltip_html(tooltip))
             h.addWidget(lbl)
             h.addWidget(field_widget)
             h.addStretch()
@@ -3535,7 +3553,7 @@ class GlossaryManagerMixin:
         # Default changed to -1 (auto/inherit) instead of 65536
         self.glossary_output_token_limit_entry = QLineEdit(str(self.config.get('glossary_max_output_tokens', -1)))
         self.glossary_output_token_limit_entry.setFixedWidth(80)
-        self.glossary_output_token_limit_entry.setToolTip("-1 = Use main translation Output Token Limit")
+        self.glossary_output_token_limit_entry.setToolTip(_wrapped_tooltip_html("-1 = Use main translation Output Token Limit"))
         
         # Container for token limit to add "tokens" label
         token_cont = QWidget()
@@ -3555,16 +3573,16 @@ class GlossaryManagerMixin:
             tooltip="Max tokens allowed in AI responses for glossary extraction.\n-1 = inherit main translation limit."
         ), 2, 0)
         # Label tooltip
-        token_cont.parentWidget().layout().itemAt(0).widget().setToolTip("Maximum tokens allowed in AI responses. -1 inherits main translation output limit.")
+        token_cont.parentWidget().layout().itemAt(0).widget().setToolTip(_wrapped_tooltip_html("Maximum tokens allowed in AI responses. -1 inherits main translation output limit."))
 
         # Disable glossary conversation history
         if not hasattr(self, 'disable_glossary_history_checkbox'):
             self.disable_glossary_history_checkbox = self._create_styled_checkbox("Disable Glossary History")
         self.disable_glossary_history_checkbox.setChecked(self.config.get('disable_glossary_history', True))
-        self.disable_glossary_history_checkbox.setToolTip(
+        self.disable_glossary_history_checkbox.setToolTip(_wrapped_tooltip_html(
             "When enabled, Extract Glossary will not send previous glossary extraction\n"
             "responses as contextual conversation history. Recommended ON."
-        )
+        ))
         settings_grid.addWidget(self.disable_glossary_history_checkbox, 0, 2)
 
         self.manual_context_entry = QLineEdit(str(self.config.get('manual_context_limit', 2)))
@@ -3594,18 +3612,18 @@ class GlossaryManagerMixin:
         if not hasattr(self, 'glossary_request_merging_checkbox'):
             self.glossary_request_merging_checkbox = self._create_styled_checkbox("Glossary Request Merging")
         self.glossary_request_merging_checkbox.setChecked(self.config.get('glossary_request_merging_enabled', False))
-        self.glossary_request_merging_checkbox.setToolTip(
+        self.glossary_request_merging_checkbox.setToolTip(_wrapped_tooltip_html(
             "Merge multiple small glossary requests before sending.\nReduces API calls; controlled by Merge Count below."
-        )
+        ))
         settings_grid.addWidget(self.glossary_request_merging_checkbox, 0, 1)
 
         # Dynamic request splitting toggle (below Glossary Request Merging)
         if not hasattr(self, 'glossary_enable_chapter_split_checkbox'):
             self.glossary_enable_chapter_split_checkbox = self._create_styled_checkbox("Dynamic request splitting")
         self.glossary_enable_chapter_split_checkbox.setChecked(self.config.get('glossary_enable_chapter_split', False))
-        self.glossary_enable_chapter_split_checkbox.setToolTip(
+        self.glossary_enable_chapter_split_checkbox.setToolTip(_wrapped_tooltip_html(
             "Automatically split large chapters using token/output limits\nso each glossary request stays under size caps."
-        )
+        ))
         settings_grid.addWidget(self.glossary_enable_chapter_split_checkbox, 1, 1)
 
         # Logic for Auto Compression Factor
@@ -3667,11 +3685,11 @@ class GlossaryManagerMixin:
         self.glossary_skip_title_header_only_checkbox.setChecked(
             self.config.get('glossary_skip_title_header_only', True)
         )
-        self.glossary_skip_title_header_only_checkbox.setToolTip(
+        self.glossary_skip_title_header_only_checkbox.setToolTip(_wrapped_tooltip_html(
             "Skip glossary API requests when a chapter's only text is inside "
             "the <title> tag, heading tags (<h1>-<h6>), or both.\n"
             "Image-only chapters are always skipped and recorded separately."
-        )
+        ))
         settings_grid.addWidget(
             self.glossary_skip_title_header_only_checkbox,
             2,
@@ -3694,7 +3712,7 @@ class GlossaryManagerMixin:
             QPushButton:hover { background-color: #255f9a; }
             QPushButton:pressed { background-color: #1f5286; }
         """)
-        anti_dup_btn.setToolTip("Configure anti-duplicate parameters for glossary generation only.")
+        anti_dup_btn.setToolTip(_wrapped_tooltip_html("Configure anti-duplicate parameters for glossary generation only."))
         anti_dup_btn.clicked.connect(lambda: self._open_glossary_anti_duplicate_dialog(parent))
         manual_layout.addWidget(anti_dup_btn)
 
@@ -3837,7 +3855,7 @@ class GlossaryManagerMixin:
         combo.setMinimumWidth(220)
         combo.setMaximumWidth(420)
         combo.lineEdit().setPlaceholderText("Profile name")
-        combo.setToolTip("Select a profile, or edit its name and save to rename it. Each profile stores both prompts.")
+        combo.setToolTip(_wrapped_tooltip_html("Select a profile, or edit its name and save to rename it. Each profile stores both prompts."))
         self._disable_combobox_mousewheel(combo)
         self._add_combobox_arrow(combo)
         combo.setStyleSheet(combo.styleSheet() + """
@@ -4189,7 +4207,7 @@ Do not stop after the glossary."""
                 saved_mode = 'minimal' if old_enabled else 'off'
             mode_index = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass': 7}.get(saved_mode.lower(), 5)
             self.auto_glossary_mode_combo.setCurrentIndex(mode_index)
-        self.auto_glossary_mode_combo.setToolTip(
+        self.auto_glossary_mode_combo.setToolTip(_wrapped_tooltip_html(
             "Off: No automatic glossary extraction + enables Auto-Mapping\n"
             "Off (Fuzzy Mapping): Off + enables Auto-Mapping + Fuzzy Auto-Mapping\n"
             "Manual Glossary Only: Off + disables Auto-Mapping (use the editor's Load Glossary button)\n"
@@ -4198,7 +4216,7 @@ Do not stop after the glossary."""
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)\n"
             "Single Pass: Extract glossary inline during each translation request"
-        )
+        ))
         from PySide6.QtCore import QSize
         self.auto_glossary_mode_combo.setFixedWidth(220)
         self.auto_glossary_mode_combo.setIconSize(QSize(18, 18))
@@ -4256,10 +4274,10 @@ Do not stop after the glossary."""
         if not hasattr(self, 'append_glossary_checkbox'):
             self.append_glossary_checkbox = self._create_styled_checkbox("Append Glossary to System Prompt")
             self.append_glossary_checkbox.setChecked(self.config.get('append_glossary', False))
-        self.append_glossary_checkbox.setToolTip(
+        self.append_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
             "Send the current glossary to the model with every request.\n"
             "Improves consistency across chapters."
-        )
+        ))
         append_layout.addWidget(self.append_glossary_checkbox)
         
         self._append_glossary_desc_label = QLabel("(Applies to ALL glossaries - manual and automatic)")
@@ -4280,10 +4298,10 @@ Do not stop after the glossary."""
             self.append_glossary_auto_load_checkbox.setChecked(self.config.get('append_glossary_auto_load', False))
         except Exception:
             pass
-        self.append_glossary_auto_load_checkbox.setToolTip(
+        self.append_glossary_auto_load_checkbox.setToolTip(_wrapped_tooltip_html(
             "When Append Glossary is enabled, automatically Auto-Fill glossary mapping\n"
             "based on filename matching. If disabled, use Load Glossary / Auto-Fill manually."
-        )
+        ))
         auto_load_layout.addWidget(self.append_glossary_auto_load_checkbox)
         auto_load_desc = QLabel("(Maps Glossary subfolder content → Output folder automatically)")
         auto_load_desc.setCursor(Qt.PointingHandCursor)
@@ -4303,11 +4321,11 @@ Do not stop after the glossary."""
             self.fuzzy_auto_mapping_checkbox.setChecked(self.config.get('fuzzy_auto_mapping', False))
         except Exception:
             pass
-        self.fuzzy_auto_mapping_checkbox.setToolTip(
+        self.fuzzy_auto_mapping_checkbox.setToolTip(_wrapped_tooltip_html(
             "When enabled, auto-mapping will match files with similar names\n"
             "(e.g. 'MyNovel_v2.epub' → 'MyNovel_glossary.csv').\n"
             "Adjust the slider to control how similar names must be."
-        )
+        ))
         fuzzy_map_layout.addWidget(self.fuzzy_auto_mapping_checkbox)
         fuzzy_map_desc = QLabel("(Matches files with similar names)")
         fuzzy_map_desc.setCursor(Qt.PointingHandCursor)
@@ -4516,10 +4534,10 @@ Do not stop after the glossary."""
         if not hasattr(self, 'add_additional_glossary_checkbox'):
             self.add_additional_glossary_checkbox = self._create_styled_checkbox("Add Additional Glossary")
             self.add_additional_glossary_checkbox.setChecked(self.config.get('add_additional_glossary', False))
-        self.add_additional_glossary_checkbox.setToolTip(
+        self.add_additional_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
             "Always include an external glossary file (CSV/JSON/TXT/PDF/MD)\n"
             "alongside the generated glossary when calling the API."
-        )
+        ))
         additional_glossary_layout.addWidget(self.add_additional_glossary_checkbox)
         
         # Load additional glossary button
@@ -4562,10 +4580,10 @@ Do not stop after the glossary."""
         if not getattr(self.compress_glossary_checkbox, '_glossary_manager_sync_connected', False):
             self.compress_glossary_checkbox.stateChanged.connect(self._on_glossary_manager_compress_glossary_toggle)
             self.compress_glossary_checkbox._glossary_manager_sync_connected = True
-        self.compress_glossary_checkbox.setToolTip(
+        self.compress_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
             "Only send glossary entries that appear in the current source text.\n"
             "Saves tokens and cost; recommended ON."
-        )
+        ))
         compress_layout.addWidget(self.compress_glossary_checkbox)
         
         label3 = QLabel("(Excludes glossary entries that don't appear in source text before sending to API)")
@@ -4584,10 +4602,10 @@ Do not stop after the glossary."""
         if not getattr(self.consider_translated_compression_checkbox, '_glossary_manager_sync_connected', False):
             self.consider_translated_compression_checkbox.stateChanged.connect(self._on_glossary_manager_consider_translated_compression_toggle)
             self.consider_translated_compression_checkbox._glossary_manager_sync_connected = True
-        self.consider_translated_compression_checkbox.setToolTip(
+        self.consider_translated_compression_checkbox.setToolTip(_wrapped_tooltip_html(
             "When ON, glossary compression keeps an entry if either raw_name or translated_name appears in the source text.\n"
             "Default OFF preserves raw-name-only matching."
-        )
+        ))
         consider_translated_layout.addWidget(self.consider_translated_compression_checkbox)
 
         consider_translated_hint = QLabel("(Optional: also match translated_name during compression; default OFF)")
@@ -4605,10 +4623,10 @@ Do not stop after the glossary."""
         if not getattr(self.strict_gender_compression_checkbox, '_glossary_manager_sync_connected', False):
             self.strict_gender_compression_checkbox.stateChanged.connect(self._on_glossary_manager_strict_gender_compression_toggle)
             self.strict_gender_compression_checkbox._glossary_manager_sync_connected = True
-        self.strict_gender_compression_checkbox.setToolTip(
+        self.strict_gender_compression_checkbox.setToolTip(_wrapped_tooltip_html(
             "When ON, gender-enabled entries such as characters are only sent if the full raw_name appears in the source text.\n"
             "When OFF, character names stay loose and may match surname/given-name tokens, including one-character CJK names."
-        )
+        ))
         strict_gender_layout.addWidget(self.strict_gender_compression_checkbox)
 
         strict_gender_hint = QLabel("(Optional: stricter compression for smart models; default OFF keeps loose character matching)")
@@ -4624,9 +4642,9 @@ Do not stop after the glossary."""
         if not hasattr(self, 'save_glossary_in_output_checkbox'):
             self.save_glossary_in_output_checkbox = self._create_styled_checkbox("Save Glossary Backup in Output")
             self.save_glossary_in_output_checkbox.setChecked(self.config.get('save_glossary_in_output', False))
-        self.save_glossary_in_output_checkbox.setToolTip(
+        self.save_glossary_in_output_checkbox.setToolTip(_wrapped_tooltip_html(
             "Also save duplicate glossary files in the current output/source folder. Primary glossary mapping stays unchanged."
-        )
+        ))
         output_save_layout.addWidget(self.save_glossary_in_output_checkbox)
 
         output_save_hint = QLabel("(Creates output-side Glossary_Backup copies; manga always also writes MangaGlossary_Backup)")
@@ -4660,10 +4678,10 @@ Do not stop after the glossary."""
         if not hasattr(self, 'include_gender_context_checkbox'):
             self.include_gender_context_checkbox = self._create_styled_checkbox("Include Gender Context (More Expensive)")
             self.include_gender_context_checkbox.setChecked(self.config.get('include_gender_context', False))
-        self.include_gender_context_checkbox.setToolTip(
+        self.include_gender_context_checkbox.setToolTip(_wrapped_tooltip_html(
             "Expand snippets with surrounding sentences to infer gender.\n"
             "Higher cost; required to enable gender nuance/description options."
-        )
+        ))
         gender_context_layout.addWidget(self.include_gender_context_checkbox)
         
         label4 = QLabel("(Expands text snippets to include surrounding sentences for better gender detection)")
@@ -4678,10 +4696,10 @@ Do not stop after the glossary."""
         if not hasattr(self, 'enable_gender_nuance_checkbox'):
             self.enable_gender_nuance_checkbox = self._create_styled_checkbox("Enable Gender Nuance Analysis")
             self.enable_gender_nuance_checkbox.setChecked(self.config.get('enable_gender_nuance', True))
-        self.enable_gender_nuance_checkbox.setToolTip(
+        self.enable_gender_nuance_checkbox.setToolTip(_wrapped_tooltip_html(
             "Adds a pronoun/honorific-aware scoring pass to prioritize\n"
             "sentences that reveal gender. Slightly higher CPU/time cost."
-        )
+        ))
         gender_nuance_layout.addWidget(self.enable_gender_nuance_checkbox)
 
         gender_nuance_label = QLabel("(Prioritizes pronoun/honorific cues to improve gender assignment; adds a scoring pass)")
@@ -4697,10 +4715,10 @@ Do not stop after the glossary."""
         if not hasattr(self, 'skip_gender_tracking_checkbox'):
             self.skip_gender_tracking_checkbox = self._create_styled_checkbox("Skip Gender Tracking")
             self.skip_gender_tracking_checkbox.setChecked(self.config.get('glossary_skip_gender_tracking', False))
-        self.skip_gender_tracking_checkbox.setToolTip(
+        self.skip_gender_tracking_checkbox.setToolTip(_wrapped_tooltip_html(
             "Do not create or use the *_gender_tracker.json sidecar file.\n"
             "Also disables the Male/Female dedupe protection, so same-name entries dedupe normally."
-        )
+        ))
         skip_gender_tracking_layout.addWidget(self.skip_gender_tracking_checkbox)
 
         skip_gender_tracking_label = QLabel("(Disables gender tracker and gender-variant dedupe protection)")
@@ -4745,11 +4763,11 @@ Do not stop after the glossary."""
             )
             self.gender_tracking_bias_combo.setCurrentIndex(bias_index)
             self._disable_combobox_mousewheel(self.gender_tracking_bias_combo)
-        self.gender_tracking_bias_combo.setToolTip(
+        self.gender_tracking_bias_combo.setToolTip(_wrapped_tooltip_html(
             "No Bias: suppress a gender variant when it appears at or below the rare-flip percentage.\n"
             "Prefer Female: never suppress rare female readings, but still suppress rare male readings.\n"
             "Prefer Male: never suppress rare male readings, but still suppress rare female readings."
-        )
+        ))
         gender_noise_layout.addWidget(self.gender_tracking_bias_combo)
 
         gender_noise_hint = QLabel("(Default 10%: one-off AI misgenders are ignored during glossary compression)")
@@ -4765,10 +4783,10 @@ Do not stop after the glossary."""
         if not hasattr(self, 'include_description_checkbox'):
             self.include_description_checkbox = self._create_styled_checkbox("Include Description Column")
             self.include_description_checkbox.setChecked(self.config.get('include_description', False))
-        self.include_description_checkbox.setToolTip(
+        self.include_description_checkbox.setToolTip(_wrapped_tooltip_html(
             "Add a description/context field to each glossary entry.\n"
             "Only available when gender context is enabled."
-        )
+        ))
         description_layout.addWidget(self.include_description_checkbox)
         
         label5 = QLabel("(Adds a description/context field for each glossary entry)")
@@ -4798,10 +4816,10 @@ Do not stop after the glossary."""
             self.disable_smart_filtering_checkbox = self._create_styled_checkbox("Disable Smart Filtering (Send Full Text)")
             # Invert the logic: checkbox is "disable" so checked=True means use_smart_filter=False
             self.disable_smart_filtering_checkbox.setChecked(not self.config.get('glossary_use_smart_filter', True))
-        self.disable_smart_filtering_checkbox.setToolTip(
+        self.disable_smart_filtering_checkbox.setToolTip(_wrapped_tooltip_html(
             "Bypass all text filtering and send the entire novel to the extractor.\n"
             "Extremely expensive; use only for debugging edge cases."
-        )
+        ))
         disable_filtering_layout.addWidget(self.disable_smart_filtering_checkbox)
         
         label6 = QLabel("(Disables all text filtering and sends the entire novel to the API - very expensive!)")
@@ -5002,7 +5020,7 @@ Do not stop after the glossary."""
             lbl.setFixedWidth(label_width)
             lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             if tooltip:
-                lbl.setToolTip(tooltip)
+                lbl.setToolTip(_wrapped_tooltip_html(tooltip))
             h.addWidget(lbl)
             h.addWidget(field_widget)
             h.addStretch()
@@ -5109,11 +5127,11 @@ Do not stop after the glossary."""
         
         # Add tooltip explaining prompt placeholder + sync behavior
         target_lang_label = QLabel("Target language:")
-        target_lang_label.setToolTip("Replaces {language} placeholder in AI prompts; synced across all target language dropdowns.")
+        target_lang_label.setToolTip(_wrapped_tooltip_html("Replaces {language} placeholder in AI prompts; synced across all target language dropdowns."))
         target_lang_pair = _pair("", self.glossary_target_language_combo)
         # swap label inside helper
         target_lang_pair.layout().itemAt(0).widget().setText("Target language:")
-        target_lang_pair.layout().itemAt(0).widget().setToolTip("Replaces {language} placeholder in AI prompts; synced across all target language dropdowns.")
+        target_lang_pair.layout().itemAt(0).widget().setToolTip(_wrapped_tooltip_html("Replaces {language} placeholder in AI prompts; synced across all target language dropdowns."))
         extraction_grid.addWidget(target_lang_pair, 2, 2, 1, 2)
         
         # Row 4 - Max sentences and chapter split threshold
@@ -5125,21 +5143,21 @@ Do not stop after the glossary."""
         ms_label = QLabel("Max sentences:")
         ms_label.setFixedWidth(180)
         ms_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        ms_label.setToolTip(
+        ms_label.setToolTip(_wrapped_tooltip_html(
             "Maximum sentences sent to AI.\nDynamic Limit adds +1 per detected character before dedup."
-        )
+        ))
         ms_layout.addWidget(ms_label)
         ms_layout.addWidget(self.glossary_max_sentences_entry)
         
         # Include All Characters toggle (dynamic limit)
         if not hasattr(self, 'include_all_characters_checkbox'):
             self.include_all_characters_checkbox = self._create_styled_checkbox("Dynamic Limit Expansion")
-            self.include_all_characters_checkbox.setToolTip(
+            self.include_all_characters_checkbox.setToolTip(_wrapped_tooltip_html(
                 "Dynamic Limit Expansion:\n"
                 "- Adds one sentence per detected character on top of 'Max sentences'.\n"
                 "- After selection, duplicate sentences are removed, so both the bonus and the base cap can shrink.\n"
                 "- Example: requesting 200 + 700 bonus may dedupe down to ~120 total."
-            )
+            ))
             self.include_all_characters_checkbox.setChecked(self.config.get('glossary_include_all_characters', False))
         ms_layout.addWidget(self.include_all_characters_checkbox)
         
@@ -5156,12 +5174,12 @@ Do not stop after the glossary."""
         
         # Row 5 - Filter mode
         filter_label = QLabel("Filter mode:")
-        filter_label.setToolTip(
+        filter_label.setToolTip(_wrapped_tooltip_html(
             "Choose which names/terms to keep:\n"
             "- All names & terms\n"
             "- Names with honorifics only\n"
             "- Names without honorifics & terms"
-        )
+        ))
         extraction_grid.addWidget(filter_label, 4, 0)
         filter_widget = QWidget()
         filter_layout = QHBoxLayout(filter_widget)
@@ -5191,18 +5209,18 @@ Do not stop after the glossary."""
 
         # Row 6 - Strip honorifics
         strip_label = QLabel("Strip honorifics:")
-        strip_label.setToolTip("Remove suffixes from extracted names (e.g., '-nim', '-san').")
+        strip_label.setToolTip(_wrapped_tooltip_html("Remove suffixes from extracted names (e.g., '-nim', '-san')."))
         extraction_grid.addWidget(strip_label, 5, 0)
         if not hasattr(self, 'strip_honorifics_checkbox'):
             self.strip_honorifics_checkbox = self._create_styled_checkbox("Remove honorifics from extracted names")
-        self.strip_honorifics_checkbox.setToolTip("Remove suffixes from extracted names (e.g., '-nim', '-san').")
+        self.strip_honorifics_checkbox.setToolTip(_wrapped_tooltip_html("Remove suffixes from extracted names (e.g., '-nim', '-san')."))
         # Always reload from config
         self.strip_honorifics_checkbox.setChecked(self.config.get('strip_honorifics', True))
         extraction_grid.addWidget(self.strip_honorifics_checkbox, 5, 1, 1, 3)
         
         # Row 7 - Fuzzy matching threshold (reuse existing value)
         fuzzy_label = QLabel("Fuzzy threshold:")
-        fuzzy_label.setToolTip("Similarity needed to merge duplicates.\n0.90 = very similar (recommended); 1.0 = exact match.")
+        fuzzy_label.setToolTip(_wrapped_tooltip_html("Similarity needed to merge duplicates.\n0.90 = very similar (recommended); 1.0 = exact match."))
         extraction_grid.addWidget(fuzzy_label, 6, 0)
         
         auto_fuzzy_widget = QWidget()
@@ -5333,7 +5351,7 @@ Do not stop after the glossary."""
             QPushButton:hover { background-color: #255f9a; }
             QPushButton:pressed { background-color: #1f5286; }
         """)
-        anti_dup_btn.setToolTip("Configure anti-duplicate parameters for glossary generation only.")
+        anti_dup_btn.setToolTip(_wrapped_tooltip_html("Configure anti-duplicate parameters for glossary generation only."))
         anti_dup_btn.clicked.connect(lambda: self._open_glossary_anti_duplicate_dialog(parent))
         extraction_grid.addWidget(anti_dup_btn, 7, 2, 1, 2)
         
@@ -6051,12 +6069,12 @@ Do not stop after the glossary."""
         bypass_min_p_cb = self._create_styled_checkbox("Bypass Min-P Provider Allowlist")
         try:
             bypass_min_p_cb.setChecked(bool(self.glossary_bypass_min_p_allowlist_var))
-            bypass_min_p_cb.setToolTip(
+            bypass_min_p_cb.setToolTip(_wrapped_tooltip_html(
                 "Default Min-P allowlist:\n"
                 "local/vLLM OpenAI-compatible endpoints\n"
                 "OpenRouter, Fireworks, Chutes, NanoGPT\n"
                 "NVIDIA, SambaNova, Opencode, custom OpenAI endpoints"
-            )
+            ))
         except Exception:
             pass
         def _on_bypass_min_p_toggle(checked):
@@ -6339,7 +6357,7 @@ Do not stop after the glossary."""
 
         self.glossary_refinement_enabled_checkbox = self._create_styled_checkbox("Enable Glossary Refinement")
         self.glossary_refinement_enabled_checkbox.setChecked(bool(self.config.get('glossary_refinement_enabled', False)))
-        self.glossary_refinement_enabled_checkbox.setToolTip("Run a final refinement API pass after glossary extraction completes.")
+        self.glossary_refinement_enabled_checkbox.setToolTip(_wrapped_tooltip_html("Run a final refinement API pass after glossary extraction completes."))
         refinement_enable_layout.addWidget(self.glossary_refinement_enabled_checkbox)
 
         try:
@@ -6349,7 +6367,7 @@ Do not stop after the glossary."""
                 self,
                 'glossary_refinement',
                 "Refinement Keys",
-                "Open the Multi API Key Manager focused on the Refinement key pool.",
+                _wrapped_tooltip_html("Open the Multi API Key Manager focused on the Refinement key pool."),
             )
             refinement_enable_layout.addWidget(refinement_keys_btn)
         except Exception:
@@ -6363,11 +6381,27 @@ Do not stop after the glossary."""
         self.glossary_refinement_wait_for_completion_checkbox.setChecked(
             bool(self.config.get('glossary_refinement_wait_for_completion', False))
         )
-        self.glossary_refinement_wait_for_completion_checkbox.setToolTip(
+        self.glossary_refinement_wait_for_completion_checkbox.setToolTip(_wrapped_tooltip_html(
             "Gate automatic refinement until every glossary extraction chapter is complete, "
             "structurally skipped, or merged. Manual Refine this actions remain available."
-        )
+        ))
         layout.addWidget(self.glossary_refinement_wait_for_completion_checkbox)
+
+        self.glossary_refinement_reopen_on_source_change_checkbox = self._create_styled_checkbox(
+            "Reopen completed types when source entries change"
+        )
+        self.glossary_refinement_reopen_on_source_change_checkbox.setObjectName(
+            'glossary_refinement_reopen_on_source_change_checkbox'
+        )
+        self.glossary_refinement_reopen_on_source_change_checkbox.setChecked(
+            bool(self.config.get('glossary_refinement_reopen_on_source_change', False))
+        )
+        self.glossary_refinement_reopen_on_source_change_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When enabled, adding, removing, or renaming source entries reopens the entire "
+            "completed entry type for automatic refinement. When off, completed types stay "
+            "completed. You can still refine them manually from the Glossary Progress Manager."
+        ))
+        layout.addWidget(self.glossary_refinement_reopen_on_source_change_checkbox)
 
         options_box = QGroupBox("Refinement Scope")
         options_layout = QVBoxLayout(options_box)
@@ -6490,11 +6524,11 @@ Do not stop after the glossary."""
         request_layout.addWidget(QLabel("Request mode:"))
         self.glossary_refinement_chunking_combo = QComboBox()
         self.glossary_refinement_chunking_combo.addItems(["Send each entry type in a separate request", "Send all entry types"])
-        self.glossary_refinement_chunking_combo.setToolTip(
-            "<qt>Send all entry types combines them within the token budget. If splitting is needed, "
+        self.glossary_refinement_chunking_combo.setToolTip(_wrapped_tooltip_html(
+            "Send all entry types combines them within the token budget. If splitting is needed, "
             "characters and surnames are grouped first, followed by enabled gendered types, then other types. "
-            "A type that exceeds the budget on its own is split into smaller requests.</qt>"
-        )
+            "A type that exceeds the budget on its own is split into smaller requests."
+        ))
         self._apply_halgakos_combo_icons(self.glossary_refinement_chunking_combo)
         self.glossary_refinement_chunking_combo.setCurrentIndex(
             self._glossary_refinement_chunking_combo_index(self.config)
@@ -6506,7 +6540,7 @@ Do not stop after the glossary."""
 
         self.glossary_refinement_skip_dedupe_checkbox = self._create_styled_checkbox("Skip deduplication after refinement")
         self.glossary_refinement_skip_dedupe_checkbox.setChecked(bool(self.config.get('glossary_refinement_skip_dedupe', False)))
-        self.glossary_refinement_skip_dedupe_checkbox.setToolTip("If enabled, refinement output is saved without the normal duplicate cleanup pass.")
+        self.glossary_refinement_skip_dedupe_checkbox.setToolTip(_wrapped_tooltip_html("If enabled, refinement output is saved without the normal duplicate cleanup pass."))
         options_layout.addWidget(self.glossary_refinement_skip_dedupe_checkbox)
 
         prompt_box = QGroupBox("Refinement Prompts")
@@ -6557,7 +6591,7 @@ Do not stop after the glossary."""
         btn_layout = QHBoxLayout(btn_row)
         btn_layout.setContentsMargins(0, 0, 0, 0)
         reset_btn = QPushButton("Reset to Default")
-        reset_btn.setToolTip("Restore both refinement prompt fields to their defaults.")
+        reset_btn.setToolTip(_wrapped_tooltip_html("Restore both refinement prompt fields to their defaults."))
         reset_btn.setStyleSheet("""
             QPushButton {
                 background-color: #b8860b;  /* dark yellow */
@@ -6588,6 +6622,7 @@ Do not stop after the glossary."""
 
         def _sync_refinement_widgets(*_args):
             enabled = self.glossary_refinement_enabled_checkbox.isChecked()
+            self.glossary_refinement_reopen_on_source_change_checkbox.setEnabled(enabled)
             options_box.setEnabled(enabled)
             prompt_box.setEnabled(enabled)
             type_list_enabled = enabled and self.glossary_refinement_type_mode_combo.currentIndex() == 1
@@ -6617,14 +6652,14 @@ Do not stop after the glossary."""
         html_toggle_layout.setContentsMargins(0, 0, 0, 4)
         self.update_html_on_save_checkbox = self._create_styled_checkbox("Update output files on save")
         self.update_html_on_save_checkbox.setChecked(self.config.get('update_html_on_save', True))
-        self.update_html_on_save_checkbox.setToolTip(
+        self.update_html_on_save_checkbox.setToolTip(_wrapped_tooltip_html(
             "When enabled, saving will also replace updated translated names in direct files in the book output folder."
-        )
+        ))
         self.hide_unused_entries_checkbox = self._create_styled_checkbox("Hide unused entries")
         self.hide_unused_entries_checkbox.setChecked(False)
-        self.hide_unused_entries_checkbox.setToolTip(
+        self.hide_unused_entries_checkbox.setToolTip(_wrapped_tooltip_html(
             "Hide glossary rows whose translated term does not appear in the translated output files."
-        )
+        ))
         def _persist_update_html(state):
             self.config['update_html_on_save'] = bool(state)
             try:
@@ -6652,7 +6687,7 @@ Do not stop after the glossary."""
             "QPushButton { background: #444; color: white; border-radius: 4px; font-size: 10pt; padding: 0; } "
             "QPushButton:hover { background: #666; }"
         )
-        self._editor_prev_btn.setToolTip("Previous glossary")
+        self._editor_prev_btn.setToolTip(_wrapped_tooltip_html("Previous glossary"))
         self._editor_prev_btn.clicked.connect(lambda: self._editor_nav(-1))
         file_layout.addWidget(self._editor_prev_btn)
 
@@ -6668,7 +6703,7 @@ Do not stop after the glossary."""
             "QPushButton { background: #444; color: white; border-radius: 4px; font-size: 10pt; padding: 0; } "
             "QPushButton:hover { background: #666; }"
         )
-        self._editor_next_btn.setToolTip("Next glossary")
+        self._editor_next_btn.setToolTip(_wrapped_tooltip_html("Next glossary"))
         self._editor_next_btn.clicked.connect(lambda: self._editor_nav(1))
         file_layout.addWidget(self._editor_next_btn)
 
@@ -6759,7 +6794,7 @@ Do not stop after the glossary."""
 
         _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
         self._reload_icon = SpinningIconLabel(_icon_path, size=20, parent=stats_widget)
-        self._reload_icon.setToolTip("Glossary reload indicator")
+        self._reload_icon.setToolTip(_wrapped_tooltip_html("Glossary reload indicator"))
         stats_layout.addWidget(self._reload_icon)
 
         self.stats_label = QLabel("No glossary loaded")
@@ -6973,12 +7008,12 @@ Do not stop after the glossary."""
             self.glossary_tree.setHeaderLabels(headers)
             header_item = self.glossary_tree.headerItem()
             if header_item is not None:
-                header_item.setToolTip(0, "Row number")
+                header_item.setToolTip(0, _wrapped_tooltip_html("Row number"))
                 for column, field in enumerate(fields, start=1):
                     state = "Filter active. " if field in filters else ""
                     header_item.setToolTip(
                         column,
-                        f"{state}Click to filter {field.replace('_', ' ')}.",
+                        _wrapped_tooltip_html(f"{state}Click to filter {field.replace('_', ' ')}."),
                     )
 
         def _tree_item_matches_glossary_filters(item):
@@ -10040,8 +10075,8 @@ Do not stop after the glossary."""
             redo_count = len(self._redo_stack)
             self._undo_btn.setEnabled(undo_count > 0)
             self._redo_btn.setEnabled(redo_count > 0)
-            self._undo_btn.setToolTip(f"Undo ({undo_count} steps)" if undo_count else "Nothing to undo")
-            self._redo_btn.setToolTip(f"Redo ({redo_count} steps)" if redo_count else "Nothing to redo")
+            self._undo_btn.setToolTip(_wrapped_tooltip_html(f"Undo ({undo_count} steps)" if undo_count else "Nothing to undo"))
+            self._redo_btn.setToolTip(_wrapped_tooltip_html(f"Redo ({redo_count} steps)" if redo_count else "Nothing to redo"))
 
         def _open_backups_folder():
             path = self.editor_file_entry.text()
@@ -10104,7 +10139,7 @@ Do not stop after the glossary."""
             "QPushButton { background-color: #6b5b3a; color: white; padding: 6px; font-weight: bold; border-radius: 3px; }"
             "QPushButton:hover { background-color: #7d6b48; }"
         )
-        backups_btn.setToolTip("Open the Backups folder in your file explorer")
+        backups_btn.setToolTip(_wrapped_tooltip_html("Open the Backups folder in your file explorer"))
         toolbar_layout.addWidget(backups_btn)
 
         toolbar_layout.addStretch()
@@ -11038,9 +11073,9 @@ Do not stop after the glossary."""
 
         self.force_refresh_glossary_btn = QPushButton("🔄 Force Refresh")
         self.force_refresh_glossary_btn.setFixedWidth(135)
-        self.force_refresh_glossary_btn.setToolTip(
+        self.force_refresh_glossary_btn.setToolTip(_wrapped_tooltip_html(
             "Reload the glossary directly from disk, even when automatic change detection misses it."
-        )
+        ))
         def _set_force_refresh_button_style(background, hover="#0e7490"):
             try:
                 self.force_refresh_glossary_btn.setStyleSheet(
@@ -11345,13 +11380,13 @@ Do not stop after the glossary."""
 
         load_btn = QPushButton("\U0001F4C4 Load")
         load_btn.setFixedWidth(70)
-        load_btn.setToolTip(
+        load_btn.setToolTip(_wrapped_tooltip_html(
             "Load the currently browsed glossary as the active manual "
             "glossary for translation. Auto Glossary mode must be set to "
             "\"Manual Glossary Only\" for it to take effect. When that mode "
             "is active, the glossary is also copied into the EPUB's output "
             "folder as glossary.csv (folder is created if missing)."
-        )
+        ))
         load_btn.clicked.connect(load_current_glossary_as_manual)
         load_btn.setStyleSheet(
             "QPushButton { background-color: transparent; color: #c8c8d0; "
