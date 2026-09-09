@@ -31,7 +31,10 @@ TRANSLATED_NAMES = [
     "1051_Chapter_1051_Arrival.xhtml",
 ]
 RAW_NAMES = [f"{number:04d}_{number:03d}_.xhtml" for number in (55, 56, 57, 802, 815, 1050, 1051)]
-ENV_KEYS = ("TRANSLATE_SPECIAL_FILES", "SPECIAL_FILE_KEYWORDS", "SPECIAL_FILE_EXACT")
+ENV_KEYS = (
+    "TRANSLATE_SPECIAL_FILES", "SPECIAL_FILE_KEYWORDS", "SPECIAL_FILE_EXACT",
+    "GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL",
+)
 
 
 def _is_special(filename):
@@ -72,6 +75,7 @@ def filtered_settings(monkeypatch):
     monkeypatch.setenv("TRANSLATE_SPECIAL_FILES", "0")
     monkeypatch.setenv("SPECIAL_FILE_KEYWORDS", ",".join(SPECIAL_KEYWORDS))
     monkeypatch.setenv("SPECIAL_FILE_EXACT", "index")
+    monkeypatch.setenv("GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL", "0")
     monkeypatch.setattr(extractor, "is_stop_requested", lambda: False)
 
 
@@ -124,6 +128,7 @@ def test_special_chapter_slots_stay_unmapped_without_shifting_later_chapters(ena
     mappings = auto_map_epub_chapters(
         _chapters(RAW_NAMES), _chapters(TRANSLATED_NAMES),
         enable_auto_offset=enable_auto_offset, special_file_predicate=_is_special,
+        protect_interior_special_files=False,
     )
 
     assert [entry["raw_index"] for entry in mappings] == list(range(7))
@@ -142,6 +147,7 @@ def test_exact_special_rule_unmaps_only_its_pair_with_asymmetric_frontmatter(ena
     mappings = auto_map_epub_chapters(
         raw, translated, enable_auto_offset=enable_auto_offset,
         special_file_predicate=lambda name: name == special_name,
+        protect_interior_special_files=False,
     )
 
     assert [entry["translated_index"] for entry in mappings] == [None, 0, None, 2]
@@ -168,12 +174,16 @@ def _wait_for_mapping(app, dialog):
     pytest.fail("Timed out while loading and mapping the small fixture EPUBs")
 
 
+@pytest.mark.parametrize("setting", [None, False], ids=["default-enabled", "saved-disabled"])
 def test_dialog_keeps_special_document_available_for_manual_mapping_and_saved_restore(
-    tmp_path, monkeypatch, qt_app, filtered_settings,
+    tmp_path, monkeypatch, qt_app, filtered_settings, setting,
 ):
-    raw_path = _write_epub(tmp_path / "raw.epub", RAW_NAMES[:3])
-    translated_path = _write_epub(tmp_path / "translated.epub", TRANSLATED_NAMES[:3])
-    dialog = ParallelEpubPairDialog(special_file_predicate=_is_special)
+    raw_names = RAW_NAMES[:3] + ["0058_058_.xhtml"]
+    translated_names = TRANSLATED_NAMES[:3] + ["0058_Chapter_58_Message.xhtml"]
+    raw_path = _write_epub(tmp_path / "raw.epub", raw_names)
+    translated_path = _write_epub(tmp_path / "translated.epub", translated_names)
+    config = {} if setting is None else {"never_consider_in_between_files_as_special": setting}
+    dialog = ParallelEpubPairDialog(config=config, special_file_predicate=_is_special)
     restored_dialog = None
     editor = None
     try:
@@ -181,15 +191,18 @@ def test_dialog_keeps_special_document_available_for_manual_mapping_and_saved_re
         dialog._load_epub("translated", str(translated_path))
         _wait_for_mapping(qt_app, dialog)
 
-        assert len(dialog.raw_chapters) == len(dialog.translated_chapters) == 3
-        assert dialog.mapping_table.rowCount() == 3
-        assert dialog.mapping_table.item(1, 1).data(Qt.UserRole) == -1
-        assert dialog.mapping_table.item(1, 2).text() == "Special file — Unmapped"
+        assert len(dialog.raw_chapters) == len(dialog.translated_chapters) == 4
+        assert dialog.mapping_table.rowCount() == 4
+        for row in (1, 3):  # Interior chapter 56 and the numbered trailing file.
+            assert dialog.mapping_table.item(row, 1).data(Qt.UserRole) == (row if setting is None else -1)
+            if setting is False:
+                assert dialog.mapping_table.item(row, 2).text() == "Special file — Unmapped"
         assert dialog.mapping_table.item(2, 1).text() == TRANSLATED_NAMES[2]
 
         dialog._apply_mapping_offset(1)
-        assert dialog.mapping_table.item(2, 1).data(Qt.UserRole) == -1
-        assert dialog.mapping_table.item(2, 2).text() == "Special file — Unmapped"
+        assert dialog.mapping_table.item(2, 1).data(Qt.UserRole) == (1 if setting is None else -1)
+        if setting is False:
+            assert dialog.mapping_table.item(2, 2).text() == "Special file — Unmapped"
         dialog._apply_mapping_offset(-1)
         assert dialog.mapping_table.item(2, 1).data(Qt.UserRole) == 2
 
@@ -221,11 +234,12 @@ def test_dialog_keeps_special_document_available_for_manual_mapping_and_saved_re
         saved = compact_parallel_epub_selection({
             "raw_path": str(raw_path), "translated_path": str(translated_path), "pairs": selected_pairs,
         })
-        restored_dialog = ParallelEpubPairDialog(special_file_predicate=_is_special)
+        restored_dialog = ParallelEpubPairDialog(config=config, special_file_predicate=_is_special)
         assert restored_dialog.restore_persisted_selection(saved)
         _wait_for_mapping(qt_app, restored_dialog)
         assert restored_dialog._selected_mapping() == [
-            {"raw_index": index, "translated_index": index} for index in range(3)
+            {"raw_index": index, "translated_index": index}
+            for index in range(4 if setting is None else 3)
         ]
         assert restored_dialog.mapping_table.item(1, 1).text() == TRANSLATED_NAMES[1]
         assert restored_dialog.mapping_table.item(1, 2).text() == "Saved Mapping"

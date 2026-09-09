@@ -3613,7 +3613,7 @@ def _glossary_structural_progress_statuses(
 
 
 # Bump when text extraction, document ordering, or structural classification changes.
-_GLOSSARY_EPUB_TEXT_CACHE_VERSION = 1
+_GLOSSARY_EPUB_TEXT_CACHE_VERSION = 2
 
 
 def _glossary_epub_extraction_settings(*, include_special_files=False):
@@ -3625,7 +3625,7 @@ def _glossary_epub_extraction_settings(*, include_special_files=False):
         'parser': 'html.parser',
         'translate_special_files': translate_special,
         'protect_interior_special_files': not translate_special and os.getenv(
-            'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '0',
+            'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '1',
         ) == '1',
         'special_file_keywords': [] if translate_special else sorted(set(
             [k.strip().lower() for k in keywords.split(',') if k.strip()]

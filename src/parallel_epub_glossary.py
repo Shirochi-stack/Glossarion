@@ -294,7 +294,7 @@ def auto_map_epub_chapters(
     *,
     enable_auto_offset: bool = True,
     special_file_predicate: Optional[Callable[[str], bool]] = None,
-    protect_interior_special_files: bool = False,
+    protect_interior_special_files: bool = True,
     raw_reading_order: Optional[Sequence[str]] = None,
     translated_reading_order: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, object]]:
@@ -1365,7 +1365,7 @@ class ParallelEpubPairDialog(QDialog):
             enable_auto_offset=self.auto_offset_checkbox.isChecked(),
             special_file_predicate=self.special_file_predicate,
             protect_interior_special_files=bool(
-                self.config.get('never_consider_in_between_files_as_special', False)
+                self.config.get('never_consider_in_between_files_as_special', True)
             ),
             raw_reading_order=self.raw_reading_order,
             translated_reading_order=self.translated_reading_order,
@@ -1548,7 +1548,7 @@ class ParallelEpubPairDialog(QDialog):
             self.translated_chapters,
             self.special_file_predicate or (lambda _filename: False),
             protect_interior=bool(
-                self.config.get('never_consider_in_between_files_as_special', False)
+                self.config.get('never_consider_in_between_files_as_special', True)
             ),
             reading_order=self.translated_reading_order,
         )

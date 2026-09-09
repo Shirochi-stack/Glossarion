@@ -16231,7 +16231,7 @@ Recent translations to summarize:
         # Numbered HTML override (must be available before Progress Manager opens)
         self.translate_all_numbered_html_var = self.config.get('translate_all_numbered_html', True)
         self.never_consider_in_between_files_as_special_var = self.config.get(
-            'never_consider_in_between_files_as_special', False
+            'never_consider_in_between_files_as_special', True
         )
         
         # String variables
@@ -35309,7 +35309,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_REQUEST_MERGE_COUNT': glossary_request_merge_count,
             'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
             'GLOSSARY_SKIP_TITLE_HEADER_ONLY': self._glossary_skip_title_header_only_env_value(),
-            'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL': '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', False)) else '0',
+            'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL': '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', True)) else '0',
             'ENABLE_AUTO_GLOSSARY': "1" if auto_glossary_mode == 'minimal' else "0",
             'AUTO_GLOSSARY_MODE': auto_glossary_mode,
             'SINGLE_PASS_GLOSSARY_MODE': '1' if auto_glossary_mode == 'single_pass' else '',
@@ -37191,7 +37191,7 @@ Important rules:
                     'GLOSSARY_OUTPUT_LEGACY_JSON': '1' if getattr(self, 'glossary_output_legacy_json_var', False) else '0',
                     'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
                     'GLOSSARY_SKIP_TITLE_HEADER_ONLY': self._glossary_skip_title_header_only_env_value(),
-                    'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL': '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', False)) else '0',
+                    'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL': '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', True)) else '0',
                     # Optional assistant prefill prompt
                     'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',
                     # Subprocess PDF extraction to prevent GUI lag
@@ -47109,7 +47109,7 @@ Important rules:
                     ('GLOSSARY_MAX_TEXT_SIZE', str(self.config.get('glossary_max_text_size', 50000))),
                     ('GLOSSARY_CHAPTER_SPLIT_THRESHOLD', str(self.config.get('glossary_chapter_split_threshold', 8192))),
                     ('GLOSSARY_FILTER_MODE', self.config.get('glossary_filter_mode', 'strict')),
-                    ('GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '1' if self.config.get('never_consider_in_between_files_as_special', False) else '0'),
+                    ('GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '1' if self.config.get('never_consider_in_between_files_as_special', True) else '0'),
                     ('GLOSSARY_DUPLICATE_ALGORITHM', self.config.get('glossary_duplicate_algorithm', 'auto')),
                     ('GLOSSARY_PARTIAL_RATIO_WEIGHT', str(self.config.get('glossary_partial_ratio_weight', 0.45))),
                     ('GLOSSARY_PARTIAL_RATIO_GENDER_ONLY', '1' if self.config.get('glossary_partial_ratio_gender_only', False) else '0'),
@@ -47866,7 +47866,7 @@ Important rules:
                 ('GLOSSARY_REQUEST_MERGE_COUNT', env_glossary_merge_count),
                 ('GLOSSARY_ENABLE_CHAPTER_SPLIT', env_glossary_chapter_split),
                 ('GLOSSARY_SKIP_TITLE_HEADER_ONLY', self._glossary_skip_title_header_only_env_value()),
-                ('GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', False)) else '0'),
+                ('GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', True)) else '0'),
 
                 # Safety/merge toggles
                 ('EMERGENCY_PARAGRAPH_RESTORE', '1' if getattr(self, 'emergency_restore_var', False) else '0'),

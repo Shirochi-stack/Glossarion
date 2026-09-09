@@ -11297,7 +11297,7 @@ def _create_processing_options_section(self, parent):
     # Protect the body of an EPUB from special-file keyword matches in glossary extraction.
     if not hasattr(self, 'never_consider_in_between_files_as_special_var'):
         self.never_consider_in_between_files_as_special_var = self.config.get(
-            'never_consider_in_between_files_as_special', False
+            'never_consider_in_between_files_as_special', True
         )
 
     in_between_files_cb = self._create_styled_checkbox(
@@ -11310,8 +11310,10 @@ def _create_processing_options_section(self, parent):
             "last non-special document in EPUB reading order. Every document between "
             "those boundaries is treated as ordinary, even if its filename matches "
             "a special-file keyword. For example, if chapters 1 and 200 are ordinary, "
-            "chapters 2 through 199 are also ordinary. This does not change translation "
-            "or compilation."
+            "chapters 2 through 199 are also ordinary. After the last originally "
+            "non-special document, files with a digit in their filename stem are "
+            "also ordinary. Leading files and unnumbered trailing files still use "
+            "the special-file rules. This does not change translation or compilation."
         )
     )
     in_between_files_cb.setChecked(bool(self.never_consider_in_between_files_as_special_var))
@@ -11329,6 +11331,7 @@ def _create_processing_options_section(self, parent):
     in_between_files_desc = QLabel(
         "Only check leading and trailing files against special-file keywords.\n"
         "Files between the first and last ordinary document are never special.\n"
+        "Numbered trailing files are also never special; leading files still get checked.\n"
         "Applies to EPUB glossary extraction and parallel EPUB pairing."
     )
     in_between_files_desc.setStyleSheet("color: gray; font-size: 10pt;")
