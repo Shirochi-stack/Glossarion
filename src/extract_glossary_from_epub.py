@@ -44,6 +44,7 @@ from glossary_refinement import (
 )
 from glossary_usage import compact_extracted_entries
 from epub_package import find_epub_opf_member, source_epub_content_fingerprint
+from epub_special_files import special_file_flags
 from gender_tracking import (
     BINARY_GENDERS,
     collapse_tracked_gender_variants,
@@ -3615,14 +3616,17 @@ def _glossary_structural_progress_statuses(
 _GLOSSARY_EPUB_TEXT_CACHE_VERSION = 1
 
 
-def _glossary_epub_extraction_settings():
+def _glossary_epub_extraction_settings(*, include_special_files=False):
     """Capture only settings applied while building glossary document records."""
     keywords = os.getenv('SPECIAL_FILE_KEYWORDS', '')
     exact = os.getenv('SPECIAL_FILE_EXACT', '')
-    translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
+    translate_special = include_special_files or os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
     return {
         'parser': 'html.parser',
         'translate_special_files': translate_special,
+        'protect_interior_special_files': not translate_special and os.getenv(
+            'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '0',
+        ) == '1',
         'special_file_keywords': [] if translate_special else sorted(set(
             [k.strip().lower() for k in keywords.split(',') if k.strip()]
             if keywords else [
@@ -3636,6 +3640,29 @@ def _glossary_epub_extraction_settings():
             if exact else ['index', 'glossary', 'glossary_extension']
         )),
     }
+
+
+def _glossary_epub_special_file_flags(filenames, signature):
+    """Use the same reading-order exclusions for extraction and numbering."""
+    def is_special(filename):
+        if signature['translate_special_files']:
+            return False
+        name = os.path.splitext(os.path.basename(filename or ''))[0].lower()
+        if not name:
+            return False
+        if name in signature['special_file_exact']:
+            return True
+        keywords = signature['special_file_keywords']
+        if not any(keyword in name for keyword in keywords):
+            return False
+        # Preserve the configured matching rules for numbered variants.
+        stripped = re.sub(r'\d+$', '', name).rstrip('_- ')
+        return not re.search(r'\d', name) or any(keyword in stripped for keyword in keywords)
+
+    return special_file_flags(
+        filenames, is_special,
+        protect_interior=signature['protect_interior_special_files'],
+    )
 
 
 def _glossary_epub_documents_digest(documents):
@@ -3723,6 +3750,7 @@ def extract_chapters_from_epub(
     *,
     cache_path=None,
     stop_check=None,
+    include_special_files: bool = False,
 ) -> List:
     """Extract chapters from EPUB for glossary extraction.
     
@@ -3734,12 +3762,16 @@ def extract_chapters_from_epub(
             returns dictionaries with its text, filename, and structural kind.
         cache_path: Optional per-book cache for validated glossary text records.
         stop_check: Optional cancellation callback used during preparation.
+        include_special_files: Retain configured special files for callers
+            that need a complete selection list, without changing global settings.
     """
     chapters = []
     items = []
     preparation_started = time.monotonic()
     should_stop = stop_check if callable(stop_check) else is_stop_requested
-    signature = _glossary_epub_extraction_settings()
+    signature = _glossary_epub_extraction_settings(
+        include_special_files=include_special_files,
+    )
     source_fingerprint = None
     cacheable = True
 
@@ -3845,10 +3877,18 @@ def extract_chapters_from_epub(
             print(f"[Fatal] Cannot open EPUB as zip: {ze}")
             return format_chapters(chapters)
             
-    # Check if special files should be skipped (same logic as TransateKRtoEN)
-    translate_special = signature['translate_special_files']
-    special_keywords = signature['special_file_keywords']
-    special_exact = signature['special_file_exact']
+    # Classify the complete reading order before dropping any document, so
+    # interior keyword matches can be protected by ordinary files on both sides.
+    item_names = []
+    for item in items:
+        if should_stop():
+            return format_chapters(chapters)
+        try:
+            item_names.append(item.get_name() if hasattr(item, 'get_name') else '')
+        except Exception:
+            # Let the per-document error handler below report an invalid item.
+            item_names.append('')
+    special_flags = _glossary_epub_special_file_flags(item_names, signature)
     skipped_special = []
 
     print(f"📚 Extracting text from {len(items):,} EPUB documents...", flush=True)
@@ -3870,26 +3910,9 @@ def extract_chapters_from_epub(
         try:
             # Skip special files when TRANSLATE_SPECIAL_FILES is disabled
             item_name = item.get_name() if hasattr(item, 'get_name') else ''
-            if not translate_special:
-                name_noext = os.path.splitext(os.path.basename(item_name))[0] if item_name else ''
-                if name_noext:
-                    name_lower = name_noext.lower()
-                    # Strip trailing digits to catch files like notice01, cover001
-                    name_stripped = re.sub(r'\d+$', '', name_lower).rstrip('_- ')
-                    has_digits = bool(re.search(r'\d', name_noext))
-                    is_special = False
-                    # Exact match: these are special only when the basename matches exactly
-                    if name_lower in special_exact:
-                        is_special = True
-                    # Match only configured special keywords, including numbered variants like notice01.
-                    elif any(kw in name_lower for kw in special_keywords):
-                        # A no-digit name is special only because it already matched a keyword.
-                        # If it has digits, keep it special when the stripped base still matches.
-                        if not has_digits or any(kw == name_stripped or kw in name_stripped for kw in special_keywords):
-                            is_special = True
-                    if is_special:
-                        skipped_special.append(name_noext)
-                        continue
+            if special_flags[item_index]:
+                skipped_special.append(os.path.splitext(os.path.basename(item_name))[0])
+                continue
 
             raw = item.get_content()
             document = _classify_glossary_html_document(raw)
@@ -7893,7 +7916,6 @@ def main(log_callback=None, stop_callback=None):
             try:
                 import xml.etree.ElementTree as _ET2
                 import zipfile as _zf2
-                translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
                 with _zf2.ZipFile(epub_path, 'r') as zf:
                     opf_member = find_epub_opf_member(zf)
                     opf_content = (
@@ -7919,25 +7941,13 @@ def main(log_callback=None, stop_callback=None):
                             _idref = _iref.get('idref')
                             if _idref and _idref in _manifest2:
                                 _all_spine2.append(_manifest2[_idref])
-                    _sp_kw_env2 = os.getenv('SPECIAL_FILE_KEYWORDS', '')
-                    _sp_keywords2 = [k.strip().lower() for k in _sp_kw_env2.split(',') if k.strip()] if _sp_kw_env2 else [
-                        'title', 'toc', 'copyright', 'preface', 'nav',
-                        'message', 'notice', 'colophon', 'dedication', 'epigraph',
-                        'foreword', 'acknowledgment', 'author', 'appendix',
-                        'bibliography'
-                    ]
-                    _sp_exact_env2 = os.getenv('SPECIAL_FILE_EXACT', '')
-                    _sp_exact2 = [k.strip().lower() for k in _sp_exact_env2.split(',') if k.strip()] if _sp_exact_env2 else ['index', 'glossary', 'glossary_extension']
-
-                    def _is_special2(fname):
-                        fnoext = os.path.splitext(os.path.basename(str(fname or '')).lower())[0]
-                        if not fnoext:
-                            return False
-                        return fnoext in _sp_exact2 or any(kw in fnoext for kw in _sp_keywords2)
+                    _special_flags2 = _glossary_epub_special_file_flags(
+                        _all_spine2, _glossary_epub_extraction_settings(),
+                    )
                     _off2 = {}
                     _tpos2 = 0
-                    for _sb in _all_spine2:
-                        if not (not translate_special and _is_special2(_sb)):
+                    for _sb, _special2 in zip(_all_spine2, _special_flags2):
+                        if not _special2:
                             _tpos2 += 1
                             _off2[_sb] = _tpos2
                             _off2[os.path.splitext(_sb)[0]] = _tpos2

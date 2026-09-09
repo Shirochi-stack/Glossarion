@@ -11293,6 +11293,47 @@ def _create_processing_options_section(self, parent):
     numbered_html_desc.setStyleSheet("color: gray; font-size: 10pt;")
     numbered_html_desc.setContentsMargins(20, 0, 0, 5)
     section_v.addWidget(numbered_html_desc)
+
+    # Protect the body of an EPUB from special-file keyword matches in glossary extraction.
+    if not hasattr(self, 'never_consider_in_between_files_as_special_var'):
+        self.never_consider_in_between_files_as_special_var = self.config.get(
+            'never_consider_in_between_files_as_special', False
+        )
+
+    in_between_files_cb = self._create_styled_checkbox(
+        "Never consider in between files as special"
+    )
+    in_between_files_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "For EPUB glossary extraction and parallel EPUB pairing, apply special-file "
+            "keywords only to files before the first non-special document or after the "
+            "last non-special document in EPUB reading order. Every document between "
+            "those boundaries is treated as ordinary, even if its filename matches "
+            "a special-file keyword. For example, if chapters 1 and 200 are ordinary, "
+            "chapters 2 through 199 are also ordinary. This does not change translation "
+            "or compilation."
+        )
+    )
+    in_between_files_cb.setChecked(bool(self.never_consider_in_between_files_as_special_var))
+
+    def _on_in_between_files_toggle(checked):
+        self.never_consider_in_between_files_as_special_var = bool(checked)
+        self.config['never_consider_in_between_files_as_special'] = bool(checked)
+        os.environ['GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL'] = '1' if checked else '0'
+        self.save_config(show_message=False)
+
+    in_between_files_cb.toggled.connect(_on_in_between_files_toggle)
+    in_between_files_cb.setContentsMargins(0, 2, 0, 0)
+    section_v.addWidget(in_between_files_cb)
+
+    in_between_files_desc = QLabel(
+        "Only check leading and trailing files against special-file keywords.\n"
+        "Files between the first and last ordinary document are never special.\n"
+        "Applies to EPUB glossary extraction and parallel EPUB pairing."
+    )
+    in_between_files_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    in_between_files_desc.setContentsMargins(20, 0, 0, 5)
+    section_v.addWidget(in_between_files_desc)
     
     # Separator before gallery/cover
     sep_special = QFrame()

@@ -16230,6 +16230,9 @@ Recent translations to summarize:
         self.special_file_exact_var = self.config.get('special_file_exact', _DEFAULT_SPECIAL_EXACT)
         # Numbered HTML override (must be available before Progress Manager opens)
         self.translate_all_numbered_html_var = self.config.get('translate_all_numbered_html', True)
+        self.never_consider_in_between_files_as_special_var = self.config.get(
+            'never_consider_in_between_files_as_special', False
+        )
         
         # String variables
         str_vars = [
@@ -35306,6 +35309,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_REQUEST_MERGE_COUNT': glossary_request_merge_count,
             'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
             'GLOSSARY_SKIP_TITLE_HEADER_ONLY': self._glossary_skip_title_header_only_env_value(),
+            'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL': '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', False)) else '0',
             'ENABLE_AUTO_GLOSSARY': "1" if auto_glossary_mode == 'minimal' else "0",
             'AUTO_GLOSSARY_MODE': auto_glossary_mode,
             'SINGLE_PASS_GLOSSARY_MODE': '1' if auto_glossary_mode == 'single_pass' else '',
@@ -37187,6 +37191,7 @@ Important rules:
                     'GLOSSARY_OUTPUT_LEGACY_JSON': '1' if getattr(self, 'glossary_output_legacy_json_var', False) else '0',
                     'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
                     'GLOSSARY_SKIP_TITLE_HEADER_ONLY': self._glossary_skip_title_header_only_env_value(),
+                    'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL': '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', False)) else '0',
                     # Optional assistant prefill prompt
                     'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',
                     # Subprocess PDF extraction to prevent GUI lag
@@ -40937,33 +40942,15 @@ Important rules:
             self._input_output_loading_dialog = None
 
     def _load_parallel_epub_chapters(self, epub_path):
-        """Load pairable HTML through the canonical glossary EPUB extractor."""
+        """Keep all EPUB documents for pairing and reading-order boundaries."""
         from extract_glossary_from_epub import extract_chapters_from_epub
 
-        tracked_env = {
-            "TRANSLATE_SPECIAL_FILES": os.environ.get("TRANSLATE_SPECIAL_FILES"),
-            "SPECIAL_FILE_KEYWORDS": os.environ.get("SPECIAL_FILE_KEYWORDS"),
-            "SPECIAL_FILE_EXACT": os.environ.get("SPECIAL_FILE_EXACT"),
-        }
-        try:
-            # Parallel chapter mapping is intentionally limited to normal
-            # reading content. The configured special-file rules still come
-            # from Other Settings, but its ordinary translation toggle must
-            # not reintroduce title pages, navigation, glossaries, and so on.
-            os.environ["TRANSLATE_SPECIAL_FILES"] = "0"
-            os.environ["SPECIAL_FILE_KEYWORDS"] = str(
-                getattr(self, "special_file_keywords_var", "") or ""
-            )
-            os.environ["SPECIAL_FILE_EXACT"] = str(
-                getattr(self, "special_file_exact_var", "") or ""
-            )
-            return extract_chapters_from_epub(epub_path, return_metadata=True)
-        finally:
-            for key, value in tracked_env.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+        # Special-file rules only veto automatic pairs in the dialog. Applying
+        # them during extraction would hide files from manual selection and
+        # prevent saved manual mappings from being restored.
+        return extract_chapters_from_epub(
+            epub_path, return_document_metadata=True, include_special_files=True,
+        )
 
     def _build_parallel_epub_pair_artifact(self, result):
         """Build the disposable working EPUB without changing GUI state."""
@@ -46877,6 +46864,11 @@ Important rules:
             if hasattr(self, 'translate_all_numbered_html_var'):
                 self.config['translate_all_numbered_html'] = self.translate_all_numbered_html_var
 
+            if hasattr(self, 'never_consider_in_between_files_as_special_var'):
+                self.config['never_consider_in_between_files_as_special'] = bool(
+                    self.never_consider_in_between_files_as_special_var
+                )
+
             # Custom special file keywords
             if hasattr(self, 'special_file_keywords_var'):
                 self.config['special_file_keywords'] = self.special_file_keywords_var
@@ -47117,6 +47109,7 @@ Important rules:
                     ('GLOSSARY_MAX_TEXT_SIZE', str(self.config.get('glossary_max_text_size', 50000))),
                     ('GLOSSARY_CHAPTER_SPLIT_THRESHOLD', str(self.config.get('glossary_chapter_split_threshold', 8192))),
                     ('GLOSSARY_FILTER_MODE', self.config.get('glossary_filter_mode', 'strict')),
+                    ('GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '1' if self.config.get('never_consider_in_between_files_as_special', False) else '0'),
                     ('GLOSSARY_DUPLICATE_ALGORITHM', self.config.get('glossary_duplicate_algorithm', 'auto')),
                     ('GLOSSARY_PARTIAL_RATIO_WEIGHT', str(self.config.get('glossary_partial_ratio_weight', 0.45))),
                     ('GLOSSARY_PARTIAL_RATIO_GENDER_ONLY', '1' if self.config.get('glossary_partial_ratio_gender_only', False) else '0'),
@@ -47873,6 +47866,7 @@ Important rules:
                 ('GLOSSARY_REQUEST_MERGE_COUNT', env_glossary_merge_count),
                 ('GLOSSARY_ENABLE_CHAPTER_SPLIT', env_glossary_chapter_split),
                 ('GLOSSARY_SKIP_TITLE_HEADER_ONLY', self._glossary_skip_title_header_only_env_value()),
+                ('GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', False)) else '0'),
 
                 # Safety/merge toggles
                 ('EMERGENCY_PARAGRAPH_RESTORE', '1' if getattr(self, 'emergency_restore_var', False) else '0'),

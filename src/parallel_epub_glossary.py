@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from ebooklib import epub
+from epub_special_files import special_file_flags
 from PySide6.QtCore import QRect, QStringListModel, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
@@ -264,13 +265,40 @@ def _nonpositive_member_layout(chapters: Sequence) -> tuple:
     return tuple(layout)
 
 
+def _chapter_special_flags(
+    chapters: Sequence,
+    predicate: Callable[[str], bool],
+    *,
+    protect_interior: bool = False,
+    reading_order: Optional[Sequence[str]] = None,
+) -> List[bool]:
+    """Keep textless EPUB documents in the special-file boundary context."""
+    filenames = [chapter_filename(chapter) for chapter in chapters]
+    if not protect_interior or not reading_order:
+        return special_file_flags(
+            filenames, predicate, protect_interior=protect_interior,
+        )
+    ordered_flags = special_file_flags(
+        reading_order, predicate, protect_interior=True,
+    )
+    by_filename = dict(zip(reading_order, ordered_flags))
+    return [
+        by_filename[filename] if filename in by_filename else bool(predicate(filename))
+        for filename in filenames
+    ]
+
+
 def auto_map_epub_chapters(
     raw_chapters: Sequence,
     translated_chapters: Sequence,
     *,
     enable_auto_offset: bool = True,
+    special_file_predicate: Optional[Callable[[str], bool]] = None,
+    protect_interior_special_files: bool = False,
+    raw_reading_order: Optional[Sequence[str]] = None,
+    translated_reading_order: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, object]]:
-    """Map names/numbers, isolating unnumbered and zero-only offset files."""
+    """Map names/numbers, leaving special files available for manual pairing."""
     mappings: List[Dict[str, object]] = [
         {
             "raw_index": index,
@@ -372,6 +400,31 @@ def auto_map_epub_chapters(
             mappings[raw_index]["translated_index"] = translated_index
             mappings[raw_index]["strategy"] = "Reading order"
             available.discard(translated_index)
+
+    if special_file_predicate:
+        raw_special = _chapter_special_flags(
+            raw_chapters,
+            special_file_predicate, protect_interior=protect_interior_special_files,
+            reading_order=raw_reading_order,
+        )
+        translated_special = _chapter_special_flags(
+            translated_chapters,
+            special_file_predicate, protect_interior=protect_interior_special_files,
+            reading_order=translated_reading_order,
+        )
+        # Keep special files in the candidate sequences until alignment is
+        # complete. Removing one first would shift every following positional
+        # pair (for example, raw 56 would receive translated 57).
+        for mapping in mappings:
+            raw_index = mapping["raw_index"]
+            translated_index = mapping["translated_index"]
+            if raw_special[raw_index] or (
+                translated_index is not None
+                and translated_special[translated_index]
+            ):
+                mapping["translated_index"] = None
+                mapping["strategy"] = "Special file — Unmapped"
+                mapping["auto_offset"] = 0
 
     return mappings
 
@@ -723,6 +776,8 @@ class ParallelEpubPairDialog(QDialog):
         self.translated_path = ""
         self.raw_chapters: List[Dict[str, str]] = []
         self.translated_chapters: List[Dict[str, str]] = []
+        self.raw_reading_order: List[str] = []
+        self.translated_reading_order: List[str] = []
         self._auto_mapping: List[Dict[str, object]] = []
         self._mapping_offset = 0
         self._mapping_build_serial = 0
@@ -758,7 +813,9 @@ class ParallelEpubPairDialog(QDialog):
     def _default_chapter_loader(path: str) -> Sequence:
         from extract_glossary_from_epub import extract_chapters_from_epub
 
-        return extract_chapters_from_epub(path, return_metadata=True)
+        return extract_chapters_from_epub(
+            path, return_document_metadata=True, include_special_files=True,
+        )
 
     def _build_ui(self):
         mapping_combo_style = ""
@@ -1086,15 +1143,13 @@ class ParallelEpubPairDialog(QDialog):
 
         def load_in_background():
             chapters = []
+            reading_order = []
             error = ""
             try:
                 extracted = list(self.chapter_loader(path) or [])
                 for index, item in enumerate(extracted, start=1):
                     filename = chapter_filename(item) or f"HTML {index}"
-                    if self.special_file_predicate and self.special_file_predicate(
-                        filename
-                    ):
-                        continue
+                    reading_order.append(filename)
                     text = chapter_text(item)
                     if not text.strip():
                         continue
@@ -1109,7 +1164,10 @@ class ParallelEpubPairDialog(QDialog):
             except Exception as exc:
                 error = str(exc)
             try:
-                self.epubLoadFinished.emit(side, path, serial, chapters, error)
+                self.epubLoadFinished.emit(
+                    side, path, serial,
+                    {"chapters": chapters, "reading_order": reading_order}, error,
+                )
             except RuntimeError:
                 # The dialog was closed while the daemon loader was finishing.
                 pass
@@ -1147,7 +1205,13 @@ class ParallelEpubPairDialog(QDialog):
                 f"{path}\n\n{error}",
             )
         elif is_latest:
-            self._apply_loaded_epub(side, path, list(chapters or []))
+            if isinstance(chapters, dict):
+                self._apply_loaded_epub(
+                    side, path, list(chapters.get("chapters") or []),
+                    reading_order=chapters.get("reading_order"),
+                )
+            else:
+                self._apply_loaded_epub(side, path, list(chapters or []))
 
         # Only the loader that currently owns the serialized queue may advance
         # it. A stale loader invalidated by Clear Selection must not start a
@@ -1158,14 +1222,19 @@ class ParallelEpubPairDialog(QDialog):
         elif completed_active_load or self._active_load is None:
             self._refresh_load_controls()
 
-    def _apply_loaded_epub(self, side: str, path: str, chapters):
+    def _apply_loaded_epub(self, side: str, path: str, chapters, reading_order=None):
+        ordered_filenames = list(reading_order) if reading_order is not None else [
+            chapter_filename(chapter) for chapter in chapters
+        ]
         if side == "raw":
             self.raw_path = path
             self.raw_chapters = chapters
+            self.raw_reading_order = ordered_filenames
             self.raw_drop.set_epub(path, len(chapters))
         else:
             self.translated_path = path
             self.translated_chapters = chapters
+            self.translated_reading_order = ordered_filenames
             self.translated_drop.set_epub(path, len(chapters))
         self._rebuild_mapping()
 
@@ -1191,6 +1260,8 @@ class ParallelEpubPairDialog(QDialog):
         self.translated_path = ""
         self.raw_chapters = []
         self.translated_chapters = []
+        self.raw_reading_order = []
+        self.translated_reading_order = []
         self.result_data = None
         self._translated_mapping_model.setStringList(["— Unmapped —"])
         self.mapping_table.setUpdatesEnabled(False)
@@ -1292,6 +1363,12 @@ class ParallelEpubPairDialog(QDialog):
             self.raw_chapters,
             self.translated_chapters,
             enable_auto_offset=self.auto_offset_checkbox.isChecked(),
+            special_file_predicate=self.special_file_predicate,
+            protect_interior_special_files=bool(
+                self.config.get('never_consider_in_between_files_as_special', False)
+            ),
+            raw_reading_order=self.raw_reading_order,
+            translated_reading_order=self.translated_reading_order,
         )
         self._translated_mapping_model.setStringList(
             ["— Unmapped —"]
@@ -1467,6 +1544,14 @@ class ParallelEpubPairDialog(QDialog):
             return
         self._mapping_offset += int(delta)
         translated_count = len(self.translated_chapters)
+        translated_special = _chapter_special_flags(
+            self.translated_chapters,
+            self.special_file_predicate or (lambda _filename: False),
+            protect_interior=bool(
+                self.config.get('never_consider_in_between_files_as_special', False)
+            ),
+            reading_order=self.translated_reading_order,
+        )
         # Offset direction follows what the user sees in the raw-row table:
         # +1 moves the existing assignments down one raw row, so each row must
         # select the translated index that was previously one row above it.
@@ -1492,6 +1577,9 @@ class ParallelEpubPairDialog(QDialog):
                 if shifted_index is None or not 0 <= shifted_index < translated_count:
                     translated_index = -1
                     strategy = f"Offset {self._mapping_offset:+d} (unmapped)"
+                elif translated_special[shifted_index]:
+                    translated_index = -1
+                    strategy = "Special file — Unmapped"
                 else:
                     translated_index = shifted_index
                     strategy = f"Offset {self._mapping_offset:+d}"

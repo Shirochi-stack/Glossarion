@@ -178,6 +178,30 @@ def test_main_reapplies_structural_skips_and_numbering_to_cached_documents(
     assert cached.chapter_status_overrides == {1: "skipped_image_only", 3: "skipped_empty"}
 
 
+def test_main_spine_positions_include_protected_interior_special_document(
+    prepare_source, monkeypatch, tmp_path,
+):
+    source = _write_epub(tmp_path / "book.epub")
+    monkeypatch.setenv("GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL", "1")
+    monkeypatch.setenv("SPECIAL_FILE_EXACT", "index,chapter0043")
+    monkeypatch.setenv("USE_SPINE_ORDER", "1")
+    read_archive = Mock(wraps=extractor.epub.read_epub)
+    monkeypatch.setattr(extractor.epub, "read_epub", read_archive)
+
+    initial = prepare_source(source)
+    cached = prepare_source(source)
+
+    read_archive.assert_called_once_with(str(source))
+    for context in (initial, cached):
+        assert context.total_chapters == 4
+        assert context.chapter_filenames == {
+            0: "chapter0042.xhtml", 1: "chapter0043.xhtml",
+            2: "chapter0044.xhtml", 3: "chapter0045.xhtml",
+        }
+        assert context.chapter_positions == {0: 1, 1: 2, 2: 3, 3: 4}
+        assert context.chapter_numbers == {0: 42, 1: 43, 2: 44, 3: 45}
+
+
 @pytest.fixture
 def cached_epub(monkeypatch, tmp_path):
     monkeypatch.setattr(extractor, "is_stop_requested", lambda: False)

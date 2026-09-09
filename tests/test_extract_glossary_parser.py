@@ -1488,7 +1488,8 @@ def test_parallel_epub_dialog_loads_in_background_and_shows_drop_feedback(tmp_pa
     assert dialog._active_load is None
     assert dialog.raw_path == str(source)
     assert dialog.raw_chapters == [
-        {"text": "raw text", "filename": "chapter-01.xhtml"}
+        {"text": "raw text", "filename": "chapter-01.xhtml"},
+        {"text": "title text", "filename": "title.xhtml"},
     ]
     assert "eligible HTML" in dialog.raw_drop.count_label.text()
     dialog.deleteLater()
