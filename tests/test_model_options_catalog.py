@@ -1284,6 +1284,29 @@ def test_proxy_start_poll_ignores_failed_attempt_but_reuses_fresh_success(tmp_pa
     )
 
 
+def test_arena_startup_respects_persisted_successful_cache(tmp_path, monkeypatch):
+    import autharena_proxy
+    import translator_gui
+    _isolated_cache(tmp_path, monkeypatch)
+    now = 1_800_000_000.0
+    monkeypatch.setattr(model_options.time, "time", lambda: now)
+    monkeypatch.setattr(autharena_proxy, "list_accounts", lambda: [{"slot": 0}])
+    monkeypatch.setattr(autharena_proxy, "check_proxy_health", lambda: {"running": True})
+    monkeypatch.setattr(autharena_proxy, "list_models", lambda **kwargs: [{"id": "test-model"}])
+    model_options.refresh_provider_model_catalogs(active_model="autharena/test-model", only_provider="autharena")
+    # Discard process memory to exercise the on-disk cache used after restart.
+    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+    monkeypatch.setattr(translator_gui, "provider_model_catalog_refresh_due", model_options.provider_model_catalog_refresh_due)
+    starts = []
+    gui = SimpleNamespace(_start_provider_model_catalog_refresh=lambda **kwargs: starts.append(kwargs) or True)
+    for _ in range(3):
+        translator_gui.TranslatorGUI._autharena_catalog_after_login(gui)
+    assert starts == []
+    monkeypatch.setattr(model_options.time, "time", lambda: now + 24 * 3600 + 1)
+    translator_gui.TranslatorGUI._autharena_catalog_after_login(gui)
+    assert starts == [{"only_provider": "autharena", "automatic": True}]
+
+
 def test_model_catalog_cache_uses_macos_caches_directory(monkeypatch):
     monkeypatch.delenv("GLOSSARION_MODEL_CATALOG_CACHE", raising=False)
     monkeypatch.setattr(model_options.platform, "system", lambda: "Darwin")

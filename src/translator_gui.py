@@ -19118,7 +19118,20 @@ Recent translations to summarize:
 
     @Slot()
     def _autharena_catalog_after_login(self):
-        self._start_provider_model_catalog_refresh(only_provider='autharena', automatic=True)
+        # Both login completion and proxy startup reach this hook. Respect the
+        # persisted successful-catalog TTL, just like Antigravity's startup hook.
+        if not provider_model_catalog_refresh_due('autharena', successful_only=True):
+            return
+        if getattr(self, '_autharena_catalog_retry_pending', False):
+            return
+        if self._start_provider_model_catalog_refresh(only_provider='autharena', automatic=True):
+            return
+        self._autharena_catalog_retry_pending = True
+        QTimer.singleShot(1500, self._autharena_retry_catalog_refresh)
+
+    def _autharena_retry_catalog_refresh(self):
+        self._autharena_catalog_retry_pending = False
+        self._autharena_catalog_after_login()
 
     def _get_authgpt_account_id(self):
         """Return the numeric account ID for the AuthGPT provider.
