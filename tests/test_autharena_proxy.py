@@ -160,7 +160,8 @@ def test_account_selector_visibility_and_numeric_labels(qt, monkeypatch):
     model = ["autharena/model"]
     parent = widgets.QWidget()
     control = arena.create_login_controls(parent, lambda: model[0], lambda value: model.__setitem__(0, value))
-    assert control.login_button.text() == "Arena Login"
+    assert control.login_button.text() == "✅ Arena"
+    assert "#0" in control.login_button.toolTip()
     assert control.accounts.isHidden()
     model[0] = "autharena0/model"
     control.refresh()

@@ -47,6 +47,11 @@ As with Antigravity, visible forced streams include reasoning. The optional
 streaming and generic batch-streaming toggles do not disable this transport.
 Interrupted streams are errors rather than completed translations.
 
+Requests wait for Arena's reCAPTCHA loader and use a fresh token immediately
+before submission. A rejected CAPTCHA gets one fresh-page/token retry without
+resetting account credentials. Missing tokens stop submission, and persistent
+rejection asks the user to complete any verification available on Arena's website.
+
 `AUTHARENA_PROXY_DATA_DIR` changes the runtime and browser installation location.
 Personal browser cookie databases are never read. The temporary login profile
 is removed after its browser closes; only captured Arena credentials are retained

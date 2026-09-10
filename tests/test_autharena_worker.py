@@ -3,6 +3,7 @@
 Uses a simulated app-owned browser. Never reads browser sessions or contacts Arena.
 """
 import asyncio
+import ast
 import base64
 import contextlib
 import importlib
@@ -67,7 +68,7 @@ class Page:
         await self.emit(None, {"dispatching": True})
         if self.context.browser.reject_once:
             self.context.browser.reject_once = False
-            await self.emit(None, {"status": 403, "headers": {}, "error_body": "session needs refresh"})
+            await self.emit(None, {"status": 403, "headers": {}, "error_body": self.context.browser.rejection_body})
             return
         if self.context.browser.fail_request:
             await self.emit(None, {"status": 400, "headers": {}, "error_body": '{"message":"invalid test payload"}'})
@@ -109,6 +110,7 @@ class Browser:
         self.login_clicks = 0
         self.fail_request = False
         self.reject_once = False
+        self.rejection_body = "session needs refresh"
         self.refreshed_cookie = None
 
     async def close(self):
@@ -126,6 +128,51 @@ class Browser:
 @unittest.skipUnless(importlib.util.find_spec("playwright") and (RUNTIME / "browser-ready").exists(),
                      "Run with installed Arena managed Python for local browser tests")
 class LoginNavigationTest(unittest.TestCase):
+    def test_captcha_readiness_and_fresh_tokens_in_browser(self):
+        tree = ast.parse(Path(arena.__file__).read_text(encoding="utf-8"))
+        script = next(n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)
+                      and isinstance(n.value, str) and n.value.startswith("async ({url, method, payload, sitekey, action})"))
+        async def run():
+            from playwright.async_api import async_playwright
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(RUNTIME.parent / "browsers")
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                try:
+                    page = await browser.new_page()
+                    for enterprise in (False, True):
+                        await page.goto("about:blank")
+                        await page.evaluate("""enterprise => {
+                            window.events=[]; window.calls=[]; window.counter=0;
+                            window.arenaEmit = async item => events.push(item);
+                            window.fetch = async (url, options) => {
+                                calls.push(JSON.parse(options.body)); return new Response('a0:"ok"\\n', {status:200});
+                            };
+                            const s=document.createElement('script'); s.type='application/json';
+                            s.src='https://www.google.com/recaptcha/'+(enterprise?'enterprise':'api')+'.js?render=page-site-key';
+                            document.head.append(s);
+                            setTimeout(() => {
+                                const api={ready:fn=>fn(), execute:async (key,{action})=>{
+                                    if(key!=='page-site-key'||action!=='chat_submit') throw Error('wrong CAPTCHA configuration');
+                                    return 'fresh-'+(++counter);
+                                }};
+                                window.grecaptcha=enterprise?{enterprise:api}:api;
+                            },150);
+                        }""", enterprise)
+                        args = {"url": "https://arena.ai/test", "method": "POST", "payload": {"recaptchaV3Token": "stale", "recaptchaV2Token": "stale-v2"}, "sitekey": "outdated-key", "action": "sign_up"}
+                        await page.evaluate(script, args)
+                        await page.evaluate(script, args)
+                        calls = await page.evaluate("calls")
+                        self.assertEqual(await page.evaluate("events.filter(e => 'line' in e).map(e => e.line)"), ['a0:"ok"', 'a0:"ok"'])
+                        self.assertEqual([v["recaptchaV3Token"] for v in calls], ["fresh-1", "fresh-2"])
+                        self.assertTrue(all("recaptchaV2Token" not in v for v in calls))
+                        await page.evaluate("grecaptcha.enterprise ? grecaptcha.enterprise.execute = async()=>'' : grecaptcha.execute = async()=>''")
+                        with self.assertRaisesRegex(Exception, "ARENA_CAPTCHA_EMPTY"):
+                            await page.evaluate(script, args)
+                        self.assertEqual(await page.evaluate("calls.length"), 2)
+                finally:
+                    await browser.close()
+        asyncio.run(run())
+
     def test_regular_browser_profile_and_cleanup(self):
         executable = arena._regular_browser_executable()
         async def run():
@@ -226,6 +273,9 @@ class WorkerTest(unittest.TestCase):
                 for slot in (0, 1, None, None):
                     response = await client.post("/v1/chat/completions", json={"model": "test-model", "messages": [{"role": "user", "content": "test"}], "account_slot": slot})
                     assert response.status_code == 200, response.text
+                    assert response.headers["X-Arena-Account-Slot"] in ("0", "1")
+                    if slot is not None:
+                        assert response.headers["X-Arena-Account-Slot"] == str(slot)
                     result = arena.consume_stream(response.text.splitlines(), log_stream=False)
                     assert result["content"] == "hello", response.text
                     assert result["usage"] == {"total_tokens": 8}, response.text
@@ -275,6 +325,14 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual(arena.consume_stream(recovered.text.splitlines(), log_stream=False)["content"], "hello")
                 self.assertEqual(len(browser.sent), before + 2)
                 self.assertEqual(arena._load("accounts.enc")["0"]["email"], "restored@example.test")
+                browser.reject_once = True
+                browser.rejection_body = '{"error":"recaptcha validation failed"}'
+                contexts_before = list(browser.contexts)
+                before = len(browser.sent)
+                recovered = await client.post("/v1/chat/completions", json={"model": "test-model", "messages": [{"role": "user", "content": "test"}], "account_slot": 0})
+                self.assertEqual(arena.consume_stream(recovered.text.splitlines(), log_stream=False)["content"], "hello")
+                self.assertEqual(len(browser.sent), before + 2)
+                self.assertEqual(browser.contexts, contexts_before)
             for sock in sockets:
                 sock.close()
 

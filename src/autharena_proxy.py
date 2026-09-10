@@ -28,7 +28,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 8
+ADAPTER_VERSION = 10
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
 _lock = threading.RLock()
@@ -537,6 +537,12 @@ def send_message_stream(messages, model, temperature=0.7, max_tokens=None, timeo
             raise RuntimeError("Arena stream cancelled")
         if not response.ok:
             raise RuntimeError("Arena: " + response.json().get("detail", f"HTTP {response.status_code}"))
+        selected = getattr(response, "headers", {}).get("X-Arena-Account-Slot")
+        if log_fn and selected is not None and str(selected).isdigit():
+            selected = int(selected)
+            saved = next((a for a in list_accounts() if a["slot"] == selected), {})
+            identity = saved.get("email") or "saved account"
+            log_fn(f"Arena: using account #{selected} ({identity})" + (" — rotation" if account_id is None else ""))
         response.encoding = "utf-8"
         return consume_stream(response.iter_lines(decode_unicode=True, chunk_size=1), log_fn,
                               visible_stream() if log_stream is None else log_stream, generation)
@@ -835,11 +841,40 @@ async def _serve_worker(key):
             sitekey, action = main.get_recaptcha_settings(cfg)
             async def pump():
                 try:
-                    await page.evaluate("""async ({url, method, payload, sitekey, action}) => {
-                        if (globalThis.grecaptcha?.enterprise && sitekey) {
-                            await new Promise(resolve => grecaptcha.enterprise.ready(resolve));
-                            payload.recaptchaV3Token = await grecaptcha.enterprise.execute(sitekey, {action});
+                    await page.evaluate(r"""async ({url, method, payload, sitekey, action}) => {
+                        // DOMContentLoaded can precede Arena's reCAPTCHA loader.
+                        // Never submit the bridge's empty/stale cached token.
+                        delete payload.recaptchaV2Token;
+                        delete payload.recaptchaV3Token;
+                        const deadline = Date.now() + 20000;
+                        let api, activeKey;
+                        while (Date.now() < deadline) {
+                            const scripts = [...document.scripts].map(s => s.src);
+                            const loaded = scripts.map(src => {
+                                try { return new URL(src); } catch { return null; }
+                            }).find(u => u && /\/(?:recaptcha\/)(?:enterprise|api)\.js$/.test(u.pathname)
+                                && ['www.google.com','www.recaptcha.net','recaptcha.net'].includes(u.hostname)
+                                && u.searchParams.get('render') && u.searchParams.get('render') !== 'explicit');
+                            activeKey = loaded?.searchParams.get('render') || sitekey;
+                            const enterprise = loaded ? loaded.pathname.endsWith('/enterprise.js')
+                                : !!globalThis.grecaptcha?.enterprise;
+                            api = enterprise ? globalThis.grecaptcha?.enterprise : globalThis.grecaptcha;
+                            if (activeKey && typeof api?.ready === 'function' && typeof api?.execute === 'function') break;
+                            await new Promise(resolve => setTimeout(resolve, 100));
                         }
+                        if (!activeKey || typeof api?.ready !== 'function' || typeof api?.execute !== 'function')
+                            throw new Error('ARENA_CAPTCHA_NOT_READY');
+                        let timer;
+                        try {
+                            const token = await Promise.race([
+                                new Promise((resolve, reject) => api.ready(() => {
+                                    Promise.resolve().then(() => api.execute(activeKey, {action:'chat_submit'})).then(resolve,reject);
+                                })),
+                                new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('ARENA_CAPTCHA_TIMEOUT')), 20000); })
+                            ]);
+                            if (typeof token !== 'string' || !token.trim()) throw new Error('ARENA_CAPTCHA_EMPTY');
+                            payload.recaptchaV3Token = token;
+                        } finally { clearTimeout(timer); }
                         await arenaEmit({dispatching:true});
                         const response = await fetch(url, {method, credentials:'include',
                             headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
@@ -866,8 +901,8 @@ async def _serve_worker(key):
                         const reader = response.body.getReader(); const decoder = new TextDecoder(); let pending='';
                         while (true) { const {done,value} = await reader.read();
                             pending += decoder.decode(value || new Uint8Array(), {stream:!done});
-                            let end; while ((end=pending.indexOf('\\n')) >= 0) {
-                                await arenaEmit({line:pending.slice(0,end).replace(/\\r$/, '')}); pending=pending.slice(end+1);
+                            let end; while ((end=pending.indexOf('\n')) >= 0) {
+                                await arenaEmit({line:pending.slice(0,end).replace(/\r$/, '')}); pending=pending.slice(end+1);
                             }
                             if (done) break;
                         }
@@ -934,7 +969,15 @@ async def _serve_worker(key):
                     if response.status_code not in (401, 403):
                         return response
                     detail = f"Arena HTTP {response.status_code}: {response.text}"
+                    captcha_rejected = response.status_code == 403 and "captcha" in response.text.lower()
                     await response.aclose()
+                    if captcha_rejected:
+                        if attempt == 0:
+                            # Fresh page and fresh token, retaining the same login.
+                            continue
+                        detail += " Arena rejected a fresh CAPTCHA token. Complete any verification offered on Arena's website before retrying."
+                        state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=detail)
+                        return state["terminal_error"]
                     safe_to_retry = True  # Explicit rejection, no accepted stream.
                 except asyncio.CancelledError:
                     for page in list(context.pages):
@@ -943,6 +986,10 @@ async def _serve_worker(key):
                                 await page.close()
                     raise
                 except Exception as exc:
+                    if "ARENA_CAPTCHA_" in str(exc):
+                        detail = "Arena CAPTCHA did not become ready or returned an empty token; no translation was submitted. Check whether Arena's verification scripts are blocked."
+                        state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=detail)
+                        return state["terminal_error"]
                     detail = f"Arena browser connection failed ({type(exc).__name__})."
                     safe_to_retry = not state["dispatched"]
                     for page in list(context.pages):
@@ -1051,7 +1098,8 @@ async def _serve_worker(key):
                 state["lock"].release()
                 jobs.pop(request_id, None)
                 cancelled_jobs.discard(request_id)
-        return StreamingResponse(chunks(), media_type="text/event-stream")
+        return StreamingResponse(chunks(), media_type="text/event-stream",
+                                 headers={"X-Arena-Account-Slot": str(slot)})
 
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -1110,6 +1158,7 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             self.spinner.setInterval(80)
             self.spinner.timeout.connect(self.animate)
             self.spinner_angle = 0
+            self.account_snapshot = None
             self.busy = False
             self.refresh()
 
@@ -1139,9 +1188,26 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             if not match:
                 return
             slot, _ = parse_route(model)
+            saved_accounts = list_accounts()
+            selected_accounts = saved_accounts if slot is None else [a for a in saved_accounts if a["slot"] == slot]
+            if not self.busy:
+                self.login_button.setText("✅ Arena" if selected_accounts else "Arena Login")
+                if selected_accounts:
+                    identities = ", ".join(f"#{a['slot']} ({a.get('email') or 'saved account'})" for a in selected_accounts)
+                    self.login_button.setToolTip(
+                        ("Rotation pool: " if slot is None else "Saved Arena account: ") + identities
+                        + ". Credentials are encrypted and restored automatically. Click to reconnect. "
+                        "Saved login does not guarantee CAPTCHA acceptance.")
+                    snapshot = (slot, identities)
+                    if snapshot != self.account_snapshot:
+                        self.progress.emit("Arena: restored " + ("account pool " if slot is None else "account ") + identities + " from encrypted storage.")
+                    self.account_snapshot = snapshot
+                else:
+                    self.login_button.setToolTip("Log into Arena in the automatically installed internal browser")
+                    self.account_snapshot = None
             self.accounts.blockSignals(True)
             self.accounts.clear()
-            ids = sorted({0, *[a["slot"] for a in list_accounts()], *([] if slot is None else [slot])})
+            ids = sorted({0, *[a["slot"] for a in saved_accounts], *([] if slot is None else [slot])})
             for aid in ids:
                 self.accounts.addItem(f"#{aid}", aid)
             self.accounts.addItem("+ New", "new")
@@ -1210,7 +1276,7 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
                 if update_route and get_model() == original:
                     _, model = parse_route(original)
                     set_model(route_for_slot(account["slot"], model))
-                self.progress.emit(f"Arena account {account['slot']} connected.")
+                self.progress.emit(f"✅ Arena account #{account['slot']} ({account.get('email') or 'saved account'}) connected.")
                 if on_login:
                     on_login()
             self.refresh()
