@@ -7,6 +7,16 @@ from pathlib import Path
 _log_folder = None
 _patched = False
 
+
+def _response_body_for_log(response, streaming=False):
+    """Leave streaming bodies to their caller, including handshake events."""
+    if streaming:
+        return "<streaming response; body not read by HTTP logger>"
+    try:
+        return response.text
+    except Exception:
+        return None
+
 def _save_http_log(method, url, headers, body, response_status=None, response_headers=None, response_body=None):
     """Save HTTP request/response to a JSON file"""
     try:
@@ -112,10 +122,7 @@ def enable_detailed_http_logging(log_folder="http_requests"):
         
         response = original_request(method, url, **kwargs)
         
-        try:
-            response_body = response.text
-        except:
-            response_body = None
+        response_body = _response_body_for_log(response, kwargs.get('stream', False))
         
         _save_http_log(
             method=method.upper(),
@@ -138,10 +145,10 @@ def enable_detailed_http_logging(log_folder="http_requests"):
         
         response = original_session_request(self, method, url, **kwargs)
         
-        try:
-            response_body = response.text
-        except:
-            response_body = None
+        streaming = kwargs.get('stream')
+        if streaming is None:
+            streaming = getattr(self, 'stream', False)
+        response_body = _response_body_for_log(response, streaming)
         
         _save_http_log(
             method=method.upper(),
@@ -187,10 +194,7 @@ def enable_detailed_http_logging(log_folder="http_requests"):
             response = original_httpx_send(self, request, **kwargs)
             
             # Get response
-            try:
-                response_body = response.text
-            except:
-                response_body = None
+            response_body = _response_body_for_log(response, kwargs.get('stream', False))
             
             _save_http_log(
                 method=method,

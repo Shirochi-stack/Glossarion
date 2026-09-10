@@ -63,6 +63,9 @@ Browser tasks are stopped before an account's request state can be reused.
 Dispatch failures are provider errors unless a real cancellation was requested.
 Upstream errors retain Arena's HTTP status and Retry-After value when supplied,
 including HTTP 429, instead of reporting them as CAPTCHA failures.
+Detailed HTTP logging records headers and a streaming-body placeholder without
+reading the response stream. Reading it in the logger delays dispatch events
+until the worker times out and causes a local acknowledgment conflict.
 
 If Arena serves a security interstitial instead of its homepage, the proxy opens
 an app-owned browser and waits for interactive verification before obtaining a
