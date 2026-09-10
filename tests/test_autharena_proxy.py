@@ -289,6 +289,31 @@ def test_previous_external_browser_worker_is_detected(monkeypatch, version):
     assert status["running"] is False
 
 
+def test_refreshed_session_is_encrypted_and_survives_process_restart():
+    import subprocess
+    from token_encryption import is_encrypted
+    session = {"user": {"id": "saved-user", "email": "saved@example.test"},
+               "expires_at": time.time() + 3600, "refresh_token": "test-refresh-secret"}
+    cookie = {"name": "arena-auth-prod-v1", "domain": ".arena.ai", "path": "/", "value":
+              "base64-" + base64.urlsafe_b64encode(json.dumps(session).encode()).decode()}
+    arena._save("accounts.enc", {"0": {"user_id": "saved-user", "expires_at": 1}})
+    arena._persist_session(0, [cookie])
+    path = arena.data_dir() / "accounts.enc"
+    assert is_encrypted(str(path))
+    assert b"saved@example.test" not in path.read_bytes()
+    assert cookie["value"].encode() not in path.read_bytes()
+    code = "import autharena_proxy as a; s=a._load('accounts.enc')['0']; assert s['user_id']=='saved-user'; assert s['expires_at']>1; assert s['cookies']; print('RESTORED')"
+    env = dict(os.environ, PYTHONPATH=str(Path(arena.__file__).parent))
+    result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "RESTORED"
+    session["user"]["id"] = "different-user"
+    cookie["value"] = "base64-" + base64.urlsafe_b64encode(json.dumps(session).encode()).decode()
+    with pytest.raises(RuntimeError, match="different account"):
+        arena._persist_session(0, [cookie])
+    assert arena._load("accounts.enc")["0"]["user_id"] == "saved-user"
+
+
 def test_interrupted_install_is_not_published(tmp_path, monkeypatch):
     uv = arena.data_dir() / ("uv.exe" if os.name == "nt" else "uv")
     uv.touch()

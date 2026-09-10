@@ -31,6 +31,8 @@ class Page:
 
     async def goto(self, *args, **kwargs):
         self.context.browser.urls.append(args[0])
+        if self.context.browser.refreshed_cookie:
+            self.context.saved_cookies = [self.context.browser.refreshed_cookie]
 
     async def bring_to_front(self):
         pass
@@ -59,7 +61,14 @@ class Page:
             self.context.pages.remove(self)
 
     async def evaluate(self, script, args):
+        assert args["payload"]["mode"] == "direct-battle"
+        assert args["payload"]["modelAId"] == "test-model-id"
         self.context.browser.sent.append((self.context.saved_cookies, args["payload"]))
+        await self.emit(None, {"dispatching": True})
+        if self.context.browser.reject_once:
+            self.context.browser.reject_once = False
+            await self.emit(None, {"status": 403, "headers": {}, "error_body": "session needs refresh"})
+            return
         if self.context.browser.fail_request:
             await self.emit(None, {"status": 400, "headers": {}, "error_body": '{"message":"invalid test payload"}'})
             return
@@ -99,6 +108,8 @@ class Browser:
         self.urls = []
         self.login_clicks = 0
         self.fail_request = False
+        self.reject_once = False
+        self.refreshed_cookie = None
 
     async def close(self):
         self.contexts.clear()
@@ -253,6 +264,17 @@ class WorkerTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "invalid test payload"):
                     arena.consume_stream(failed.text.splitlines(), log_stream=False)
                 self.assertEqual(len(browser.sent), before + 1)
+                browser.fail_request = False
+                refreshed = {"user": {"id": "user-0", "email": "restored@example.test"},
+                             "expires_at": int(time.time()) + 3600, "refresh_token": "test-refresh"}
+                browser.refreshed_cookie = {"name": "arena-auth-prod-v1", "domain": ".arena.ai", "path": "/",
+                    "value": "base64-" + base64.urlsafe_b64encode(json.dumps(refreshed).encode()).decode()}
+                browser.reject_once = True
+                before = len(browser.sent)
+                recovered = await client.post("/v1/chat/completions", json={"model": "test-model", "messages": [{"role": "user", "content": "test"}], "account_slot": 0})
+                self.assertEqual(arena.consume_stream(recovered.text.splitlines(), log_stream=False)["content"], "hello")
+                self.assertEqual(len(browser.sent), before + 2)
+                self.assertEqual(arena._load("accounts.enc")["0"]["email"], "restored@example.test")
             for sock in sockets:
                 sock.close()
 

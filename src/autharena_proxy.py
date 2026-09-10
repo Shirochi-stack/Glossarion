@@ -28,7 +28,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 6
+ADAPTER_VERSION = 8
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
 _lock = threading.RLock()
@@ -591,6 +591,21 @@ def session_from_cookies(cookies):
         return None
 
 
+def _persist_session(slot, cookies):
+    """Keep refreshed Arena credentials across worker/app restarts."""
+    session = session_from_cookies(cookies)
+    if session is None:
+        return None
+    with disk_lock():
+        accounts = _load("accounts.enc")
+        previous = accounts.get(str(slot))
+        if not previous or previous.get("user_id") != session["user_id"]:
+            raise RuntimeError("Arena restored a different account; reconnect the intended account with Arena Login.")
+        accounts[str(slot)] = session
+        _save("accounts.enc", accounts)
+    return session
+
+
 async def _serve_worker(key):
     """Authenticated loopback broker; independent upstream module state per slot."""
     import asyncio
@@ -699,16 +714,41 @@ async def _serve_worker(key):
         async with slot_init_lock:
             return await initialize_slot(slot)
 
-    async def initialize_slot(slot):
+    async def restore_context(slot, refresh=False):
         chrome = await connect()
         with disk_lock():
             account = _load("accounts.enc").get(str(slot))
-        if not account or account.get("expires_at", 0) <= time.time():
+        if not account:
             raise HTTPException(401, f"Arena account {slot} needs Arena Login.")
+        context = await chrome.new_context()
+        try:
+            await context.add_cookies(account["cookies"])
+            if refresh or account.get("expires_at", 0) <= time.time() + 60:
+                page = await context.new_page()
+                try:
+                    await page.goto("https://arena.ai/", wait_until="domcontentloaded")
+                    # Let Arena's own session client refresh its saved session.
+                    # Access-token expiry alone must not discard a refresh token.
+                    for _ in range(60):
+                        restored = _persist_session(slot, await context.cookies(["https://arena.ai/", "https://lmarena.ai/"]))
+                        if restored:
+                            account = restored
+                            break
+                        await asyncio.sleep(.5)
+                    else:
+                        raise HTTPException(401, f"Arena account {slot} could not refresh its saved session. Use Arena Login.")
+                finally:
+                    await page.close()
+            return context, account
+        except BaseException:
+            await context.close()
+            raise
+
+    async def initialize_slot(slot):
+        chrome = await connect()
         if slot in slots and slots[slot]["context"] in chrome.contexts:
             return slots[slot]
-        context = await chrome.new_context()
-        await context.add_cookies(account["cookies"])
+        context, account = await restore_context(slot)
         namespace = f"arena_slot_{slot}_{secrets.token_hex(4)}"
         package = types.ModuleType(namespace)
         package.__path__ = [str(Path(__file__).parent / "bridge")]
@@ -770,13 +810,22 @@ async def _serve_worker(key):
             parsed = urlparse(url)
             if parsed.hostname not in ("arena.ai", "lmarena.ai"):
                 raise RuntimeError("Unexpected Arena transport origin")
+            if (http_method.upper() == "POST"
+                    and parsed.path.rstrip("/") == "/nextjs-api/stream/create-evaluation"
+                    and payload.get("mode") == "direct"):
+                # Arena's current Direct UI creates direct-battle sessions.
+                # Legacy direct sessions can continue but cannot be created.
+                # Each Glossarion request is a fresh first turn with model A.
+                payload = dict(payload, mode="direct-battle")
             page = await context.new_page()
             queue = asyncio.Queue(maxsize=32)
             headers_ready = asyncio.Event()
             done_event = asyncio.Event()
             result = {"status": 502, "headers": {}}
             async def emit(source, item):
-                if "status" in item:
+                if item.get("dispatching"):
+                    state["dispatched"] = True
+                elif "status" in item:
                     result.update(item)
                     headers_ready.set()
                 elif "line" in item:
@@ -791,6 +840,7 @@ async def _serve_worker(key):
                             await new Promise(resolve => grecaptcha.enterprise.ready(resolve));
                             payload.recaptchaV3Token = await grecaptcha.enterprise.execute(sitekey, {action});
                         }
+                        await arenaEmit({dispatching:true});
                         const response = await fetch(url, {method, credentials:'include',
                             headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
                         if (!response.ok) {
@@ -862,6 +912,8 @@ async def _serve_worker(key):
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await task
+                    with contextlib.suppress(Exception):
+                        _persist_session(slot, await context.cookies(["https://arena.ai/", "https://lmarena.ai/"]))
                     await page.close()
                 async def __aexit__(self, *args):
                     await self.aclose()
@@ -869,24 +921,50 @@ async def _serve_worker(key):
                             lines_queue=queue if result["status"] < 400 else None,
                             done_event=done_event, method=http_method, url=url)
         async def submit_once(*args, **kwargs):
+            nonlocal context
             if state["submitted"]:
-                return transport.BrowserFetchStreamResponse(400, {}, text="Arena request was already submitted; reconnect with Arena Login before retrying.")
+                return state.get("terminal_error") or transport.BrowserFetchStreamResponse(
+                    400, {}, text="Arena response was interrupted after submission; it was not replayed. Retry the request explicitly.")
             state["submitted"] = True
-            before = set(context.pages)
-            try:
-                return await fetch(*args, **kwargs)
-            except asyncio.CancelledError:
-                for page in context.pages:
-                    if page not in before:
-                        await page.close()
-                raise
-            except Exception:
-                for page in context.pages:
-                    if page not in before:
-                        await page.close()
-                # Returning an explicit response prevents upstream from falling
-                # through to its unrelated HTTP/browser launch fallbacks.
-                return transport.BrowserFetchStreamResponse(400, {}, text="The internal browser could not submit the Arena request. Use Arena Login to reconnect.")
+            for attempt in range(2):
+                state["dispatched"] = False
+                before = set(context.pages)
+                try:
+                    response = await fetch(*args, **kwargs)
+                    if response.status_code not in (401, 403):
+                        return response
+                    detail = f"Arena HTTP {response.status_code}: {response.text}"
+                    await response.aclose()
+                    safe_to_retry = True  # Explicit rejection, no accepted stream.
+                except asyncio.CancelledError:
+                    for page in list(context.pages):
+                        if page not in before:
+                            with contextlib.suppress(Exception):
+                                await page.close()
+                    raise
+                except Exception as exc:
+                    detail = f"Arena browser connection failed ({type(exc).__name__})."
+                    safe_to_retry = not state["dispatched"]
+                    for page in list(context.pages):
+                        if page not in before:
+                            with contextlib.suppress(Exception):
+                                await page.close()
+                if attempt == 0 and safe_to_retry:
+                    with contextlib.suppress(Exception):
+                        await context.close()
+                    try:
+                        context, restored = await restore_context(slot, refresh=True)
+                        state["context"] = context
+                        cfg.update(auth_token=restored["token"], auth_tokens=[restored["token"]],
+                                   browser_cookies={c["name"]: c["value"] for c in restored["cookies"]})
+                        continue
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        detail += " Automatic session reconnection failed. Use Arena Login if the session was revoked."
+                # Stop upstream retry loops from masking the actual rejection.
+                state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=detail)
+                return state["terminal_error"]
         main.fetch_lmarena_stream_via_chrome = submit_once
         main.fetch_lmarena_stream_via_camoufox = submit_once
         slots[slot] = state
@@ -943,6 +1021,7 @@ async def _serve_worker(key):
         await state["lock"].acquire()
         main.chat_sessions.clear()
         state["submitted"] = False
+        state["terminal_error"] = None
         state["usage"] = None
         try:
             response = await main.api_chat_completions(request, {"key": key, "rpm": 100000})
