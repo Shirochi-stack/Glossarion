@@ -200,7 +200,7 @@ def paired_job(broker, account=0):
 
 
 @pytest.fixture
-def setup_installer(monkeypatch):
+def setup_installer(monkeypatch, broker):
     entered, release = threading.Event(), threading.Event()
     calls, folders, callbacks = [], [], []
     outcome = {"status": "awaiting_connection", "message": "Browser setup submitted; waiting for the helper."}
@@ -223,6 +223,8 @@ def setup_installer(monkeypatch):
     monkeypatch.setitem(sys.modules, "autharena_setup", SimpleNamespace(
         install_extension=install, open_extension_folder=open_folder,
     ))
+    monkeypatch.setattr(bridge_module, 'update_extension_from_github',
+                        lambda **kwargs: broker.state.extension_path)
     yield SimpleNamespace(entered=entered, release=release, calls=calls, outcome=outcome, folders=folders,
                           progress=callbacks)
     release.set()

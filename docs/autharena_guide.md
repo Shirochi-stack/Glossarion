@@ -19,7 +19,10 @@ profile you want to use.
 1. Select an Arena model and click **Arena Login**. Glossarion opens a local
    connection page using the system's default external browser and prepares the
    companion folder at `~/.glossarion/autharena_extension`.
-2. Click **Install in browser** on the connection page. On Windows, Glossarion
+2. Click **Install in browser** on the connection page. Glossarion downloads the
+   extension from `Shirochi-stack/Glossarion` on GitHub, using one commit from
+   `main` for all files. It also extracts the page-controller string from that
+   commit's `src/autharena.py` without executing the Python file. On Windows, it
    finds that exact page in your current Chrome or Edge window, opens a new
    Extensions tab in the same window and profile, and attempts to enable
    **Developer mode**, choose **Load unpacked**, and select the prepared folder.
@@ -44,6 +47,11 @@ The repository template is in `assets/autharena_extension`. Load the generated
 folder above: Glossarion adds the required `arena_page.js`, which is not present
 in the template alone. After a companion update, reload the extension from the
 browser's extensions page and reconnect.
+
+GitHub download errors leave existing files intact and offer a retry. Downloads
+happen when **Install in browser** is clicked; normal requests reuse the saved
+extension without needing GitHub. The bundled files remain available for initial
+preparation and manual setup when offline.
 
 A one-file `.exe` includes all helper assets and the setup code. On each launch,
 Glossarion prepares the same permanent folder under `~/.glossarion`, outside the

@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections import deque
 from contextlib import contextmanager
 import atexit
+import ast
 import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -26,7 +27,7 @@ PORT = 18874
 VERSION = 1
 # Bump when a running server must not be reused after installer/bridge updates.
 # This is separate from the persistent pairing data and extension protocol.
-SERVER_REVISION = 3
+SERVER_REVISION = 5
 _start_lock = threading.RLock()
 _running = None
 
@@ -98,23 +99,81 @@ def _extension_source():
     return next((path for path in candidates if (path / 'manifest.json').is_file()), None)
 
 
-def prepare_extension():
+def update_extension_from_github(*, cancel_check, progress):
+    """Download one coherent repository revision; never execute remote Python."""
+    def fetch(url, limit):
+        if cancel_check():
+            raise RuntimeError('Arena extension download was cancelled.')
+        with requests.get(url, timeout=(5, 15), stream=True, allow_redirects=False,
+                          headers={'Accept': 'application/vnd.github+json',
+                                   'User-Agent': 'Glossarion-Arena-Setup'}) as response:
+            response.raise_for_status()
+            if response.status_code != 200:
+                raise RuntimeError('GitHub did not return the requested extension file.')
+            data = bytearray()
+            for chunk in response.iter_content(65536):
+                if cancel_check():
+                    raise RuntimeError('Arena extension download was cancelled.')
+                data.extend(chunk)
+                if len(data) > limit:
+                    raise RuntimeError('The GitHub extension download exceeded its size limit.')
+            return bytes(data)
+
+    progress({'status': 'running', 'message': 'Downloading the Arena extension from Shirochi-stack/Glossarion on GitHub.'})
+    try:
+        commit = json.loads(fetch('https://api.github.com/repos/Shirochi-stack/Glossarion/commits/main', 1000000))['sha']
+        if not isinstance(commit, str) or not re.fullmatch(r'[0-9a-f]{40}', commit):
+            raise ValueError('Invalid repository revision')
+        base = f'https://raw.githubusercontent.com/Shirochi-stack/Glossarion/{commit}/'
+        assets = {}
+        for name in ('manifest.json', 'background.js', 'connect.js', 'README.md'):
+            progress({'status': 'running', 'message': f'Downloading Arena extension: {name}.'})
+            assets[name] = fetch(base + 'assets/autharena_extension/' + name, 2000000)
+        # The repository stores the page controller as a Python string. Extract
+        # that literal from the SAME commit without importing or executing it.
+        tree = ast.parse(fetch(base + 'src/autharena.py', 2000000).decode('utf-8-sig'))
+        values = [node.value for node in tree.body if isinstance(node, ast.Assign)
+                  and any(isinstance(target, ast.Name) and target.id == '_PREPARE_JS' for target in node.targets)]
+        if len(values) != 1 or not isinstance(values[0], ast.Constant) or not isinstance(values[0].value, str):
+            raise ValueError('The repository page controller is not a literal string')
+        if cancel_check():
+            raise RuntimeError('Arena extension download was cancelled.')
+        return prepare_extension(assets=assets, prepare_js=values[0].value, source_revision=commit)
+    except (requests.RequestException, ValueError, KeyError, TypeError, SyntaxError, ImportError) as error:
+        raise RuntimeError('Could not download a complete Arena extension from GitHub. '
+                           'The installed files were kept. Retry installation.') from error
+
+
+def prepare_extension(*, assets=None, prepare_js=None, source_revision=None):
     """Validate and atomically update files at the extension's persistent path."""
-    from autharena import _PREPARE_JS
-    source = _extension_source()
-    if source is None:
-        raise ImportError('The Arena browser helper extension is missing from this installation.')
-    assets = {}
+    target = _root() / 'autharena_extension'
+    if assets is None:
+        if (target / '.github-revision').is_file():
+            from autharena_setup import _validated_folder
+            try:
+                return _validated_folder(target)
+            except (OSError, ValueError):
+                pass
+        from autharena import _PREPARE_JS
+        prepare_js = _PREPARE_JS
+        source = _extension_source()
+        if source is None:
+            raise ImportError('The Arena browser helper extension is missing from this installation.')
+        assets = {}
+        for name in ('manifest.json', 'background.js', 'connect.js', 'README.md'):
+            path = source / name
+            if not path.is_file():
+                raise ImportError(f'The Arena browser helper installation is missing {name}.')
+            assets[name] = path.read_bytes()
+    else:
+        assets = dict(assets)
     for name in ('manifest.json', 'background.js', 'connect.js', 'README.md'):
-        path = source / name
-        if not path.is_file():
-            raise ImportError(f'The Arena browser helper installation is missing {name}.')
-        assets[name] = path.read_bytes()
         if not assets[name].strip():
             raise ImportError(f'The Arena browser helper installation contains an empty {name}.')
     try:
         manifest = json.loads(assets['manifest.json'].decode('utf-8'))
-        if not isinstance(manifest, dict) or manifest.get('manifest_version') != 3:
+        if (not isinstance(manifest, dict) or manifest.get('manifest_version') != 3
+                or manifest.get('name') != 'Glossarion Arena Browser Companion'):
             raise ValueError('expected a Manifest V3 object')
         referenced = [manifest['background']['service_worker']]
         for content_script in manifest.get('content_scripts', []):
@@ -127,10 +186,11 @@ def prepare_extension():
                     '__TIMEOUT_MS__': 'config.timeout_ms', '__V2_SITEKEY__': 'config.recaptcha_v2_sitekey',
                     '__REJECTIONS__': 'config.rejections', '__LOGIN_ONLY__': 'config.login_only',
                     '__ALLOW_INTERACTIVE__': 'config.allow_interactive'}
-    body = re.sub('|'.join(map(re.escape, replacements)), lambda m: replacements[m.group()], _PREPARE_JS)
+    body = re.sub('|'.join(map(re.escape, replacements)), lambda m: replacements[m.group()], prepare_js)
     script = 'function prepareArena(config) {\n' + body + '\n}\n'
     assets['arena_page.js'] = script.encode('utf-8')
-    target = _root() / 'autharena_extension'
+    if source_revision:
+        assets['.github-revision'] = source_revision.encode('ascii')
     # Serialize concurrent desktop/helper processes. The target path and
     # manifest identity stay stable across one-file extraction directories.
     with _state_lock():
@@ -316,12 +376,15 @@ class _State:
                 from autharena_setup import install_extension
                 with self.cv:
                     self.setup_job(body['nonce'])
-                returned = install_extension(self.extension_path, browser_hint=hint, cancel_check=cancelled,
+                extension_path = update_extension_from_github(cancel_check=cancelled, progress=progress)
+                returned = install_extension(extension_path, browser_hint=hint, cancel_check=cancelled,
                                              connect_url=job['connect_url'], progress=progress)
                 if (isinstance(returned, dict)
                         and returned.get('status') in {'awaiting_connection', 'manual_required', 'error', 'cancelled'}
                         and isinstance(returned.get('message'), str)):
                     result = {'status': returned['status'], 'message': public_message(returned['message'])}
+            except RuntimeError as error:
+                result = {'status': 'error', 'message': public_message(str(error))}
             except Exception:
                 pass
             finally:

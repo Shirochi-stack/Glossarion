@@ -227,10 +227,22 @@ function AssertManagementPage {
         Manual 'Setup only acts on its browser Extensions tab. Finish setup there, or return to the Arena connection page and retry.'
     }
 }
+function RootOwnerHandle([long]$handle) {
+    return [ArenaSetupWindow]::GetAncestor([IntPtr]$handle, 3).ToInt64()
+}
 function OwnedPicker($picker) {
+    # Chromium can host shell dialogs in a separate utility process. Bind to
+    # the exact owning browser window, not the browser process ID.
     return $null -ne $picker -and $picker.Current.ClassName -eq '#32770' -and
-        $picker.Current.ProcessId -eq $arenaBrowserPid -and
-        [ArenaSetupWindow]::GetAncestor([IntPtr]$picker.Current.NativeWindowHandle, 3).ToInt64() -eq $arenaWindowHandle
+        (RootOwnerHandle $picker.Current.NativeWindowHandle) -eq $arenaWindowHandle
+}
+function PickerTransition($candidate) {
+    if (-not (OwnedPicker $candidate)) { return 'unrelated' }
+    if ($candidate.Current.Name -match '(?i)(select.*(extension|folder)|load.*(extension|unpacked))') {
+        return 'ready'
+    }
+    # The owned native window can become foreground before its title is set.
+    return 'pending'
 }
 function AssertPicker($picker) {
     if ((CurrentWindowHandle) -ne $picker.Current.NativeWindowHandle -or -not (OwnedPicker $picker)) {
@@ -257,6 +269,55 @@ function Invoke($element, $window, [bool]$async = $false) {
     }
     if ($async) { [ArenaSetupWindow]::InvokeAsync($pattern) }
     else { $pattern.Invoke() }
+}
+
+function SelectArenaFolder($picker) {
+    Progress 'selecting the Arena folder' 'Selecting the prepared Arena companion folder.'
+    # The common file dialog can appear before its edit/control providers are
+    # ready. Wait for them rather than treating that transition as a failure.
+    $folderEdit = $null
+    $value = $null
+    $fieldDeadline = [DateTime]::UtcNow.AddSeconds(8)
+    while ([DateTime]::UtcNow -lt $fieldDeadline -and [DateTime]::UtcNow -lt $arenaDeadline) {
+        AssertPicker $picker
+        $edits = $picker.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+            (TypeCondition ([System.Windows.Automation.ControlType]::Edit)))
+        foreach ($edit in $edits) {
+            if ((Visible $edit) -and ($edit.Current.Name -match '^(Folder|File name)\s*:?\s*$' -or
+                $edit.Current.AutomationId -eq '1152')) {
+                if ($null -ne $folderEdit) { Manual 'The folder picker contains multiple destination fields. Select the Arena folder in this dialog.' }
+                $folderEdit = $edit
+            }
+        }
+        if ($null -ne $folderEdit) {
+            if ($folderEdit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$value)) { break }
+        }
+        $folderEdit = $null
+        Start-Sleep -Milliseconds 100
+    }
+    if ($null -eq $folderEdit) {
+        Manual 'Paste the prepared Arena folder path into the folder picker and select that folder.'
+    }
+    AssertPicker $picker
+    $folderEdit.SetFocus()
+    AssertPicker $picker
+    $value.SetValue($arenaFolder)
+    if ($value.Current.Value -cne $arenaFolder) { Manual 'The folder picker did not accept the Arena directory. Select it in this dialog.' }
+    $select = FindButton $picker 'Select Folder'
+    if ($null -eq $select) { $select = FindButton $picker 'Select folder' }
+    if ($null -eq $select) { $select = FindButton $picker 'Select' }
+    if ($null -eq $select) { $select = FindButton $picker 'Open' }
+    $pickerHandle = $picker.Current.NativeWindowHandle
+    Invoke $select $picker $true
+    $closeDeadline = [DateTime]::UtcNow.AddSeconds(8)
+    while ((CurrentWindowHandle) -eq $pickerHandle -and
+           [DateTime]::UtcNow -lt $closeDeadline -and [DateTime]::UtcNow -lt $arenaDeadline) {
+        if ([ArenaSetupWindow]::InvokeFailed) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ((CurrentWindowHandle) -ne $arenaWindowHandle) {
+        Manual 'The browser has not accepted the selected extension folder. Check the open dialog before retrying.'
+    }
 }
 
 try {
@@ -393,39 +454,21 @@ try {
         if ($foreground -ne $arenaWindowHandle) {
             if ($foreground -eq 0) { Manual 'Setup paused because the browser window is no longer active. Finish Load unpacked manually.' }
             $candidate = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$foreground)
-            if ((OwnedPicker $candidate) -and
-                $candidate.Current.Name -match '(?i)(select.*(extension|folder)|load.*(extension|unpacked))') {
+            $transition = PickerTransition $candidate
+            if ($transition -eq 'ready') {
                 $picker = $candidate
                 break
             }
-            Manual 'Setup paused because another window became active. Finish Load unpacked in the intended browser.'
+            if ($transition -eq 'unrelated') {
+                Manual 'Setup paused because another window became active. Finish Load unpacked in the intended browser.'
+            }
         }
         if ([ArenaSetupWindow]::InvokeFailed) { break }
         Start-Sleep -Milliseconds 150
     }
     if ($null -eq $picker) { Manual 'Select the prepared Arena folder in the browser folder picker, then return to the Arena connection page.' }
 
-    Progress 'selecting the Arena folder' 'Selecting the prepared Arena companion folder.'
-    $edits = $picker.FindAll([System.Windows.Automation.TreeScope]::Descendants,
-        (TypeCondition ([System.Windows.Automation.ControlType]::Edit)))
-    $folderEdit = $null
-    foreach ($edit in $edits) {
-        if ((Visible $edit) -and $edit.Current.Name -match '^(Folder|File name):?$') {
-            if ($null -ne $folderEdit) { Manual 'Select the prepared Arena folder in the open folder picker.' }
-            $folderEdit = $edit
-        }
-    }
-    $value = $null
-    if ($null -eq $folderEdit -or -not $folderEdit.TryGetCurrentPattern(
-        [System.Windows.Automation.ValuePattern]::Pattern, [ref]$value)) {
-        Manual 'Paste the prepared Arena folder path into the folder picker and select that folder.'
-    }
-    AssertPicker $picker
-    $value.SetValue($arenaFolder)
-    $select = FindButton $picker 'Select Folder'
-    if ($null -eq $select) { $select = FindButton $picker 'Select folder' }
-    if ($null -eq $select) { $select = FindButton $picker 'Select' }
-    Invoke $select $picker
+    SelectArenaFolder $picker
     Finish 'awaiting_connection' 'The Arena folder was submitted to the browser. Return to the Arena connection page; installation is confirmed when the helper connects.'
 } catch {
     Finish 'manual_required' ("Windows setup stopped while " + $script:arenaSetupPhase + ". Finish the normal browser steps manually, or return to the Arena connection page and retry.")

@@ -392,7 +392,7 @@ $ErrorActionPreference = 'Stop'
 $source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:ARENA_GUARD_TEST))
 $tokens = $null; $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
-$names = @('ConnectAddressMatches','SelectedNativeTab','AssertBoundWindow','AssertConnectionPage','AssertNewTab')
+$names = @('ConnectAddressMatches','SelectedNativeTab','AssertBoundWindow','AssertConnectionPage','AssertNewTab','OwnedPicker','PickerTransition','AssertPicker')
 foreach ($name in $names) {
     $definition = $ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}, $true)
     if ($null -eq $definition) { throw "Missing production guard $name" }
@@ -400,6 +400,7 @@ foreach ($name in $names) {
 }
 function Manual([string]$message) { throw ('MANUAL: ' + $message) }
 function CurrentWindowHandle { return $script:foreground }
+function RootOwnerHandle($handle) { return $script:rootOwner }
 function NativeAddress($window) { return 'mock-address' }
 function AddressPattern($address) { return [pscustomobject]@{Current=[pscustomobject]@{Value=$script:addressValue}} }
 function NativeTabs($window) { return $script:tabs }
@@ -451,6 +452,23 @@ Reset; $script:tabs = @((Tab 'connection' $false), (Tab 'unexpected' $true))
 Blocks { AssertNewTab }
 Reset; $script:tabs = @((Tab 'connection' $false), (Tab 'new' $true)); $script:foreground = 99
 Blocks { AssertNewTab }
+Reset
+$script:rootOwner=11; $script:foreground=33
+$picker=[pscustomobject]@{Current=[pscustomobject]@{ClassName='#32770';NativeWindowHandle=33;ProcessId=44;Name='Select the extension directory.'}}
+Allows { AssertPicker $picker } # Dialog PID differs from the browser PID.
+Allows { if ((PickerTransition $picker) -ne 'ready') { throw 'Owned utility-process dialog was rejected' } }
+$picker.Current.Name=''
+Allows { if ((PickerTransition $picker) -ne 'pending') { throw 'Dialog title initialization was treated as a focus change' } }
+$picker.Current.Name='Select the extension directory.'
+$script:rootOwner=99
+Blocks { AssertPicker $picker }
+Allows { if ((PickerTransition $picker) -ne 'unrelated') { throw 'Another profile window was accepted' } }
+$script:rootOwner=11; $picker.Current.ClassName='Chrome_WidgetWin_1'
+Blocks { AssertPicker $picker }
+$picker.Current.ClassName='#32770'; $script:foreground=99
+Blocks { AssertPicker $picker }
+$script:foreground=33; $script:rootOwner=99; $picker.Current.ProcessId=22
+Blocks { AssertPicker $picker } # Same process alone never grants ownership.
 @{cases=$cases;passed=$true} | ConvertTo-Json -Compress
 '''
     encoded = base64.b64encode(command.encode('utf-16-le')).decode('ascii')
@@ -461,7 +479,7 @@ Blocks { AssertNewTab }
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert json.loads(result.stdout) == {'cases': 14, 'passed': True}
+    assert json.loads(result.stdout) == {'cases': 22, 'passed': True}
 
 
 def test_real_installer_process_roundtrip_without_browser_automation(extension, monkeypatch):
@@ -532,3 +550,87 @@ throw 'The cancelled helper should have been terminated.'
     assert len(launches) == 1
     assert Path(launches[0][0][0]).name.lower() == 'powershell.exe'
     assert launches[0][1].poll() is not None
+
+
+def test_folder_selection_waits_fills_and_submits_with_mocked_dialog():
+    powershell = shutil.which('powershell.exe')
+    if powershell is None:
+        pytest.skip('Windows PowerShell dialog logic check')
+    # Load only type definitions; all dialog objects and actions below are
+    # mocks. No browser, window enumeration, keyboard events or native API calls.
+    command = r'''
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:ARENA_DIALOG_TEST))
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+$definition = $ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'SelectArenaFolder'}, $true)
+Invoke-Expression $definition.Extent.Text
+function Progress($phase, $message) {}
+function Manual($message) { throw ('MANUAL: ' + $message) }
+function AssertPicker($picker) { if ($script:foreground -ne 12) { Manual 'Wrong foreground window' } }
+function Visible($element) { return $true }
+function TypeCondition($type) { return $null }
+function CurrentWindowHandle { return $script:foreground }
+function FindButton($picker, $name) { return [pscustomobject]@{Name=$name} }
+function Invoke($button, $picker, $async) {
+    if (-not $async) { throw 'Closing the modal dialog must be asynchronous' }
+    if ($script:pattern.Current.Value -cne $script:arenaFolder) { throw 'Submitted before filling the folder' }
+    $script:submitted++; $script:closed=$true; $script:foreground=11
+}
+function Reset {
+    $script:arenaFolder = 'C:\Arena helper & files\extension'
+    $script:arenaWindowHandle = 11; $script:foreground=12
+    $script:arenaDeadline = [DateTime]::UtcNow.AddSeconds(20)
+    $script:closed=$false; $script:reads=0; $script:submitted=0
+    $script:reject=$false; $script:ambiguous=$false
+    $script:pattern=[pscustomobject]@{Current=[pscustomobject]@{Value=''}}
+    $script:pattern | Add-Member ScriptMethod SetValue {param($value) if (-not $script:reject) { $this.Current.Value=$value }}
+    $script:edit=[pscustomobject]@{Current=[pscustomobject]@{Name='Folder: ';AutomationId='1152'}}
+    $script:edit | Add-Member ScriptMethod SetFocus {}
+    $script:edit | Add-Member ScriptMethod TryGetCurrentPattern {
+        param($id, $result)
+        $result.Value=$script:pattern
+        return $true
+    }
+    $script:picker=[pscustomobject]@{}
+    $script:picker | Add-Member ScriptProperty Current {
+        if ($script:closed) { throw 'Do not access a closed dialog' }
+        return [pscustomobject]@{NativeWindowHandle=12}
+    }
+    $script:picker | Add-Member ScriptMethod FindAll {
+        param($scope, $condition)
+        $script:reads++
+        if ($script:reads -lt 3) { return @() }
+        if ($script:ambiguous) { return @($script:edit, $script:edit) }
+        return @($script:edit)
+    }
+}
+$cases=0
+foreach ($fieldName in @('Folder: ','')) {
+    Reset
+    $script:edit.Current.Name=$fieldName
+    SelectArenaFolder $picker
+    if ($submitted -ne 1 -or $reads -ne 3) { throw 'The delayed dialog was not completed exactly once' }
+    $cases++
+}
+foreach ($failure in @('reject','ambiguous')) {
+    Reset
+    if ($failure -eq 'reject') { $script:reject=$true } else { $script:ambiguous=$true }
+    $blocked=$false
+    try { SelectArenaFolder $picker } catch { if (-not $_.Exception.Message.StartsWith('MANUAL:')) { throw }; $blocked=$true }
+    if (-not $blocked -or $submitted -ne 0) { throw 'Invalid directory selection was submitted' }
+    $cases++
+}
+@{cases=$cases;passed=$true} | ConvertTo-Json -Compress
+'''
+    encoded = base64.b64encode(command.encode('utf-16-le')).decode('ascii')
+    result = subprocess.run(
+        [powershell, '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded],
+        capture_output=True, text=True, timeout=15,
+        env=dict(os.environ, ARENA_DIALOG_TEST=base64.b64encode(setup._INSTALL_SCRIPT.encode('utf-8')).decode('ascii')),
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == {'cases': 4, 'passed': True}
