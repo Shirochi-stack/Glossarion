@@ -11,6 +11,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -28,7 +29,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 17
+ADAPTER_VERSION = 18
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 ARENA_RECAPTCHA_V3_SITEKEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0"
 UV_VERSION = "0.8.22"
@@ -49,6 +50,35 @@ class ArenaStreamError(RuntimeError):
         self.http_status = http_status
         self.retry_after = retry_after
         self.partial_response = partial_response
+
+
+async def _run_stream_with_idle_timeout(awaitable, activity, timeout):
+    """Allow a long active response; time out only when upstream stops sending."""
+    import asyncio
+    task = asyncio.create_task(awaitable)
+    try:
+        if timeout is None:
+            return await task
+        while not task.done():
+            activity.clear()
+            wake = asyncio.create_task(activity.wait())
+            try:
+                ready, _ = await asyncio.wait((task, wake), timeout=timeout,
+                                               return_when=asyncio.FIRST_COMPLETED)
+                if not ready:
+                    raise RuntimeError(f"Arena stream stalled: no upstream data for {timeout:g} seconds. Partial output was not replayed.")
+            finally:
+                wake.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await wake
+        return await task
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("Arena browser stream timed out. Partial output was not replayed.") from exc
+    finally:
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
 
 
 async def _open_arena_login(page, navigation):
@@ -632,7 +662,11 @@ def consume_stream(lines, log_fn=print, log_stream=True, cancel_generation=None,
                 continue
             if event.get("error"):
                 error = event["error"]
-                message = str(error.get("message", "upstream error") if isinstance(error, dict) else error)
+                message = str((error.get("message") or "") if isinstance(error, dict) else error).strip()
+                if not message:
+                    phase = "after reasoning, before answer text" if thinking and not text else "before completion"
+                    kind = str(error.get("type") or "unspecified upstream error") if isinstance(error, dict) else "unspecified upstream error"
+                    message = f"Arena ended the stream {phase} without an error message ({kind})."
                 status = error.get("status_code") if isinstance(error, dict) else None
                 retry_after = error.get("retry_after") if isinstance(error, dict) else None
                 if retry_after:
@@ -669,7 +703,7 @@ def send_message_stream(messages, model, temperature=0.7, max_tokens=None, timeo
     status = ensure_proxy_running(log_fn=log_fn)
     if is_cancel_generation_cancelled(generation):
         raise RuntimeError("Arena stream cancelled")
-    payload = {"model": model, "messages": messages, "stream": True, "temperature": temperature, "account_slot": account_id, "dispatch_ack": True}
+    payload = {"model": model, "messages": messages, "stream": True, "temperature": temperature, "account_slot": account_id, "dispatch_ack": True, "stream_timeout": timeout}
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
     request_id = secrets.token_hex(16)
@@ -1050,12 +1084,15 @@ async def _serve_worker(key):
             queue = asyncio.Queue(maxsize=32)
             headers_ready = asyncio.Event()
             done_event = asyncio.Event()
+            upstream_activity = asyncio.Event()
             result = {"status": 502, "headers": {}}
             state["upstream_error"] = None
             request_events = state["events"]
             request_dispatch_ack = state.get("dispatch_ack")
             async def emit(source, item):
-                if item.get("dispatching"):
+                if item.get("activity"):
+                    upstream_activity.set()
+                elif item.get("dispatching"):
                     if request_dispatch_ack is not None:
                         request_dispatch_ack.clear()
                         await request_events.put({"arena_progress": "dispatch"})
@@ -1064,6 +1101,7 @@ async def _serve_worker(key):
                 elif item.get("token_received"):
                     await request_events.put({"arena_progress": "token"})
                 elif "status" in item:
+                    upstream_activity.set()
                     result.update(item)
                     if item["status"] >= 400:
                         state["upstream_error"] = {
@@ -1074,6 +1112,7 @@ async def _serve_worker(key):
                     headers_ready.set()
                     await request_events.put({"arena_progress": "headers:" + str(item["status"])})
                 elif "line" in item:
+                    upstream_activity.set()
                     await queue.put(item["line"])
             await page.expose_binding("arenaEmit", emit)
             navigation = await page.goto("https://arena.ai/", wait_until="domcontentloaded")
@@ -1114,7 +1153,7 @@ async def _serve_worker(key):
                     request_payload["recaptchaV3Token"] = token
                     await emit(None, {"token_received": True})
                     await emit(None, {"dispatching": True})
-                    await page.evaluate(r"""async ({url, method, payload}) => {
+                    await _run_stream_with_idle_timeout(page.evaluate(r"""async ({url, method, payload}) => {
                         const response = await fetch(url, {method, credentials:'include',
                             headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
                         if (!response.ok) {
@@ -1139,6 +1178,7 @@ async def _serve_worker(key):
                         await arenaEmit({status:response.status, headers:Object.fromEntries(response.headers)});
                         const reader = response.body.getReader(); const decoder = new TextDecoder(); let pending='';
                         while (true) { const {done,value} = await reader.read();
+                            if (value?.length) await arenaEmit({activity:true});
                             pending += decoder.decode(value || new Uint8Array(), {stream:!done});
                             let end; while ((end=pending.indexOf('\n')) >= 0) {
                                 await arenaEmit({line:pending.slice(0,end).replace(/\r$/, '')}); pending=pending.slice(end+1);
@@ -1146,24 +1186,27 @@ async def _serve_worker(key):
                             if (done) break;
                         }
                         if (pending) await arenaEmit({line:pending});
-                    }""", {"url": "https://arena.ai" + parsed.path, "method": http_method, "payload": request_payload})
+                    }""", {"url": "https://arena.ai" + parsed.path, "method": http_method, "payload": request_payload}),
+                        upstream_activity, state["stream_timeout"])
                 finally:
                     headers_ready.set()
                     captcha_page = None
                     done_event.set()
-            task = asyncio.create_task(asyncio.wait_for(pump(), timeout_seconds))
+            task = asyncio.create_task(pump())
             request_tasks = state["transport_tasks"]
             request_tasks.add(task)
             task.add_done_callback(request_tasks.discard)
             try:
-                await asyncio.wait_for(headers_ready.wait(), timeout_seconds)
+                await asyncio.wait_for(headers_ready.wait(), 300)
                 if task.done() and task.exception():
                     raise task.exception()
-            except BaseException:
+            except BaseException as exc:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
                 await page.close()
+                if isinstance(exc, asyncio.TimeoutError):
+                    raise RuntimeError("Arena browser setup timed out before response headers arrived.") from exc
                 raise
             class Response(transport.BrowserFetchStreamResponse):
                 async def aiter_lines(self):
@@ -1363,6 +1406,14 @@ async def _serve_worker(key):
 
     async def prepare_chat(request, body, request_id):
         nonlocal cursor
+        stream_timeout = body.pop("stream_timeout", 600)
+        if stream_timeout is not None:
+            try:
+                stream_timeout = float(stream_timeout)
+                if not math.isfinite(stream_timeout) or stream_timeout <= 0:
+                    raise ValueError()
+            except (ValueError, TypeError):
+                raise HTTPException(400, "Arena stream_timeout must be positive or null")
         slot = body.pop("account_slot", 0)
         if slot is None:
             accounts = list_accounts()
@@ -1382,6 +1433,7 @@ async def _serve_worker(key):
         state["submitted"] = False
         state["terminal_error"] = None
         state["usage"] = None
+        state["stream_timeout"] = stream_timeout
         state["upstream_error"] = None
         state["events"] = asyncio.Queue(maxsize=64)
         state["transport_tasks"] = set()

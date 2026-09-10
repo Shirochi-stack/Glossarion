@@ -46,6 +46,11 @@ visibility. During batch mode, `ALLOW_AUTHGPT_BATCH_STREAM_LOGS` controls it.
 As with Antigravity, visible forced streams include reasoning. The optional
 streaming and generic batch-streaming toggles do not disable this transport.
 Interrupted streams are errors rather than completed translations.
+The request's configured timeout is forwarded to the worker as a streaming
+inactivity limit, starting after CAPTCHA preparation and dispatch acknowledgment.
+Incoming upstream data resets that limit; active reasoning and answer streams
+are not capped at 120 seconds. Stalls report their duration, and empty upstream
+errors identify whether reasoning had arrived before the answer.
 
 Token generation, loader initialization, readiness waits, and cache/refresh now
 use the pinned LMArenaBridge `recaptcha.py` helpers. The adapter binds them to

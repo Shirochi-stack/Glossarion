@@ -90,6 +90,7 @@ class Page:
             return
         await self.emit(None, {"status": 200, "headers": {}})
         await self.emit(None, {"line": 'ag:"reasoning"'})
+        await asyncio.sleep(self.context.browser.delay_after_reasoning)
         await self.emit(None, {"line": 'a0:"hello"'})
         await asyncio.sleep(.01)
         await self.emit(None, {"line": 'ad:{"finishReason":"stop","usage":{"total_tokens":8}}'})
@@ -132,6 +133,7 @@ class Browser:
         self.verifications = 0
         self.mint_gate = None
         self.mint_started = asyncio.Event()
+        self.delay_after_reasoning = 0
 
     async def close(self):
         self.contexts.clear()
@@ -367,6 +369,16 @@ class WorkerTest(unittest.TestCase):
                 recovered = await asyncio.wait_for(delayed, 5)
                 self.assertEqual(arena.consume_stream(recovered.text.splitlines(), log_stream=False)["content"], "hello")
                 self.assertEqual(len(browser.sent), before + 1)
+                before = len(browser.sent)
+                browser.delay_after_reasoning = 0.5
+                stalled = await client.post("/v1/chat/completions", json={
+                    "stream_timeout": 0.1, "account_slot": 0,
+                    "model": "test-model", "messages": [{"role": "user", "content": "test"}]})
+                with self.assertRaisesRegex(arena.ArenaStreamError, "no upstream data") as caught:
+                    arena.consume_stream(stalled.text.splitlines(), log_stream=False)
+                self.assertTrue(caught.exception.partial_response)
+                self.assertEqual(len(browser.sent), before + 1)
+                browser.delay_after_reasoning = 0
             for sock in sockets:
                 sock.close()
 

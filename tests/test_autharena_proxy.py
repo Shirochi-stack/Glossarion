@@ -119,6 +119,15 @@ def test_hidden_stream_has_no_content_or_phase_logs():
     assert logged == []
 
 
+@pytest.mark.parametrize('message', ['', None, '   '])
+def test_empty_upstream_error_after_reasoning_explains_interrupted_phase(message):
+    lines = [event({'reasoning_content': 'still thinking'}),
+             'data: ' + json.dumps({'error': {'message': message, 'type': 'internal_error'}})]
+    with pytest.raises(arena.ArenaStreamError, match='after reasoning, before answer text') as error:
+        arena.consume_stream(lines, log_stream=False)
+    assert error.value.partial_response is True
+
+
 @pytest.mark.parametrize("ending", [[], ["data: [DONE]"], [event(finish="stop")]])
 def test_incomplete_stream_is_not_reported_as_success(ending):
     with pytest.raises(RuntimeError, match="interrupted"):
@@ -458,6 +467,8 @@ def test_dispatch_ack_follows_callback_and_progress_ignores_stream_visibility(mo
         def close(self):
             pass
     def post(url, **kwargs):
+        if url.endswith('/v1/chat/completions'):
+            assert kwargs['json']['stream_timeout'] == 42.5
         if url.endswith('/dispatch'):
             assert order == ['watchdog']
             order.append('dispatch')
@@ -465,7 +476,7 @@ def test_dispatch_ack_follows_callback_and_progress_ignores_stream_visibility(mo
     monkeypatch.setattr(arena, "ensure_proxy_running", lambda **kwargs: {"url": "http://localhost:1", "key": "test"})
     monkeypatch.setattr(arena.requests, "post", post)
     result = arena.send_message_stream([], "test", log_fn=logs.append, log_stream=False,
-        before_send_callback=lambda: order.append('watchdog'))
+        before_send_callback=lambda: order.append('watchdog'), timeout=42.5)
     assert order == ['watchdog', 'dispatch']
     assert result['content'] == 'done'
     assert any('token received' in line for line in logs)
