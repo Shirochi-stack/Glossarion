@@ -8286,8 +8286,8 @@ class MultiAPIKeyDialog(QDialog):
         if route != -1:
             return route
         ids = self._autharena_login_account_choices()
-        labels = ['Default account (slot 0)' if slot == 0 else f'Account #{slot}' for slot in ids]
-        labels.append('New account…')
+        labels = [str(slot) for slot in ids]
+        labels.append('+ New')
         selected, accepted = QInputDialog.getItem(
             self, 'Arena login account',
             'autharena0/ rotates signed-in accounts. Choose an account to sign in:',
@@ -8316,7 +8316,7 @@ class MultiAPIKeyDialog(QDialog):
             za_button = getattr(combo, '_authza_login_button', None)
             occupied = 28 if za_button is not None and not za_button.isHidden() else 0
             editor.setTextMargins(margins.left(), margins.top(),
-                                  max(original, occupied, 78 if route is not None else 0),
+                                  max(original, occupied, button.width() + 4 if route is not None else 0),
                                   margins.bottom())
             if route is None:
                 return
@@ -8331,13 +8331,15 @@ class MultiAPIKeyDialog(QDialog):
                 )
             except Exception:
                 pass
-            button.setText('Waiting…' if busy else ('✓ Login' if signed_in else 'Login'))
-            label = 'rotating pool (choose an account)' if route == -1 else (
-                'default account' if route == 0 else f'account #{route}'
-            )
+            button.setText('Arena Login')
+            label = 'rotating pool (choose an account)' if route == -1 else f'account {route}'
             button.setToolTip(
-                f'Arena {label}: click to sign in or replace the saved login. '
-                'Complete sign-in and first-use consent in the browser.'
+                f'Arena {label}. '
+                + ('Sign-in is in progress in the external browser.' if busy else (
+                    ('Last verified signed in. ' if signed_in else 'No verified sign-in. ')
+                    + 'Click to sign in or replace the saved login in the external browser. '
+                    'Complete sign-in and first-use consent there.'
+                ))
             )
             button.raise_()
         except RuntimeError:
@@ -8352,9 +8354,10 @@ class MultiAPIKeyDialog(QDialog):
         if editor is None:
             return
         button = QToolButton(editor)
-        button.setFixedSize(74, 22)
+        button.setText('Arena Login')
+        button.setFixedSize(max(94, button.sizeHint().width()), 22)
         button.setCursor(Qt.PointingHandCursor)
-        button.setAccessibleName('Arena login')
+        button.setAccessibleName('Arena Login')
         button.setObjectName('autharenaManagerLoginButton')
         button.hide()
         combo._autharena_login_button = button
@@ -8403,7 +8406,7 @@ class MultiAPIKeyDialog(QDialog):
         signals = self._autharena_login_signals
         self._autharena_login_busy = True
         self._refresh_all_autharena_login_buttons()
-        self._autharena_manager_login_progress(f'Arena: opening login for account #{account_id}…')
+        self._autharena_manager_login_progress(f'Arena: opening login for account {account_id}…')
 
         def progress(message):
             try:
@@ -8442,7 +8445,7 @@ class MultiAPIKeyDialog(QDialog):
         self._autharena_login_result = outcome.get('result')
         self._refresh_all_autharena_login_buttons()
         message = (f"Arena login failed: {self._autharena_login_error}" if self._autharena_login_error
-                   else f"Arena account #{outcome['account_id']} is signed in.")
+                   else f"Arena account {outcome['account_id']} is signed in.")
         self._autharena_manager_login_progress(message)
         if not self._autharena_login_error:
             self._refresh_parent_model_requirements(save_config=False)

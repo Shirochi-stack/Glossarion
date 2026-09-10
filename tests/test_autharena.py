@@ -24,6 +24,7 @@ def clean_cancel(monkeypatch, tmp_path):
     arena._cancel_event.clear()
     monkeypatch.setattr(arena, "_profiles_root", lambda: tmp_path)
     monkeypatch.setattr(arena, "_pool_cursor", 0)
+    monkeypatch.setattr(arena, "_ensure_browser_bridge", lambda: {'url': 'http://127.0.0.1:18874', 'control_token': 'test-only'})
     yield
     arena.cancel_stream()
     arena._cancel_event.clear()
@@ -361,7 +362,7 @@ def test_helper_ready_callback_error_never_dispatches(monkeypatch, tmp_path):
     sent = tmp_path / "sent"
     child_script(monkeypatch, tmp_path,
                  "emit('ready')\n"
-                 "if sys.stdin.readline():\n"
+                 "if json.loads(sys.stdin.readline()).get('command') == 'dispatch':\n"
                  " from pathlib import Path\n"
                  " Path(config['sent']).touch()\n")
 
@@ -485,6 +486,112 @@ def test_send_logs_options_once_and_uses_new_payloads(monkeypatch):
     assert callbacks == ["send", "send"]
 
 
+@pytest.mark.parametrize("batch,shared,batch_allow,provider,expected", [
+    ("0", "1", "0", "1", True),
+    ("0", "0", "1", "1", False),
+    ("0", "1", "1", "0", False),
+    ("1", "1", "0", "1", False),
+    ("1", "0", "1", "1", True),
+    ("1", "1", "true", "0", True),
+])
+def test_stream_visibility_uses_forced_provider_settings(monkeypatch, batch, shared, batch_allow, provider, expected):
+    monkeypatch.setenv("BATCH_TRANSLATION", batch)
+    monkeypatch.setenv("LOG_STREAM_CHUNKS", shared)
+    monkeypatch.setenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", batch_allow)
+    monkeypatch.setenv("AUTHARENA_LOG_STREAM_CHUNKS", provider)
+    monkeypatch.setenv("ENABLE_STREAMING", "0")
+    monkeypatch.setenv("AUTHARENA_STREAM", "0")
+    assert arena._stream_logs_enabled() is expected
+    assert arena._stream_logs_enabled(False) is False
+    assert arena._stream_logs_enabled(True) is True
+
+
+def test_small_content_and_reasoning_deltas_are_visible_before_helper_returns(monkeypatch):
+    logs = []
+    fragments = []
+    monkeypatch.setenv("BATCH_TRANSLATION", "0")
+    monkeypatch.setenv("LOG_STREAM_CHUNKS", "1")
+    monkeypatch.setenv("AUTHARENA_LOG_STREAM_CHUNKS", "1")
+    monkeypatch.setenv("AUTHARENA_STREAM_THINKING_LOGS", "1")
+    monkeypatch.setenv("ENABLE_STREAMING", "0")
+
+    def helper(config, deadline, **kwargs):
+        for channel, text in [("reasoning", "hmm"), ("content", "A"), ("content", " "),
+                              ("content", "你\n"), ("reasoning", "check"), ("content", "\tB")]:
+            count = len(fragments)
+            kwargs["on_chunk"](channel, text)
+            assert fragments[count:] == [(channel, text)]  # Already emitted, before next delta.
+        assert not any("Stream finished" in line for line in logs)
+        return {"content": "A 你\n\tB", "reasoning_content": "hmmcheck",
+                "finish_reason": "length", "finish_reason_explicit": True, "usage": {}}
+
+    monkeypatch.setattr(arena, "_run_browser_helper", helper)
+    result = arena.send_chat_completion(messages=[{"role": "user", "content": "go"}], model="test",
+                                       stream=False, log_fn=logs.append,
+                                       log_chunk_fn=lambda channel, text: fragments.append((channel, text)))
+    assert result["finish_reason"] == "length"
+    assert result["reasoning_content"] == "hmmcheck"
+    assert logs.count("🧠 [autharena] Thinking...") == 2
+    assert logs.count("📡 AuthArena: Text streaming...") == 2
+    assert logs[-1].startswith("📡 AuthArena: Stream finished in")
+    assert "A" not in logs  # Structured chunks are not duplicated through log_fn.
+
+
+def test_plain_logger_gets_tiny_deltas_immediately_and_hidden_reasoning_is_retained(monkeypatch):
+    logs = []
+    monkeypatch.setenv("AUTHARENA_STREAM_THINKING_LOGS", "0")
+
+    def helper(config, deadline, **kwargs):
+        kwargs["on_chunk"]("reasoning", "hidden")
+        assert not any("Thinking" in line or "hidden" in line for line in logs)
+        kwargs["on_chunk"]("content", "x")
+        assert logs[-1] == "x"
+        kwargs["on_chunk"]("content", " ")
+        assert logs[-1] == " "
+        return {"content": "x ", "reasoning_content": "hidden", "finish_reason": "stop",
+                "finish_reason_explicit": True, "usage": {}}
+
+    monkeypatch.setattr(arena, "_run_browser_helper", helper)
+    result = arena.send_chat_completion(messages=[{"role": "user", "content": "go"}], model="test",
+                                       log_stream=True, log_fn=logs.append)
+    assert result["reasoning_content"] == "hidden"
+
+
+def test_stream_error_closes_visible_phase_without_changing_failure_metadata(monkeypatch):
+    logs = []
+
+    def helper(config, deadline, **kwargs):
+        kwargs["on_chunk"]("content", "partial")
+        error = RuntimeError("stream was truncated")
+        error.request_dispatched = True
+        raise error
+
+    monkeypatch.setattr(arena, "_run_browser_helper", helper)
+    with pytest.raises(RuntimeError) as caught:
+        arena.send_chat_completion(messages=[{"role": "user", "content": "go"}], model="test",
+                                   log_stream=True, log_fn=logs.append)
+    assert caught.value.request_dispatched is True
+    assert logs[-1] == "📡 AuthArena: Stream finished with an error"
+
+
+def test_disabled_stream_visibility_keeps_final_content_without_fragment_callbacks(monkeypatch):
+    logs = []
+
+    def helper(config, deadline, **kwargs):
+        kwargs["on_chunk"]("content", "answer")
+        kwargs["on_chunk"]("reasoning", "reason")
+        return {"content": "answer", "reasoning_content": "reason", "finish_reason": "stop",
+                "finish_reason_explicit": True, "usage": {}}
+
+    monkeypatch.setattr(arena, "_run_browser_helper", helper)
+    result = arena.send_chat_completion(messages=[{"role": "user", "content": "go"}], model="test",
+                                       log_stream=False, log_fn=logs.append,
+                                       log_chunk_fn=lambda *args: pytest.fail("hidden stream was logged"))
+    assert result["content"] == "answer"
+    assert result["reasoning_content"] == "reason"
+    assert not any("streaming" in line or "Thinking" in line for line in logs)
+
+
 def test_cli_messages_stdin_json_and_no_browser_for_list(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["autharena.py", "--messages", "-", "--system", "Translate", "--json", "--quiet"])
     monkeypatch.setattr(sys, "stdin", io.StringIO('[{"role":"user","content":"你好"}]'))
@@ -505,6 +612,24 @@ def test_cli_invalid_inputs_and_frozen_command(monkeypatch, capsys):
     assert "not both" in capsys.readouterr().err
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     assert arena._helper_command() == [sys.executable, "--autharena-helper"]
+
+
+def test_cli_stream_fragments_are_readable_contiguous_stderr(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["autharena.py", "--prompt", "go"])
+
+    def send(**kwargs):
+        kwargs["log_fn"]("Text streaming")
+        kwargs["log_chunk_fn"]("content", "hel")
+        kwargs["log_chunk_fn"]("content", "lo ")
+        kwargs["log_chunk_fn"]("content", "world")
+        assert capsys.readouterr().err == "Text streaming\nhello world"
+        kwargs["log_fn"]("Stream finished")
+        assert capsys.readouterr().err == "\nStream finished\n"
+        return {"content": "hello world"}
+
+    monkeypatch.setattr(arena, "send_chat_completion", send)
+    assert arena._main() == 0
+    assert capsys.readouterr().out == "hello world\n"
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="Node optional for browser JavaScript simulation")

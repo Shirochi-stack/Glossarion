@@ -75,6 +75,52 @@ def test_arena_route_passes_active_account_and_defers_progress(arena_client, mon
     assert tls.pre_api_call_callback is None
 
 
+@pytest.mark.parametrize('batch,shared,forced,provider,expected', [
+    ('0', '1', '0', '1', True),
+    ('0', '0', '1', '1', False),
+    ('0', '1', '1', '0', False),
+    ('1', '1', '0', '1', False),
+    ('1', '0', '1', '1', True),
+])
+def test_arena_forced_stream_visibility_is_independent_of_optional_streaming(arena_client, monkeypatch,
+                                                                          batch, shared, forced, provider, expected):
+    client, _ = arena_client
+    client._streaming_enabled = lambda: pytest.fail('optional transport toggle used for forced Arena stream')
+    for key, value in {'BATCH_TRANSLATION': batch, 'LOG_STREAM_CHUNKS': shared,
+                       'ALLOW_AUTHGPT_BATCH_STREAM_LOGS': forced, 'AUTHARENA_LOG_STREAM_CHUNKS': provider,
+                       'ENABLE_STREAMING': '0'}.items():
+        monkeypatch.setenv(key, value)
+
+    def send(**kwargs):
+        assert kwargs['stream'] is True
+        assert kwargs['log_stream'] is expected
+        return completed()
+
+    monkeypatch.setattr(api, '_autharena_send', send)
+    client._send_autharena([], .2, 99, 'chapter')
+
+
+def test_arena_fragment_pipe_flushes_each_delta_and_preserves_exact_text(arena_client, monkeypatch):
+    from streaming_log import decode_stream_fragment
+    client, _ = arena_client
+    emitted = []
+    # This module routes print through its synchronous GUI logger wrapper.
+    monkeypatch.setattr(api, 'print', lambda *args, **kwargs: emitted.append((args, kwargs)))
+
+    def send(**kwargs):
+        kwargs['log_fn']('📡 AuthArena: Text streaming...')
+        assert emitted[-1][1]['flush'] is True
+        for channel, text in [('content', 'a'), ('content', ' \n\t你'), ('reasoning', 'look')]:
+            kwargs['log_chunk_fn'](channel, text)
+            args, options = emitted[-1]
+            assert options['flush'] is True
+            assert decode_stream_fragment(args[0]) == {'channel': channel, 'text': text}
+        return completed()
+
+    monkeypatch.setattr(api, '_autharena_send', send)
+    client._send_autharena([], .2, 99, 'chapter')
+
+
 def test_graceful_stop_during_preparation_prevents_send(arena_client, monkeypatch):
     client, tls = arena_client
     events = []

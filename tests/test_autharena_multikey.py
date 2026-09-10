@@ -88,8 +88,8 @@ def test_shared_editor_installs_visible_account_login(dialog, model, slot):
     assert button.isHidden() == (slot is None)
     if slot is not None:
         assert button.property('autharenaAccountId') == slot
-        assert 'Login' in button.text()
-        assert combo.lineEdit().textMargins().right() >= 78
+        assert button.text() == 'Arena Login'
+        assert combo.lineEdit().textMargins().right() >= button.width() + 4
 
 
 def test_editor_switching_keeps_other_auth_button_and_silent_reset(dialog):
@@ -100,7 +100,8 @@ def test_editor_switching_keeps_other_auth_button_and_silent_reset(dialog):
     assert not combo._authza_login_button.isHidden()
     assert combo.lineEdit().textMargins().right() >= 28
     combo.setCurrentText('autharena0/model')
-    assert combo._autharena_login_button.text() == '✓ Login'
+    assert combo._autharena_login_button.text() == 'Arena Login'
+    assert 'Last verified signed in' in combo._autharena_login_button.toolTip()
     widget._set_combo_text_silently(combo, '')
     assert combo._autharena_login_button.isHidden()
     assert combo.lineEdit().textMargins().right() == 0
@@ -115,12 +116,12 @@ def test_pool_chooser_includes_default_existing_pending_and_configured_slots(dia
 
     def choose(*args):
         choices.extend(args[3])
-        return 'Account #4', True
+        return '4', True
 
     monkeypatch.setattr(manager.QInputDialog, 'getItem', choose)
     assert widget._choose_autharena_login_account(-1) == 4
-    assert choices == ['Default account (slot 0)', 'Account #2', 'Account #4', 'Account #7', 'New account…']
-    monkeypatch.setattr(manager.QInputDialog, 'getItem', lambda *_: ('New account…', True))
+    assert choices == ['0', '2', '4', '7', '+ New']
+    monkeypatch.setattr(manager.QInputDialog, 'getItem', lambda *_: ('+ New', True))
     monkeypatch.setattr(manager.QInputDialog, 'getInt', lambda *_: (9, True))
     assert widget._choose_autharena_login_account(-1) == 9
     monkeypatch.setattr(manager.QInputDialog, 'getItem', lambda *_: ('', False))
@@ -155,6 +156,8 @@ def test_login_runs_off_thread_and_notifies_on_gui_thread(dialog, app):
     combo._autharena_login_button.click()
     assert widget._autharena_login_busy
     assert not combo._autharena_login_button.isEnabled()
+    assert combo._autharena_login_button.text() == 'Arena Login'
+    assert 'Sign-in is in progress' in combo._autharena_login_button.toolTip()
     combo.setCurrentText('autharena8/model')  # Account belongs to the click, not current text.
     release.set()
     wait_for(app, lambda: bool(widget.translator_gui.notifications))
@@ -163,6 +166,7 @@ def test_login_runs_off_thread_and_notifies_on_gui_thread(dialog, app):
     assert all(thread == gui_thread for _, thread in widget.translator_gui.logs)
     assert widget.translator_gui.notifications == [gui_thread]
     assert not widget._autharena_login_busy
+    assert combo._autharena_login_button.text() == 'Arena Login'
 
 
 @pytest.mark.parametrize('outcome', ['exception', 'unverified'])
@@ -182,6 +186,7 @@ def test_login_errors_are_captured_without_worker_dialogs(dialog, app, monkeypat
     assert widget._autharena_login_error
     assert not widget.translator_gui.notifications
     assert combo._autharena_login_button.isEnabled()
+    assert combo._autharena_login_button.text() == 'Arena Login'
     assert 'failed' in widget.translator_gui.logs[-1][0]
 
 
@@ -189,7 +194,7 @@ def test_pool_login_uses_selected_physical_slot(dialog, app, monkeypatch):
     widget, api = dialog
     combo = field(widget, 'autharena0/model')
     calls = []
-    monkeypatch.setattr(manager.QInputDialog, 'getItem', lambda *_: ('Default account (slot 0)', True))
+    monkeypatch.setattr(manager.QInputDialog, 'getItem', lambda *_: ('0', True))
     api.login = lambda **kwargs: calls.append(kwargs['account_id']) or {'logged_in': True}
     combo._autharena_login_button.click()
     wait_for(app, lambda: not widget._autharena_login_busy)

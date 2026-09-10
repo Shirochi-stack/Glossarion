@@ -48,6 +48,7 @@ _warn_lock = threading.Lock()
 _account_state_lock = threading.RLock()
 _pool_cursor = 0
 _LOGIN_STATUS_FILE = ".login-status.json"
+_bridge_config = None
 
 
 class AuthArenaError(RuntimeError):
@@ -62,6 +63,15 @@ class AuthArenaError(RuntimeError):
 
 def _env_bool(name, default=True):
     return os.getenv(name, str(default)).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _stream_logs_enabled(log_stream=None):
+    """Arena always streams; these settings control only visible live output."""
+    if log_stream is not None:
+        return bool(log_stream)
+    if os.getenv("BATCH_TRANSLATION", "0") == "1":
+        return _env_bool("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", False)
+    return _env_bool("LOG_STREAM_CHUNKS") and _env_bool("AUTHARENA_LOG_STREAM_CHUNKS")
 
 
 def _cancelled(cancel_check=None):
@@ -109,6 +119,12 @@ def _terminate_helper(proc):
 
 def cancel_stream():
     _cancel_event.set()
+    if _bridge_config:
+        try:
+            from autharena_bridge import request
+            request(_bridge_config, 'POST', '/control/cancel-owner', {'owner_pid': os.getpid()}, timeout=1)
+        except Exception:
+            pass
     with _active_lock:
         processes = list(_active_helpers)
     for proc in processes:
@@ -519,8 +535,17 @@ def _helper_command():
     return [sys.executable, str(Path(__file__).resolve()), "--browser-helper"]
 
 
+def _ensure_browser_bridge():
+    global _bridge_config
+    from autharena_bridge import ensure_broker
+    _bridge_config = ensure_broker()
+    return _bridge_config
+
+
 def _run_browser_helper(config, deadline, *, cancel_check=None, before_send_callback=None, after_rejection_callback=None,
                         log_fn=None, on_chunk=None):
+    config = dict(config, bridge=_ensure_browser_bridge(), owner_pid=os.getpid(),
+                  recaptcha_v2_sitekey=RECAPTCHA_V2_SITEKEY)
     environment = os.environ.copy()
     environment["AUTHARENA_BROWSER_HELPER"] = "1"
     environment["PYTHONIOENCODING"] = "utf-8"
@@ -630,8 +655,14 @@ def _run_browser_helper(config, deadline, *, cancel_check=None, before_send_call
         annotate_failure(exc)
         raise
     finally:
-        # Give the browser controller a chance to flush persistent cookies.
+        # Let the companion cancel its owned job and release the browser state.
         cleanup_error = None
+        if pending_error is not None:
+            try:
+                proc.stdin.write('{"command":"cancel"}\n')
+                proc.stdin.flush()
+            except (OSError, ValueError):
+                pass
         try:
             try:
                 proc.wait(timeout=3)
@@ -709,13 +740,14 @@ def send_chat_completion(*, messages, model, temperature=None, max_tokens=None,
                          timeout=None, connect_timeout=None, account_id=0,
                          stream=None, log_stream=None, progress_label=None, log_fn=None,
                          cancel_check=None, before_send_callback=None, after_rejection_callback=None,
-                         allow_interactive=True):
+                         allow_interactive=True, log_chunk_fn=None):
     if re.match(r"(?i)^autharena0/", str(model or "").strip()):
         return _send_account_pool(dict(messages=messages, model=model, temperature=temperature,
                                        max_tokens=max_tokens, top_p=top_p, frequency_penalty=frequency_penalty,
                                        presence_penalty=presence_penalty, timeout=timeout,
                                        connect_timeout=connect_timeout, account_id=account_id, stream=stream,
                                        log_stream=log_stream, progress_label=progress_label, log_fn=log_fn,
+                                       log_chunk_fn=log_chunk_fn,
                                        cancel_check=cancel_check, before_send_callback=before_send_callback,
                                        after_rejection_callback=after_rejection_callback))
     prompt = _render_messages(messages)
@@ -733,19 +765,33 @@ def send_chat_completion(*, messages, model, temperature=None, max_tokens=None,
             _warned_options.update(ignored)
         if new:
             log_fn("AuthArena: Arena controls generation settings; unsupported options are ignored: " + ", ".join(new))
-    should_log = (_env_bool("AUTHARENA_STREAM") if stream is None else bool(stream))
-    should_log = should_log and (_env_bool("AUTHARENA_LOG_STREAM_CHUNKS", _env_bool("LOG_STREAM_CHUNKS")) if log_stream is None else bool(log_stream))
+    # ENABLE_STREAMING and the legacy AUTHARENA_STREAM setting cannot disable
+    # Arena's required stream. Match other forced-stream providers' visibility.
+    should_log = _stream_logs_enabled(log_stream)
     thinking_log = _env_bool("AUTHARENA_STREAM_THINKING_LOGS", _env_bool("STREAM_THINKING_LOGS"))
 
-    log_buffers = {"content": "", "reasoning": ""}
+    visible_phase = None
     started = time.monotonic()
 
     def on_chunk(kind, text):
-        if should_log and log_fn and (kind != "reasoning" or thinking_log):
-            log_buffers[kind] += text.replace("\x1f", "\\x1F")
-            if "\n" in log_buffers[kind] or len(log_buffers[kind]) >= 160:
-                text, log_buffers[kind] = log_buffers[kind], ""
-                log_fn(("    " if kind == "reasoning" else "") + text)
+        nonlocal visible_phase
+        if not should_log or not text or (kind == "reasoning" and not thinking_log):
+            return
+        if log_fn and visible_phase != kind:
+            if kind == "reasoning":
+                log_fn("🧠 [autharena] Thinking...")
+            else:
+                if visible_phase == "reasoning":
+                    log_fn("🧠 [autharena] Thinking complete")
+                log_fn("📡 AuthArena: Text streaming...")
+        visible_phase = kind
+        # Forward each delta immediately, even a single character or whitespace.
+        # GUI callers can preserve fragment boundaries through log_chunk_fn;
+        # plain loggers/CLI also receive live deltas without a size threshold.
+        if log_chunk_fn:
+            log_chunk_fn(kind, text)
+        elif log_fn:
+            log_fn(text.replace("\x1f", "\\x1F"))
 
     def before_send():
         if before_send_callback:
@@ -760,14 +806,16 @@ def send_chat_completion(*, messages, model, temperature=None, max_tokens=None,
                   "allow_interactive": bool(allow_interactive)}
         if log_fn:
             log_fn(f"AuthArena: preparing a new isolated request for {model}")
-        result = _run_browser_helper(config, deadline, cancel_check=cancel_check,
-                                     before_send_callback=before_send, after_rejection_callback=after_rejection_callback,
-                                     log_fn=log_fn, on_chunk=on_chunk)
+        try:
+            result = _run_browser_helper(config, deadline, cancel_check=cancel_check,
+                                         before_send_callback=before_send, after_rejection_callback=after_rejection_callback,
+                                         log_fn=log_fn, on_chunk=on_chunk)
+        except BaseException:
+            if should_log and log_fn and visible_phase is not None:
+                log_fn("📡 AuthArena: Stream finished with an error")
+            raise
         result["account_id"] = account_id
         if should_log and log_fn:
-            for kind, text in log_buffers.items():
-                if text:
-                    log_fn(("    " if kind == "reasoning" else "") + text)
             log_fn(f"📡 AuthArena: Stream finished in {time.monotonic() - started:.1f}s")
         return result
 
@@ -776,7 +824,7 @@ def login(account_id=0, timeout=DEFAULT_TIMEOUT, log_fn=None):
     deadline = time.monotonic() + _positive_timeout(timeout)
     with _profile_gate(account_id, deadline, log_fn=log_fn) as profile:
         return _run_browser_helper({"profile": str(profile), "account_id": _account_number(account_id),
-                                    "model": DEFAULT_MODEL, "login": True,
+                                    "model": "", "login": True,
                                     "timeout": max(0.01, deadline - time.monotonic())},
                                    deadline, log_fn=log_fn)
 
@@ -1048,7 +1096,24 @@ def _main():
                               "error_type": "configuration" if isinstance(exc, ImportError) else
                               "timeout" if isinstance(exc, TimeoutError) else "api"}), flush=True)
             return 1
-    log_fn = None if args.quiet else lambda message: print(message, file=sys.stderr, flush=True)
+    partial_stream_line = False
+
+    def cli_log(message):
+        nonlocal partial_stream_line
+        if partial_stream_line:
+            print(file=sys.stderr)
+        print(message, file=sys.stderr, flush=True)
+        partial_stream_line = False
+
+    def cli_fragment(channel, text):
+        nonlocal partial_stream_line
+        del channel
+        sys.stderr.write(text)
+        sys.stderr.flush()
+        if text:
+            partial_stream_line = not text.endswith("\n")
+
+    log_fn = None if args.quiet else cli_log
     try:
         if args.list_models and args.login:
             raise ValueError("Use --list-models or --login, not both")
@@ -1060,7 +1125,8 @@ def _main():
             print(json.dumps(result) if args.json else "Arena browser profile saved.")
         else:
             result = send_chat_completion(messages=_load_cli_messages(args), model=args.model,
-                                          timeout=args.timeout, account_id=args.account_id, log_fn=log_fn)
+                                          timeout=args.timeout, account_id=args.account_id, log_fn=log_fn,
+                                          log_chunk_fn=None if args.quiet else cli_fragment)
             print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else result["content"])
         return 0
     except (Exception, KeyboardInterrupt) as exc:

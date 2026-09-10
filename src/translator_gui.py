@@ -483,6 +483,7 @@ from collections import deque
 import atexit
 import faulthandler
 import platform
+from streaming_log import decode_stream_fragment
 
 _GUI_LOG_BATCH_MAX_MESSAGES = 250
 _GUI_LOG_BATCH_MAX_CHARS = 256 * 1024
@@ -9958,6 +9959,19 @@ class _InputOutputDialog(QDialog):
             callback_thread = str(
                 source_thread or threading.current_thread().name or ""
             )
+            fragment = decode_stream_fragment(value)
+            if fragment is not None:
+                # Fragments carry their own channel and exact whitespace. Do
+                # not interpret generated text as pipeline status or thread IDs.
+                phase = "thinking" if fragment["channel"] == "reasoning" else "text"
+                self._listener_stream_phase_by_thread[callback_thread] = phase
+                self._log_queue.append({
+                    "message": fragment["text"],
+                    "thread": callback_thread,
+                    "channel": phase,
+                    "fragment": True,
+                })
+                return "suppress-main-log"
             thread_key = self._thread_key_from_log(value, callback_thread)
 
             # Tell append_log not to duplicate high-volume token payloads in
@@ -10284,6 +10298,29 @@ class _InputOutputDialog(QDialog):
                 message, source_thread = queued, ""
                 channel_hint = ""
             drained += 1
+            if isinstance(queued, dict) and queued.get("fragment") is True:
+                chunk = str(message)
+                if not chunk:
+                    continue
+                phase = "thinking" if channel_hint == "thinking" else "text"
+                self._stream_phase_by_thread[source_thread] = phase
+                self._in_thinking = phase == "thinking"
+                self._streaming_text = phase == "text"
+                segment = self._request_segment_for_thread(source_thread)
+                segment["status_only"] = False
+                segment["phase"] = phase
+                segment["complete"] = False
+                if phase == "text":
+                    self._streamed_content += chunk
+                    segment["content"] += chunk
+                    generation_batches.setdefault(id(segment), [segment, []])[1].append(chunk)
+                    output_changed = True
+                else:
+                    self._append_thinking(chunk, streamed_thinking=True)
+                    segment["thinking"] += chunk
+                    thinking_batches.setdefault(id(segment), [segment, []])[1].append(chunk)
+                    processing_changed = True
+                continue
             for raw_line in str(message).split("\n"):
                 for line in self._split_embedded_pipeline_log(raw_line):
                     kind = self._classify_line(
@@ -18834,7 +18871,7 @@ Recent translations to summarize:
                 if arena_match and model != getattr(self, '_autharena_account_model_snapshot', None):
                     primary_id = int(arena_match.group(1) or 0)
                     # Explicit zero means the rotating route; its login chooser
-                    # still targets a physical profile, including Default.
+                    # still targets a physical profile, including slot 0.
                     if arena_match.group(1) != '0' and primary_id in sorted_ids:
                         cur_idx = sorted_ids.index(primary_id)
             if (
@@ -18877,7 +18914,7 @@ Recent translations to summarize:
                     combo.blockSignals(True)
                     combo.clear()
                     for aid in sorted_ids:
-                        combo.addItem("Default" if provider == 'autharena' and aid == 0 else f"#{aid}", aid)
+                        combo.addItem(str(aid) if provider == 'autharena' else f"#{aid}", aid)
                     if provider == 'authgrok' and authgrok_pool_requested:
                         combo.addItem("+ N", _AUTHGROK_ADD_ACCOUNT_SENTINEL)
                     if provider == 'autharena':
@@ -19521,6 +19558,7 @@ Recent translations to summarize:
     def _update_autharena_login_status(self):
         """Display cached verification status without opening a browser."""
         button = self.autharena_login_btn
+        button.setText("Arena Login")
         combo = getattr(self, 'autharena_acct_combo', None)
         busy = getattr(self, '_autharena_login_in_progress', False)
         button.setEnabled(not busy)
@@ -19528,26 +19566,24 @@ Recent translations to summarize:
             combo.setEnabled(not busy)
         if busy:
             account = self._autharena_login_account_id
-            label = 'Default' if account == 0 else f'#{account}'
-            button.setText(f"⏳ Arena {label} Login…")
+            label = str(account)
+            button.setToolTip(f"Arena profile: {label}. Sign-in is in progress in the external browser.")
             return
         account = self._get_autharena_account_id()
-        label = 'Default' if account == 0 else f'#{account}'
+        label = str(account)
         try:
             from autharena import get_account_status
             status = get_account_status(account)
             signed_in = isinstance(status, dict) and status.get('logged_in') is True
         except (ImportError, OSError, ValueError) as exc:
-            button.setText(f"🔐 Arena {label} Login (unavailable)")
-            button.setToolTip(f"Arena login is unavailable: {exc}")
+            button.setToolTip(f"Arena profile: {label}. Login is unavailable: {exc}")
             button.setEnabled(False)
             return
-        button.setText(f"✅ Arena {label}" if signed_in else f"🔐 Arena {label} Login")
         button.setToolTip(
             f"Arena profile: {label}. "
             + ("Last verified signed in. Click to open the external browser and verify again. " if signed_in else "Click to sign in to Arena in the external browser. ")
             + "Login is saved for this profile; each request starts a fresh conversation. "
-            + ("autharena0/ rotates through signed-in profiles, including Default." if self._autharena_pool_route_requested() else "No API key is required.")
+            + ("autharena0/ rotates through signed-in profiles, including account 0." if self._autharena_pool_route_requested() else "No API key is required.")
         )
         button.setStyleSheet(
             f"background-color: {'#28a745' if signed_in else '#a36f28'}; color: white; font-weight: bold; "
@@ -19587,7 +19623,7 @@ Recent translations to summarize:
         self._autharena_login_account_id = account
         self._autharena_login_in_progress = True
         self._update_autharena_login_status()
-        label = 'Default' if account == 0 else f'#{account}'
+        label = str(account)
         self.append_log(f"🔐 Arena {label}: Opening external browser for login…")
 
         def do_login():
@@ -19632,7 +19668,7 @@ Recent translations to summarize:
         self._autharena_login_outcome = None
         self._autharena_login_in_progress = False
         account = outcome['account_id']
-        label = 'Default' if account == 0 else f'#{account}'
+        label = str(account)
         self._autharena_login_status_changed()
         for message in outcome['logs']:
             self.append_log(str(message))
@@ -22721,7 +22757,7 @@ Recent translations to summarize:
         self.authgrok_acct_combo.hide()
         model_btn_layout.addWidget(self.authgrok_acct_combo)
         
-        self.autharena_login_btn = QPushButton("🔐 Arena Default Login")
+        self.autharena_login_btn = QPushButton("Arena Login")
         self.autharena_login_btn.setStyleSheet(
             "background-color: #a36f28; color: white; font-weight: bold; "
             "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
@@ -22736,7 +22772,7 @@ Recent translations to summarize:
         self.autharena_acct_combo = QComboBox()
         self.autharena_acct_combo.setStyleSheet(_acct_combo_style.replace('max-width: 46px', 'max-width: 76px'))
         self.autharena_acct_combo.setToolTip(
-            "Select an Arena login profile: Default or #N. Choose + New to sign in another account. "
+            "Select an Arena account number. Choose + New to sign in another account. "
             "autharena0/ automatically rotates through verified profiles."
         )
         self.autharena_acct_combo.setFixedWidth(76)
@@ -40452,6 +40488,8 @@ Important rules:
     def _direct_log_message_is_suppressed(self, message):
         """Return whether a queued worker message is expected stop-time noise."""
         try:
+            if decode_stream_fragment(message) is not None:
+                return False
             stopping_now = (
                 bool(getattr(self, 'stop_requested', False))
                 or os.environ.get('TRANSLATION_CANCELLED') == '1'
@@ -40501,12 +40539,31 @@ Important rules:
             if not visible_messages:
                 return
 
-            text = "\n".join(visible_messages)
-            # appendPlainText() is Qt's optimized log-viewer insertion path.
-            # It appends the whole flood batch as one document operation and
-            # enforces maximumBlockCount without the QTextEdit rich-text
-            # layout/formatting overhead.
-            self.log_text.appendPlainText(text)
+            ordinary = []
+
+            def append_ordinary():
+                if ordinary:
+                    # Retain the optimized batched path for ordinary logs.
+                    self.log_text.appendPlainText("\n".join(ordinary))
+                    ordinary.clear()
+                    self._gui_stream_fragment_channel = None
+
+            for message in visible_messages:
+                fragment = decode_stream_fragment(message)
+                if fragment is None:
+                    ordinary.append(message)
+                    continue
+                append_ordinary()
+                if not fragment["text"]:
+                    continue
+                cursor = self.log_text.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                if getattr(self, '_gui_stream_fragment_channel', None) != fragment["channel"]:
+                    if not self.log_text.document().isEmpty():
+                        cursor.insertText("\n")
+                cursor.insertText(fragment["text"])
+                self._gui_stream_fragment_channel = fragment["channel"]
+            append_ordinary()
             self._schedule_log_autoscroll()
         except Exception:
             # GUI logging must never interrupt translation workers.
@@ -40671,6 +40728,14 @@ Important rules:
                pass
        if _suppress_main_log and getattr(self, '_input_output_run_active', False):
            return
+       if decode_stream_fragment(message) is not None:
+           # Keep wire records out of the visible log and avoid matching stop
+           # notices against words that belong to the generated response.
+           if threading.current_thread() is threading.main_thread():
+               self._append_gui_log_batch((message,))
+           else:
+               self._queue_gui_log_message(message)
+           return
        def _append():
            try:
                # Suppress expected graceful-stop pre-send cancellations (avoid noisy per-chapter lines)
@@ -40753,6 +40818,7 @@ Important rules:
                # foreground color.  A previous special case rendered memory
                # and rolling-summary messages as green italics, which also
                # caught ordinary key-pool status messages.
+               self._gui_stream_fragment_channel = None
                self.log_text.appendPlainText(str(message))
                
                # Coalesce auto-scroll work so a log burst does not create one

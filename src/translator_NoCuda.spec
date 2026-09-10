@@ -280,7 +280,10 @@ app_files = [
 	('authnd_auth.py', '.'),  # NVIDIA Build browser-backed auth
 	('gemini_free.py', '.'),  # Google Search/Gemini browser-backed route
 	('autharena.py', '.'),  # Arena browser-backed Direct chat
-	('autharena_browser.py', '.'),  # Installed Chrome/Edge browser transport
+	('autharena_browser.py', '.'),  # Current-browser helper client
+	('autharena_bridge.py', '.'),  # Local Arena extension broker
+	('streaming_log.py', '.'),  # Lossless stream fragment codec
+	(os.path.join(SPEC_DIR, '..', 'assets', 'autharena_extension'), 'autharena_extension'),
 	('token_encryption.py', '.'),
 
 	# Antigravity Cloud Code proxy
@@ -557,8 +560,9 @@ app_modules = [
 	'authnd_auth',  # NVIDIA Build browser-backed auth
 	'gemini_free',  # Google Search/Gemini browser-backed route
 	'autharena',  # Arena browser-backed Direct chat
-	'autharena_browser',  # Installed Chrome/Edge browser transport
-	'websocket',  # websocket-client for Chrome/Edge CDP
+	'autharena_browser',  # Current-browser helper client
+	'autharena_bridge',  # Local Arena extension broker
+	'streaming_log',  # Lossless stream fragment codec
 	'token_encryption',  # Encrypted token storage
 	'ocagy_cli',  # OpenCode + opencode-antigravity-auth
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
@@ -1227,7 +1231,7 @@ hiddenimports.extend(encoding_modules)
 hiddenimports = list(set(hiddenimports))
 
 excludes = [
-    # Legacy POE wrappers (Arena uses websocket-client for browser control)
+    # Legacy POE wrappers
     'poe_api_wrapper', 'poe_api_wrapper.*',
     'ballyregan', 'ballyregan.*',
 

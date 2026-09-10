@@ -28252,6 +28252,16 @@ class UnifiedClient:
                 raise UnifiedClientError("AuthArena: Translation stopped by user", error_type="cancelled")
             label = getattr(tls, 'current_request_label', None) or 'request'
             context = getattr(tls, 'current_request_context', None) or 'translation'
+            # Arena is a forced-stream route. The optional OpenAI-compatible
+            # streaming toggle must not hide its live output outside batches.
+            if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                log_stream = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").strip().lower() not in ("", "0", "false", "no", "off")
+            else:
+                log_stream = (
+                    os.getenv("LOG_STREAM_CHUNKS", "1").strip().lower() not in ("", "0", "false", "no", "off")
+                    and os.getenv("AUTHARENA_LOG_STREAM_CHUNKS", "1").strip().lower() not in ("", "0", "false", "no", "off")
+                )
+            from streaming_log import encode_stream_fragment
             result = _autharena_send(
                 messages=messages,
                 # Preserve the explicit zero route: the adapter owns one pool
@@ -28262,8 +28272,9 @@ class UnifiedClient:
                 max_tokens=max_tokens,
                 timeout=self.request_timeout,
                 stream=True,
-                log_stream=self._streaming_enabled(),
-                log_fn=print,
+                log_stream=log_stream,
+                log_fn=lambda message: print(message, flush=True),
+                log_chunk_fn=lambda channel, text: print(encode_stream_fragment(channel, text), flush=True),
                 progress_label=f"📤 [{threading.current_thread().name}] {label} ({context}) API call in progress",
                 cancel_check=cancelled,
                 before_send_callback=provider_started,

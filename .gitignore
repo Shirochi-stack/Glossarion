@@ -131,6 +131,8 @@ tests/**
 !tests/test_autharena_gui.py
 !tests/test_autharena_multikey.py
 !tests/test_autharena_browser.py
+!tests/test_autharena_bridge.py
+!tests/test_autharena_extension.py
 !tests/test_authgrok_auth.py
 !tests/test_authgpt_request.py
 !tests/test_openai_token_compatibility.py
