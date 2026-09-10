@@ -38,6 +38,16 @@ class Page:
     async def bring_to_front(self):
         pass
 
+    async def title(self):
+        if self.context.browser.challenge_pages:
+            self.context.browser.challenge_pages -= 1
+            return "Just a moment..."
+        return "Arena"
+
+    async def wait_for_function(self, *args, **kwargs):
+        assert len(self.context.browser.sent) == self.context.browser.before_challenge
+        self.context.browser.verifications += 1
+
     def get_by_role(self, role, name):
         page = self
         class Control:
@@ -112,6 +122,9 @@ class Browser:
         self.reject_once = False
         self.rejection_body = "session needs refresh"
         self.refreshed_cookie = None
+        self.challenge_pages = 0
+        self.before_challenge = 0
+        self.verifications = 0
 
     async def close(self):
         self.contexts.clear()
@@ -353,6 +366,13 @@ class WorkerTest(unittest.TestCase):
                 recovered = await client.post("/v1/chat/completions", json={"model": "test-model", "messages": [{"role": "user", "content": "test"}], "account_slot": 0})
                 self.assertEqual(arena.consume_stream(recovered.text.splitlines(), log_stream=False)["content"], "hello")
                 self.assertEqual(len(browser.sent), before + 2)
+                self.assertEqual(browser.contexts, contexts_before)
+                browser.challenge_pages = 2  # Headless page, then visible verification.
+                browser.before_challenge = len(browser.sent)
+                recovered = await client.post("/v1/chat/completions", json={"model": "test-model", "messages": [{"role": "user", "content": "test"}], "account_slot": 0})
+                self.assertEqual(arena.consume_stream(recovered.text.splitlines(), log_stream=False)["content"], "hello")
+                self.assertEqual(browser.verifications, 1)
+                self.assertEqual(len(browser.sent), browser.before_challenge + 1)
                 self.assertEqual(browser.contexts, contexts_before)
             for sock in sockets:
                 sock.close()

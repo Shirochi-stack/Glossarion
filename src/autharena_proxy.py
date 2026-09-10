@@ -28,7 +28,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 13
+ADAPTER_VERSION = 14
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 ARENA_RECAPTCHA_V3_SITEKEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0"
 ARENA_RECAPTCHA_V2_SITEKEY = "6Le3_cYsAAAAAGwWOK2RLDgNI15Bh8C0yLBOL1yL"
@@ -640,12 +640,13 @@ def send_message_stream(messages, model, temperature=0.7, max_tokens=None, timeo
                       "token": "✅ Arena: captcha token received",
                       "retry": "🔁 Arena: captcha rejected; retrying with a fresh token",
                       "verification": "🔐 Arena: verification required. Complete the CAPTCHA in the Arena Verification browser window; this request will resume automatically.",
+                      "browser_verification": "🌐 Arena: security verification required. Complete it in the Arena browser window; this request will wait before submission.",
                       "headers": "📥 Arena: response headers received"}
             if stage in labels:
                 log_fn(labels[stage])
     try:
         if log_fn:
-            log_fn("Arena: preparing saved session and browser…")
+            log_fn("🌐 Arena: preparing saved session and browser…")
         if is_cancel_generation_cancelled(generation):
             raise RuntimeError("Arena stream cancelled")
         response = requests.post(status["url"] + "/v1/chat/completions", json=payload,
@@ -661,7 +662,7 @@ def send_message_stream(messages, model, temperature=0.7, max_tokens=None, timeo
             selected = int(selected)
             saved = next((a for a in list_accounts() if a["slot"] == selected), {})
             identity = saved.get("email") or "saved account"
-            log_fn(f"Arena: using account #{selected} ({identity})" + (" — rotation" if account_id is None else ""))
+            log_fn(f"👤 Arena: using account #{selected} ({identity})" + (" — rotation" if account_id is None else ""))
         response.encoding = "utf-8"
         return consume_stream(response.iter_lines(decode_unicode=True, chunk_size=1), log_fn,
                               visible_stream() if log_stream is None else log_stream, generation, progress)
@@ -952,7 +953,8 @@ async def _serve_worker(key):
 
         async def fetch(http_method, url, payload, auth_token="", timeout_seconds=120, **kwargs):
             verification = bool(kwargs.pop("_verification", False))
-            if verification:
+            interactive = bool(kwargs.pop("_interactive", verification))
+            if interactive:
                 timeout_seconds = max(timeout_seconds, 360)
             from urllib.parse import urlparse
             parsed = urlparse(url)
@@ -986,9 +988,26 @@ async def _serve_worker(key):
                 elif "line" in item:
                     await queue.put(item["line"])
             await page.expose_binding("arenaEmit", emit)
-            await page.goto("https://arena.ai/", wait_until="domcontentloaded")
-            if verification:
+            navigation = await page.goto("https://arena.ai/", wait_until="domcontentloaded")
+            if interactive:
                 await page.bring_to_front()
+            # A security interstitial has no Arena reCAPTCHA loader. Waiting for
+            # grecaptcha there can never work; allow the user to verify first.
+            if "just a moment" in (await page.title()).lower():
+                if not interactive:
+                    await page.close()
+                    raise RuntimeError("ARENA_BROWSER_CHALLENGE")
+                await state["events"].put({"arena_progress": "browser_verification"})
+                try:
+                    await page.wait_for_function(
+                        "() => !document.title.toLowerCase().includes('just a moment') && !!document.querySelector('script[src*=\"recaptcha/\"]')",
+                        timeout=300000)
+                except Exception as exc:
+                    await page.close()
+                    raise RuntimeError("Arena security verification did not complete. If the challenge is unresponsive, check DNS/network access to its challenge domain. No translation was submitted.") from exc
+            elif navigation is not None and navigation.status >= 400:
+                await page.close()
+                raise RuntimeError(f"Arena homepage returned HTTP {navigation.status}; no translation was submitted.")
             sitekey, action = main.get_recaptcha_settings(cfg)
             # Arena's getRecaptchaV3Token uses this distinct v3 key. The loader
             # render parameter may instead be its v2 widget key; they are not
@@ -1134,6 +1153,45 @@ async def _serve_worker(key):
             return Response(result["status"], result["headers"], text=result.get("error_body", ""),
                             lines_queue=queue if result["status"] < 400 else None,
                             done_event=done_event, method=http_method, url=url)
+        async def interactive_fetch(args, kwargs, verification):
+            nonlocal context
+            await state["events"].put({"arena_progress": "verification" if verification else "browser_verification"})
+            async with login_lock:
+                original_context = context
+                lease = _regular_login_browser(playwright)
+                context = await lease.__aenter__()
+                try:
+                    await context.add_cookies(await original_context.cookies(["https://arena.ai/", "https://lmarena.ai/"]))
+                    verified = await fetch(*args, **dict(kwargs, _interactive=True, _verification=verification))
+                    if not verification and verified.status_code == 403 and "captcha" in verified.text.lower():
+                        await verified.aclose()
+                        await state["events"].put({"arena_progress": "verification"})
+                        verified = await fetch(*args, **dict(kwargs, _interactive=True, _verification=True))
+                except BaseException:
+                    await lease.__aexit__(None, None, None)
+                    context = original_context
+                    raise
+                original_close = verified.aclose
+                closed = False
+                async def close_verified():
+                    nonlocal context, closed
+                    if closed:
+                        return
+                    closed = True
+                    try:
+                        await original_close()
+                        await original_context.add_cookies(await context.cookies(["https://arena.ai/", "https://lmarena.ai/"]))
+                    finally:
+                        await lease.__aexit__(None, None, None)
+                        context = original_context
+                verified.aclose = close_verified
+                if verified.status_code >= 400:
+                    detail = f"Arena HTTP {verified.status_code}: {verified.text} Verification was not accepted."
+                    await verified.aclose()
+                    state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=detail)
+                    return state["terminal_error"]
+                return verified
+
         async def submit_once(*args, **kwargs):
             nonlocal context
             if state["submitted"]:
@@ -1155,40 +1213,7 @@ async def _serve_worker(key):
                     await response.aclose()
                     if captcha_rejected:
                         if attempt == 0:
-                            await state["events"].put({"arena_progress": "verification"})
-                            async with login_lock:
-                                original_context = context
-                                lease = _regular_login_browser(playwright)
-                                context = await lease.__aenter__()
-                                try:
-                                    await context.add_cookies(await original_context.cookies(["https://arena.ai/", "https://lmarena.ai/"]))
-                                    verified = await fetch(*args, **dict(kwargs, _verification=True))
-                                except BaseException:
-                                    await lease.__aexit__(None, None, None)
-                                    context = original_context
-                                    raise
-                                # Keep the verification context through the stream;
-                                # return to the headless account context afterward.
-                                original_close = verified.aclose
-                                closed = False
-                                async def close_verified():
-                                    nonlocal context, closed
-                                    if closed:
-                                        return
-                                    closed = True
-                                    try:
-                                        await original_close()
-                                        await original_context.add_cookies(await context.cookies(["https://arena.ai/", "https://lmarena.ai/"]))
-                                    finally:
-                                        await lease.__aexit__(None, None, None)
-                                        context = original_context
-                                verified.aclose = close_verified
-                                if verified.status_code >= 400:
-                                    detail = f"Arena HTTP {verified.status_code}: {verified.text} Verification was not accepted."
-                                    await verified.aclose()
-                                    state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=detail)
-                                    return state["terminal_error"]
-                                return verified
+                            return await interactive_fetch(args, kwargs, verification=True)
                         detail += " Arena rejected a fresh CAPTCHA token. Complete any verification offered on Arena's website before retrying."
                         state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=detail)
                         return state["terminal_error"]
@@ -1200,6 +1225,12 @@ async def _serve_worker(key):
                                 await page.close()
                     raise
                 except Exception as exc:
+                    if str(exc) == "ARENA_BROWSER_CHALLENGE" and not state["dispatched"]:
+                        try:
+                            return await interactive_fetch(args, kwargs, verification=False)
+                        except Exception as interactive_error:
+                            state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=str(interactive_error))
+                            return state["terminal_error"]
                     if "ARENA_CAPTCHA_" in str(exc):
                         marker = re.search(r"ARENA_CAPTCHA_[A-Z_]+", str(exc)).group(0)
                         detail = ("Arena verification was cancelled; no additional translation was submitted."

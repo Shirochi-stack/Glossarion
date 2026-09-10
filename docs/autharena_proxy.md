@@ -59,6 +59,12 @@ without token values. The application acknowledges dispatch before the worker
 sends to Arena, starting the watchdog and API-call progress at that boundary
 rather than during browser and CAPTCHA preparation.
 
+If Arena serves a security interstitial instead of its homepage, the proxy opens
+an app-owned browser and waits for interactive verification before obtaining a
+CAPTCHA token or submitting a translation. An interstitial is no longer treated
+as a missing reCAPTCHA loader. The wait is cancellable and bounded to five minutes;
+blocked challenge scripts or DNS failures still require working network access.
+
 `AUTHARENA_PROXY_DATA_DIR` changes the runtime and browser installation location.
 The proxy stores full model IDs and metadata in `models.enc`, separately from
 the GUI's display-name catalog. It reuses this cache across restarts for 24 hours
