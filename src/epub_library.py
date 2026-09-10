@@ -22,7 +22,6 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from streaming_log import decode_stream_fragment
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
@@ -24409,14 +24408,6 @@ class EpubReaderDialog(QDialog):
         stripped = s.strip()
         low = stripped.lower()
 
-        if any(marker in low for marker in (
-            "stream finished", "stream complete", "translation completed",
-            "translation stopped", "force stop requested",
-        )):
-            self._live_in_thinking = False
-            self._live_streaming_text = False
-            return "log"
-
         # Thinking block state markers (emitted by unified_api_client when
         # STREAM_THINKING_LOGS is on — which the live view forces).
         if "thinking complete" in low:
@@ -24433,6 +24424,9 @@ class EpubReaderDialog(QDialog):
         # Text-stream lifecycle markers.
         if ("text streaming" in low or "first text token" in low):
             self._live_streaming_text = True
+            return "log"
+        if "stream complete" in low or "translation completed" in low:
+            self._live_streaming_text = False
             return "log"
 
         if not stripped:
@@ -24460,18 +24454,6 @@ class EpubReaderDialog(QDialog):
             except IndexError:
                 break
             drained += 1
-            fragment = decode_stream_fragment(raw)
-            if fragment is not None:
-                # Preserve exact deltas; generated words and whitespace are
-                # not line-oriented status records.
-                self._live_in_thinking = fragment["channel"] == "reasoning"
-                self._live_streaming_text = not self._live_in_thinking
-                if self._live_in_thinking:
-                    self._live_think_pending += fragment["text"]
-                else:
-                    self._live_content_buf += fragment["text"]
-                    content_added = bool(fragment["text"]) or content_added
-                continue
             for line in str(raw).split("\n"):
                 kind = self._classify_live_line(line)
                 if kind == "content":

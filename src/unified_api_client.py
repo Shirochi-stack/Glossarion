@@ -1521,18 +1521,6 @@ except ImportError:
     _authnd_reasoning_status_label = None
     AUTHND_AVAILABLE = False
 
-# AuthArena - isolated Arena website requests with a persistent browser login.
-try:
-    from autharena import send_chat_completion as _autharena_send
-    from autharena import cancel_stream as _autharena_cancel_stream
-    from autharena import reset_cancel as _autharena_reset_cancel
-    AUTHARENA_AVAILABLE = True
-except ImportError:
-    _autharena_send = None
-    _autharena_cancel_stream = None
-    _autharena_reset_cancel = None
-    AUTHARENA_AVAILABLE = False
-
 # Search/Gemini Free - Google Search browser-backed route (optional, no API key)
 try:
     from gemini_free import send_chat_completion as _search_gemini_send
@@ -1605,16 +1593,6 @@ class UnifiedClientError(Exception):
         self.error_type = error_type
         self.http_status = http_status
         self.details = details
-
-
-def _is_ambiguous_autharena_error(error) -> bool:
-    """A dispatched Arena generation cannot be replayed without risking a duplicate."""
-    details = getattr(error, 'details', None)
-    return bool(
-        isinstance(details, dict)
-        and details.get('provider') == 'autharena'
-        and details.get('request_dispatched') is True
-    )
 
 # ---------------------------------------------------------------------------
 # Deferred batch log buffer
@@ -1965,9 +1943,7 @@ class UnifiedClient:
                 messages, temperature, max_tokens, max_completion_tokens, context,
                 request_id=request_id, image_data=image_data
             )
-        except Exception as error:
-            if _is_ambiguous_autharena_error(error):
-                raise
+        except Exception:
             return None
 
     def _detect_safety_filter(self, messages, extracted_content: str, finish_reason: Optional[str], response: Any, provider: str) -> bool:
@@ -2427,8 +2403,6 @@ class UnifiedClient:
                 else:
                     print(f"  Retry #{attempt_idx + 1}/{retry_attempts} returned no usable text")
             except UnifiedClientError as retry_error:
-                if _is_ambiguous_autharena_error(retry_error):
-                    raise
                 if retry_error.error_type == "cancelled" or "cancelled" in str(retry_error).lower():
                     print(f"  Truncation retry #{attempt_idx + 1}/{retry_attempts} cancelled")
                     raise
@@ -2904,8 +2878,6 @@ class UnifiedClient:
         'search': 'search',
         'authnd/': 'authnd',
         'authnd': 'authnd',
-        'autharena/': 'autharena',
-        'autharena': 'autharena',
         'eh/': 'electronhub',
         'electronhub/': 'electronhub',
         'electron/': 'electronhub',
@@ -2924,6 +2896,7 @@ class UnifiedClient:
         'authgem': 'authgem',
         'ocagy/': 'ocagy',
         'ocagy': 'ocagy',
+        'autharena': 'autharena',
         'antigravity/': 'antigravity',
         'antigravity': 'antigravity',
         'za/': 'za',
@@ -2959,7 +2932,7 @@ class UnifiedClient:
         return False
     
     # Models/prefixes that authenticate without a traditional API key
-    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgrok/', 'authgrok', 'authgem', 'authgem-vertex', 'vertex/', 'ocagy/', 'ocagy', 'antigravity/', 'antigravity', 'authza/', 'authza', 'authnd/', 'authnd', 'autharena/', 'autharena', 'search/', 'search', 'authcd/', 'authcd')
+    _NO_API_KEY_PREFIXES = ('autharena', 'authgpt/', 'authgpt', 'authgrok/', 'authgrok', 'authgem', 'authgem-vertex', 'vertex/', 'ocagy/', 'ocagy', 'antigravity/', 'antigravity', 'authza/', 'authza', 'authnd/', 'authnd', 'search/', 'search', 'authcd/', 'authcd')
     # NOTE: 'authgem' (without /) intentionally matches authgem/, authgem-key/, authgem-vertex/,
     # AND all numbered variants (authgem1/, authgem2/, authgem-vertex3/, etc.)
     _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
@@ -3090,7 +3063,6 @@ class UnifiedClient:
                 (r'^authgrok\d{1,4}(?:/|$)', 'authgrok'),
                 (r'^authza\d{1,4}(?:/|$)', 'authza'),
                 (r'^authnd\d{1,4}(?:/|$)', 'authnd'),
-                (r'^autharena\d{1,4}(?:/|$)', 'autharena'),
                 (r'^authcd\d{1,4}(?:/|$)', 'authcd'),
             )
             for pattern, provider in numbered_routes:
@@ -4082,12 +4054,6 @@ class UnifiedClient:
                 _authnd_cancel_stream()
         except Exception:
             pass
-        # Cancel any in-flight AuthArena browser-backed streams
-        try:
-            if _autharena_cancel_stream is not None:
-                _autharena_cancel_stream()
-        except Exception:
-            pass
 
         # Cancel any in-flight Gemini Free browser helper
         try:
@@ -4152,13 +4118,6 @@ class UnifiedClient:
         try:
             if _authnd_reset_cancel is not None:
                 _authnd_reset_cancel()
-        except Exception:
-            pass
-
-        # Reset AuthArena cancel event
-        try:
-            if _autharena_reset_cancel is not None:
-                _autharena_reset_cancel()
         except Exception:
             pass
         # Reset Gemini Free cancel event
@@ -7025,8 +6984,6 @@ class UnifiedClient:
                     pass
                 return result
             except Exception as exc:
-                if _is_ambiguous_autharena_error(exc):
-                    raise
                 last_error = exc
                 try:
                     pool.mark_key_error(key_idx, 429 if self._is_rate_limit_error(exc) else None)
@@ -8059,8 +8016,6 @@ class UnifiedClient:
                             return self._send_image_internal(messages, image_data, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
                     
                     except UnifiedClientError as e:
-                        if _is_ambiguous_autharena_error(e):
-                            raise
                         last_error = e
                         
                         # Handle rate limit errors with key rotation
@@ -8811,6 +8766,9 @@ class UnifiedClient:
             if account_id:
                 print(f"🔐 AuthGem: Using account slot #{account_id}")
 
+        elif self.client_type == 'autharena':
+            import autharena_proxy
+
         elif self.client_type == 'antigravity':
             # Antigravity uses Shirochi-stack/antigravity-proxy – no SDK client needed
             if not ANTIGRAVITY_AVAILABLE:
@@ -8842,12 +8800,6 @@ class UnifiedClient:
             if not AUTHND_AVAILABLE:
                 raise ImportError(
                     "AuthND package not found. Make sure 'authnd_auth.py' exists under src/."
-                )
-
-        elif self.client_type == 'autharena':
-            if not AUTHARENA_AVAILABLE:
-                raise ImportError(
-                    "AuthArena is unavailable. Make sure 'autharena.py' exists under src/."
                 )
 
         elif self.client_type == 'search':
@@ -10187,9 +10139,7 @@ class UnifiedClient:
                                         content, fr = retry_res
                                         if content and content.strip() and len(content) > 10:
                                             return content, fr
-                                except Exception as retry_error:
-                                    if _is_ambiguous_autharena_error(retry_error):
-                                        raise
+                                except Exception:
                                     pass
                         
                         # Try glossary keys if context is glossary (independent of multi-key mode toggle)
@@ -10223,8 +10173,6 @@ class UnifiedClient:
                                                 print(f"✅ {retry_pool_label.title()} key succeeded for safety filter")
                                                 return res_content, res_fr
                                     except Exception as gk_err:
-                                        if _is_ambiguous_autharena_error(gk_err):
-                                            raise
                                         print(f"❌ {retry_pool_label.title()} key retry failed: {gk_err}")
                             
                             # Try fallback keys directly (independent of multi-key mode toggle)
@@ -10241,8 +10189,6 @@ class UnifiedClient:
                                             print(f"✅ Fallback key succeeded for safety filter")
                                             return res_content, res_fr
                                 except Exception as fb_err:
-                                    if _is_ambiguous_autharena_error(fb_err):
-                                        raise
                                     print(f"❌ Fallback key retry failed: {fb_err}")
                             else:
                                 print("[FALLBACK DIRECT] Fallback keys disabled; skipping safety-filter retry")
@@ -10665,6 +10611,8 @@ class UnifiedClient:
                 return extracted_content, finish_reason
                 
             except UnifiedClientError as e:
+                if e.error_type == "autharena_stream_error":
+                    raise  # Never replay an Arena request after possible streamed output.
                 # Handle cancellation specially for timeout support
                 if e.error_type == "cancelled" or "cancelled" in str(e):
                     self._in_cleanup = False  # Ensure cleanup flag is set
@@ -10673,10 +10621,6 @@ class UnifiedClient:
                     if not self._is_stop_requested() and not graceful_stop_active:
                         logger.info(f"Propagating cancellation to caller (Error: {e})")
                     # Re-raise so send_with_interrupt can handle it
-                    raise
-                if _is_ambiguous_autharena_error(e):
-                    # Arena has no idempotent replay: an interrupted response may
-                    # still be generating. Preserve the failure for the caller.
                     raise
                 if e.error_type == "no_keys" and _glossary_refinement_overridden:
                     return _retry_without_glossary_refinement_pool("Refinement pool unavailable or exhausted")
@@ -10861,8 +10805,6 @@ class UnifiedClient:
                                     if res_content and res_content.strip():
                                         return res_content, res_fr
                             except Exception as gk_err:
-                                if _is_ambiguous_autharena_error(gk_err):
-                                    raise
                                 print(f"❌ {retry_pool_label.title()} key retry failed: {gk_err}")
                     
                     # Try fallback keys directly (independent of multi-key mode toggle)
@@ -10878,8 +10820,6 @@ class UnifiedClient:
                                 if res_content and res_content.strip():
                                     return res_content, res_fr
                         except Exception as fb_err:
-                            if _is_ambiguous_autharena_error(fb_err):
-                                raise
                             print(f"❌ Fallback key retry failed: {fb_err}")
                     else:
                         print("[FALLBACK DIRECT] Fallback keys disabled; skipping prohibited-content retry")
@@ -11119,9 +11059,7 @@ class UnifiedClient:
                             if retry_res:
                                 content, fr = retry_res
                                 return content, fr
-                        except Exception as retry_error:
-                            if _is_ambiguous_autharena_error(retry_error):
-                                raise
+                        except Exception:
                             pass
                     
                     # Fall through to normal error handling
@@ -11719,11 +11657,6 @@ class UnifiedClient:
                         continue
                         
                 except UnifiedClientError as e:
-                    if _is_ambiguous_autharena_error(e):
-                        if _api_call_delay > 0:
-                            with _fallback_key_lock:
-                                _fallback_key_in_use.discard(_key_id)
-                        raise
                     import traceback
                     http_status = getattr(e, "http_status", None)
                     error_str_lower = str(e).lower()
@@ -12102,7 +12035,7 @@ class UnifiedClient:
                         
                 except UnifiedClientError as ue:
                     # If cancelled, stop immediately and propagate the cancellation
-                    if ue.error_type == "cancelled" or _is_ambiguous_autharena_error(ue):
+                    if ue.error_type == "cancelled":
                         # Release in-use before re-raising
                         if _api_call_delay > 0:
                             with _fallback_key_lock:
@@ -12130,7 +12063,7 @@ class UnifiedClient:
             
         except UnifiedClientError as ue:
             # Propagate cancellation up to the caller
-            if ue.error_type == "cancelled" or _is_ambiguous_autharena_error(ue):
+            if ue.error_type == "cancelled":
                 raise ue
             print(f"[FALLBACK DIRECT] UnifiedClientError: {ue}")
             return None
@@ -12334,7 +12267,7 @@ class UnifiedClient:
                         print(f"⚠️ [GLOSSARY DIRECT {idx+1}] No result from {gk_model}, trying next key")
                         
                 except UnifiedClientError as uce:
-                    if uce.error_type == "cancelled" or _is_ambiguous_autharena_error(uce):
+                    if uce.error_type == "cancelled":
                         raise
                     print(f"❌ [GLOSSARY DIRECT {idx+1}] UnifiedClientError with {gk_model}: {uce}")
                     # Mark that a glossary key was used (even on failure for stats)
@@ -12349,7 +12282,7 @@ class UnifiedClient:
             
         except UnifiedClientError as ue:
             # Propagate cancellation and pool-boundary failures up to the caller.
-            if ue.error_type in ("cancelled", "no_keys") or _is_ambiguous_autharena_error(ue):
+            if ue.error_type in ("cancelled", "no_keys"):
                 raise ue
             print(f"[GLOSSARY DIRECT] UnifiedClientError: {ue}")
             return None
@@ -14656,13 +14589,6 @@ class UnifiedClient:
                     _authnd_reset_cancel()
             except Exception:
                 pass
-
-            # Reset AuthArena cancel event
-            try:
-                if _autharena_reset_cancel is not None:
-                    _autharena_reset_cancel()
-            except Exception:
-                pass
             # Reset logging levels for new operations
             self._reset_http_logs()
 
@@ -16391,7 +16317,7 @@ class UnifiedClient:
             return f" (reasoning_effort: {effort})"
 
         # Non-Gemini wrapper-auth prefixes: suppress thinking info entirely.
-        _suppress_prefixes = ('authgpt', 'authgrok', 'authza', 'authcd', 'autharena', 'ocagy', 'antigravity', 'za/')
+        _suppress_prefixes = ('authgpt', 'authgrok', 'authza', 'authcd', 'ocagy', 'antigravity', 'za/')
         if not _is_gemini_wrapper:
             for p in _suppress_prefixes:
                 if model_lower.startswith(p):
@@ -16660,10 +16586,9 @@ class UnifiedClient:
         # For immediate requests: flush deferred logs and show "now" at fire time
         if sleep_time <= 0:
             flush_deferred_batch_logs()
-            _model_lower = (self._get_active_request_model() or '').lower()
+            _model_lower = getattr(self, 'model', '').lower()
             _is_authgem = _model_lower.startswith('authgem')
             _is_authnd = _model_lower.startswith('authnd')
-            _is_autharena = _model_lower.startswith('autharena')
             _is_authza = _model_lower.startswith('authza')
             _is_vertex = (
                 _model_lower.startswith('vertex/') or
@@ -16682,7 +16607,7 @@ class UnifiedClient:
                     _is_sdk_provider = True
             except Exception:
                 pass
-            _defer_progress_log = _is_authgem or _is_authnd or _is_autharena or _is_authza or _is_vertex or _is_sdk_provider
+            _defer_progress_log = _is_authgem or _is_authnd or _is_authza or _is_vertex or _is_sdk_provider
             if not _defer_progress_log and self._should_show_api_lifecycle_logs() and os.environ.get('GRACEFUL_STOP') != '1':
                 try:
                     tls = self._get_thread_local_client()
@@ -16708,10 +16633,9 @@ class UnifiedClient:
         # (Skip for authgem, AuthZA, native gemini, Antigravity, vertex/ providers,
         # and all SDK-routed providers — they emit this after their own setup
         # so the "API call in progress" line appears right before the POST.)
-        _model_lower = (self._get_active_request_model() or '').lower()
+        _model_lower = getattr(self, 'model', '').lower()
         _is_authgem = _model_lower.startswith('authgem')
         _is_authnd = _model_lower.startswith('authnd')
-        _is_autharena = _model_lower.startswith('autharena')
         _is_authza = _model_lower.startswith('authza')
         _is_search = _model_lower.startswith('search')
         _is_native_gemini = _model_lower.startswith('gemini')
@@ -16738,7 +16662,6 @@ class UnifiedClient:
         if (
             not _is_authgem
             and not _is_authnd
-            and not _is_autharena
             and not _is_authza
             and not _is_search
             and not _is_native_gemini
@@ -18339,14 +18262,14 @@ class UnifiedClient:
             if not hasattr(self, 'client_type'):
                 self.client_type = None
 
-        # Most providers are ready to send at this point. Browser routes still
-        # need authentication and AuthZA still needs a healthy local proxy, so those
+        # Most providers are ready to send at this point. AuthND still needs a
+        # browser token and AuthZA still needs a healthy local proxy, so those
         # routes claim their watchdog row inside their provider handler. For
         # every other route, claim before changing progress to In Progress.
         try:
             tls = self._get_thread_local_client()
             self._remember_actual_request_model()
-            deferred_provider_boundary = {'authnd', 'autharena', 'authza'}
+            deferred_provider_boundary = {'authnd', 'authza'}
             active_model_lower = str(
                 self._get_active_request_model() or ''
             ).strip().lower()
@@ -18357,7 +18280,7 @@ class UnifiedClient:
             except Exception:
                 actual_provider_lower = ''
             defer_progress_callback = (
-                active_model_lower.startswith(('authnd', 'autharena', 'authza'))
+                active_model_lower.startswith(('authnd', 'authza'))
                 or str(getattr(self, 'client_type', '') or '').lower()
                 in deferred_provider_boundary
                 or actual_provider_lower in deferred_provider_boundary
@@ -18520,11 +18443,11 @@ class UnifiedClient:
             'authgem_key': self._send_authgem_key,  # Gemini via AI Studio API key
             'authgem_vertex': self._send_authgem_vertex,  # Gemini via Google OAuth + Vertex AI
             'ocagy': self._send_ocagy,  # OpenCode + opencode-antigravity-auth
+            'autharena': self._send_autharena,
             'antigravity': self._send_antigravity,  # Antigravity Cloud Code proxy
             'za': self._send_openai_provider_router,  # Z.AI via API key
             'authza': self._send_authza,  # Z.AI login-plan/general API via local proxy
             'authnd': self._send_authnd,  # NVIDIA Build browser-backed route
-            'autharena': self._send_autharena,  # Fresh Arena evaluation per request
             'search': self._send_search_gemini,  # Google Search/Gemini browser-backed route
             'nanogpt': self._send_nanogpt,  # NanoGPT (nano-gpt.com) – chat/image/video
             'sambanova': self._send_openai_provider_router,  # SambaNova Cloud API
@@ -27741,6 +27664,26 @@ class UnifiedClient:
                 raise UnifiedClientError(text, error_type="config_error")
             raise UnifiedClientError(text, error_type="provider_error")
 
+    def _send_autharena(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        from autharena_proxy import parse_route, send_message_stream, capture_cancel_generation
+        slot, model = parse_route(self._get_active_request_model())
+        if not model:
+            raise UnifiedClientError("Select an Arena model from the catalog.", error_type="config_error")
+        if self._should_abort_retry():
+            raise UnifiedClientError("Arena translation cancelled", error_type="cancelled")
+        generation = capture_cancel_generation()
+        try:
+            result = send_message_stream(messages, model, temperature, max_tokens,
+                                         timeout=self.request_timeout, account_id=slot,
+                                         cancel_generation=generation, log_fn=print)
+            return UnifiedResponse(content=result["content"],
+                                   finish_reason=self._normalize_finish_reason(result["finish_reason"]),
+                                   usage=result.get("usage"), raw_response=result)
+        except Exception as exc:
+            # Do not internally replay a stream which may have already emitted text.
+            kind = "cancelled" if "cancelled" in str(exc).lower() else "autharena_stream_error"
+            raise UnifiedClientError(str(exc), error_type=kind) from exc
+
     def _send_antigravity(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request via the Antigravity Cloud Code proxy.
 
@@ -28181,152 +28124,6 @@ class UnifiedClient:
             f"Gemini Free request failed after {max_retries} attempts: {last_error}",
             error_type="api_error"
         )
-
-    def _send_autharena(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Create one isolated Arena evaluation, preserving only the browser login."""
-        del response_name
-        if not AUTHARENA_AVAILABLE or _autharena_send is None:
-            raise UnifiedClientError(
-                "AuthArena is unavailable. Ensure src/autharena.py is installed.",
-                error_type="config_error",
-            )
-        request_model = str(self._get_active_request_model() or '').strip()
-        match = re.match(r'^autharena(\d{0,4})(?:/|$)', request_model, re.IGNORECASE)
-        if not match:
-            raise UnifiedClientError("Invalid AuthArena model prefix.", error_type="validation")
-        account_id = int(match.group(1) or 0)
-        actual_model = request_model[match.end():] or 'gpt-6-astra-medium'
-        pool_mode = bool(match.group(1)) and account_id == 0
-        tls = self._get_thread_local_client()
-        request_id = getattr(tls, 'current_request_id', None)
-        started = False
-
-        def cancelled():
-            if self._is_stop_requested():
-                return True
-            # Graceful Stop cancels preparation/queued work, but lets a request
-            # which has reached Arena finish normally.
-            return bool(
-                not started
-                and not getattr(self, '_ignore_graceful_stop', False)
-                and (
-                    os.environ.get('GRACEFUL_STOP') == '1'
-                    or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
-                )
-            )
-
-        def provider_started():
-            nonlocal started
-            if self._should_abort_retry() or cancelled():
-                raise UnifiedClientError("AuthArena: Translation stopped by user", error_type="cancelled")
-            if started:
-                return
-            if request_id:
-                claimed = _api_watchdog_mark_in_flight(
-                    request_id, request_model,
-                    allow_during_graceful=bool(getattr(self, '_ignore_graceful_stop', False)),
-                )
-                if not claimed:
-                    raise UnifiedClientError("AuthArena: pending request was cancelled before dispatch", error_type="cancelled")
-            started = True
-            callback = getattr(tls, 'pre_api_call_callback', None)
-            if callable(callback):
-                tls.last_pre_api_call_callback = callback
-                tls.last_pre_api_call_callback_request_id = request_id
-                callback()
-            if hasattr(tls, 'pre_api_call_callback'):
-                tls.pre_api_call_callback = None
-
-        def request_rejected():
-            nonlocal started
-            # A rejected POST is no longer an active generation. Graceful Stop
-            # should stop browser verification before another POST is sent.
-            started = False
-
-        try:
-            if self._should_abort_retry() or cancelled():
-                raise UnifiedClientError("AuthArena: Translation stopped by user", error_type="cancelled")
-            if _autharena_reset_cancel is not None:
-                _autharena_reset_cancel()
-            if cancelled():
-                raise UnifiedClientError("AuthArena: Translation stopped by user", error_type="cancelled")
-            label = getattr(tls, 'current_request_label', None) or 'request'
-            context = getattr(tls, 'current_request_context', None) or 'translation'
-            # Arena is a forced-stream route. The optional OpenAI-compatible
-            # streaming toggle must not hide its live output outside batches.
-            if os.getenv("BATCH_TRANSLATION", "0") == "1":
-                log_stream = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").strip().lower() not in ("", "0", "false", "no", "off")
-            else:
-                log_stream = (
-                    os.getenv("LOG_STREAM_CHUNKS", "1").strip().lower() not in ("", "0", "false", "no", "off")
-                    and os.getenv("AUTHARENA_LOG_STREAM_CHUNKS", "1").strip().lower() not in ("", "0", "false", "no", "off")
-                )
-            from streaming_log import encode_stream_fragment
-            result = _autharena_send(
-                messages=messages,
-                # Preserve the explicit zero route: the adapter owns one pool
-                # implementation shared by the desktop app and standalone CLI.
-                model=f'autharena0/{actual_model}' if pool_mode else actual_model,
-                account_id=account_id,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                timeout=self.request_timeout,
-                stream=True,
-                log_stream=log_stream,
-                log_fn=lambda message: print(message, flush=True),
-                log_chunk_fn=lambda channel, text: print(encode_stream_fragment(channel, text), flush=True),
-                progress_label=f"📤 [{threading.current_thread().name}] {label} ({context}) API call in progress",
-                cancel_check=cancelled,
-                before_send_callback=provider_started,
-                after_rejection_callback=request_rejected,
-            )
-            if not result.get('finish_reason_explicit') or not result.get('finish_reason'):
-                raise UnifiedClientError(
-                    "AuthArena: stream ended without an explicit completion event.",
-                    error_type="api_error",
-                    details={"provider": "autharena", "request_dispatched": True},
-                )
-            return UnifiedResponse(
-                content=result.get('content', ''),
-                finish_reason=result['finish_reason'],
-                usage=result.get('usage'),
-                raw_response=result,
-            )
-        except UnifiedClientError:
-            raise
-        except Exception as exc:
-            detail = str(exc)
-            status = getattr(exc, 'status_code', None)
-            details = {
-                "provider": "autharena",
-                # The adapter distinguishes an explicit rejection (False) from
-                # an unknown outcome after dispatch (True). Retain that decision
-                # through every shared retry and fallback layer.
-                "request_dispatched": bool(getattr(exc, 'request_dispatched', started)),
-            }
-            retry_after = getattr(exc, 'retry_after', None)
-            if retry_after is not None:
-                details['retry_after'] = retry_after
-            if cancelled() or 'cancelled' in detail.lower():
-                error_type = 'cancelled'
-            elif status == 429:
-                error_type = 'rate_limit'
-            elif status in (401, 403):
-                error_type = 'auth_error'
-            elif isinstance(exc, (ImportError, ModuleNotFoundError)):
-                error_type = 'config_error'
-            elif isinstance(exc, ValueError):
-                error_type = 'validation'
-            elif isinstance(exc, TimeoutError):
-                error_type = 'timeout'
-            else:
-                error_type = 'api_error'
-            # Shared retry policy may retry explicit rejections, but must retain
-            # ambiguous dispatch failures without generating a duplicate.
-            raise UnifiedClientError(
-                f"AuthArena: {detail}", error_type=error_type,
-                http_status=status, details=details,
-            ) from exc
 
     def _send_authnd(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request through NVIDIA Build's browser-backed public route.
@@ -31835,6 +31632,11 @@ def set_stop_flag(value: bool = True):
             _ocagy_reset_cancel()
         except Exception:
             pass
+    try:
+        from autharena_proxy import cancel_stream as arena_cancel, reset_cancel as arena_reset
+        arena_cancel() if value else arena_reset()
+    except Exception:
+        pass
     # Antigravity cancellation is process-wide. Workers must never reset it;
     # only this explicit lifecycle reset (called before a new run) may clear it.
     if value and _antigravity_cancel_stream is not None:
@@ -31860,11 +31662,6 @@ def set_stop_flag(value: bool = True):
     if value and _authnd_cancel_stream is not None:
         try:
             _authnd_cancel_stream()
-        except Exception:
-            pass
-    if value and _autharena_cancel_stream is not None:
-        try:
-            _autharena_cancel_stream()
         except Exception:
             pass
     if value and _search_gemini_cancel_stream is not None:
@@ -31902,6 +31699,11 @@ def hard_cancel_all():
         except Exception:
             pass
     # Also signal the antigravity proxy cancel event
+    try:
+        from autharena_proxy import cancel_stream as arena_cancel
+        arena_cancel()
+    except Exception:
+        pass
     if _antigravity_cancel_stream is not None:
         try:
             _antigravity_cancel_stream()
@@ -31915,11 +31717,6 @@ def hard_cancel_all():
     if _authnd_cancel_stream is not None:
         try:
             _authnd_cancel_stream()
-        except Exception:
-            pass
-    if _autharena_cancel_stream is not None:
-        try:
-            _autharena_cancel_stream()
         except Exception:
             pass
     if _search_gemini_cancel_stream is not None:

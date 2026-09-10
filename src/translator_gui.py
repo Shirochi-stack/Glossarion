@@ -57,23 +57,6 @@ if __name__ == '__main__':
             }, separators=(",", ":")), flush=True)
             raise SystemExit(1)
 
-    # Keep the Arena browser helper out of the full GUI initialization path.
-    if "--autharena-helper" in _authnd_sys.argv:
-        _idx = _authnd_sys.argv.index("--autharena-helper")
-        _remaining = _authnd_sys.argv[_idx + 1:]
-        _authnd_sys.argv = [_authnd_sys.argv[0], "--browser-helper", *_remaining]
-        try:
-            from autharena import _main as _autharena_main
-            raise SystemExit(_autharena_main())
-        except Exception as _autharena_exc:
-            import json as _autharena_json
-            print(_autharena_json.dumps({
-                "autharena": 1,
-                "event": "error",
-                "message": f"AuthArena browser helper failed: {_autharena_exc}",
-            }, separators=(",", ":")), flush=True)
-            raise SystemExit(1)
-
     # PyInstaller-safe Gemini Free helper entrypoint.  gemini_free.py is normally
     # run as a subprocess so Qt WebEngine stays out of translation worker threads.
     if "--gemini-free-search" in _authnd_sys.argv:
@@ -133,7 +116,6 @@ from title_tag_translation import DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
 
 
 _AUTHGROK_ADD_ACCOUNT_SENTINEL = "__authgrok_add_account__"
-_AUTHARENA_ADD_ACCOUNT_SENTINEL = "__autharena_add_account__"
 
 
 def _authnd_auto_token_limits():
@@ -483,7 +465,6 @@ from collections import deque
 import atexit
 import faulthandler
 import platform
-from streaming_log import decode_stream_fragment
 
 _GUI_LOG_BATCH_MAX_MESSAGES = 250
 _GUI_LOG_BATCH_MAX_CHARS = 256 * 1024
@@ -1839,9 +1820,6 @@ class _InputOutputDialog(QDialog):
         'AUTHND_STREAM',
         'AUTHND_LOG_STREAM_CHUNKS',
         'AUTHND_STREAM_THINKING_LOGS',
-        'AUTHARENA_STREAM',
-        'AUTHARENA_LOG_STREAM_CHUNKS',
-        'AUTHARENA_STREAM_THINKING_LOGS',
     )
     _OUTPUT_ENV_KEYS = ('OUTPUT_DIRECTORY', 'OUTPUT_DIR', 'EPUB_OUTPUT_DIR')
     _IMAGE_ATTACHMENT_EXTENSIONS = {
@@ -1897,7 +1875,6 @@ class _InputOutputDialog(QDialog):
         'THINKING_BUDGET',
         'STREAM_THINKING_LOGS',
         'AUTHND_STREAM_THINKING_LOGS',
-        'AUTHARENA_STREAM_THINKING_LOGS',
         'ENABLE_THOUGHTS',
         'DIRECT_TEXT_ATTACHMENT_PROMPT',
         'DIRECT_TEXT_ATTACHMENT_PROMPT_ROLE',
@@ -1940,7 +1917,6 @@ class _InputOutputDialog(QDialog):
         '📡 AuthGem: Stream finished',
         '📡 AuthCD: Stream finished',
         '📡 AuthND: Stream finished',
-        '📡 AuthArena: Stream finished',
         'TRANSLATION_COMPLETE_SIGNAL', 'GLOSSARY_COMPLETE_SIGNAL',
         '✅ Text file translation complete',
     )
@@ -9959,19 +9935,6 @@ class _InputOutputDialog(QDialog):
             callback_thread = str(
                 source_thread or threading.current_thread().name or ""
             )
-            fragment = decode_stream_fragment(value)
-            if fragment is not None:
-                # Fragments carry their own channel and exact whitespace. Do
-                # not interpret generated text as pipeline status or thread IDs.
-                phase = "thinking" if fragment["channel"] == "reasoning" else "text"
-                self._listener_stream_phase_by_thread[callback_thread] = phase
-                self._log_queue.append({
-                    "message": fragment["text"],
-                    "thread": callback_thread,
-                    "channel": phase,
-                    "fragment": True,
-                })
-                return "suppress-main-log"
             thread_key = self._thread_key_from_log(value, callback_thread)
 
             # Tell append_log not to duplicate high-volume token payloads in
@@ -10298,29 +10261,6 @@ class _InputOutputDialog(QDialog):
                 message, source_thread = queued, ""
                 channel_hint = ""
             drained += 1
-            if isinstance(queued, dict) and queued.get("fragment") is True:
-                chunk = str(message)
-                if not chunk:
-                    continue
-                phase = "thinking" if channel_hint == "thinking" else "text"
-                self._stream_phase_by_thread[source_thread] = phase
-                self._in_thinking = phase == "thinking"
-                self._streaming_text = phase == "text"
-                segment = self._request_segment_for_thread(source_thread)
-                segment["status_only"] = False
-                segment["phase"] = phase
-                segment["complete"] = False
-                if phase == "text":
-                    self._streamed_content += chunk
-                    segment["content"] += chunk
-                    generation_batches.setdefault(id(segment), [segment, []])[1].append(chunk)
-                    output_changed = True
-                else:
-                    self._append_thinking(chunk, streamed_thinking=True)
-                    segment["thinking"] += chunk
-                    thinking_batches.setdefault(id(segment), [segment, []])[1].append(chunk)
-                    processing_changed = True
-                continue
             for raw_line in str(message).split("\n"):
                 for line in self._split_embedded_pipeline_log(raw_line):
                     kind = self._classify_line(
@@ -18417,7 +18357,9 @@ Recent translations to summarize:
         # Show/hide the local Z.AI Coding Plan login control. Enabled key-pool
         # routes count too, matching the other login-backed providers.
         self._refresh_authza_login_visibility(model)
-        self._refresh_autharena_login_visibility(model)
+
+        if hasattr(self, "autharena_controls"):
+            self.autharena_controls.refresh()
 
         # Show/hide Antigravity proxy controls
         if hasattr(self, 'antigravity_login_btn'):
@@ -18664,50 +18606,6 @@ Recent translations to summarize:
         return needs_authza
 
 
-    def _has_autharena_in_key_pools(self):
-        """Include every enabled pool that can send Arena requests."""
-        import re as _re
-        return any(
-            _re.match(r'^autharena\d{0,4}/', str(model or '').strip().lower())
-            for _pool, _toggle, model in self._iter_enabled_key_pool_models()
-        )
-
-    def _autharena_pool_route_requested(self, model=None):
-        import re as _re
-        active = model if model is not None else (
-            getattr(self, 'model_var', '') or self.config.get('model', '')
-        )
-        if _re.match(r'^autharena0/', str(active or '').strip().lower()):
-            return True
-        return any(
-            _re.match(r'^autharena0/', str(value or '').strip().lower())
-            for _pool, _toggle, value in self._iter_enabled_key_pool_models()
-        )
-
-    def _refresh_autharena_login_visibility(self, model=None):
-        """Refresh Arena controls for the main route and live key-pool edits."""
-        if not hasattr(self, 'autharena_login_btn'):
-            return False
-        import re as _re
-        active = model if model is not None else (
-            getattr(self, 'model_var', '') or self.config.get('model', '')
-        )
-        visible = bool(
-            _re.match(r'^autharena\d{0,4}/', str(active or '').strip().lower())
-            or self._has_autharena_in_key_pools()
-            or getattr(self, '_multi_key_manager_autharena_pool_hint', False)
-        )
-        self.autharena_login_btn.setVisible(visible)
-        if hasattr(self, 'autharena_acct_combo') and _re.match(
-            r'^autharena0{0,4}/', str(active or '').strip().lower()
-        ):
-            self.autharena_acct_combo.hide()
-        if visible:
-            self._update_autharena_login_status()
-        elif hasattr(self, 'autharena_acct_combo'):
-            self.autharena_acct_combo.hide()
-        return visible
-
     def _has_authcd_in_key_pools(self):
         """Check if any enabled key pool contains an enabled authcd model."""
         try:
@@ -18745,7 +18643,7 @@ Recent translations to summarize:
         Returns dict: {'authgpt': {0, 2}, 'authgrok': {0}, 'authcd': {1}, 'authgem': {0, 3}}.
         """
         import re as _re
-        result = {'authgpt': set(), 'authgrok': set(), 'authcd': set(), 'authgem': set(), 'autharena': set()}
+        result = {'authgpt': set(), 'authgrok': set(), 'authcd': set(), 'authgem': set()}
         patterns = {
             'authgpt': _re.compile(r'^authgpt(\d{0,4})/'),
             'authgrok': _re.compile(r'^authgrok(\d{0,4})/'),
@@ -18778,10 +18676,6 @@ Recent translations to summarize:
                                 result[provider].add(acct_id)
         except Exception:
             pass
-        for _pool, _toggle, model in self._iter_enabled_key_pool_models():
-            match = _re.match(r'^autharena(\d{0,4})/', str(model or '').strip().lower())
-            if match:
-                result['autharena'].add(int(match.group(1) or 0))
         return result
 
     def _refresh_auth_account_arrows(self):
@@ -18795,28 +18689,6 @@ Recent translations to summarize:
 
         model = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
         pool_ids = self._collect_auth_account_ids_from_pools()
-        autharena_configured = bool(
-            pool_ids.get('autharena')
-            or _re.match(r'^autharena\d{0,4}/', model)
-            or getattr(self, '_multi_key_manager_autharena_pool_hint', False)
-        )
-        previous_autharena_ids = getattr(self, '_auth_account_ids', {}).get('autharena', [0])
-        previous_autharena_idx = getattr(self, '_auth_account_idx', {}).get('autharena', 0)
-        previous_autharena_id = (
-            previous_autharena_ids[previous_autharena_idx]
-            if 0 <= previous_autharena_idx < len(previous_autharena_ids) else 0
-        )
-        if autharena_configured:
-            pool_ids.setdefault('autharena', set()).add(0)
-            pool_ids['autharena'].update(getattr(self, '_autharena_pending_account_ids', set()))
-            pool_ids['autharena'].update(
-                getattr(self, '_multi_key_manager_autharena_account_ids', set())
-            )
-            try:
-                from autharena import get_account_ids
-                pool_ids['autharena'].update(get_account_ids())
-            except (ImportError, OSError, ValueError):
-                pass
         authgrok_pool_requested = self._authgrok_pool_route_requested(model)
         if authgrok_pool_requested:
             # Pool mode is useful before the first login too, so always expose
@@ -18839,7 +18711,6 @@ Recent translations to summarize:
             'authgrok': _re.compile(r'^authgrok(\d{0,4})/'),
             'authcd':  _re.compile(r'^authcd(\d{0,4})/'),
             'authgem': _re.compile(r'^authgem(?:-vertex)?(\d{0,4})/'),
-            'autharena': _re.compile(r'^autharena(\d{0,4})/'),
         }
         for provider, pat in _prov_patterns.items():
             m = pat.match(model)
@@ -18854,13 +18725,12 @@ Recent translations to summarize:
             'authgrok': 'authgrok_acct_combo',
             'authcd':  'authcd_acct_combo',
             'authgem': 'authgem_acct_combo',
-            'autharena': 'autharena_acct_combo',
         }
 
         if not hasattr(self, '_auth_account_ids'):
-            self._auth_account_ids = {'authgpt': [0], 'authgrok': [0], 'authcd': [0], 'authgem': [0], 'autharena': [0]}
+            self._auth_account_ids = {'authgpt': [0], 'authgrok': [0], 'authcd': [0], 'authgem': [0]}
         if not hasattr(self, '_auth_account_idx'):
-            self._auth_account_idx = {'authgpt': 0, 'authgrok': 0, 'authcd': 0, 'authgem': 0, 'autharena': 0}
+            self._auth_account_idx = {'authgpt': 0, 'authgrok': 0, 'authcd': 0, 'authgem': 0}
 
         for provider, acct_set in pool_ids.items():
             sorted_ids = sorted(acct_set) if acct_set else [0]
@@ -18868,20 +18738,6 @@ Recent translations to summarize:
 
             # Clamp current index if accounts were removed
             cur_idx = self._auth_account_idx.get(provider, 0)
-            if provider == 'autharena':
-                if previous_autharena_id in sorted_ids:
-                    cur_idx = sorted_ids.index(previous_autharena_id)
-                arena_match = _prov_patterns['autharena'].match(model)
-                if arena_match:
-                    primary_id = int(arena_match.group(1) or 0)
-                    # Bare and pooled routes hide the selector and log in to
-                    # the first physical account. Positive routes keep manual
-                    # selector changes until the main model changes again.
-                    if primary_id in sorted_ids and (
-                        primary_id == 0
-                        or model != getattr(self, '_autharena_account_model_snapshot', None)
-                    ):
-                        cur_idx = sorted_ids.index(primary_id)
             if (
                 provider == 'authgrok'
                 and model != previous_authgrok_model
@@ -18912,23 +18768,15 @@ Recent translations to summarize:
                     provider == 'authgrok'
                     and authgrok_pool_requested
                     and hasattr(self, main_btn_name)
-                ) or (
-                    provider == 'autharena'
-                    and autharena_configured
-                    and hasattr(self, main_btn_name)
                 )
-                if provider == 'autharena' and _re.match(r'^autharena0{0,4}/', model):
-                    show_combo = False
                 if show_combo:
                     # Repopulate items (block signals to avoid triggering change handler)
                     combo.blockSignals(True)
                     combo.clear()
                     for aid in sorted_ids:
-                        combo.addItem(str(aid) if provider == 'autharena' else f"#{aid}", aid)
+                        combo.addItem(f"#{aid}", aid)
                     if provider == 'authgrok' and authgrok_pool_requested:
                         combo.addItem("+ N", _AUTHGROK_ADD_ACCOUNT_SENTINEL)
-                    if provider == 'autharena':
-                        combo.addItem("+ New", _AUTHARENA_ADD_ACCOUNT_SENTINEL)
                     combo.setCurrentIndex(cur_idx)
                     combo.blockSignals(False)
                     combo.show()
@@ -18936,7 +18784,7 @@ Recent translations to summarize:
                     combo.hide()
 
         # Update all visible main button labels to reflect current selection
-        for provider in ('authgpt', 'authgrok', 'authcd', 'authgem', 'autharena'):
+        for provider in ('authgpt', 'authgrok', 'authcd', 'authgem'):
             main_btn_name = f"{provider}_login_btn"
             if hasattr(self, main_btn_name) and getattr(self, main_btn_name).isVisible():
                 update_fn = getattr(self, f'_update_{provider}_login_status', None)
@@ -18947,7 +18795,6 @@ Recent translations to summarize:
                         update_fn()
 
         self._authgrok_account_model_snapshot = model
-        self._autharena_account_model_snapshot = model
 
     def _on_auth_acct_combo_changed(self, provider, index):
         """Handle account-slot dropdown selection change for *provider*.
@@ -18963,9 +18810,6 @@ Recent translations to summarize:
             and selected_data == _AUTHGROK_ADD_ACCOUNT_SENTINEL
         ):
             self._add_authgrok_account_slot()
-            return
-        if provider == 'autharena' and selected_data == _AUTHARENA_ADD_ACCOUNT_SENTINEL:
-            self._add_autharena_account_slot()
             return
         ids_list = self._auth_account_ids.get(provider, [0])
         if selected_data in ids_list:
@@ -19256,6 +19100,25 @@ Recent translations to summarize:
         err = getattr(self, '_authcd_login_error', 'Unknown error')
         self.append_log(f"\u274c Claude login failed: {err}")
         QMessageBox.warning(self, "Login Failed", f"Claude login failed:\n{err}")
+
+    def _autharena_control_model(self):
+        from autharena_proxy import ROUTE_RE
+        model = str(getattr(self, 'model_var', '') or self.config.get('model', ''))
+        if ROUTE_RE.match(model.strip()):
+            return model
+        pools = {'multi_api_keys': 'use_multi_api_keys', 'fallback_keys': 'use_fallback_keys',
+                 'glossary_keys': 'use_glossary_keys', 'glossary_refinement_keys': 'use_glossary_refinement_keys',
+                 'rolling_summary_keys': 'use_rolling_summary_keys', 'truncation_retry_keys': 'use_truncation_retry_keys'}
+        for pool, toggle in pools.items():
+            if self.config.get(toggle):
+                for item in self.config.get(pool, []):
+                    if isinstance(item, dict) and item.get('enabled', True) and ROUTE_RE.match(str(item.get('model', '')).strip()):
+                        return item['model']
+        return model
+
+    @Slot()
+    def _autharena_catalog_after_login(self):
+        self._start_provider_model_catalog_refresh(only_provider='autharena', automatic=True)
 
     def _get_authgpt_account_id(self):
         """Return the numeric account ID for the AuthGPT provider.
@@ -19551,151 +19414,6 @@ Recent translations to summarize:
         error = getattr(self, '_authgrok_login_error', 'Unknown error')
         self.append_log(f"❌ Grok login failed: {error}")
         QMessageBox.warning(self, "Login Failed", f"Grok login failed:\n{error}")
-
-    def _get_autharena_account_id(self):
-        """Return the physical profile selected for login, never the pooled route."""
-        import re as _re
-        model = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
-        match = _re.match(r'^autharena(\d{0,4})/', model)
-        if match and int(match.group(1) or 0) == 0:
-            # A hidden selector must never redirect bare/pool login to a
-            # previously selected numbered account. Zero here is physical 0.
-            return 0
-        if match and model != getattr(self, '_autharena_account_model_snapshot', None):
-            return int(match.group(1) or 0)
-        ids = getattr(self, '_auth_account_ids', {}).get('autharena', [])
-        index = getattr(self, '_auth_account_idx', {}).get('autharena', 0)
-        if 0 <= index < len(ids):
-            return ids[index]
-        return int(match.group(1) or 0) if match else 0
-
-    def _update_autharena_login_status(self):
-        """Display cached verification status without opening a browser."""
-        button = self.autharena_login_btn
-        button.setText("Arena Login")
-        combo = getattr(self, 'autharena_acct_combo', None)
-        busy = getattr(self, '_autharena_login_in_progress', False)
-        button.setEnabled(not busy)
-        if combo is not None:
-            combo.setEnabled(not busy)
-        if busy:
-            account = self._autharena_login_account_id
-            label = 'first account (0)' if account == 0 else str(account)
-            button.setToolTip(f"Arena profile: {label}. Sign-in is in progress in the external browser.")
-            return
-        account = self._get_autharena_account_id()
-        label = 'first account (0)' if account == 0 else str(account)
-        try:
-            from autharena import get_account_status
-            status = get_account_status(account)
-            signed_in = isinstance(status, dict) and status.get('logged_in') is True
-        except (ImportError, OSError, ValueError) as exc:
-            button.setToolTip(f"Arena profile: {label}. Login is unavailable: {exc}")
-            button.setEnabled(False)
-            return
-        button.setToolTip(
-            f"Arena profile: {label}. "
-            + ("Last verified signed in. Click to open the external browser and verify again. " if signed_in else "Click to sign in to Arena in the external browser. ")
-            + "Login is saved for this profile; each request starts a fresh conversation. "
-            + ("autharena0/ rotates through signed-in profiles, including the first account." if self._autharena_pool_route_requested() else "No API key is required.")
-        )
-        button.setStyleSheet(
-            f"background-color: {'#28a745' if signed_in else '#a36f28'}; color: white; font-weight: bold; "
-            "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
-        )
-
-    def _add_autharena_account_slot(self):
-        """Select a new physical profile and open its Arena login."""
-        if getattr(self, '_autharena_login_in_progress', False):
-            return
-        reserved = set(getattr(self, '_auth_account_ids', {}).get('autharena', []))
-        account = next((number for number in range(1, 10000) if number not in reserved), None)
-        if account is None:
-            QMessageBox.warning(self, "Arena Accounts", "All Arena profile slots are already in use.")
-            return
-        pending = getattr(self, '_autharena_pending_account_ids', set())
-        pending.add(account)
-        self._autharena_pending_account_ids = pending
-        self._refresh_auth_account_arrows()
-        ids = self._auth_account_ids['autharena']
-        self._auth_account_idx['autharena'] = ids.index(account)
-        combo = self.autharena_acct_combo
-        combo.setCurrentIndex(combo.findData(account))
-        self._update_autharena_login_status()
-        QTimer.singleShot(0, self._autharena_login_clicked)
-
-    def _autharena_login_clicked(self):
-        """Run browser login off the GUI thread, capturing its physical profile."""
-        if getattr(self, '_autharena_login_in_progress', False):
-            return
-        try:
-            from autharena import login
-        except ImportError as exc:
-            QMessageBox.warning(self, "Arena Login Unavailable", str(exc))
-            return
-        account = self._get_autharena_account_id()
-        self._autharena_login_account_id = account
-        self._autharena_login_in_progress = True
-        self._update_autharena_login_status()
-        label = str(account)
-        self.append_log(f"🔐 Arena {label}: Opening external browser for login…")
-
-        def do_login():
-            logs = []
-            error = None
-            cancelled = False
-            try:
-                result = login(account_id=account, timeout=600, log_fn=logs.append)
-                cancelled = bool(isinstance(result, dict) and result.get('cancelled'))
-                if cancelled or not isinstance(result, dict) or result.get('logged_in') is not True:
-                    error = (result.get('error') if isinstance(result, dict) else None) or (
-                        "Login cancelled" if cancelled else "Arena did not verify a signed-in account."
-                    )
-                elif result.get('account_id', account) != account:
-                    error = "Arena verified a different profile from the one selected for login."
-            except Exception as exc:
-                error = str(exc)
-                cancelled = 'cancel' in error.lower()
-            self._autharena_login_outcome = {
-                'account_id': account, 'error': error, 'cancelled': cancelled, 'logs': logs,
-            }
-            try:
-                QMetaObject.invokeMethod(self, "_autharena_login_finished", Qt.QueuedConnection)
-            except RuntimeError:
-                pass  # The application may have closed while the browser exited.
-
-        threading.Thread(target=do_login, name=f"autharena-login-{account}", daemon=True).start()
-
-    @Slot()
-    def _autharena_login_status_changed(self):
-        """GUI-thread refresh, also used by login controls in key-pool dialogs."""
-        self._refresh_autharena_login_visibility()
-        self._refresh_auth_account_arrows()
-        if hasattr(self, 'autharena_login_btn'):
-            self._update_autharena_login_status()
-
-    @Slot()
-    def _autharena_login_finished(self):
-        outcome = getattr(self, '_autharena_login_outcome', None)
-        if not outcome:
-            return
-        self._autharena_login_outcome = None
-        self._autharena_login_in_progress = False
-        account = outcome['account_id']
-        label = str(account)
-        self._autharena_login_status_changed()
-        for message in outcome['logs']:
-            self.append_log(str(message))
-        if outcome['error']:
-            state = 'cancelled' if outcome['cancelled'] else 'failed'
-            self.append_log(f"❌ Arena {label}: Login {state}: {outcome['error']}")
-            if not outcome['cancelled']:
-                QMessageBox.warning(self, "Arena Login Failed", f"Arena {label}: {outcome['error']}")
-        else:
-            getattr(self, '_autharena_pending_account_ids', set()).discard(account)
-            self.append_log(f"✅ Arena {label}: Signed in and verified")
-            if hasattr(self, '_schedule_current_provider_catalog_refresh'):
-                self._schedule_current_provider_catalog_refresh(0)
 
     # ==================================================================
     # AuthGem (Gemini Login) – mirrors the AuthGPT pattern
@@ -21084,10 +20802,6 @@ Recent translations to summarize:
             <li><b>authnd/openai/gpt-oss-120b</b></li>
         </ul>
 
-        <h4>Arena Direct (autharena/)</h4>
-        <p>Use Arena Direct models with <code>autharena/</code>, for example <b>autharena/gpt-6-astra-medium</b>. Each request starts a fresh conversation; browser login is retained. No API key is required.</p>
-        <p>Selecting this prefix automatically refreshes Arena's public model list when its daily cache is due.</p>
-
         <h4>Custom Prefix Routes</h4>
         <p>User-defined prefixes can route models to custom OpenAI-compatible endpoints from Model Manager.</p>
         
@@ -21880,9 +21594,9 @@ Recent translations to summarize:
             custom_routes = []
 
         provider = catalog_provider_for_model(active_model, custom_routes)
-        if provider and provider.split(':', 1)[0] in {'authnd', 'autharena'}:
-            # These public browser routes use on-demand catalog adapters.
-            # Poll the selected adapter first and always follow with the
+        if provider and provider.split(':', 1)[0] == 'authnd':
+            # AuthND is an on-demand route, not a generic ProviderCatalogSpec.
+            # Poll it as an explicit first stage and always follow with the
             # full sweep, even if another catalog worker is currently active.
             self._provider_model_catalog_full_refresh_pending = True
             return self._start_provider_model_catalog_refresh(
@@ -22332,7 +22046,6 @@ Recent translations to summarize:
                 'authcd': 'AuthCD',
                 'authgem': 'AuthGem',
                 'authnd': 'AuthND',
-                'autharena': 'AuthArena',
                 'authza': 'AuthZA',
                 'ocagy': 'OcAgy',
                 'gemini': 'Gemini',
@@ -22396,8 +22109,8 @@ Recent translations to summarize:
                 "the existing signed-in session is then queried without opening a login"
             )
         lines.append(
-            "   🔑 Selected route polling: authgpt*/, authcd*/, authgem*/, authnd*/, "
-            "autharena*/, and authza*/ are polled when that route/account is selected; interactive login is never opened"
+            "   🔑 Signed-in route polling: authgpt*/, authcd*/, authgem*/, authnd*/, "
+            "and authza*/ are polled when that route/account is selected; interactive login is never opened"
         )
         self.append_log('\n'.join(lines))
 
@@ -22771,31 +22484,6 @@ Recent translations to summarize:
         self.authgrok_acct_combo.hide()
         model_btn_layout.addWidget(self.authgrok_acct_combo)
         
-        self.autharena_login_btn = QPushButton("Arena Login")
-        self.autharena_login_btn.setStyleSheet(
-            "background-color: #a36f28; color: white; font-weight: bold; "
-            "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
-        )
-        self.autharena_login_btn.setToolTip(
-            "Sign in to Arena in the external browser. Login is saved for the selected profile."
-        )
-        self.autharena_login_btn.clicked.connect(self._autharena_login_clicked)
-        self.autharena_login_btn.hide()
-        model_btn_layout.addWidget(self.autharena_login_btn)
-
-        self.autharena_acct_combo = QComboBox()
-        self.autharena_acct_combo.setStyleSheet(_acct_combo_style.replace('max-width: 46px', 'max-width: 76px'))
-        self.autharena_acct_combo.setToolTip(
-            "Select an Arena account number. Choose + New to sign in another account. "
-            "autharena0/ automatically rotates through verified profiles."
-        )
-        self.autharena_acct_combo.setFixedWidth(76)
-        self.autharena_acct_combo.currentIndexChanged.connect(
-            lambda idx: self._on_auth_acct_combo_changed('autharena', idx)
-        )
-        self.autharena_acct_combo.hide()
-        model_btn_layout.addWidget(self.autharena_acct_combo)
-
         # AuthCD Login button (visible only for authcd/ models)
         self.authcd_login_btn = QPushButton("🔐 Claude Login")
         self.authcd_login_btn.setStyleSheet(
@@ -22923,6 +22611,18 @@ Recent translations to summarize:
         self.authza_login_btn.hide()
         model_btn_layout.addWidget(self.authza_login_btn)
 
+        from autharena_proxy import create_login_controls, set_proxy_started_callback
+        set_proxy_started_callback(lambda: QMetaObject.invokeMethod(
+            self, "_autharena_catalog_after_login", Qt.QueuedConnection))
+        self.autharena_controls = create_login_controls(
+            self, self._autharena_control_model, self.model_combo.setCurrentText,
+            self.append_log, self._autharena_catalog_after_login,
+            selector_enabled=lambda: self.model_combo.currentText().strip().lower().startswith("autharena"))
+        self.autharena_login_btn = self.autharena_controls.login_button
+        self.autharena_acct_combo = self.autharena_controls.accounts
+        model_btn_layout.addWidget(self.autharena_controls)
+        self.model_combo.currentTextChanged.connect(self.autharena_controls.refresh)
+
         # Antigravity proxy controls (visible only for antigravity* models)
         self.antigravity_login_btn = QPushButton("🔐 Antigravity Login")
         self.antigravity_login_btn.setStyleSheet(
@@ -23033,10 +22733,10 @@ Recent translations to summarize:
         
         # State for arrow-based account slot cycling
         self._auth_account_ids = {
-            'authgpt': [0], 'authgrok': [0], 'authcd': [0], 'authgem': [0], 'autharena': [0]
+            'authgpt': [0], 'authgrok': [0], 'authcd': [0], 'authgem': [0]
         }
         self._auth_account_idx = {
-            'authgpt': 0, 'authgrok': 0, 'authcd': 0, 'authgem': 0, 'autharena': 0
+            'authgpt': 0, 'authgrok': 0, 'authcd': 0, 'authgem': 0
         }
         
         model_btn_layout.addStretch()
@@ -24222,10 +23922,6 @@ Recent translations to summarize:
             if active_model.startswith('authnd'):
                 poll_status.setText(
                     "Polling selected AuthND catalog, then remaining providers…"
-                )
-            elif active_model.startswith('autharena'):
-                poll_status.setText(
-                    "Polling selected Arena catalog, then remaining providers…"
                 )
             elif active_model.startswith('authza'):
                 poll_status.setText(
@@ -35155,7 +34851,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
             os.environ.pop('THINKING_BUDGET', None)
             os.environ['STREAM_THINKING_LOGS'] = '0'
             os.environ['AUTHND_STREAM_THINKING_LOGS'] = '0'
-            os.environ['AUTHARENA_STREAM_THINKING_LOGS'] = '0'
             os.environ['ENABLE_THOUGHTS'] = '0'
 
     def _format_translation_anti_duplicate_settings(self, env_vars=None):
@@ -39020,7 +38715,7 @@ Important rules:
 
                             # Known helper flags / scripts
                             #
-                            # Browser-backed routes (AuthND / Arena / Gemini-Free) spawn a
+                            # Browser-backed routes (AuthND / Gemini-Free) spawn a
                             # short-lived QtWebEngine helper subprocess to mint a
                             # captcha/search token. If a stop races the spawn, the
                             # helper (and its Chromium children) can linger holding
@@ -39031,7 +38726,6 @@ Important rules:
                                     or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
                                     or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s
                                     or "--authnd-mint-token" in cmd_s or "--mint-token" in cmd_s
-                                    or "--autharena-helper" in cmd_s or "--browser-helper" in cmd_s
                                     or "--gemini-free-search" in cmd_s or "--search-helper" in cmd_s):
                                 processes_to_terminate.append(child)
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -40502,8 +40196,6 @@ Important rules:
     def _direct_log_message_is_suppressed(self, message):
         """Return whether a queued worker message is expected stop-time noise."""
         try:
-            if decode_stream_fragment(message) is not None:
-                return False
             stopping_now = (
                 bool(getattr(self, 'stop_requested', False))
                 or os.environ.get('TRANSLATION_CANCELLED') == '1'
@@ -40553,31 +40245,12 @@ Important rules:
             if not visible_messages:
                 return
 
-            ordinary = []
-
-            def append_ordinary():
-                if ordinary:
-                    # Retain the optimized batched path for ordinary logs.
-                    self.log_text.appendPlainText("\n".join(ordinary))
-                    ordinary.clear()
-                    self._gui_stream_fragment_channel = None
-
-            for message in visible_messages:
-                fragment = decode_stream_fragment(message)
-                if fragment is None:
-                    ordinary.append(message)
-                    continue
-                append_ordinary()
-                if not fragment["text"]:
-                    continue
-                cursor = self.log_text.textCursor()
-                cursor.movePosition(QTextCursor.End)
-                if getattr(self, '_gui_stream_fragment_channel', None) != fragment["channel"]:
-                    if not self.log_text.document().isEmpty():
-                        cursor.insertText("\n")
-                cursor.insertText(fragment["text"])
-                self._gui_stream_fragment_channel = fragment["channel"]
-            append_ordinary()
+            text = "\n".join(visible_messages)
+            # appendPlainText() is Qt's optimized log-viewer insertion path.
+            # It appends the whole flood batch as one document operation and
+            # enforces maximumBlockCount without the QTextEdit rich-text
+            # layout/formatting overhead.
+            self.log_text.appendPlainText(text)
             self._schedule_log_autoscroll()
         except Exception:
             # GUI logging must never interrupt translation workers.
@@ -40742,14 +40415,6 @@ Important rules:
                pass
        if _suppress_main_log and getattr(self, '_input_output_run_active', False):
            return
-       if decode_stream_fragment(message) is not None:
-           # Keep wire records out of the visible log and avoid matching stop
-           # notices against words that belong to the generated response.
-           if threading.current_thread() is threading.main_thread():
-               self._append_gui_log_batch((message,))
-           else:
-               self._queue_gui_log_message(message)
-           return
        def _append():
            try:
                # Suppress expected graceful-stop pre-send cancellations (avoid noisy per-chapter lines)
@@ -40832,7 +40497,6 @@ Important rules:
                # foreground color.  A previous special case rendered memory
                # and rolling-summary messages as green italics, which also
                # caught ordinary key-pool status messages.
-               self._gui_stream_fragment_channel = None
                self.log_text.appendPlainText(str(message))
                
                # Coalesce auto-scroll work so a log burst does not create one
@@ -44472,7 +44136,6 @@ Important rules:
                 ("🤖", "antigravity/", "Cloud Code", "Local proxy (localhost)", "#181830", "#a0a0f0"),
                 ("🟢", "nd/", "NVIDIA", "NVIDIA Integrate models", "#143014", "#60d060"),
                 ("🟢", "authnd/", "AuthND", "NVIDIA Build browser route", "#143014", "#8ee88e"),
-                ("🏟️", "autharena/", "AuthArena", "Arena Direct browser route", "#282014", "#f5c478"),
                 ("🇨🇳", "za/", "Zhipu Intl.", "GLM international endpoint", "#1e2030", "#60c0e0"),
                 ("🌌", "nan/", "NanoGPT", "Generative & text models", "#1a1025", "#c084fc"),
                 ("⚙️", "sam/", "SambaNova", "SambaNova Cloud API", "#1a1e14", "#7cb343"),

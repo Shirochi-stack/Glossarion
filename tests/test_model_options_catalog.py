@@ -1,13 +1,10 @@
-import ast
 import base64
 import io
 import inspect
-import json
 import sys
 import types
 import urllib.error
 from types import SimpleNamespace
-from pathlib import Path
 
 import model_options
 import pytest
@@ -140,7 +137,6 @@ def test_multi_key_manager_detects_live_authgrok_pool_route():
             "authgem-vertex27/gemini-3",
         ),
         ("authnd4/nemotron", "authnd/nemotron-3", "authnd4/nemotron-3"),
-        ("autharena4/gpt", "autharena/gpt-6-astra-medium", "autharena4/gpt-6-astra-medium"),
         ("authza2/glm", "authza/glm-5", "authza2/glm-5"),
         ("ocagy0", "ocagy/gemini-3.1-pro-high", "ocagy0/gemini-3.1-pro-high"),
         (
@@ -742,113 +738,6 @@ def test_numbered_authnd_poll_preserves_selected_route_prefix(tmp_path, monkeypa
     )
 
     assert result.provider_models["authnd:4"] == ["authnd4/z-ai/glm-5.2"]
-
-
-@pytest.mark.parametrize("suffix,account_id", [("", 0), ("0", 0), ("4", 4)])
-def test_autharena_auto_poll_is_public_scoped_and_persists_daily_ttl(
-    tmp_path, monkeypatch, suffix, account_id
-):
-    _isolated_cache(tmp_path, monkeypatch)
-    now = [1_000_000.0]
-    monkeypatch.setattr(model_options.time, "time", lambda: now[0])
-    calls = []
-
-    def fetch_available_models(*, timeout, account_id):
-        calls.append((timeout, account_id))
-        return ["gpt-6-astra-medium", "new-arena-model", "new-arena-model"]
-
-    # No session store or browser entrypoint: catalog polling must need neither.
-    monkeypatch.setitem(sys.modules, "autharena", SimpleNamespace(
-        fetch_available_models=fetch_available_models,
-    ))
-    monkeypatch.setattr(
-        model_options,
-        "_fetch_provider_catalog",
-        lambda *_args, **_kwargs: pytest.fail("scoped Arena poll contacted another provider"),
-    )
-    prefix = f"autharena{suffix}/"
-    provider = f"autharena:{account_id}" if suffix else "autharena"
-    assert model_options.provider_model_catalog_supports_anonymous_poll(prefix)
-    assert model_options.due_provider_catalog_for_model(prefix) == provider
-
-    result = model_options.refresh_provider_model_catalogs(
-        active_model=prefix,
-        only_provider=provider,
-        timeout=0.1,
-    )
-    expected_models = [f"{prefix}gpt-6-astra-medium", f"{prefix}new-arena-model"]
-    assert calls == [(1, account_id)]
-    assert result.provider_models[provider] == expected_models
-    assert result.statuses[provider] == "online (2 models)"
-    assert f"{prefix}new-arena-model" in result.models
-
-    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
-    assert model_options.get_last_successful_provider_models()[provider] == expected_models
-    now[0] += 24 * 60 * 60 - 1
-    assert model_options.due_provider_catalog_for_model(prefix) is None
-    now[0] += 1
-    assert model_options.due_provider_catalog_for_model(prefix) == provider
-    assert calls == [(1, account_id)]
-
-
-def test_autharena_failed_public_poll_retains_last_success_and_static_seed(
-    tmp_path, monkeypatch
-):
-    _isolated_cache(tmp_path, monkeypatch)
-    adapter = SimpleNamespace(
-        fetch_available_models=lambda **_kwargs: ["live-arena-model"],
-    )
-    monkeypatch.setitem(sys.modules, "autharena", adapter)
-    kwargs = {"active_model": "autharena/", "only_provider": "autharena", "timeout": 0.1}
-    model_options.refresh_provider_model_catalogs(**kwargs)
-
-    def blocked_catalog(**_kwargs):
-        raise OSError("catalog unavailable")
-
-    adapter.fetch_available_models = blocked_catalog
-    result = model_options.refresh_provider_model_catalogs(**kwargs)
-    assert result.provider_models == {}
-    assert result.statuses["autharena"] == "static fallback (OSError — catalog unavailable)"
-    assert "autharena/gpt-6-astra-medium" in result.models
-    assert "autharena/live-arena-model" not in result.models
-    assert model_options.get_last_successful_provider_models()["autharena"] == [
-        "autharena/live-arena-model"
-    ]
-    assert model_options.due_provider_catalog_for_model("autharena/") is None
-
-
-@pytest.mark.parametrize("helper_fails", [False, True])
-def test_autharena_frozen_helper_dispatches_before_gui_imports(monkeypatch, capsys, helper_fails):
-    source_path = Path(__file__).resolve().parents[1] / "src" / "translator_gui.py"
-    entrypoint = ast.parse(source_path.read_text(encoding="utf-8-sig")).body[0]
-    helper_calls = []
-    monkeypatch.setitem(sys.modules, "multiprocessing", SimpleNamespace(freeze_support=lambda: None))
-    def helper_main():
-        helper_calls.append(list(sys.argv))
-        if helper_fails:
-            raise ImportError("missing browser dependency")
-        return 0
-
-    monkeypatch.setitem(sys.modules, "autharena", SimpleNamespace(_main=helper_main))
-    monkeypatch.setattr(sys, "argv", [
-        "Glossarion.exe", "--autharena-helper", "--timeout", "30",
-    ])
-    with pytest.raises(SystemExit) as stopped:
-        exec(
-            compile(ast.Module(body=[entrypoint], type_ignores=[]), str(source_path), "exec"),
-            {"__name__": "__main__"},
-        )
-    assert stopped.value.code == (1 if helper_fails else 0)
-    assert helper_calls == [["Glossarion.exe", "--browser-helper", "--timeout", "30"]]
-    output = capsys.readouterr().out
-    if helper_fails:
-        assert json.loads(output) == {
-            "autharena": 1,
-            "event": "error",
-            "message": "AuthArena browser helper failed: missing browser dependency",
-        }
-    else:
-        assert output == ""
 
 
 def test_authza_poll_reads_existing_selector_without_login(tmp_path, monkeypatch):
@@ -2403,8 +2292,6 @@ def test_model_text_provider_refresh_is_debounced(monkeypatch):
         ("or/openrouter/free", "", True),
         ("or/openrouter/free", "openrouter-key", True),
         ("authnd/nvidia/model", "", True),
-        ("autharena/gpt-6-astra-medium", "", True),
-        ("autharena4/gpt-6-astra-medium", "", True),
         ("authza/glm-5.3", "", True),
     ],
 )
@@ -2679,11 +2566,9 @@ def test_glm_proxy_ready_does_not_poll_a_different_selected_account(monkeypatch)
     [
         ("authnd/", "authnd"),
         ("authnd4/z-ai/glm-5.2", "authnd:4"),
-        ("autharena/", "autharena"),
-        ("autharena4/gpt-6-astra-medium", "autharena:4"),
     ],
 )
-def test_manage_models_poll_explicitly_polls_selected_browser_catalog_before_full_refresh(
+def test_manage_models_poll_explicitly_polls_selected_authnd_before_full_refresh(
     active_model,
     expected_provider,
 ):

@@ -18,7 +18,6 @@ def _isolated_state_env(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
     monkeypatch.delenv("AUTHND_TOKEN_HELPER", raising=False)
-    monkeypatch.delenv("AUTHARENA_BROWSER_HELPER", raising=False)
     monkeypatch.delenv("GEMINI_FREE_HELPER", raising=False)
     return home
 
@@ -105,9 +104,7 @@ def test_browser_state_cleanup_finds_app_data_roots(monkeypatch, tmp_path):
         assert (root / "cache" / "kept.txt").is_file()
 
 
-@pytest.mark.parametrize("helper_env", (
-    "AUTHND_TOKEN_HELPER", "AUTHARENA_BROWSER_HELPER", "GEMINI_FREE_HELPER",
-))
+@pytest.mark.parametrize("helper_env", ("AUTHND_TOKEN_HELPER", "GEMINI_FREE_HELPER"))
 def test_browser_state_cleanup_skips_helper_processes(monkeypatch, tmp_path, helper_env):
     home = _isolated_state_env(monkeypatch, tmp_path)
     root = home / ".glossarion"
@@ -119,53 +116,6 @@ def test_browser_state_cleanup_skips_helper_processes(monkeypatch, tmp_path, hel
     assert stats["skipped"] == 1
     assert stats["removed"] == 0
     assert profile.is_dir()
-
-
-def test_browser_state_cleanup_preserves_arena_account_cookies(monkeypatch, tmp_path):
-    home = _isolated_state_env(monkeypatch, tmp_path)
-    root = home / ".glossarion"
-    cookies = [
-        _touch(root / "autharena_browser" / "Cookies", "default login"),
-        _touch(root / "autharena_browser" / "account-1" / "Cookies", "account login"),
-    ]
-    disposable = _make_profile_dir(root, "authnd_browser", "temporary")
-
-    stats = shutdown_utils.cleanup_browser_generated_state_for_shutdown()
-    direct_stats = shutdown_utils.cleanup_generated_browser_profile_dir(
-        str(root / "autharena_browser" / "account-1"), "autharena_browser",
-    )
-
-    assert stats["removed"] == 1
-    assert not disposable.exists()
-    assert direct_stats["skipped"] == 1
-    assert [path.read_text(encoding="utf-8") for path in cookies] == [
-        "default login", "account login",
-    ]
-
-
-def test_hard_stop_cancels_arena_when_unified_client_is_unavailable(monkeypatch):
-    cancelled = []
-    monkeypatch.setitem(sys.modules, "unified_api_client", None)
-    for name in (
-        "authnd_auth", "authgpt_auth", "authgem_auth", "authcd_auth", "gemini_free",
-        "TransateKRtoEN", "extract_glossary_from_epub", "GlossaryManager",
-    ):
-        monkeypatch.setitem(sys.modules, name, None)
-    monkeypatch.setitem(
-        sys.modules, "autharena",
-        types.SimpleNamespace(cancel_stream=lambda: cancelled.append(True)),
-    )
-    monkeypatch.delenv("GLOSSARY_STOP_FILE", raising=False)
-    for name in (
-        "TRANSLATION_CANCELLED", "GRACEFUL_STOP", "GRACEFUL_STOP_COMPLETED",
-        "WAIT_FOR_CHUNKS",
-    ):
-        monkeypatch.setenv(name, "0")
-
-    shutdown_utils.request_hard_stop_for_shutdown()
-
-    assert cancelled == [True]
-    assert shutdown_utils.os.environ["TRANSLATION_CANCELLED"] == "1"
 
 
 def test_browser_state_cleanup_sweeps_stale_handoff(monkeypatch, tmp_path):

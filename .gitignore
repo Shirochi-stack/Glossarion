@@ -82,7 +82,6 @@ howtoruntest.txt
 
 # Exclude all JSON by default (change if needed)
 *.json
-!assets/autharena_extension/manifest.json
 PATH
 PATH
 src/test_azure.py
@@ -96,6 +95,8 @@ src/wait_and_open.ps1
 tests/
 !tests/
 tests/**
+!tests/test_autharena_proxy.py
+!tests/test_autharena_worker.py
 !tests/test_glm_proxy.py
 !tests/test_sdlxliff_support.py
 !tests/test_sdlxliff_json_batch.py
@@ -127,15 +128,6 @@ tests/**
 !tests/test_config_backup_restore.py
 !tests/test_update_manager_notes.py
 !tests/test_authnd_captcha_navigation.py
-!tests/test_autharena.py
-!tests/test_autharena_routing.py
-!tests/test_autharena_gui.py
-!tests/test_autharena_multikey.py
-!tests/test_autharena_browser.py
-!tests/test_autharena_bridge.py
-!tests/test_autharena_extension.py
-!tests/test_autharena_packaging.py
-!tests/test_autharena_setup.py
 !tests/test_authgrok_auth.py
 !tests/test_authgpt_request.py
 !tests/test_openai_token_compatibility.py

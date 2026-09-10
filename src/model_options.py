@@ -357,9 +357,6 @@ def _get_static_model_options() -> List[str]:
         # Google Search / Gemini browser-backed route (no API key needed)
         "search/gemini",
 
-        # Arena Direct browser-backed route (no API key needed)
-        "autharena/gpt-6-astra-medium",
-
         # NVIDIA Build browser-backed route (no API key needed) - chat-tagged catalog models
         "authnd/nvidia/nemotron-3-ultra-550b-a55b",
         "authnd/mistralai/mistral-medium-3.5-128b",
@@ -600,6 +597,7 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
     ),
     # The local proxy is queried only if it is already running. Catalog
     # discovery must never start the proxy or open an OAuth browser window.
+    ProviderCatalogSpec("autharena", "autharena/", "http://127.0.0.1/v1/models", public=True),
     ProviderCatalogSpec(
         "antigravity", "antigravity/", "http://localhost:3000/v1/models",
         public=True, base_url_env="ANTIGRAVITY_PROXY_URL", models_path="/v1/models",
@@ -616,6 +614,7 @@ STATIC_ONLY_PROVIDER_PREFIXES: Mapping[str, str] = {
 
 
 _PREFIX_PROVIDER_MAP: Tuple[Tuple[str, str], ...] = (
+    ("autharena/", "autharena"),
     ("authgem-vertex/", "static"),
     ("authgrok/", "authgrok"),
     ("authgem-key/", "static"),
@@ -665,7 +664,7 @@ _BARE_PROVIDER_PREFIXES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
 
 
 _NUMBERED_MODEL_COMPLETION_RE = re.compile(
-    r"^(authgem-vertex|antigravity|authgpt|authgrok|authcd|authgem|authnd|autharena|authza|ocagy)"
+    r"^(autharena|authgem-vertex|antigravity|authgpt|authgrok|authcd|authgem|authnd|authza|ocagy)"
     r"(\d{1,4})(?=/|$)",
     re.IGNORECASE,
 )
@@ -760,6 +759,8 @@ def _catalog_provider_for_model(model: str) -> Optional[str]:
     authenticated_target = _authenticated_catalog_target(value)
     if authenticated_target is not None:
         return authenticated_target[0]
+    if re.match(r"^autharena\d{0,4}(?:/|$)", value):
+        return "autharena"
     if re.match(r"^ocagy\d{0,4}(?:/|$)", value):
         return "ocagy"
     authgrok_match = re.match(r"^authgrok(\d{1,4})/", value)
@@ -779,15 +780,11 @@ def _authenticated_catalog_target(
 ) -> Optional[Tuple[str, str, int, str]]:
     """Return (cache name, dropdown prefix, account id, route) for auth routes."""
     value = str(active_model or "").strip().lower()
-    match = re.match(r"^(authgpt|authcd|authgem|authnd|autharena|authza)(\d{0,4})/", value)
+    match = re.match(r"^(authgpt|authcd|authgem|authnd|authza)(\d{0,4})/", value)
     if not match:
         return None
     route = match.group(1)
     account_id = int(match.group(2) or 0)
-    if route == "autharena" and match.group(2) and account_id == 0:
-        # Explicit zero rotates accounts; the bare prefix selects the default
-        # profile. Keep suggestions/cache entries from rewriting one as the other.
-        return "autharena:0", "autharena0/", 0, route
     provider_name = route if not account_id else f"{route}:{account_id}"
     prefix = f"{route}{account_id if account_id else ''}/"
     return provider_name, prefix, account_id, route
@@ -1128,6 +1125,9 @@ def _fetch_provider_catalog(
     api_key: str = "",
     timeout: float = 8.0,
 ) -> List[str]:
+    if spec.name == "autharena":
+        from autharena_proxy import list_models
+        return ["autharena/" + m["id"] for m in list_models(timeout=max(timeout, 120))]
     url = _provider_models_url(spec)
     headers = {
         "Accept": "application/json",
@@ -1242,9 +1242,9 @@ def _authenticated_catalog_has_session(active_model: str) -> bool:
     if target is None:
         return False
     _provider_name, _prefix, account_id, route = target
-    if route in {"authnd", "autharena"}:
-        # The advertised model lists are public; browser helpers are only
-        # needed when the user actually sends an inference request.
+    if route == "authnd":
+        # NVIDIA's advertised model list is public; WebEngine/hCaptcha is only
+        # needed when the user actually sends a request.
         return True
     module_name = {
         "authgpt": "authgpt_auth",
@@ -1282,13 +1282,6 @@ def _fetch_authenticated_catalog(
         # hides newly released models and models omitted by /v1/models.
         raw_models = authnd_auth.fetch_available_models(
             timeout=max(1, int(round(timeout)))
-        )
-    elif route == "autharena":
-        import autharena
-
-        raw_models = autharena.fetch_available_models(
-            timeout=max(1, int(round(timeout))),
-            account_id=account_id,
         )
     elif route == "authza":
         import glm_proxy
@@ -1402,8 +1395,6 @@ def provider_model_catalog_supports_anonymous_poll(
     provider = catalog_provider_for_model(model, custom_routes)
     if not provider:
         return False
-    if provider.split(":", 1)[0] == "autharena":
-        return True
     specs = list(PROVIDER_CATALOG_SPECS)
     specs.extend(_custom_catalog_specs(custom_routes, model))
     spec = next((item for item in specs if item.name == provider), None)
@@ -1468,6 +1459,11 @@ def due_provider_catalog_for_model(
     # The Antigravity catalog lives behind a local proxy. Typing/selecting its
     # prefix must not spend the 24-hour attempt TTL while that proxy is offline;
     # its dedicated proxy-start hook polls once the service is healthy instead.
+    if provider == "autharena":
+        from autharena_proxy import list_accounts
+        # The background catalog worker checks health; avoid HTTP on the Qt thread.
+        if not list_accounts():
+            return None
     if provider == "antigravity":
         return None
     if not provider or not provider_model_catalog_refresh_due(provider, max_age=max_age):
@@ -1528,6 +1524,11 @@ def refresh_provider_model_catalogs(
     statuses: Dict[str, str] = {}
     eligible: List[Tuple[ProviderCatalogSpec, str]] = []
     for spec in specs:
+        if spec.name == "autharena":
+            from autharena_proxy import list_accounts, check_proxy_health
+            if not list_accounts() or not check_proxy_health().get("running"):
+                statuses[spec.name] = "waiting for Arena Login"
+                continue
         key = _provider_key(spec, active_provider, active_api_key, provider_keys)
         if spec.name.startswith("custom:") and active_api_key:
             key = str(active_api_key).strip()
@@ -1636,11 +1637,11 @@ def refresh_provider_model_catalogs(
         built_in_names.update(name for name in failed if name.startswith("authgrok"))
         built_in_names.update(
             name for name in successful
-            if name.split(":", 1)[0] in {"authgpt", "authcd", "authgem", "authnd", "autharena", "authza"}
+            if name.split(":", 1)[0] in {"authgpt", "authcd", "authgem", "authnd", "authza"}
         )
         built_in_names.update(
             name for name in failed
-            if name.split(":", 1)[0] in {"authgpt", "authcd", "authgem", "authnd", "autharena", "authza"}
+            if name.split(":", 1)[0] in {"authgpt", "authcd", "authgem", "authnd", "authza"}
         )
         for name in failed:
             if name in built_in_names:

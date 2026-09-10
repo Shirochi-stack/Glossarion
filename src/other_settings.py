@@ -3104,7 +3104,6 @@ def _create_response_handling_section(self, parent):
     self.enable_streaming_checkbox.setToolTip(
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
         "Streams tokens as they are generated to reduce time-to-first-byte. "
-        "AuthArena always streams and uses the forced-stream batch log setting below. "
         "Some official providers (e.g., Google Gemini) may truncate streams without raising an error—disable streaming if you see incomplete outputs."
         "</p></qt>"
     )
@@ -3166,8 +3165,8 @@ def _create_response_handling_section(self, parent):
     self.stream_thinking_logs_checkbox.setToolTip(
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
         "Show 🧠 thinking logs in real-time when models use reasoning/thinking. "
-        "Applies to Anthropic, Gemini, OpenAI reasoning, AuthGPT, AuthGrok, AuthGem, and AuthArena. "
-        "Antigravity and OcAgy include thinking whenever their forced live stream is visible. "
+        "Applies to Anthropic, Gemini, OpenAI reasoning, AuthGPT, AuthGrok, and AuthGem. "
+        "Arena, Antigravity and OcAgy include thinking whenever their forced live stream is visible. "
         "AuthGrok reasoning summaries always stream outside batch mode; this setting still applies to AuthGrok during batch mode. "
         "For other providers, disable this to suppress thinking output and show only final text.</p></qt>"
     )
@@ -3227,12 +3226,12 @@ def _create_response_handling_section(self, parent):
     except Exception:
         pass
     self.allow_authgpt_batch_stream_logs_checkbox = self._create_styled_checkbox(
-        "Allow forced-stream batch log (AuthGPT / AuthGrok / AuthGem / AuthCD / AuthZA / AuthArena / Antigravity / OcAgy)"
+        "Allow forced-stream batch log (AuthGPT / AuthGrok / AuthGem / AuthCD / AuthZA / Arena / Antigravity / OcAgy)"
     )
     self.allow_authgpt_batch_stream_logs_checkbox.setToolTip(
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
         "AuthGPT (authgpt/), AuthGrok (authgrok/), AuthGem (authgem/), AuthCD (authcd/), "
-        "AuthZA (authza/), AuthArena (autharena/), Antigravity (antigravity/), and OcAgy (ocagy/) always stream internally. "
+        "AuthZA (authza/), Antigravity (antigravity/), and OcAgy (ocagy/) always stream internally. "
         "During batch translation this can flood the log. Enable this to see streaming "
         "tokens and reasoning in the log during batch mode. Off by default.</p></qt>"
     )
@@ -3251,7 +3250,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(self.allow_authgpt_batch_stream_logs_checkbox)
 
     authgpt_note = QLabel(
-        "🔐 AuthGPT, AuthGrok, AuthGem, AuthCD, AuthZA, AuthArena, Antigravity, and OcAgy always stream "
+        "🔐 AuthGPT, AuthGrok, AuthGem, AuthCD, Arena, Antigravity, and OcAgy always stream "
         "— this controls batch log visibility"
     )
     authgpt_note.setStyleSheet("color: #6b7280; font-size: 9pt; font-style: italic;")
