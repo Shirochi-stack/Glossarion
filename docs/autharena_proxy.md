@@ -32,7 +32,9 @@ does not inherit another account's sign-in. A login keeps
 its original target if the model or another key row changes while it is open.
 
 Translation requests have separate conversation state and isolated internal
-browser contexts per saved account. The app owns and closes this browser;
+browser contexts per saved account. Translation runs headlessly; only an explicit
+Arena Login opens a visible browser. Upstream HTTP errors include Arena's response
+details when provided, rather than only the status code. The app owns and closes this browser;
 personal browser profiles are not used. Credentials use Glossarion's existing encrypted
 storage. The loopback service requires a generated authentication key.
 

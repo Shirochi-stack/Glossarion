@@ -60,6 +60,9 @@ class Page:
 
     async def evaluate(self, script, args):
         self.context.browser.sent.append((self.context.saved_cookies, args["payload"]))
+        if self.context.browser.fail_request:
+            await self.emit(None, {"status": 400, "headers": {}, "error_body": '{"message":"invalid test payload"}'})
+            return
         await self.emit(None, {"status": 200, "headers": {}})
         await self.emit(None, {"line": 'ag:"reasoning"'})
         await self.emit(None, {"line": 'a0:"hello"'})
@@ -95,6 +98,7 @@ class Browser:
         self.sent = []
         self.urls = []
         self.login_clicks = 0
+        self.fail_request = False
 
     async def close(self):
         self.contexts.clear()
@@ -188,7 +192,7 @@ class WorkerTest(unittest.TestCase):
                 return self
 
             async def launch(self, **kwargs):
-                assert kwargs["headless"] is False
+                assert kwargs["headless"] is True
                 return browser
 
             async def stop(self):
@@ -243,6 +247,12 @@ class WorkerTest(unittest.TestCase):
                 mismatch = await client.post("/login", json={"slot": 0})
                 assert mismatch.status_code == 409, mismatch.text
                 assert arena._load("accounts.enc")["0"]["user_id"] == "user-0"
+                browser.fail_request = True
+                before = len(browser.sent)
+                failed = await client.post("/v1/chat/completions", json={"model": "test-model", "messages": [{"role": "user", "content": "test"}], "account_slot": 0})
+                with self.assertRaisesRegex(RuntimeError, "invalid test payload"):
+                    arena.consume_stream(failed.text.splitlines(), log_stream=False)
+                self.assertEqual(len(browser.sent), before + 1)
             for sock in sockets:
                 sock.close()
 

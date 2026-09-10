@@ -28,7 +28,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 5
+ADAPTER_VERSION = 6
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
 _lock = threading.RLock()
@@ -634,7 +634,7 @@ async def _serve_worker(key):
         if browser is not None and browser.is_connected():
             return browser
         try:
-            browser = await playwright.chromium.launch(headless=False, timeout=60000)
+            browser = await playwright.chromium.launch(headless=True, timeout=60000)
         except Exception as exc:
             raise HTTPException(503, f"Arena could not open its internal browser: {exc}")
         return browser
@@ -793,6 +793,25 @@ async def _serve_worker(key):
                         }
                         const response = await fetch(url, {method, credentials:'include',
                             headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+                        if (!response.ok) {
+                            // Buffer errors before publishing headers: the bridge's
+                            // synchronous raise_for_status needs the response body.
+                            const reader = response.body?.getReader();
+                            const decoder = new TextDecoder(); let errorBody = '';
+                            if (reader) {
+                                try {
+                                    while (errorBody.length < 8192) {
+                                        const {done,value} = await reader.read();
+                                        if (done) break;
+                                        errorBody += decoder.decode(value, {stream:true});
+                                    }
+                                    errorBody += decoder.decode();
+                                } finally { await reader.cancel(); }
+                            }
+                            await arenaEmit({status:response.status,
+                                headers:Object.fromEntries(response.headers), error_body:errorBody.slice(0,8192)});
+                            return;
+                        }
                         await arenaEmit({status:response.status, headers:Object.fromEntries(response.headers)});
                         const reader = response.body.getReader(); const decoder = new TextDecoder(); let pending='';
                         while (true) { const {done,value} = await reader.read();
@@ -846,7 +865,9 @@ async def _serve_worker(key):
                     await page.close()
                 async def __aexit__(self, *args):
                     await self.aclose()
-            return Response(result["status"], result["headers"], lines_queue=queue, done_event=done_event, method=http_method, url=url)
+            return Response(result["status"], result["headers"], text=result.get("error_body", ""),
+                            lines_queue=queue if result["status"] < 400 else None,
+                            done_event=done_event, method=http_method, url=url)
         async def submit_once(*args, **kwargs):
             if state["submitted"]:
                 return transport.BrowserFetchStreamResponse(400, {}, text="Arena request was already submitted; reconnect with Arena Login before retrying.")
