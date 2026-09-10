@@ -376,12 +376,12 @@ def _normalize_model(model):
 
 
 def _model_account(model, account_id):
-    prefix = re.match(r"(?i)^autharena(\d+)/", str(model or "").strip())
+    prefix = re.match(r"(?i)^autharena(\d*)/", str(model or "").strip())
     account_id = _account_number(account_id)
     if prefix:
-        numbered = _account_number(prefix.group(1))
+        numbered = _account_number(prefix.group(1) or 0)
         if account_id not in (0, numbered):
-            raise ValueError("AuthArena numbered model prefix conflicts with account_id")
+            raise ValueError("AuthArena model prefix conflicts with account_id")
         return numbered
     return account_id
 

@@ -18698,6 +18698,10 @@ Recent translations to summarize:
             or getattr(self, '_multi_key_manager_autharena_pool_hint', False)
         )
         self.autharena_login_btn.setVisible(visible)
+        if hasattr(self, 'autharena_acct_combo') and _re.match(
+            r'^autharena0{0,4}/', str(active or '').strip().lower()
+        ):
+            self.autharena_acct_combo.hide()
         if visible:
             self._update_autharena_login_status()
         elif hasattr(self, 'autharena_acct_combo'):
@@ -18868,11 +18872,15 @@ Recent translations to summarize:
                 if previous_autharena_id in sorted_ids:
                     cur_idx = sorted_ids.index(previous_autharena_id)
                 arena_match = _prov_patterns['autharena'].match(model)
-                if arena_match and model != getattr(self, '_autharena_account_model_snapshot', None):
+                if arena_match:
                     primary_id = int(arena_match.group(1) or 0)
-                    # Explicit zero means the rotating route; its login chooser
-                    # still targets a physical profile, including slot 0.
-                    if arena_match.group(1) != '0' and primary_id in sorted_ids:
+                    # Bare and pooled routes hide the selector and log in to
+                    # the first physical account. Positive routes keep manual
+                    # selector changes until the main model changes again.
+                    if primary_id in sorted_ids and (
+                        primary_id == 0
+                        or model != getattr(self, '_autharena_account_model_snapshot', None)
+                    ):
                         cur_idx = sorted_ids.index(primary_id)
             if (
                 provider == 'authgrok'
@@ -18909,6 +18917,8 @@ Recent translations to summarize:
                     and autharena_configured
                     and hasattr(self, main_btn_name)
                 )
+                if provider == 'autharena' and _re.match(r'^autharena0{0,4}/', model):
+                    show_combo = False
                 if show_combo:
                     # Repopulate items (block signals to avoid triggering change handler)
                     combo.blockSignals(True)
@@ -19547,7 +19557,11 @@ Recent translations to summarize:
         import re as _re
         model = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
         match = _re.match(r'^autharena(\d{0,4})/', model)
-        if match and match.group(1) != '0' and model != getattr(self, '_autharena_account_model_snapshot', None):
+        if match and int(match.group(1) or 0) == 0:
+            # A hidden selector must never redirect bare/pool login to a
+            # previously selected numbered account. Zero here is physical 0.
+            return 0
+        if match and model != getattr(self, '_autharena_account_model_snapshot', None):
             return int(match.group(1) or 0)
         ids = getattr(self, '_auth_account_ids', {}).get('autharena', [])
         index = getattr(self, '_auth_account_idx', {}).get('autharena', 0)
@@ -19566,11 +19580,11 @@ Recent translations to summarize:
             combo.setEnabled(not busy)
         if busy:
             account = self._autharena_login_account_id
-            label = str(account)
+            label = 'first account (0)' if account == 0 else str(account)
             button.setToolTip(f"Arena profile: {label}. Sign-in is in progress in the external browser.")
             return
         account = self._get_autharena_account_id()
-        label = str(account)
+        label = 'first account (0)' if account == 0 else str(account)
         try:
             from autharena import get_account_status
             status = get_account_status(account)
@@ -19583,7 +19597,7 @@ Recent translations to summarize:
             f"Arena profile: {label}. "
             + ("Last verified signed in. Click to open the external browser and verify again. " if signed_in else "Click to sign in to Arena in the external browser. ")
             + "Login is saved for this profile; each request starts a fresh conversation. "
-            + ("autharena0/ rotates through signed-in profiles, including account 0." if self._autharena_pool_route_requested() else "No API key is required.")
+            + ("autharena0/ rotates through signed-in profiles, including the first account." if self._autharena_pool_route_requested() else "No API key is required.")
         )
         button.setStyleSheet(
             f"background-color: {'#28a745' if signed_in else '#a36f28'}; color: white; font-weight: bold; "

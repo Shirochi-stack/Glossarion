@@ -70,13 +70,18 @@ def arena(monkeypatch):
     return adapter, signed_in, known
 
 
-@pytest.mark.parametrize('model', ['autharena/model', 'autharena3/model', ' autharena0/model ', 'AUTHARENA/model'])
-def test_arena_login_visible_for_main_default_numbered_and_pool(qapp, arena, model):
+@pytest.mark.parametrize('model,selector_visible', [
+    ('autharena/model', False), ('autharena3/model', True),
+    (' autharena0/model ', False), ('AUTHARENA/model', False),
+    ('autharena0000/model', False), ('autharena0003/model', True),
+])
+def test_arena_login_visible_for_main_default_numbered_and_pool(qapp, arena, model, selector_visible):
     gui = ArenaHarness(model)
     assert not gui.autharena_login_btn.isHidden()
     assert gui.autharena_login_btn.text() == 'Arena Login'
-    assert not gui.autharena_acct_combo.isHidden()
-    assert gui.autharena_acct_combo.itemText(0) == '0'
+    assert gui.autharena_acct_combo.isHidden() is not selector_visible
+    if selector_visible:
+        assert gui.autharena_acct_combo.itemText(0) == '0'
     gui.close()
 
 
@@ -289,6 +294,7 @@ def test_arena_login_visibility_tracks_enabled_pool_and_rows(qapp, arena, pool, 
     config = {toggle: True, pool: [{'model': 'autharena7/model', 'enabled': True}]}
     gui = ArenaHarness('gpt-other', config)
     assert not gui.autharena_login_btn.isHidden()
+    assert not gui.autharena_acct_combo.isHidden()
     assert 7 in gui._auth_account_ids['autharena']
     config[pool][0]['enabled'] = False
     gui._autharena_login_status_changed()
@@ -321,29 +327,33 @@ def test_arena_account_selection_preserves_physical_slot_and_follows_new_model(q
     known[:] = [0, 2, 5]
     gui = ArenaHarness('autharena3/model')
     assert gui._get_autharena_account_id() == 3
-    gui.model_var = 'autharena/model'
-    gui._autharena_login_status_changed()
-    assert gui._get_autharena_account_id() == 0
-    gui.model_var = 'autharena0/model'
-    gui._autharena_login_status_changed()
     combo = gui.autharena_acct_combo
     combo.setCurrentIndex(combo.findData(5))
     known.insert(1, 1)
     gui._autharena_login_status_changed()
     assert gui._get_autharena_account_id() == 5
     assert combo.currentText() == '5'
+    gui.model_var = 'autharena/model'
+    gui._autharena_login_status_changed()
+    assert gui._get_autharena_account_id() == 0
+    assert combo.isHidden()
+    gui.model_var = 'autharena0/model'
+    gui._autharena_login_status_changed()
+    assert gui._get_autharena_account_id() == 0
+    assert combo.isHidden()
     assert 'rotates' in gui.autharena_login_btn.toolTip()
     gui.model_var = 'autharena2/model'
     gui._autharena_login_status_changed()
     assert gui._get_autharena_account_id() == 2
+    assert not combo.isHidden()
     gui.close()
 
 
-def test_arena_pool_add_new_selects_unused_physical_slot(qapp, arena, monkeypatch):
+def test_arena_numbered_route_add_new_selects_unused_physical_slot(qapp, arena, monkeypatch):
     arena[2][:] = [0, 1, 3]
     queued = []
     monkeypatch.setattr(translator_gui, 'QTimer', SimpleNamespace(singleShot=lambda delay, callback: queued.append(callback)))
-    gui = ArenaHarness('autharena0/model')
+    gui = ArenaHarness('autharena1/model')
     gui.autharena_acct_combo.setCurrentIndex(
         gui.autharena_acct_combo.findData(translator_gui._AUTHARENA_ADD_ACCOUNT_SENTINEL)
     )
@@ -351,6 +361,30 @@ def test_arena_pool_add_new_selects_unused_physical_slot(qapp, arena, monkeypatc
     assert gui.autharena_acct_combo.currentText() == '2'
     assert gui._autharena_pending_account_ids == {2}
     assert len(queued) == 1
+    gui.close()
+
+
+@pytest.mark.parametrize('model', ['autharena/model', 'autharena0/model', 'AUTHARENA000/model'])
+def test_hidden_arena_selector_never_redirects_first_account_login(qapp, arena, model):
+    arena[2][:] = [0, 3, 7]
+    gui = ArenaHarness('autharena3/model', {
+        'use_multi_api_keys': True,
+        'multi_api_keys': [{'model': 'autharena7/model', 'enabled': True}],
+    })
+    gui._multi_key_manager_autharena_pool_hint = True
+    gui._multi_key_manager_autharena_account_ids = {7}
+    combo = gui.autharena_acct_combo
+    combo.setCurrentIndex(combo.findData(7))
+    assert gui._get_autharena_account_id() == 7
+    gui.model_var = model
+    assert gui._get_autharena_account_id() == 0  # Safe even before the redraw.
+    gui._autharena_login_status_changed()
+    assert combo.isHidden()
+    assert not gui.autharena_login_btn.isHidden()
+    assert 'first account (0)' in gui.autharena_login_btn.toolTip()
+    # A stale programmatic selector change cannot alter the hidden login slot.
+    gui._auth_account_idx['autharena'] = gui._auth_account_ids['autharena'].index(7)
+    assert gui._get_autharena_account_id() == 0
     gui.close()
 
 

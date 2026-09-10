@@ -42,23 +42,29 @@ Glossarion are not used for this route, including in Lite and TurboLite builds.
 
 ## Account numbers and rotation
 
-The main account selector uses plain numbers: **0**, **1**, **2**, and so on.
-Choose **+ New** to add another account number. In **Multi API Key Manager**,
-**Arena Login** appears in each Arena model field, including fallback and
-dedicated key pools. Arena rows do not require an API key.
+The main account selector is hidden for `autharena/` and `autharena0/`.
+**Arena Login** remains available and signs in the first account for either
+prefix. Selecting a positive numbered prefix, such as `autharena1/`, shows the
+account selector with **0**, **1**, **2**, and **+ New**. The selector's **0** is
+the first saved account; it does not mean rotation. Choose **+ New** to add
+another account number.
+
+In **Multi API Key Manager**, **Arena Login** appears in each Arena model field,
+including fallback and dedicated key pools. Arena rows do not require an API key.
 
 | Model prefix | Account selection |
 | --- | --- |
-| `autharena/` | Physical account slot `0`, initially paired with your current browser profile. |
+| `autharena/` | The first account (slot `0`), initially paired with your current browser profile. |
 | `autharena1/`, `autharena2/`, … | The corresponding numbered browser-profile binding. |
-| `autharena0/` | Rotation through verified, connected accounts, including physical slot `0`. |
+| `autharena0/` | Rotation through all verified, connected accounts, including the first account. |
 
 For another account, use a different existing browser profile, install the
 companion there, and open that account number's connection page in that profile.
 Each browser profile binds to one physical slot. Two tabs in the same profile
 share the same Arena login and cannot hold separate Arena accounts. The
-**Arena Login** action for `autharena0/` lets you choose a physical account number
-or **+ New**; logging in does not create a separate pooled identity.
+**Arena Login** action in **Multi API Key Manager** for `autharena0/` lets you
+choose an account number or **+ New**; logging in does not create a separate
+pooled identity.
 
 Keep the intended browser profiles connected while using rotation. A cached
 login marker alone does not establish that a browser is connected or that its

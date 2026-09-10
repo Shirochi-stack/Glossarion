@@ -309,6 +309,62 @@ def test_plain_default_and_numbered_routes_do_not_rotate(monkeypatch):
     assert all(config["allow_interactive"] for config in calls)
 
 
+@pytest.mark.parametrize("prefix", ["autharena", "AUTHARENA"])
+def test_bare_route_stays_on_first_account_while_explicit_zero_rotates(monkeypatch, tmp_path, prefix):
+    for account_id in (0, 2, 5):
+        arena._write_account_status(account_id, logged_in=True)
+    (tmp_path / "9").mkdir()  # An unverified slot never enters the pool.
+    calls = []
+
+    def helper(config, deadline, **kwargs):
+        calls.append(config)
+        return {"content": "ok", "finish_reason": "stop", "finish_reason_explicit": True}
+
+    monkeypatch.setattr(arena, "_run_browser_helper", helper)
+    messages = [{"role": "user", "content": "hello"}]
+    for pooled_account in (0, 2, 5, 0):
+        fixed = arena.send_chat_completion(messages=messages, model=f"{prefix}/model")
+        pooled = arena.send_chat_completion(messages=messages, model=f"{prefix}0/model")
+        numbered = arena.send_chat_completion(messages=messages, model=f"{prefix}2/model")
+        assert (fixed["account_id"], pooled["account_id"], numbered["account_id"]) == (0, pooled_account, 2)
+
+    assert [config["account_id"] for config in calls[::3]] == [0, 0, 0, 0]
+    assert [config["account_id"] for config in calls[1::3]] == [0, 2, 5, 0]
+    assert all(config["allow_interactive"] for config in calls[::3])
+    assert all(not config["allow_interactive"] for config in calls[1::3])
+    assert all(config["model"] == "model" for config in calls)
+    assert len({config["payload"]["id"] for config in calls}) == len(calls)
+
+
+def test_literal_bare_route_cannot_be_redirected_by_account_argument(monkeypatch):
+    calls = []
+    monkeypatch.setattr(arena, "_run_browser_helper",
+                        lambda config, deadline, **kwargs: calls.append(config) or {"content": "ok"})
+    messages = [{"role": "user", "content": "hello"}]
+    with pytest.raises(ValueError, match="prefix conflicts with account_id"):
+        arena.send_chat_completion(messages=messages, model="autharena/model", account_id=3)
+    assert not calls
+    # Internal callers and --account-id use a canonical model without a prefix.
+    result = arena.send_chat_completion(messages=messages, model="model", account_id=3)
+    assert result["account_id"] == 3
+    assert calls[0]["account_id"] == 3
+
+
+def test_bare_route_does_not_fall_back_to_other_verified_accounts(monkeypatch):
+    for account_id in (0, 2):
+        arena._write_account_status(account_id, logged_in=True)
+    calls = []
+
+    def helper(config, deadline, **kwargs):
+        calls.append(config["account_id"])
+        raise arena.AuthArenaError("first account rejected", 429, safe_to_rotate=True)
+
+    monkeypatch.setattr(arena, "_run_browser_helper", helper)
+    with pytest.raises(arena.AuthArenaError, match="first account rejected"):
+        arena.send_chat_completion(messages=[{"role": "user", "content": "hello"}], model="autharena/model")
+    assert calls == [0]
+
+
 def test_waiting_for_profile_is_cancellable(tmp_path):
     ready = threading.Event()
     release = threading.Event()
