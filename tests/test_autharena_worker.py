@@ -72,10 +72,15 @@ class Page:
             self.context.pages.remove(self)
 
     async def evaluate(self, script, args):
+        if "LM_BRIDGE_MINT_RECAPTCHA_V3" in script:
+            assert args["action"] == "chat_submit"
+            if self.context.browser.mint_gate is not None:
+                self.context.browser.mint_started.set()
+                await self.context.browser.mint_gate.wait()
+            return "upstream-test-token"
         assert args["payload"]["mode"] == "direct-battle"
         assert args["payload"]["modelAId"] == "test-model-id"
         self.context.browser.sent.append((self.context.saved_cookies, args["payload"]))
-        await self.emit(None, {"dispatching": True})
         if self.context.browser.reject_once:
             self.context.browser.reject_once = False
             await self.emit(None, {"status": 403, "headers": {}, "error_body": self.context.browser.rejection_body})
@@ -125,6 +130,8 @@ class Browser:
         self.challenge_pages = 0
         self.before_challenge = 0
         self.verifications = 0
+        self.mint_gate = None
+        self.mint_started = asyncio.Event()
 
     async def close(self):
         self.contexts.clear()
@@ -141,65 +148,24 @@ class Browser:
 @unittest.skipUnless(importlib.util.find_spec("playwright") and (RUNTIME / "browser-ready").exists(),
                      "Run with installed Arena managed Python for local browser tests")
 class LoginNavigationTest(unittest.TestCase):
-    def test_captcha_readiness_and_fresh_tokens_in_browser(self):
-        tree = ast.parse(Path(arena.__file__).read_text(encoding="utf-8"))
-        script = next(n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)
-                      and isinstance(n.value, str) and n.value.startswith("async ({url, method, payload, sitekey, action,"))
+    def test_upstream_captcha_loader_and_token_generation(self):
         async def run():
+            sys.path.insert(0, str(RUNTIME))
+            from bridge.src.recaptcha import _mint_recaptcha_v3_token_in_page
             from playwright.async_api import async_playwright
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(RUNTIME.parent / "browsers")
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
                 try:
                     page = await browser.new_page()
-                    for enterprise in (False, True):
-                        await page.goto("about:blank")
-                        await page.evaluate("""enterprise => {
-                            window.events=[]; window.calls=[]; window.counter=0;
-                            window.arenaEmit = async item => events.push(item);
-                            window.fetch = async (url, options) => {
-                                calls.push(JSON.parse(options.body)); return new Response('a0:"ok"\\n', {status:200});
-                            };
-                            const s=document.createElement('script'); s.type='application/json';
-                            s.src='https://www.google.com/recaptcha/'+(enterprise?'enterprise':'api')+'.js?render=page-site-key';
-                            document.head.append(s);
-                            setTimeout(() => {
-                                const api={ready:fn=>fn(), execute:async (key,{action})=>{
-                                    if(key!=='request-v3-key'||action!=='chat_submit') throw Error('wrong CAPTCHA configuration');
-                                    return 'fresh-'+(++counter);
-                                }};
-                                window.grecaptcha=enterprise?{enterprise:api}:api;
-                            },150);
-                        }""", enterprise)
-                        args = {"url": "https://arena.ai/test", "method": "POST", "payload": {"recaptchaV3Token": "stale", "recaptchaV2Token": "stale-v2"}, "sitekey": "request-v3-key", "action": "sign_up"}
-                        await page.evaluate(script, args)
-                        await page.evaluate(script, args)
-                        calls = await page.evaluate("calls")
-                        self.assertEqual(await page.evaluate("events.filter(e => 'line' in e).map(e => e.line)"), ['a0:"ok"', 'a0:"ok"'])
-                        self.assertEqual([v["recaptchaV3Token"] for v in calls], ["fresh-1", "fresh-2"])
-                        self.assertTrue(all("recaptchaV2Token" not in v for v in calls))
-                        await page.evaluate("grecaptcha.enterprise ? grecaptcha.enterprise.execute = async()=>'' : grecaptcha.execute = async()=>''")
-                        with self.assertRaisesRegex(Exception, "ARENA_CAPTCHA_EMPTY"):
-                            await page.evaluate(script, args)
-                        self.assertEqual(await page.evaluate("calls.length"), 2)
-                        await page.evaluate("""() => {
-                            const api=grecaptcha.enterprise || grecaptcha;
-                            api.render=(element, options)=> {
-                                if(options.sitekey!=='test-v2-key') throw Error('wrong v2 key');
-                                setTimeout(()=>options.callback('interactive-test-token'),50);
-                            };
-                        }""")
-                        await page.evaluate(script, dict(args, verification=True, v2Sitekey="test-v2-key"))
-                        verified = await page.evaluate("calls[2]")
-                        self.assertEqual(verified["recaptchaV2Token"], "interactive-test-token")
-                        self.assertNotIn("recaptchaV3Token", verified)
-                        await page.evaluate("""() => {
-                            (grecaptcha.enterprise || grecaptcha).render=()=>setTimeout(()=>
-                                Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Cancel request').click(),50);
-                        }""")
-                        with self.assertRaisesRegex(Exception, "ARENA_CAPTCHA_VERIFICATION_CANCELLED"):
-                            await page.evaluate(script, dict(args, verification=True, v2Sitekey="test-v2-key"))
-                        self.assertEqual(await page.evaluate("calls.length"), 3)
+                    await page.route("**/recaptcha/**", lambda route: route.fulfill(
+                        content_type="application/javascript",
+                        body="window.grecaptcha={enterprise:{ready:fn=>fn(),execute:async(key,opts)=>{if(key!=='test-key'||opts.action!=='chat_submit') throw Error('wrong configuration');return 'upstream-token';}}};"))
+                    await page.goto("about:blank")
+                    token = await _mint_recaptcha_v3_token_in_page(page, sitekey="test-key", action="chat_submit")
+                    self.assertEqual(token, "upstream-token")
+                    await page.evaluate("grecaptcha.enterprise.execute=async()=>''")
+                    self.assertEqual(await _mint_recaptcha_v3_token_in_page(page, sitekey="test-key", action="chat_submit"), "")
                 finally:
                     await browser.close()
         asyncio.run(run())
@@ -349,6 +315,21 @@ class WorkerTest(unittest.TestCase):
                     arena.consume_stream(failed.text.splitlines(), log_stream=False)
                 self.assertEqual(len(browser.sent), before + 1)
                 browser.fail_request = False
+                browser.mint_gate = asyncio.Event()
+                browser.mint_started.clear()
+                before = len(browser.sent)
+                interrupted = asyncio.create_task(client.post("/v1/chat/completions", json={
+                    "request_id": "cancel-during-token", "dispatch_ack": True, "account_slot": 0,
+                    "model": "test-model", "messages": [{"role": "user", "content": "test"}]}))
+                await asyncio.wait_for(browser.mint_started.wait(), 5)
+                await client.post("/cancel", json={"id": "cancel-during-token"})
+                await asyncio.wait_for(asyncio.gather(interrupted, return_exceptions=True), 5)
+                self.assertEqual(len(browser.sent), before)
+                browser.mint_gate = None
+                resumed = await asyncio.wait_for(client.post("/v1/chat/completions", json={
+                    "account_slot": 0, "model": "test-model", "messages": [{"role": "user", "content": "test"}]}), 5)
+                self.assertEqual(arena.consume_stream(resumed.text.splitlines(), log_stream=False)["content"], "hello")
+                browser.fail_request = False
                 refreshed = {"user": {"id": "user-0", "email": "restored@example.test"},
                              "expires_at": int(time.time()) + 3600, "refresh_token": "test-refresh"}
                 browser.refreshed_cookie = {"name": "arena-auth-prod-v1", "domain": ".arena.ai", "path": "/",
@@ -374,6 +355,18 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual(browser.verifications, 1)
                 self.assertEqual(len(browser.sent), browser.before_challenge + 1)
                 self.assertEqual(browser.contexts, contexts_before)
+                before = len(browser.sent)
+                delayed = asyncio.create_task(client.post("/v1/chat/completions", json={
+                    "request_id": "delayed-ack", "dispatch_ack": True, "account_slot": 0,
+                    "model": "test-model", "messages": [{"role": "user", "content": "test"}]}))
+                await asyncio.sleep(31)  # Regression: old handshake expired after 30 seconds.
+                self.assertEqual(len(browser.sent), before)
+                self.assertFalse(delayed.done())
+                ack = await client.post("/dispatch", json={"id": "delayed-ack"})
+                self.assertEqual(ack.status_code, 200)
+                recovered = await asyncio.wait_for(delayed, 5)
+                self.assertEqual(arena.consume_stream(recovered.text.splitlines(), log_stream=False)["content"], "hello")
+                self.assertEqual(len(browser.sent), before + 1)
             for sock in sockets:
                 sock.close()
 

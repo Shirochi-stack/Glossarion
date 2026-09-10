@@ -27667,7 +27667,7 @@ class UnifiedClient:
             raise UnifiedClientError(text, error_type="provider_error")
 
     def _send_autharena(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        from autharena_proxy import parse_route, send_message_stream, capture_cancel_generation
+        from autharena_proxy import parse_route, send_message_stream, capture_cancel_generation, is_cancel_generation_cancelled
         slot, model = parse_route(self._get_active_request_model())
         if not model:
             raise UnifiedClientError("Select an Arena model from the catalog.", error_type="config_error")
@@ -27713,8 +27713,15 @@ class UnifiedClient:
                                    usage=result.get("usage"), raw_response=result)
         except Exception as exc:
             # Do not internally replay a stream which may have already emitted text.
-            kind = "cancelled" if "cancelled" in str(exc).lower() else "autharena_stream_error"
-            raise UnifiedClientError(str(exc), error_type=kind) from exc
+            if isinstance(exc, UnifiedClientError):
+                raise
+            kind = "cancelled" if is_cancel_generation_cancelled(generation) else "autharena_stream_error"
+            partial = bool(getattr(exc, "partial_response", False))
+            raise UnifiedClientError(str(exc), error_type=kind,
+                http_status=None if partial else getattr(exc, "http_status", None),
+                details={"retry_after": getattr(exc, "retry_after", None),
+                         "upstream_http_status": getattr(exc, "http_status", None),
+                         "partial_response": partial}) from exc
 
     def _send_antigravity(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request via the Antigravity Cloud Code proxy.

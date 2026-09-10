@@ -380,6 +380,7 @@ def test_dispatch_ack_follows_callback_and_progress_ignores_stream_visibility(mo
     order, logs = [], []
     class Response:
         ok = True
+        status_code = 200
         headers = {}
         def iter_lines(self, **kwargs):
             for stage in ("captcha", "token", "dispatch", "headers"):
@@ -405,3 +406,37 @@ def test_dispatch_ack_follows_callback_and_progress_ignores_stream_visibility(mo
     assert any('token received' in line for line in logs)
     assert sum('API call in progress' in line for line in logs) == 1
     assert not any(line == 'done' for line in logs)
+
+
+def test_expired_dispatch_is_not_reported_as_user_cancellation(monkeypatch):
+    class Response:
+        ok = True
+        status_code = 200
+        headers = {}
+        def iter_lines(self, **kwargs):
+            yield 'data: {"arena_progress":"dispatch"}'
+        def close(self):
+            pass
+    def post(url, **kwargs):
+        response = Response()
+        if url.endswith('/dispatch'):
+            response.status_code = 409
+        return response
+    monkeypatch.setattr(arena, "ensure_proxy_running", lambda **kwargs: {"url": "http://localhost:1", "key": "test"})
+    monkeypatch.setattr(arena.requests, "post", post)
+    with pytest.raises(RuntimeError, match="dispatch preparation ended") as error:
+        arena.send_message_stream([], "test", log_fn=None)
+    assert 'cancel' not in str(error.value).lower()
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_upstream_rejection_retains_status_and_retry_after(partial):
+    lines = [event({"content": "partial"})] if partial else []
+    lines.append('data: ' + json.dumps({"error": {"message": 'Arena HTTP 429: {"error":"prompt failed"}',
+                                                "status_code": 429, "retry_after": "60"}}))
+    with pytest.raises(arena.ArenaStreamError, match="Arena HTTP 429") as error:
+        arena.consume_stream(lines, log_stream=False)
+    assert error.value.http_status == 429
+    assert error.value.retry_after == '60'
+    assert error.value.partial_response == partial
+    assert 'cancel' not in str(error.value).lower()

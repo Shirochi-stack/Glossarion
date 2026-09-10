@@ -28,10 +28,9 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 14
+ADAPTER_VERSION = 17
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 ARENA_RECAPTCHA_V3_SITEKEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0"
-ARENA_RECAPTCHA_V2_SITEKEY = "6Le3_cYsAAAAAGwWOK2RLDgNI15Bh8C0yLBOL1yL"
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
 _lock = threading.RLock()
@@ -42,6 +41,14 @@ _responses = set()
 _pending_requests = {}
 _owned = None
 _started_callback = None
+
+
+class ArenaStreamError(RuntimeError):
+    def __init__(self, message, http_status=None, retry_after=None, partial_response=False):
+        super().__init__(message)
+        self.http_status = http_status
+        self.retry_after = retry_after
+        self.partial_response = partial_response
 
 
 async def _open_arena_login(page, navigation):
@@ -583,7 +590,12 @@ def consume_stream(lines, log_fn=print, log_stream=True, cancel_generation=None,
             continue
         if event.get("error"):
             error = event["error"]
-            raise RuntimeError("Arena stream failed: " + str(error.get("message", "upstream error") if isinstance(error, dict) else error))
+            message = str(error.get("message", "upstream error") if isinstance(error, dict) else error)
+            status = error.get("status_code") if isinstance(error, dict) else None
+            retry_after = error.get("retry_after") if isinstance(error, dict) else None
+            if retry_after:
+                message += f" (Retry-After: {retry_after})"
+            raise ArenaStreamError("Arena stream failed: " + message, status, retry_after, bool(text or thinking))
         usage = event.get("usage") or usage
         for choice in event.get("choices", []):
             if choice.get("index", 0) != 0:
@@ -628,6 +640,10 @@ def send_message_stream(messages, model, temperature=0.7, max_tokens=None, timeo
                 before_send_callback()
             approved = requests.post(status["url"] + "/dispatch", json={"id": request_id},
                                      headers={"Authorization": "Bearer " + status["key"]}, timeout=10)
+            if approved.status_code == 409:
+                if is_cancel_generation_cancelled(generation):
+                    raise RuntimeError("Arena stream cancelled")
+                raise RuntimeError("Arena dispatch preparation ended before handoff; no automatic replay was attempted.")
             approved.raise_for_status()
             if log_fn:
                 log_fn("📨 Arena: captcha token acquired; sending Arena request")
@@ -639,7 +655,7 @@ def send_message_stream(messages, model, temperature=0.7, max_tokens=None, timeo
             labels = {"captcha": "🔐 Arena: requesting a fresh captcha token…",
                       "token": "✅ Arena: captcha token received",
                       "retry": "🔁 Arena: captcha rejected; retrying with a fresh token",
-                      "verification": "🔐 Arena: verification required. Complete the CAPTCHA in the Arena Verification browser window; this request will resume automatically.",
+                      "verification": "🔄 Arena: CAPTCHA rejected; LMArenaBridge is obtaining a fresh token in the Arena browser…",
                       "browser_verification": "🌐 Arena: security verification required. Complete it in the Arena browser window; this request will wait before submission.",
                       "headers": "📥 Arena: response headers received"}
             if stage in labels:
@@ -899,9 +915,19 @@ async def _serve_worker(key):
         config_module = importlib.import_module(namespace + ".src.config")
         auth = importlib.import_module(namespace + ".src.auth")
         transport = importlib.import_module(namespace + ".src.transport")
+        recaptcha = importlib.import_module(namespace + ".src.recaptcha")
+        if not all(callable(getattr(recaptcha, name, None)) for name in (
+            "_mint_recaptcha_v3_token_in_page", "refresh_recaptcha_token", "get_cached_recaptcha_token"
+        )):
+            await context.close()
+            raise RuntimeError("Pinned LMArenaBridge CAPTCHA helpers are incompatible with this adapter.")
         cfg = {"auth_tokens": [account["token"]], "auth_token": account["token"], "api_keys": [{"key": key, "rpm": 100000}],
                "persist_arena_auth_cookie": False, "browser_cookies": {c["name"]: c["value"] for c in account["cookies"]}}
         config_module._apply_config_defaults(cfg)
+        # Upstream's default 120s outer timeout includes navigation, interactive
+        # verification, token minting and dispatch acknowledgment together.
+        cfg["chrome_fetch_outer_timeout_seconds"] = 300
+        cfg["camoufox_fetch_outer_timeout_seconds"] = 300
         try:
             models = list(await _ensure_catalog(context))
         except BaseException as exc:
@@ -941,10 +967,18 @@ async def _serve_worker(key):
         main.find_chrome_executable = lambda: "managed-chromium"
         async def no_refresh(*args, **kwargs):
             return None
-        main.refresh_recaptcha_token = no_refresh
         main.maybe_refresh_expired_auth_tokens = no_refresh
         main.maybe_refresh_expired_auth_tokens_via_lmarena_http = no_refresh
-        main.get_cached_recaptcha_token = lambda: ""
+        # Keep upstream cache/refresh; mint only in this account's request page.
+        captcha_page = None
+        async def mint_for_slot():
+            if captcha_page is None:
+                return None
+            return await recaptcha._mint_recaptcha_v3_token_in_page(
+                captcha_page, sitekey=ARENA_RECAPTCHA_V3_SITEKEY, action="chat_submit")
+        recaptcha.get_recaptcha_v3_token = mint_for_slot
+        main.refresh_recaptcha_token = recaptcha.refresh_recaptcha_token
+        main.get_cached_recaptcha_token = recaptcha.get_cached_recaptcha_token
         async def refresh_initial_data():
             models[:] = await _ensure_catalog(context)
         main.get_initial_data = refresh_initial_data
@@ -972,19 +1006,28 @@ async def _serve_worker(key):
             headers_ready = asyncio.Event()
             done_event = asyncio.Event()
             result = {"status": 502, "headers": {}}
+            state["upstream_error"] = None
+            request_events = state["events"]
+            request_dispatch_ack = state.get("dispatch_ack")
             async def emit(source, item):
                 if item.get("dispatching"):
-                    if state.get("dispatch_ack") is not None:
-                        state["dispatch_ack"].clear()
-                        await state["events"].put({"arena_progress": "dispatch"})
-                        await asyncio.wait_for(state["dispatch_ack"].wait(), 30)
+                    if request_dispatch_ack is not None:
+                        request_dispatch_ack.clear()
+                        await request_events.put({"arena_progress": "dispatch"})
+                        await request_dispatch_ack.wait()
                     state["dispatched"] = True
                 elif item.get("token_received"):
-                    await state["events"].put({"arena_progress": "token"})
+                    await request_events.put({"arena_progress": "token"})
                 elif "status" in item:
                     result.update(item)
+                    if item["status"] >= 400:
+                        state["upstream_error"] = {
+                            "message": f"Arena HTTP {item['status']}: {item.get('error_body', '')}",
+                            "status_code": item["status"],
+                            "retry_after": item.get("headers", {}).get("retry-after"),
+                        }
                     headers_ready.set()
-                    await state["events"].put({"arena_progress": "headers:" + str(item["status"])})
+                    await request_events.put({"arena_progress": "headers:" + str(item["status"])})
                 elif "line" in item:
                     await queue.put(item["line"])
             await page.expose_binding("arenaEmit", emit)
@@ -1001,7 +1044,7 @@ async def _serve_worker(key):
                 try:
                     await page.wait_for_function(
                         "() => !document.title.toLowerCase().includes('just a moment') && !!document.querySelector('script[src*=\"recaptcha/\"]')",
-                        timeout=300000)
+                        timeout=180000)
                 except Exception as exc:
                     await page.close()
                     raise RuntimeError("Arena security verification did not complete. If the challenge is unresponsive, check DNS/network access to its challenge domain. No translation was submitted.") from exc
@@ -1014,65 +1057,19 @@ async def _serve_worker(key):
             # interchangeable. The pinned bridge still ships an older v3 key.
             sitekey = ARENA_RECAPTCHA_V3_SITEKEY
             async def pump():
+                nonlocal captcha_page
                 try:
                     await state["events"].put({"arena_progress": "captcha"})
-                    await page.evaluate(r"""async ({url, method, payload, sitekey, action, verification, v2Sitekey}) => {
-                        // DOMContentLoaded can precede Arena's reCAPTCHA loader.
-                        // Never submit the bridge's empty/stale cached token.
-                        delete payload.recaptchaV2Token;
-                        delete payload.recaptchaV3Token;
-                        const deadline = Date.now() + 20000;
-                        let api, activeKey;
-                        while (Date.now() < deadline) {
-                            const scripts = [...document.scripts].map(s => s.src);
-                            const loaded = scripts.map(src => {
-                                try { return new URL(src); } catch { return null; }
-                            }).find(u => u && /\/(?:recaptcha\/)(?:enterprise|api)\.js$/.test(u.pathname)
-                                && ['www.google.com','www.recaptcha.net','recaptcha.net'].includes(u.hostname)
-                                && u.searchParams.get('render') && u.searchParams.get('render') !== 'explicit');
-                            activeKey = sitekey;
-                            const enterprise = loaded ? loaded.pathname.endsWith('/enterprise.js')
-                                : !!globalThis.grecaptcha?.enterprise;
-                            api = enterprise ? globalThis.grecaptcha?.enterprise : globalThis.grecaptcha;
-                            if (activeKey && typeof api?.ready === 'function' && typeof api?.execute === 'function') break;
-                            await new Promise(resolve => setTimeout(resolve, 100));
-                        }
-                        if (!activeKey || typeof api?.ready !== 'function' || typeof api?.execute !== 'function')
-                            throw new Error('ARENA_CAPTCHA_NOT_READY');
-                        let timer;
-                        try {
-                            let token;
-                            if (verification) {
-                                if (typeof api.render !== 'function') throw new Error('ARENA_CAPTCHA_V2_UNAVAILABLE');
-                                const panel = document.createElement('div');
-                                panel.style.cssText='position:fixed;inset:0;z-index:10000;background:#202123;color:white;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;font:18px sans-serif';
-                                const title=document.createElement('h1'); title.textContent='Arena Verification';
-                                const info=document.createElement('p'); info.textContent='Complete the verification below. Glossarion will resume your request automatically.';
-                                const widget=document.createElement('div');
-                                const cancel=document.createElement('button'); cancel.textContent='Cancel request';
-                                panel.append(title,info,widget,cancel); document.body.append(panel);
-                                document.title='Arena Verification';
-                                try {
-                                    token = await new Promise((resolve,reject) => {
-                                        timer=setTimeout(()=>reject(new Error('ARENA_CAPTCHA_VERIFICATION_TIMEOUT')),300000);
-                                        cancel.onclick=()=>reject(new Error('ARENA_CAPTCHA_VERIFICATION_CANCELLED'));
-                                        api.ready(()=>api.render(widget,{sitekey:v2Sitekey,theme:'dark',callback:resolve,
-                                            'error-callback':()=>reject(new Error('ARENA_CAPTCHA_VERIFICATION_ERROR')),
-                                            'expired-callback':()=>reject(new Error('ARENA_CAPTCHA_VERIFICATION_EXPIRED'))}));
-                                    });
-                                } finally { panel.remove(); }
-                            } else token = await Promise.race([
-                                new Promise((resolve, reject) => api.ready(() => {
-                                    Promise.resolve().then(() => api.execute(activeKey, {action:'chat_submit'})).then(resolve,reject);
-                                })),
-                                new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('ARENA_CAPTCHA_TIMEOUT')), 20000); })
-                            ]);
-                            if (typeof token !== 'string' || !token.trim()) throw new Error('ARENA_CAPTCHA_EMPTY');
-                            if (verification) payload.recaptchaV2Token = token;
-                            else payload.recaptchaV3Token = token;
-                            await arenaEmit({token_received:true});
-                        } finally { clearTimeout(timer); }
-                        await arenaEmit({dispatching:true});
+                    captcha_page = page
+                    token = await recaptcha.refresh_recaptcha_token(force_new=True)
+                    if not token:
+                        raise RuntimeError("Arena: LMArenaBridge could not obtain a CAPTCHA token; no translation was submitted.")
+                    request_payload = dict(payload)
+                    request_payload.pop("recaptchaV2Token", None)
+                    request_payload["recaptchaV3Token"] = token
+                    await emit(None, {"token_received": True})
+                    await emit(None, {"dispatching": True})
+                    await page.evaluate(r"""async ({url, method, payload}) => {
                         const response = await fetch(url, {method, credentials:'include',
                             headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
                         if (!response.ok) {
@@ -1104,19 +1101,23 @@ async def _serve_worker(key):
                             if (done) break;
                         }
                         if (pending) await arenaEmit({line:pending});
-                    }""", {"url": "https://arena.ai" + parsed.path, "method": http_method, "payload": payload,
-                             "sitekey": sitekey, "action": action, "verification": verification,
-                             "v2Sitekey": ARENA_RECAPTCHA_V2_SITEKEY})
+                    }""", {"url": "https://arena.ai" + parsed.path, "method": http_method, "payload": request_payload})
                 finally:
                     headers_ready.set()
+                    captcha_page = None
                     done_event.set()
             task = asyncio.create_task(asyncio.wait_for(pump(), timeout_seconds))
+            request_tasks = state["transport_tasks"]
+            request_tasks.add(task)
+            task.add_done_callback(request_tasks.discard)
             try:
                 await asyncio.wait_for(headers_ready.wait(), timeout_seconds)
                 if task.done() and task.exception():
                     raise task.exception()
             except BaseException:
                 task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
                 await page.close()
                 raise
             class Response(transport.BrowserFetchStreamResponse):
@@ -1186,7 +1187,9 @@ async def _serve_worker(key):
                         context = original_context
                 verified.aclose = close_verified
                 if verified.status_code >= 400:
-                    detail = f"Arena HTTP {verified.status_code}: {verified.text} Verification was not accepted."
+                    detail = f"Arena HTTP {verified.status_code}: {verified.text}"
+                    if verified.status_code == 403 and "captcha" in verified.text.lower():
+                        detail += " Arena rejected the refreshed CAPTCHA token."
                     await verified.aclose()
                     state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=detail)
                     return state["terminal_error"]
@@ -1194,6 +1197,10 @@ async def _serve_worker(key):
 
         async def submit_once(*args, **kwargs):
             nonlocal context
+            request_tasks = state["transport_tasks"]
+            transport_task = asyncio.current_task()
+            request_tasks.add(transport_task)
+            transport_task.add_done_callback(request_tasks.discard)
             if state["submitted"]:
                 return state.get("terminal_error") or transport.BrowserFetchStreamResponse(
                     400, {}, text="Arena response was interrupted after submission; it was not replayed. Retry the request explicitly.")
@@ -1330,7 +1337,9 @@ async def _serve_worker(key):
         state["submitted"] = False
         state["terminal_error"] = None
         state["usage"] = None
+        state["upstream_error"] = None
         state["events"] = asyncio.Queue(maxsize=64)
+        state["transport_tasks"] = set()
         state["dispatch_ack"] = asyncio.Event() if dispatch_ack else None
         if state["dispatch_ack"] is not None:
             dispatch_acks[request_id] = state["dispatch_ack"]
@@ -1351,19 +1360,21 @@ async def _serve_worker(key):
                 if request_id in cancelled_jobs:
                     raise asyncio.CancelledError()
                 async for chunk in response.body_iterator:
-                    if state["usage"] and isinstance(chunk, str) and chunk.startswith("data: {"):
+                    if isinstance(chunk, str) and chunk.startswith("data: {"):
                         event = json.loads(chunk[6:])
-                        if any(c.get("finish_reason") for c in event.get("choices", [])):
+                        if event.get("error") and state["upstream_error"]:
+                            event["error"] = state["upstream_error"]
+                            chunk = "data: " + json.dumps(event) + "\n\n"
+                        elif state["usage"] and any(c.get("finish_reason") for c in event.get("choices", [])):
                             event["usage"] = state["usage"]
                             chunk = "data: " + json.dumps(event) + "\n\n"
                     yield chunk
             finally:
-                main.chat_sessions.clear()
-                main.conversation_tokens.clear()
-                main.request_failed_tokens.clear()
-                state["lock"].release()
+                close_iterator = getattr(response.body_iterator, "aclose", None)
+                if close_iterator is not None:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await close_iterator()
                 jobs.pop(request_id, None)
-                cancelled_jobs.discard(request_id)
         async def chunks():
             events = state["events"]
             end = object()
@@ -1387,6 +1398,13 @@ async def _serve_worker(key):
                     try:
                         item = await asyncio.wait_for(events.get(), 5)
                     except asyncio.TimeoutError:
+                        if producer.done():
+                            if producer.cancelled():
+                                raise asyncio.CancelledError()
+                            failure = producer.exception()
+                            if failure:
+                                raise failure
+                            break
                         yield ": Arena request pending\n\n"
                         continue
                     if item is end:
@@ -1395,10 +1413,22 @@ async def _serve_worker(key):
                         raise item
                     yield "data: " + json.dumps(item) + "\n\n" if isinstance(item, dict) else item
             finally:
-                dispatch_acks.pop(request_id, None)
                 producer.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await producer
+                # Upstream launches browser tasks separately from its stream
+                # iterator. Drain them before reusing this account's state.
+                pending = [t for t in state["transport_tasks"] if t is not asyncio.current_task() and not t.done()]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                dispatch_acks.pop(request_id, None)
+                cancelled_jobs.discard(request_id)
+                main.chat_sessions.clear()
+                main.conversation_tokens.clear()
+                main.request_failed_tokens.clear()
+                state["lock"].release()
         return StreamingResponse(chunks(), media_type="text/event-stream",
                                  headers={"X-Arena-Account-Slot": str(slot)})
 

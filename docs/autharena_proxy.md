@@ -47,22 +47,28 @@ As with Antigravity, visible forced streams include reasoning. The optional
 streaming and generic batch-streaming toggles do not disable this transport.
 Interrupted streams are errors rather than completed translations.
 
-Requests wait for Arena's reCAPTCHA loader and use a fresh token immediately
-before submission. A rejected CAPTCHA opens an app-owned Arena Verification
-browser for interactive v2 verification. Complete the challenge to resume the
-rejected request once; cancellation or failed verification stops it. Successful
-streams and partial output are never replayed. This live fallback still needs
-verification against Arena. Account credentials remain encrypted.
+Token generation, loader initialization, readiness waits, and cache/refresh now
+use the pinned LMArenaBridge `recaptcha.py` helpers. The adapter binds them to
+each account's request page and forces a fresh token before submission. A rejected
+CAPTCHA gets a bounded fresh-token attempt in the app-owned browser. The custom
+CAPTCHA widget has been removed. Successful streams and partial output are never
+replayed. Account credentials remain encrypted.
 
 Token requested/received, submission, and response-header stages are logged
 without token values. The application acknowledges dispatch before the worker
 sends to Arena, starting the watchdog and API-call progress at that boundary
-rather than during browser and CAPTCHA preparation.
+rather than during browser and CAPTCHA preparation. The acknowledgment no longer
+has a separate 30-second expiry; request timeout and cancellation still apply.
+Browser tasks are stopped before an account's request state can be reused.
+Dispatch failures are provider errors unless a real cancellation was requested.
+Upstream errors retain Arena's HTTP status and Retry-After value when supplied,
+including HTTP 429, instead of reporting them as CAPTCHA failures.
 
 If Arena serves a security interstitial instead of its homepage, the proxy opens
 an app-owned browser and waits for interactive verification before obtaining a
 CAPTCHA token or submitting a translation. An interstitial is no longer treated
-as a missing reCAPTCHA loader. The wait is cancellable and bounded to five minutes;
+as a missing reCAPTCHA loader. The wait is cancellable and bounded to three minutes,
+within the upstream five-minute total browser-setup budget;
 blocked challenge scripts or DNS failures still require working network access.
 
 `AUTHARENA_PROXY_DATA_DIR` changes the runtime and browser installation location.
