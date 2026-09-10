@@ -20,10 +20,13 @@ profile you want to use.
    connection page using the system's default external browser and prepares the
    companion folder at `~/.glossarion/autharena_extension`.
 2. Click **Install in browser** on the connection page. On Windows, Glossarion
-   opens Chrome or Edge's Extensions page and attempts to enable **Developer
-   mode**, choose **Load unpacked**, and select the prepared folder. Keep that
-   page in front while setup runs. If you use several browser profiles, check
-   that the opened profile is the one you intend to use for Arena.
+   finds that exact page in your current Chrome or Edge window, opens a new
+   Extensions tab in the same window and profile, and attempts to enable
+   **Developer mode**, choose **Load unpacked**, and select the prepared folder.
+   Keep Arena Login in front until the Extensions tab opens, then keep that
+   window in front while setup runs. The installer does not launch another
+   browser process or choose a profile. Progress and the step requiring your
+   attention appear on the connection page.
 3. If the browser requires a manual step, expand **Manual installation**. Use
    **Copy folder path** or **Open folder**, finish **Load unpacked**, then choose
    **Connect helper**. Automatic setup recognizes English Chrome/Edge controls;
@@ -167,6 +170,21 @@ The default model is `gpt-6-astra-medium`, account number `0`, and timeout
 `180` seconds. Use `python src/autharena.py --help` for all options.
 
 ## Troubleshooting
+
+If Windows setup fails before opening Extensions, the connection page shows the
+initialization step and Windows error, with a **Retry installation** button.
+Manual instructions stay collapsed for initialization errors. After updating
+Glossarion, restart the app and open a fresh **Arena Login** page so the running
+helper uses the updated code. Packaged Windows builds isolate system PowerShell
+from the app's bundled DLL search paths.
+The setup script's temporary environment variable is removed inside PowerShell
+before compilation, so it does not overflow the Windows compiler's environment
+limit. No changes to your system environment variables are needed.
+
+Close every Glossarion window when restarting after an update. An older instance
+can still own the shared Arena server even while a newer window is open. The app
+checks the server's implementation revision and reports this conflict instead of
+silently using an outdated installer. Browser refresh alone does not replace it.
 
 If the connection page cannot find the companion, check that the generated
 extension folder is loaded in that exact browser profile, then refresh the page.

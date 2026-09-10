@@ -1,6 +1,6 @@
 # Glossarion Arena Browser Companion
 
-Click **Arena Login** in Glossarion, then **Install in browser**. On Windows, setup attempts Chrome/Edge's normal Developer mode and Load unpacked steps. Keep Extensions in front and use the manual fallback if the browser requires it. **Copy folder path**, **Open folder**, and **Connect helper** are available on the setup page.
+Click **Arena Login** in Glossarion, then **Install in browser**. On Windows, setup opens an Extensions tab in that same Chrome/Edge window and profile, then attempts the normal Developer mode and Load unpacked steps. Keep Arena Login in front until Extensions opens, then keep that window in front. The setup page shows progress and any remaining manual step. **Copy folder path**, **Open folder**, and **Connect helper** are also available there.
 
 The companion folder is generated at `~/.glossarion/autharena_extension`, including when Glossarion runs as a one-file `.exe`. Keep this folder in place: the browser loads the extension from there after app restarts. It includes `arena_page.js`; the repository template folder by itself is incomplete. Other Chromium browsers can load the generated folder manually.
 

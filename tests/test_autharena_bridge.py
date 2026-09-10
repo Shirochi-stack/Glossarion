@@ -1,6 +1,7 @@
 """Exercise the broker on an ephemeral loopback port, without personal state."""
 
 import copy
+from contextlib import nullcontext
 from http.client import HTTPConnection
 import json
 from pathlib import Path
@@ -20,6 +21,40 @@ import autharena_bridge as bridge_module
 
 
 CONTROL = "test-desktop-control-secret"
+
+
+@pytest.mark.parametrize('race', [False, True])
+@pytest.mark.parametrize('revision', [None, 1, bridge_module.SERVER_REVISION])
+def test_broker_reuses_only_current_server_revision(monkeypatch, tmp_path, race, revision):
+    monkeypatch.setattr(bridge_module, 'prepare_extension', lambda: tmp_path)
+    monkeypatch.setattr(bridge_module, '_state_lock', nullcontext)
+    monkeypatch.setattr(bridge_module, '_settings', lambda: {'control_token': CONTROL})
+    calls = []
+
+    def health(*args, **kwargs):
+        calls.append(kwargs['timeout'])
+        if race and len(calls) == 1:
+            raise requests.ConnectionError('Not listening yet')
+        result = {'version': bridge_module.VERSION}
+        if revision is not None:
+            result['revision'] = revision
+        return result
+
+    def server(*args, **kwargs):
+        if not race:
+            pytest.fail('Do not try binding over a responding server')
+        raise OSError('Another instance won the startup race')
+
+    monkeypatch.setattr(bridge_module, 'request', health)
+    monkeypatch.setattr(bridge_module, '_Server', server)
+    if revision == bridge_module.SERVER_REVISION:
+        assert bridge_module.ensure_broker()['control_token'] == CONTROL
+    else:
+        with pytest.raises(RuntimeError, match='close all Glossarion windows'):
+            bridge_module.ensure_broker()
+    assert len(calls) == (2 if race else 1)
+
+
 DEVICE_A = "test_browser_profile_a"
 DEVICE_B = "test_browser_profile_b"
 DEVICE_TOKEN_A = "test-browser-a-token"
@@ -167,11 +202,12 @@ def paired_job(broker, account=0):
 @pytest.fixture
 def setup_installer(monkeypatch):
     entered, release = threading.Event(), threading.Event()
-    calls, folders = [], []
+    calls, folders, callbacks = [], [], []
     outcome = {"status": "awaiting_connection", "message": "Browser setup submitted; waiting for the helper."}
 
-    def install(path, browser_hint="", cancel_check=None):
-        calls.append((path, browser_hint))
+    def install(path, browser_hint="", cancel_check=None, *, connect_url, progress):
+        calls.append((path, browser_hint, connect_url))
+        callbacks.append(progress)
         entered.set()
         for _ in range(100):
             if cancel_check():
@@ -187,7 +223,8 @@ def setup_installer(monkeypatch):
     monkeypatch.setitem(sys.modules, "autharena_setup", SimpleNamespace(
         install_extension=install, open_extension_folder=open_folder,
     ))
-    yield SimpleNamespace(entered=entered, release=release, calls=calls, outcome=outcome, folders=folders)
+    yield SimpleNamespace(entered=entered, release=release, calls=calls, outcome=outcome, folders=folders,
+                          progress=callbacks)
     release.set()
 
 
@@ -213,6 +250,8 @@ def test_connect_page_and_status_never_start_install_without_a_click(broker, set
     page = broker.call("GET", "/connect", token=None)
     assert page.status_code == 200
     assert "Install in browser" in page.text and "Copy folder path" in page.text and "Open folder" in page.text
+    assert "Keep this Arena Login page in front" in page.text
+    assert "in the same browser window" in page.text
     assert page.headers["X-Frame-Options"] == "DENY"
     assert page.headers["Content-Security-Policy"] == "frame-ancestors 'none'"
     assert setup_request(broker, "status", nonce).json()["status"] == "ready"
@@ -249,6 +288,7 @@ def test_setup_requires_a_real_active_pairing_nonce(broker, setup_installer, inv
 @pytest.mark.parametrize("extra", [
     {"path": "C:/arbitrary"}, {"url": "https://evil.example"}, {"browser_hint": "--load-extension=x"},
     {"browser_hint": "firefox"}, {"account_id": 9},
+    {"connect_url": "http://127.0.0.1:18874/connect#attacker_nonce"}, {"window_handle": 123},
 ])
 def test_setup_cannot_select_arbitrary_paths_urls_or_commands(broker, setup_installer, extra):
     _, nonce = setup_nonce(broker)
@@ -265,7 +305,7 @@ def test_setup_is_async_single_active_and_does_not_claim_installation_or_login(b
     assert setup_request(broker, "status", nonce).json()["status"] == "running"
     assert setup_request(broker, "install", nonce, browser_hint="edge").json()["status"] == "running"
     assert setup_request(broker, "install", other_nonce).status_code == 409
-    assert setup_installer.calls == [(broker.state.extension_path, "edge")]
+    assert setup_installer.calls == [(broker.state.extension_path, "edge", first["connect_url"])]
     setup_installer.release.set()
     result = wait_for_setup(broker, first["job_id"])
     assert result["status"] == "awaiting_connection"
@@ -273,6 +313,36 @@ def test_setup_is_async_single_active_and_does_not_claim_installation_or_login(b
     assert broker.settings["accounts"] == {}
     assert broker.state.jobs[first["job_id"]]["verified"] is False
     assert "PRIVATE-PROMPT-TEST" not in str(result) and CONTROL not in str(result)
+
+
+def test_setup_target_is_derived_from_server_not_desktop_or_page_arguments(broker, setup_installer):
+    job = broker.create(login=True, timeout=600, connect_url="https://evil.example/connect#fake",
+                        base_url="https://evil.example", window_handle=123)
+    nonce = urlsplit(job["connect_url"]).fragment
+    assert setup_request(broker, "install", nonce, browser_hint="chrome").status_code == 200
+    assert setup_installer.entered.wait(1)
+    assert setup_installer.calls == [(broker.state.extension_path, "chrome", broker.base + "/connect#" + nonce)]
+
+
+def test_installer_progress_is_visible_before_completion_and_cannot_claim_success(broker, setup_installer):
+    job, nonce = setup_nonce(broker)
+    started = setup_request(broker, "install", nonce).json()
+    assert setup_installer.entered.wait(1)
+    progress = setup_installer.progress[0]
+    progress({"status": "running", "message": "Opening Extensions in the current window."})
+    visible = setup_request(broker, "status", nonce).json()
+    assert visible == {"status": "running", "attempt_id": started["attempt_id"],
+                       "message": "Opening Extensions in the current window."}
+    assert broker.state.active_setup == job["job_id"]
+    for invalid in ({"status": "installed", "message": "Success"}, {"status": "running", "message": []}, "text"):
+        progress(invalid)
+    assert setup_request(broker, "status", nonce).json() == visible
+    progress({"status": "running", "message": "Locating " + job["connect_url"] + " " + nonce})
+    assert nonce not in setup_request(broker, "status", nonce).text
+    setup_installer.release.set()
+    final = wait_for_setup(broker, job["job_id"])
+    progress({"status": "running", "message": "Late progress"})
+    assert setup_request(broker, "status", nonce).json() == final
 
 
 def test_cancelled_login_stops_the_installer_and_invalidates_setup_requests(broker, setup_installer):
@@ -284,6 +354,8 @@ def test_cancelled_login_stops_the_installer_and_invalidates_setup_requests(brok
     assert setup_request(broker, "status", nonce).status_code == 410
     assert setup_request(broker, "install", nonce).status_code == 410
     assert len(setup_installer.calls) == 1
+    setup_installer.progress[0]({"status": "running", "message": "Stale progress"})
+    assert broker.state.setup_results[job["job_id"]]["status"] == "cancelled"
 
 
 def test_consumed_and_expired_nonce_cannot_start_or_inspect_setup(broker, setup_installer):
@@ -332,7 +404,10 @@ def test_host_and_origin_protection_rejects_webpage_requests(broker, headers, or
 def test_desktop_and_extension_credentials_have_separate_roles(broker):
     assert broker.call("GET", "/control/health", token=None).status_code == 401
     assert broker.call("GET", "/control/health", token="incorrect").status_code == 401
-    assert broker.call("GET", "/control/health").json() == {"version": bridge_module.VERSION}
+    assert broker.call("GET", "/control/health").json() == {
+        "version": bridge_module.VERSION, "revision": bridge_module.SERVER_REVISION,
+        "pid": bridge_module.os.getpid(),
+    }
     assert broker.call("GET", "/control/health", token=DEVICE_TOKEN_A,
                        origin=EXTENSION_ORIGIN).status_code == 403
     assert broker.call("GET", "/control/health", origin=EXTENSION_ORIGIN).status_code == 403

@@ -170,6 +170,21 @@ def test_connect_page_reconnects_after_setup_without_restarting_installer():
     assert result['message'] == 'Waiting for helper'
 
 
+def test_connect_page_refreshes_running_progress_without_repeating_install():
+    result = run_connect_page(r"""
+      responseQueue.push({status:'running',message:'Finding this Arena Login window',attempt_id:'attempt-1'});
+      await timers.shift().fn();
+      const first=element('status').textContent;
+      responseQueue.push({status:'running',message:'Opening Extensions in the same window',attempt_id:'attempt-1'});
+      await timers.shift().fn();
+      return {first,second:element('status').textContent,disabled:element('install').disabled,requests,reloaded};
+    """)
+    assert result['first'] == 'Finding this Arena Login window'
+    assert result['second'] == 'Opening Extensions in the same window'
+    assert result['disabled'] is True and result['reloaded'] == 0
+    assert [item['path'] for item in result['requests']] == ['/setup/status', '/setup/status']
+
+
 def test_connect_page_caps_reload_attempts_and_shows_manual_help():
     result = run_connect_page(r"""
       responseQueue.push({status:'awaiting_connection',message:'Waiting for helper',attempt_id:'attempt-1'});
@@ -202,6 +217,24 @@ def test_connect_page_renders_installer_errors_as_text_and_never_success():
     """)
     assert result['message'] == '<img src=x onerror=alert(1)>'
     assert result['manual'] is True and result['reloaded'] == 0
+
+
+def test_initialization_error_stays_visible_and_allows_retry_without_manual_expansion():
+    result = run_connect_page(r"""
+      responseQueue.push({status:'error',message:'Windows setup initialization failed while loading UIAutomationClient: test error'});
+      await timers.shift().fn();
+      const failure={manual:element('manual').open,message:element('status').textContent,
+        label:element('install').textContent,disabled:element('install').disabled,reloaded};
+      responseQueue.push({status:'running',message:'Starting setup'});
+      await element('install').listeners.click();
+      return {failure,installs:requests.filter(r=>r.path==='/setup/install').length};
+    """)
+    assert 'loading UIAutomationClient: test error' in result['failure']['message']
+    assert result['failure']['manual'] is False
+    assert result['failure']['label'] == 'Retry installation'
+    assert result['failure']['disabled'] is False
+    assert result['failure']['reloaded'] == 0
+    assert result['installs'] == 1
 
 
 def test_connect_page_confirms_actual_pairing_and_stops_pending_reloads():

@@ -24,6 +24,9 @@ import requests
 
 PORT = 18874
 VERSION = 1
+# Bump when a running server must not be reused after installer/bridge updates.
+# This is separate from the persistent pairing data and extension protocol.
+SERVER_REVISION = 3
 _start_lock = threading.RLock()
 _running = None
 
@@ -285,7 +288,7 @@ class _State:
         attempt_id = secrets.token_urlsafe(12)
         self.active_setup = job_id
         self.setup_results[job_id] = {'status': 'running', 'attempt_id': attempt_id,
-                                     'message': 'Setting up the Arena helper. Keep the Extensions page in front and follow any browser confirmation.'}
+                                     'message': 'Keep this Arena Login page in front while setup finds its browser window.'}
 
         def cancelled():
             with self.cv:
@@ -293,17 +296,32 @@ class _State:
                 current = self.jobs.get(job_id)
                 return not current or current['terminal'] or body['nonce'] not in self.pairings
 
+        def public_message(message):
+            return message.replace(job['connect_url'], 'Arena Login').replace(body['nonce'], '[login link]')[:2000]
+
+        def progress(update):
+            if (not isinstance(update, dict) or update.get('status') != 'running'
+                    or not isinstance(update.get('message'), str)):
+                return
+            with self.cv:
+                if self.active_setup != job_id or cancelled():
+                    return
+                self.setup_results[job_id] = {'status': 'running', 'attempt_id': attempt_id,
+                                             'message': public_message(update['message'])}
+                self.cv.notify_all()
+
         def install():
             result = {'status': 'error', 'message': 'Automatic setup could not finish. Use the manual steps below.'}
             try:
                 from autharena_setup import install_extension
                 with self.cv:
                     self.setup_job(body['nonce'])
-                returned = install_extension(self.extension_path, browser_hint=hint, cancel_check=cancelled)
+                returned = install_extension(self.extension_path, browser_hint=hint, cancel_check=cancelled,
+                                             connect_url=job['connect_url'], progress=progress)
                 if (isinstance(returned, dict)
                         and returned.get('status') in {'awaiting_connection', 'manual_required', 'error', 'cancelled'}
                         and isinstance(returned.get('message'), str)):
-                    result = {'status': returned['status'], 'message': returned['message'][:2000]}
+                    result = {'status': returned['status'], 'message': public_message(returned['message'])}
             except Exception:
                 pass
             finally:
@@ -361,6 +379,9 @@ class _State:
             job['terminal'] = True
             job['events'].append({'event': 'error', 'status_code': 401, 'safe_to_rotate': True,
                                   'message': f'Arena account {account} is not paired. Use Arena Login first.'})
+        # This URL comes only from the server's own loopback address and nonce.
+        # It binds installation to the browser window displaying this login.
+        job['connect_url'] = connect_url
         return {'job_id': job_id, 'connect_url': connect_url}
 
     def pair(self, body):
@@ -561,7 +582,7 @@ class _Handler(BaseHTTPRequestHandler):
                 if self.headers.get('Origin'):
                     raise _Problem(403, 'Desktop control is unavailable to browser origins')
                 if path == '/control/health':
-                    return self._send(200, {'version': VERSION})
+                    return self._send(200, {'version': VERSION, 'revision': SERVER_REVISION, 'pid': os.getpid()})
                 if path == '/control/jobs' and self.command == 'POST':
                     return self._send(200, state.create(body, f'http://127.0.0.1:{self.server.server_port}'))
                 if path == '/control/cancel-owner' and self.command == 'POST':
@@ -607,7 +628,7 @@ def _connect_page(extension_path):
 <h1>Arena Login</h1>
 <p id="status" role="status">Connecting to the Arena helper in this browser…</p>
 <p>Set up the helper once, then Arena sign-in opens in this browser. Your browser may ask you to confirm installation.</p>
-<p>Keep the Extensions page in front while setup runs. If you use several browser profiles, check that it is the one you want for Arena.</p>
+<p>Keep this Arena Login page in front until setup opens Extensions in the same browser window. Then leave Extensions in front until setup finishes.</p>
 <button id="install" type="button">Install in browser</button>
 <details id="manual"><summary>Manual installation</summary>
 <ol><li>Open your browser’s Extensions page and turn on Developer mode.</li>
@@ -659,9 +680,10 @@ def _connect_page(extension_path):
       if (stopped) return;
       if (result.status !== 'ready') status.textContent = result.message;
       install.disabled = result.status === 'running';
+      install.textContent = result.status === 'error' ? 'Retry installation' : 'Install in browser';
       if (result.status === 'running') setTimeout(poll, 1500);
       else if (result.status === 'awaiting_connection') reconnect(result.attempt_id);
-      else if (['manual_required','error','cancelled'].includes(result.status)) manual.open = true;
+      else if (result.status === 'manual_required') manual.open = true;
     } catch (error) {
       if (!stopped) { status.textContent = error.message; install.disabled = true; stopped = true; }
     } finally { polling = false; }
@@ -669,13 +691,14 @@ def _connect_page(extension_path):
   install.addEventListener('click', async () => {
     if (stopped || install.disabled || !valid) return;
     install.disabled = true;
+    manual.open = false;
     try {
       const result = await request('/setup/install', {browser_hint:browserHint});
       if (stopped) return;
       status.textContent = result.message;
       setTimeout(poll, 500);
     } catch (error) {
-      status.textContent = error.message; install.disabled = false; manual.open = true;
+      status.textContent = error.message; install.disabled = false; install.textContent = 'Retry installation';
     }
   });
   document.getElementById('copy').addEventListener('click', async () => {
@@ -711,6 +734,15 @@ def _connect_page(extension_path):
 </script>'''.replace('__EXTENSION_FOLDER__', html.escape(str(extension_path)))
 
 
+def _check_server_revision(health):
+    if health.get('version') != VERSION or health.get('revision') != SERVER_REVISION:
+        raise RuntimeError(
+            'Another Glossarion instance is running a different version of the Arena login helper. '
+            'Save your work and close all Glossarion windows, then reopen the updated app and click Arena Login. '
+            'Refreshing the browser page cannot update the running helper.'
+        )
+
+
 def ensure_broker():
     global _running
     with _start_lock:
@@ -718,20 +750,25 @@ def ensure_broker():
         with _state_lock():
             settings = _settings()
         bridge = {'url': f'http://127.0.0.1:{PORT}', 'control_token': settings['control_token']}
+        health = None
         try:
-            if request(bridge, 'GET', '/control/health', timeout=.5).get('version') == VERSION:
-                return bridge
+            health = request(bridge, 'GET', '/control/health', timeout=.5)
         except (requests.RequestException, RuntimeError):
             pass
+        if health is not None:
+            _check_server_revision(health)
+            return bridge
         try:
             server = _Server(('127.0.0.1', PORT), _Handler)
         except OSError as error:
             # Another application instance may have won the same startup race.
             try:
-                if request(bridge, 'GET', '/control/health', timeout=2).get('version') == VERSION:
-                    return bridge
+                health = request(bridge, 'GET', '/control/health', timeout=2)
             except (requests.RequestException, RuntimeError):
                 pass
+            if health is not None:
+                _check_server_revision(health)
+                return bridge
             raise RuntimeError(f'Arena browser bridge could not use local port {PORT}. Close the other app using it and retry.') from error
         server.state = _State(settings, extension_path)
         threading.Thread(target=server.serve_forever, name='autharena-browser-bridge', daemon=True).start()
