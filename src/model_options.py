@@ -357,6 +357,9 @@ def _get_static_model_options() -> List[str]:
         # Google Search / Gemini browser-backed route (no API key needed)
         "search/gemini",
 
+        # Arena Direct browser-backed route (no API key needed)
+        "autharena/gpt-6-astra-medium",
+
         # NVIDIA Build browser-backed route (no API key needed) - chat-tagged catalog models
         "authnd/nvidia/nemotron-3-ultra-550b-a55b",
         "authnd/mistralai/mistral-medium-3.5-128b",
@@ -662,7 +665,7 @@ _BARE_PROVIDER_PREFIXES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
 
 
 _NUMBERED_MODEL_COMPLETION_RE = re.compile(
-    r"^(authgem-vertex|antigravity|authgpt|authgrok|authcd|authgem|authnd|authza|ocagy)"
+    r"^(authgem-vertex|antigravity|authgpt|authgrok|authcd|authgem|authnd|autharena|authza|ocagy)"
     r"(\d{1,4})(?=/|$)",
     re.IGNORECASE,
 )
@@ -776,7 +779,7 @@ def _authenticated_catalog_target(
 ) -> Optional[Tuple[str, str, int, str]]:
     """Return (cache name, dropdown prefix, account id, route) for auth routes."""
     value = str(active_model or "").strip().lower()
-    match = re.match(r"^(authgpt|authcd|authgem|authnd|authza)(\d{0,4})/", value)
+    match = re.match(r"^(authgpt|authcd|authgem|authnd|autharena|authza)(\d{0,4})/", value)
     if not match:
         return None
     route = match.group(1)
@@ -1235,9 +1238,9 @@ def _authenticated_catalog_has_session(active_model: str) -> bool:
     if target is None:
         return False
     _provider_name, _prefix, account_id, route = target
-    if route == "authnd":
-        # NVIDIA's advertised model list is public; WebEngine/hCaptcha is only
-        # needed when the user actually sends a request.
+    if route in {"authnd", "autharena"}:
+        # The advertised model lists are public; browser helpers are only
+        # needed when the user actually sends an inference request.
         return True
     module_name = {
         "authgpt": "authgpt_auth",
@@ -1275,6 +1278,13 @@ def _fetch_authenticated_catalog(
         # hides newly released models and models omitted by /v1/models.
         raw_models = authnd_auth.fetch_available_models(
             timeout=max(1, int(round(timeout)))
+        )
+    elif route == "autharena":
+        import autharena
+
+        raw_models = autharena.fetch_available_models(
+            timeout=max(1, int(round(timeout))),
+            account_id=account_id,
         )
     elif route == "authza":
         import glm_proxy
@@ -1388,6 +1398,8 @@ def provider_model_catalog_supports_anonymous_poll(
     provider = catalog_provider_for_model(model, custom_routes)
     if not provider:
         return False
+    if provider.split(":", 1)[0] == "autharena":
+        return True
     specs = list(PROVIDER_CATALOG_SPECS)
     specs.extend(_custom_catalog_specs(custom_routes, model))
     spec = next((item for item in specs if item.name == provider), None)
@@ -1620,11 +1632,11 @@ def refresh_provider_model_catalogs(
         built_in_names.update(name for name in failed if name.startswith("authgrok"))
         built_in_names.update(
             name for name in successful
-            if name.split(":", 1)[0] in {"authgpt", "authcd", "authgem", "authnd", "authza"}
+            if name.split(":", 1)[0] in {"authgpt", "authcd", "authgem", "authnd", "autharena", "authza"}
         )
         built_in_names.update(
             name for name in failed
-            if name.split(":", 1)[0] in {"authgpt", "authcd", "authgem", "authnd", "authza"}
+            if name.split(":", 1)[0] in {"authgpt", "authcd", "authgem", "authnd", "autharena", "authza"}
         )
         for name in failed:
             if name in built_in_names:

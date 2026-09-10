@@ -234,6 +234,7 @@ app_files = [
 	('authcd_auth.py', '.'),  # Claude subscription OAuth
 	('glm_proxy.py', '.'),
 	('gemini_free.py', '.'),  # Google Search/Gemini browser-backed route
+	('autharena.py', '.'),  # Arena browser-backed Direct chat
 	('token_encryption.py', '.'),
 
 	# Antigravity Cloud Code proxy
@@ -359,6 +360,7 @@ app_modules = [
 	'authcd_auth',  # Claude subscription OAuth
 	'glm_proxy',  # Z.AI Coding Plan login proxy
 	'gemini_free',  # Google Search/Gemini browser-backed route
+	'autharena',  # Arena browser-backed Direct chat
 	'token_encryption',  # Encrypted token storage
 	'ocagy_cli',  # OpenCode + opencode-antigravity-auth
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
@@ -1182,6 +1184,7 @@ excludes = [
     # ============================================================================
     # QTWEBENGINE / CHROMIUM - excluded to save ~152 MB exe size.
     # epub_library.py is not bundled in Lite, so this is safe.
+    # AuthArena's browser helper requires a build that includes QtWebEngine.
     # ============================================================================
     'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore',
     'PySide6.QtWebEngineQuick',

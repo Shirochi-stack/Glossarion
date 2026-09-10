@@ -57,6 +57,23 @@ if __name__ == '__main__':
             }, separators=(",", ":")), flush=True)
             raise SystemExit(1)
 
+    # Keep the Arena browser helper out of the full GUI initialization path.
+    if "--autharena-helper" in _authnd_sys.argv:
+        _idx = _authnd_sys.argv.index("--autharena-helper")
+        _remaining = _authnd_sys.argv[_idx + 1:]
+        _authnd_sys.argv = [_authnd_sys.argv[0], "--browser-helper", *_remaining]
+        try:
+            from autharena import _main as _autharena_main
+            raise SystemExit(_autharena_main())
+        except Exception as _autharena_exc:
+            import json as _autharena_json
+            print(_autharena_json.dumps({
+                "autharena": 1,
+                "event": "error",
+                "message": f"AuthArena browser helper failed: {_autharena_exc}",
+            }, separators=(",", ":")), flush=True)
+            raise SystemExit(1)
+
     # PyInstaller-safe Gemini Free helper entrypoint.  gemini_free.py is normally
     # run as a subprocess so Qt WebEngine stays out of translation worker threads.
     if "--gemini-free-search" in _authnd_sys.argv:
@@ -1820,6 +1837,9 @@ class _InputOutputDialog(QDialog):
         'AUTHND_STREAM',
         'AUTHND_LOG_STREAM_CHUNKS',
         'AUTHND_STREAM_THINKING_LOGS',
+        'AUTHARENA_STREAM',
+        'AUTHARENA_LOG_STREAM_CHUNKS',
+        'AUTHARENA_STREAM_THINKING_LOGS',
     )
     _OUTPUT_ENV_KEYS = ('OUTPUT_DIRECTORY', 'OUTPUT_DIR', 'EPUB_OUTPUT_DIR')
     _IMAGE_ATTACHMENT_EXTENSIONS = {
@@ -1875,6 +1895,7 @@ class _InputOutputDialog(QDialog):
         'THINKING_BUDGET',
         'STREAM_THINKING_LOGS',
         'AUTHND_STREAM_THINKING_LOGS',
+        'AUTHARENA_STREAM_THINKING_LOGS',
         'ENABLE_THOUGHTS',
         'DIRECT_TEXT_ATTACHMENT_PROMPT',
         'DIRECT_TEXT_ATTACHMENT_PROMPT_ROLE',
@@ -1917,6 +1938,7 @@ class _InputOutputDialog(QDialog):
         '📡 AuthGem: Stream finished',
         '📡 AuthCD: Stream finished',
         '📡 AuthND: Stream finished',
+        '📡 AuthArena: Stream finished',
         'TRANSLATION_COMPLETE_SIGNAL', 'GLOSSARY_COMPLETE_SIGNAL',
         '✅ Text file translation complete',
     )
@@ -20780,6 +20802,10 @@ Recent translations to summarize:
             <li><b>authnd/openai/gpt-oss-120b</b></li>
         </ul>
 
+        <h4>Arena Direct (autharena/)</h4>
+        <p>Use Arena Direct models with <code>autharena/</code>, for example <b>autharena/gpt-6-astra-medium</b>. Each request starts a fresh conversation; browser login is retained. No API key is required.</p>
+        <p>Selecting this prefix automatically refreshes Arena's public model list when its daily cache is due.</p>
+
         <h4>Custom Prefix Routes</h4>
         <p>User-defined prefixes can route models to custom OpenAI-compatible endpoints from Model Manager.</p>
         
@@ -21572,9 +21598,9 @@ Recent translations to summarize:
             custom_routes = []
 
         provider = catalog_provider_for_model(active_model, custom_routes)
-        if provider and provider.split(':', 1)[0] == 'authnd':
-            # AuthND is an on-demand route, not a generic ProviderCatalogSpec.
-            # Poll it as an explicit first stage and always follow with the
+        if provider and provider.split(':', 1)[0] in {'authnd', 'autharena'}:
+            # These public browser routes use on-demand catalog adapters.
+            # Poll the selected adapter first and always follow with the
             # full sweep, even if another catalog worker is currently active.
             self._provider_model_catalog_full_refresh_pending = True
             return self._start_provider_model_catalog_refresh(
@@ -22024,6 +22050,7 @@ Recent translations to summarize:
                 'authcd': 'AuthCD',
                 'authgem': 'AuthGem',
                 'authnd': 'AuthND',
+                'autharena': 'AuthArena',
                 'authza': 'AuthZA',
                 'ocagy': 'OcAgy',
                 'gemini': 'Gemini',
@@ -22087,8 +22114,8 @@ Recent translations to summarize:
                 "the existing signed-in session is then queried without opening a login"
             )
         lines.append(
-            "   🔑 Signed-in route polling: authgpt*/, authcd*/, authgem*/, authnd*/, "
-            "and authza*/ are polled when that route/account is selected; interactive login is never opened"
+            "   🔑 Selected route polling: authgpt*/, authcd*/, authgem*/, authnd*/, "
+            "autharena*/, and authza*/ are polled when that route/account is selected; interactive login is never opened"
         )
         self.append_log('\n'.join(lines))
 
@@ -23888,6 +23915,10 @@ Recent translations to summarize:
             if active_model.startswith('authnd'):
                 poll_status.setText(
                     "Polling selected AuthND catalog, then remaining providers…"
+                )
+            elif active_model.startswith('autharena'):
+                poll_status.setText(
+                    "Polling selected Arena catalog, then remaining providers…"
                 )
             elif active_model.startswith('authza'):
                 poll_status.setText(
@@ -34817,6 +34848,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             os.environ.pop('THINKING_BUDGET', None)
             os.environ['STREAM_THINKING_LOGS'] = '0'
             os.environ['AUTHND_STREAM_THINKING_LOGS'] = '0'
+            os.environ['AUTHARENA_STREAM_THINKING_LOGS'] = '0'
             os.environ['ENABLE_THOUGHTS'] = '0'
 
     def _format_translation_anti_duplicate_settings(self, env_vars=None):
@@ -38681,7 +38713,7 @@ Important rules:
 
                             # Known helper flags / scripts
                             #
-                            # Browser-backed routes (AuthND / Gemini-Free) spawn a
+                            # Browser-backed routes (AuthND / Arena / Gemini-Free) spawn a
                             # short-lived QtWebEngine helper subprocess to mint a
                             # captcha/search token. If a stop races the spawn, the
                             # helper (and its Chromium children) can linger holding
@@ -38692,6 +38724,7 @@ Important rules:
                                     or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
                                     or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s
                                     or "--authnd-mint-token" in cmd_s or "--mint-token" in cmd_s
+                                    or "--autharena-helper" in cmd_s or "--browser-helper" in cmd_s
                                     or "--gemini-free-search" in cmd_s or "--search-helper" in cmd_s):
                                 processes_to_terminate.append(child)
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -44102,6 +44135,7 @@ Important rules:
                 ("🤖", "antigravity/", "Cloud Code", "Local proxy (localhost)", "#181830", "#a0a0f0"),
                 ("🟢", "nd/", "NVIDIA", "NVIDIA Integrate models", "#143014", "#60d060"),
                 ("🟢", "authnd/", "AuthND", "NVIDIA Build browser route", "#143014", "#8ee88e"),
+                ("🏟️", "autharena/", "AuthArena", "Arena Direct browser route", "#282014", "#f5c478"),
                 ("🇨🇳", "za/", "Zhipu Intl.", "GLM international endpoint", "#1e2030", "#60c0e0"),
                 ("🌌", "nan/", "NanoGPT", "Generative & text models", "#1a1025", "#c084fc"),
                 ("⚙️", "sam/", "SambaNova", "SambaNova Cloud API", "#1a1e14", "#7cb343"),

@@ -126,6 +126,8 @@ tests/**
 !tests/test_config_backup_restore.py
 !tests/test_update_manager_notes.py
 !tests/test_authnd_captcha_navigation.py
+!tests/test_autharena.py
+!tests/test_autharena_routing.py
 !tests/test_authgrok_auth.py
 !tests/test_authgpt_request.py
 !tests/test_openai_token_compatibility.py

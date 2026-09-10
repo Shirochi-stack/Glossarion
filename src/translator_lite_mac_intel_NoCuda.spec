@@ -212,6 +212,7 @@ app_files = [
 	('glm_proxy.py', '.'),
 	('authnd_auth.py', '.'),  # NVIDIA Build browser-backed auth
 	('gemini_free.py', '.'),  # Google Search/Gemini browser-backed route
+	('autharena.py', '.'),  # Arena browser-backed Direct chat
 	('token_encryption.py', '.'),
 
 	# Antigravity Cloud Code proxy
@@ -338,6 +339,7 @@ app_modules = [
 	'glm_proxy',  # Z.AI Coding Plan login proxy
 	'authnd_auth',  # NVIDIA Build browser-backed auth
 	'gemini_free',  # Google Search/Gemini browser-backed route
+	'autharena',  # Arena browser-backed Direct chat
 	'token_encryption',  # Encrypted token storage
 	'ocagy_cli',  # OpenCode + opencode-antigravity-auth
 	'antigravity_proxy',  # Antigravity Cloud Code proxy

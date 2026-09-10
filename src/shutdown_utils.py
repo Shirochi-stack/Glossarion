@@ -21,6 +21,8 @@ from typing import Callable, Iterable, Optional
 _last_qt_shutdown_drain_at = 0.0
 _WINDOWS_CREATE_NO_WINDOW = 0x08000000
 _WINDOWS_SW_HIDE = 0
+# Disposable profiles only: autharena_browser contains persistent login cookies
+# (including account subdirectories) and must survive application shutdown.
 _BROWSER_STATE_PROFILE_PARENT_DIRS = (
     "authnd_browser",
     "gemini_free_browser",
@@ -29,6 +31,7 @@ _BROWSER_STATE_PROFILE_PARENT_DIRS = (
 _BROWSER_STATE_CLEANUP_HANDOFF_DIR = ".startup_cleanup_deleting"
 _BROWSER_STATE_HELPER_ENV_VARS = (
     "AUTHND_TOKEN_HELPER",
+    "AUTHARENA_BROWSER_HELPER",
     "GEMINI_FREE_HELPER",
 )
 _EPUB_READER_TEMP_CACHE_DIRS = (
@@ -1167,7 +1170,7 @@ def request_hard_stop_for_shutdown(owner=None, translation_stop_flag=None, gloss
             if hasattr(unified_api_client.UnifiedClient, "set_global_cancellation"):
                 unified_api_client.UnifiedClient.set_global_cancellation(True)
             # Fire the browser-backed route cancels (AuthND / AuthGPT / AuthGem /
-            # AuthCD / Gemini-Free) and close in-flight HTTP sessions. This sets
+            # AuthCD / AuthArena / Gemini-Free) and close in-flight HTTP sessions. This sets
             # each helper module's _cancel_event and terminates their token-helper
             # subprocesses, so a request that was mid-flight when the user hit Stop
             # cannot keep running — and its Chromium child cannot linger holding
@@ -1185,6 +1188,7 @@ def request_hard_stop_for_shutdown(owner=None, translation_stop_flag=None, gloss
     # unified client's hard_cancel_all path was unavailable (e.g. import order).
     for _helper_module in (
         "authnd_auth",
+        "autharena",
         "authgpt_auth",
         "authgem_auth",
         "authcd_auth",
