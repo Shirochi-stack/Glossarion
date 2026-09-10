@@ -29,7 +29,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 18
+ADAPTER_VERSION = 19
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 ARENA_RECAPTCHA_V3_SITEKEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0"
 UV_VERSION = "0.8.22"
@@ -815,7 +815,7 @@ def session_from_cookies(cookies):
         return None
 
 
-def _persist_session(slot, cookies):
+def _persist_session(slot, cookies, expected_token=None):
     """Keep refreshed Arena credentials across worker/app restarts."""
     session = session_from_cookies(cookies)
     if session is None:
@@ -825,13 +825,20 @@ def _persist_session(slot, cookies):
         previous = accounts.get(str(slot))
         if not previous or previous.get("user_id") != session["user_id"]:
             raise RuntimeError("Arena restored a different account; reconnect the intended account with Arena Login.")
-        accounts[str(slot)] = session
-        _save("accounts.enc", accounts)
+        if expected_token is not None and previous.get("token") != expected_token:
+            # Restoration started before another request or Arena Login saved
+            # a different session. It must not overwrite those credentials.
+            return session
+        # Concurrent contexts can finish out of order. Keep newer refreshed
+        # credentials even if an older, still-valid session finishes last.
+        if session["expires_at"] >= previous.get("expires_at", 0):
+            accounts[str(slot)] = session
+            _save("accounts.enc", accounts)
     return session
 
 
 async def _serve_worker(key):
-    """Authenticated loopback broker; independent upstream module state per slot."""
+    """Authenticated loopback broker; independent browser/bridge state per request."""
     import asyncio
     import copy
     import importlib
@@ -848,7 +855,7 @@ async def _serve_worker(key):
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(data_dir() / "browsers")
     playwright = await async_playwright().start()
     slots = {}
-    slot_init_lock = asyncio.Lock()
+    slot_pool_lock = asyncio.Lock()
     connect_lock = asyncio.Lock()
     login_lock = asyncio.Lock()
     cursor = 0
@@ -912,20 +919,25 @@ async def _serve_worker(key):
                             await asyncio.sleep(1)
                             continue
                     if account:
-                        with disk_lock():
-                            saved = _load("accounts.enc")
-                            slot = body.get("slot")
-                            if slot is None:
-                                slot = max([int(k) for k in saved] + [-1]) + 1
-                            slot = int(slot)
-                            if slot < 0 or slot > 9998:
-                                raise HTTPException(400, "Invalid Arena account slot")
-                            saved[str(slot)] = account
-                            _save("accounts.enc", saved)
-                        previous = slots.pop(slot, None)
-                        if previous:
-                            async with previous["lock"]:
-                                await previous["context"].close()
+                        # Reconnect future requests immediately. Active requests
+                        # finish in their own contexts before those are retired.
+                        async with slot_pool_lock:
+                            with disk_lock():
+                                saved = _load("accounts.enc")
+                                slot = body.get("slot")
+                                if slot is None:
+                                    slot = max([int(k) for k in saved] + [-1]) + 1
+                                slot = int(slot)
+                                if slot < 0 or slot > 9998:
+                                    raise HTTPException(400, "Invalid Arena account slot")
+                                saved[str(slot)] = account
+                                _save("accounts.enc", saved)
+                            previous = slots.pop(slot, [])
+                            for state in previous:
+                                state["retired"] = True
+                        for state in previous:
+                            if not state["lock"].locked():
+                                await close_slot(state)
                         # Capture full routing metadata while the regular login
                         # browser is available; background requests can reuse it.
                         catalog_cached = False
@@ -948,8 +960,63 @@ async def _serve_worker(key):
                     await login_browser.__aexit__(None, None, None)
 
     async def get_slot(slot):
-        async with slot_init_lock:
-            return await initialize_slot(slot)
+        """Reserve an idle context, or create another for overlapping requests."""
+        while True:
+            chrome = await connect()
+            async with slot_pool_lock:
+                pool = slots.setdefault(slot, [])
+                for state in list(pool):
+                    if state["context"] not in chrome.contexts:
+                        state["retired"] = True
+                        pool.remove(state)
+                        if not state["lock"].locked():
+                            await close_slot(state)
+                    elif not state["lock"].locked():
+                        await state["lock"].acquire()
+                        return state
+            # Navigation and catalog loading must not block other batch calls.
+            state = await initialize_slot(slot)
+            reserved = False
+            try:
+                async with slot_pool_lock:
+                    if slots.get(slot) is pool:
+                        await state["lock"].acquire()
+                        pool.append(state)
+                        reserved = True
+                        return state
+            finally:
+                if not reserved:
+                    # Login changed the account during restoration, or the
+                    # caller cancelled while waiting to reserve this context.
+                    await close_slot(state)
+
+    async def close_slot(state):
+        state["retired"] = True
+        with contextlib.suppress(Exception):
+            await state["context"].close()
+        namespace = state["namespace"]
+        for name in list(sys.modules):
+            if name == namespace or name.startswith(namespace + "."):
+                sys.modules.pop(name, None)
+
+    async def release_slot(state):
+        try:
+            # Upstream launches browser tasks separately from its stream
+            # iterator. Drain them before this context can be reused.
+            pending = [task for task in state.get("transport_tasks", ())
+                       if task is not asyncio.current_task() and not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            main = state["main"]
+            main.chat_sessions.clear()
+            main.conversation_tokens.clear()
+            main.request_failed_tokens.clear()
+            if state["retired"]:
+                await close_slot(state)
+        finally:
+            state["lock"].release()
 
     async def restore_context(slot, refresh=False):
         chrome = await connect()
@@ -967,7 +1034,8 @@ async def _serve_worker(key):
                     # Let Arena's own session client refresh its saved session.
                     # Access-token expiry alone must not discard a refresh token.
                     for _ in range(60):
-                        restored = _persist_session(slot, await context.cookies(["https://arena.ai/", "https://lmarena.ai/"]))
+                        restored = _persist_session(slot, await context.cookies(["https://arena.ai/", "https://lmarena.ai/"]),
+                                                    expected_token=account.get("token"))
                         if restored:
                             account = restored
                             break
@@ -982,11 +1050,15 @@ async def _serve_worker(key):
             raise
 
     async def initialize_slot(slot):
-        chrome = await connect()
-        if slot in slots and slots[slot]["context"] in chrome.contexts:
-            return slots[slot]
         context, account = await restore_context(slot)
         namespace = f"arena_slot_{slot}_{secrets.token_hex(4)}"
+        try:
+            return await configure_slot(slot, context, account, namespace)
+        except BaseException:
+            await close_slot({"context": context, "namespace": namespace})
+            raise
+
+    async def configure_slot(slot, context, account, namespace):
         package = types.ModuleType(namespace)
         package.__path__ = [str(Path(__file__).parent / "bridge")]
         sys.modules[namespace] = package
@@ -998,7 +1070,6 @@ async def _serve_worker(key):
         if not all(callable(getattr(recaptcha, name, None)) for name in (
             "_mint_recaptcha_v3_token_in_page", "refresh_recaptcha_token", "get_cached_recaptcha_token"
         )):
-            await context.close()
             raise RuntimeError("Pinned LMArenaBridge CAPTCHA helpers are incompatible with this adapter.")
         cfg = {"auth_tokens": [account["token"]], "auth_token": account["token"], "api_keys": [{"key": key, "rpm": 100000}],
                "persist_arena_auth_cookie": False, "browser_cookies": {c["name"]: c["value"] for c in account["cookies"]}}
@@ -1010,7 +1081,6 @@ async def _serve_worker(key):
         try:
             models = list(await _ensure_catalog(context))
         except BaseException as exc:
-            await context.close()
             if isinstance(exc, asyncio.CancelledError):
                 raise
             raise HTTPException(503, str(exc)) from exc
@@ -1062,7 +1132,8 @@ async def _serve_worker(key):
             models[:] = await _ensure_catalog(context)
         main.get_initial_data = refresh_initial_data
         main.STRICT_BROWSER_FETCH_MODELS = {m["publicName"] for m in models}
-        state = {"main": main, "context": context, "lock": asyncio.Lock(), "models": models, "submitted": False, "usage": None}
+        state = {"main": main, "context": context, "lock": asyncio.Lock(), "models": models,
+                 "namespace": namespace, "retired": False, "submitted": False, "usage": None}
 
         async def fetch(http_method, url, payload, auth_token="", timeout_seconds=120, **kwargs):
             verification = bool(kwargs.pop("_verification", False))
@@ -1235,7 +1306,9 @@ async def _serve_worker(key):
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await task
                     with contextlib.suppress(Exception):
-                        _persist_session(slot, await context.cookies(["https://arena.ai/", "https://lmarena.ai/"]))
+                        cookies = await context.cookies(["https://arena.ai/", "https://lmarena.ai/"])
+                        if not state["retired"]:
+                            _persist_session(slot, cookies)
                     await page.close()
                 async def __aexit__(self, *args):
                     await self.aclose()
@@ -1357,7 +1430,6 @@ async def _serve_worker(key):
                 return state["terminal_error"]
         main.fetch_lmarena_stream_via_chrome = submit_once
         main.fetch_lmarena_stream_via_camoufox = submit_once
-        slots[slot] = state
         return state
 
     @app.get("/v1/models")
@@ -1366,9 +1438,11 @@ async def _serve_worker(key):
         if not accounts:
             return {"data": []}
         state = await get_slot(accounts[0]["slot"])
-        async with state["lock"]:
+        try:
             state["models"][:] = await _ensure_catalog(state["context"])
             state["main"].STRICT_BROWSER_FETCH_MODELS = {m["publicName"] for m in state["models"]}
+        finally:
+            await release_slot(state)
         return {"data": [{"id": m["publicName"]} for m in state["models"]]}
 
     @app.post("/cancel")
@@ -1421,14 +1495,13 @@ async def _serve_worker(key):
                 raise HTTPException(401, "No Arena accounts. Use Arena Login.")
             slot = accounts[cursor % len(accounts)]["slot"]
             cursor += 1
-        state = await get_slot(int(slot))
-        main = state["main"]
         body["stream"] = True
         body.pop("conversation_id", None)
         dispatch_ack = body.pop("dispatch_ack", False)
         request._body = json.dumps(body).encode()
         request._json = body
-        await state["lock"].acquire()
+        state = await get_slot(int(slot))
+        main = state["main"]
         main.chat_sessions.clear()
         state["submitted"] = False
         state["terminal_error"] = None
@@ -1444,11 +1517,11 @@ async def _serve_worker(key):
             response = await main.api_chat_completions(request, {"key": key, "rpm": 100000})
         except BaseException:
             dispatch_acks.pop(request_id, None)
-            state["lock"].release()
+            await release_slot(state)
             raise
         if not hasattr(response, "body_iterator"):
             dispatch_acks.pop(request_id, None)
-            state["lock"].release()
+            await release_slot(state)
             jobs.pop(request_id, None)
             return response
         async def upstream_chunks():
@@ -1513,19 +1586,9 @@ async def _serve_worker(key):
                 producer.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await producer
-                # Upstream launches browser tasks separately from its stream
-                # iterator. Drain them before reusing this account's state.
-                pending = [t for t in state["transport_tasks"] if t is not asyncio.current_task() and not t.done()]
-                for task in pending:
-                    task.cancel()
-                if pending:
-                    await asyncio.gather(*pending, return_exceptions=True)
                 dispatch_acks.pop(request_id, None)
                 cancelled_jobs.discard(request_id)
-                main.chat_sessions.clear()
-                main.conversation_tokens.clear()
-                main.request_failed_tokens.clear()
-                state["lock"].release()
+                await release_slot(state)
         return StreamingResponse(chunks(), media_type="text/event-stream",
                                  headers={"X-Arena-Account-Slot": str(slot)})
 
@@ -1542,9 +1605,9 @@ async def _serve_worker(key):
     try:
         await server.serve(sockets=[sock])
     finally:
-        for state in slots.values():
-            with contextlib.suppress(Exception):
-                await state["context"].close()
+        for pool in slots.values():
+            for state in pool:
+                await close_slot(state)
         # This browser belongs exclusively to the Arena worker.
         if browser is not None:
             with contextlib.suppress(Exception):

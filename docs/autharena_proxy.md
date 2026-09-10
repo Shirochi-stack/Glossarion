@@ -32,7 +32,12 @@ does not inherit another account's sign-in. A login keeps
 its original target if the model or another key row changes while it is open.
 
 Translation requests have separate conversation state and isolated internal
-browser contexts per saved account. New requests use Arena's current
+browser contexts. Batch size controls simultaneous calls, including calls using
+the same saved account. Each active request has its own bridge module state,
+CAPTCHA token, dispatch acknowledgment, and browser context; idle contexts are
+reused for subsequent requests. Cancelling one request does not stop another.
+Reconnecting an account retires its old contexts after their active requests
+finish. New requests use Arena's current
 `direct-battle` creation mode (the Direct UI route), retaining the selected
 model for the first turn; the pinned bridge's legacy `direct` value is adapted.
 Translation runs headlessly; only an explicit
@@ -64,7 +69,7 @@ without token values. The application acknowledges dispatch before the worker
 sends to Arena, starting the watchdog and API-call progress at that boundary
 rather than during browser and CAPTCHA preparation. The acknowledgment no longer
 has a separate 30-second expiry; request timeout and cancellation still apply.
-Browser tasks are stopped before an account's request state can be reused.
+Browser tasks are stopped before a request's context and state can be reused.
 Dispatch failures are provider errors unless a real cancellation was requested.
 Upstream errors retain Arena's HTTP status and Retry-After value when supplied,
 including HTTP 429, instead of reporting them as CAPTCHA failures.
@@ -87,7 +92,8 @@ Arena Login also captures these records from its browser. A cache failure now
 reports whether the page was blocked or its model data could not be parsed.
 Personal browser cookie databases are never read. The temporary login profile
 is removed after its browser closes; only captured Arena credentials are retained
-in the encrypted account store. Translation contexts remain isolated per account.
+in the encrypted account store. Simultaneous translations use separate contexts,
+even when they select the same account.
 
 For standalone use, run `python src/autharena_proxy.py` to keep the proxy running,
 `python src/autharena_proxy.py --status` for a read-only health check, or

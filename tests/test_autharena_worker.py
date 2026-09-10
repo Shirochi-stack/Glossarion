@@ -26,6 +26,8 @@ RUNTIME = Path.home() / ".glossarion/autharena_proxy" / ("bridge-" + arena.REVIS
 class Page:
     def __init__(self, context):
         self.context = context
+        self.token = f"upstream-test-token-{context.browser.page_sequence}"
+        context.browser.page_sequence += 1
 
     async def expose_binding(self, name, callback):
         self.emit = callback
@@ -62,7 +64,7 @@ class Page:
                 return True
             async def click(self, **kwargs):
                 page.context.browser.login_clicks += 1
-                session = {"user": {"id": "new-user", "email": "new@example.test"}, "expires_at": int(time.time()) + 3600}
+                session = {"user": page.context.browser.login_user, "expires_at": int(time.time()) + 3600}
                 page.context.saved_cookies = [{"name": "arena-auth-prod-v1", "domain": ".arena.ai", "path": "/",
                                                "value": "base64-" + base64.urlsafe_b64encode(json.dumps(session).encode()).decode()}]
         return Control()
@@ -77,10 +79,13 @@ class Page:
             if self.context.browser.mint_gate is not None:
                 self.context.browser.mint_started.set()
                 await self.context.browser.mint_gate.wait()
-            return "upstream-test-token"
+            return self.token
         assert args["payload"]["mode"] == "direct-battle"
         assert args["payload"]["modelAId"] == "test-model-id"
         self.context.browser.sent.append((self.context.saved_cookies, args["payload"]))
+        if self.context.browser.response_handler is not None:
+            await self.context.browser.response_handler(self, args["payload"])
+            return
         if self.context.browser.reject_once:
             self.context.browser.reject_once = False
             await self.emit(None, {"status": 403, "headers": {}, "error_body": self.context.browser.rejection_body})
@@ -120,6 +125,7 @@ class Context:
 class Browser:
     version = "152.0.0.0"
     def __init__(self):
+        self.page_sequence = 0
         self.contexts = [Context(self)]
         self.sent = []
         self.urls = []
@@ -134,6 +140,8 @@ class Browser:
         self.mint_gate = None
         self.mint_started = asyncio.Event()
         self.delay_after_reasoning = 0
+        self.response_handler = None
+        self.login_user = {"id": "new-user", "email": "new@example.test"}
 
     async def close(self):
         self.contexts.clear()
@@ -229,6 +237,156 @@ class LoginNavigationTest(unittest.TestCase):
 @unittest.skipUnless(importlib.util.find_spec("camoufox") and (RUNTIME / "bridge").exists(),
                      "Run with installed Arena managed Python for the offline bridge integration test")
 class WorkerTest(unittest.TestCase):
+    def test_same_account_stream_overlap_cancel_and_reconnect(self):
+        import httpx
+        browser = Browser()
+
+        @contextlib.asynccontextmanager
+        async def login_browser(playwright):
+            context = await browser.new_context()
+            try:
+                yield context
+            finally:
+                await context.close()
+
+        class Playwright:
+            async def start(self):
+                self.chromium = self
+                return self
+
+            async def launch(self, **kwargs):
+                return browser
+
+            async def stop(self):
+                pass
+
+        catalog = [{"id": "test-model-id", "publicName": "test-model", "organization": "test", "capabilities": {}}]
+
+        async def discover_catalog(context):
+            return catalog
+
+        original_import = importlib.import_module
+
+        def import_bridge(name, *args, **kwargs):
+            module = original_import(name, *args, **kwargs)
+            if name.startswith("arena_slot_") and name.endswith(".src.main"):
+                async def discovery():
+                    module.save_models(catalog)
+                module.get_initial_data = discovery
+            return module
+
+        async def serve(server, sockets):
+            started, gates, pages, payloads = {}, {}, {}, {}
+            requests = []
+
+            async def respond(page, payload):
+                label = payload["userMessage"]["content"].strip()
+                pages[label], payloads[label] = page, payload
+                self.assertEqual(payload["recaptchaV3Token"], page.token)
+                await page.emit(None, {"status": 200, "headers": {}})
+                await page.emit(None, {"line": "ag:" + json.dumps("thinking " + label)})
+                started[label].set()
+                await gates[label].wait()
+                await page.emit(None, {"line": "a0:" + json.dumps("answer " + label)})
+                await page.emit(None, {"line": 'ad:{"finishReason":"stop","usage":{"total_tokens":8}}'})
+
+            browser.response_handler = respond
+            headers = {"Authorization": "Bearer test-key"}
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.config.app), base_url="http://test", headers=headers) as client:
+                def launch(label, complete=False):
+                    started[label], gates[label] = asyncio.Event(), asyncio.Event()
+                    if complete:
+                        gates[label].set()
+                    task = asyncio.create_task(client.post("/v1/chat/completions", json={
+                        "request_id": label, "account_slot": 0, "stream_timeout": 30,
+                        "model": "test-model", "messages": [{"role": "user", "content": label}]}))
+                    requests.append(task)
+                    return task
+
+                async def result(task, label):
+                    response = await asyncio.wait_for(task, 5)
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.headers["X-Arena-Account-Slot"], "0")
+                    parsed = arena.consume_stream(response.text.splitlines(), log_stream=False)
+                    self.assertEqual(parsed["content"], "answer " + label)
+                    self.assertEqual(parsed["reasoning_content"], "thinking " + label)
+                    self.assertEqual(parsed["usage"], {"total_tokens": 8})
+
+                try:
+                    first = launch("first")
+                    await asyncio.wait_for(started["first"].wait(), 5)
+                    second = launch("second")
+                    # Neither answer can finish until both requests have reached
+                    # Arena. Serializing the account makes this assertion fail.
+                    await asyncio.wait_for(started["second"].wait(), 5)
+                    first_context, second_context = pages["first"].context, pages["second"].context
+                    self.assertIsNot(first_context, second_context)
+                    self.assertNotEqual(pages["first"].token, pages["second"].token)
+                    self.assertNotEqual(payloads["first"]["id"], payloads["second"]["id"])
+                    self.assertNotEqual(payloads["first"]["userMessageId"], payloads["second"]["userMessageId"])
+                    self.assertEqual(first_context.saved_cookies[0]["value"], "slot-0")
+                    self.assertEqual(second_context.saved_cookies[0]["value"], "slot-0")
+                    first_context.saved_cookies.append({"name": "request-local", "value": "first", "domain": ".arena.ai", "path": "/"})
+                    self.assertEqual(len(second_context.saved_cookies), 1)
+                    self.assertEqual(browser.contexts[0].saved_cookies, [])
+
+                    gates["first"].set()
+                    await result(first, "first")
+                    self.assertFalse(second.done())
+                    cancelled = launch("cancelled")
+                    await asyncio.wait_for(started["cancelled"].wait(), 5)
+                    self.assertIs(pages["cancelled"].context, first_context)
+                    await client.post("/cancel", json={"id": "cancelled"})
+                    await asyncio.wait_for(asyncio.gather(cancelled, return_exceptions=True), 5)
+                    self.assertFalse(second.done())
+                    self.assertIn(pages["second"], second_context.pages)
+                    gates["second"].set()
+                    await result(second, "second")
+                    self.assertNotIn(pages["cancelled"], first_context.pages)
+
+                    contexts = list(browser.contexts)
+                    await result(launch("reused", complete=True), "reused")
+                    self.assertEqual(browser.contexts, contexts)
+
+                    old = launch("old-session")
+                    await asyncio.wait_for(started["old-session"].wait(), 5)
+                    old_context = pages["old-session"].context
+                    browser.login_user = {"id": "user-0", "email": "reconnected@example.test"}
+                    login = await asyncio.wait_for(client.post("/login", json={"slot": 0}), 5)
+                    self.assertEqual(login.status_code, 200, login.text)
+                    self.assertIn(old_context, browser.contexts)
+                    self.assertIn(pages["old-session"], old_context.pages)
+                    self.assertFalse(old.done())
+                    fresh = launch("new-session", complete=True)
+                    await result(fresh, "new-session")
+                    self.assertIsNot(pages["new-session"].context, old_context)
+                    self.assertEqual(pages["new-session"].context.saved_cookies[0]["name"], "arena-auth-prod-v1")
+                    gates["old-session"].set()
+                    await result(old, "old-session")
+                    self.assertNotIn(old_context, browser.contexts)
+                    self.assertEqual(len(browser.sent), 6)
+                    self.assertEqual(len({p["id"] for p in payloads.values()}), 6)
+                finally:
+                    for task in requests:
+                        task.cancel()
+                    await asyncio.gather(*requests, return_exceptions=True)
+                    for sock in sockets:
+                        sock.close()
+
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"AUTHARENA_PROXY_DATA_DIR": root}), \
+                patch.object(arena, "__file__", str(RUNTIME / "autharena_proxy.py")), \
+                patch.object(arena, "_regular_login_browser", login_browser), \
+                patch.object(arena, "_discover_catalog", discover_catalog), \
+                patch("playwright.async_api.async_playwright", Playwright), \
+                patch("uvicorn.Server.serve", serve), patch("importlib.import_module", import_bridge):
+            expiration = int(time.time()) + 3600
+            token = "base64-" + base64.urlsafe_b64encode(json.dumps({
+                "access_token": "test-access", "refresh_token": "test-refresh", "expires_at": expiration,
+                "user": {"id": "user-0", "email": "saved@example.test"}}).encode()).decode()
+            arena._save("accounts.enc", {"0": {"token": token, "user_id": "user-0", "expires_at": expiration,
+                "cookies": [{"name": "test-account", "value": "slot-0", "domain": ".arena.ai", "path": "/"}]}})
+            asyncio.run(arena._serve_worker("test-key"))
+
     def test_pinned_bridge_routing_isolation_and_stream(self):
         import httpx
         browser = Browser()

@@ -389,6 +389,35 @@ def test_refreshed_session_is_encrypted_and_survives_process_restart():
     assert arena._load("accounts.enc")["0"]["user_id"] == "saved-user"
 
 
+def test_older_parallel_session_cannot_overwrite_refreshed_credentials():
+    expiration = int(time.time()) + 3600
+    session = {"user": {"id": "saved-user", "email": "saved@example.test"},
+               "expires_at": expiration, "refresh_token": "older-refresh"}
+
+    def cookie_for(value):
+        return {"name": "arena-auth-prod-v1", "domain": ".arena.ai", "path": "/", "value":
+                "base64-" + base64.urlsafe_b64encode(json.dumps(value).encode()).decode()}
+
+    older_cookie = cookie_for(session)
+    session.update(expires_at=expiration + 100, refresh_token="newer-refresh")
+    newer_cookie = cookie_for(session)
+    arena._save("accounts.enc", {"0": {"user_id": "saved-user", "expires_at": 1}})
+    arena._persist_session(0, [newer_cookie])
+    restored = arena._persist_session(0, [older_cookie])
+    # The old context still reports its own session, but disk retains the newer
+    # refresh credentials for the next restart or newly created context.
+    assert restored["token"] == older_cookie["value"]
+    saved = arena._load("accounts.enc")["0"]
+    assert saved["expires_at"] == expiration + 100
+    assert saved["cookies"] == [newer_cookie]
+
+    # An old context refreshing during a reconnect must not replace the new
+    # login, even when its newly minted token has a later expiration.
+    session.update(expires_at=expiration + 200, refresh_token="obsolete-login-refresh")
+    arena._persist_session(0, [cookie_for(session)], expected_token=older_cookie["value"])
+    assert arena._load("accounts.enc")["0"] == saved
+
+
 def test_interrupted_install_is_not_published(tmp_path, monkeypatch):
     uv = arena.data_dir() / ("uv.exe" if os.name == "nt" else "uv")
     uv.touch()
