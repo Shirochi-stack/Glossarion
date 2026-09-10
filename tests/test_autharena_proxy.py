@@ -42,16 +42,81 @@ def test_stream_is_delivered_before_completion_and_preserves_whitespace():
     logged = []
     def lines():
         yield event({"content": " hello "})
-        assert logged == [" hello "]
-        yield event({"reasoning_content": "thinking"})
-        assert logged[-1] == "thinking"
+        assert logged == ["📡 Arena: Text streaming..."]
         yield event({"content": "world\n"})
+        assert logged[-1] == " hello world"
+        yield event({"reasoning_content": "thinking\n"})
+        assert logged[-1] == "    thinking"
         yield event(finish="length", usage={"total_tokens": 10})
         yield "data: [DONE]"
     result = arena.consume_stream(lines(), logged.append)
     assert result["content"] == " hello world\n"
     assert result["finish_reason"] == "length"
     assert result["usage"] == {"total_tokens": 10}
+
+
+def test_token_sized_html_chunks_are_grouped_before_completion():
+    logged = []
+    paragraph = '<p>Every time her throat was stabbed, Sia gagged.</p>'
+    def lines():
+        for token in ('<p>Every ', 'time ', 'her ', 'throat ', 'was ', 'stabbed, ', 'Sia ', 'gagged.', '</p', '>'):
+            yield event({"content": token})
+        assert logged == ['📡 Arena: Text streaming...', paragraph]
+        yield event(finish='stop')
+        yield 'data: [DONE]'
+    assert arena.consume_stream(lines(), logged.append)['content'] == paragraph
+    assert logged[-1] == '📡 Arena: Stream complete'
+
+
+def test_long_plain_text_stream_flushes_without_waiting_for_completion():
+    logged = []
+    def lines():
+        for _ in range(31):
+            yield event({"content": 'word '})
+        assert logged == ['📡 Arena: Text streaming...', 'word ' * 31]
+        yield event(finish='stop')
+        yield 'data: [DONE]'
+    assert arena.consume_stream(lines(), logged.append)['content'] == 'word ' * 31
+
+
+def test_stream_phase_switches_flush_without_mixing_reasoning_and_content():
+    logged = []
+    result = arena.consume_stream([
+        event({'reasoning_content': 'Think '}), event({'reasoning_content': 'first'}),
+        event({'content': 'Hello '}), event({'content': 'world'}),
+        event({'reasoning_content': 'Check again'}), event({'content': '!'}),
+        event(finish='stop'), 'data: [DONE]',
+    ], logged.append)
+    assert result['content'] == 'Hello world!'
+    assert result['reasoning_content'] == 'Think firstCheck again'
+    assert logged == [
+        '🧠 [autharena] Thinking...', '    Think first', '─' * 50,
+        '📡 Arena: Text streaming...', 'Hello world', '─' * 50,
+        '🧠 [autharena] Thinking...', '    Check again', '─' * 50,
+        '📡 Arena: Text streaming...', '!', '📡 Arena: Stream complete',
+    ]
+
+
+def test_interrupted_stream_flushes_remainder_without_complete_banner():
+    logged = []
+    with pytest.raises(arena.ArenaStreamError):
+        arena.consume_stream([event({'content': 'unfinished'}), 'data: {"error":"connection lost"}'], logged.append)
+    assert logged == ['📡 Arena: Text streaming...', 'unfinished']
+
+
+def test_stream_display_escaping_does_not_change_returned_text():
+    logged = []
+    result = arena.consume_stream([event({'content': '\x1ftext'}), event(finish='stop'), 'data: [DONE]'], logged.append)
+    assert result['content'] == '\x1ftext'
+    assert '\\x1Ftext' in logged
+
+
+def test_hidden_stream_has_no_content_or_phase_logs():
+    logged = []
+    result = arena.consume_stream([event({'reasoning_content': 'think', 'content': 'text'}), event(finish='stop'), 'data: [DONE]'], logged.append, log_stream=False)
+    assert result['content'] == 'text'
+    assert result['reasoning_content'] == 'think'
+    assert logged == []
 
 
 @pytest.mark.parametrize("ending", [[], ["data: [DONE]"], [event(finish="stop")]])

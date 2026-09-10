@@ -569,49 +569,94 @@ def visible_stream():
     return os.getenv(name, default).strip().lower() not in ("", "0", "false", "no", "off")
 
 
+class _ArenaStreamLog:
+    """Group deltas into readable log records, as the AuthGPT adapter does."""
+    def __init__(self, log_fn):
+        self.log_fn = log_fn
+        self.phase = None
+        self.buffer = ""
+
+    def _emit(self, text):
+        prefix = "    " if self.phase == "thinking" and text else ""
+        self.log_fn(prefix + text.replace("\x1f", "\\x1F"))
+
+    def flush(self):
+        if self.log_fn and self.buffer.strip(" \t\r\n"):
+            self._emit(self.buffer.strip(" \t\r\n"))
+        self.buffer = ""
+
+    def append(self, chunk, phase):
+        if not self.log_fn:
+            return
+        if phase != self.phase:
+            self.flush()
+            if self.phase is not None:
+                self.log_fn("─" * 50)
+            self.log_fn("📡 Arena: Text streaming..." if phase == "text" else "🧠 [autharena] Thinking...")
+            self.phase = phase
+        combined = self.buffer + chunk
+        for tag in ("</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</p>"):
+            combined = combined.replace(tag, tag + "\n")
+        if "\n" in combined:
+            parts = combined.split("\n")
+            for part in parts[:-1]:
+                self._emit(part)
+            self.buffer = parts[-1]
+        elif len(combined) > 150:
+            self._emit(combined)
+            self.buffer = ""
+        else:
+            self.buffer = combined
+
+
 def consume_stream(lines, log_fn=print, log_stream=True, cancel_generation=None, progress_callback=None):
     text, thinking, usage, finish = [], [], None, None
     done = False
-    for line in lines:
-        if is_cancel_generation_cancelled(cancel_generation):
-            raise RuntimeError("Arena stream cancelled")
-        if isinstance(line, bytes):
-            line = line.decode("utf-8")
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            done = True
-            break
-        event = json.loads(data)
-        if event.get("arena_progress"):
-            if progress_callback:
-                progress_callback(event["arena_progress"])
-            continue
-        if event.get("error"):
-            error = event["error"]
-            message = str(error.get("message", "upstream error") if isinstance(error, dict) else error)
-            status = error.get("status_code") if isinstance(error, dict) else None
-            retry_after = error.get("retry_after") if isinstance(error, dict) else None
-            if retry_after:
-                message += f" (Retry-After: {retry_after})"
-            raise ArenaStreamError("Arena stream failed: " + message, status, retry_after, bool(text or thinking))
-        usage = event.get("usage") or usage
-        for choice in event.get("choices", []):
-            if choice.get("index", 0) != 0:
+    display = _ArenaStreamLog(log_fn if log_stream else None)
+    try:
+        for line in lines:
+            if is_cancel_generation_cancelled(cancel_generation):
+                raise RuntimeError("Arena stream cancelled")
+            if isinstance(line, bytes):
+                line = line.decode("utf-8")
+            if not line.startswith("data:"):
                 continue
-            delta = choice.get("delta", {})
-            for field, target in (("content", text), ("reasoning_content", thinking), ("reasoning", thinking)):
-                chunk = delta.get(field)
-                if isinstance(chunk, str) and chunk:
-                    target.append(chunk)
-                    if log_stream and log_fn:
-                        log_fn(chunk)
-            finish = choice.get("finish_reason") or finish
+            data = line[5:].strip()
+            if data == "[DONE]":
+                done = True
+                break
+            event = json.loads(data)
+            if event.get("arena_progress"):
+                if progress_callback:
+                    progress_callback(event["arena_progress"])
+                continue
+            if event.get("error"):
+                error = event["error"]
+                message = str(error.get("message", "upstream error") if isinstance(error, dict) else error)
+                status = error.get("status_code") if isinstance(error, dict) else None
+                retry_after = error.get("retry_after") if isinstance(error, dict) else None
+                if retry_after:
+                    message += f" (Retry-After: {retry_after})"
+                raise ArenaStreamError("Arena stream failed: " + message, status, retry_after, bool(text or thinking))
+            usage = event.get("usage") or usage
+            for choice in event.get("choices", []):
+                if choice.get("index", 0) != 0:
+                    continue
+                delta = choice.get("delta", {})
+                for field, target in (("content", text), ("reasoning_content", thinking), ("reasoning", thinking)):
+                    chunk = delta.get(field)
+                    if isinstance(chunk, str) and chunk:
+                        target.append(chunk)
+                        display.append(chunk, "text" if field == "content" else "thinking")
+                finish = choice.get("finish_reason") or finish
+    finally:
+        display.flush()
     if is_cancel_generation_cancelled(cancel_generation):
         raise RuntimeError("Arena stream cancelled")
     if not done or not finish:
         raise RuntimeError("Arena stream interrupted before its completion marker; partial output was not retried.")
+    if display.log_fn and display.phase is not None:
+        display.log_fn("📡 Arena: Stream complete")
     return {"content": "".join(text), "reasoning_content": "".join(thinking), "usage": usage, "finish_reason": finish}
 
 
