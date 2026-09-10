@@ -245,6 +245,7 @@ app_files = [
 	('autharena.py', '.'),  # Arena browser-backed Direct chat
 	('autharena_browser.py', '.'),  # Current-browser helper client
 	('autharena_bridge.py', '.'),  # Local Arena extension broker
+	('autharena_setup.py', '.'),  # Current-browser extension setup
 	('streaming_log.py', '.'),  # Lossless stream fragment codec
 	(os.path.join(SPEC_DIR, '..', 'assets', 'autharena_extension'), 'autharena_extension'),
 	('token_encryption.py', '.'),
@@ -376,6 +377,7 @@ app_modules = [
 	'autharena',  # Arena browser-backed Direct chat
 	'autharena_browser',  # Current-browser helper client
 	'autharena_bridge',  # Local Arena extension broker
+	'autharena_setup',  # Current-browser extension setup
 	'streaming_log',  # Lossless stream fragment codec
 	'token_encryption',  # Encrypted token storage
 	'ocagy_cli',  # OpenCode + opencode-antigravity-auth

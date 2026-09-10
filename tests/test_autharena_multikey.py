@@ -147,6 +147,7 @@ def test_login_runs_off_thread_and_notifies_on_gui_thread(dialog, app):
     release = threading.Event()
 
     def login(**kwargs):
+        assert kwargs['timeout'] == 600
         invoked.append((kwargs['account_id'], threading.get_ident()))
         kwargs['log_fn']('Please sign in')
         assert release.wait(2)

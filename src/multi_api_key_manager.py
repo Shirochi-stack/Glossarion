@@ -8418,7 +8418,7 @@ class MultiAPIKeyDialog(QDialog):
             outcome = {'account_id': account_id, 'error': '', 'result': None}
             try:
                 from autharena import login
-                outcome['result'] = login(account_id=account_id, timeout=180, log_fn=progress)
+                outcome['result'] = login(account_id=account_id, timeout=600, log_fn=progress)
                 if not isinstance(outcome['result'], dict) or not outcome['result'].get('logged_in'):
                     outcome['error'] = 'Arena sign-in was not verified. Complete login and consent, then try again.'
             except Exception as exc:

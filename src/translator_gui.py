@@ -19645,7 +19645,7 @@ Recent translations to summarize:
             error = None
             cancelled = False
             try:
-                result = login(account_id=account, timeout=180, log_fn=logs.append)
+                result = login(account_id=account, timeout=600, log_fn=logs.append)
                 cancelled = bool(isinstance(result, dict) and result.get('cancelled'))
                 if cancelled or not isinstance(result, dict) or result.get('logged_in') is not True:
                     error = (result.get('error') if isinstance(result, dict) else None) or (

@@ -1,6 +1,7 @@
 """Exercise the companion's actual JavaScript with a mocked Chrome/browser bridge."""
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -84,6 +85,163 @@ def run_js(script, setup=''):
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+def run_connect_page(script, setup=''):
+    import autharena_bridge
+
+    html = autharena_bridge._connect_page(Path('C:/Glossarion/Arena helper'))
+    source = re.search(r'<script>(.*?)</script>', html, re.S).group(1)
+    harness = r"""
+const vm=require('vm');
+const elements=new Map(), timers=[], requests=[], messages=[], stored=new Map();
+const responseQueue=[];
+let reloaded=0, replaced=0, pairResult={ok:true,account_id:0};
+function element(id){if(!elements.has(id))elements.set(id,{textContent:'',disabled:false,open:false,
+  listeners:{},addEventListener(name,fn){this.listeners[name]=fn;}});return elements.get(id);}
+element('folder').textContent='C:/Glossarion/Arena helper';
+const location={origin:'http://127.0.0.1:18874',pathname:'/connect',search:'',
+  hash:'#abcdefghijklmnopqrstuvwx',reload(){reloaded++;}};
+const listeners={};
+const context=vm.createContext({
+  location,URL,Promise,console,
+  navigator:{userAgent:'Mozilla Chrome/140.0 Edg/140.0',clipboard:{async writeText(value){messages.push({copied:value});}}},
+  document:{getElementById:element,createElement(){return {setAttribute(){},textContent:''};},body:{appendChild(){}}},
+  sessionStorage:{getItem:key=>stored.get(key)||null,setItem:(key,value)=>stored.set(key,value),removeItem:key=>stored.delete(key)},
+  history:{replaceState(){replaced++;location.hash='';}},
+  setTimeout(fn,delay){timers.push({fn,delay});},
+  addEventListener(name,fn){listeners[name]=fn;},
+  chrome:{runtime:{async sendMessage(message){requests.push({pair:message});return pairResult;}}},
+  fetch:async(path,options)=>{
+    requests.push({path,options,body:JSON.parse(options.body)});
+    const response=responseQueue.shift()||{status:'ready',message:'Ready'};
+    return {ok:!response.error,json:async()=>response};
+  }
+});
+context.window=context;
+const run=source=>vm.runInContext(source,context);
+context.deliverMessage=event=>listeners.message?.(event);
+context.postMessage=(data,origin)=>{
+  messages.push(data);context.messageData=data;context.messageOrigin=origin;
+  run('deliverMessage({source:window,origin:messageOrigin,data:messageData})');
+};
+const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
+(async()=>{
+  __SETUP__
+  run(__SOURCE__);
+  const result=await(async()=>{__TEST__})();
+  console.log(JSON.stringify(result));
+})().catch(error=>{console.error(error.stack);process.exitCode=1;});
+"""
+    program = harness.replace('__SOURCE__', json.dumps(source)).replace('__SETUP__', setup).replace('__TEST__', script)
+    result = subprocess.run([NODE, '-e', program], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_connect_page_requires_click_then_posts_only_nonce_and_browser_hint():
+    result = run_connect_page(r"""
+      await timers.shift().fn();
+      const before=requests.map(item=>item.path);
+      responseQueue.push({status:'running',message:'Installing',attempt_id:'attempt-1'});
+      await element('install').listeners.click();
+      await element('install').listeners.click();
+      return {before,requests,disabled:element('install').disabled,reloaded};
+    """)
+    assert result['before'] == ['/setup/status']
+    installs = [request for request in result['requests'] if request['path'] == '/setup/install']
+    assert len(installs) == 1
+    assert installs[0]['body'] == {'nonce': 'abcdefghijklmnopqrstuvwx', 'browser_hint': 'edge'}
+    assert installs[0]['options']['credentials'] == 'omit'
+    assert result['disabled'] and result['reloaded'] == 0
+
+
+def test_connect_page_reconnects_after_setup_without_restarting_installer():
+    result = run_connect_page(r"""
+      responseQueue.push({status:'awaiting_connection',message:'Waiting for helper',attempt_id:'attempt-1'});
+      await timers.shift().fn();
+      const message=element('status').textContent;
+      await timers.shift().fn();
+      return {requests,reloaded,stored:[...stored.values()],message};
+    """)
+    assert [item['path'] for item in result['requests']] == ['/setup/status']
+    assert result['reloaded'] == 1
+    assert json.loads(result['stored'][0]) == {'attempt': 'attempt-1', 'count': 1}
+    assert result['message'] == 'Waiting for helper'
+
+
+def test_connect_page_caps_reload_attempts_and_shows_manual_help():
+    result = run_connect_page(r"""
+      responseQueue.push({status:'awaiting_connection',message:'Waiting for helper',attempt_id:'attempt-1'});
+      await timers.shift().fn();
+      return {reloaded,timers:timers.length,manual:element('manual').open,message:element('status').textContent};
+    """, setup=r"""
+      stored.set('autharena-setup:abcdefghijklmnopqrstuvwx',JSON.stringify({attempt:'attempt-1',count:15}));
+    """)
+    assert result['reloaded'] == result['timers'] == 0
+    assert result['manual'] and 'has not connected yet' in result['message']
+
+
+def test_connect_page_expired_nonce_stops_reconnect_and_install():
+    result = run_connect_page(r"""
+      responseQueue.push({error:'Login expired'});
+      await timers.shift().fn();
+      await element('install').listeners.click();
+      return {requests,reloaded,timers:timers.length,message:element('status').textContent};
+    """)
+    assert [item['path'] for item in result['requests']] == ['/setup/status']
+    assert result['reloaded'] == result['timers'] == 0
+    assert result['message'] == 'Login expired'
+
+
+def test_connect_page_renders_installer_errors_as_text_and_never_success():
+    result = run_connect_page(r"""
+      responseQueue.push({status:'manual_required',message:'<img src=x onerror=alert(1)>'});
+      await timers.shift().fn();
+      return {manual:element('manual').open,message:element('status').textContent,reloaded};
+    """)
+    assert result['message'] == '<img src=x onerror=alert(1)>'
+    assert result['manual'] is True and result['reloaded'] == 0
+
+
+def test_connect_page_confirms_actual_pairing_and_stops_pending_reloads():
+    result = run_connect_page(r"""
+      responseQueue.push({status:'awaiting_connection',message:'Waiting',attempt_id:'attempt-1'});
+      await timers.shift().fn();
+      context.postMessage({type:'arena-pair-result',ok:true,account_id:0},location.origin);
+      await timers.shift().fn();
+      await element('install').listeners.click();
+      return {reloaded,label:element('install').textContent,message:element('status').textContent,
+        disabled:element('install').disabled,stored:[...stored],requests};
+    """)
+    assert result['reloaded'] == 0 and result['stored'] == []
+    assert result['label'] == 'Helper connected' and result['disabled']
+    assert 'Opening Arena sign-in' in result['message']
+    assert [item['path'] for item in result['requests']] == ['/setup/status']
+
+
+def test_connect_page_rejects_pair_success_messages_from_other_origins():
+    result = run_connect_page(r"""
+      context.postMessage({type:'arena-pair-result',ok:true},'https://evil.example');
+      return {label:element('install').textContent,disabled:element('install').disabled,message:element('status').textContent};
+    """)
+    assert result['label'] != 'Helper connected' and not result['disabled']
+    assert 'Opening Arena sign-in' not in result['message']
+
+
+@pytest.mark.parametrize('success', [True, False])
+def test_content_script_keeps_nonce_until_pairing_succeeds(success):
+    content_script = (EXTENSION / 'connect.js').read_text(encoding='utf-8')
+    result = run_connect_page(
+        'pairResult=' + json.dumps({'ok': success, 'account_id': 0}) + ';run(' + json.dumps(content_script) + r""");
+      await tick();
+      return {replaced,hash:location.hash,requests,messages};
+    """)
+    assert result['replaced'] == (1 if success else 0)
+    assert bool(result['hash']) is not success
+    pair = next(item for item in result['requests'] if 'pair' in item)
+    assert pair['pair']['nonce'] == 'abcdefghijklmnopqrstuvwx'
+    assert all('device_token' not in str(message) for message in result['messages'])
 
 
 def test_companion_permissions_are_limited_to_arena_and_local_bridge():

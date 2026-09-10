@@ -19,19 +19,35 @@ profile you want to use.
 1. Select an Arena model and click **Arena Login**. Glossarion opens a local
    connection page using the system's default external browser and prepares the
    companion folder at `~/.glossarion/autharena_extension`.
-2. Open that browser's extensions page, enable **Developer mode**, choose
-   **Load unpacked**, and select the generated `autharena_extension` folder.
-3. Refresh the local connection page, or click **Arena Login** again. The
-   companion pairs this browser profile with the selected account number and
+2. Click **Install in browser** on the connection page. On Windows, Glossarion
+   opens Chrome or Edge's Extensions page and attempts to enable **Developer
+   mode**, choose **Load unpacked**, and select the prepared folder. Keep that
+   page in front while setup runs. If you use several browser profiles, check
+   that the opened profile is the one you intend to use for Arena.
+3. If the browser requires a manual step, expand **Manual installation**. Use
+   **Copy folder path** or **Open folder**, finish **Load unpacked**, then choose
+   **Connect helper**. Automatic setup recognizes English Chrome/Edge controls;
+   other languages and browsers use these manual steps. Glossarion leaves
+   browser security policies and administrator settings alone.
+4. The page reconnects after automatic setup and reports **Helper connected**
+   only when the extension actually responds. The companion pairs this browser
+   profile with the selected account number and
    opens Arena's own sign-in dialog. Choose Google or email there if sign-in is
    needed, and complete Arena's verification and first-use terms.
-4. Return to Glossarion after login is verified. The button stays labeled
+5. Return to Glossarion after login is verified. The button stays labeled
    **Arena Login**; its tooltip reports the selected account's status.
 
 The repository template is in `assets/autharena_extension`. Load the generated
 folder above: Glossarion adds the required `arena_page.js`, which is not present
 in the template alone. After a companion update, reload the extension from the
 browser's extensions page and reconnect.
+
+A one-file `.exe` includes all helper assets and the setup code. On each launch,
+Glossarion prepares the same permanent folder under `~/.glossarion`, outside the
+executable's temporary extraction directory. No source checkout or separate
+Python installation is needed. Leave that permanent folder in place after
+installing the extension. Explicit login allows ten minutes for initial setup;
+if the login link expires, click **Arena Login** again.
 
 Existing Arena login cookies stay inside that browser profile. The companion
 requests access to Arena and Glossarion's local broker, with no cookies or

@@ -435,7 +435,7 @@ def test_arena_login_worker_uses_captured_profile_and_only_gui_thread_updates(
         qapp.processEvents()
         time.sleep(0.01)
     assert not gui._autharena_login_in_progress
-    assert calls == [(2, 180, 'autharena-login-2')]
+    assert calls == [(2, 600, 'autharena-login-2')]
     assert 'External browser status' in gui.logs
     assert gui.autharena_login_btn.isEnabled()
     assert gui.autharena_acct_combo.isEnabled()

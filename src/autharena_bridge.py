@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sys
 import threading
 import time
 from urllib.parse import urlsplit
@@ -83,35 +84,93 @@ def _settings():
 
 
 def _extension_source():
+    bundle = getattr(sys, '_MEIPASS', None)
+    if bundle is not None:
+        # A one-file extraction is temporary. It is a source only, never the
+        # path Chromium should remember for the unpacked extension.
+        source = Path(bundle) / 'autharena_extension'
+        return source if source.is_dir() else None
     candidates = [Path(__file__).resolve().parent / 'autharena_extension',
                   Path(__file__).resolve().parent.parent / 'assets' / 'autharena_extension']
     return next((path for path in candidates if (path / 'manifest.json').is_file()), None)
 
 
 def prepare_extension():
-    """Materialize an unpacked extension, including the adapter's shared engine."""
+    """Validate and atomically update files at the extension's persistent path."""
     from autharena import _PREPARE_JS
     source = _extension_source()
     if source is None:
         raise ImportError('The Arena browser helper extension is missing from this installation.')
-    target = _root() / 'autharena_extension'
-    target.mkdir(parents=True, exist_ok=True)
+    assets = {}
     for name in ('manifest.json', 'background.js', 'connect.js', 'README.md'):
         path = source / name
-        if path.is_file():
-            contents = path.read_bytes()
-            destination = target / name
-            if not destination.is_file() or destination.read_bytes() != contents:
-                destination.write_bytes(contents)
+        if not path.is_file():
+            raise ImportError(f'The Arena browser helper installation is missing {name}.')
+        assets[name] = path.read_bytes()
+        if not assets[name].strip():
+            raise ImportError(f'The Arena browser helper installation contains an empty {name}.')
+    try:
+        manifest = json.loads(assets['manifest.json'].decode('utf-8'))
+        if not isinstance(manifest, dict) or manifest.get('manifest_version') != 3:
+            raise ValueError('expected a Manifest V3 object')
+        referenced = [manifest['background']['service_worker']]
+        for content_script in manifest.get('content_scripts', []):
+            referenced.extend(content_script.get('js', []))
+        if any(name not in assets for name in referenced):
+            raise ValueError('manifest references an unpackaged script')
+    except (ValueError, KeyError, TypeError, AttributeError, UnicodeError) as exc:
+        raise ImportError(f'The Arena browser helper manifest is invalid: {exc}') from exc
     replacements = {'__PAYLOAD__': 'config.payload', '__MODEL__': 'config.model',
                     '__TIMEOUT_MS__': 'config.timeout_ms', '__V2_SITEKEY__': 'config.recaptcha_v2_sitekey',
                     '__REJECTIONS__': 'config.rejections', '__LOGIN_ONLY__': 'config.login_only',
                     '__ALLOW_INTERACTIVE__': 'config.allow_interactive'}
     body = re.sub('|'.join(map(re.escape, replacements)), lambda m: replacements[m.group()], _PREPARE_JS)
     script = 'function prepareArena(config) {\n' + body + '\n}\n'
-    page = target / 'arena_page.js'
-    if not page.is_file() or page.read_text(encoding='utf-8') != script:
-        page.write_text(script, encoding='utf-8')
+    assets['arena_page.js'] = script.encode('utf-8')
+    target = _root() / 'autharena_extension'
+    # Serialize concurrent desktop/helper processes. The target path and
+    # manifest identity stay stable across one-file extraction directories.
+    with _state_lock():
+        target.mkdir(parents=True, exist_ok=True)
+        staged = []
+        committed = []
+        temporary_paths = []
+
+        def stage(contents):
+            temporary = target.parent / ('.arena-extension-' + secrets.token_hex(12) + '.tmp')
+            temporary_paths.append(temporary)
+            with temporary.open('xb') as handle:
+                handle.write(contents)
+                handle.flush()
+                os.fsync(handle.fileno())
+            return temporary
+
+        try:
+            # Stage the complete update before touching installed files; put
+            # the manifest last so a browser reload sees complete script files.
+            for name in sorted(assets, key=lambda value: value == 'manifest.json'):
+                destination = target / name
+                previous = destination.read_bytes() if destination.is_file() else None
+                if previous == assets[name]:
+                    continue
+                replacement = stage(assets[name])
+                backup = stage(previous) if previous is not None else None
+                staged.append((destination, replacement, backup))
+            for destination, replacement, backup in staged:
+                os.replace(replacement, destination)
+                committed.append((destination, backup))
+        except OSError:
+            # Restore already replaced files if a later replace fails (for
+            # example because a browser temporarily locks a file on Windows).
+            for destination, backup in reversed(committed):
+                if backup is None:
+                    destination.unlink(missing_ok=True)
+                else:
+                    os.replace(backup, destination)
+            raise
+        finally:
+            for temporary in temporary_paths:
+                temporary.unlink(missing_ok=True)
     return target
 
 
@@ -144,6 +203,8 @@ class _State:
         self.pairings = {}
         self.device_commands = {}
         self.last_seen = {}
+        self.setup_results = {}
+        self.active_setup = None
 
     def _save(self):
         with _state_lock():
@@ -185,6 +246,85 @@ class _State:
         for nonce, (job_id, expires) in list(self.pairings.items()):
             if now > expires or job_id not in self.jobs:
                 self.pairings.pop(nonce, None)
+        for job_id in list(self.setup_results):
+            if job_id not in self.jobs and job_id != self.active_setup:
+                self.setup_results.pop(job_id, None)
+
+    def setup_job(self, nonce):
+        self._expire()
+        if not isinstance(nonce, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{16,256}', nonce):
+            raise _Problem(403, 'Invalid Arena login link. Click Arena Login in Glossarion again.')
+        pairing = self.pairings.get(nonce)
+        if not pairing or pairing[1] <= time.monotonic():
+            raise _Problem(403, 'Arena login link expired or already connected. Click Arena Login again if needed.')
+        job = self.job(pairing[0])
+        if job['terminal']:
+            raise _Problem(410, 'This Arena login is no longer active')
+        return job
+
+    def setup_status(self, body):
+        if set(body) != {'nonce'}:
+            raise _Problem(400, 'Invalid Arena setup request')
+        job = self.setup_job(body.get('nonce'))
+        return dict(self.setup_results.get(job['id'], {
+            'status': 'ready', 'message': 'Click Install in browser to set up the Arena helper.',
+        }))
+
+    def start_setup(self, body):
+        if set(body) - {'nonce', 'browser_hint'} or 'nonce' not in body:
+            raise _Problem(400, 'Invalid Arena setup request')
+        hint = body.get('browser_hint', '')
+        if hint not in ('', 'chrome', 'edge'):
+            raise _Problem(400, 'Unsupported browser selection')
+        job = self.setup_job(body.get('nonce'))
+        job_id = job['id']
+        if self.active_setup == job_id:
+            return dict(self.setup_results[job_id])
+        if self.active_setup is not None:
+            raise _Problem(409, 'Another Arena browser installation is in progress. Finish it first.')
+        attempt_id = secrets.token_urlsafe(12)
+        self.active_setup = job_id
+        self.setup_results[job_id] = {'status': 'running', 'attempt_id': attempt_id,
+                                     'message': 'Setting up the Arena helper. Keep the Extensions page in front and follow any browser confirmation.'}
+
+        def cancelled():
+            with self.cv:
+                self._expire()
+                current = self.jobs.get(job_id)
+                return not current or current['terminal'] or body['nonce'] not in self.pairings
+
+        def install():
+            result = {'status': 'error', 'message': 'Automatic setup could not finish. Use the manual steps below.'}
+            try:
+                from autharena_setup import install_extension
+                with self.cv:
+                    self.setup_job(body['nonce'])
+                returned = install_extension(self.extension_path, browser_hint=hint, cancel_check=cancelled)
+                if (isinstance(returned, dict)
+                        and returned.get('status') in {'awaiting_connection', 'manual_required', 'error', 'cancelled'}
+                        and isinstance(returned.get('message'), str)):
+                    result = {'status': returned['status'], 'message': returned['message'][:2000]}
+            except Exception:
+                pass
+            finally:
+                with self.cv:
+                    self.setup_results[job_id] = dict(result, attempt_id=attempt_id)
+                    if self.active_setup == job_id:
+                        self.active_setup = None
+                    self.cv.notify_all()
+
+        threading.Thread(target=install, name='autharena-browser-setup', daemon=True).start()
+        return dict(self.setup_results[job_id])
+
+    def open_setup_folder(self, body):
+        if set(body) != {'nonce'}:
+            raise _Problem(400, 'Invalid Arena setup request')
+        self.setup_job(body.get('nonce'))
+        from autharena_setup import open_extension_folder
+        result = open_extension_folder(self.extension_path)
+        if not isinstance(result, dict) or not isinstance(result.get('message'), str):
+            raise _Problem(500, 'Could not open the Arena helper folder')
+        return {'status': str(result.get('status', 'manual_required')), 'message': result['message'][:2000]}
 
     def create(self, config, base_url):
         account = config.get('account_id', 0)
@@ -354,6 +494,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('X-Frame-Options', 'DENY')
+        self.send_header('Content-Security-Policy', "frame-ancestors 'none'")
         origin = self.headers.get('Origin', '')
         if re.fullmatch(r'(?:chrome|moz)-extension://[a-zA-Z0-9_-]+', origin):
             self.send_header('Access-Control-Allow-Origin', origin)
@@ -380,7 +522,15 @@ class _Handler(BaseHTTPRequestHandler):
             path = urlsplit(self.path).path
             if self.command == 'GET' and path == '/connect':
                 return self._send(200, _connect_page(self.server.state.extension_path), html_page=True)
-            self._origin()
+            setup_route = path in {'/setup/install', '/setup/status', '/setup/open-folder'}
+            if setup_route:
+                if (self.headers.get('Origin') != f'http://127.0.0.1:{self.server.server_port}'
+                        or self.headers.get('Sec-Fetch-Site', 'same-origin') != 'same-origin'):
+                    raise _Problem(403, 'Arena setup is only available from its local login page')
+                if self.command != 'POST' or self.headers.get('Content-Type', '').split(';', 1)[0].strip() != 'application/json':
+                    raise _Problem(400, 'Invalid Arena setup request')
+            else:
+                self._origin()
             if options:
                 return self._send(200, {})
             length = int(self.headers.get('Content-Length', '0'))
@@ -391,6 +541,10 @@ class _Handler(BaseHTTPRequestHandler):
                 raise _Problem(400, 'Invalid Arena bridge request')
             state = self.server.state
             with state.cv:
+                if setup_route:
+                    action = {'/setup/install': state.start_setup, '/setup/status': state.setup_status,
+                              '/setup/open-folder': state.open_setup_folder}[path]
+                    return self._send(200, action(body))
                 if self.command == 'POST' and path == '/pair':
                     return self._send(200, state.pair(body))
                 header = self.headers.get('Authorization', '')
@@ -448,16 +602,113 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def _connect_page(extension_path):
-    folder = html.escape(str(extension_path))
-    return f'''<!doctype html><meta charset="utf-8"><title>Arena Login</title>
-<style>body{{font:17px system-ui;max-width:760px;margin:70px auto;padding:24px;background:#202124;color:#eee}}h1{{font-size:28px}}code{{display:block;padding:16px;background:#303134;overflow-wrap:anywhere}}li{{margin:16px 0}}#status{{color:#9ad}}button{{padding:8px}}</style>
-<h1>Arena Login</h1><p id="status">Connecting to the Arena helper in this browser…</p>
-<p>If this is your first login, enable the helper extension once. Arena sign-in will then open automatically in this browser.</p>
+    return '''<!doctype html><meta charset="utf-8"><title>Arena Login</title>
+<style>body{font:17px system-ui;max-width:760px;margin:56px auto;padding:24px;background:#202124;color:#eee}h1{font-size:28px}code{display:block;padding:16px;background:#303134;overflow-wrap:anywhere}li{margin:16px 0}#status{color:#9ad;min-height:48px}button{padding:12px 18px;border-radius:8px;border:0;cursor:pointer}#install{background:#a8c7fa;color:#172238;font-size:17px}button:disabled{opacity:.6;cursor:default}details{margin-top:28px}summary{cursor:pointer}</style>
+<h1>Arena Login</h1>
+<p id="status" role="status">Connecting to the Arena helper in this browser…</p>
+<p>Set up the helper once, then Arena sign-in opens in this browser. Your browser may ask you to confirm installation.</p>
+<p>Keep the Extensions page in front while setup runs. If you use several browser profiles, check that it is the one you want for Arena.</p>
+<button id="install" type="button">Install in browser</button>
+<details id="manual"><summary>Manual installation</summary>
 <ol><li>Open your browser’s Extensions page and turn on Developer mode.</li>
-<li>Choose <b>Load unpacked</b> and select this folder:<code>{folder}</code></li>
-<li>Refresh this page. The helper will open Arena’s sign-in form.</li></ol>
+<li>Choose <b>Load unpacked</b> and select this folder:<code id="folder">__EXTENSION_FOLDER__</code>
+<button id="copy" type="button">Copy folder path</button> <button id="open-folder" type="button">Open folder</button></li>
+<li>Return to this page and choose <button id="reconnect" type="button">Connect helper</button>.</li></ol></details>
 <p>The helper only works with Arena and this local app. Your Arena session stays in this browser.</p>
-<script>addEventListener('message',e=>{{if(e.source===window&&e.data?.type==='arena-pair-result'&&e.data.error)document.getElementById('status').textContent=e.data.error;}});</script>'''
+<script>
+(() => {
+  const nonce = location.hash.slice(1);
+  const status = document.getElementById('status');
+  const install = document.getElementById('install');
+  const manual = document.getElementById('manual');
+  const storageKey = 'autharena-setup:' + nonce;
+  let stopped = false, polling = false;
+  const valid = /^[A-Za-z0-9_-]{16,256}$/.test(nonce);
+  const browserHint = /Edg\\//.test(navigator.userAgent) ? 'edge' :
+    /Chrome\\//.test(navigator.userAgent) ? 'chrome' : '';
+  async function request(path, details = {}) {
+    const response = await fetch(path, {method:'POST', credentials:'omit', cache:'no-store',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({nonce, ...details})});
+    const result = await response.json();
+    if (!response.ok) throw Error(result.error || 'Arena setup is unavailable.');
+    return result;
+  }
+  function reconnect(attempt) {
+    if (stopped) return;
+    let count = 0;
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(storageKey) || '{}');
+      count = saved.attempt === attempt ? Number(saved.count) || 0 : 0;
+      if (count >= 15) {
+        status.textContent = 'The helper has not connected yet. Complete browser installation, then choose Connect helper below.';
+        manual.open = true; return;
+      }
+      sessionStorage.setItem(storageKey, JSON.stringify({attempt, count:count + 1}));
+    } catch (_) {
+      status.textContent = 'Complete browser installation, then choose Connect helper below.';
+      manual.open = true; return;
+    }
+    setTimeout(() => { if (!stopped) location.reload(); }, 2000);
+  }
+  async function poll() {
+    if (stopped) return;
+    if (polling) { setTimeout(poll, 500); return; }
+    polling = true;
+    try {
+      const result = await request('/setup/status');
+      if (stopped) return;
+      if (result.status !== 'ready') status.textContent = result.message;
+      install.disabled = result.status === 'running';
+      if (result.status === 'running') setTimeout(poll, 1500);
+      else if (result.status === 'awaiting_connection') reconnect(result.attempt_id);
+      else if (['manual_required','error','cancelled'].includes(result.status)) manual.open = true;
+    } catch (error) {
+      if (!stopped) { status.textContent = error.message; install.disabled = true; stopped = true; }
+    } finally { polling = false; }
+  }
+  install.addEventListener('click', async () => {
+    if (stopped || install.disabled || !valid) return;
+    install.disabled = true;
+    try {
+      const result = await request('/setup/install', {browser_hint:browserHint});
+      if (stopped) return;
+      status.textContent = result.message;
+      setTimeout(poll, 500);
+    } catch (error) {
+      status.textContent = error.message; install.disabled = false; manual.open = true;
+    }
+  });
+  document.getElementById('copy').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(document.getElementById('folder').textContent);
+      status.textContent = 'Folder path copied.';
+    } catch (_) { status.textContent = 'Select the folder path above and copy it.'; }
+  });
+  document.getElementById('reconnect').addEventListener('click', async () => {
+    if (stopped || !valid) return;
+    try { await request('/setup/status'); location.reload(); }
+    catch (error) { status.textContent = error.message; }
+  });
+  document.getElementById('open-folder').addEventListener('click', async () => {
+    if (stopped || !valid) return;
+    try { const result = await request('/setup/open-folder'); status.textContent = result.message; }
+    catch (error) { status.textContent = error.message; }
+  });
+  addEventListener('message', event => {
+    if (event.source !== window || event.origin !== location.origin || event.data?.type !== 'arena-pair-result') return;
+    stopped = true; install.disabled = true;
+    if (event.data.ok) {
+      status.textContent = 'Arena helper connected. Opening Arena sign-in…';
+      install.textContent = 'Helper connected';
+      try { sessionStorage.removeItem(storageKey); } catch (_) {}
+    } else { status.textContent = event.data.error || 'Arena pairing failed. Open a new Arena Login link.'; manual.open = true; }
+  });
+  if (!valid) {
+    stopped = true; install.disabled = true;
+    status.textContent = 'Open Arena Login in Glossarion to start a new connection.';
+  } else setTimeout(poll, 1200);
+})();
+</script>'''.replace('__EXTENSION_FOLDER__', html.escape(str(extension_path)))
 
 
 def ensure_broker():

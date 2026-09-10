@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -161,6 +162,158 @@ def paired_job(broker, account=0):
     assert run["type"] == "run"
     assert run["job_id"] == job["job_id"]
     return job["job_id"]
+
+
+@pytest.fixture
+def setup_installer(monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    calls, folders = [], []
+    outcome = {"status": "awaiting_connection", "message": "Browser setup submitted; waiting for the helper."}
+
+    def install(path, browser_hint="", cancel_check=None):
+        calls.append((path, browser_hint))
+        entered.set()
+        for _ in range(100):
+            if cancel_check():
+                return {"status": "cancelled", "message": "Login cancelled."}
+            if release.wait(.02):
+                return dict(outcome)
+        return {"status": "error", "message": "Test installer timed out"}
+
+    def open_folder(path):
+        folders.append(path)
+        return {"status": "opened", "message": "Folder opened."}
+
+    monkeypatch.setitem(sys.modules, "autharena_setup", SimpleNamespace(
+        install_extension=install, open_extension_folder=open_folder,
+    ))
+    yield SimpleNamespace(entered=entered, release=release, calls=calls, outcome=outcome, folders=folders)
+    release.set()
+
+
+def setup_nonce(broker, account=0):
+    job = broker.create(account=account, login=True, timeout=600)
+    return job, urlsplit(job["connect_url"]).fragment
+
+
+def setup_request(broker, action, nonce, **extra):
+    return broker.call("POST", "/setup/" + action, {"nonce": nonce, **extra}, token=None, origin=broker.base)
+
+
+def wait_for_setup(broker, job_id):
+    end = time.monotonic() + 3
+    while broker.state.active_setup == job_id and time.monotonic() < end:
+        time.sleep(.01)
+    assert broker.state.active_setup is None
+    return broker.state.setup_results[job_id]
+
+
+def test_connect_page_and_status_never_start_install_without_a_click(broker, setup_installer):
+    _, nonce = setup_nonce(broker)
+    page = broker.call("GET", "/connect", token=None)
+    assert page.status_code == 200
+    assert "Install in browser" in page.text and "Copy folder path" in page.text and "Open folder" in page.text
+    assert page.headers["X-Frame-Options"] == "DENY"
+    assert page.headers["Content-Security-Policy"] == "frame-ancestors 'none'"
+    assert setup_request(broker, "status", nonce).json()["status"] == "ready"
+    assert setup_installer.calls == []
+
+
+@pytest.mark.parametrize("origin", [None, "null", "https://arena.ai", "https://evil.example", EXTENSION_ORIGIN])
+@pytest.mark.parametrize("action", ["install", "status", "open-folder"])
+def test_setup_requires_local_page_origin_even_with_valid_nonce(broker, setup_installer, origin, action):
+    _, nonce = setup_nonce(broker)
+    response = broker.call("POST", "/setup/" + action, {"nonce": nonce}, token=CONTROL, origin=origin)
+    assert response.status_code == 403
+    assert setup_installer.calls == setup_installer.folders == []
+
+
+@pytest.mark.parametrize("headers", [
+    {"Host": "evil.example"}, {"Sec-Fetch-Site": "cross-site"},
+    {"Content-Type": "text/plain"}, {"Content-Type": "application/x-www-form-urlencoded"},
+])
+def test_setup_rejects_host_csrf_and_non_json_requests(broker, setup_installer, headers):
+    _, nonce = setup_nonce(broker)
+    response = broker.call("POST", "/setup/install", {"nonce": nonce},
+                           token=None, origin=broker.base, headers=headers)
+    assert response.status_code in (400, 403)
+    assert setup_installer.calls == []
+
+
+@pytest.mark.parametrize("invalid", ["unknown_nonce_with_valid_length", [], None, "short"])
+def test_setup_requires_a_real_active_pairing_nonce(broker, setup_installer, invalid):
+    assert setup_request(broker, "install", invalid).status_code == 403
+    assert setup_installer.calls == []
+
+
+@pytest.mark.parametrize("extra", [
+    {"path": "C:/arbitrary"}, {"url": "https://evil.example"}, {"browser_hint": "--load-extension=x"},
+    {"browser_hint": "firefox"}, {"account_id": 9},
+])
+def test_setup_cannot_select_arbitrary_paths_urls_or_commands(broker, setup_installer, extra):
+    _, nonce = setup_nonce(broker)
+    assert setup_request(broker, "install", nonce, **extra).status_code == 400
+    assert setup_installer.calls == []
+
+
+def test_setup_is_async_single_active_and_does_not_claim_installation_or_login(broker, setup_installer):
+    first, nonce = setup_nonce(broker)
+    _, other_nonce = setup_nonce(broker, account=1)
+    response = setup_request(broker, "install", nonce, browser_hint="edge")
+    assert response.status_code == 200 and response.json()["status"] == "running"
+    assert setup_installer.entered.wait(1)
+    assert setup_request(broker, "status", nonce).json()["status"] == "running"
+    assert setup_request(broker, "install", nonce, browser_hint="edge").json()["status"] == "running"
+    assert setup_request(broker, "install", other_nonce).status_code == 409
+    assert setup_installer.calls == [(broker.state.extension_path, "edge")]
+    setup_installer.release.set()
+    result = wait_for_setup(broker, first["job_id"])
+    assert result["status"] == "awaiting_connection"
+    assert setup_request(broker, "status", nonce).json() == result
+    assert broker.settings["accounts"] == {}
+    assert broker.state.jobs[first["job_id"]]["verified"] is False
+    assert "PRIVATE-PROMPT-TEST" not in str(result) and CONTROL not in str(result)
+
+
+def test_cancelled_login_stops_the_installer_and_invalidates_setup_requests(broker, setup_installer):
+    job, nonce = setup_nonce(broker)
+    assert setup_request(broker, "install", nonce).status_code == 200
+    assert setup_installer.entered.wait(1)
+    assert command(broker, job["job_id"], "cancel").status_code == 200
+    assert wait_for_setup(broker, job["job_id"])["status"] == "cancelled"
+    assert setup_request(broker, "status", nonce).status_code == 410
+    assert setup_request(broker, "install", nonce).status_code == 410
+    assert len(setup_installer.calls) == 1
+
+
+def test_consumed_and_expired_nonce_cannot_start_or_inspect_setup(broker, setup_installer):
+    job, nonce = setup_nonce(broker)
+    assert broker.call("POST", "/pair", {"nonce": nonce, "device_id": DEVICE_A},
+                       token=None, origin=EXTENSION_ORIGIN).status_code == 200
+    assert setup_request(broker, "install", nonce).status_code == 403
+    assert setup_request(broker, "status", nonce).status_code == 403
+    _, expired = setup_nonce(broker, account=2)
+    broker.state.pairings[expired] = (job["job_id"], time.monotonic() - 1)
+    assert setup_request(broker, "install", expired).status_code == 403
+    assert setup_installer.calls == []
+
+
+def test_manual_folder_action_opens_only_prepared_folder(broker, setup_installer):
+    _, nonce = setup_nonce(broker)
+    assert setup_request(broker, "open-folder", nonce, path="C:/arbitrary").status_code == 400
+    response = setup_request(broker, "open-folder", nonce)
+    assert response.status_code == 200 and response.json()["status"] == "opened"
+    assert setup_installer.folders == [broker.state.extension_path]
+    assert setup_installer.calls == []
+
+
+def test_unexpected_installer_success_is_not_reported_as_installed(broker, setup_installer):
+    job, nonce = setup_nonce(broker)
+    setup_installer.outcome.update(status="installed", message="unverified success")
+    setup_installer.release.set()
+    setup_request(broker, "install", nonce)
+    assert wait_for_setup(broker, job["job_id"])["status"] == "error"
+    assert broker.settings["accounts"] == {}
 
 
 @pytest.mark.parametrize("headers,origin", [
