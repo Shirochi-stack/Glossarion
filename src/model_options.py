@@ -784,6 +784,10 @@ def _authenticated_catalog_target(
         return None
     route = match.group(1)
     account_id = int(match.group(2) or 0)
+    if route == "autharena" and match.group(2) and account_id == 0:
+        # Explicit zero rotates accounts; the bare prefix selects the default
+        # profile. Keep suggestions/cache entries from rewriting one as the other.
+        return "autharena:0", "autharena0/", 0, route
     provider_name = route if not account_id else f"{route}:{account_id}"
     prefix = f"{route}{account_id if account_id else ''}/"
     return provider_name, prefix, account_id, route

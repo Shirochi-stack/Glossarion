@@ -1,7 +1,7 @@
 # AuthArena user guide
 
 `src/autharena.py` sends requests through Arena's website Direct chat flow using
-an embedded browser. In Glossarion, select a model with the `autharena/` prefix,
+an installed Chrome or Edge browser. In Glossarion, select a model with the `autharena/` prefix,
 for example `autharena/gpt-6-astra-medium`. Model availability comes from Arena's
 current website catalog; a saved model name may later become unavailable.
 
@@ -11,10 +11,22 @@ conversation, so previous website chats are not added to the request.
 
 ## Requirements and login
 
-Install the Glossarion Python dependencies, including `PySide6` with Qt
-WebEngine, or use a desktop build containing Qt WebEngine. The Windows Lite and
-TurboLite build specifications exclude that browser runtime, so their browser
-helper cannot run AuthArena chat or login.
+Install Chrome or Edge and the Glossarion Python dependencies, including
+`websocket-client`, or use the packaged desktop app. Arena opens in an external
+browser window with a separate profile for each account slot. Qt WebEngine is
+not required for this provider, including in Lite and TurboLite builds.
+On Windows the default Chrome-compatible browser is preferred, with installed
+Chrome or Edge as fallbacks. To choose another installation, set
+`AUTHARENA_BROWSER` to its executable path. Each account has a separate browser
+profile, so sign in once there even if Arena is already open in your usual profile.
+
+In the main window, select an Arena model and click **Arena Default Login**
+(or **Arena #N Login** for a numbered account). Use the adjacent account selector
+and **+ New** to add another physical account slot. In the
+**Multi API Key Manager**, a **Login** button appears inside every Arena model
+field, including the model editor shared by translation, fallback and dedicated
+key pools. Type a numbered prefix to sign into that account slot. These routes
+do not require an API key in the manager.
 
 Run these commands from the repository root:
 
@@ -23,12 +35,15 @@ python src/autharena.py --login
 python src/autharena.py --model gpt-6-astra-medium --prompt "Reply with exactly: ok"
 ```
 
-Complete Arena sign-in, consent, or any browser challenge interactively when
-prompted. Login mode stays open until you click **Done**. Requests use the
-website's streaming flow and may require reCAPTCHA or a renewed login; the
-adapter does not bypass those checks. Arena's own limits still apply.
+Direct chat requires Arena sign-in and first-use consent. Complete these and
+any browser challenge interactively in the external browser. Login is recorded
+only after the website confirms the signed-in account and consent. Requests use
+the website's streaming flow and may require reCAPTCHA or a renewed login;
+the adapter does not bypass those checks. Arena's own limits still apply.
+The login window closes automatically once verification succeeds.
 
-Cookies persist locally under `~/.glossarion/autharena_browser/<account-id>`.
+Account state persists locally under `~/.glossarion/autharena_browser/<account-id>`;
+the external browser stores its cookies and profile in that directory's `chromium` subfolder.
 Normal application shutdown retains them. Use the same `--account-id` for login
 and requests when using a separate profile:
 
@@ -37,8 +52,22 @@ python src/autharena.py --account-id 1 --login
 python src/autharena.py --account-id 1 --prompt "Hello"
 ```
 
-In Glossarion, `autharena1/gpt-6-astra-medium` selects the same account profile
-as `--account-id 1`. Each profile still starts a new conversation for each call.
+| Model prefix | Account selection |
+| --- | --- |
+| `autharena/` | Default physical account slot `0`. |
+| `autharena1/`, `autharena2/`, … | The corresponding numbered account slot. |
+| `autharena0/` | Round-robin rotation across all successfully signed-in accounts, including the default slot. |
+
+`autharena1/gpt-6-astra-medium` selects the same account profile as
+`--account-id 1`. Each call still starts a new conversation. For `autharena0/`,
+the manager's **Login** button asks which physical slot to sign in: the default,
+an existing or configured slot, or a new numbered slot. Sign into each intended
+account once before using rotation. A folder or saved cookies alone do not
+qualify an account for the pool; a verified login does. Sessions can expire and
+may need another login.
+Pool requests run without opening login windows. Explicit sign-in or rate-limit
+rejections can advance to the next account; an uncertain submitted request is
+reported as an error to avoid duplicating it.
 
 ## Prompts and messages
 
@@ -91,7 +120,7 @@ complete command options.
 ## Troubleshooting
 
 If the browser asks you to sign in or solve a challenge, complete it in the
-visible helper window. If it times out, allow more time with `--timeout` and
+external browser window. If it times out, allow more time with `--timeout` and
 check that Arena loads normally. A rate-limit response requires waiting before
 retrying; restarting the helper does not remove the website's limits.
 

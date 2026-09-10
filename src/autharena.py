@@ -4,8 +4,8 @@ Each completion creates a new evaluation. Only browser authentication persists;
 conversation identifiers and prompts are never reused. The website controls
 sampling and output limits. Public model polling uses HTTP and never launches UI.
 
-Qt WebEngine runs in a child process because callers commonly run in GUI workers.
-Cookies and reCAPTCHA tokens remain inside that browser's same-origin context.
+The external browser controller runs in a child process. Cookies and reCAPTCHA
+tokens remain inside the user's installed browser's same-origin context.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ import sys
 import threading
 import time
 import uuid
-from urllib.parse import quote
 
 import requests
 
@@ -46,13 +45,19 @@ _profile_locks = {}
 _profile_locks_guard = threading.Lock()
 _warned_options = set()
 _warn_lock = threading.Lock()
+_account_state_lock = threading.RLock()
+_pool_cursor = 0
+_LOGIN_STATUS_FILE = ".login-status.json"
 
 
 class AuthArenaError(RuntimeError):
-    def __init__(self, message, status_code=None, retry_after=None):
+    def __init__(self, message, status_code=None, retry_after=None, *, safe_to_rotate=False, request_dispatched=False, auth_invalid=False):
         super().__init__(message)
         self.status_code = status_code
         self.retry_after = retry_after
+        self.safe_to_rotate = bool(safe_to_rotate)
+        self.request_dispatched = bool(request_dispatched)
+        self.auth_invalid = bool(auth_invalid)
 
 
 def _env_bool(name, default=True):
@@ -81,7 +86,7 @@ def reset_cancel():
 def _terminate_helper(proc):
     if proc.poll() is not None:
         return
-    # QtWebEngineProcess children otherwise retain the profile and frozen DLLs.
+    # Browser-controller children otherwise retain the profile and frozen DLLs.
     if os.name == "nt":
         try:
             subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
@@ -122,12 +127,97 @@ def _positive_timeout(value):
 
 def _account_number(account_id):
     if isinstance(account_id, bool) or not re.fullmatch(r"\d+", str(account_id)):
-        raise ValueError("AuthArena account_id must be a nonnegative integer")
-    return int(account_id)
+        raise ValueError("AuthArena account_id must be an integer from 0 through 9999")
+    result = int(account_id)
+    if not 0 <= result <= 9999:
+        raise ValueError("AuthArena account_id must be an integer from 0 through 9999")
+    return result
+
+
+def _profiles_root():
+    return Path.home() / ".glossarion" / "autharena_browser"
 
 
 def _profile_path(account_id):
-    return Path.home() / ".glossarion" / "autharena_browser" / str(_account_number(account_id))
+    return _profiles_root() / str(_account_number(account_id))
+
+
+def get_account_ids():
+    """List existing canonical numeric profiles, including unverified profiles."""
+    root = _profiles_root()
+    if not root.is_dir():
+        return []
+    result = []
+    for entry in root.iterdir():
+        if not re.fullmatch(r"(?:0|[1-9]\d{0,3})", entry.name):
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            result.append(int(entry.name))
+    return sorted(result)
+
+
+def get_account_status(account_id):
+    """Read last observed browser verification; cookie presence proves nothing."""
+    account_id = _account_number(account_id)
+    status = {"account_id": account_id, "logged_in": False, "verified_at": None,
+              "status_cached": True, "verification_state": "unverified",
+              "note": "Cached browser verification; a saved session may have expired."}
+    with _account_state_lock:
+        try:
+            marker = json.loads((_profile_path(account_id) / _LOGIN_STATUS_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return status
+        if not isinstance(marker, dict) or marker.get("version") != 1:
+            return status
+        if type(marker.get("account_id")) is not int or marker["account_id"] != account_id:
+            return status
+        verified_at = marker.get("verified_at")
+        if (not isinstance(verified_at, (int, float)) or isinstance(verified_at, bool)
+                or not math.isfinite(verified_at) or verified_at <= 0 or verified_at > time.time() + 300):
+            return status
+        if type(marker.get("logged_in")) is not bool:
+            return status
+        status.update(logged_in=marker["logged_in"], verified_at=verified_at,
+                      verification_state="verified" if marker["logged_in"] else "logged_out")
+    return status
+
+
+def _write_account_status(account_id, *, logged_in):
+    account_id = _account_number(account_id)
+    with _account_state_lock:
+        previous = get_account_status(account_id)
+        # A negative status does not invent a last successful verification.
+        if not logged_in and previous["verified_at"] is None:
+            return
+        marker = {"version": 1, "account_id": account_id, "logged_in": bool(logged_in),
+                  "verified_at": time.time() if logged_in else previous["verified_at"]}
+        if not logged_in:
+            marker["invalidated_at"] = time.time()
+        path = _profile_path(account_id)
+        path.mkdir(parents=True, exist_ok=True)
+        temporary = path / ("." + uuid.uuid4().hex + ".login.tmp")
+        try:
+            temporary.write_text(json.dumps(marker, separators=(",", ":")), encoding="utf-8")
+            os.replace(temporary, path / _LOGIN_STATUS_FILE)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def mark_account_logged_out(account_id):
+    """Invalidate a verified profile after a real login rejection, not CAPTCHA."""
+    _write_account_status(account_id, logged_in=False)
+
+
+def get_rotating_account_pool():
+    """Return one fair, thread-safe rotation of every last-verified account."""
+    global _pool_cursor
+    with _account_state_lock:
+        accounts = [account for account in get_account_ids() if get_account_status(account)["logged_in"]]
+        if not accounts:
+            return []
+        start = _pool_cursor % len(accounts)
+        _pool_cursor = (start + 1) % len(accounts)
+        return accounts[start:] + accounts[:start]
 
 
 @contextmanager
@@ -273,7 +363,7 @@ def _model_account(model, account_id):
     prefix = re.match(r"(?i)^autharena(\d+)/", str(model or "").strip())
     account_id = _account_number(account_id)
     if prefix:
-        numbered = int(prefix.group(1))
+        numbered = _account_number(prefix.group(1))
         if account_id not in (0, numbered):
             raise ValueError("AuthArena numbered model prefix conflicts with account_id")
         return numbered
@@ -465,6 +555,17 @@ def _run_browser_helper(config, deadline, *, cancel_check=None, before_send_call
         reader.start()
     parser = _ArenaStreamParser(on_chunk)
     dispatched = False
+    verified = False
+    auth_invalid = False
+    pending_error = None
+
+    def annotate_failure(error):
+        # Timeout/parser/EOF and even a failed IPC write can follow a real POST.
+        # Preserve this fact for outer translation retry loops as well as pools.
+        error.request_dispatched = bool(dispatched or getattr(error, "request_dispatched", False))
+        error.safe_to_rotate = (False if error.request_dispatched else
+                                bool(getattr(error, "safe_to_rotate", False)))
+
     try:
         proc.stdin.write(json.dumps(config, ensure_ascii=False) + "\n")
         proc.stdin.flush()
@@ -480,39 +581,64 @@ def _run_browser_helper(config, deadline, *, cancel_check=None, before_send_call
                 if before_send_callback:
                     before_send_callback()
                 _check_wait(deadline, cancel_check)
+                dispatched = True
                 proc.stdin.write('{"command":"dispatch"}\n')
                 proc.stdin.flush()
-                dispatched = True
             elif kind == "chunk":
                 parser.feed(event.get("data"))
             elif kind == "rejected":
                 dispatched = False
                 if after_rejection_callback:
                     after_rejection_callback()
+            elif kind == "verified":
+                if event.get("logged_in") is True and event.get("tou_accepted") is True:
+                    _write_account_status(config.get("account_id", 0), logged_in=True)
+                    verified = True
+                    auth_invalid = False
+            elif kind == "logged_out":
+                mark_account_logged_out(config.get("account_id", 0))
+                verified = False
+                auth_invalid = True
             elif kind == "done":
-                result = {"profile_saved": True} if config.get("login") else parser.finish()
+                if config.get("login") and not verified:
+                    raise AuthArenaError("Arena login was not verified; the profile was not marked signed in", 401)
+                result = {"profile_saved": True, "logged_in": True} if config.get("login") else parser.finish()
+                result["account_id"] = config.get("account_id", 0)
                 return result
             elif kind == "status":
                 if log_fn:
                     log_fn("AuthArena: " + _short_error(event.get("message")))
             elif kind == "error":
+                if event.get("auth_invalid") is True:
+                    mark_account_logged_out(config.get("account_id", 0))
+                    auth_invalid = True
                 if event.get("error_type") == "timeout":
                     raise TimeoutError("AuthArena: " + _short_error(event.get("message")))
                 if event.get("error_type") == "configuration":
                     raise ImportError("AuthArena: " + _short_error(event.get("message")))
                 raise AuthArenaError("AuthArena: " + _short_error(event.get("message")),
-                                     event.get("status_code"), event.get("retry_after"))
+                                     event.get("status_code"), event.get("retry_after"),
+                                     safe_to_rotate=event.get("safe_to_rotate") is True,
+                                     request_dispatched=dispatched, auth_invalid=auth_invalid)
             elif kind == "eof":
                 _check_wait(deadline, cancel_check)
                 suffix = " after dispatch; the request was not retried" if dispatched else " before dispatch"
                 detail = "; ".join(diagnostics)[-1200:]
                 raise RuntimeError("AuthArena browser helper exited" + suffix + (": " + detail if detail else ""))
+    except BaseException as exc:
+        pending_error = exc
+        annotate_failure(exc)
+        raise
     finally:
-        # Give Qt a chance to flush its persistent cookie store on normal exit.
+        # Give the browser controller a chance to flush persistent cookies.
+        cleanup_error = None
         try:
-            proc.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            _terminate_helper(proc)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                _terminate_helper(proc)
+        except BaseException as exc:
+            cleanup_error = exc
         with _active_lock:
             _active_helpers.discard(proc)
         for pipe in (proc.stdin, proc.stdout, proc.stderr):
@@ -522,13 +648,76 @@ def _run_browser_helper(config, deadline, *, cancel_check=None, before_send_call
                 pass
         for reader in readers:
             reader.join(timeout=0.2)
+        if cleanup_error is not None and pending_error is None:
+            annotate_failure(cleanup_error)
+            raise cleanup_error
+
+
+def _send_account_pool(options):
+    """Try each verified profile once; never repeat an uncertain generation."""
+    if _account_number(options.get("account_id", 0)) != 0:
+        raise ValueError("AuthArena0 automatic rotation cannot be combined with a fixed account_id")
+    deadline = time.monotonic() + _positive_timeout(options.get("timeout"))
+    _check_wait(deadline, options.get("cancel_check"))
+    _render_messages(options["messages"])  # Fail invalid input before inspecting profiles.
+    accounts = get_rotating_account_pool()
+    if not accounts:
+        raise AuthArenaError("AuthArena0 has no verified signed-in accounts. Use the Arena Login button or --login for each account first.", 401)
+    model = _normalize_model(options["model"])
+    last_error = None
+    for account_id in accounts:
+        _check_wait(deadline, options.get("cancel_check"))
+        if not get_account_status(account_id)["logged_in"]:
+            continue
+        attempt = dict(options, model=model, account_id=account_id, allow_interactive=False,
+                       timeout=max(0.01, deadline - time.monotonic()))
+        callback_called = False
+        original_rejection = options.get("after_rejection_callback")
+
+        def after_rejection():
+            nonlocal callback_called
+            callback_called = True
+            if original_rejection:
+                original_rejection()
+
+        attempt["after_rejection_callback"] = after_rejection
+        if options.get("log_fn"):
+            options["log_fn"](f"AuthArena0: trying signed-in account {account_id}")
+        try:
+            result = send_chat_completion(**attempt)
+            result["account_id"] = account_id
+            return result
+        except AuthArenaError as exc:
+            if not exc.safe_to_rotate:
+                raise
+            last_error = exc
+            if exc.auth_invalid:
+                mark_account_logged_out(account_id)
+            if not callback_called:
+                after_rejection()
+            _check_wait(deadline, options.get("cancel_check"))
+            if options.get("log_fn"):
+                options["log_fn"](f"AuthArena0: account {account_id} rejected the request; checking the next signed-in account")
+    if last_error is not None:
+        raise AuthArenaError("AuthArena0 exhausted its signed-in account pool: " + str(last_error),
+                             last_error.status_code, last_error.retry_after) from last_error
+    raise AuthArenaError("AuthArena0 has no remaining verified signed-in accounts", 401)
 
 
 def send_chat_completion(*, messages, model, temperature=None, max_tokens=None,
                          top_p=None, frequency_penalty=None, presence_penalty=None,
                          timeout=None, connect_timeout=None, account_id=0,
                          stream=None, log_stream=None, progress_label=None, log_fn=None,
-                         cancel_check=None, before_send_callback=None, after_rejection_callback=None):
+                         cancel_check=None, before_send_callback=None, after_rejection_callback=None,
+                         allow_interactive=True):
+    if re.match(r"(?i)^autharena0/", str(model or "").strip()):
+        return _send_account_pool(dict(messages=messages, model=model, temperature=temperature,
+                                       max_tokens=max_tokens, top_p=top_p, frequency_penalty=frequency_penalty,
+                                       presence_penalty=presence_penalty, timeout=timeout,
+                                       connect_timeout=connect_timeout, account_id=account_id, stream=stream,
+                                       log_stream=log_stream, progress_label=progress_label, log_fn=log_fn,
+                                       cancel_check=cancel_check, before_send_callback=before_send_callback,
+                                       after_rejection_callback=after_rejection_callback))
     prompt = _render_messages(messages)
     account_id = _model_account(model, account_id)
     model = _normalize_model(model)
@@ -567,12 +756,14 @@ def send_chat_completion(*, messages, model, temperature=None, max_tokens=None,
     with _profile_gate(account_id, deadline, cancel_check, log_fn) as profile:
         config = {"profile": str(profile), "account_id": account_id, "model": model,
                   "timeout": max(0.01, deadline - time.monotonic()),
-                  "payload": _build_payload(None, prompt), "login": False}
+                  "payload": _build_payload(None, prompt), "login": False,
+                  "allow_interactive": bool(allow_interactive)}
         if log_fn:
             log_fn(f"AuthArena: preparing a new isolated request for {model}")
         result = _run_browser_helper(config, deadline, cancel_check=cancel_check,
                                      before_send_callback=before_send, after_rejection_callback=after_rejection_callback,
                                      log_fn=log_fn, on_chunk=on_chunk)
+        result["account_id"] = account_id
         if should_log and log_fn:
             for kind, text in log_buffers.items():
                 if text:
@@ -597,10 +788,14 @@ _PREPARE_JS = r"""
   if (location.origin !== 'https://arena.ai') return;
   const state = window.__glossarionArena = {events: [], payload: __PAYLOAD__, phase: 'preparing', rejections: __REJECTIONS__};
   const emit = (event, details = {}) => state.events.push({event, ...details});
-  const fail = (message, status_code = null, retry_after = null) => {
-    state.phase = 'error'; emit('error', {message, status_code, retry_after});
+  const fail = (message, status_code = null, retry_after = null, safe_to_rotate = false, auth_invalid = false) => {
+    state.phase = 'error'; emit('error', {message, status_code, retry_after, safe_to_rotate, auth_invalid});
   };
-  const needUser = message => {state.phase = 'waiting'; emit('action', {message});};
+  const needUser = (message, status_code = 403) => {
+    if (status_code === 401) emit('logged_out');
+    if (!__ALLOW_INTERACTIVE__) {fail(message, status_code, null, true, status_code === 401); return;}
+    state.phase = 'waiting'; emit('action', {message, status_code});
+  };
   const deadline = Date.now() + __TIMEOUT_MS__;
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const readValue = (data, start) => {
@@ -622,11 +817,11 @@ _PREPARE_JS = r"""
     const match = new RegExp('"' + name + '"\\s*:\\s*').exec(data);
     return match ? readValue(data, match.index + match[0].length) : null;
   };
-  const readFlight = () => {
+  const readFlight = (root = document) => {
     // Next drains __next_f during hydration and replaces push with a consumer.
     // The original inline script text remains available after loadFinished.
     const chunks = [];
-    for (const script of document.scripts) {
+    for (const script of root.scripts) {
       const source = script.textContent || '';
       const pattern = /(?:self\.)?__next_f\.push\(\s*/g;
       let match;
@@ -637,7 +832,7 @@ _PREPARE_JS = r"""
         } catch (_) {}
       }
     }
-    return chunks.length ? chunks.join('') : (window.__next_f || [])
+    return chunks.length ? chunks.join('') : (root === document ? window.__next_f || [] : [])
       .filter(p => Array.isArray(p) && typeof p[1] === 'string').map(p => p[1]).join('');
   };
   const getToken = async action => {
@@ -652,10 +847,10 @@ _PREPARE_JS = r"""
       if (key && key !== 'explicit' && window.grecaptcha?.enterprise?.execute) break;
       await sleep(200);
     }
-    if (!key || !window.grecaptcha?.enterprise?.execute) throw Error('Arena reCAPTCHA is not ready. Complete any browser security screen, then click Continue.');
+    if (!key || !window.grecaptcha?.enterprise?.execute) throw Error('Arena reCAPTCHA is not ready. Complete any browser security screen in the Arena browser.');
     await new Promise(resolve => window.grecaptcha.enterprise.ready(resolve));
     const token = await window.grecaptcha.enterprise.execute(key, {action});
-    if (!token) throw Error('Arena did not issue a reCAPTCHA token. Complete browser verification, then click Continue.');
+    if (!token) throw Error('Arena did not issue a reCAPTCHA token. Complete browser verification in the Arena browser.');
     return token;
   };
   state.challenge = () => {
@@ -676,11 +871,11 @@ _PREPARE_JS = r"""
           state.payload.recaptchaV2Token = token;
           container.remove(); state.phase = 'ready'; emit('ready');
         },
-        'error-callback': () => needUser('Arena security verification failed. Click Continue to reload and try again.'),
-        'expired-callback': () => needUser('Arena security verification expired. Click Continue to reload and try again.'),
+        'error-callback': () => needUser('Arena security verification failed. Reload the Arena page to try again.'),
+        'expired-callback': () => needUser('Arena security verification expired. Reload the Arena page to try again.'),
         theme: 'light'
       });
-    } catch (_) {needUser('Arena could not display security verification. Sign in on the page, then click Continue.');}
+    } catch (_) {needUser('Arena could not display security verification. Sign in on the page in the Arena browser.');}
   };
   state.dispatch = async () => {
     if (state.phase !== 'ready') return;
@@ -698,12 +893,14 @@ _PREPARE_JS = r"""
         const code = typeof body.code === 'string' ? body.code : '';
         if (response.status === 401 && code === 'LOGIN_GATE') {
           emit('rejected');
-          needUser('Arena requires a signed-in account for this model. Sign in using the page, then click Continue.'); return;
+          needUser('Arena requires a signed-in account for this model. Sign in using the browser.', 401); return;
         }
-        if (state.rejections < 2 && /recaptcha|captcha|prompt failed/i.test(message) && [400, 401, 403, 429].includes(response.status)) {
+        if (__ALLOW_INTERACTIVE__ && state.rejections < 2 && /recaptcha|captcha|prompt failed/i.test(message) && [400, 401, 403, 429].includes(response.status)) {
           state.rejections++; emit('rejected'); state.challenge(); return;
         }
-        fail('HTTP ' + response.status + ': ' + (code ? code + ': ' : '') + message, response.status, response.headers.get('Retry-After')); return;
+        emit('rejected');
+        fail('HTTP ' + response.status + ': ' + (code ? code + ': ' : '') + message,
+          response.status, response.headers.get('Retry-After'), [401,403,429].includes(response.status)); return;
       }
       const type = response.headers.get('Content-Type') || '';
       if (/text\/html|application\/json/.test(type)) {
@@ -718,7 +915,7 @@ _PREPARE_JS = r"""
         const data = decoder.decode(value, {stream: true});
         if (data) emit('chunk', {data});
         // Backpressure prevents very fast streams from accumulating without a
-        // bound while Qt or the parent is briefly busy.
+        // bound while the browser controller or parent is briefly busy.
         while (state.events.length > 128) await sleep(25);
       }
       const tail = decoder.decode();
@@ -733,13 +930,31 @@ _PREPARE_JS = r"""
   (async () => {
     try {
       let flight = '', models = null;
+      let root = document;
+      // Native login can change cookies without updating the original page's
+      // server-rendered snapshot. Verify each attempt with a fresh same-origin
+      // read, including after a successful interactive login probe.
+      const snapshot = await fetch('/text/direct', {credentials:'same-origin', cache:'no-store'});
+      if (!snapshot.ok) {needUser('Arena login verification is temporarily unavailable. Complete browser sign-in or verification.'); return;}
+      root = new DOMParser().parseFromString(await snapshot.text(), 'text/html');
       for (let attempt = 0; attempt < 100 && Date.now() < deadline; attempt++) {
-        flight = readFlight();
+        flight = readFlight(root);
         models = readJSON(flight, 'initialModels');
         if (Array.isArray(models)) break;
         await sleep(100);
       }
-      if (!Array.isArray(models)) {needUser('Arena model data is unavailable. Complete any browser security screen, then click Continue.'); return;}
+      if (!Array.isArray(models)) {needUser('Arena model data is unavailable. Complete any browser security screen in the Arena browser.'); return;}
+      const user = readJSON(flight, 'user');
+      // The native Direct form is login-gated for every anonymous account.
+      // First-use terms must also be accepted by the user in Arena's own UI.
+      if (!user || typeof user.email !== 'string' || !user.email) {
+        needUser('Arena Direct requires sign-in. Sign in using the Arena browser.', 401); return;
+      }
+      if (!user.touConsentTimestamp) {
+        needUser('Complete Arena first-use terms in its normal chat interface.', 401); return;
+      }
+      emit('verified', {logged_in:true, tou_accepted:true});
+      if (__LOGIN_ONLY__) {state.phase='done';emit('done');return;}
       const eligible = models.filter(m => m.organization != null && m.provider != null && m.userSelectable === true && m.capabilities?.inputCapabilities?.text === true && m.capabilities?.outputCapabilities?.text === true);
       const wanted = __MODEL__;
       const model = (wanted.toLowerCase() === 'max' ? eligible.find(m => m.publicName?.toLowerCase() === 'max') : null)
@@ -747,217 +962,28 @@ _PREPARE_JS = r"""
         || eligible.find(m => m.name === wanted) || eligible.find(m => m.id === wanted);
       if (!model || !model.id) {fail('The requested model is not currently selectable for text requests: ' + __MODEL__); return;}
       state.payload.modelAId = model.id;
-      const user = readJSON(flight, 'user');
-      // The native Direct form is login-gated for every anonymous account.
-      // First-use terms must also be accepted by the user in Arena's own UI.
-      if (!user || typeof user.email !== 'string' || !user.email) {
-        needUser('Arena Direct requires sign-in. Sign in using the Arena page, then click Continue.'); return;
-      }
-      if (!user.touConsentTimestamp) {
-        needUser('Complete Arena first-use terms in its normal chat interface, then click Continue.'); return;
-      }
       state.payload.recaptchaV3Token = await getToken('chat_submit');
       state.phase = 'ready'; emit('ready');
-    } catch (error) {needUser(error?.message || 'Arena browser preparation failed. Sign in or complete verification, then click Continue.');}
+    } catch (error) {needUser(error?.message || 'Arena browser preparation failed. Sign in or complete verification in the Arena browser.');}
   })();
 })();
 """
 
 
-def _prepare_script(payload, model, timeout, rejections=0):
+def _prepare_script(payload, model, timeout, rejections=0, *, login_only=False, allow_interactive=True):
     replacements = {"__PAYLOAD__": json.dumps(payload), "__MODEL__": json.dumps(model),
                     "__TIMEOUT_MS__": str(max(1, int(timeout * 1000))),
-                    "__V2_SITEKEY__": json.dumps(RECAPTCHA_V2_SITEKEY), "__REJECTIONS__": str(rejections)}
+                    "__V2_SITEKEY__": json.dumps(RECAPTCHA_V2_SITEKEY), "__REJECTIONS__": str(rejections),
+                    "__LOGIN_ONLY__": json.dumps(bool(login_only)),
+                    "__ALLOW_INTERACTIVE__": json.dumps(bool(allow_interactive))}
     # One pass prevents markers contained in user prompts from being replaced.
     return re.sub("|".join(map(re.escape, replacements)), lambda m: replacements[m.group()], _PREPARE_JS)
 
 
 def _browser_helper(config):
-    """Run only in the isolated subprocess, never a GUI worker thread."""
-    try:
-        from PySide6.QtCore import QEventLoop, QTimer, QUrl
-        from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget
-        from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
-        from PySide6.QtWebEngineWidgets import QWebEngineView
-    except ImportError as exc:
-        raise ImportError("AuthArena requires PySide6 QtWebEngine. Install the full PySide6 package or use a Glossarion build with QtWebEngine support.") from exc
-
-    app = QApplication(["autharena-browser-helper"])
-    profile_path = Path(config["profile"])
-    profile_path.mkdir(parents=True, exist_ok=True)
-    profile = QWebEngineProfile("glossarion-autharena-" + str(config["account_id"]), app)
-    profile.setPersistentStoragePath(str(profile_path))
-    profile.setCachePath(str(profile_path / "cache"))
-    profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
-    # Retain the actual Chromium version while removing Qt's application label.
-    profile.setHttpUserAgent(re.sub(r"\s+QtWebEngine/\S+", "", profile.httpUserAgent()))
-    window = QWidget()
-    window.setWindowTitle("Glossarion — Arena browser authentication")
-    window.resize(1100, 800)
-    layout = QVBoxLayout(window)
-    status = QLabel("Sign in or complete any Arena verification, then click Done." if config.get("login") else "Preparing a new Arena request…")
-    status.setWordWrap(True)
-    layout.addWidget(status)
-    view = QWebEngineView(window)
-    page = QWebEnginePage(profile, view)
-    view.setPage(page)
-    layout.addWidget(view)
-    proceed = QPushButton("Done" if config.get("login") else "Continue")
-    layout.addWidget(proceed)
-    cancel = QPushButton("Cancel")
-    layout.addWidget(cancel)
-    deadline = time.monotonic() + _positive_timeout(config.get("timeout"))
-    state = {"finished": False, "injected": False, "polling": False, "loaded": False,
-             "rejections": 0, "action": False, "started": time.monotonic()}
-    incoming = queue.Queue()
-    target_url = CATALOG_URL + "?model_a=" + quote(_normalize_model(config["model"]), safe="")
-
-    def emit(event, **details):
-        print(json.dumps({"autharena": 1, "event": event, **details}, ensure_ascii=False), flush=True)
-
-    def finish(event, **details):
-        if state["finished"]:
-            return
-        state["finished"] = True
-        timer.stop()
-        emit(event, **details)
-        window.hide()
-        QTimer.singleShot(100, app.quit)
-
-    def show_action(message):
-        state["action"] = True
-        proceed.setEnabled(True)
-        status.setText(message)
-        window.show()
-        window.raise_()
-        emit("status", message=message)
-
-    def inject():
-        if state["injected"] or state["finished"] or config.get("login"):
-            return
-        if page.url().host() != "arena.ai" or page.url().scheme() != "https":
-            return
-        state["injected"] = True
-        page.runJavaScript(_prepare_script(config["payload"], config["model"],
-                                          deadline - time.monotonic(), state["rejections"]))
-
-    def on_loaded(ok):
-        state["loaded"] = bool(ok)
-        if ok:
-            inject()
-        elif not ok and not config.get("login"):
-            show_action("Arena could not load. Check the visible browser, then click Continue.")
-
-    def on_started():
-        if state.get("dispatched"):
-            finish("error", message="Browser navigation interrupted a dispatched request; completion is uncertain and the request was not retried")
-            return
-        state["loaded"] = False
-        state["injected"] = False
-
-    def continue_clicked():
-        if config.get("login"):
-            finish("done")
-            return
-        if state.get("dispatched"):
-            return
-        state["action"] = False
-        state["injected"] = False
-        state["started"] = time.monotonic()
-        status.setText("Preparing Arena request…")
-        page.setUrl(QUrl(target_url))
-
-    def receive_events(value):
-        state["polling"] = False
-        if state["finished"] or not isinstance(value, str):
-            return
-        try:
-            events = json.loads(value)
-        except ValueError:
-            return
-        for event in events:
-            kind = event.pop("event", None)
-            if kind == "action":
-                state["dispatched"] = False  # Only preparation or explicit HTTP rejection can emit action.
-                show_action(event.get("message", "Complete browser verification, then click Continue."))
-            elif kind == "rejected":
-                state["rejections"] += 1
-                emit(kind)
-            elif kind in ("error", "done"):
-                finish(kind, **event)
-                break
-            elif kind == "ready":
-                state["action"] = False
-                proceed.setEnabled(False)
-                status.setText("Arena is ready; waiting to send…")
-                emit(kind, **event)
-            elif kind in ("chunk", "status"):
-                emit(kind, **event)
-
-    def tick():
-        if state["finished"]:
-            return
-        if time.monotonic() >= deadline:
-            finish("error", message="Request timed out while waiting for Arena/browser verification", error_type="timeout")
-            return
-        if not config.get("login") and not window.isVisible() and time.monotonic() - state["started"] > 12 and not state.get("dispatched"):
-            show_action("Arena is still preparing. Complete any visible browser verification; Continue reloads the page if needed.")
-        while not incoming.empty():
-            command = incoming.get_nowait()
-            if command.get("command") == "dispatch":
-                state["dispatched"] = True
-                status.setText("Generating an isolated Arena response…")
-                page.runJavaScript("if(location.origin==='https://arena.ai')window.__glossarionArena?.dispatch();")
-            elif command.get("command") == "cancel":
-                finish("error", message="Browser request cancelled")
-                return
-        if state["loaded"] and not state["polling"] and not config.get("login"):
-            state["polling"] = True
-            page.runJavaScript("location.origin==='https://arena.ai' ? JSON.stringify(window.__glossarionArena?.events.splice(0,64)||[]) : '[]'", receive_events)
-
-    def read_commands():
-        for line in sys.stdin:
-            try:
-                value = json.loads(line)
-                if isinstance(value, dict):
-                    incoming.put(value)
-            except ValueError:
-                pass
-        incoming.put({"command": "cancel"})
-
-    threading.Thread(target=read_commands, daemon=True).start()
-    timer = QTimer(window)
-    timer.setInterval(50)
-    timer.timeout.connect(tick)
-    page.loadStarted.connect(on_started)
-    page.loadFinished.connect(on_loaded)
-    page.newWindowRequested.connect(lambda request: request.openIn(page))
-    proceed.clicked.connect(continue_clicked)
-    cancel.clicked.connect(lambda: finish("error", message="Browser request cancelled"))
-    # Closing the browser must not leave the parent waiting until its timeout.
-    original_close = window.closeEvent
-
-    def close_event(event):
-        if not state["finished"]:
-            finish("error", message="Arena browser was closed")
-        original_close(event)
-
-    window.closeEvent = close_event
-    page.setUrl(QUrl(target_url))
-    if config.get("login"):
-        window.show()
-        emit("status", message="Sign in or initialize Arena in the browser, then click Done. The browser profile is saved for this account.")
-    timer.start()
-    app.exec()
-    # Destroy the page before the profile and allow Chromium to flush storage.
-    view.setPage(None)
-    page.deleteLater()
-    loop = QEventLoop()
-    QTimer.singleShot(100, loop.quit)
-    loop.exec()
-    profile.deleteLater()
-    app.processEvents()
-    return 0 if state["finished"] else 1
+    """Delegate to the installed external-browser controller in this child."""
+    from autharena_browser import run_browser_helper
+    return run_browser_helper(config, prepare_script=_prepare_script)
 
 
 def _load_cli_messages(args):

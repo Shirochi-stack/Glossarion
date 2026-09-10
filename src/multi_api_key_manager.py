@@ -5,6 +5,7 @@ Handles multiple API keys with round-robin load balancing and rate limit managem
 """
 
 import os
+import re
 import sys
 
 # GUI imports - optional for Discord bot
@@ -111,6 +112,11 @@ _MODEL_POLL_MARKER_ROLE = Qt.UserRole + 73 if HAS_GUI else 73
 
 
 if HAS_GUI:
+    class _ArenaManagerLoginSignals(QObject):
+        progress = Signal(str)
+        completed = Signal(object)
+
+
     class _ModelPollMarkerDelegate(QStyledItemDelegate):
         """Paint popup checks with an explicit compact check-to-text gap."""
 
@@ -2548,6 +2554,8 @@ class MultiAPIKeyDialog(QDialog):
             except Exception:
                 pass
             self._suspend_model_requirement_refresh = previous_suspend
+        MultiAPIKeyDialog._refresh_authza_login_button(self, combo)
+        MultiAPIKeyDialog._refresh_autharena_login_button(self, combo)
 
     def _get_model_options_for_dropdown(self):
         """Return the same model list shape used by the main translator dropdown."""
@@ -2589,6 +2597,7 @@ class MultiAPIKeyDialog(QDialog):
             or model.startswith('authcd')
             or model.startswith('authgem')
             or model.startswith('authza')
+            or model.startswith('autharena')
         )
 
     def _has_pending_google_creds_model(self):
@@ -2663,6 +2672,11 @@ class MultiAPIKeyDialog(QDialog):
                 '_multi_key_manager_authgrok_pool_hint',
                 self._has_pending_authgrok_pool_model(),
             )
+            arena_routes = self._pending_autharena_routes()
+            self.translator_gui._multi_key_manager_autharena_pool_hint = -1 in arena_routes
+            self.translator_gui._multi_key_manager_autharena_account_ids = {
+                account_id for account_id in arena_routes if account_id >= 0
+            }
         except Exception:
             pass
 
@@ -8227,6 +8241,216 @@ class MultiAPIKeyDialog(QDialog):
         log_fn(f"❌ AuthZA login failed: {err}")
         QMessageBox.warning(self, "Z.AI Login Failed", f"Z.AI login failed:\n{err}")
 
+    @staticmethod
+    def _autharena_route_account(model):
+        """Return a physical slot, -1 for rotating mode, or None for another route."""
+        match = re.match(r'^autharena(\d{0,4})(?:/|$)', str(model or '').strip(), re.I)
+        if not match:
+            return None
+        digits = match.group(1)
+        return -1 if digits and int(digits) == 0 else int(digits or 0)
+
+    def _pending_autharena_routes(self):
+        routes = set()
+        for combo in list(getattr(self, '_model_search_combos', []) or []):
+            try:
+                account_id = self._autharena_route_account(combo.currentText())
+                if account_id is not None:
+                    routes.add(account_id)
+            except RuntimeError:
+                continue
+        return routes
+
+    def _autharena_login_account_choices(self):
+        """Include existing and configured physical slots, even before first login."""
+        ids = {0}
+        try:
+            from autharena import get_account_ids
+            ids.update(int(value) for value in get_account_ids() if 0 <= int(value) <= 9999)
+        except (ImportError, ValueError, TypeError, OSError):
+            pass
+        ids.update(value for value in self._pending_autharena_routes() if value >= 0)
+        config = getattr(self.translator_gui, 'config', {}) or {}
+        entries = list(getattr(getattr(self, 'key_pool', None), 'keys', []) or [])
+        for name, values in config.items():
+            if name.endswith('_keys') and isinstance(values, list):
+                entries.extend(values)
+        for entry in entries:
+            model = entry.get('model', '') if isinstance(entry, dict) else getattr(entry, 'model', '')
+            slot = self._autharena_route_account(model)
+            if slot is not None and slot >= 0:
+                ids.add(slot)
+        return sorted(ids)
+
+    def _choose_autharena_login_account(self, route):
+        if route != -1:
+            return route
+        ids = self._autharena_login_account_choices()
+        labels = ['Default account (slot 0)' if slot == 0 else f'Account #{slot}' for slot in ids]
+        labels.append('New account…')
+        selected, accepted = QInputDialog.getItem(
+            self, 'Arena login account',
+            'autharena0/ rotates signed-in accounts. Choose an account to sign in:',
+            labels, 0, False,
+        )
+        if not accepted:
+            return None
+        if selected == labels[-1]:
+            unused = next((slot for slot in range(1, 10000) if slot not in ids), 1)
+            slot, accepted = QInputDialog.getInt(
+                self, 'Arena account slot', 'Account number:', unused, 1, 9999,
+            )
+            return slot if accepted else None
+        return ids[labels.index(selected)] if selected in labels else None
+
+    def _refresh_autharena_login_button(self, combo):
+        button = getattr(combo, '_autharena_login_button', None)
+        if button is None:
+            return
+        try:
+            route = MultiAPIKeyDialog._autharena_route_account(combo.currentText())
+            button.setVisible(route is not None)
+            editor = combo.lineEdit()
+            margins = editor.textMargins()
+            original = int(getattr(combo, '_authza_original_right_margin', 0) or 0)
+            za_button = getattr(combo, '_authza_login_button', None)
+            occupied = 28 if za_button is not None and not za_button.isHidden() else 0
+            editor.setTextMargins(margins.left(), margins.top(),
+                                  max(original, occupied, 78 if route is not None else 0),
+                                  margins.bottom())
+            if route is None:
+                return
+            busy = bool(getattr(self, '_autharena_login_busy', False))
+            button.setEnabled(not busy)
+            button.setProperty('autharenaAccountId', route)
+            signed_in = False
+            try:
+                from autharena import get_account_status, get_account_ids
+                signed_in = any(get_account_status(slot).get('logged_in') for slot in get_account_ids()) if route == -1 else bool(
+                    get_account_status(route).get('logged_in')
+                )
+            except Exception:
+                pass
+            button.setText('Waiting…' if busy else ('✓ Login' if signed_in else 'Login'))
+            label = 'rotating pool (choose an account)' if route == -1 else (
+                'default account' if route == 0 else f'account #{route}'
+            )
+            button.setToolTip(
+                f'Arena {label}: click to sign in or replace the saved login. '
+                'Complete sign-in and first-use consent in the browser.'
+            )
+            button.raise_()
+        except RuntimeError:
+            pass
+
+    def _install_autharena_login_button(self, combo):
+        """Install on the shared model editor so every key pool has local login."""
+        if getattr(combo, '_autharena_login_button', None) is not None:
+            MultiAPIKeyDialog._refresh_autharena_login_button(self, combo)
+            return
+        editor = combo.lineEdit() if combo.isEditable() else None
+        if editor is None:
+            return
+        button = QToolButton(editor)
+        button.setFixedSize(74, 22)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setAccessibleName('Arena login')
+        button.setObjectName('autharenaManagerLoginButton')
+        button.hide()
+        combo._autharena_login_button = button
+
+        def position():
+            try:
+                button.move(max(0, editor.width() - button.width() - 2),
+                            max(0, (editor.height() - button.height()) // 2))
+            except RuntimeError:
+                pass
+
+        original_resize = editor.resizeEvent
+
+        def resize(event):
+            original_resize(event)
+            position()
+
+        editor.resizeEvent = resize
+        button.clicked.connect(lambda _checked=False: MultiAPIKeyDialog._autharena_login_for_combo(self, combo))
+        combo.currentTextChanged.connect(lambda _text: MultiAPIKeyDialog._refresh_autharena_login_button(self, combo))
+        combo.editTextChanged.connect(lambda _text: MultiAPIKeyDialog._refresh_autharena_login_button(self, combo))
+        QTimer.singleShot(0, position)
+        MultiAPIKeyDialog._refresh_autharena_login_button(self, combo)
+
+    def _refresh_all_autharena_login_buttons(self):
+        for combo in list(getattr(self, '_model_search_combos', []) or []):
+            self._refresh_autharena_login_button(combo)
+
+    def _autharena_login_for_combo(self, combo):
+        if getattr(self, '_autharena_login_busy', False):
+            return
+        route = self._autharena_route_account(combo.currentText())
+        if route is None:
+            return
+        account_id = self._choose_autharena_login_account(route)
+        if account_id is None:
+            return
+        if not hasattr(self, '_autharena_login_signals'):
+            self._autharena_login_signals = _ArenaManagerLoginSignals(self)
+            self._autharena_login_signals.progress.connect(
+                self._autharena_manager_login_progress, Qt.QueuedConnection,
+            )
+            self._autharena_login_signals.completed.connect(
+                self._autharena_manager_login_completed, Qt.QueuedConnection,
+            )
+        signals = self._autharena_login_signals
+        self._autharena_login_busy = True
+        self._refresh_all_autharena_login_buttons()
+        self._autharena_manager_login_progress(f'Arena: opening login for account #{account_id}…')
+
+        def progress(message):
+            try:
+                signals.progress.emit(str(message))
+            except RuntimeError:
+                pass  # The manager can close while its browser is still open.
+
+        def worker():
+            outcome = {'account_id': account_id, 'error': '', 'result': None}
+            try:
+                from autharena import login
+                outcome['result'] = login(account_id=account_id, timeout=180, log_fn=progress)
+                if not isinstance(outcome['result'], dict) or not outcome['result'].get('logged_in'):
+                    outcome['error'] = 'Arena sign-in was not verified. Complete login and consent, then try again.'
+            except Exception as exc:
+                outcome['error'] = str(exc)
+            try:
+                signals.completed.emit(outcome)
+            except RuntimeError:
+                pass
+
+        self._autharena_login_thread = threading.Thread(target=worker, daemon=True)
+        self._autharena_login_thread.start()
+
+    @Slot(str)
+    def _autharena_manager_login_progress(self, message):
+        self._show_status(message)
+        log = getattr(self.translator_gui, 'append_log', None)
+        if callable(log):
+            log(message)
+
+    @Slot(object)
+    def _autharena_manager_login_completed(self, outcome):
+        self._autharena_login_busy = False
+        self._autharena_login_error = outcome.get('error', '')
+        self._autharena_login_result = outcome.get('result')
+        self._refresh_all_autharena_login_buttons()
+        message = (f"Arena login failed: {self._autharena_login_error}" if self._autharena_login_error
+                   else f"Arena account #{outcome['account_id']} is signed in.")
+        self._autharena_manager_login_progress(message)
+        if not self._autharena_login_error:
+            self._refresh_parent_model_requirements(save_config=False)
+            try:
+                QMetaObject.invokeMethod(self.translator_gui, '_autharena_login_status_changed', Qt.QueuedConnection)
+            except (RuntimeError, TypeError):
+                pass
+
     def _attach_model_autofill(self, combo: QComboBox, on_change=None, model_values=None):
         """Attach the same prefix-priority contains completer used by translator_gui."""
         from PySide6.QtCore import QStringListModel
@@ -8402,6 +8626,7 @@ class MultiAPIKeyDialog(QDialog):
             registered_combos.append(combo)
         self._model_search_combos = registered_combos
         MultiAPIKeyDialog._install_authza_login_button(self, combo)
+        MultiAPIKeyDialog._install_autharena_login_button(self, combo)
 
     def _notify_authgpt_visibility(self):
         """Notify the translator GUI to re-evaluate AuthGPT/AuthGem login button visibility."""

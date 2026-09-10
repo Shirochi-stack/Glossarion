@@ -1606,6 +1606,16 @@ class UnifiedClientError(Exception):
         self.http_status = http_status
         self.details = details
 
+
+def _is_ambiguous_autharena_error(error) -> bool:
+    """A dispatched Arena generation cannot be replayed without risking a duplicate."""
+    details = getattr(error, 'details', None)
+    return bool(
+        isinstance(details, dict)
+        and details.get('provider') == 'autharena'
+        and details.get('request_dispatched') is True
+    )
+
 # ---------------------------------------------------------------------------
 # Deferred batch log buffer
 # In batch mode, prompt-preparation logs (🎯 system prompt, 💬 combined prompt)
@@ -1955,7 +1965,9 @@ class UnifiedClient:
                 messages, temperature, max_tokens, max_completion_tokens, context,
                 request_id=request_id, image_data=image_data
             )
-        except Exception:
+        except Exception as error:
+            if _is_ambiguous_autharena_error(error):
+                raise
             return None
 
     def _detect_safety_filter(self, messages, extracted_content: str, finish_reason: Optional[str], response: Any, provider: str) -> bool:
@@ -2415,6 +2427,8 @@ class UnifiedClient:
                 else:
                     print(f"  Retry #{attempt_idx + 1}/{retry_attempts} returned no usable text")
             except UnifiedClientError as retry_error:
+                if _is_ambiguous_autharena_error(retry_error):
+                    raise
                 if retry_error.error_type == "cancelled" or "cancelled" in str(retry_error).lower():
                     print(f"  Truncation retry #{attempt_idx + 1}/{retry_attempts} cancelled")
                     raise
@@ -7011,6 +7025,8 @@ class UnifiedClient:
                     pass
                 return result
             except Exception as exc:
+                if _is_ambiguous_autharena_error(exc):
+                    raise
                 last_error = exc
                 try:
                     pool.mark_key_error(key_idx, 429 if self._is_rate_limit_error(exc) else None)
@@ -8043,6 +8059,8 @@ class UnifiedClient:
                             return self._send_image_internal(messages, image_data, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
                     
                     except UnifiedClientError as e:
+                        if _is_ambiguous_autharena_error(e):
+                            raise
                         last_error = e
                         
                         # Handle rate limit errors with key rotation
@@ -10169,7 +10187,9 @@ class UnifiedClient:
                                         content, fr = retry_res
                                         if content and content.strip() and len(content) > 10:
                                             return content, fr
-                                except Exception:
+                                except Exception as retry_error:
+                                    if _is_ambiguous_autharena_error(retry_error):
+                                        raise
                                     pass
                         
                         # Try glossary keys if context is glossary (independent of multi-key mode toggle)
@@ -10203,6 +10223,8 @@ class UnifiedClient:
                                                 print(f"✅ {retry_pool_label.title()} key succeeded for safety filter")
                                                 return res_content, res_fr
                                     except Exception as gk_err:
+                                        if _is_ambiguous_autharena_error(gk_err):
+                                            raise
                                         print(f"❌ {retry_pool_label.title()} key retry failed: {gk_err}")
                             
                             # Try fallback keys directly (independent of multi-key mode toggle)
@@ -10219,6 +10241,8 @@ class UnifiedClient:
                                             print(f"✅ Fallback key succeeded for safety filter")
                                             return res_content, res_fr
                                 except Exception as fb_err:
+                                    if _is_ambiguous_autharena_error(fb_err):
+                                        raise
                                     print(f"❌ Fallback key retry failed: {fb_err}")
                             else:
                                 print("[FALLBACK DIRECT] Fallback keys disabled; skipping safety-filter retry")
@@ -10650,6 +10674,10 @@ class UnifiedClient:
                         logger.info(f"Propagating cancellation to caller (Error: {e})")
                     # Re-raise so send_with_interrupt can handle it
                     raise
+                if _is_ambiguous_autharena_error(e):
+                    # Arena has no idempotent replay: an interrupted response may
+                    # still be generating. Preserve the failure for the caller.
+                    raise
                 if e.error_type == "no_keys" and _glossary_refinement_overridden:
                     return _retry_without_glossary_refinement_pool("Refinement pool unavailable or exhausted")
                 
@@ -10833,6 +10861,8 @@ class UnifiedClient:
                                     if res_content and res_content.strip():
                                         return res_content, res_fr
                             except Exception as gk_err:
+                                if _is_ambiguous_autharena_error(gk_err):
+                                    raise
                                 print(f"❌ {retry_pool_label.title()} key retry failed: {gk_err}")
                     
                     # Try fallback keys directly (independent of multi-key mode toggle)
@@ -10848,6 +10878,8 @@ class UnifiedClient:
                                 if res_content and res_content.strip():
                                     return res_content, res_fr
                         except Exception as fb_err:
+                            if _is_ambiguous_autharena_error(fb_err):
+                                raise
                             print(f"❌ Fallback key retry failed: {fb_err}")
                     else:
                         print("[FALLBACK DIRECT] Fallback keys disabled; skipping prohibited-content retry")
@@ -11087,7 +11119,9 @@ class UnifiedClient:
                             if retry_res:
                                 content, fr = retry_res
                                 return content, fr
-                        except Exception:
+                        except Exception as retry_error:
+                            if _is_ambiguous_autharena_error(retry_error):
+                                raise
                             pass
                     
                     # Fall through to normal error handling
@@ -11685,6 +11719,11 @@ class UnifiedClient:
                         continue
                         
                 except UnifiedClientError as e:
+                    if _is_ambiguous_autharena_error(e):
+                        if _api_call_delay > 0:
+                            with _fallback_key_lock:
+                                _fallback_key_in_use.discard(_key_id)
+                        raise
                     import traceback
                     http_status = getattr(e, "http_status", None)
                     error_str_lower = str(e).lower()
@@ -12063,7 +12102,7 @@ class UnifiedClient:
                         
                 except UnifiedClientError as ue:
                     # If cancelled, stop immediately and propagate the cancellation
-                    if ue.error_type == "cancelled":
+                    if ue.error_type == "cancelled" or _is_ambiguous_autharena_error(ue):
                         # Release in-use before re-raising
                         if _api_call_delay > 0:
                             with _fallback_key_lock:
@@ -12091,7 +12130,7 @@ class UnifiedClient:
             
         except UnifiedClientError as ue:
             # Propagate cancellation up to the caller
-            if ue.error_type == "cancelled":
+            if ue.error_type == "cancelled" or _is_ambiguous_autharena_error(ue):
                 raise ue
             print(f"[FALLBACK DIRECT] UnifiedClientError: {ue}")
             return None
@@ -12295,7 +12334,7 @@ class UnifiedClient:
                         print(f"⚠️ [GLOSSARY DIRECT {idx+1}] No result from {gk_model}, trying next key")
                         
                 except UnifiedClientError as uce:
-                    if uce.error_type == "cancelled":
+                    if uce.error_type == "cancelled" or _is_ambiguous_autharena_error(uce):
                         raise
                     print(f"❌ [GLOSSARY DIRECT {idx+1}] UnifiedClientError with {gk_model}: {uce}")
                     # Mark that a glossary key was used (even on failure for stats)
@@ -12310,7 +12349,7 @@ class UnifiedClient:
             
         except UnifiedClientError as ue:
             # Propagate cancellation and pool-boundary failures up to the caller.
-            if ue.error_type in ("cancelled", "no_keys"):
+            if ue.error_type in ("cancelled", "no_keys") or _is_ambiguous_autharena_error(ue):
                 raise ue
             print(f"[GLOSSARY DIRECT] UnifiedClientError: {ue}")
             return None
@@ -28157,6 +28196,7 @@ class UnifiedClient:
             raise UnifiedClientError("Invalid AuthArena model prefix.", error_type="validation")
         account_id = int(match.group(1) or 0)
         actual_model = request_model[match.end():] or 'gpt-6-astra-medium'
+        pool_mode = bool(match.group(1)) and account_id == 0
         tls = self._get_thread_local_client()
         request_id = getattr(tls, 'current_request_id', None)
         started = False
@@ -28214,7 +28254,9 @@ class UnifiedClient:
             context = getattr(tls, 'current_request_context', None) or 'translation'
             result = _autharena_send(
                 messages=messages,
-                model=actual_model,
+                # Preserve the explicit zero route: the adapter owns one pool
+                # implementation shared by the desktop app and standalone CLI.
+                model=f'autharena0/{actual_model}' if pool_mode else actual_model,
                 account_id=account_id,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -28230,7 +28272,8 @@ class UnifiedClient:
             if not result.get('finish_reason_explicit') or not result.get('finish_reason'):
                 raise UnifiedClientError(
                     "AuthArena: stream ended without an explicit completion event.",
-                    error_type="api_error", details={"provider": "autharena"},
+                    error_type="api_error",
+                    details={"provider": "autharena", "request_dispatched": True},
                 )
             return UnifiedResponse(
                 content=result.get('content', ''),
@@ -28243,7 +28286,13 @@ class UnifiedClient:
         except Exception as exc:
             detail = str(exc)
             status = getattr(exc, 'status_code', None)
-            details = {"provider": "autharena"}
+            details = {
+                "provider": "autharena",
+                # The adapter distinguishes an explicit rejection (False) from
+                # an unknown outcome after dispatch (True). Retain that decision
+                # through every shared retry and fallback layer.
+                "request_dispatched": bool(getattr(exc, 'request_dispatched', started)),
+            }
             retry_after = getattr(exc, 'retry_after', None)
             if retry_after is not None:
                 details['retry_after'] = retry_after
@@ -28261,8 +28310,8 @@ class UnifiedClient:
                 error_type = 'timeout'
             else:
                 error_type = 'api_error'
-            # Shared retry policy owns failures. Replaying an ambiguous POST
-            # inside this handler could create a duplicate Arena generation.
+            # Shared retry policy may retry explicit rejections, but must retain
+            # ambiguous dispatch failures without generating a duplicate.
             raise UnifiedClientError(
                 f"AuthArena: {detail}", error_type=error_type,
                 http_status=status, details=details,

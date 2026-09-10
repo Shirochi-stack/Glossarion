@@ -4365,3 +4365,187 @@ def test_progress_context_queues_one_clicked_qa_entry(tmp_path):
     assert dummy._single_qa_resolution_request["output_file"] == (
         "chapter0012.xhtml"
     )
+
+
+@pytest.fixture
+def autharena_translation_env(monkeypatch):
+    for name, value in {
+        'RETRY_TIMEOUT': '1', 'TIMEOUT_RETRY_ATTEMPTS': '2', 'CHUNK_TIMEOUT': '30',
+        'THREAD_SUBMISSION_DELAY_SECONDS': '0', 'SEND_INTERVAL_SECONDS': '0',
+        'RETRY_DUPLICATE_BODIES': '0', 'RETRY_TRUNCATED': '0', 'RETRY_SPLIT_FAILED': '0',
+        'GRACEFUL_STOP': '0', 'GRACEFUL_STOP_COMPLETED': '0', 'TRANSLATION_CANCELLED': '0',
+        'SAVE_PARTIAL_RESULTS': '0', 'SAVE_PROHIBITED_RESULTS': '0',
+        'PRESERVE_ORIGINAL_TEXT_ON_FAILURE': '0', 'DIRECT_TEXT_ACTIVE': '0',
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(translation_module.time, 'sleep', lambda *_: None)
+    monkeypatch.setattr(translation_module, '_single_pass_glossary_mode', lambda: False)
+
+
+@pytest.mark.parametrize('dispatched,error_type', [(True, 'api_error'), (False, 'auth_error'),
+                                                 (False, 'cancelled')])
+def test_autharena_interrupt_preserves_error_metadata(autharena_translation_env, dispatched, error_type):
+    from unified_api_client import UnifiedClientError
+
+    # The 429 text used to replace this exception and discard its dispatch marker.
+    error = UnifiedClientError('Arena 429 rate limit response interrupted', error_type=error_type,
+                               http_status=401,
+                               details={'provider': 'autharena', 'request_dispatched': dispatched})
+    attempts = []
+
+    class Client:
+        def send(self, messages, **kwargs):
+            attempts.append(True)
+            raise error
+
+    with pytest.raises(UnifiedClientError) as caught:
+        translation_module.send_with_interrupt(
+            [{'role': 'user', 'content': 'Translate.'}], Client(), 0, 100,
+            lambda: False, chunk_timeout=30,
+        )
+    assert caught.value is error
+    assert attempts == [True]
+
+
+@pytest.mark.parametrize('provider,dispatched,error_type,expect_retry', [
+    ('autharena', True, 'timeout', False),
+    ('autharena', True, 'api_error', False),
+    ('autharena', False, 'cancelled', False),
+    ('autharena', False, 'timeout', True),
+    ('other', True, 'timeout', True),
+])
+def test_autharena_sequential_translation_does_not_replay_terminal_error(
+    autharena_translation_env, tmp_path, provider, dispatched, error_type, expect_retry,
+):
+    from unified_api_client import UnifiedClientError
+
+    class Config:
+        MODEL = 'autharena/gpt-6-astra-medium'
+        CONTEXTUAL = False
+        TEMP = 0
+        MAX_OUTPUT_TOKENS = 1024
+        MAX_RETRY_TOKENS = 1024
+        RETRY_TRUNCATED = False
+        RETRY_TIMEOUT = True
+        CHUNK_TIMEOUT = 30
+        EMERGENCY_IMAGE_RESTORE = False
+
+    message = 'Arena browser cancelled by user' if error_type == 'cancelled' else 'Arena response timed out'
+    error = UnifiedClientError(message, error_type=error_type,
+                               details={'provider': provider, 'request_dispatched': dispatched})
+    attempts = []
+
+    class Client:
+        def send(self, messages, **kwargs):
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise error
+            return '<title>Translated</title>', 'stop'
+
+    chapter = {'num': 1, 'body': '<title>Source</title>', 'filename': 'chapter.xhtml',
+               '_title_tag_only_translation': True}
+    processor = translation_module.TranslationProcessor(
+        Config(), Client(), str(tmp_path), stop_callback=lambda: False,
+    )
+    args = ([{'role': 'user', 'content': chapter['body']}], chapter['body'], chapter, 1, 1)
+    if expect_retry:
+        assert processor.translate_with_retry(*args)[:2] == ('<title>Translated</title>', 'stop')
+        assert len(attempts) == 2
+    else:
+        with pytest.raises(UnifiedClientError) as caught:
+            processor.translate_with_retry(*args)
+        assert caught.value is error
+        assert attempts == [True]
+
+
+@pytest.mark.parametrize('dispatched,error_type', [(True, 'timeout'), (False, 'cancelled')])
+def test_autharena_batch_translation_does_not_replay_terminal_error(
+    autharena_translation_env, tmp_path, monkeypatch, dispatched, error_type,
+):
+    from unified_api_client import UnifiedClientError
+
+    message = 'Arena browser cancelled by user' if error_type == 'cancelled' else 'Arena response timed out'
+    error = UnifiedClientError(message, error_type=error_type,
+                               details={'provider': 'autharena', 'request_dispatched': dispatched})
+    attempts = []
+    original_send = translation_module.send_with_interrupt
+
+    def counted_send(*args, **kwargs):
+        attempts.append(True)
+        return original_send(*args, **kwargs)
+
+    monkeypatch.setattr(translation_module, 'send_with_interrupt', counted_send)
+    _source, saved = _run_batch_chapter_failure(
+        tmp_path, monkeypatch, raised_error=error, expected_output_count=0,
+        expected_statuses=('pending',) if error_type == 'cancelled' else ('qa_failed', 'failed'),
+    )
+    assert saved is None
+    assert attempts == [True]
+
+
+@pytest.mark.parametrize('timeout_path', ['waiting', 'late_result'])
+@pytest.mark.parametrize('active_model,dispatched', [
+    ('AUTHARENA4/gpt-6-astra-medium', False),
+    ('AUTHARENA4/gpt-6-astra-medium', True),
+    ('other/model', True),
+])
+def test_autharena_wrapper_timeout_captures_dispatch_before_cleanup(
+    autharena_translation_env, monkeypatch, timeout_path, active_model, dispatched,
+):
+    from types import SimpleNamespace
+    from unified_api_client import UnifiedClientError
+
+    monkeypatch.setattr(translation_module, 'get_current_thread_actual_request_model', lambda: None)
+    finished = threading.Event()
+    closed = threading.Event()
+    tls = SimpleNamespace(model=active_model)
+    calls = []
+
+    class Transport:
+        def close(self):
+            # Cleanup can erase provider state before the wrapper raises.
+            tls.model = None
+            closed.set()
+
+    tls.current_httpx_client = Transport()
+
+    class Client:
+        # A sibling/shared model must not override this worker's actual model.
+        model = 'other/shared' if active_model.startswith('AUTHARENA') else 'autharena/shared'
+
+        def _get_thread_local_client(self):
+            return tls
+
+        def get_last_actual_request_model(self):
+            return active_model
+
+        def send(self, messages, **kwargs):
+            calls.append(True)
+            try:
+                if dispatched:
+                    tls.pre_api_call_callback()
+                if timeout_path == 'waiting':
+                    assert closed.wait(2), 'Wrapper did not close its timed-out transport'
+                else:
+                    # Return within the first queue poll, after the configured
+                    # timeout, to exercise the completed-but-late result branch.
+                    threading.Event().wait(.03)
+                    tls.model = None
+                return SimpleNamespace(content='Completed response')
+            finally:
+                finished.set()
+
+    with pytest.raises(UnifiedClientError) as caught:
+        translation_module.send_with_interrupt(
+            [{'role': 'user', 'content': 'Translate.'}], Client(), 0, 100,
+            lambda: False, chunk_timeout=.01, before_send_callback=lambda: None,
+        )
+    assert finished.wait(2)
+    assert calls == [True]
+    assert closed.is_set()
+    if active_model.startswith('AUTHARENA'):
+        assert caught.value.details == {'provider': 'autharena', 'request_dispatched': dispatched}
+        assert translation_module._autharena_retry_is_terminal(caught.value) is dispatched
+    else:
+        assert caught.value.details is None
+        assert not translation_module._autharena_retry_is_terminal(caught.value)

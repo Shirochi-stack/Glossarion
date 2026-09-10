@@ -744,9 +744,9 @@ def test_numbered_authnd_poll_preserves_selected_route_prefix(tmp_path, monkeypa
     assert result.provider_models["authnd:4"] == ["authnd4/z-ai/glm-5.2"]
 
 
-@pytest.mark.parametrize("account_id", [0, 4])
+@pytest.mark.parametrize("suffix,account_id", [("", 0), ("0", 0), ("4", 4)])
 def test_autharena_auto_poll_is_public_scoped_and_persists_daily_ttl(
-    tmp_path, monkeypatch, account_id
+    tmp_path, monkeypatch, suffix, account_id
 ):
     _isolated_cache(tmp_path, monkeypatch)
     now = [1_000_000.0]
@@ -766,8 +766,8 @@ def test_autharena_auto_poll_is_public_scoped_and_persists_daily_ttl(
         "_fetch_provider_catalog",
         lambda *_args, **_kwargs: pytest.fail("scoped Arena poll contacted another provider"),
     )
-    prefix = f"autharena{account_id if account_id else ''}/"
-    provider = f"autharena:{account_id}" if account_id else "autharena"
+    prefix = f"autharena{suffix}/"
+    provider = f"autharena:{account_id}" if suffix else "autharena"
     assert model_options.provider_model_catalog_supports_anonymous_poll(prefix)
     assert model_options.due_provider_catalog_for_model(prefix) == provider
 

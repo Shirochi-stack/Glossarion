@@ -212,6 +212,7 @@ app_files = [
 	('authnd_auth.py', '.'),  # NVIDIA Build browser-backed auth
 	('gemini_free.py', '.'),  # Google Search/Gemini browser-backed route
 	('autharena.py', '.'),  # Arena browser-backed Direct chat
+	('autharena_browser.py', '.'),  # Installed Chrome/Edge browser transport
 	('token_encryption.py', '.'),
 
 	# Antigravity Cloud Code proxy
@@ -339,6 +340,8 @@ app_modules = [
 	'authnd_auth',  # NVIDIA Build browser-backed auth
 	'gemini_free',  # Google Search/Gemini browser-backed route
 	'autharena',  # Arena browser-backed Direct chat
+	'autharena_browser',  # Installed Chrome/Edge browser transport
+	'websocket',  # websocket-client for Chrome/Edge CDP
 	'token_encryption',  # Encrypted token storage
 	'ocagy_cli',  # OpenCode + opencode-antigravity-auth
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
@@ -991,10 +994,9 @@ hiddenimports = list(set(hiddenimports))
 # ============================================================================
 
 excludes = [
-    # POE / websocket-client (no longer needed; imports guarded by try/except)
+    # Legacy POE wrappers (Arena uses websocket-client for browser control)
     'poe_api_wrapper', 'poe_api_wrapper.*',
     'ballyregan', 'ballyregan.*',
-    'websocket', 'websocket.*',
 
     # ============================================================================
     # MACHINE LEARNING & AI FRAMEWORKS (MAJOR SIZE REDUCTION)

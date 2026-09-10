@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -21,7 +22,8 @@ MODEL_ID = "01a07d42-938f-7267-9398-4529e857491c"
 def clean_cancel(monkeypatch, tmp_path):
     monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
     arena._cancel_event.clear()
-    monkeypatch.setattr(arena, "_profile_path", lambda account: tmp_path / str(account))
+    monkeypatch.setattr(arena, "_profiles_root", lambda: tmp_path)
+    monkeypatch.setattr(arena, "_pool_cursor", 0)
     yield
     arena.cancel_stream()
     arena._cancel_event.clear()
@@ -175,9 +177,135 @@ def test_numbered_prefix_validation():
     assert arena._model_account("AuthArena2/gpt-example", 0) == 2
     with pytest.raises(ValueError, match="conflicts"):
         arena._model_account("autharena2/model", 3)
-    for invalid in ("../test", -1, True):
+    for invalid in ("../test", -1, True, 10000):
         with pytest.raises(ValueError):
             arena._account_number(invalid)
+
+
+def test_account_ids_ignore_files_and_noncanonical_directories(tmp_path):
+    for name in ("0", "1", "9999", "01", "-1", "10000", "unrelated"):
+        (tmp_path / name).mkdir()
+    (tmp_path / "2").write_text("not a profile")
+    assert arena.get_account_ids() == [0, 1, 9999]
+    assert not arena.get_account_status(0)["logged_in"]
+    # Chromium cookie files do not establish signed-in status.
+    (tmp_path / "0" / "Cookies").write_text("cookie-like data")
+    assert not arena.get_account_status(0)["logged_in"]
+
+
+@pytest.mark.parametrize("marker", [
+    [], {"logged_in": True},
+    {"version": 1, "account_id": 2, "logged_in": True, "verified_at": 10},
+    {"version": 1, "account_id": 1, "logged_in": "true", "verified_at": 10},
+    {"version": 1, "account_id": 1, "logged_in": True, "verified_at": "yesterday"},
+    {"version": 1, "account_id": 1, "logged_in": True, "verified_at": float("nan")},
+    {"version": 1, "account_id": 1, "logged_in": True, "verified_at": 10**15},
+])
+def test_account_status_rejects_invalid_verification_markers(tmp_path, marker):
+    (tmp_path / "1").mkdir()
+    (tmp_path / "1" / arena._LOGIN_STATUS_FILE).write_text(json.dumps(marker))
+    assert not arena.get_account_status(1)["logged_in"]
+
+
+def test_verified_markers_store_no_credentials_and_can_be_invalidated(tmp_path):
+    arena._write_account_status(2, logged_in=True)
+    status = arena.get_account_status(2)
+    assert status["logged_in"] and status["status_cached"]
+    marker = json.loads((tmp_path / "2" / arena._LOGIN_STATUS_FILE).read_text())
+    assert set(marker) == {"version", "account_id", "logged_in", "verified_at"}
+    assert arena.get_rotating_account_pool() == [2]
+    arena.mark_account_logged_out(2)
+    assert not arena.get_account_status(2)["logged_in"]
+    assert arena.get_account_status(2)["verification_state"] == "logged_out"
+    assert arena.get_rotating_account_pool() == []
+
+
+def test_pool_fair_concurrent_rotation_includes_verified_default_only(tmp_path):
+    for account in (0, 2, 5):
+        arena._write_account_status(account, logged_in=True)
+    (tmp_path / "8").mkdir()
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        pools = list(executor.map(lambda _: arena.get_rotating_account_pool(), range(30)))
+    assert all(set(pool) == {0, 2, 5} for pool in pools)
+    assert [pool[0] for pool in pools].count(0) == 10
+    assert [pool[0] for pool in pools].count(2) == 10
+    assert [pool[0] for pool in pools].count(5) == 10
+
+
+def test_explicit_pool_empty_errors_without_starting_browser(monkeypatch):
+    monkeypatch.setattr(arena, "_run_browser_helper", lambda *a, **k: pytest.fail("opened browser"))
+    with pytest.raises(arena.AuthArenaError, match="no verified signed-in accounts"):
+        arena.send_chat_completion(messages=[{"role": "user", "content": "hello"}], model="autharena0/model")
+
+
+@pytest.mark.parametrize("captcha_status", [401, 403])
+def test_pool_tries_next_safe_rejection_and_preserves_captcha_account(monkeypatch, captcha_status):
+    for account in (0, 2):
+        arena._write_account_status(account, logged_in=True)
+    attempts = []
+    rejection = []
+
+    def helper(config, deadline, **kwargs):
+        attempts.append(config)
+        if config["account_id"] == 0:
+            raise arena.AuthArenaError("captcha required", captcha_status, safe_to_rotate=True)
+        return {"content": "answer"}
+
+    monkeypatch.setattr(arena, "_run_browser_helper", helper)
+    result = arena.send_chat_completion(messages=[{"role": "user", "content": "hello"}], model="AuthArena0/model",
+                                        after_rejection_callback=lambda: rejection.append("reset"))
+    assert result == {"content": "answer", "account_id": 2}
+    assert [item["account_id"] for item in attempts] == [0, 2]
+    assert all(item["allow_interactive"] is False for item in attempts)
+    assert attempts[0]["payload"]["id"] != attempts[1]["payload"]["id"]
+    assert arena.get_account_status(0)["logged_in"]
+    assert rejection == ["reset"]
+
+
+def test_pool_login_rejection_invalidates_account_and_rate_exhaustion_is_bounded(monkeypatch):
+    for account in (1, 3):
+        arena._write_account_status(account, logged_in=True)
+    calls = []
+
+    def helper(config, deadline, **kwargs):
+        calls.append(config["account_id"])
+        status = 401 if config["account_id"] == 1 else 429
+        raise arena.AuthArenaError("rejected", status, "60", safe_to_rotate=True, auth_invalid=status == 401)
+
+    monkeypatch.setattr(arena, "_run_browser_helper", helper)
+    with pytest.raises(arena.AuthArenaError, match="exhausted") as caught:
+        arena.send_chat_completion(messages=[{"role": "user", "content": "hello"}], model="autharena0/model")
+    assert calls == [1, 3]
+    assert not arena.get_account_status(1)["logged_in"]
+    assert arena.get_account_status(3)["logged_in"]
+    assert caught.value.status_code == 429
+    assert caught.value.retry_after == "60"
+
+
+def test_pool_never_retries_ambiguous_dispatched_failure(monkeypatch):
+    for account in (0, 1):
+        arena._write_account_status(account, logged_in=True)
+    calls = []
+
+    def helper(config, deadline, **kwargs):
+        calls.append(config["account_id"])
+        raise arena.AuthArenaError("transport failed", request_dispatched=True)
+
+    monkeypatch.setattr(arena, "_run_browser_helper", helper)
+    with pytest.raises(arena.AuthArenaError, match="transport failed"):
+        arena.send_chat_completion(messages=[{"role": "user", "content": "hello"}], model="autharena0/model")
+    assert calls == [0]
+
+
+def test_plain_default_and_numbered_routes_do_not_rotate(monkeypatch):
+    calls = []
+    monkeypatch.setattr(arena, "_run_browser_helper",
+                        lambda config, deadline, **kw: calls.append(config) or {"content": "ok"})
+    monkeypatch.setattr(arena, "get_rotating_account_pool", lambda: pytest.fail("unexpected rotation"))
+    for name in ("autharena/model", "autharena3/model"):
+        arena.send_chat_completion(messages=[{"role": "user", "content": "hello"}], model=name)
+    assert [config["account_id"] for config in calls] == [0, 3]
+    assert all(config["allow_interactive"] for config in calls)
 
 
 def test_waiting_for_profile_is_cancellable(tmp_path):
@@ -254,6 +382,32 @@ def test_helper_error_preserves_http_metadata(monkeypatch, tmp_path):
     assert caught.value.retry_after == "60"
 
 
+def test_login_done_without_verified_event_cannot_report_success(monkeypatch, tmp_path):
+    child_script(monkeypatch, tmp_path, "emit('done')\n")
+    with pytest.raises(arena.AuthArenaError, match="not verified"):
+        arena._run_browser_helper({"login": True, "account_id": 1}, time.monotonic() + 5)
+    assert not arena.get_account_status(1)["logged_in"]
+
+
+def test_login_verified_event_records_minimal_marker_and_returns_account(monkeypatch, tmp_path):
+    child_script(monkeypatch, tmp_path,
+                 "emit('verified',logged_in=True,tou_accepted=True)\nemit('done')\n")
+    result = arena._run_browser_helper({"login": True, "account_id": 3}, time.monotonic() + 5)
+    assert result == {"profile_saved": True, "logged_in": True, "account_id": 3}
+    assert arena.get_account_status(3)["logged_in"]
+
+
+@pytest.mark.parametrize("status, auth_invalid, remains_signed_in",
+                         [(401, True, False), (401, False, True), (403, False, True), (429, False, True)])
+def test_helper_auth_invalidation_does_not_discard_captcha_sessions(monkeypatch, tmp_path, status, auth_invalid, remains_signed_in):
+    arena._write_account_status(2, logged_in=True)
+    child_script(monkeypatch, tmp_path, f"emit('error',message='rejected',status_code={status},safe_to_rotate=True,auth_invalid={auth_invalid})\n")
+    with pytest.raises(arena.AuthArenaError) as caught:
+        arena._run_browser_helper({"account_id": 2}, time.monotonic() + 5)
+    assert caught.value.safe_to_rotate
+    assert arena.get_account_status(2)["logged_in"] is remains_signed_in
+
+
 @pytest.mark.parametrize("kind,exception", [("timeout", TimeoutError), ("configuration", ImportError)])
 def test_helper_error_preserves_error_type(monkeypatch, tmp_path, kind, exception):
     child_script(monkeypatch, tmp_path, f"emit('error',message='classified failure',error_type={kind!r})\n")
@@ -267,8 +421,31 @@ def test_helper_timeout_and_abrupt_exit_are_not_retried(monkeypatch, tmp_path):
         arena._run_browser_helper({}, time.monotonic() + 0.2)
     assert not arena._active_helpers
     child_script(monkeypatch, tmp_path, "emit('ready')\nsys.stdin.readline()\nsys.exit(2)\n")
-    with pytest.raises(RuntimeError, match="after dispatch; the request was not retried"):
+    with pytest.raises(RuntimeError, match="after dispatch; the request was not retried") as caught:
         arena._run_browser_helper({}, time.monotonic() + 5)
+    assert caught.value.request_dispatched is True
+    assert caught.value.safe_to_rotate is False
+
+
+@pytest.mark.parametrize("response", [
+    "emit('chunk',data='a0:\"partial\"\\n')\nemit('done')\n",
+    "emit('chunk',data='not-stream-data\\n')\n",
+    "emit('error',message='transport timeout',error_type='timeout')\n",
+])
+def test_dispatched_parser_and_helper_timeout_errors_carry_no_retry_metadata(monkeypatch, tmp_path, response):
+    child_script(monkeypatch, tmp_path, "emit('ready')\nsys.stdin.readline()\n" + response)
+    with pytest.raises((RuntimeError, TimeoutError)) as caught:
+        arena._run_browser_helper({}, time.monotonic() + 5)
+    assert caught.value.request_dispatched is True
+    assert caught.value.safe_to_rotate is False
+
+
+def test_parent_timeout_after_dispatch_carries_no_retry_metadata(monkeypatch, tmp_path):
+    child_script(monkeypatch, tmp_path, "emit('ready')\nsys.stdin.readline()\ntime.sleep(30)\n")
+    with pytest.raises(TimeoutError) as caught:
+        arena._run_browser_helper({}, time.monotonic() + 1)
+    assert caught.value.request_dispatched is True
+    assert caught.value.safe_to_rotate is False
 
 
 def test_helper_rejection_rearms_graceful_cancel(monkeypatch, tmp_path):
@@ -331,14 +508,19 @@ def test_cli_invalid_inputs_and_frozen_command(monkeypatch, capsys):
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="Node optional for browser JavaScript simulation")
-@pytest.mark.parametrize("scenario", ["success", "anonymous", "terms", "transport", "rate", "challenge", "alias", "hydrated"])
+@pytest.mark.parametrize("scenario", ["success", "anonymous", "terms", "transport", "rate", "challenge", "alias", "hydrated",
+                                     "login_success", "login_anonymous", "login_terms",
+                                     "noninteractive_anonymous", "noninteractive_challenge", "noninteractive_challenge401"])
 def test_browser_script_runs_normal_protocol_without_exporting_tokens(tmp_path, scenario):
     entries = [model(displayName='Name "quoted" \\ backslash', publicName="public-model", name="internal-model")]
     wanted = "internal-model" if scenario == "alias" else entries[0]["displayName"]
     prompt = "__MODEL__ __PAYLOAD__ __TIMEOUT_MS__ \u2028 hello"
-    user = None if scenario == "anonymous" else {"email": "user@example.test", "touConsentTimestamp": None if scenario == "terms" else "2026-01-01"}
+    user = None if scenario in ("anonymous", "login_anonymous", "noninteractive_anonymous") else {
+        "email": "user@example.test", "touConsentTimestamp": None if scenario in ("terms", "login_terms") else "2026-01-01"}
     flight = json.dumps({"initialModels": entries, "user": user})
-    source = arena._prepare_script(arena._build_payload(None, prompt), wanted, 3)
+    source = arena._prepare_script(arena._build_payload(None, prompt), wanted, 3,
+                                   login_only=scenario.startswith("login_"),
+                                   allow_interactive=not scenario.startswith("noninteractive"))
     script = r'''
 const vm = require('vm');
 const fs = require('fs');
@@ -368,10 +550,11 @@ window.grecaptcha = {enterprise:{
   render:(widget,opts)=>{challenge=opts.callback;}
 }};
 global.fetch = async(url, options)=>{
-  requests.push({url, body:JSON.parse(options.body),credentials:options.credentials});
+  requests.push({url, body:options.body?JSON.parse(options.body):null,credentials:options.credentials});
+  if(url==='/text/direct')return {ok:true,text:async()=>input.flight};
   if(input.scenario==='transport') throw Error('disconnected');
   if(input.scenario==='rate') return {ok:false,status:429,headers:{get:()=> '30'},json:async()=>({error:'Rate limit exceeded'})};
-  if(input.scenario==='challenge' && requests.length===1) return {ok:false,status:403,headers:{get:()=>null},json:async()=>({error:'reCAPTCHA validation failed'})};
+  if(['challenge','noninteractive_challenge','noninteractive_challenge401'].includes(input.scenario) && requests.length===2) return {ok:false,status:input.scenario==='noninteractive_challenge401'?401:403,headers:{get:()=>null},json:async()=>({error:'reCAPTCHA validation failed'})};
   let read=false;
   return {ok:true,status:200,headers:{get:()=> 'text/plain'},body:{getReader:()=>({
     read:async()=>{
@@ -381,6 +564,13 @@ global.fetch = async(url, options)=>{
     }
   })}};
 };
+global.DOMParser = class {parseFromString(text){
+  return {scripts:[{textContent:'self.__next_f.push('+JSON.stringify([1,text])+')'}]};
+}};
+if(input.scenario==='login_success'){
+  // Verify the fresh snapshot, not the stale pre-login page bootstrap.
+  window.__next_f=[[1,JSON.stringify({initialModels:[],user:null})]];
+}
 (async()=>{
   vm.runInThisContext(input.source);
   await new Promise(resolve=>setTimeout(resolve,50));
@@ -396,20 +586,46 @@ global.fetch = async(url, options)=>{
     assert result.returncode == 0, result.stderr
     actual = json.loads(result.stdout)
     assert "PRIVATE" not in json.dumps(actual["events"])
+    assert "user@example.test" not in json.dumps(actual["events"])
+    generation = [request for request in actual["requests"] if request["url"] == arena.CREATE_EVALUATION_PATH]
+    if scenario.startswith("login_"):
+        assert generation == []
+        assert actual["actions"] == []
+        assert len(actual["requests"]) == 1
+        if scenario == "login_success":
+            assert actual["events"][-1]["event"] == "done"
+            assert any(event["event"] == "verified" for event in actual["events"])
+        else:
+            assert actual["events"][-1]["event"] == "action"
+            assert not any(event["event"] == "verified" for event in actual["events"])
+        return
     if scenario in ("anonymous", "terms"):
-        assert actual["requests"] == []
+        assert generation == []
         assert actual["events"][-1]["event"] == "action"
+        return
+    if scenario == "noninteractive_anonymous":
+        assert generation == []
+        assert actual["events"][-1]["event"] == "error"
+        assert actual["events"][-1]["status_code"] == 401
+        assert actual["events"][-1]["safe_to_rotate"] is True
         return
     assert actual["actions"] == ["chat_submit"]
     assert all(item["url"] == arena.CREATE_EVALUATION_PATH and item["credentials"] == "same-origin"
-               and item["body"]["userMessage"]["content"] == prompt for item in actual["requests"])
+               and item["body"]["userMessage"]["content"] == prompt for item in generation)
     if scenario == "transport":
-        assert len(actual["requests"]) == 1
+        assert len(generation) == 1
         assert actual["events"][-1]["event"] == "error"
         assert "not retried" in actual["events"][-1]["message"]
     elif scenario == "rate":
         assert actual["events"][-1]["status_code"] == 429
         assert actual["events"][-1]["retry_after"] == "30"
+    elif scenario in ("noninteractive_challenge", "noninteractive_challenge401"):
+        assert len(generation) == 1
+        assert actual["events"][-1]["status_code"] == (401 if scenario.endswith("401") else 403)
+        assert actual["events"][-1]["safe_to_rotate"] is True
+        assert actual["events"][-1]["auth_invalid"] is False
+        assert not any(event["event"] == "action" for event in actual["events"])
+        assert not any(event["event"] == "logged_out" for event in actual["events"])
     else:
         assert actual["phase"] == "done"
         parser = arena._ArenaStreamParser()
@@ -418,7 +634,7 @@ global.fetch = async(url, options)=>{
                 parser.feed(event["data"])
         assert parser.finish()["content"] == "answer"
         if scenario == "challenge":
-            assert len(actual["requests"]) == 2
-            assert actual["requests"][1]["body"]["recaptchaV2Token"] == "PRIVATE-V2-TOKEN"
-            assert "recaptchaV3Token" not in actual["requests"][1]["body"]
+            assert len(generation) == 2
+            assert generation[1]["body"]["recaptchaV2Token"] == "PRIVATE-V2-TOKEN"
+            assert "recaptchaV3Token" not in generation[1]["body"]
             assert any(event["event"] == "rejected" for event in actual["events"])

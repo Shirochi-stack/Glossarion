@@ -62,6 +62,19 @@ _pending_translation_send_lock = threading.Lock()
 _pending_translation_sends = {}
 
 
+def _autharena_retry_is_terminal(error) -> bool:
+    """Do not replay an unknown Arena generation or reopen a cancelled browser."""
+    details = getattr(error, 'details', None)
+    return bool(
+        isinstance(details, dict)
+        and details.get('provider') == 'autharena'
+        and (
+            details.get('request_dispatched') is True
+            or getattr(error, 'error_type', None) == 'cancelled'
+        )
+    )
+
+
 def cancel_queued_translation_sends() -> int:
     """Cancel admitted sends which have not started their provider call.
 
@@ -9689,6 +9702,8 @@ class TranslationProcessor:
                 break
                 
             except UnifiedClientError as e:
+                if _autharena_retry_is_terminal(e):
+                    raise
                 error_msg = str(e)
                 
                 if "stopped by user" in error_msg:
@@ -10887,6 +10902,8 @@ class BatchTranslationProcessor:
                             )
                         break  # Success, exit retry loop
                     except UnifiedClientError as e:
+                        if _autharena_retry_is_terminal(e):
+                            raise
                         error_msg = str(e)
 
                         if chunk_abort_event.is_set():
@@ -22353,6 +22370,24 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     if not retry_timeout_enabled:
         chunk_timeout = None
 
+    def _wrapper_timeout_error(message, actual_model=None):
+        # Snapshot before cancelling/closing transports can clear worker state.
+        # The callback records the actual provider when a fallback client sends.
+        api_tls = api_call_state.get('tls')
+        request_model = (
+            actual_model
+            or api_call_state.get('provider_model')
+            or getattr(api_tls, 'model', None)
+            or getattr(client, 'model', None)
+        )
+        details = None
+        if re.match(r'^autharena\d{0,4}(?:/|$)', str(request_model or '').strip(), re.IGNORECASE):
+            details = {
+                'provider': 'autharena',
+                'request_dispatched': provider_call_started.is_set(),
+            }
+        return UnifiedClientError(message, details=details)
+
     def _clear_watchdog_for_chapter_context() -> None:
         """Clear only this wrapper's abandoned request from the GUI watchdog.
 
@@ -22468,6 +22503,12 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             provider_call_started.set()
 
     def _provider_boundary_callback() -> None:
+        api_tls = api_call_state.get('tls')
+        api_call_state['provider_model'] = (
+            get_current_thread_actual_request_model()
+            or getattr(api_tls, 'model', None)
+            or getattr(client, 'model', None)
+        )
         _mark_provider_call_started()
         if callable(before_send_callback):
             before_send_callback()
@@ -22669,6 +22710,11 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     getattr(result, '_glossarion_actual_model', None),
                     getattr(result, '_glossarion_actual_key', None),
                 )
+                # Keep Arena's dispatch/rejection decision and cancellation type
+                # intact; text-based rate-limit normalization would discard it.
+                error_details = getattr(result, 'details', None)
+                if isinstance(error_details, dict) and error_details.get('provider') == 'autharena':
+                    raise result
                 # For expected errors like rate limits, preserve the error type without extra traceback
                 if hasattr(result, 'error_type') and result.error_type == "rate_limit":
                     raise result
@@ -22739,6 +22785,10 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     return return_value
                     
                 if chunk_timeout is not None and api_time > chunk_timeout:
+                    timeout_error = _wrapper_timeout_error(
+                        f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)",
+                        actual_model=result[3] if len(result) >= 5 else None,
+                    )
                     # Set cleanup flag when chunk timeout occurs
                     if hasattr(client, '_in_cleanup'):
                         client._in_cleanup = True
@@ -22749,7 +22799,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         api_thread.join(timeout=2.0)
                     except Exception:
                         pass
-                    raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
+                    raise timeout_error
                 return api_result
             return result
         except queue.Empty:
@@ -22816,6 +22866,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 raise UnifiedClientError("Translation stopped by user", error_type="cancelled")
             elapsed += check_interval
             if chunk_timeout is not None and elapsed >= chunk_timeout:
+                timeout_error = _wrapper_timeout_error(f"API call timed out after {chunk_timeout} seconds")
                 if hasattr(client, '_in_cleanup'):
                     client._in_cleanup = True
                 _cancel_current_api_call(reason="chunk timeout")
@@ -22826,7 +22877,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     api_thread.join(timeout=2.0)
                 except Exception:
                     pass
-                raise UnifiedClientError(f"API call timed out after {chunk_timeout} seconds")
+                raise timeout_error
 
 def handle_api_error(processor, error, chunk_info=""):
     """Handle API errors with multi-key support"""

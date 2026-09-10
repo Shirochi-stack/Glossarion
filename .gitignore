@@ -128,6 +128,9 @@ tests/**
 !tests/test_authnd_captcha_navigation.py
 !tests/test_autharena.py
 !tests/test_autharena_routing.py
+!tests/test_autharena_gui.py
+!tests/test_autharena_multikey.py
+!tests/test_autharena_browser.py
 !tests/test_authgrok_auth.py
 !tests/test_authgpt_request.py
 !tests/test_openai_token_compatibility.py

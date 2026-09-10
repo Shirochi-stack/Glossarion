@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 
 import pytest
 
@@ -226,6 +227,7 @@ def test_missing_terminal_is_not_success_or_prohibited_fallback(arena_client, mo
     with pytest.raises(api.UnifiedClientError, match='completion event') as caught:
         client._send_autharena([], .2, 99, 'chapter')
     assert caught.value.error_type == 'api_error'
+    assert caught.value.details['request_dispatched'] is True
 
 
 def test_arena_does_not_report_unsupported_reasoning_settings(arena_client, monkeypatch):
@@ -234,3 +236,182 @@ def test_arena_does_not_report_unsupported_reasoning_settings(arena_client, monk
     monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
     monkeypatch.setenv('GPT_EFFORT', 'max')
     assert client._get_thinking_status_label() == ''
+
+
+@pytest.mark.parametrize('route,passed_model,account_id', [
+    ('autharena/model', 'model', 0),
+    ('AUTHARENA0/model', 'autharena0/model', 0),
+    ('autharena4/model', 'model', 4),
+])
+def test_default_pool_and_numbered_routes_remain_distinct(arena_client, monkeypatch, route, passed_model, account_id):
+    client, tls = arena_client
+    tls.model = route
+    selected_account = 2 if route.lower().startswith('autharena0/') else account_id
+
+    def send(**kwargs):
+        assert kwargs['model'] == passed_model
+        assert kwargs['account_id'] == account_id
+        return completed(account_id=selected_account)
+
+    monkeypatch.setattr(api, '_autharena_send', send)
+    response = client._send_autharena([], .2, 99, 'chapter')
+    assert response.raw_response['account_id'] == selected_account
+
+
+@pytest.fixture
+def retrying_arena_client(arena_client, monkeypatch, tmp_path):
+    """Exercise the real provider router, internal retries, and public send wrapper."""
+    for name, value in {
+        'USE_MULTI_API_KEYS': '0', 'MAX_RETRIES': '3', 'RETRY_TIMEOUT': '1',
+        'INDEFINITE_RATE_LIMIT_RETRY': '0', 'BATCH_TRANSLATION': '0',
+        'SEND_INTERVAL_SECONDS': '0', 'THREAD_SUBMISSION_DELAY_SECONDS': '0',
+        'USE_FALLBACK_KEYS': '0', 'USE_GLOSSARY_KEYS': '0',
+        'DISABLE_REFUSAL_CHECKS': '1', 'SYSTEM_PROMPT_TO_USER': '0',
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(api, '_payloads_dir', lambda: str(tmp_path / 'payloads'))
+    monkeypatch.setattr(api.time, 'sleep', lambda *_: None)
+    for name in ('_save_payload', '_save_failed_request', '_save_response', '_track_stats',
+                 '_apply_api_call_stagger', '_apply_thread_submission_delay',
+                 '_refresh_rotation_settings_from_environment'):
+        monkeypatch.setattr(api.UnifiedClient, name, lambda *a, **k: None)
+    for name in ('_api_watchdog_started', '_api_watchdog_finished', '_api_watchdog_record_retry'):
+        monkeypatch.setattr(api, name, lambda *a, **k: None)
+    monkeypatch.setattr(api, '_api_watchdog_mark_in_flight', lambda *a, **k: True)
+    client = api.UnifiedClient('', 'autharena0/gpt-6-astra-medium',
+                               output_dir=str(tmp_path), _skip_cancel_reset=True)
+    client._should_abort_retry = lambda: False
+    client._is_stop_requested = lambda: False
+    client._get_max_retries = lambda: 3
+    client._compute_backoff = lambda *a, **k: 0
+    client._sleep_with_cancel = lambda *a, **k: True
+    client._ensure_thread_client = lambda: None
+    return client
+
+
+@pytest.mark.parametrize('multi_key', [False, True])
+@pytest.mark.parametrize('failure', ['timeout', 'eof', 'parser', 'missing_terminal'])
+def test_outer_send_does_not_replay_ambiguous_arena_generation(
+    retrying_arena_client, monkeypatch, multi_key, failure,
+):
+    client = retrying_arena_client
+    client._multi_key_mode = multi_key
+    attempts = []
+    rotations = []
+    client._handle_rate_limit_for_thread = lambda: rotations.append(True)
+
+    def send(**kwargs):
+        attempts.append(kwargs['model'])
+        kwargs['before_send_callback']()
+        if failure == 'missing_terminal':
+            return {'content': 'Partial', 'finish_reason_explicit': False}
+        error_class = {'timeout': TimeoutError, 'eof': RuntimeError, 'parser': ValueError}[failure]
+        error = error_class(f'Arena response {failure}')
+        error.request_dispatched = True
+        raise error
+
+    monkeypatch.setattr(api, '_autharena_send', send)
+    with pytest.raises(api.UnifiedClientError) as caught:
+        client._send_core([{'role': 'user', 'content': 'Translate this sentence.'}],
+                          .2, 99, context='translation')
+    assert caught.value.details == {'provider': 'autharena', 'request_dispatched': True}
+    assert attempts == ['autharena0/gpt-6-astra-medium']
+    assert rotations == []
+
+
+def test_explicit_arena_rejection_remains_retryable(retrying_arena_client, monkeypatch):
+    client = retrying_arena_client
+    attempts = []
+
+    def send(**kwargs):
+        attempts.append(True)
+        kwargs['before_send_callback']()
+        if len(attempts) == 1:
+            error = RuntimeError('Arena explicitly rejected request')
+            error.status_code = 500
+            # This explicit adapter decision must override the callback's started state.
+            error.request_dispatched = False
+            raise error
+        return completed()
+
+    monkeypatch.setattr(api, '_autharena_send', send)
+    result = client._send_core([{'role': 'user', 'content': 'Translate this sentence.'}],
+                               .2, 99, context='translation')
+    assert result == ('Translated text', 'stop')
+    assert len(attempts) == 2
+
+
+def test_ambiguous_guard_does_not_change_other_provider_retries(retrying_arena_client, monkeypatch):
+    client = retrying_arena_client
+    attempts = []
+
+    def get_response(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise api.UnifiedClientError('Server error', error_type='api_error',
+                                        details={'provider': 'openai', 'request_dispatched': True})
+        return api.UnifiedResponse(content='Translated text', finish_reason='stop')
+
+    monkeypatch.setattr(client, '_get_response', get_response)
+    result = client._send_core([{'role': 'user', 'content': 'Translate this sentence.'}],
+                               .2, 99, context='translation')
+    assert result == ('Translated text', 'stop')
+    assert len(attempts) == 2
+
+
+def test_outer_multi_key_rotation_preserves_ambiguous_error(retrying_arena_client, monkeypatch):
+    client = retrying_arena_client
+    client._multi_key_mode = True
+    error = api.UnifiedClientError('Rate limit response interrupted', error_type='rate_limit',
+                                   http_status=429,
+                                   details={'provider': 'autharena', 'request_dispatched': True})
+    calls = []
+    rotations = []
+
+    def send_internal(*args, **kwargs):
+        calls.append(True)
+        raise error
+
+    monkeypatch.setattr(client, '_send_internal', send_internal)
+    monkeypatch.setattr(client, '_handle_rate_limit_for_thread', lambda: rotations.append(True))
+    with pytest.raises(api.UnifiedClientError) as caught:
+        client._send_core([{'role': 'user', 'content': 'Translate this sentence.'}],
+                          .2, 99, context='translation')
+    assert caught.value is error
+    assert calls == [True]
+    assert rotations == []
+
+
+@pytest.mark.parametrize('method', ['_try_fallback_keys_direct', '_retry_with_main_key',
+                                   '_try_glossary_keys_direct'])
+def test_fallback_pools_stop_after_ambiguous_arena_attempt(
+    retrying_arena_client, monkeypatch, method,
+):
+    client = retrying_arena_client
+    # These tests exercise the actual fallback loops and their temporary clients.
+    client._multi_key_mode = method == '_retry_with_main_key'
+    keys = [{'model': f'autharena{i}/gpt-6-astra-medium', 'api_key': 'unused',
+             'api_call_delay': 0.01} for i in (1, 2)]
+    monkeypatch.setenv('USE_MAIN_KEY_FALLBACK', '0')
+    monkeypatch.setenv('USE_FALLBACK_KEYS', '1')
+    monkeypatch.setenv('USE_GLOSSARY_KEYS', '1')
+    monkeypatch.setenv('FALLBACK_KEYS', json.dumps(keys))
+    monkeypatch.setenv('GLOSSARY_API_KEYS', json.dumps(keys))
+    monkeypatch.setattr(api, '_fallback_key_last_used', {})
+    monkeypatch.setattr(api, '_fallback_key_in_use', set())
+    attempts = []
+
+    def send(**kwargs):
+        attempts.append(kwargs['account_id'])
+        kwargs['before_send_callback']()
+        error = RuntimeError('Arena response disconnected')
+        error.request_dispatched = True
+        raise error
+
+    monkeypatch.setattr(api, '_autharena_send', send)
+    with pytest.raises(api.UnifiedClientError) as caught:
+        getattr(client, method)([{'role': 'user', 'content': 'Translate this sentence.'}],
+                                 .2, 99, context='translation', request_id='arena-pool-test')
+    assert caught.value.details['request_dispatched'] is True
+    assert attempts == [1]
+    assert api._fallback_key_in_use == set()

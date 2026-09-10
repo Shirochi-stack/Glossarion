@@ -243,6 +243,7 @@ app_files = [
 	('authnd_auth.py', '.'),  # NVIDIA Build browser-backed auth
 	('gemini_free.py', '.'),  # Google Search/Gemini browser-backed route
 	('autharena.py', '.'),  # Arena browser-backed Direct chat
+	('autharena_browser.py', '.'),  # Installed Chrome/Edge browser transport
 	('token_encryption.py', '.'),
 
 	# Antigravity Cloud Code proxy
@@ -370,6 +371,7 @@ app_modules = [
 	'authnd_auth',  # NVIDIA Build browser-backed auth
 	'gemini_free',  # Google Search/Gemini browser-backed route
 	'autharena',  # Arena browser-backed Direct chat
+	'autharena_browser',  # Installed Chrome/Edge browser transport
 	'token_encryption',  # Encrypted token storage
 	'ocagy_cli',  # OpenCode + opencode-antigravity-auth
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
