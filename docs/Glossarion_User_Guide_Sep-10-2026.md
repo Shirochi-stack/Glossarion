@@ -182,7 +182,7 @@ Glossarion doesn't translate by itself — it sends your text to an AI company a
 | `authnd/...` | AuthND (browser/token routing — needs the EPUB Library build) |
 | `ocagy0/...`, `ocagy/...`, `ocagy1/...`, ... | OpenCode plus `opencode-antigravity-auth` — no API key; supports pooled or pinned OAuth accounts |
 | `antigravity/...` | Local Antigravity proxy — needs a Google login; Glossarion installs Bun automatically if no runtime is available |
-| `autharena/...`, `autharena0/...`, `autharena1/...`, ... | Local Arena proxy — use **Arena Login**; `autharena0/` rotates accounts, while `autharena/` and `autharena1/` select the first saved account |
+| `autharena/...`, `autharena0/...`, `autharena1/...`, ... | Local Arena proxy — use **Arena Login**; `autharena0/` rotates accounts, `autharena/` selects account **#0**, and `autharena1/` selects account **#1** |
 
 > Glossarion supports **40+ providers**. If yours isn't obvious, open **Manage Models → ℹ️ Model Provider Information** for the full list and the exact prefixes.
 
@@ -1033,17 +1033,17 @@ Successful installations are cached under `~/.glossarion/autharena_proxy` (on Wi
 
 ### Account numbers and rotation
 
-The dropdown starts at **0**, while explicit model prefixes start at **1**:
+Account labels match AuthGPT: the bare prefix selects **#0**, and a positive suffix selects the same numbered account. **`autharena0/`** is reserved for rotation:
 
 | Prefix | What it selects |
 | --- | --- |
-| `autharena/` | First saved account, labelled **0** |
+| `autharena/` | First saved account, labelled **#0** |
 | `autharena0/` | Rotate all saved accounts |
-| `autharena1/` | First saved account, labelled **0** |
-| `autharena2/` | Second saved account, labelled **1** |
-| `autharenaN/` | Saved account labelled **N − 1**, for N ≥ 1 |
+| `autharena1/` | Second saved account, labelled **#1** |
+| `autharena2/` | Third saved account, labelled **#2** |
+| `autharenaN/` | Saved account labelled **#N**, for N ≥ 1 |
 
-**`autharena0/` is rotation, never account 0.** Bare `autharena/` and pooled `autharena0/` hide the inline account dropdown but keep **Arena Login** visible. Explicit numbered routes show numeric account labels and **+ New**. Choose **+ New** to sign into another account. In rotation mode, **Arena Login** opens account management so you can add or reconnect an account.
+**`autharena0/` is rotation, never account #0.** Bare `autharena/` and pooled `autharena0/` hide the inline account dropdown but keep **Arena Login** visible. Explicit numbered routes show **#0**, **#1**, etc., and **+ New**. Choose **+ New** to sign into another account. In rotation mode, **Arena Login** opens account management so you can add or reconnect an account.
 
 Login stays attached to the account and Multi API Key Manager row that started it, even if you change another model while sign-in is open. Every translation request starts a fresh Arena conversation.
 

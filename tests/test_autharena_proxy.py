@@ -23,14 +23,14 @@ def isolated(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("route,slot", [("autharena/m", 0), ("autharena0/m", None),
-                                         ("autharena1/m", 0), ("autharena2/m", 1),
-                                         ("autharena17/m", 16), ("AUTHARENA1/m", 0)])
-def test_prefix_numbers_are_one_based_and_zero_is_only_rotation(route, slot):
+                                         ("autharena1/m", 1), ("autharena2/m", 2),
+                                         ("autharena17/m", 17), ("AUTHARENA1/m", 1)])
+def test_prefix_numbers_match_authgpt_with_zero_reserved_for_rotation(route, slot):
     assert arena.parse_route(route) == (slot, "m")
 
 
 def test_selected_slot_zero_never_generates_rotation():
-    assert arena.route_for_slot(0, "m") == "autharena1/m"
+    assert arena.route_for_slot(0, "m") == "autharena/m"
     assert arena.parse_route(arena.route_for_slot(4, "m"))[0] == 4
 
 
@@ -168,10 +168,10 @@ def test_account_selector_visibility_and_numeric_labels(qt, monkeypatch):
     model[0] = "autharena1/model"
     control.refresh()
     assert not control.accounts.isHidden()
-    assert [control.accounts.itemText(i) for i in range(control.accounts.count())] == ["0", "1", "+ New"]
-    assert control.accounts.currentData() == 0
-    control.select_account(1)
-    assert model[0] == "autharena2/model"
+    assert [control.accounts.itemText(i) for i in range(control.accounts.count())] == ["#0", "#1", "+ New"]
+    assert control.accounts.currentData() == 1
+    control.select_account(0)
+    assert model[0] == "autharena/model"
     parent.close()
 
 
@@ -195,7 +195,9 @@ def test_login_animates_immediately_and_resets(qt, monkeypatch, failure):
     assert control.login_button.text() == "Signing in…"
     assert not control.login_button.icon().isNull()
     angle = control.spinner_angle
-    QTest.qWait(110)
+    deadline = time.monotonic() + 1
+    while control.spinner_angle == angle and time.monotonic() < deadline:
+        QTest.qWait(50)
     assert control.spinner_angle != angle
     control.show_progress("Arena: downloading Chromium")
     assert control.login_button.toolTip() == "Arena: downloading Chromium"
@@ -233,9 +235,9 @@ def test_multi_key_login_control_follows_only_its_row(qt, monkeypatch):
     control = combos[1]._autharena_controls
     control.finished(({"slot": 3}, "autharena2/m", True), None)
     assert combos[0].currentText() == "autharena1/m"
-    assert combos[1].currentText() == "autharena4/m"
+    assert combos[1].currentText() == "autharena3/m"
     combos[1].setCurrentText("other/m")
-    control.finished(({"slot": 5}, "autharena4/m", True), None)
+    control.finished(({"slot": 5}, "autharena3/m", True), None)
     assert combos[1].currentText() == "other/m"
     parent.close()
 

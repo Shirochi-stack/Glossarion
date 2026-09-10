@@ -1,7 +1,7 @@
 """Arena sessions and the automatically provisioned LMArenaBridge runtime.
 
-Route numbers are one-based: autharena1/ is stored slot 0. autharena0/
-is the rotating pool; autharena/ is an alias for autharena1/.
+Route labels match AuthGPT: autharena/ is slot 0, autharena1/ is slot 1.
+autharena0/ is reserved for the rotating pool.
 This file is also the managed Python worker entry point (including frozen builds).
 """
 from __future__ import annotations
@@ -175,12 +175,12 @@ def parse_route(model):
     if not match:
         raise ValueError("Expected autharena/, autharena0/, or autharenaN/.")
     number = match.group(1)
-    slot = None if number and int(number) == 0 else (int(number) - 1 if number else 0)
+    slot = None if number and int(number) == 0 else (int(number) if number else 0)
     return slot, str(model).strip()[match.end():]
 
 
 def route_for_slot(slot, model):
-    return f"autharena{int(slot) + 1}/{model}"
+    return f"autharena{int(slot) if int(slot) else ''}/{model}"
 
 
 @contextlib.contextmanager
@@ -1032,7 +1032,7 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             self.accounts.clear()
             ids = sorted({0, *[a["slot"] for a in list_accounts()], *([] if slot is None else [slot])})
             for aid in ids:
-                self.accounts.addItem(str(aid), aid)
+                self.accounts.addItem(f"#{aid}", aid)
             self.accounts.addItem("+ New", "new")
             self.accounts.setCurrentIndex(max(0, self.accounts.findData(slot)))
             self.accounts.blockSignals(False)
@@ -1053,11 +1053,11 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             slot, _ = parse_route(get_model())
             if slot is None:
                 entries = list_accounts()
-                labels = [str(a["slot"]) for a in entries] + ["+ New"]
+                labels = [f"#{a['slot']}" for a in entries] + ["+ New"]
                 choice, ok = QInputDialog.getItem(self, "Arena Login", "Account", labels, 0, False)
                 if not ok:
                     return
-                slot = None if choice == "+ New" else int(choice)
+                slot = None if choice == "+ New" else int(choice.removeprefix("#"))
             self.start(slot, False)
 
         def start(self, slot, update_route):
@@ -1150,7 +1150,7 @@ if __name__ == "__main__":
         import argparse
         parser = argparse.ArgumentParser(description="Manage Glossarion's Arena proxy; no arguments starts the service until Ctrl+C.")
         parser.add_argument("--status", action="store_true", help="Check health without starting the service or browser")
-        parser.add_argument("--login", metavar="PREFIX", help="Sign in to an account, e.g. autharena1/ for stored account 0")
+        parser.add_argument("--login", metavar="PREFIX", help="Sign in to an account, e.g. autharena/ for account #0, autharena1/ for #1")
         args = parser.parse_args()
         try:
             if args.status:
