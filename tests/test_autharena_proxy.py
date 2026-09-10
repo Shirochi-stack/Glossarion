@@ -325,3 +325,83 @@ def test_interrupted_install_is_not_published(tmp_path, monkeypatch):
         arena._ensure_runtime(log_fn=lambda value: None)
     assert not list(arena.data_dir().glob("bridge-*/ready"))
     assert not list(arena.data_dir().glob("setup-*"))
+
+
+def test_catalog_parser_handles_split_nextjs_frames_and_changed_following_field():
+    records = [{"id": "model-uuid", "publicName": "model-name", "displayName": "日本語", "capabilities": {"chat": True}}]
+    content = '1:{"initialModels":' + json.dumps(records, ensure_ascii=False) + ',"someNewField":true}'
+    parts = [content[:26], content[26:]]
+    html = ''.join('<script>self.__next_f.push(' + json.dumps([1, part], ensure_ascii=False) + ')</script>' for part in parts)
+    assert arena._extract_catalog(html) == records
+    assert arena._extract_catalog('<html>Just a moment...</html>') == []
+
+
+def test_catalog_cache_survives_restart_with_full_model_ids(monkeypatch):
+    import asyncio
+    import subprocess
+    records = [{"id": "model-uuid", "publicName": "test-model", "capabilities": {"chat": True}}]
+    arena._save_catalog(records)
+    async def unavailable(context):
+        raise AssertionError("Fresh cached catalog must not access the browser")
+    monkeypatch.setattr(arena, "_discover_catalog", unavailable)
+    assert asyncio.run(arena._ensure_catalog(None)) == records
+    env = dict(os.environ, PYTHONPATH=str(Path(arena.__file__).parent))
+    code = "import asyncio, autharena_proxy as a; m=asyncio.run(a._ensure_catalog(None)); assert m[0]['id']=='model-uuid'; assert m[0]['capabilities']['chat']; print('CACHED')"
+    result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "CACHED"
+
+
+def test_catalog_refresh_failure_keeps_stale_full_metadata(monkeypatch):
+    import asyncio
+    records = [{"id": "model-uuid", "publicName": "test-model"}]
+    arena._save("models.enc", {"fetched_at": 1, "models": records})
+    before = (arena.data_dir() / "models.enc").read_bytes()
+    async def unavailable(context):
+        raise RuntimeError("Arena catalog page returned HTTP 403.")
+    monkeypatch.setattr(arena, "_discover_catalog", unavailable)
+    assert asyncio.run(arena._ensure_catalog(None)) == records
+    assert (arena.data_dir() / "models.enc").read_bytes() == before
+    with pytest.raises(ValueError, match="retained"):
+        arena._save_catalog([])
+    assert arena._load_catalog()["models"] == records
+
+
+def test_catalog_without_cache_reports_actual_fetch_failure(monkeypatch):
+    import asyncio
+    async def unavailable(context):
+        raise RuntimeError("Arena catalog page returned HTTP 403.")
+    monkeypatch.setattr(arena, "_discover_catalog", unavailable)
+    with pytest.raises(RuntimeError, match="no saved model IDs.*HTTP 403"):
+        asyncio.run(arena._ensure_catalog(None))
+
+
+def test_dispatch_ack_follows_callback_and_progress_ignores_stream_visibility(monkeypatch):
+    order, logs = [], []
+    class Response:
+        ok = True
+        headers = {}
+        def iter_lines(self, **kwargs):
+            for stage in ("captcha", "token", "dispatch", "headers"):
+                yield 'data: ' + json.dumps({"arena_progress": stage})
+            yield event({"content": "done"})
+            yield event(finish="stop")
+            yield "data: [DONE]"
+        def raise_for_status(self):
+            pass
+        def close(self):
+            pass
+    def post(url, **kwargs):
+        if url.endswith('/dispatch'):
+            assert order == ['watchdog']
+            order.append('dispatch')
+        return Response()
+    monkeypatch.setattr(arena, "ensure_proxy_running", lambda **kwargs: {"url": "http://localhost:1", "key": "test"})
+    monkeypatch.setattr(arena.requests, "post", post)
+    result = arena.send_message_stream([], "test", log_fn=logs.append, log_stream=False,
+        before_send_callback=lambda: order.append('watchdog'))
+    assert order == ['watchdog', 'dispatch']
+    assert result['content'] == 'done'
+    assert any('token received' in line for line in logs)
+    assert sum('API call in progress' in line for line in logs) == 1
+    assert not any(line == 'done' for line in logs)

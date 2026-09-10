@@ -131,7 +131,7 @@ class LoginNavigationTest(unittest.TestCase):
     def test_captcha_readiness_and_fresh_tokens_in_browser(self):
         tree = ast.parse(Path(arena.__file__).read_text(encoding="utf-8"))
         script = next(n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)
-                      and isinstance(n.value, str) and n.value.startswith("async ({url, method, payload, sitekey, action})"))
+                      and isinstance(n.value, str) and n.value.startswith("async ({url, method, payload, sitekey, action,"))
         async def run():
             from playwright.async_api import async_playwright
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(RUNTIME.parent / "browsers")
@@ -169,6 +169,24 @@ class LoginNavigationTest(unittest.TestCase):
                         with self.assertRaisesRegex(Exception, "ARENA_CAPTCHA_EMPTY"):
                             await page.evaluate(script, args)
                         self.assertEqual(await page.evaluate("calls.length"), 2)
+                        await page.evaluate("""() => {
+                            const api=grecaptcha.enterprise || grecaptcha;
+                            api.render=(element, options)=> {
+                                if(options.sitekey!=='test-v2-key') throw Error('wrong v2 key');
+                                setTimeout(()=>options.callback('interactive-test-token'),50);
+                            };
+                        }""")
+                        await page.evaluate(script, dict(args, verification=True, v2Sitekey="test-v2-key"))
+                        verified = await page.evaluate("calls[2]")
+                        self.assertEqual(verified["recaptchaV2Token"], "interactive-test-token")
+                        self.assertNotIn("recaptchaV3Token", verified)
+                        await page.evaluate("""() => {
+                            (grecaptcha.enterprise || grecaptcha).render=()=>setTimeout(()=>
+                                Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Cancel request').click(),50);
+                        }""")
+                        with self.assertRaisesRegex(Exception, "ARENA_CAPTCHA_VERIFICATION_CANCELLED"):
+                            await page.evaluate(script, dict(args, verification=True, v2Sitekey="test-v2-key"))
+                        self.assertEqual(await page.evaluate("calls.length"), 3)
                 finally:
                     await browser.close()
         asyncio.run(run())
@@ -258,6 +276,9 @@ class WorkerTest(unittest.TestCase):
 
         original_import = importlib.import_module
 
+        async def discover_catalog(context):
+            return [{"id": "test-model-id", "publicName": "test-model", "organization": "test", "capabilities": {}}]
+
         def import_bridge(name, *args, **kwargs):
             module = original_import(name, *args, **kwargs)
             if name.startswith("arena_slot_") and name.endswith(".src.main"):
@@ -339,6 +360,7 @@ class WorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"AUTHARENA_PROXY_DATA_DIR": root}), \
                 patch.object(arena, "__file__", str(RUNTIME / "autharena_proxy.py")), \
                 patch.object(arena, "_regular_login_browser", login_browser), \
+                patch.object(arena, "_discover_catalog", discover_catalog), \
                 patch("playwright.async_api.async_playwright", Playwright), \
                 patch("uvicorn.Server.serve", serve), patch("importlib.import_module", import_bridge):
             expiration = int(time.time()) + 3600

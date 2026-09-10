@@ -16636,6 +16636,7 @@ class UnifiedClient:
         _model_lower = getattr(self, 'model', '').lower()
         _is_authgem = _model_lower.startswith('authgem')
         _is_authnd = _model_lower.startswith('authnd')
+        _is_autharena = _model_lower.startswith('autharena')
         _is_authza = _model_lower.startswith('authza')
         _is_search = _model_lower.startswith('search')
         _is_native_gemini = _model_lower.startswith('gemini')
@@ -16662,6 +16663,7 @@ class UnifiedClient:
         if (
             not _is_authgem
             and not _is_authnd
+            and not _is_autharena
             and not _is_authza
             and not _is_search
             and not _is_native_gemini
@@ -18269,7 +18271,7 @@ class UnifiedClient:
         try:
             tls = self._get_thread_local_client()
             self._remember_actual_request_model()
-            deferred_provider_boundary = {'authnd', 'authza'}
+            deferred_provider_boundary = {'authnd', 'authza', 'autharena'}
             active_model_lower = str(
                 self._get_active_request_model() or ''
             ).strip().lower()
@@ -18280,7 +18282,7 @@ class UnifiedClient:
             except Exception:
                 actual_provider_lower = ''
             defer_progress_callback = (
-                active_model_lower.startswith(('authnd', 'authza'))
+                active_model_lower.startswith(('authnd', 'authza', 'autharena'))
                 or str(getattr(self, 'client_type', '') or '').lower()
                 in deferred_provider_boundary
                 or actual_provider_lower in deferred_provider_boundary
@@ -27672,10 +27674,40 @@ class UnifiedClient:
         if self._should_abort_retry():
             raise UnifiedClientError("Arena translation cancelled", error_type="cancelled")
         generation = capture_cancel_generation()
+        tls = self._get_thread_local_client()
+        arena_request_id = getattr(tls, 'current_request_id', None)
+        marked = False
+        def provider_started():
+            nonlocal marked
+            if marked:
+                return
+            if self._is_local_cancel_requested() or (
+                not getattr(self, '_ignore_graceful_stop', False)
+                and (os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1')
+            ):
+                raise UnifiedClientError("Arena request cancelled before submission", error_type="cancelled")
+            if arena_request_id:
+                claimed = _api_watchdog_mark_in_flight(arena_request_id, self._get_active_request_model(),
+                    allow_during_graceful=bool(getattr(self, '_ignore_graceful_stop', False)))
+                if not claimed and (self._is_local_cancel_requested() or (
+                    not getattr(self, '_ignore_graceful_stop', False)
+                    and (os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1')
+                )):
+                    raise UnifiedClientError("Arena request cancelled before submission", error_type="cancelled")
+            callback = getattr(tls, 'pre_api_call_callback', None)
+            if callable(callback):
+                tls.last_pre_api_call_callback = callback
+                tls.last_pre_api_call_callback_request_id = arena_request_id
+                callback()
+            if hasattr(tls, 'pre_api_call_callback'):
+                tls.pre_api_call_callback = None
+            marked = True
+        progress_label = f"📤 [{threading.current_thread().name}] {getattr(tls, 'current_request_label', None) or 'request'} ({getattr(tls, 'current_request_context', None) or 'translation'}) API call in progress"
         try:
             result = send_message_stream(messages, model, temperature, max_tokens,
                                          timeout=self.request_timeout, account_id=slot,
-                                         cancel_generation=generation, log_fn=print)
+                                         cancel_generation=generation, log_fn=print,
+                                         before_send_callback=provider_started, progress_label=progress_label)
             return UnifiedResponse(content=result["content"],
                                    finish_reason=self._normalize_finish_reason(result["finish_reason"]),
                                    usage=result.get("usage"), raw_response=result)

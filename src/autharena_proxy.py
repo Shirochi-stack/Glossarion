@@ -28,8 +28,10 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 11
+ADAPTER_VERSION = 13
+CATALOG_TTL_SECONDS = 24 * 60 * 60
 ARENA_RECAPTCHA_V3_SITEKEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0"
+ARENA_RECAPTCHA_V2_SITEKEY = "6Le3_cYsAAAAAGwWOK2RLDgNI15Bh8C0yLBOL1yL"
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
 _lock = threading.RLock()
@@ -244,6 +246,92 @@ def list_accounts():
         accounts = _load("accounts.enc")
     return [{"slot": int(k), "email": v.get("email", ""), "user_id": v.get("user_id", "")}
             for k, v in sorted(accounts.items(), key=lambda x: int(x[0]))]
+
+
+def _catalog_models(value):
+    """Validate full upstream records; display names alone cannot route requests."""
+    if not isinstance(value, list) or not value or len(value) > 20000:
+        return []
+    models = []
+    for item in value:
+        if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                or not item["id"].strip() or not isinstance(item.get("publicName"), str)
+                or not item["publicName"].strip()):
+            return []
+        models.append(item)
+    return models
+
+
+def _load_catalog():
+    with disk_lock():
+        saved = _load("models.enc")
+    if not isinstance(saved, dict) or not _catalog_models(saved.get("models")):
+        return {"models": [], "fetched_at": 0}
+    return saved
+
+
+def _save_catalog(models):
+    models = _catalog_models(models)
+    if not models:
+        raise ValueError("Arena returned no valid model IDs; the saved catalog was retained.")
+    with disk_lock():
+        _save("models.enc", {"models": models, "fetched_at": time.time()})
+    return models
+
+
+def _extract_catalog(page_html):
+    """Decode Next.js stream strings without relying on the following field name."""
+    decoder = json.JSONDecoder()
+    chunks = []
+    for match in re.finditer(r"(?:self\.)?__next_f\.push\(", page_html):
+        try:
+            frame, _ = decoder.raw_decode(page_html[match.end():].lstrip())
+            if isinstance(frame, list) and len(frame) > 1 and frame[0] == 1 and isinstance(frame[1], str):
+                chunks.append(frame[1])
+        except (ValueError, TypeError):
+            continue
+    for content in ("".join(chunks), page_html):
+        for match in re.finditer(r'"initialModels"\s*:\s*', content):
+            try:
+                value, _ = decoder.raw_decode(content[match.end():])
+                models = _catalog_models(value)
+                if models:
+                    return models
+            except ValueError:
+                continue
+    return []
+
+
+async def _discover_catalog(context):
+    import asyncio
+    page = await context.new_page()
+    try:
+        response = await page.goto("https://arena.ai/", wait_until="domcontentloaded", timeout=30000)
+        if response is not None and response.status >= 400:
+            raise RuntimeError(f"Arena catalog page returned HTTP {response.status}.")
+        for _ in range(10):
+            models = _extract_catalog(await page.content())
+            if models:
+                return models
+            title = (await page.title()).lower()
+            if "just a moment" in title or "verify you are human" in title:
+                raise RuntimeError("Arena is requesting browser verification before loading its catalog.")
+            await asyncio.sleep(.5)
+        raise RuntimeError("Arena loaded, but its page did not contain readable model IDs.")
+    finally:
+        await page.close()
+
+
+async def _ensure_catalog(context):
+    saved = _load_catalog()
+    if saved["models"] and time.time() - float(saved.get("fetched_at", 0)) < CATALOG_TTL_SECONDS:
+        return saved["models"]
+    try:
+        return _save_catalog(await _discover_catalog(context))
+    except Exception as exc:
+        if saved["models"]:
+            return saved["models"]
+        raise RuntimeError(f"Arena has no saved model IDs and catalog retrieval failed: {exc} Open Arena Login to refresh the catalog from its browser.") from exc
 
 
 def _env():
@@ -474,7 +562,7 @@ def visible_stream():
     return os.getenv(name, default).strip().lower() not in ("", "0", "false", "no", "off")
 
 
-def consume_stream(lines, log_fn=print, log_stream=True, cancel_generation=None):
+def consume_stream(lines, log_fn=print, log_stream=True, cancel_generation=None, progress_callback=None):
     text, thinking, usage, finish = [], [], None, None
     done = False
     for line in lines:
@@ -489,6 +577,10 @@ def consume_stream(lines, log_fn=print, log_stream=True, cancel_generation=None)
             done = True
             break
         event = json.loads(data)
+        if event.get("arena_progress"):
+            if progress_callback:
+                progress_callback(event["arena_progress"])
+            continue
         if event.get("error"):
             error = event["error"]
             raise RuntimeError("Arena stream failed: " + str(error.get("message", "upstream error") if isinstance(error, dict) else error))
@@ -512,14 +604,15 @@ def consume_stream(lines, log_fn=print, log_stream=True, cancel_generation=None)
 
 
 def send_message_stream(messages, model, temperature=0.7, max_tokens=None, timeout=600,
-                        log_fn=print, log_stream=None, account_id=0, cancel_generation=None):
+                        log_fn=print, log_stream=None, account_id=0, cancel_generation=None,
+                        before_send_callback=None, progress_label=None):
     generation = capture_cancel_generation() if cancel_generation is None else cancel_generation
     if is_cancel_generation_cancelled(generation):
         raise RuntimeError("Arena stream cancelled")
     status = ensure_proxy_running(log_fn=log_fn)
     if is_cancel_generation_cancelled(generation):
         raise RuntimeError("Arena stream cancelled")
-    payload = {"model": model, "messages": messages, "stream": True, "temperature": temperature, "account_slot": account_id}
+    payload = {"model": model, "messages": messages, "stream": True, "temperature": temperature, "account_slot": account_id, "dispatch_ack": True}
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
     request_id = secrets.token_hex(16)
@@ -527,7 +620,32 @@ def send_message_stream(messages, model, temperature=0.7, max_tokens=None, timeo
     with _lock:
         _pending_requests[request_id] = status
     response = None
+    def progress(stage):
+        if stage == "dispatch":
+            if is_cancel_generation_cancelled(generation):
+                raise RuntimeError("Arena stream cancelled")
+            if before_send_callback:
+                before_send_callback()
+            approved = requests.post(status["url"] + "/dispatch", json={"id": request_id},
+                                     headers={"Authorization": "Bearer " + status["key"]}, timeout=10)
+            approved.raise_for_status()
+            if log_fn:
+                log_fn("📨 Arena: captcha token acquired; sending Arena request")
+                log_fn(progress_label or f"📤 [{threading.current_thread().name}] API call in progress")
+        elif log_fn:
+            if stage.startswith("headers:"):
+                log_fn("📥 Arena: response headers received (HTTP " + stage.split(":", 1)[1] + ")")
+                return
+            labels = {"captcha": "🔐 Arena: requesting a fresh captcha token…",
+                      "token": "✅ Arena: captcha token received",
+                      "retry": "🔁 Arena: captcha rejected; retrying with a fresh token",
+                      "verification": "🔐 Arena: verification required. Complete the CAPTCHA in the Arena Verification browser window; this request will resume automatically.",
+                      "headers": "📥 Arena: response headers received"}
+            if stage in labels:
+                log_fn(labels[stage])
     try:
+        if log_fn:
+            log_fn("Arena: preparing saved session and browser…")
         if is_cancel_generation_cancelled(generation):
             raise RuntimeError("Arena stream cancelled")
         response = requests.post(status["url"] + "/v1/chat/completions", json=payload,
@@ -546,8 +664,11 @@ def send_message_stream(messages, model, temperature=0.7, max_tokens=None, timeo
             log_fn(f"Arena: using account #{selected} ({identity})" + (" — rotation" if account_id is None else ""))
         response.encoding = "utf-8"
         return consume_stream(response.iter_lines(decode_unicode=True, chunk_size=1), log_fn,
-                              visible_stream() if log_stream is None else log_stream, generation)
+                              visible_stream() if log_stream is None else log_stream, generation, progress)
     except Exception:
+        with contextlib.suppress(Exception):
+            requests.post(status["url"] + "/cancel", json={"id": request_id},
+                          headers={"Authorization": "Bearer " + status["key"]}, timeout=2)
         if is_cancel_generation_cancelled(generation):
             raise RuntimeError("Arena stream cancelled") from None
         raise
@@ -637,6 +758,7 @@ async def _serve_worker(key):
     cursor = 0
     jobs = {}
     cancelled_jobs = set()
+    dispatch_acks = {}
 
     @app.middleware("http")
     async def authorize(request, call_next):
@@ -708,7 +830,19 @@ async def _serve_worker(key):
                         if previous:
                             async with previous["lock"]:
                                 await previous["context"].close()
-                        return {"slot": slot, "email": account["email"]}
+                        # Capture full routing metadata while the regular login
+                        # browser is available; background requests can reuse it.
+                        catalog_cached = False
+                        try:
+                            page_models = _extract_catalog(await page.content())
+                            if page_models:
+                                _save_catalog(page_models)
+                            else:
+                                await _ensure_catalog(context)
+                            catalog_cached = True
+                        except Exception:
+                            pass  # Keep the successful encrypted login.
+                        return {"slot": slot, "email": account["email"], "catalog_cached": catalog_cached}
                     if not clicked:
                         clicked = await _open_arena_login(page, navigation)
                     await asyncio.sleep(1 if clicked else .2)
@@ -767,14 +901,23 @@ async def _serve_worker(key):
         cfg = {"auth_tokens": [account["token"]], "auth_token": account["token"], "api_keys": [{"key": key, "rpm": 100000}],
                "persist_arena_auth_cookie": False, "browser_cookies": {c["name"]: c["value"] for c in account["cookies"]}}
         config_module._apply_config_defaults(cfg)
-        models = []
+        try:
+            models = list(await _ensure_catalog(context))
+        except BaseException as exc:
+            await context.close()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise HTTPException(503, str(exc)) from exc
         def save_config(value, **kwargs):
             cfg.update(copy.deepcopy(value))
+        def save_models(value):
+            validated = _save_catalog(value)
+            models[:] = validated
         for module in (main, config_module):
             module.get_config = lambda: copy.deepcopy(cfg)
             module.save_config = save_config
             module.get_models = lambda: list(models)
-            module.save_models = lambda value: (models.clear(), models.extend(value))
+            module.save_models = save_models
         main.DEBUG = False
         main.debug_print = lambda *args, **kwargs: None
         main.print = lambda *args, **kwargs: None
@@ -801,18 +944,16 @@ async def _serve_worker(key):
         main.maybe_refresh_expired_auth_tokens = no_refresh
         main.maybe_refresh_expired_auth_tokens_via_lmarena_http = no_refresh
         main.get_cached_recaptcha_token = lambda: ""
-        try:
-            await main.get_initial_data()
-        except BaseException:
-            await context.close()
-            raise
-        if not models:
-            await context.close()
-            raise HTTPException(503, "Arena's model catalog was unavailable. Complete any browser challenge and retry.")
+        async def refresh_initial_data():
+            models[:] = await _ensure_catalog(context)
+        main.get_initial_data = refresh_initial_data
         main.STRICT_BROWSER_FETCH_MODELS = {m["publicName"] for m in models}
         state = {"main": main, "context": context, "lock": asyncio.Lock(), "models": models, "submitted": False, "usage": None}
 
         async def fetch(http_method, url, payload, auth_token="", timeout_seconds=120, **kwargs):
+            verification = bool(kwargs.pop("_verification", False))
+            if verification:
+                timeout_seconds = max(timeout_seconds, 360)
             from urllib.parse import urlparse
             parsed = urlparse(url)
             if parsed.hostname not in ("arena.ai", "lmarena.ai"):
@@ -831,14 +972,23 @@ async def _serve_worker(key):
             result = {"status": 502, "headers": {}}
             async def emit(source, item):
                 if item.get("dispatching"):
+                    if state.get("dispatch_ack") is not None:
+                        state["dispatch_ack"].clear()
+                        await state["events"].put({"arena_progress": "dispatch"})
+                        await asyncio.wait_for(state["dispatch_ack"].wait(), 30)
                     state["dispatched"] = True
+                elif item.get("token_received"):
+                    await state["events"].put({"arena_progress": "token"})
                 elif "status" in item:
                     result.update(item)
                     headers_ready.set()
+                    await state["events"].put({"arena_progress": "headers:" + str(item["status"])})
                 elif "line" in item:
                     await queue.put(item["line"])
             await page.expose_binding("arenaEmit", emit)
             await page.goto("https://arena.ai/", wait_until="domcontentloaded")
+            if verification:
+                await page.bring_to_front()
             sitekey, action = main.get_recaptcha_settings(cfg)
             # Arena's getRecaptchaV3Token uses this distinct v3 key. The loader
             # render parameter may instead be its v2 widget key; they are not
@@ -846,7 +996,8 @@ async def _serve_worker(key):
             sitekey = ARENA_RECAPTCHA_V3_SITEKEY
             async def pump():
                 try:
-                    await page.evaluate(r"""async ({url, method, payload, sitekey, action}) => {
+                    await state["events"].put({"arena_progress": "captcha"})
+                    await page.evaluate(r"""async ({url, method, payload, sitekey, action, verification, v2Sitekey}) => {
                         // DOMContentLoaded can precede Arena's reCAPTCHA loader.
                         // Never submit the bridge's empty/stale cached token.
                         delete payload.recaptchaV2Token;
@@ -871,14 +1022,36 @@ async def _serve_worker(key):
                             throw new Error('ARENA_CAPTCHA_NOT_READY');
                         let timer;
                         try {
-                            const token = await Promise.race([
+                            let token;
+                            if (verification) {
+                                if (typeof api.render !== 'function') throw new Error('ARENA_CAPTCHA_V2_UNAVAILABLE');
+                                const panel = document.createElement('div');
+                                panel.style.cssText='position:fixed;inset:0;z-index:10000;background:#202123;color:white;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;font:18px sans-serif';
+                                const title=document.createElement('h1'); title.textContent='Arena Verification';
+                                const info=document.createElement('p'); info.textContent='Complete the verification below. Glossarion will resume your request automatically.';
+                                const widget=document.createElement('div');
+                                const cancel=document.createElement('button'); cancel.textContent='Cancel request';
+                                panel.append(title,info,widget,cancel); document.body.append(panel);
+                                document.title='Arena Verification';
+                                try {
+                                    token = await new Promise((resolve,reject) => {
+                                        timer=setTimeout(()=>reject(new Error('ARENA_CAPTCHA_VERIFICATION_TIMEOUT')),300000);
+                                        cancel.onclick=()=>reject(new Error('ARENA_CAPTCHA_VERIFICATION_CANCELLED'));
+                                        api.ready(()=>api.render(widget,{sitekey:v2Sitekey,theme:'dark',callback:resolve,
+                                            'error-callback':()=>reject(new Error('ARENA_CAPTCHA_VERIFICATION_ERROR')),
+                                            'expired-callback':()=>reject(new Error('ARENA_CAPTCHA_VERIFICATION_EXPIRED'))}));
+                                    });
+                                } finally { panel.remove(); }
+                            } else token = await Promise.race([
                                 new Promise((resolve, reject) => api.ready(() => {
                                     Promise.resolve().then(() => api.execute(activeKey, {action:'chat_submit'})).then(resolve,reject);
                                 })),
                                 new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('ARENA_CAPTCHA_TIMEOUT')), 20000); })
                             ]);
                             if (typeof token !== 'string' || !token.trim()) throw new Error('ARENA_CAPTCHA_EMPTY');
-                            payload.recaptchaV3Token = token;
+                            if (verification) payload.recaptchaV2Token = token;
+                            else payload.recaptchaV3Token = token;
+                            await arenaEmit({token_received:true});
                         } finally { clearTimeout(timer); }
                         await arenaEmit({dispatching:true});
                         const response = await fetch(url, {method, credentials:'include',
@@ -913,7 +1086,8 @@ async def _serve_worker(key):
                         }
                         if (pending) await arenaEmit({line:pending});
                     }""", {"url": "https://arena.ai" + parsed.path, "method": http_method, "payload": payload,
-                             "sitekey": sitekey, "action": action})
+                             "sitekey": sitekey, "action": action, "verification": verification,
+                             "v2Sitekey": ARENA_RECAPTCHA_V2_SITEKEY})
                 finally:
                     headers_ready.set()
                     done_event.set()
@@ -972,14 +1146,49 @@ async def _serve_worker(key):
                 try:
                     response = await fetch(*args, **kwargs)
                     if response.status_code not in (401, 403):
+                        if response.status_code >= 400:
+                            state["terminal_error"] = transport.BrowserFetchStreamResponse(
+                                response.status_code, {}, text=response.text)
                         return response
                     detail = f"Arena HTTP {response.status_code}: {response.text}"
                     captcha_rejected = response.status_code == 403 and "captcha" in response.text.lower()
                     await response.aclose()
                     if captcha_rejected:
                         if attempt == 0:
-                            # Fresh page and fresh token, retaining the same login.
-                            continue
+                            await state["events"].put({"arena_progress": "verification"})
+                            async with login_lock:
+                                original_context = context
+                                lease = _regular_login_browser(playwright)
+                                context = await lease.__aenter__()
+                                try:
+                                    await context.add_cookies(await original_context.cookies(["https://arena.ai/", "https://lmarena.ai/"]))
+                                    verified = await fetch(*args, **dict(kwargs, _verification=True))
+                                except BaseException:
+                                    await lease.__aexit__(None, None, None)
+                                    context = original_context
+                                    raise
+                                # Keep the verification context through the stream;
+                                # return to the headless account context afterward.
+                                original_close = verified.aclose
+                                closed = False
+                                async def close_verified():
+                                    nonlocal context, closed
+                                    if closed:
+                                        return
+                                    closed = True
+                                    try:
+                                        await original_close()
+                                        await original_context.add_cookies(await context.cookies(["https://arena.ai/", "https://lmarena.ai/"]))
+                                    finally:
+                                        await lease.__aexit__(None, None, None)
+                                        context = original_context
+                                verified.aclose = close_verified
+                                if verified.status_code >= 400:
+                                    detail = f"Arena HTTP {verified.status_code}: {verified.text} Verification was not accepted."
+                                    await verified.aclose()
+                                    state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=detail)
+                                    return state["terminal_error"]
+                                return verified
                         detail += " Arena rejected a fresh CAPTCHA token. Complete any verification offered on Arena's website before retrying."
                         state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=detail)
                         return state["terminal_error"]
@@ -992,7 +1201,10 @@ async def _serve_worker(key):
                     raise
                 except Exception as exc:
                     if "ARENA_CAPTCHA_" in str(exc):
-                        detail = "Arena CAPTCHA did not become ready or returned an empty token; no translation was submitted. Check whether Arena's verification scripts are blocked."
+                        marker = re.search(r"ARENA_CAPTCHA_[A-Z_]+", str(exc)).group(0)
+                        detail = ("Arena verification was cancelled; no additional translation was submitted."
+                                  if "CANCELLED" in str(exc) else
+                                  f"Arena CAPTCHA could not complete ({marker}); no additional translation was submitted. Check the Arena Verification window and whether verification scripts are blocked.")
                         state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=detail)
                         return state["terminal_error"]
                     detail = f"Arena browser connection failed ({type(exc).__name__})."
@@ -1028,6 +1240,9 @@ async def _serve_worker(key):
         if not accounts:
             return {"data": []}
         state = await get_slot(accounts[0]["slot"])
+        async with state["lock"]:
+            state["models"][:] = await _ensure_catalog(state["context"])
+            state["main"].STRICT_BROWSER_FETCH_MODELS = {m["publicName"] for m in state["models"]}
         return {"data": [{"id": m["publicName"]} for m in state["models"]]}
 
     @app.post("/cancel")
@@ -1040,6 +1255,14 @@ async def _serve_worker(key):
         if task is not None:
             task.cancel()
         return {"cancelled": True}
+
+    @app.post("/dispatch")
+    async def approve_dispatch(request: Request):
+        request_id = str((await request.json()).get("id", ""))
+        if request_id in cancelled_jobs or request_id not in dispatch_acks:
+            raise HTTPException(409, "Arena request is no longer waiting to send")
+        dispatch_acks[request_id].set()
+        return {"approved": True}
 
     @app.post("/v1/chat/completions")
     async def chat(request: Request):
@@ -1068,6 +1291,7 @@ async def _serve_worker(key):
         main = state["main"]
         body["stream"] = True
         body.pop("conversation_id", None)
+        dispatch_ack = body.pop("dispatch_ack", False)
         request._body = json.dumps(body).encode()
         request._json = body
         await state["lock"].acquire()
@@ -1075,16 +1299,22 @@ async def _serve_worker(key):
         state["submitted"] = False
         state["terminal_error"] = None
         state["usage"] = None
+        state["events"] = asyncio.Queue(maxsize=64)
+        state["dispatch_ack"] = asyncio.Event() if dispatch_ack else None
+        if state["dispatch_ack"] is not None:
+            dispatch_acks[request_id] = state["dispatch_ack"]
         try:
             response = await main.api_chat_completions(request, {"key": key, "rpm": 100000})
         except BaseException:
+            dispatch_acks.pop(request_id, None)
             state["lock"].release()
             raise
         if not hasattr(response, "body_iterator"):
+            dispatch_acks.pop(request_id, None)
             state["lock"].release()
             jobs.pop(request_id, None)
             return response
-        async def chunks():
+        async def upstream_chunks():
             try:
                 jobs[request_id] = asyncio.current_task()
                 if request_id in cancelled_jobs:
@@ -1103,6 +1333,41 @@ async def _serve_worker(key):
                 state["lock"].release()
                 jobs.pop(request_id, None)
                 cancelled_jobs.discard(request_id)
+        async def chunks():
+            events = state["events"]
+            end = object()
+            async def produce():
+                upstream = upstream_chunks()
+                try:
+                    async for chunk in upstream:
+                        await events.put(chunk)
+                except asyncio.CancelledError:
+                    with contextlib.suppress(asyncio.QueueFull):
+                        events.put_nowait(asyncio.CancelledError())
+                    raise
+                except BaseException as exc:
+                    await events.put(exc)
+                finally:
+                    await upstream.aclose()
+                await events.put(end)
+            producer = asyncio.create_task(produce())
+            try:
+                while True:
+                    try:
+                        item = await asyncio.wait_for(events.get(), 5)
+                    except asyncio.TimeoutError:
+                        yield ": Arena request pending\n\n"
+                        continue
+                    if item is end:
+                        break
+                    if isinstance(item, BaseException):
+                        raise item
+                    yield "data: " + json.dumps(item) + "\n\n" if isinstance(item, dict) else item
+            finally:
+                dispatch_acks.pop(request_id, None)
+                producer.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await producer
         return StreamingResponse(chunks(), media_type="text/event-stream",
                                  headers={"X-Arena-Account-Slot": str(slot)})
 
@@ -1282,6 +1547,8 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
                     _, model = parse_route(original)
                     set_model(route_for_slot(account["slot"], model))
                 self.progress.emit(f"✅ Arena account #{account['slot']} ({account.get('email') or 'saved account'}) connected.")
+                if account.get("catalog_cached") is False:
+                    self.progress.emit("Arena login was saved, but model IDs could not be refreshed. The last successful catalog will be reused if available.")
                 if on_login:
                     on_login()
             self.refresh()

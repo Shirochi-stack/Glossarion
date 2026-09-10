@@ -48,11 +48,23 @@ streaming and generic batch-streaming toggles do not disable this transport.
 Interrupted streams are errors rather than completed translations.
 
 Requests wait for Arena's reCAPTCHA loader and use a fresh token immediately
-before submission. A rejected CAPTCHA gets one fresh-page/token retry without
-resetting account credentials. Missing tokens stop submission, and persistent
-rejection asks the user to complete any verification available on Arena's website.
+before submission. A rejected CAPTCHA opens an app-owned Arena Verification
+browser for interactive v2 verification. Complete the challenge to resume the
+rejected request once; cancellation or failed verification stops it. Successful
+streams and partial output are never replayed. This live fallback still needs
+verification against Arena. Account credentials remain encrypted.
+
+Token requested/received, submission, and response-header stages are logged
+without token values. The application acknowledges dispatch before the worker
+sends to Arena, starting the watchdog and API-call progress at that boundary
+rather than during browser and CAPTCHA preparation.
 
 `AUTHARENA_PROXY_DATA_DIR` changes the runtime and browser installation location.
+The proxy stores full model IDs and metadata in `models.enc`, separately from
+the GUI's display-name catalog. It reuses this cache across restarts for 24 hours
+and retains the last successful records if a refresh is blocked or fails.
+Arena Login also captures these records from its browser. A cache failure now
+reports whether the page was blocked or its model data could not be parsed.
 Personal browser cookie databases are never read. The temporary login profile
 is removed after its browser closes; only captured Arena credentials are retained
 in the encrypted account store. Translation contexts remain isolated per account.
