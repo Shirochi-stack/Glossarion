@@ -104,6 +104,7 @@
 * **Config Backup System** — automatic JSON config backups with atomic writes
 * **AuthGPT OAuth** — use your ChatGPT subscription directly via OAuth token flow
 * **AuthGrok Browser Login & Pooling** — sign in to multiple xAI/Grok accounts with deterministic numbered slots, or use `authgrok0/` for automatic rotation
+* **AuthArena Browser Login & Pooling** — use **Arena Login** to save encrypted Arena sessions, with numbered accounts or automatic rotation through `autharena0/`
 * **OpenCode Antigravity OAuth** — use `ocagy0/` for the plugin-managed account pool or numbered OcAgy routes for deterministic batch-account selection, including Gemini 3.1 Pro High
 
 ---
@@ -128,6 +129,7 @@
 | **Groq** | `groq/*` | groq/llama-3.3-70b-versatile, groq/meta-llama/llama-4-maverick-17b |
 | **AuthGPT** | `authgpt/*` | authgpt/gpt-5.4, authgpt/gpt-5.3-codex, authgpt/gpt-5.2 |
 | **AuthGrok** | `authgrok0/*`, `authgrok/*`, `authgrokN/*` | authgrok0/grok-4.5, authgrok/grok-4.5, authgrok1/grok-build |
+| **AuthArena** | `autharena/*`, `autharena0/*`, `autharenaN/*` | autharena/deepseek-v4-pro-low, autharena/kimi-k3, autharena/gpt-5.6-sol-medium |
 | **AuthCD** | `authcd/*` | authcd/claude-sonnet-4-6, authcd/claude-haiku-4-5-20251001 |
 | **AuthGem** | `authgem/*`, `authgem-vertex/*` | authgem/gemini-3.1-pro-preview, authgem-vertex/gemini-3.1-pro-preview |
 | **Antigravity** | `antigravity/*` | antigravity/claude-opus-4-6-thinking-high, antigravity/gemini-3.1-pro-low |
@@ -152,6 +154,8 @@
 
 > **OcAgy login and account slots:** OcAgy is separate from the local `antigravity/` proxy. Click **OCAGY Login**; Glossarion installs OpenCode and `opencode-antigravity-auth` automatically when needed, then opens the login so you can choose **Google → OAuth with Google (Antigravity)**. No API key is required. `ocagy0/...` preserves the plugin-managed shared pool/current behavior; `ocagy/...` pins saved account #1, `ocagy1/...` pins account #2, `ocagy2/...` pins account #3, and so on. A pinned route fails clearly if that slot is missing, disabled, or out of quota instead of silently switching accounts.
 
+> **AuthArena login and account pool:** Click **Arena Login** in the main window or Multi API Key Manager. Glossarion automatically installs its managed LMArenaBridge runtime and opens Arena sign-in; no API key is required. This uses browser-session authentication, not official Arena OAuth. Saved sessions are encrypted. `autharena/` selects account #0, `autharena0/` rotates all saved accounts, and `autharena1/`, `autharena2/`, and later numbered routes select their matching account numbers. AuthArena supports real-time streaming and parallel batch requests, with a fresh conversation for each request. Website login and security challenges remain interactive. See [AuthArena proxy details](docs/autharena_proxy.md).
+
 Custom prefix routing is supported for user-defined OpenAI-compatible endpoints; add the prefix route in Model Manager, then use `prefix/model-name` in the model field.
 
 > **Note:** Many more providers are supported — including Baichuan, Zhipu AI (GLM), Moonshot/Kimi, Baidu ERNIE, Tencent Hunyuan, ByteDance Doubao, MiniMax, Meta Llama, Microsoft Phi, Falcon, and others. See `model_options.py` and `unified_api_client.py` for the full catalog.
@@ -163,9 +167,10 @@ Custom endpoints can use either a base URL or a user-defined prefix route for se
 2. **ElectronHub** — single API key for access to models from multiple providers
 3. **AuthGPT** — use your ChatGPT subscription via OAuth (no API key needed)
 4. **AuthGrok** — type `authgrok/grok-4.5`, click **Grok Login**, and sign in to xAI (Google sign-in is available on xAI's page)
-5. **OcAgy** — use `ocagy0/gemini-3.1-pro-high` for automatic plugin account rotation or a numbered account route for batch translation, then use **OCAGY Login**; Glossarion installs the required OpenCode runtime and auth plugin when needed (no API key required)
-6. **Antigravity** — local Cloud Code proxy on `localhost:3000` via `Shirochi-stack/antigravity-proxy` (no API key needed)
-7. **Custom Endpoints** — configure base URL for self-hosted or alternative endpoints
+5. **AuthArena** — type `autharena/deepseek-v4-pro-low`, click **Arena Login**, and sign in to Arena; the local proxy and its dependencies are installed automatically (no API key required)
+6. **OcAgy** — use `ocagy0/gemini-3.1-pro-high` for automatic plugin account rotation or a numbered account route for batch translation, then use **OCAGY Login**; Glossarion installs the required OpenCode runtime and auth plugin when needed (no API key required)
+7. **Antigravity** — local Cloud Code proxy on `localhost:3000` via `Shirochi-stack/antigravity-proxy` (no API key needed)
+8. **Custom Endpoints** — configure base URL for self-hosted or alternative endpoints
 
 ### Manga Translation Setup
 1. Create a Google Cloud Project (or Azure AI resource)
@@ -329,6 +334,7 @@ Glossarion/
 │   ├── other_settings.py           # Advanced settings dialogs
 │   ├── authgpt_auth.py             # ChatGPT OAuth integration
 │   ├── authgrok_auth.py            # xAI/Grok OAuth integration
+│   ├── autharena_proxy.py          # Arena browser-session proxy and streaming
 │   ├── api_key_encryption.py       # API key encryption at rest
 │   ├── config_backup.py            # Config backup management
 │   ├── dpi_setup.py                # DPI awareness configuration

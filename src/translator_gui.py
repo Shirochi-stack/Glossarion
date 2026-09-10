@@ -20743,6 +20743,20 @@ Recent translations to summarize:
             <b>ℹ️ Tip:</b> Click the <b>🔐 ChatGPT Login</b> button next to the model dropdown to authenticate.
         </p>
 
+        <h4>Arena Proxy (autharena/)</h4>
+        <p>Use your Arena account — no API key needed. Supports real-time streaming and parallel batch requests.</p>
+        <ul>
+            <li><b>autharena/deepseek-v4-pro-low</b> - DeepSeek V4 Pro (low reasoning)</li>
+            <li><b>autharena/kimi-k3</b> - Kimi K3</li>
+            <li><b>autharena/gpt-5.6-sol-medium</b> - GPT-5.6 Sol (medium reasoning)</li>
+        </ul>
+        <p><code>autharena/</code> selects account #0; <code>autharena0/</code> rotates all saved accounts.
+            Numbered prefixes such as <code>autharena1/</code> select the matching account number (#1).</p>
+        <p style="color: #34d399; padding: 4px; font-size: 11px;">
+            <b>ℹ️ Tip:</b> Click <b>Arena Login</b> next to the model dropdown or in the multi API key manager.
+            Setup is automatic; complete sign-in in the browser. Saved sessions are encrypted.
+        </p>
+
         <h4>Grok Account (authgrok/)</h4>
         <p>Use Grok through an xAI account OAuth session — no API key needed</p>
         <ul>
@@ -44143,6 +44157,7 @@ Important rules:
                 ("🔧", "groq/", "Groq", "Ultra-fast inference", "#241c0c", "#f5b820"),
                 ("☁️", "vertex/", "Google Vertex", "Enterprise Google Cloud AI", "#181e28", "#b0c0d8"),
                 ("🔑", "authgpt/", "AuthGPT", "ChatGPT via OAuth login", "#281418", "#e88080"),
+                ("🏟️", "autharena/", "AuthArena", "Arena Login; no API key", "#123028", "#34d399"),
                 ("✕", "authgrok/", "AuthGrok", "Grok via xAI OAuth login", "#111111", "#d8d8d8"),
                 ("🔒", "authcd/", "AuthCD", "Claude via CLI login", "#1e1438", "#d97706"),
                 ("☁️", "authgem-vertex/", "AuthGem Vertex", "Vertex AI (GCP billing)", "#143840", "#34a853"),
