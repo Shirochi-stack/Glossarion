@@ -175,6 +175,51 @@ def test_account_selector_visibility_and_numeric_labels(qt, monkeypatch):
     parent.close()
 
 
+@pytest.mark.parametrize("failure", [False, True])
+def test_login_animates_immediately_and_resets(qt, monkeypatch, failure):
+    from PySide6.QtTest import QTest
+    widgets, app = qt
+    monkeypatch.setattr(arena, "list_accounts", lambda: [])
+    monkeypatch.setattr(widgets.QMessageBox, "warning", lambda *args: None)
+    class PendingWorker:
+        def __init__(self, **kwargs):
+            pass
+        def start(self):
+            pass
+    monkeypatch.setattr(arena.threading, "Thread", PendingWorker)
+    parent = widgets.QWidget()
+    control = arena.create_login_controls(parent, lambda: "autharena1/m", lambda value: None, log_fn=lambda value: None)
+    control.start(0, False)
+    assert control.busy and control.spinner.isActive()
+    assert not control.login_button.isEnabled()
+    assert control.login_button.text() == "Signing in…"
+    assert not control.login_button.icon().isNull()
+    angle = control.spinner_angle
+    QTest.qWait(110)
+    assert control.spinner_angle != angle
+    control.show_progress("Arena: downloading Chromium")
+    assert control.login_button.toolTip() == "Arena: downloading Chromium"
+    control.finished(None if failure else ({"slot": 0}, "autharena1/m", False), "Test failure" if failure else None)
+    assert not control.spinner.isActive()
+    assert control.login_button.isEnabled()
+    assert control.login_button.icon().isNull()
+    assert control.login_button.text() == "Arena Login"
+    parent.close()
+
+
+def test_login_reuses_started_service(monkeypatch):
+    state = {"url": "http://127.0.0.1:12345", "key": "test"}
+    calls = []
+    monkeypatch.setattr(arena, "ensure_proxy_running", lambda **kwargs: calls.append("start") or state)
+    def request(path, payload, **kwargs):
+        assert kwargs["status"] is state
+        assert path == "/login" and payload == {"slot": 0}
+        return {"slot": 0}
+    monkeypatch.setattr(arena, "_request", request)
+    assert arena.open_login(log_fn=None) == {"slot": 0}
+    assert calls == ["start"]
+
+
 def test_multi_key_login_control_follows_only_its_row(qt, monkeypatch):
     widgets, app = qt
     monkeypatch.setattr(arena, "list_accounts", lambda: [])

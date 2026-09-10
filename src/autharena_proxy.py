@@ -315,8 +315,9 @@ def ensure_proxy_running(log_fn=print, notify_started=True):
     raise RuntimeError("Arena proxy did not become healthy.")
 
 
-def _request(path, payload=None, timeout=600):
-    status = ensure_proxy_running()
+def _request(path, payload=None, timeout=600, status=None):
+    if status is None:
+        status = ensure_proxy_running()
     method = requests.post if payload is not None else requests.get
     response = method(status["url"] + path, headers={"Authorization": "Bearer " + status["key"]},
                       **({"json": payload} if payload is not None else {}), timeout=timeout)
@@ -326,10 +327,12 @@ def _request(path, payload=None, timeout=600):
 
 
 def open_login(log_fn=print, account_id=0):
-    ensure_proxy_running(log_fn=log_fn)
+    if log_fn:
+        log_fn("Arena Login: preparing the proxy and internal browser…")
+    status = ensure_proxy_running(log_fn=log_fn)
     if log_fn:
         log_fn("Arena Login: opening the internal browser. Finish sign-in on the Arena page.")
-    return _request("/login", {"slot": account_id}, timeout=660)
+    return _request("/login", {"slot": account_id}, timeout=660, status=status)
 
 
 def list_models(timeout=30):
@@ -885,7 +888,8 @@ async def _serve_worker(key):
 
 def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=None, selector_enabled=None):
     """Shared Qt controls; capture the target slot before starting background work."""
-    from PySide6.QtCore import Signal, Slot
+    from PySide6.QtCore import Signal, Slot, QTimer, Qt
+    from PySide6.QtGui import QIcon, QPixmap, QPainter, QPen, QColor
     from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QComboBox, QInputDialog, QMessageBox
 
     class Controls(QWidget):
@@ -911,8 +915,32 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             self.accounts.activated.connect(self.select_account)
             self.completed.connect(self.finished)
             self.progress.connect(log_fn or print)
+            self.progress.connect(self.show_progress)
+            self.spinner = QTimer(self)
+            self.spinner.setInterval(80)
+            self.spinner.timeout.connect(self.animate)
+            self.spinner_angle = 0
             self.busy = False
             self.refresh()
+
+        def animate(self):
+            pixmap = QPixmap(20, 20)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(QColor("white"), 2.5))
+            painter.drawArc(3, 3, 14, 14, self.spinner_angle * 16, 270 * 16)
+            painter.end()
+            icon = QIcon()
+            icon.addPixmap(pixmap, QIcon.Mode.Normal)
+            icon.addPixmap(pixmap, QIcon.Mode.Disabled)
+            self.login_button.setIcon(icon)
+            self.spinner_angle = (self.spinner_angle - 30) % 360
+
+        @Slot(str)
+        def show_progress(self, message):
+            if self.busy:
+                self.login_button.setToolTip(message)
 
         def refresh(self, *args):
             model = str(get_model() or "")
@@ -957,7 +985,12 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             if self.busy:
                 return
             self.busy = True
-            self.refresh()
+            self.accounts.setEnabled(False)
+            self.login_button.setEnabled(False)
+            self.login_button.setText("Signing in…")
+            self.login_button.setToolTip("Preparing Arena login. First-time setup can take a few minutes.")
+            self.animate()
+            self.spinner.start()
             # A row/model can change while login is open. Never retarget the
             # credential write or overwrite a later model edit on completion.
             original = get_model()
@@ -975,6 +1008,10 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
         @Slot(object, object)
         def finished(self, result, error):
             self.busy = False
+            self.spinner.stop()
+            self.login_button.setIcon(QIcon())
+            self.login_button.setText("Arena Login")
+            self.login_button.setToolTip("Log into Arena in the automatically installed internal browser")
             if error:
                 self.progress.emit("Arena Login: " + error)
                 QMessageBox.warning(self, "Arena Login", error)

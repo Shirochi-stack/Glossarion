@@ -1,6 +1,6 @@
 # 📚 Glossarion — The Complete, Monkey-Proof User Guide
 
-**Version 9.6.9 · Updated August 23, 2026**
+**Version 9.6.10 · Updated September 10, 2026**
 
 This guide explains **every button, box, and toggle** in Glossarion in plain English. You do **not** need to know anything about coding, AI, or computers beyond clicking, typing, and dragging files. If you can use a web browser, you can use this guide.
 
@@ -30,6 +30,7 @@ This guide explains **every button, box, and toggle** in Glossarion in plain Eng
 18. [Antigravity and OcAgy setup for compiled `.exe` builds](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds)
 19. [When things go wrong (troubleshooting)](#19-when-things-go-wrong-troubleshooting)
 20. [One-page cheat sheet](#20-one-page-cheat-sheet)
+21. [Arena proxy setup, accounts, and streaming](#21-arena-proxy-setup-accounts-and-streaming)
 
 ---
 
@@ -133,6 +134,7 @@ The top of the window is the control strip you'll use every time.
   - **🔐 Gemini Login** — "Log in with your Google account via browser. No API key needed – uses your Google Cloud project."
   - **🔐 OCAGY Login** — opens OpenCode's interactive Google OAuth flow for OcAgy models. Choose **Google → OAuth with Google (Antigravity)** in the terminal, then use **📊** to check the plugin and linked accounts.
   - **🔐 Antigravity Login** — "Log in with your Google account for `antigravity/...` models." See [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds) for the extra `.exe` requirements.
+  - **Arena Login** — installs the Arena proxy and opens its own browser for sign-in. Available beside Arena models in the main window and Multi API Key Manager; no API key needed. See [Section 21](#21-arena-proxy-setup-accounts-and-streaming).
   - Each has an account-slot dropdown so you can keep several accounts.
 - **Profile:** The instruction set (language + rules). Use the dropdown to switch.
   - **+ New Profile** — make a blank one.
@@ -180,6 +182,7 @@ Glossarion doesn't translate by itself — it sends your text to an AI company a
 | `authnd/...` | AuthND (browser/token routing — needs the EPUB Library build) |
 | `ocagy0/...`, `ocagy/...`, `ocagy1/...`, ... | OpenCode plus `opencode-antigravity-auth` — no API key; supports pooled or pinned OAuth accounts |
 | `antigravity/...` | Local Antigravity proxy — needs a Google login; Glossarion installs Bun automatically if no runtime is available |
+| `autharena/...`, `autharena0/...`, `autharena1/...`, ... | Local Arena proxy — use **Arena Login**; `autharena0/` rotates accounts, while `autharena/` and `autharena1/` select the first saved account |
 
 > Glossarion supports **40+ providers**. If yours isn't obvious, open **Manage Models → ℹ️ Model Provider Information** for the full list and the exact prefixes.
 
@@ -1014,4 +1017,56 @@ You do **not** need Glossarion's local proxy, port `3000`, or an API key when us
 
 ---
 
-*Made with 🌸 for the translation community. This guide reflects Glossarion v9.6.9 as of August 23, 2026 and is built directly from the in-app tooltips and the program's own code. If a button looks different from this guide, hover it — the live tooltip is always the final word.*
+## 21. Arena proxy setup, accounts, and streaming
+
+The **Arena proxy** lets Glossarion send translation requests through your signed-in Arena account without an API key. It uses an adapted LMArenaBridge runtime and Arena browser sessions; this is not an official Arena OAuth integration.
+
+### First login
+
+1. Enter an Arena model using `autharena/` followed by its model name. The green **Arena Login** button appears beside the model field, including in the **Multi API Key Manager**.
+2. Click **Arena Login**. On first use, Glossarion automatically downloads uv, an isolated Python runtime, the pinned LMArenaBridge dependencies, and Chromium. Watch the app log for setup progress. A system Python installation is not needed, including when launching a Windows onefile `.exe`.
+3. Glossarion opens its own browser at Arena's homepage. It automatically opens the sidebar when needed and clicks **Log In** as soon as the control is available. No extension or personal Chrome debugging setup is needed.
+4. Complete sign-in and any website challenge in that window. Glossarion detects the signed-in session and saves the account automatically.
+5. The model catalog refreshes after successful startup/login. Choose an available Arena model, leave the API key empty for this route, and start with a small translation.
+
+Successful installations are cached under `~/.glossarion/autharena_proxy` (on Windows, `C:\Users\<you>\.glossarion\autharena_proxy`). These files remain outside the application, so a onefile executable can reuse them. Account credentials use Glossarion's encrypted storage. Each account has an isolated browser context; your personal browser profiles are not used.
+
+### Account numbers and rotation
+
+The dropdown starts at **0**, while explicit model prefixes start at **1**:
+
+| Prefix | What it selects |
+| --- | --- |
+| `autharena/` | First saved account, labelled **0** |
+| `autharena0/` | Rotate all saved accounts |
+| `autharena1/` | First saved account, labelled **0** |
+| `autharena2/` | Second saved account, labelled **1** |
+| `autharenaN/` | Saved account labelled **N − 1**, for N ≥ 1 |
+
+**`autharena0/` is rotation, never account 0.** Bare `autharena/` and pooled `autharena0/` hide the inline account dropdown but keep **Arena Login** visible. Explicit numbered routes show numeric account labels and **+ New**. Choose **+ New** to sign into another account. In rotation mode, **Arena Login** opens account management so you can add or reconnect an account.
+
+Login stays attached to the account and Multi API Key Manager row that started it, even if you change another model while sign-in is open. Every translation request starts a fresh Arena conversation.
+
+### Real-time output
+
+Arena always receives responses as a stream. These controls affect what appears in the log, rather than turning Arena's streaming transport off:
+
+- **Outside batch mode:** `LOG_STREAM_CHUNKS` controls visible incremental output.
+- **During batch mode:** use **Other Settings → Real-time Translation (Streaming) → Allow forced-stream batch log**, whose provider list includes Arena. This is the same control used by Antigravity (`ALLOW_AUTHGPT_BATCH_STREAM_LOGS`).
+- **Reasoning:** when a forced stream is visible, reasoning is shown with it, matching Antigravity. The separate **Stream thinking/reasoning logs** toggle does not independently hide Arena reasoning.
+
+The general **Enable streaming responses** and **Allow streaming logs during batch mode** toggles do not override Arena's forced-stream behavior. **Stop** cancels an active request. An interrupted stream is reported as an error rather than treated as a completed translation or silently replayed as a new successful request.
+
+### Platform status and troubleshooting
+
+- **Windows:** automatic runtime installation, Chromium launch, and a minimal onefile executable startup have been tested.
+- **macOS and Linux:** installation paths are implemented but have not been tested on those platforms. Linux needs a desktop session and Chromium's system libraries; setup does not currently install those operating-system packages automatically.
+- **Live Arena login and generation:** the complete signed-in flow still needs live validation. Website changes or challenges can require interaction in the internal browser.
+- **Session expired:** click **Arena Login** for the affected account and sign in again.
+- **Download/setup failed:** check the app log and internet access, then retry **Arena Login**. Successful cached installations are reused.
+
+For runtime details and standalone commands, see [Arena proxy documentation](autharena_proxy.md).
+
+---
+
+*Made with 🌸 for the translation community. This guide reflects Glossarion v9.6.10 as of September 10, 2026 and is built directly from the in-app tooltips and the program's own code. If a button looks different from this guide, hover it — the live tooltip is always the final word.*
