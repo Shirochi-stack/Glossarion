@@ -152,13 +152,13 @@ class LoginNavigationTest(unittest.TestCase):
                             document.head.append(s);
                             setTimeout(() => {
                                 const api={ready:fn=>fn(), execute:async (key,{action})=>{
-                                    if(key!=='page-site-key'||action!=='chat_submit') throw Error('wrong CAPTCHA configuration');
+                                    if(key!=='request-v3-key'||action!=='chat_submit') throw Error('wrong CAPTCHA configuration');
                                     return 'fresh-'+(++counter);
                                 }};
                                 window.grecaptcha=enterprise?{enterprise:api}:api;
                             },150);
                         }""", enterprise)
-                        args = {"url": "https://arena.ai/test", "method": "POST", "payload": {"recaptchaV3Token": "stale", "recaptchaV2Token": "stale-v2"}, "sitekey": "outdated-key", "action": "sign_up"}
+                        args = {"url": "https://arena.ai/test", "method": "POST", "payload": {"recaptchaV3Token": "stale", "recaptchaV2Token": "stale-v2"}, "sitekey": "request-v3-key", "action": "sign_up"}
                         await page.evaluate(script, args)
                         await page.evaluate(script, args)
                         calls = await page.evaluate("calls")

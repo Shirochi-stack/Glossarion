@@ -28,7 +28,8 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 10
+ADAPTER_VERSION = 11
+ARENA_RECAPTCHA_V3_SITEKEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0"
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
 _lock = threading.RLock()
@@ -839,6 +840,10 @@ async def _serve_worker(key):
             await page.expose_binding("arenaEmit", emit)
             await page.goto("https://arena.ai/", wait_until="domcontentloaded")
             sitekey, action = main.get_recaptcha_settings(cfg)
+            # Arena's getRecaptchaV3Token uses this distinct v3 key. The loader
+            # render parameter may instead be its v2 widget key; they are not
+            # interchangeable. The pinned bridge still ships an older v3 key.
+            sitekey = ARENA_RECAPTCHA_V3_SITEKEY
             async def pump():
                 try:
                     await page.evaluate(r"""async ({url, method, payload, sitekey, action}) => {
@@ -855,7 +860,7 @@ async def _serve_worker(key):
                             }).find(u => u && /\/(?:recaptcha\/)(?:enterprise|api)\.js$/.test(u.pathname)
                                 && ['www.google.com','www.recaptcha.net','recaptcha.net'].includes(u.hostname)
                                 && u.searchParams.get('render') && u.searchParams.get('render') !== 'explicit');
-                            activeKey = loaded?.searchParams.get('render') || sitekey;
+                            activeKey = sitekey;
                             const enterprise = loaded ? loaded.pathname.endsWith('/enterprise.js')
                                 : !!globalThis.grecaptcha?.enterprise;
                             api = enterprise ? globalThis.grecaptcha?.enterprise : globalThis.grecaptcha;
