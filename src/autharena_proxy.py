@@ -28,7 +28,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 4
+ADAPTER_VERSION = 5
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
 _lock = threading.RLock()
@@ -111,6 +111,7 @@ def _regular_browser_executable():
 async def _regular_login_browser(playwright):
     """Launch a normal browser profile, then attach only to this owned process."""
     import asyncio
+    import socket
     executable = _regular_browser_executable()
     profiles = data_dir() / "login-profiles"
     profiles.mkdir(parents=True, exist_ok=True)
@@ -118,25 +119,35 @@ async def _regular_login_browser(playwright):
     process = None
     connected = None
     try:
-        process = subprocess.Popen(
-            [str(executable), "--user-data-dir=" + str(profile),
-             "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
-             "--no-first-run", "--no-default-browser-check", "about:blank"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            env=_env(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        # Chrome treats a literal debugging port of 0 as an automated launch.
+        # Allocate a concrete loopback port instead; keep browser security and
+        # page JavaScript unchanged. A raced port fails startup rather than
+        # attaching to whichever service happens to own that port.
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        startup_log = profile / "browser-startup.log"
+        with startup_log.open("wb") as stderr:
+            process = subprocess.Popen(
+                [str(executable), "--user-data-dir=" + str(profile),
+                 f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1",
+                 "--no-first-run", "--no-default-browser-check", "about:blank"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr,
+                env=_env(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         deadline = time.monotonic() + 45
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise RuntimeError("Arena's login browser closed before it was ready. Click Arena Login to retry.")
-            port_file = profile / "DevToolsActivePort"
-            if port_file.exists():
-                lines = port_file.read_text(encoding="utf-8").splitlines()
-                if len(lines) >= 2 and lines[0].isdigit() and lines[1].startswith("/devtools/browser/"):
-                    connected = await playwright.chromium.connect_over_cdp(
-                        "ws://127.0.0.1:" + lines[0] + lines[1], timeout=15000)
-                    # Use the regular profile context, not an incognito context.
-                    yield connected.contexts[0]
-                    return
+            # Use the unique endpoint emitted by OUR child, not an unverified
+            # /json/version response from a potentially unrelated process.
+            endpoint = re.search(
+                rf"DevTools listening on (ws://127\.0\.0\.1:{port}/devtools/browser/[a-fA-F0-9-]+)",
+                startup_log.read_text(encoding="utf-8", errors="replace"))
+            if endpoint:
+                connected = await playwright.chromium.connect_over_cdp(endpoint.group(1), timeout=15000)
+                # Use the regular profile context, not an incognito context.
+                yield connected.contexts[0]
+                return
             await asyncio.sleep(.1)
         raise RuntimeError("Arena's login browser did not become ready. Close its window and retry Arena Login.")
     finally:

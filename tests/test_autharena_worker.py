@@ -122,6 +122,8 @@ class LoginNavigationTest(unittest.TestCase):
                     for attempt in range(2):
                         async with arena._regular_login_browser(playwright) as context:
                             self.assertIs(context, context.browser.contexts[0])
+                            page = context.pages[0] if context.pages else await context.new_page()
+                            self.assertFalse(await page.evaluate("navigator.webdriver"))
                             self.assertEqual(await context.cookies("https://arena.ai/"), [])
                             await context.add_cookies([{"name": "isolation-test", "value": "test", "url": "https://arena.ai/"}])
                             self.assertEqual(len(list((Path(root) / "login-profiles").iterdir())), 1)
