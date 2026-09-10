@@ -7,10 +7,14 @@ Neither system Python nor an extension is required. Frozen builds include the
 worker's source and the existing token-encryption module as data files.
 
 Use **Arena Login** beside the model selector or in a multi-key model field.
-The app automatically installs and opens its own Chromium window, navigates
+For login, the app opens installed Chrome with a fresh, app-owned regular
+profile (not an incognito context). If Chrome is unavailable, it uses the
+automatically installed Chromium executable with the same regular-profile flow. It navigates
 to Arena's homepage, and activates its sign-in control. No existing browser or
 remote-debugging setup is needed. Finish sign-in and any website challenge in
-that window; the app captures the Arena session automatically. This is session
+that window; the app captures the Arena session automatically. Google may still
+reject sign-in from a connected browser; this change does not guarantee Google
+login acceptance. This is session
 authentication, not an official Arena OAuth API.
 
 | Model prefix | Account |
@@ -39,7 +43,9 @@ streaming and generic batch-streaming toggles do not disable this transport.
 Interrupted streams are errors rather than completed translations.
 
 `AUTHARENA_PROXY_DATA_DIR` changes the runtime and browser installation location.
-Personal browser cookie databases are never read.
+Personal browser cookie databases are never read. The temporary login profile
+is removed after its browser closes; only captured Arena credentials are retained
+in the encrypted account store. Translation contexts remain isolated per account.
 
 For standalone use, run `python src/autharena_proxy.py` to keep the proxy running,
 `python src/autharena_proxy.py --status` for a read-only health check, or

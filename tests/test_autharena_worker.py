@@ -4,6 +4,7 @@ Uses a simulated app-owned browser. Never reads browser sessions or contacts Are
 """
 import asyncio
 import base64
+import contextlib
 import importlib
 import importlib.util
 import json
@@ -110,6 +111,23 @@ class Browser:
 @unittest.skipUnless(importlib.util.find_spec("playwright") and (RUNTIME / "browser-ready").exists(),
                      "Run with installed Arena managed Python for local browser tests")
 class LoginNavigationTest(unittest.TestCase):
+    def test_regular_browser_profile_and_cleanup(self):
+        executable = arena._regular_browser_executable()
+        async def run():
+            from playwright.async_api import async_playwright
+            with tempfile.TemporaryDirectory(prefix="Arena browser test ") as root, \
+                    patch.dict(os.environ, {"AUTHARENA_PROXY_DATA_DIR": root}), \
+                    patch.object(arena, "_regular_browser_executable", return_value=executable):
+                async with async_playwright() as playwright:
+                    for attempt in range(2):
+                        async with arena._regular_login_browser(playwright) as context:
+                            self.assertIs(context, context.browser.contexts[0])
+                            self.assertEqual(await context.cookies("https://arena.ai/"), [])
+                            await context.add_cookies([{"name": "isolation-test", "value": "test", "url": "https://arena.ai/"}])
+                            self.assertEqual(len(list((Path(root) / "login-profiles").iterdir())), 1)
+                        self.assertEqual(list((Path(root) / "login-profiles").iterdir()), [])
+        asyncio.run(run())
+
     def test_sidebar_and_login_navigation(self):
         async def run():
             from playwright.async_api import async_playwright
@@ -151,6 +169,14 @@ class WorkerTest(unittest.TestCase):
     def test_pinned_bridge_routing_isolation_and_stream(self):
         import httpx
         browser = Browser()
+
+        @contextlib.asynccontextmanager
+        async def login_browser(playwright):
+            context = await browser.new_context()
+            try:
+                yield context
+            finally:
+                await context.close()
 
         class Playwright:
             chromium = None
@@ -220,6 +246,7 @@ class WorkerTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"AUTHARENA_PROXY_DATA_DIR": root}), \
                 patch.object(arena, "__file__", str(RUNTIME / "autharena_proxy.py")), \
+                patch.object(arena, "_regular_login_browser", login_browser), \
                 patch("playwright.async_api.async_playwright", Playwright), \
                 patch("uvicorn.Server.serve", serve), patch("importlib.import_module", import_bridge):
             expiration = int(time.time()) + 3600

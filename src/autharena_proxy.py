@@ -28,7 +28,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 3
+ADAPTER_VERSION = 4
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
 _lock = threading.RLock()
@@ -79,6 +79,83 @@ async def _open_arena_login(page, navigation):
             navigation["sidebar_opened"] = True
             return await click_login()
     return False
+
+
+def _regular_browser_executable():
+    """Prefer installed Chrome; never open or copy its personal profile."""
+    candidates = []
+    if platform.system() == "Windows":
+        for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            if os.environ.get(variable):
+                candidates.append(Path(os.environ[variable]) / "Google/Chrome/Application/chrome.exe")
+    elif platform.system() == "Darwin":
+        candidates.extend([Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+                           Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"])
+    else:
+        for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+            found = shutil.which(name)
+            if found:
+                candidates.append(Path(found))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    marker = data_dir() / ("bridge-" + REVISION) / "browser-ready"
+    if marker.exists():
+        candidate = Path(marker.read_text(encoding="utf-8"))
+        if candidate.is_file():
+            return candidate
+    raise RuntimeError("Arena could not find Chrome or its installed Chromium browser. Retry Arena Login after setup finishes.")
+
+
+@contextlib.asynccontextmanager
+async def _regular_login_browser(playwright):
+    """Launch a normal browser profile, then attach only to this owned process."""
+    import asyncio
+    executable = _regular_browser_executable()
+    profiles = data_dir() / "login-profiles"
+    profiles.mkdir(parents=True, exist_ok=True)
+    profile = Path(tempfile.mkdtemp(prefix="login-", dir=profiles))
+    process = None
+    connected = None
+    try:
+        process = subprocess.Popen(
+            [str(executable), "--user-data-dir=" + str(profile),
+             "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
+             "--no-first-run", "--no-default-browser-check", "about:blank"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=_env(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError("Arena's login browser closed before it was ready. Click Arena Login to retry.")
+            port_file = profile / "DevToolsActivePort"
+            if port_file.exists():
+                lines = port_file.read_text(encoding="utf-8").splitlines()
+                if len(lines) >= 2 and lines[0].isdigit() and lines[1].startswith("/devtools/browser/"):
+                    connected = await playwright.chromium.connect_over_cdp(
+                        "ws://127.0.0.1:" + lines[0] + lines[1], timeout=15000)
+                    # Use the regular profile context, not an incognito context.
+                    yield connected.contexts[0]
+                    return
+            await asyncio.sleep(.1)
+        raise RuntimeError("Arena's login browser did not become ready. Close its window and retry Arena Login.")
+    finally:
+        if connected is not None:
+            with contextlib.suppress(Exception):
+                session = await connected.new_browser_cdp_session()
+                await session.send("Browser.close")
+            with contextlib.suppress(Exception):
+                await connected.close()
+        if process is not None and process.poll() is None:
+            try:
+                await asyncio.to_thread(process.wait, timeout=5)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    await asyncio.to_thread(process.wait, timeout=5)
+        # This fresh app-owned profile is disposable; only Arena credentials
+        # captured by the caller are retained in the encrypted account store.
+        await asyncio.to_thread(shutil.rmtree, profile, ignore_errors=True)
 
 
 def set_proxy_started_callback(callback):
@@ -160,7 +237,7 @@ def list_accounts():
 def _env():
     # Do not inherit translation prompts or API keys into compiler/runtime processes.
     keep = {"systemroot", "windir", "comspec", "path", "pathext", "temp", "tmp",
-            "home", "userprofile", "localappdata", "appdata", "lang", "lc_all",
+            "home", "userprofile", "localappdata", "appdata", "programfiles", "programfiles(x86)", "lang", "lc_all",
             "display", "wayland_display", "xdg_runtime_dir", "xdg_config_home", "dbus_session_bus_address"}
     env = {k: v for k, v in os.environ.items() if k.lower() in keep}
     env.update(PYTHONUTF8="1", PYTHONUNBUFFERED="1", UV_PYTHON_INSTALL_DIR=str(data_dir() / "python"))
@@ -559,11 +636,13 @@ async def _serve_worker(key):
     async def login(request: Request):
         body = await request.json()
         async with login_lock:
-            chrome = await connect()
-            # Each login owns its context; + New never inherits another account.
-            context = await chrome.new_context()
+            login_browser = _regular_login_browser(playwright)
             try:
-                page = await context.new_page()
+                context = await login_browser.__aenter__()
+            except Exception as exc:
+                raise HTTPException(503, f"Arena could not open its regular login browser: {exc}")
+            try:
+                page = context.pages[0] if context.pages else await context.new_page()
                 await page.goto("https://arena.ai/", wait_until="domcontentloaded")
                 await page.bring_to_front()
                 clicked = False
@@ -603,7 +682,7 @@ async def _serve_worker(key):
                 raise HTTPException(408, "Arena Login timed out before a signed-in session was available.")
             finally:
                 with contextlib.suppress(Exception):
-                    await context.close()
+                    await login_browser.__aexit__(None, None, None)
 
     async def get_slot(slot):
         async with slot_init_lock:

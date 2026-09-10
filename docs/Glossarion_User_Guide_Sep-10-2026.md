@@ -1025,7 +1025,7 @@ The **Arena proxy** lets Glossarion send translation requests through your signe
 
 1. Enter an Arena model using `autharena/` followed by its model name. The green **Arena Login** button appears beside the model field, including in the **Multi API Key Manager**.
 2. Click **Arena Login**. On first use, Glossarion automatically downloads uv, an isolated Python runtime, the pinned LMArenaBridge dependencies, and Chromium. Watch the app log for setup progress. A system Python installation is not needed, including when launching a Windows onefile `.exe`.
-3. Glossarion opens its own browser at Arena's homepage. It automatically opens the sidebar when needed and clicks **Log In** as soon as the control is available. No extension or personal Chrome debugging setup is needed.
+3. Glossarion opens installed Chrome with a fresh regular profile owned by the app, at Arena's homepage. If Chrome is unavailable, it uses the downloaded Chromium browser. It automatically opens the sidebar when needed and clicks **Log In** as soon as the control is available. No extension or personal Chrome debugging setup is needed. The temporary login profile is removed after the login browser closes.
 4. Complete sign-in and any website challenge in that window. Glossarion detects the signed-in session and saves the account automatically.
 5. The model catalog refreshes after successful startup/login. Choose an available Arena model, leave the API key empty for this route, and start with a small translation.
 
@@ -1063,6 +1063,7 @@ The general **Enable streaming responses** and **Allow streaming logs during bat
 - **macOS and Linux:** installation paths are implemented but have not been tested on those platforms. Linux needs a desktop session and Chromium's system libraries; setup does not currently install those operating-system packages automatically.
 - **Live Arena login and generation:** the complete signed-in flow still needs live validation. Website changes or challenges can require interaction in the internal browser.
 - **Session expired:** click **Arena Login** for the affected account and sign in again.
+- **Google says the browser or app may not be secure:** Google rejected this sign-in session. The regular-profile login flow does not guarantee Google acceptance; try another sign-in method offered by Arena if available.
 - **Download/setup failed:** check the app log and internet access, then retry **Arena Login**. Successful cached installations are reused.
 
 For runtime details and standalone commands, see [Arena proxy documentation](autharena_proxy.md).
