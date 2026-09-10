@@ -37,6 +37,8 @@ class Page:
     def get_by_role(self, role, name):
         page = self
         class Control:
+            def nth(self, index):
+                return self
             @property
             def first(self):
                 return self
@@ -44,7 +46,7 @@ class Page:
                 return 1
             async def is_visible(self):
                 return True
-            async def click(self):
+            async def click(self, **kwargs):
                 page.context.browser.login_clicks += 1
                 session = {"user": {"id": "new-user", "email": "new@example.test"}, "expires_at": int(time.time()) + 3600}
                 page.context.saved_cookies = [{"name": "arena-auth-prod-v1", "domain": ".arena.ai", "path": "/",
@@ -103,6 +105,44 @@ class Browser:
         context = Context(self)
         self.contexts.append(context)
         return context
+
+
+@unittest.skipUnless(importlib.util.find_spec("playwright") and (RUNTIME / "browser-ready").exists(),
+                     "Run with installed Arena managed Python for local browser tests")
+class LoginNavigationTest(unittest.TestCase):
+    def test_sidebar_and_login_navigation(self):
+        async def run():
+            from playwright.async_api import async_playwright
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(RUNTIME.parent / "browsers")
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=True)
+                try:
+                    page = await browser.new_page()
+                    for expanded in (False, True):
+                        await page.set_content('''
+                            <script>window.sidebarClicks=0;window.loginClicks=0;</script>
+                            <button aria-label="Toggle Sidebar" onclick="window.sidebarClicks++;document.querySelector('aside').hidden=false">Sidebar</button>
+                            <button hidden>Log In</button>
+                            <aside %s><button onclick="window.loginClicks++">Log In</button></aside>
+                        ''' % ("" if expanded else "hidden"))
+                        self.assertTrue(await arena._open_arena_login(page, {}))
+                        self.assertEqual(await page.evaluate("window.sidebarClicks"), 0 if expanded else 1)
+                        self.assertEqual(await page.evaluate("window.loginClicks"), 1)
+                    # Icon-only trigger; login arrives after the sidebar animation/hydration.
+                    await page.set_content('''
+                        <script>window.sidebarClicks=0;window.loginClicks=0;</script>
+                        <button data-sidebar="trigger" onclick="window.sidebarClicks++">Sidebar</button>
+                    ''')
+                    navigation = {}
+                    self.assertFalse(await arena._open_arena_login(page, navigation))
+                    self.assertFalse(await arena._open_arena_login(page, navigation))
+                    self.assertEqual(await page.evaluate("window.sidebarClicks"), 1)
+                    await page.evaluate("""document.body.insertAdjacentHTML('beforeend', '<a href="#" onclick="window.loginClicks++">Log In</a>')""")
+                    self.assertTrue(await arena._open_arena_login(page, navigation))
+                    self.assertEqual(await page.evaluate("window.loginClicks"), 1)
+                finally:
+                    await browser.close()
+        asyncio.run(run())
 
 
 @unittest.skipUnless(importlib.util.find_spec("camoufox") and (RUNTIME / "bridge").exists(),

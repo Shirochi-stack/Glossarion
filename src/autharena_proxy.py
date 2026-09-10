@@ -28,7 +28,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 2
+ADAPTER_VERSION = 3
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
 _lock = threading.RLock()
@@ -39,6 +39,46 @@ _responses = set()
 _pending_requests = {}
 _owned = None
 _started_callback = None
+
+
+async def _open_arena_login(page, navigation):
+    """Reveal the sidebar once if necessary, then activate the visible login control."""
+    async def click_visible(controls):
+        for index in range(await controls.count()):
+            control = controls.nth(index)
+            if await control.is_visible():
+                try:
+                    await control.click(timeout=1500)
+                    return True
+                except Exception:
+                    # Hydration/navigation can replace a control. Retry next poll.
+                    return False
+        return False
+
+    async def click_login():
+        for role in ("button", "link"):
+            if await click_visible(page.get_by_role(
+                role, name=re.compile(r"^\s*(sign\s*in|log\s*in|login)\s*$", re.I)
+            )):
+                return True
+        return False
+
+    if await click_login():
+        return True
+    if not navigation.get("sidebar_opened"):
+        triggers = page.get_by_role("button", name=re.compile(
+            r"(open|expand|toggle).*sidebar|sidebar.*(open|expand|toggle)|^menu$", re.I
+        ))
+        opened = await click_visible(triggers)
+        if not opened:
+            opened = await click_visible(page.locator(
+                'button[data-sidebar="trigger"], button[data-slot="sidebar-trigger"], '
+                'button:has(svg.lucide-panel-left), button:has(svg.lucide-panel-left-open)'
+            ))
+        if opened:
+            navigation["sidebar_opened"] = True
+            return await click_login()
+    return False
 
 
 def set_proxy_started_callback(callback):
@@ -524,7 +564,9 @@ async def _serve_worker(key):
                 await page.goto("https://arena.ai/", wait_until="domcontentloaded")
                 await page.bring_to_front()
                 clicked = False
-                for _ in range(300):
+                navigation = {}
+                deadline = time.monotonic() + 300
+                while time.monotonic() < deadline:
                     cookies = await context.cookies(["https://arena.ai/", "https://lmarena.ai/"])
                     account = session_from_cookies(cookies)
                     if account and body.get("slot") is not None:
@@ -553,13 +595,8 @@ async def _serve_worker(key):
                                 await previous["context"].close()
                         return {"slot": slot, "email": account["email"]}
                     if not clicked:
-                        for role in ("button", "link"):
-                            control = page.get_by_role(role, name=re.compile(r"\b(sign\s*in|log\s*in|login)\b", re.I))
-                            if await control.count() and await control.first.is_visible():
-                                await control.first.click()
-                                clicked = True
-                                break
-                    await asyncio.sleep(1)
+                        clicked = await _open_arena_login(page, navigation)
+                    await asyncio.sleep(1 if clicked else .2)
                 raise HTTPException(408, "Arena Login timed out before a signed-in session was available.")
             finally:
                 with contextlib.suppress(Exception):
@@ -863,6 +900,10 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             self.accounts = QComboBox(self)
             self.accounts.setMinimumWidth(65)
             self.login_button = QPushButton("Arena Login", self)
+            self.login_button.setStyleSheet(
+                "background-color: #10a37f; color: white; font-weight: bold; "
+                "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
+            )
             self.login_button.setToolTip("Log into Arena in the automatically installed internal browser")
             row.addWidget(self.accounts)
             row.addWidget(self.login_button)
