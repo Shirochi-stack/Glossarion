@@ -234,6 +234,10 @@ def test_account_selector_visibility_and_numeric_labels(qt, monkeypatch):
     model = ["autharena/model"]
     parent = widgets.QWidget()
     control = arena.create_login_controls(parent, lambda: model[0], lambda value: model.__setitem__(0, value))
+    from PySide6.QtTest import QTest
+    deadline = time.monotonic() + 2
+    while not control.accounts_ready and time.monotonic() < deadline:
+        QTest.qWait(10)
     assert control.login_button.text() == "✅ Arena"
     assert "#0" in control.login_button.toolTip()
     assert control.accounts.isHidden()
@@ -264,6 +268,7 @@ def test_login_animates_immediately_and_resets(qt, monkeypatch, failure):
     monkeypatch.setattr(arena.threading, "Thread", PendingWorker)
     parent = widgets.QWidget()
     control = arena.create_login_controls(parent, lambda: "autharena1/m", lambda value: None, log_fn=lambda value: None)
+    control.receive_accounts([], None)
     control.start(0, False)
     assert control.busy and control.spinner.isActive()
     assert not control.login_button.isEnabled()
@@ -282,6 +287,49 @@ def test_login_animates_immediately_and_resets(qt, monkeypatch, failure):
     assert control.login_button.icon().isNull()
     assert control.login_button.text() == "Arena Login"
     parent.close()
+
+
+def test_model_typing_does_not_block_on_arena_accounts_or_start_proxy(qt, monkeypatch):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtTest import QTest
+    widgets, app = qt
+    release = threading.Event()
+    entered = threading.Event()
+    readers = []
+    def slow_accounts():
+        readers.append(threading.get_ident())
+        entered.set()
+        assert release.wait(3)
+        return [{"slot": 0, "email": "test@example.com"}]
+    def forbidden_proxy(*args, **kwargs):
+        pytest.fail("Typing must not start the Arena proxy")
+    monkeypatch.setattr(arena, "list_accounts", slow_accounts)
+    monkeypatch.setattr(arena, "ensure_proxy_running", forbidden_proxy)
+    parent = widgets.QWidget()
+    combo = widgets.QComboBox(parent)
+    combo.setEditable(True)
+    arena.install_combo_login(parent, combo)
+    try:
+        combo.setCurrentText("autharena/model")
+        assert entered.wait(1)
+        ticks = []
+        QTimer.singleShot(0, lambda: ticks.append(True))
+        for index in range(25):
+            combo.setCurrentText("autharena/model" + str(index))
+        QTest.qWait(20)
+        assert ticks and len(readers) == 1
+        assert readers[0] != threading.get_ident()
+        release.set()
+        control = combo._autharena_controls
+        deadline = time.monotonic() + 2
+        while not control.accounts_ready and time.monotonic() < deadline:
+            QTest.qWait(10)
+        assert control.login_button.text() == "✅ Arena"
+        combo.setCurrentText("autharena/another-model")
+        assert len(readers) == 1
+    finally:
+        release.set()
+        parent.close()
 
 
 def test_login_reuses_started_service(monkeypatch):

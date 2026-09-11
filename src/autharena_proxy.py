@@ -1660,6 +1660,7 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
     class Controls(QWidget):
         completed = Signal(object, object)
         progress = Signal(str)
+        accounts_loaded = Signal(object, object)
 
         def __init__(self):
             super().__init__(parent)
@@ -1686,7 +1687,41 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             self.spinner.timeout.connect(self.animate)
             self.spinner_angle = 0
             self.account_snapshot = None
+            self.saved_accounts = []
+            self.accounts_ready = False
+            self.accounts_loading = False
+            self.accounts_reload_pending = False
+            self.accounts_checked_at = None
+            self.accounts_loaded.connect(self.receive_accounts)
             self.busy = False
+            self.refresh()
+
+        def load_accounts_async(self):
+            if self.accounts_loading:
+                return
+            self.accounts_loading = True
+            def worker():
+                try:
+                    result, error = list_accounts(), None
+                except Exception as exc:
+                    result, error = None, str(exc)
+                with contextlib.suppress(RuntimeError):
+                    self.accounts_loaded.emit(result, error)
+            threading.Thread(target=worker, daemon=True, name="Arena account list").start()
+
+        @Slot(object, object)
+        def receive_accounts(self, accounts, error):
+            self.accounts_loading = False
+            self.accounts_checked_at = time.monotonic()
+            if error is None:
+                self.saved_accounts = accounts
+                self.accounts_ready = True
+            else:
+                self.progress.emit("⚠️ Arena: could not load saved accounts: " + error)
+                QTimer.singleShot(5000, self.refresh)
+            if self.accounts_reload_pending:
+                self.accounts_reload_pending = False
+                self.accounts_checked_at = None
             self.refresh()
 
         def animate(self):
@@ -1715,7 +1750,9 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             if not match:
                 return
             slot, _ = parse_route(model)
-            saved_accounts = list_accounts()
+            if self.accounts_checked_at is None or time.monotonic() - self.accounts_checked_at >= 5:
+                self.load_accounts_async()
+            saved_accounts = self.saved_accounts
             selected_accounts = saved_accounts if slot is None else [a for a in saved_accounts if a["slot"] == slot]
             if not self.busy:
                 self.login_button.setText("✅ Arena" if selected_accounts else "Arena Login")
@@ -1741,8 +1778,10 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             self.accounts.setCurrentIndex(max(0, self.accounts.findData(slot)))
             self.accounts.blockSignals(False)
             self.accounts.setVisible(bool(match.group(1)) and slot is not None and (selector_enabled is None or selector_enabled()))
-            self.accounts.setEnabled(not self.busy)
-            self.login_button.setEnabled(not self.busy)
+            self.accounts.setEnabled(not self.busy and self.accounts_ready)
+            self.login_button.setEnabled(not self.busy and self.accounts_ready)
+            if not self.accounts_ready:
+                self.login_button.setToolTip("Loading saved Arena accounts…")
 
         def select_account(self, index):
             selected = self.accounts.itemData(index)
@@ -1756,7 +1795,7 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
         def login(self):
             slot, _ = parse_route(get_model())
             if slot is None:
-                entries = list_accounts()
+                entries = self.saved_accounts
                 labels = [f"#{a['slot']}" for a in entries] + ["+ New"]
                 choice, ok = QInputDialog.getItem(self, "Arena Login", "Account", labels, 0, False)
                 if not ok:
@@ -1808,6 +1847,8 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
                     self.progress.emit("Arena login was saved, but model IDs could not be refreshed. The last successful catalog will be reused if available.")
                 if on_login:
                     on_login()
+            self.accounts_checked_at = None
+            self.accounts_reload_pending = self.accounts_loading
             self.refresh()
 
     return Controls()
