@@ -29,6 +29,8 @@ import hmac
 import base64
 import secrets
 import subprocess
+import threading
+import atexit
 from typing import Optional, Dict
 
 logger = logging.getLogger(__name__)
@@ -340,9 +342,73 @@ def is_encrypted(file_path: str) -> bool:
         return False
 
 
-def _storage_log(message: str, file_path: str) -> None:
+_storage_log_lock = threading.Lock()
+_storage_log_pending = {}
+_storage_log_timer = None
+
+
+def _credential_email(tokens):
+    if not isinstance(tokens, dict):
+        return ""
+    email = tokens.get("email")
+    if not email and isinstance(tokens.get("user"), dict):
+        email = tokens["user"].get("email")
+    if not email and isinstance(tokens.get("id_token"), str):
+        try:
+            payload = tokens["id_token"].split(".")[1]
+            claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+            email = claims.get("email") or claims.get("https://api.openai.com/profile", {}).get("email")
+        except (ValueError, IndexError, TypeError, AttributeError):
+            pass
+    return " ".join(str(email or "").split())[:254]
+
+
+def _flush_storage_logs():
+    global _storage_log_timer
+    with _storage_log_lock:
+        pending = dict(_storage_log_pending)
+        _storage_log_pending.clear()
+        timer, _storage_log_timer = _storage_log_timer, None
+        if timer is not None:
+            timer.cancel()
+    for operation, accounts in pending.items():
+        first_email = next(iter(accounts.values()), "")
+        count = len(accounts)
+        emoji = "🔒" if operation == "encrypted" else "🔓"
+        message = f"{emoji} {count} account{'s' if count != 1 else ''} {operation}"
+        if first_email:
+            message += f" — first: {first_email}"
+        _storage_log(message)
+
+
+def _storage_success(operation, tokens, file_path):
+    """Summarize successful account operations within a short batch window."""
+    global _storage_log_timer
+    if os.path.basename(file_path).startswith("models."):
+        return  # Arena's model catalog is not an account credential store.
+    if not tokens and os.path.basename(file_path).startswith("accounts."):
+        return
+    records = tokens if isinstance(tokens, dict) and tokens and all(
+        str(key).isdigit() and isinstance(value, dict) for key, value in tokens.items()
+    ) else {"single": tokens}
+    path = os.path.normcase(os.path.abspath(file_path))
+    with _storage_log_lock:
+        accounts = _storage_log_pending.setdefault(operation, {})
+        for slot, value in records.items():
+            accounts[(path, str(slot))] = _credential_email(value)
+        if _storage_log_timer is None:
+            _storage_log_timer = threading.Timer(1.0, _flush_storage_logs)
+            _storage_log_timer.daemon = True
+            _storage_log_timer.start()
+
+
+atexit.register(_flush_storage_logs)
+
+
+def _storage_log(message: str, file_path: str = "") -> None:
     # stderr also keeps worker stdout protocols free of status messages.
-    message = f"{message} ({os.path.basename(file_path)})"
+    if file_path:
+        message = f"{message} ({os.path.basename(file_path)})"
     logger.debug(message)
     try:
         print(message, file=sys.stderr)
@@ -354,7 +420,6 @@ def _storage_log(message: str, file_path: str) -> None:
 def save_encrypted_tokens(tokens: Dict, file_path: str) -> None:
     """Encrypt and save tokens to a file."""
     os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
-    _storage_log("🔐 Encrypting credentials…", file_path)
     try:
         encrypted = encrypt_tokens(tokens)
     except Exception:
@@ -368,7 +433,7 @@ def save_encrypted_tokens(tokens: Dict, file_path: str) -> None:
             os.chmod(file_path, 0o600)
         except Exception:
             pass
-    _storage_log("🔒 Credentials encrypted and saved", file_path)
+    _storage_success("encrypted", tokens, file_path)
 
 
 def load_encrypted_tokens(file_path: str) -> Optional[Dict]:
@@ -388,20 +453,18 @@ def load_encrypted_tokens(file_path: str) -> Optional[Dict]:
 
     # Check if already encrypted
     if data.startswith(_ENCRYPTED_HEADER):
-        _storage_log("🔓 Decrypting credentials into memory…", file_path)
         try:
             tokens = decrypt_tokens(data)
         except Exception:
             _storage_log("❌ Credential decryption failed", file_path)
             raise
-        _storage_log("✅ Credentials decrypted successfully", file_path)
+        _storage_success("decrypted", tokens, file_path)
         return tokens
 
     # Plain JSON — migrate to encrypted
     try:
         tokens = json.loads(data.decode("utf-8"))
         if isinstance(tokens, dict):
-            _storage_log("🔐 Migrating unencrypted credentials to encrypted storage", file_path)
             save_encrypted_tokens(tokens, file_path)
             return tokens
     except (json.JSONDecodeError, UnicodeDecodeError):

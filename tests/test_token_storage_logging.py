@@ -10,17 +10,49 @@ import pytest
 import token_encryption as storage
 
 
+@pytest.fixture(autouse=True)
+def flush_storage_logs():
+    storage._flush_storage_logs()
+    yield
+    storage._flush_storage_logs()
+
+
 def test_encryption_and_decryption_logs_exclude_credentials(tmp_path, capsys):
     path = tmp_path / "test_tokens.json"
     secret = {"access_token": "private-token-value"}
     storage.save_encrypted_tokens(secret, str(path))
     assert storage.load_encrypted_tokens(str(path)) == secret
+    storage._flush_storage_logs()
     output = capsys.readouterr()
     assert not output.out
-    for message in ("🔐 Encrypting", "🔒 Credentials encrypted and saved",
-                    "🔓 Decrypting", "✅ Credentials decrypted successfully"):
+    for message in ("🔒 1 account encrypted", "🔓 1 account decrypted"):
         assert message in output.err
     assert "private-token-value" not in output.err
+
+
+@pytest.mark.parametrize("combined", [False, True])
+def test_thirty_accounts_log_one_summary_per_operation(tmp_path, capsys, combined, monkeypatch):
+    class DeferredTimer:
+        def __init__(self, *args):
+            pass
+        def start(self):
+            pass
+        def cancel(self):
+            pass
+    monkeypatch.setattr(storage.threading, "Timer", DeferredTimer)
+    accounts = {str(i): {"email": f"account{i}@example.com", "access_token": "secret"} for i in range(30)}
+    records = {"accounts.enc": accounts} if combined else {
+        f"authgpt_tokens_{i}.json": account for i, account in accounts.items()
+    }
+    for filename, value in records.items():
+        path = str(tmp_path / filename)
+        storage.save_encrypted_tokens(value, path)
+        storage.load_encrypted_tokens(path)
+        storage.load_encrypted_tokens(path)  # A repeat read is not another account.
+    storage._flush_storage_logs()
+    lines = capsys.readouterr().err.splitlines()
+    assert lines == ["🔒 30 accounts encrypted — first: account0@example.com",
+                     "🔓 30 accounts decrypted — first: account0@example.com"]
 
 
 @pytest.mark.parametrize("operation", ["encrypt", "decrypt"])
