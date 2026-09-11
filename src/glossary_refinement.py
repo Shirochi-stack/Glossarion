@@ -10,6 +10,7 @@ coupled to each other's implementation details.
 import hashlib
 import csv
 import io
+import inspect
 import json
 import os
 import tempfile
@@ -1155,7 +1156,14 @@ def _actual_request_key_context(client=None) -> Dict:
     return context
 
 
-def _call_send(send_fn, messages, client, temp, mtoks, check_stop, chunk_timeout, chunk_idx, total_chunks, context_label):
+def _call_send(send_fn, messages, client, temp, mtoks, check_stop, chunk_timeout, chunk_idx, total_chunks, context_label, before_send_callback=None):
+    callback_kwargs = {}
+    if callable(before_send_callback):
+        parameters = inspect.signature(send_fn).parameters
+        if "before_send_callback" in parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+        ):
+            callback_kwargs["before_send_callback"] = before_send_callback
     try:
         client.context = context_label
         if hasattr(client, "_get_thread_local_client"):
@@ -1174,6 +1182,7 @@ def _call_send(send_fn, messages, client, temp, mtoks, check_stop, chunk_timeout
             chunk_idx=chunk_idx,
             total_chunks=total_chunks,
             context=context_label,
+            **callback_kwargs,
         )
     except TypeError:
         return send_fn(
@@ -1184,6 +1193,7 @@ def _call_send(send_fn, messages, client, temp, mtoks, check_stop, chunk_timeout
             stop_check_fn=check_stop,
             chunk_timeout=chunk_timeout,
             context=context_label,
+            **callback_kwargs,
         )
 
 
@@ -1582,6 +1592,26 @@ def refine_glossary_entries(
             msgs = _build_messages(system_prompt, user_prompt, chunk_entry_type, chunk_text, payload_columns, chunk_idx, total_chunks, selected_types)
             msgs = _sanitize_messages_for_api(msgs, chunk_text)
             context_label = "glossary_refinement"
+            def record_dispatched_model():
+                # Runs in the API worker after the multi-key pool has selected
+                # its concrete client. Never infer the selection from the main
+                # model or another concurrently completing chunk.
+                model_update = _actual_request_key_context(client)
+                model_name = _actual_request_model_name(client)
+                if model_name:
+                    model_update["model_name"] = model_name
+                if not model_update:
+                    return
+                if send_all_types:
+                    update_refinement_progress(
+                        progress_file, broad_type_key, model_update,
+                        atomic_replace_fn=atomic_replace_fn,
+                    )
+                for selected_type in chunk_types.get(chunk_idx, []):
+                    update_refinement_progress(
+                        progress_file, type_keys[selected_type], model_update,
+                        atomic_replace_fn=atomic_replace_fn,
+                    )
             try:
                 raw, finish_reason, _raw_obj = _call_send(
                     send_fn,
@@ -1594,6 +1624,7 @@ def refine_glossary_entries(
                     chunk_idx,
                     total_chunks,
                     context_label,
+                    before_send_callback=record_dispatched_model,
                 )
             except Exception as e:
                 cancelled = (

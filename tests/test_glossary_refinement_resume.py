@@ -21,6 +21,69 @@ def entry(entry_type, raw_name=None):
     }
 
 
+def test_in_progress_uses_dispatched_pool_model_before_completion(resume, monkeypatch):
+    import threading
+    selected = threading.local()
+    monkeypatch.setattr(refinement, "_actual_request_model_name", lambda client: selected.model)
+    monkeypatch.setattr(refinement, "_actual_request_key_context", lambda client: {
+        "key_identifier": selected.key, "key_pool": "glossary_refinement",
+    })
+    snapshots = []
+
+    def send(messages, *args, before_send_callback=None, **kwargs):
+        assert callable(before_send_callback)
+        # Selection occurs after the placeholder is written, as in UnifiedClient.
+        for model, key in (("authgpt/gpt-5.6-sol", "GlossaryRefinementKey#1"),
+                           ("authgpt/gpt-5.6-luna", "GlossaryRefinementKey#2")):
+            selected.model, selected.key = model, key
+            before_send_callback()
+            records = resume.progress()
+            for kind in TYPES:
+                _, row = refinement._find_type_refinement_progress(records, kind)
+                assert row["status"] == "in_progress"
+                assert row["completed_chunks"] == 0
+                assert row["model_name"] == model
+                assert row["key_identifier"] == key
+            snapshots.append(records)
+        return json.dumps([entry(t) for t in TYPES]), "stop", None
+
+    resume(send_override=send)
+    assert len(snapshots) == 2
+    for kind in TYPES:
+        _, row = refinement._find_type_refinement_progress(resume.progress(), kind)
+        assert row["status"] == "completed"
+        assert row["model_name"] == "authgpt/gpt-5.6-luna"
+
+
+def test_parallel_in_progress_models_are_scoped_to_their_types(resume, monkeypatch):
+    import threading
+    monkeypatch.setenv("BATCH_TRANSLATION", "1")
+    monkeypatch.setenv("BATCH_SIZE", "4")
+    selected = threading.local()
+    monkeypatch.setattr(refinement, "_actual_request_model_name", lambda client: selected.model)
+    monkeypatch.setattr(refinement, "_actual_request_key_context", lambda client: {})
+    barrier = threading.Barrier(len(TYPES))
+    snapshots = []
+
+    def send(messages, *args, before_send_callback=None, **kwargs):
+        kind = next(t for t in TYPES if f"source {t}" in messages[-1]["content"])
+        selected.model = f"pool-model-{kind}"
+        before_send_callback()
+        barrier.wait(timeout=5)
+        records = resume.progress()
+        snapshots.append(records)
+        barrier.wait(timeout=5)
+        return json.dumps([entry(kind)]), "stop", None
+
+    resume(mode="separate", send_override=send)
+    assert len(snapshots) == len(TYPES)
+    for records in snapshots:
+        for kind in TYPES:
+            _, row = refinement._find_type_refinement_progress(records, kind)
+            assert row["status"] == "in_progress"
+            assert row["model_name"] == f"pool-model-{kind}"
+
+
 def v1_identity(entry_type, entries, mode):
     """Reproduce the persisted v1 format without calling the current hash helper."""
     payload = {
@@ -52,7 +115,7 @@ def resume(monkeypatch, tmp_path):
     calls = []
     logs = []
 
-    def run(entries=None, *, mode="all", selected_types=None, active_types=None, force=False):
+    def run(entries=None, *, mode="all", selected_types=None, active_types=None, force=False, send_override=None):
         entries = entries if entries is not None else [entry(t) for t in TYPES]
         active_types = active_types or TYPES
 
@@ -73,7 +136,7 @@ def resume(monkeypatch, tmp_path):
             parse_response_fn=json.loads,
             dedupe_fn=lambda rows: rows,
             custom_entry_types_fn=lambda: {t: {"enabled": True} for t in active_types},
-            send_fn=send,
+            send_fn=send_override or send,
             progress_file=str(progress_file),
             output_path=str(tmp_path / "glossary.csv"),
             log=logs.append,
