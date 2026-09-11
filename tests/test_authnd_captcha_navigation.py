@@ -609,8 +609,19 @@ def reasoning_transport(request, monkeypatch):
             state['cancelled'] = True
         return response
 
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def close(self):
+            pass
+        stream = staticmethod(post)
+
     monkeypatch.setitem(sys.modules, 'httpx', types.SimpleNamespace(
-        Timeout=lambda *args, **kwargs: None, stream=post,
+        Timeout=lambda *args, **kwargs: None, Client=Client,
     ) if request.param == 'httpx' else None)
     monkeypatch.setattr(authnd, '_get_session', lambda: object())
     monkeypatch.setattr(authnd, '_post_with_cancel', post)

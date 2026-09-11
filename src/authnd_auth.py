@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import contextlib
+import functools
 import html as html_lib
 import json
 import math
@@ -55,6 +57,8 @@ USER_AGENT = (
 )
 
 _cancel_event = threading.Event()
+_cancel_generation = threading.Event()
+_cancel_lock = threading.Lock()
 _thread_local = threading.local()
 _metadata_cache: Dict[str, Dict[str, str]] = {}
 _metadata_lock = threading.Lock()
@@ -107,7 +111,7 @@ def _is_injectable_captcha_document(url: Any, title: Any) -> bool:
 
 
 def _log(log_fn: Optional[Callable[[str], None]], message: str, *, debug_only: bool = False) -> None:
-    if not log_fn:
+    if not log_fn or _is_cancelled():
         return
     if debug_only and not _debug_enabled():
         return
@@ -248,7 +252,9 @@ def _stream_thinking_logging_enabled() -> bool:
 
 def cancel_stream() -> None:
     """Signal any active AuthND stream/request to stop."""
-    _cancel_event.set()
+    with _cancel_lock:
+        _cancel_event.set()
+        _cancel_generation.set()
     with _active_response_lock:
         closers = list(_active_response_closers)
     for closer in closers:
@@ -282,9 +288,13 @@ def reset_cancel() -> None:
     which is also what leaves a child holding PyInstaller ``_MEIPASS`` DLLs and
     triggers the "Failed to remove temporary directory" warning on exit.
     """
-    if _hard_stop_active():
-        return
-    _cancel_event.clear()
+    global _cancel_generation
+    with _cancel_lock:
+        if _hard_stop_active():
+            return
+        if _cancel_generation.is_set():
+            _cancel_generation = threading.Event()
+        _cancel_event.clear()
 
 
 def _hard_stop_active() -> bool:
@@ -301,7 +311,89 @@ def _is_cancelled() -> bool:
     # Also honor the hard-abort env var. The AuthND helper otherwise only sees
     # _cancel_event, so a racing reset_cancel()/reset_cleanup_state() from
     # another worker could let an in-flight request bypass Stop.
-    return _cancel_event.is_set() or _hard_stop_active()
+    generation = getattr(_thread_local, "cancel_generation", _cancel_generation)
+    check = getattr(_thread_local, "cancel_check", None)
+    return (generation.is_set() or _cancel_event.is_set() or _hard_stop_active()
+            or (callable(check) and bool(check())))
+
+
+def _request_scope(fn):
+    """Keep an old request cancelled when the next run resets provider state."""
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        previous = getattr(_thread_local, "cancel_generation", None)
+        previous_check = getattr(_thread_local, "cancel_check", None)
+        _thread_local.cancel_generation = previous or _cancel_generation
+        _thread_local.cancel_check = kwargs.get("cancel_check") or previous_check
+        log = kwargs.get("log_fn")
+        if log:
+            kwargs["log_fn"] = lambda message: None if _is_cancelled() else log(message)
+        try:
+            if _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            return fn(*args, **kwargs)
+        finally:
+            _thread_local.cancel_check = previous_check
+            if previous is None:
+                del _thread_local.cancel_generation
+            else:
+                _thread_local.cancel_generation = previous
+    return wrapped
+
+
+def _interruptible_transport(fn):
+    """Do not leave the caller blocked on headers, error bodies, or stream reads."""
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        generation = getattr(_thread_local, "cancel_generation", _cancel_generation)
+        check = getattr(_thread_local, "cancel_check", None)
+        results = queue.Queue(maxsize=1)
+        def run():
+            _thread_local.cancel_generation = generation
+            _thread_local.cancel_check = check
+            try:
+                if _is_cancelled():
+                    raise RuntimeError("stream cancelled")
+                results.put((True, fn(*args, **kwargs)))
+            except BaseException as exc:
+                results.put((False, exc))
+            finally:
+                session = getattr(_thread_local, "session", None)
+                if session is not None:
+                    try:
+                        session.close()
+                    finally:
+                        with _active_sessions_lock:
+                            _active_sessions.discard(session)
+        threading.Thread(target=run, name="AuthNDTransport", daemon=True).start()
+        while True:
+            if generation.is_set() or _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            try:
+                success, result = results.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if generation.is_set() or _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            if not success:
+                raise result
+            return result
+    return wrapped
+
+
+@contextlib.contextmanager
+def _httpx_stream(httpx, *args, **kwargs):
+    # Register the client BEFORE waiting for response headers. Session-level
+    # cleanup cannot reach httpx.stream's otherwise hidden client.
+    with httpx.Client(timeout=kwargs.pop("timeout")) as client:
+        closer = _register_response_closer(client.close)
+        try:
+            if _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            with client.stream(*args, **kwargs) as response:
+                yield response
+        finally:
+            _unregister_response_closer(closer)
 
 
 def _acquire_gate(
@@ -1090,6 +1182,8 @@ def _post_with_cancel(session: requests.Session, *args, **kwargs) -> requests.Re
     being torn down in the background.
     """
     result_queue: "queue.Queue[Tuple[str, Any]]" = queue.Queue(maxsize=1)
+    abandoned = threading.Event()
+    result_lock = threading.Lock()
 
     def _run_post() -> None:
         try:
@@ -1100,13 +1194,11 @@ def _post_with_cancel(session: requests.Session, *args, **kwargs) -> requests.Re
             except Exception:
                 pass
         else:
-            try:
-                result_queue.put_nowait(("response", response))
-            except Exception:
-                try:
+            with result_lock:
+                if abandoned.is_set():
                     response.close()
-                except Exception:
-                    pass
+                else:
+                    result_queue.put_nowait(("response", response))
 
     worker = threading.Thread(target=_run_post, name="AuthNDRequest", daemon=True)
     worker.start()
@@ -1115,20 +1207,30 @@ def _post_with_cancel(session: requests.Session, *args, **kwargs) -> requests.Re
             kind, value = result_queue.get(timeout=0.1)
         except queue.Empty:
             if _is_cancelled():
+                with result_lock:
+                    abandoned.set()
+                    try:
+                        late_kind, late_value = result_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    else:
+                        if late_kind == "response":
+                            late_value.close()
                 try:
                     session.close()
                 except Exception:
                     pass
                 raise RuntimeError("stream cancelled")
             continue
-        if kind == "error":
-            raise value
         if _is_cancelled():
             try:
-                value.close()
+                if kind == "response":
+                    value.close()
             except Exception:
                 pass
             raise RuntimeError("stream cancelled")
+        if kind == "error":
+            raise value
         return value
 
 
@@ -2337,6 +2439,7 @@ def _post_prediction(
     )
 
 
+@_interruptible_transport
 def _send_prediction_payload(
     payload: Dict[str, Any], *, url: str, headers: Dict[str, str],
     timeout: int, connect_timeout: Optional[float], stream: bool,
@@ -2359,7 +2462,7 @@ def _send_prediction_payload(
             import httpx as _httpx
 
             _timeout = _httpx.Timeout(timeout, connect=connect_timeout)
-            with _httpx.stream(
+            with _httpx_stream(_httpx,
                 "POST",
                 url,
                 headers=headers,
@@ -2367,6 +2470,9 @@ def _send_prediction_payload(
                 timeout=_timeout,
             ) as response:
                 closer = _register_response_closer(response.close)
+                if _is_cancelled():
+                    _unregister_response_closer(closer)
+                    raise RuntimeError("stream cancelled")
                 _log(
                     log_fn,
                     f"🔎 AuthND debug response: status={response.status_code}, content_type={response.headers.get('content-type', '')}, transport=httpx",
@@ -2374,6 +2480,9 @@ def _send_prediction_payload(
                 )
                 if not 200 <= response.status_code < 300:
                     exc = _httpx_status_error(response)
+                    if _is_cancelled():
+                        _unregister_response_closer(closer)
+                        raise RuntimeError("stream cancelled")
                     _log(log_fn, f"⚠️ AuthND HTTP failure: {_short_error(exc)}")
                     _unregister_response_closer(closer)
                     raise exc
@@ -2417,45 +2526,53 @@ def _send_prediction_payload(
         stream=stream,
         allow_redirects=False,
     )
-    _log(
-        log_fn,
-        f"🔎 AuthND debug response: status={response.status_code}, content_type={response.headers.get('content-type', '')}",
-        debug_only=True,
-    )
-    if not 200 <= response.status_code < 300:
+    response_closer = _register_response_closer(response.close)
+    try:
+        if _is_cancelled():
+            raise RuntimeError("stream cancelled")
         _log(
             log_fn,
-            f"⚠️ AuthND HTTP failure: {_authnd_http_error_message(response.status_code, response.headers, response.text or '', response.reason)}",
+            f"🔎 AuthND debug response: status={response.status_code}, content_type={response.headers.get('content-type', '')}",
+            debug_only=True,
         )
-    _raise_for_status(response)
-    content_type = (response.headers.get("content-type") or "").lower()
-    if stream or "text/event-stream" in content_type:
-        if _is_cancelled():
-            try:
-                response.close()
-            except Exception:
-                pass
-            raise RuntimeError("stream cancelled")
-        if progress_label:
-            _log(log_fn, progress_label)
-        if log_stream is None or log_stream:
-            _log(log_fn, f"📡 AuthND: Stream opened (status={response.status_code})")
-        closer = _register_response_closer(response.close)
-        try:
-            return _parse_sse_response(
-                response,
-                log_fn=log_fn,
-                log_stream=_stream_logging_enabled() if log_stream is None else bool(log_stream),
-                t_start=request_started,
-                requested_max_tokens=max_tokens,
+        if not 200 <= response.status_code < 300:
+            _log(
+                log_fn,
+                f"⚠️ AuthND HTTP failure: {_authnd_http_error_message(response.status_code, response.headers, response.text or '', response.reason)}",
             )
-        finally:
-            _unregister_response_closer(closer)
-    result = _parse_json_response(response, requested_max_tokens=max_tokens)
-    _log_non_stream_summary(result, log_fn=log_fn, started_at=request_started)
-    return result
+        _raise_for_status(response)
+        content_type = (response.headers.get("content-type") or "").lower()
+        if stream or "text/event-stream" in content_type:
+            if _is_cancelled():
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                raise RuntimeError("stream cancelled")
+            if progress_label:
+                _log(log_fn, progress_label)
+            if log_stream is None or log_stream:
+                _log(log_fn, f"📡 AuthND: Stream opened (status={response.status_code})")
+            closer = _register_response_closer(response.close)
+            try:
+                return _parse_sse_response(
+                    response,
+                    log_fn=log_fn,
+                    log_stream=_stream_logging_enabled() if log_stream is None else bool(log_stream),
+                    t_start=request_started,
+                    requested_max_tokens=max_tokens,
+                )
+            finally:
+                _unregister_response_closer(closer)
+        result = _parse_json_response(response, requested_max_tokens=max_tokens)
+        _log_non_stream_summary(result, log_fn=log_fn, started_at=request_started)
+        return result
+    finally:
+        _unregister_response_closer(response_closer)
+        response.close()
 
 
+@_request_scope
 def send_chat_completion(
     *,
     messages: Iterable[Dict[str, Any]],
