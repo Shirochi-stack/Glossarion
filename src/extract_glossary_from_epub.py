@@ -10223,6 +10223,16 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         failed_set = set(failed_clean)
         merged_set = set(merged_clean)
         requested_in_progress_set = set(_unique_int_list(in_progress)) if in_progress is not None else set()
+        # Completion lists also contain unchanged chapters from earlier saves.
+        # Only a result carrying fresh request/entry updates may supersede a
+        # failed row written on disk; a bookkeeping save must preserve it.
+        fresh_result_indices = set(_unique_int_list(model_update_indices or []))
+        for updates in (model_updates, key_updates, extracted_entries_updates):
+            if isinstance(updates, dict):
+                fresh_result_indices.update(_unique_int_list(list(updates)))
+        fresh_success_indices = (
+            fresh_result_indices & (set(completed_clean) | merged_set)
+        ) - requested_failed_set
         requested_stem_owners = {}
         for req_idx in sorted(set(completed_clean) | set(failed_clean) | set(merged_clean) | requested_in_progress_set):
             req_file = _glossary_chapter_output_file(req_idx, context=context)
@@ -10341,6 +10351,9 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 merged_indices[:] = merged_clean
 
         if externally_failed:
+            externally_failed = [
+                idx for idx in externally_failed if idx not in fresh_success_indices
+            ]
             failed_clean = _unique_int_list(failed_clean + externally_failed)
             failed_set = set(failed_clean)
             merged_clean = [idx for idx in merged_clean if idx not in failed_set]

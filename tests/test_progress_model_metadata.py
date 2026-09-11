@@ -95,6 +95,53 @@ def _clear_actual_request_metadata():
     set_current_thread_actual_request_model(None, None)
 
 
+def test_retranslation_clears_older_qa_alias_after_chapter_renumbering(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    filename = "response_chapter_notice0001.html"
+    progress.prog["chapters"] = {
+        "1": {"actual_num": 1, "output_file": filename, "status": "qa_failed",
+              "last_updated": 10, "qa_timestamp": 20, "qa_issues": True,
+              "qa_issues_found": ["missing_images_8_lost_(0/8)"],
+              "original_basename": "chapter_notice0001.xhtml"},
+        "0": {"actual_num": 0, "output_file": "response_chapter_notice0002.html",
+              "status": "completed"},
+    }
+    progress._ensure_progress_output_index()
+    progress.update(3, 0, "new-hash", filename, status="in_progress",
+                    chapter_obj={"spine_order": 3})
+    assert "1" in progress.prog["chapters"]
+    progress.update(3, 0, "new-hash", filename, status="completed",
+                    chapter_obj={"spine_order": 3})
+    assert "1" not in progress.prog["chapters"]
+    completed = progress.prog["chapters"]["0@3"]
+    assert completed["status"] == "completed"
+    assert completed["original_basename"] == "chapter_notice0001.xhtml"
+    assert not completed.get("qa_issues_found")
+    assert "0" in progress.prog["chapters"]
+    assert "1" not in progress._ensure_progress_output_index().values()
+
+
+@pytest.mark.parametrize("difference", ["newer_qa", "other_output", "merged", "subtitle"])
+def test_retranslation_qa_alias_cleanup_preserves_unrelated_or_newer_state(tmp_path, difference):
+    progress = ProgressManager(str(tmp_path))
+    completed = {"actual_num": 0, "output_file": "response_notice.html",
+                 "status": "completed", "last_updated": 30}
+    old = {"actual_num": 1, "output_file": "response_notice.html",
+           "status": "qa_failed", "last_updated": 10, "qa_timestamp": 20,
+           "qa_issues_found": ["missing_images_8_lost_(0/8)"]}
+    if difference == "newer_qa":
+        old["qa_timestamp"] = 40
+    elif difference == "other_output":
+        old["output_file"] = "response_other.html"
+    elif difference == "merged":
+        old["status"] = "merged"
+    else:
+        old["subtitle_progress_key"] = "subtitle:1"
+    progress.prog["chapters"] = {"old": old, "new": completed}
+    progress._clear_retranslated_output_qa_aliases("new", completed)
+    assert progress.prog["chapters"]["old"] is old
+
+
 def test_chapter_display_numbers_do_not_reset_after_positive_sequence():
     assert nonreset_chapter_display_numbers([0, 1, 2, 0, 1, 0]) == [
         0,
@@ -377,6 +424,42 @@ def test_pending_progress_rows_hide_model_metadata_in_both_progress_views():
     glossary_display_source = glossary_source[glossary_start:glossary_end]
     assert "hide_model = _progress_status_hides_model_for_display(status)" in glossary_display_source
     assert "if status in skipped_labels or hide_model:" in glossary_display_source
+
+
+@pytest.mark.parametrize("scenario", ["fresh_completion", "bookkeeping", "renumbered"])
+def test_glossary_completion_reconciles_saved_qa_failures(tmp_path, monkeypatch, scenario):
+    progress_file = tmp_path / "book_glossary_progress.json"
+    old_idx = 1 if scenario == "renumbered" else 0
+    issue = ["API_ERROR"]
+    progress_file.write_text(json.dumps({
+        "chapters": {str(old_idx): {
+            "chapter_index": old_idx, "actual_num": old_idx + 1,
+            "output_file": "notice.xhtml", "status": "qa_failed",
+            "qa_issues": True, "qa_issues_found": issue}},
+        "failed": [old_idx], "completed": [],
+    }), encoding="utf-8")
+    monkeypatch.setattr(glossary_extractor, "_GLOSSARY_QA_ISSUES_FOUND", {old_idx: issue})
+    context = make_glossary_progress_context(
+        progress_file=str(progress_file),
+        output_file=str(tmp_path / "book_glossary.json"),
+        chapter_positions={0: 1}, chapter_numbers={0: 0},
+        chapter_filenames={0: "notice.xhtml"}, total_chapters=1,
+    )
+    completed, failed = [0], []
+    save_glossary_progress(completed, [], [], failed=failed, in_progress=[],
+                          context=context,
+                          model_updates={0: "test/model"} if scenario != "bookkeeping" else None)
+    result = json.loads(progress_file.read_text(encoding="utf-8"))
+    if scenario == "bookkeeping":
+        assert result["chapters"]["0"]["status"] == "qa_failed"
+        assert result["failed"] == [0]
+    else:
+        assert result["completed"] == [0]
+        assert result["failed"] == []
+        assert result["qa_issues_found"] == {}
+        assert set(result["chapters"]) == {"0"}
+        assert result["chapters"]["0"]["status"] == "completed"
+        assert not result["chapters"]["0"].get("qa_issues_found")
 
 
 def test_glossary_progress_reactivates_a_manually_removed_chapter(tmp_path):

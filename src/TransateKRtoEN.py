@@ -5492,6 +5492,45 @@ class ProgressManager:
                     self.prog["chapters"][key] = failed
         self._progress_file_delete_invalidated = True
     
+    def _clear_retranslated_output_qa_aliases(self, chapter_key, chapter_info):
+        """Discard obsolete QA rows when renumbering gave a new translation a new key."""
+        if (
+            chapter_info.get("status") != "completed"
+            or self._entry_or_previous_has_qa_issue_marker(chapter_info)
+            or is_metadata_progress_entry(chapter_key, chapter_info)
+            or self._is_subtitle_progress_info(chapter_info)
+        ):
+            return
+        output = _normalize_output_filename_stem(chapter_info.get("output_file"))
+        if not output:
+            return
+        completed_at = float(chapter_info.get("last_updated") or 0)
+        chapters = self.prog.get("chapters", {})
+        for old_key, old_info in list(chapters.items()):
+            if old_key == chapter_key or not isinstance(old_info, dict):
+                continue
+            if (
+                old_info.get("status") == "merged"
+                or is_metadata_progress_entry(old_key, old_info)
+                or self._is_subtitle_progress_info(old_info)
+                or not self._entry_or_previous_has_qa_issue_marker(old_info)
+                or _normalize_output_filename_stem(old_info.get("output_file")) != output
+            ):
+                continue
+            try:
+                previous_at = max(float(old_info.get("last_updated") or 0),
+                                  float(old_info.get("qa_timestamp") or 0))
+            except (TypeError, ValueError):
+                continue
+            if completed_at <= previous_at:
+                continue
+            if not chapter_info.get("original_basename") and old_info.get("original_basename"):
+                chapter_info["original_basename"] = old_info["original_basename"]
+            del chapters[old_key]
+            self._progress_output_index = None
+            self._progress_output_reverse_index = None
+            self._progress_output_index_signature = None
+
     def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None, chapter_obj=None, merged_chapters=None, qa_issues_found=None, *, prefer_thread_model=None, model_name=None, key_identifier=None):
         """Update progress for a chapter"""
         # Use helper method to get consistent key
@@ -5748,6 +5787,7 @@ class ProgressManager:
             pass
         
         self.prog["chapters"][chapter_key] = chapter_info
+        self._clear_retranslated_output_qa_aliases(chapter_key, chapter_info)
         self._remember_progress_output_index(chapter_key, chapter_info)
         if content_hash:
             self.mark_chapter_chunk_progress_status(content_hash, status)
