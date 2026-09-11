@@ -389,6 +389,7 @@ Built using:
 - TK - contributed the Gemma stray p&gt; and number spacing token fixes
 - Jin - contributed the `ocagy/` prefix routing implementation
 - Open source libraries and tools
+- The `autharena/` prefix routing uses [LMArenaBridge](https://github.com/CloudWaddie/LMArenaBridge).
 - comic-translate by ogkalu2 — https://github.com/ogkalu2/comic-translate
 
 ---
