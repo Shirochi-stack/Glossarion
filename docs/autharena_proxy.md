@@ -73,6 +73,10 @@ Browser tasks are stopped before a request's context and state can be reused.
 Dispatch failures are provider errors unless a real cancellation was requested.
 Upstream errors retain Arena's HTTP status and Retry-After value when supplied,
 including HTTP 429, instead of reporting them as CAPTCHA failures.
+HTTP rejections are forwarded promptly to Glossarion's normal API error handling;
+the bridge does not hold them in its own rate-limit retry loop. Failures returned
+before streaming begins also preserve their HTTP status. Partial streams remain
+protected from automatic replay, including errors reported after reasoning.
 Detailed HTTP logging records headers and a streaming-body placeholder without
 reading the response stream. Reading it in the logger delays dispatch events
 until the worker times out and causes a local acknowledgment conflict.

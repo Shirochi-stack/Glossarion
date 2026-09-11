@@ -575,7 +575,7 @@ class QAScannerMixin:
                     'check_multiple_headers': True,
                     'warn_name_mismatch': True,
                     'check_missing_html_tag': True,
-                    'check_missing_beautifulsoup_tags': False,
+                    'check_missing_beautifulsoup_tags': True,
                     'sdlxliff_tag_retention_threshold': 0.9,
                     'sdlxliff_tag_surplus_tolerance': 0.05,
                     'sdlxliff_min_source_paragraph_tags': 20,
@@ -3837,7 +3837,7 @@ class QAScannerMixin:
                 "Use SDLXLIFF subfolder for source -> output h1/p tag checks"
             )
             check_missing_beautifulsoup_tags_checkbox.setChecked(
-                qa_settings.get('check_missing_beautifulsoup_tags', False)
+                qa_settings.get('check_missing_beautifulsoup_tags', True)
             )
             check_missing_beautifulsoup_tags_checkbox.setToolTip(
                 "Compares source and output p and h1-h6 tag counts from matching SDLXLIFF sidecars. "
@@ -5897,7 +5897,7 @@ class QAScannerMixin:
                             ('QA_CHECK_POTENTIAL_TRUNCATION', '1' if qa_settings.get('check_potential_truncation', False) else '0'),
                             ('QA_CHECK_AI_TRUNCATION_DETECTION', '1' if qa_settings.get('check_ai_truncation_detection', False) else '0'),
                             ('QA_CHECK_WORD_COUNT_RATIO', '1' if qa_settings.get('check_word_count_ratio', True) else '0'),
-                            ('QA_CHECK_MISSING_BEAUTIFULSOUP_TAGS', '1' if qa_settings.get('check_missing_beautifulsoup_tags', False) else '0'),
+                            ('QA_CHECK_MISSING_BEAUTIFULSOUP_TAGS', '1' if qa_settings.get('check_missing_beautifulsoup_tags', True) else '0'),
                         ]
 
                         # CRITICAL: refresh the JSON snapshot too. The
@@ -6048,7 +6048,7 @@ class QAScannerMixin:
                     ('check_multiple_headers', check_multiple_headers_checkbox, True),
                     ('warn_name_mismatch', warn_mismatch_checkbox, True),
                     ('check_missing_html_tag', check_missing_html_tag_checkbox, True),
-                    ('check_missing_beautifulsoup_tags', check_missing_beautifulsoup_tags_checkbox, False),
+                    ('check_missing_beautifulsoup_tags', check_missing_beautifulsoup_tags_checkbox, True),
                     ('sdlxliff_min_source_paragraph_tags', sdlxliff_min_source_paragraph_spinbox, 20),
                     ('check_body_tag', check_body_tag_checkbox, False),
                     ('check_missing_header_tags', check_missing_header_tags_checkbox, True),
@@ -6273,7 +6273,7 @@ class QAScannerMixin:
                     check_multiple_headers_checkbox.setChecked(True)
                     warn_mismatch_checkbox.setChecked(True)
                     check_missing_html_tag_checkbox.setChecked(True)
-                    check_missing_beautifulsoup_tags_checkbox.setChecked(False)
+                    check_missing_beautifulsoup_tags_checkbox.setChecked(True)
                     sdlxliff_tag_retention_spinbox.setValue(90)
                     sdlxliff_tag_surplus_spinbox.setValue(5)
                     sdlxliff_min_source_paragraph_spinbox.setValue(20)

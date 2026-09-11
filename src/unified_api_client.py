@@ -2430,7 +2430,11 @@ class UnifiedClient:
         return None
 
     def _is_rate_limit_error(self, exc: Exception) -> bool:
+        if getattr(exc, 'error_type', None) == 'autharena_stream_error':
+            return False  # An interrupted/uncertain Arena stream must not rotate and replay.
         s = str(exc).lower()
+        if getattr(exc, 'http_status', None) == 429:
+            return True
         if hasattr(exc, 'error_type') and getattr(exc, 'error_type') == 'rate_limit':
             return True
         return ('429' in s) or ('rate limit' in s) or ('quota' in s)
@@ -2613,7 +2617,11 @@ class UnifiedClient:
         return {}
 
     def _is_rate_limit_error(self, exc: Exception) -> bool:
+        if getattr(exc, 'error_type', None) == 'autharena_stream_error':
+            return False  # An interrupted/uncertain Arena stream must not rotate and replay.
         s = str(exc).lower()
+        if getattr(exc, 'http_status', None) == 429:
+            return True
         if hasattr(exc, 'error_type') and getattr(exc, 'error_type') == 'rate_limit':
             return True
         return ('429' in s) or ('rate limit' in s) or ('quota' in s)
@@ -10655,6 +10663,10 @@ class UnifiedClient:
                     print("OpenCode Antigravity setup/authentication error - not retrying")
                     raise
 
+                if self.client_type == "autharena" and e.error_type in ("auth_error", "config_error"):
+                    print("Arena setup/authentication error - use Arena Login before retrying")
+                    raise
+
                 if self._should_retry_with_image_request_quality(context, e) and attempt < internal_retries - 1:
                     self._enable_image_request_quality_retry()
                     self._last_retry_error_type = 'payload_too_large_image_quality'
@@ -10732,7 +10744,10 @@ class UnifiedClient:
                     "invalid type",
                     "bad request",
                 )
-                non_safety_bad_request = bad_request and any(marker in error_str for marker in non_safety_bad_request_markers)
+                non_safety_bad_request = bad_request and (
+                    (self.client_type == "autharena" and e.error_type == "invalid_request_error")
+                    or any(marker in error_str for marker in non_safety_bad_request_markers)
+                )
                 safety_detected = self._detect_safety_filter(
                     messages,
                     extracted_content or "",
@@ -27715,12 +27730,26 @@ class UnifiedClient:
             # Do not internally replay a stream which may have already emitted text.
             if isinstance(exc, UnifiedClientError):
                 raise
-            kind = "cancelled" if is_cancel_generation_cancelled(generation) else "autharena_stream_error"
             partial = bool(getattr(exc, "partial_response", False))
+            status = getattr(exc, "http_status", None)
+            if is_cancel_generation_cancelled(generation):
+                kind = "cancelled"
+            elif partial or status is None:
+                kind = "autharena_stream_error"
+            elif status == 429:
+                kind = "rate_limit"
+            elif status in (401, 403):
+                kind = "auth_error"
+            elif 500 <= status < 600:
+                kind = "api_error"
+            elif 400 <= status < 500:
+                kind = "invalid_request_error"
+            else:
+                kind = "autharena_stream_error"
             raise UnifiedClientError(str(exc), error_type=kind,
-                http_status=None if partial else getattr(exc, "http_status", None),
+                http_status=None if partial else status,
                 details={"retry_after": getattr(exc, "retry_after", None),
-                         "upstream_http_status": getattr(exc, "http_status", None),
+                         "upstream_http_status": status,
                          "partial_response": partial}) from exc
 
     def _send_antigravity(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:

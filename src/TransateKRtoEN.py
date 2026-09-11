@@ -9690,6 +9690,8 @@ class TranslationProcessor:
                 
             except UnifiedClientError as e:
                 error_msg = str(e)
+                if e.error_type == "autharena_stream_error":
+                    raise  # Preserve Arena's no-replay boundary, including timeout text.
                 
                 if "stopped by user" in error_msg:
                     print("❌ Translation stopped by user during API call")
@@ -22670,7 +22672,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     getattr(result, '_glossarion_actual_key', None),
                 )
                 # For expected errors like rate limits, preserve the error type without extra traceback
-                if hasattr(result, 'error_type') and result.error_type == "rate_limit":
+                if isinstance(result, UnifiedClientError):
                     raise result
                 elif "429" in str(result) or "rate limit" in str(result).lower():
                     # Convert generic exceptions to UnifiedClientError for rate limits

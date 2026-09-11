@@ -545,3 +545,60 @@ def test_upstream_rejection_retains_status_and_retry_after(partial):
     assert error.value.retry_after == '60'
     assert error.value.partial_response == partial
     assert 'cancel' not in str(error.value).lower()
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 408, 409, 413, 422, 429, 500, 502, 503, 504])
+def test_local_http_errors_retain_status_and_retry_after(monkeypatch, status):
+    class Response:
+        ok = False
+        status_code = status
+        headers = {"Retry-After": "120"}
+        closed = False
+
+        def json(self):
+            return {"detail": "Provider rejected the request"}
+
+        def iter_lines(self, **kwargs):
+            pytest.fail("An HTTP rejection must not be consumed as a successful stream")
+
+        def close(self):
+            self.closed = True
+
+    response = Response()
+    monkeypatch.setattr(arena, "ensure_proxy_running", lambda **kwargs: {"url": "http://localhost:1", "key": "test"})
+    monkeypatch.setattr(arena.requests, "post", lambda *args, **kwargs: response)
+    with pytest.raises(arena.ArenaStreamError, match=f"Arena HTTP {status}") as error:
+        arena.send_message_stream([], "test", log_fn=None)
+    assert error.value.http_status == status
+    assert error.value.retry_after == "120"
+    assert error.value.partial_response is False
+    assert "Provider rejected" in str(error.value)
+    assert response.closed
+
+
+@pytest.mark.parametrize("body", [{"error": {"message": "Unavailable"}}, {"detail": [{"msg": "Unavailable"}]}, None])
+def test_http_error_bodies_keep_status_even_without_json(body):
+    class Response:
+        status_code = 503
+        headers = {"retry-after": "60"}
+        text = "Unavailable"
+
+        def json(self):
+            if body is None:
+                raise ValueError("Not JSON")
+            return body
+
+    error = arena._http_response_error(Response())
+    assert error.http_status == 503
+    assert error.retry_after == "60"
+    assert "Unavailable" in str(error)
+
+
+def test_sse_status_is_numeric_and_interrupted_reasoning_is_partial():
+    lines = ['data: ' + json.dumps({"error": {"message": "Rate limited", "status_code": "429"}})]
+    with pytest.raises(arena.ArenaStreamError) as error:
+        arena.consume_stream(lines, log_stream=False)
+    assert error.value.http_status == 429
+    with pytest.raises(arena.ArenaStreamError) as partial:
+        arena.consume_stream([event({"reasoning_content": "Thinking"})], log_stream=False)
+    assert partial.value.partial_response is True

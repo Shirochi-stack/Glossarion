@@ -237,6 +237,84 @@ class LoginNavigationTest(unittest.TestCase):
 @unittest.skipUnless(importlib.util.find_spec("camoufox") and (RUNTIME / "bridge").exists(),
                      "Run with installed Arena managed Python for the offline bridge integration test")
 class WorkerTest(unittest.TestCase):
+    def test_upstream_http_errors_are_prompt_and_preserve_status(self):
+        import httpx
+        browser = Browser()
+
+        class Playwright:
+            async def start(self):
+                self.chromium = self
+                return self
+
+            async def launch(self, **kwargs):
+                return browser
+
+            async def stop(self):
+                pass
+
+        catalog = [{"id": "test-model-id", "publicName": "test-model", "organization": "test", "capabilities": {}}]
+
+        async def discover_catalog(context):
+            return catalog
+
+        original_import = importlib.import_module
+
+        def import_bridge(name, *args, **kwargs):
+            module = original_import(name, *args, **kwargs)
+            if name.startswith("arena_slot_") and name.endswith(".src.main"):
+                async def discovery():
+                    module.save_models(catalog)
+                module.get_initial_data = discovery
+            return module
+
+        async def serve(server, sockets):
+            headers = {"Authorization": "Bearer test-key"}
+            payload = {"account_slot": 0, "model": "test-model", "messages": [{"role": "user", "content": "test"}]}
+            try:
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.config.app), base_url="http://test", headers=headers) as client:
+                    for status in (429, 404, 500):
+                        with self.subTest(status=status):
+                            async def reject(page, request_payload):
+                                await page.emit(None, {"status": status, "headers": {"retry-after": "120"},
+                                    "error_body": json.dumps({"error": "test rejection " + str(status)})})
+
+                            browser.response_handler = reject
+                            before = len(browser.sent)
+                            # Retry-After must reach Glossarion, not become a hidden
+                            # two-minute bridge sleep followed by another submission.
+                            response = await asyncio.wait_for(client.post("/v1/chat/completions", json=payload), 5)
+                            self.assertEqual(response.status_code, 200, response.text)
+                            with self.assertRaisesRegex(arena.ArenaStreamError, "test rejection " + str(status)) as caught:
+                                arena.consume_stream(response.text.splitlines(), log_stream=False)
+                            self.assertEqual(caught.exception.http_status, status)
+                            self.assertEqual(caught.exception.retry_after, "120")
+                            self.assertFalse(caught.exception.partial_response)
+                            self.assertEqual(len(browser.sent), before + 1)
+                            self.assertTrue(all(not context.pages for context in browser.contexts))
+
+                            contexts = list(browser.contexts)
+                            browser.response_handler = None
+                            recovered = await asyncio.wait_for(client.post("/v1/chat/completions", json=payload), 5)
+                            self.assertEqual(arena.consume_stream(recovered.text.splitlines(), log_stream=False)["content"], "hello")
+                            self.assertEqual(len(browser.sent), before + 2)
+                            self.assertEqual(browser.contexts, contexts)
+            finally:
+                for sock in sockets:
+                    sock.close()
+
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"AUTHARENA_PROXY_DATA_DIR": root}), \
+                patch.object(arena, "__file__", str(RUNTIME / "autharena_proxy.py")), \
+                patch.object(arena, "_discover_catalog", discover_catalog), \
+                patch("playwright.async_api.async_playwright", Playwright), \
+                patch("uvicorn.Server.serve", serve), patch("importlib.import_module", import_bridge):
+            expiration = int(time.time()) + 3600
+            token = "base64-" + base64.urlsafe_b64encode(json.dumps({"access_token": "test-access",
+                "refresh_token": "test-refresh", "expires_at": expiration,
+                "user": {"id": "user-0", "email": "saved@example.test"}}).encode()).decode()
+            arena._save("accounts.enc", {"0": {"token": token, "user_id": "user-0", "expires_at": expiration,
+                "cookies": [{"name": "test-account", "value": "slot-0", "domain": ".arena.ai", "path": "/"}]}})
+            asyncio.run(arena._serve_worker("test-key"))
+
     def test_same_account_stream_overlap_cancel_and_reconnect(self):
         import httpx
         browser = Browser()

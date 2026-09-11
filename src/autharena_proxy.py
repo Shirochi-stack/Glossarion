@@ -29,7 +29,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 19
+ADAPTER_VERSION = 20
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 ARENA_RECAPTCHA_V3_SITEKEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0"
 UV_VERSION = "0.8.22"
@@ -47,9 +47,33 @@ _started_callback = None
 class ArenaStreamError(RuntimeError):
     def __init__(self, message, http_status=None, retry_after=None, partial_response=False):
         super().__init__(message)
-        self.http_status = http_status
+        try:
+            status = int(http_status)
+        except (ValueError, TypeError):
+            status = 0
+        self.http_status = status if 400 <= status <= 599 else None
         self.retry_after = retry_after
         self.partial_response = partial_response
+
+
+def _http_response_error(response):
+    """Preserve HTTP failures returned before the local SSE stream starts."""
+    status = response.status_code
+    try:
+        body = response.json()
+        detail = body.get("detail", body.get("error", body)) if isinstance(body, dict) else body
+        if isinstance(detail, dict):
+            detail = detail.get("message") or detail.get("detail") or detail
+        if not isinstance(detail, str):
+            detail = json.dumps(detail, ensure_ascii=False)
+    except (ValueError, TypeError):
+        detail = response.text
+    detail = (detail or "").strip()[:8192]
+    retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
+    message = f"Arena HTTP {status}" + (f": {detail}" if detail else "")
+    if retry_after:
+        message += f" (Retry-After: {retry_after})"
+    return ArenaStreamError(message, status, retry_after)
 
 
 async def _run_stream_with_idle_timeout(awaitable, activity, timeout):
@@ -688,7 +712,8 @@ def consume_stream(lines, log_fn=print, log_stream=True, cancel_generation=None,
     if is_cancel_generation_cancelled(cancel_generation):
         raise RuntimeError("Arena stream cancelled")
     if not done or not finish:
-        raise RuntimeError("Arena stream interrupted before its completion marker; partial output was not retried.")
+        raise ArenaStreamError("Arena stream interrupted before its completion marker; partial output was not retried.",
+                               partial_response=bool(text or thinking))
     if display.log_fn and display.phase is not None:
         display.log_fn("📡 Arena: Stream complete")
     return {"content": "".join(text), "reasoning_content": "".join(thinking), "usage": usage, "finish_reason": finish}
@@ -722,7 +747,9 @@ def send_message_stream(messages, model, temperature=0.7, max_tokens=None, timeo
             if approved.status_code == 409:
                 if is_cancel_generation_cancelled(generation):
                     raise RuntimeError("Arena stream cancelled")
-                raise RuntimeError("Arena dispatch preparation ended before handoff; no automatic replay was attempted.")
+                raise ArenaStreamError("Arena dispatch preparation ended before handoff; no automatic replay was attempted.", 409)
+            if approved.status_code >= 400:
+                raise _http_response_error(approved)
             approved.raise_for_status()
             if log_fn:
                 log_fn("📨 Arena: captcha token acquired; sending Arena request")
@@ -751,7 +778,7 @@ def send_message_stream(messages, model, temperature=0.7, max_tokens=None, timeo
         if is_cancel_generation_cancelled(generation):
             raise RuntimeError("Arena stream cancelled")
         if not response.ok:
-            raise RuntimeError("Arena: " + response.json().get("detail", f"HTTP {response.status_code}"))
+            raise _http_response_error(response)
         selected = getattr(response, "headers", {}).get("X-Arena-Account-Slot")
         if log_fn and selected is not None and str(selected).isdigit():
             selected = int(selected)
@@ -1178,7 +1205,8 @@ async def _serve_worker(key):
                         state["upstream_error"] = {
                             "message": f"Arena HTTP {item['status']}: {item.get('error_body', '')}",
                             "status_code": item["status"],
-                            "retry_after": item.get("headers", {}).get("retry-after"),
+                            "retry_after": (item.get("headers", {}).get("retry-after")
+                                            or item.get("headers", {}).get("Retry-After")),
                         }
                     headers_ready.set()
                     await request_events.put({"arena_progress": "headers:" + str(item["status"])})
@@ -1373,8 +1401,16 @@ async def _serve_worker(key):
                     response = await fetch(*args, **kwargs)
                     if response.status_code not in (401, 403):
                         if response.status_code >= 400:
+                            # The pinned bridge retries 429/5xx internally,
+                            # delaying the actual rejection behind keepalives.
+                            # Stop that loop with its non-retryable status;
+                            # upstream_chunks preserves the real status/body
+                            # and Retry-After from state["upstream_error"].
+                            detail = f"Arena HTTP {response.status_code}: {response.text}"
+                            await response.aclose()
                             state["terminal_error"] = transport.BrowserFetchStreamResponse(
-                                response.status_code, {}, text=response.text)
+                                400, {}, text=detail)
+                            return state["terminal_error"]
                         return response
                     detail = f"Arena HTTP {response.status_code}: {response.text}"
                     captcha_rejected = response.status_code == 403 and "captcha" in response.text.lower()
