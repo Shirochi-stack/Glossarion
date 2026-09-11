@@ -213,6 +213,7 @@ app_files = [
 	('authnd_auth.py', '.'),  # NVIDIA Build browser-backed auth
 	('gemini_free.py', '.'),  # Google Search/Gemini browser-backed route
 	('token_encryption.py', '.'),
+	('proxy_token_storage.py', '.'),
 
 	# Antigravity Cloud Code proxy
 	('ocagy_cli.py', '.'),  # OpenCode + opencode-antigravity-auth
@@ -340,6 +341,7 @@ app_modules = [
 	'authnd_auth',  # NVIDIA Build browser-backed auth
 	'gemini_free',  # Google Search/Gemini browser-backed route
 	'token_encryption',  # Encrypted token storage
+	'proxy_token_storage',  # Encrypted proxy token storage
 	'ocagy_cli',  # OpenCode + opencode-antigravity-auth
 	'autharena_proxy',
 	'antigravity_proxy',  # Antigravity Cloud Code proxy

@@ -15,6 +15,13 @@ if str(SRC) not in sys.path:
 import ocagy_cli
 
 
+@pytest.fixture(autouse=True)
+def isolate_credential_runtime_patching(monkeypatch):
+    # CLI fakes must never patch the user's real installed OAuth plugin.
+    # Real copied-runtime adapter coverage lives in test_proxy_token_storage.
+    monkeypatch.setattr(ocagy_cli, "_secure_plugin_account_storage", lambda **kwargs: None)
+
+
 def _fake_opencode(tmp_path: Path) -> Path:
     script = tmp_path / "fake_opencode.py"
     script.write_text(
@@ -129,9 +136,10 @@ def test_numbered_prefix_isolates_selected_account(tmp_path, monkeypatch):
 
     def fake_server_send(**kwargs):
         isolated_dir = Path(kwargs["subprocess_env"]["OPENCODE_CONFIG_DIR"])
-        account_store = json.loads(
-            (isolated_dir / "antigravity-accounts.json").read_text(encoding="utf-8")
-        )
+        from proxy_token_storage import load_accounts
+        from token_encryption import is_encrypted
+        assert is_encrypted(str(isolated_dir / "antigravity-accounts.json"))
+        account_store = load_accounts(isolated_dir / "antigravity-accounts.json")
         plugin_settings = json.loads(
             (isolated_dir / "antigravity.json").read_text(encoding="utf-8")
         )

@@ -391,6 +391,7 @@ def ensure_auth_plugin_installed(executable: str, log_fn=None) -> None:
             return
 
         workspace = _workspace_dir()
+        _secure_plugin_account_storage(required=False)
         logger(
             "🧩 Ensuring the OpenCode Antigravity auth plugin is installed "
             f"({_PLUGIN_PACKAGE})..."
@@ -413,6 +414,7 @@ def ensure_auth_plugin_installed(executable: str, log_fn=None) -> None:
                 f"Installer details: {detail}\n\n{_plugin_fallback_instructions()}"
             )
 
+        _secure_plugin_account_storage(required=True)
         _PLUGIN_BOOTSTRAPPED_EXECUTABLES.add(key)
         logger("✅ OpenCode Antigravity auth plugin is installed and ready.")
 
@@ -602,7 +604,8 @@ def _account_summary() -> Dict[str, Any]:
     if not path.is_file():
         return result
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        from proxy_token_storage import load_accounts
+        payload = load_accounts(path)
         accounts = payload.get("accounts", []) if isinstance(payload, dict) else []
         enabled = [item for item in accounts if isinstance(item, dict) and item.get("enabled", True)]
         result["account_count"] = len(enabled)
@@ -623,7 +626,8 @@ def _load_account_store() -> Tuple[Path, Dict[str, Any]]:
     if not path.is_file():
         return path, {}
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        from proxy_token_storage import load_accounts
+        payload = load_accounts(path)
     except Exception as exc:
         raise OcAgyError(f"The OpenCode Antigravity OAuth account store could not be read: {exc}") from exc
     if not isinstance(payload, dict):
@@ -679,6 +683,10 @@ def _require_oauth_account(account_number: int = 0) -> Optional[Tuple[Dict[str, 
 
 
 def _write_private_json(path: Path, payload: Dict[str, Any]) -> None:
+    if path.name == "antigravity-accounts.json":
+        from proxy_token_storage import save_accounts
+        save_accounts(path, payload)
+        return
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     try:
         path.chmod(0o600)
@@ -903,6 +911,21 @@ def _plugin_install_candidates() -> Iterable[Path]:
             packages_dir.glob(f"{package_name}@*/node_modules/{package_name}"),
             reverse=True,
         )
+
+
+def _secure_plugin_account_storage(*, required):
+    from proxy_token_storage import patch_ocagy, load_accounts, migrate_opencode_oauth
+    roots = [root for root in _plugin_install_candidates()
+             if (root / "dist" / "src" / "plugin" / "storage.js").is_file()]
+    if not roots:
+        if required:
+            raise OcAgyError("Cannot locate the OAuth plugin to enable encrypted credential storage")
+        return
+    for root in dict.fromkeys(roots):
+        patch_ocagy(root)
+    load_accounts(_config_dir() / "antigravity-accounts.json", migrate=True)
+    data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    migrate_opencode_oauth(data_home / "opencode" / "auth.json")
 
 
 def _plugin_oauth_client_credentials() -> Tuple[str, str]:
@@ -1180,7 +1203,8 @@ def get_quota_status(timeout: float = 15.0, log_fn=None) -> Dict[str, Any]:
     _require_oauth_account()
     account_path = _config_dir() / "antigravity-accounts.json"
     try:
-        payload = json.loads(account_path.read_text(encoding="utf-8"))
+        from proxy_token_storage import load_accounts
+        payload = load_accounts(account_path)
     except Exception as exc:
         raise OcAgyError(f"Could not read the OpenCode Antigravity account store: {exc}") from exc
     accounts = payload.get("accounts", []) if isinstance(payload, dict) else []

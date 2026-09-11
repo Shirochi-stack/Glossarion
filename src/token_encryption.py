@@ -388,9 +388,14 @@ def _storage_success(operation, tokens, file_path):
         return  # Arena's model catalog is not an account credential store.
     if not tokens and os.path.basename(file_path).startswith("accounts."):
         return
-    records = tokens if isinstance(tokens, dict) and tokens and all(
-        str(key).isdigit() and isinstance(value, dict) for key, value in tokens.items()
-    ) else {"single": tokens}
+    if isinstance(tokens, dict) and isinstance(tokens.get("accounts"), list):
+        records = {str(index): account for index, account in enumerate(tokens["accounts"])}
+        if not records:
+            return
+    else:
+        records = tokens if isinstance(tokens, dict) and tokens and all(
+            str(key).isdigit() and isinstance(value, dict) for key, value in tokens.items()
+        ) else {"single": tokens}
     path = os.path.normcase(os.path.abspath(file_path))
     with _storage_log_lock:
         accounts = _storage_log_pending.setdefault(operation, {})

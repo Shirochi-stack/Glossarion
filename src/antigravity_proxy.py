@@ -75,7 +75,7 @@ PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
 PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS = 90
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
 BUN_INSTALL_TIMEOUT_SECONDS = 300
-RUNTIME_PATCH_VERSION = "2026-08-17-round-robin-forced-account-v3"
+RUNTIME_PATCH_VERSION = "2026-09-12-encrypted-account-storage-v1"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -314,6 +314,8 @@ def _write_proxy_runtime_package_json(data_dir: str, version: Optional[str] = No
 
 
 def _patch_runtime_package_json(runtime_dir: str, version: str) -> None:
+    from proxy_token_storage import patch_antigravity
+    patch_antigravity(runtime_dir)
     package_json = os.path.join(runtime_dir, "package.json")
     with open(package_json, "r", encoding="utf-8") as f:
         package_data = json.load(f)
@@ -2681,6 +2683,9 @@ def ensure_proxy_running(log_fn=None, notify_started: bool = True) -> Dict[str, 
                 "ACCOUNTS_FILE",
                 os.path.join(data_dir, "antigravity-accounts.json"),
             )
+            from proxy_token_storage import load_accounts
+            # Runtime adapters are installed before migrating the account file.
+            load_accounts(env["ACCOUNTS_FILE"], migrate=True)
 
             kwargs: Dict[str, Any] = {
                 "stdout": subprocess.DEVNULL,
@@ -2854,8 +2859,8 @@ def _load_stored_accounts() -> List[Dict[str, Any]]:
     path = _accounts_file_path()
     if not path or not os.path.exists(path):
         return []
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    from proxy_token_storage import load_accounts
+    data = load_accounts(path)
 
     if isinstance(data, list):
         raw_accounts = data
