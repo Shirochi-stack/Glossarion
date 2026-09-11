@@ -209,7 +209,7 @@ def _get_symmetric_key() -> bytes:
             return key
         key = secrets.token_bytes(32)
         _keychain_store_key(key)
-        logger.info("Generated new encryption key (stored in macOS Keychain)")
+        logger.info("🔑 Generated new encryption key (stored in macOS Keychain)")
         return key
     else:
         # Linux / other Unix
@@ -218,7 +218,7 @@ def _get_symmetric_key() -> bytes:
             return key
         key = secrets.token_bytes(32)
         _file_store_key(key)
-        logger.info("Generated new encryption key (stored in %s)", _KEY_FILE)
+        logger.info("🔑 Generated new encryption key (stored in %s)", _KEY_FILE)
         return key
 
 
@@ -246,7 +246,7 @@ def _fernet_encrypt(data: bytes, key: bytes) -> bytes:
 
     # Last resort: XOR with key-derived stream + HMAC for integrity
     # (weaker than AES but far better than plain text)
-    logger.warning("No AES library available — using HMAC-protected obfuscation")
+    logger.warning("⚠️ No AES library available — falling back to HMAC-protected obfuscation, NOT AES encryption")
     salt = secrets.token_bytes(16)
     stream_key = hashlib.pbkdf2_hmac("sha256", key, salt, 100000, dklen=len(data))
     ct = bytes(a ^ b for a, b in zip(data, stream_key))
@@ -340,10 +340,26 @@ def is_encrypted(file_path: str) -> bool:
         return False
 
 
+def _storage_log(message: str, file_path: str) -> None:
+    # stderr also keeps worker stdout protocols free of status messages.
+    message = f"{message} ({os.path.basename(file_path)})"
+    logger.debug(message)
+    try:
+        print(message, file=sys.stderr)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stderr, "encoding", None) or "ascii"
+        print(message.encode(encoding, errors="replace").decode(encoding), file=sys.stderr)
+
+
 def save_encrypted_tokens(tokens: Dict, file_path: str) -> None:
     """Encrypt and save tokens to a file."""
     os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
-    encrypted = encrypt_tokens(tokens)
+    _storage_log("🔐 Encrypting credentials…", file_path)
+    try:
+        encrypted = encrypt_tokens(tokens)
+    except Exception:
+        _storage_log("❌ Credential encryption failed", file_path)
+        raise
     with open(file_path, "wb") as f:
         f.write(encrypted)
     # Restrict file permissions on Unix
@@ -352,7 +368,7 @@ def save_encrypted_tokens(tokens: Dict, file_path: str) -> None:
             os.chmod(file_path, 0o600)
         except Exception:
             pass
-    logger.debug("Encrypted tokens saved to %s", file_path)
+    _storage_log("🔒 Credentials encrypted and saved", file_path)
 
 
 def load_encrypted_tokens(file_path: str) -> Optional[Dict]:
@@ -372,21 +388,24 @@ def load_encrypted_tokens(file_path: str) -> Optional[Dict]:
 
     # Check if already encrypted
     if data.startswith(_ENCRYPTED_HEADER):
-        return decrypt_tokens(data)
+        _storage_log("🔓 Decrypting credentials into memory…", file_path)
+        try:
+            tokens = decrypt_tokens(data)
+        except Exception:
+            _storage_log("❌ Credential decryption failed", file_path)
+            raise
+        _storage_log("✅ Credentials decrypted successfully", file_path)
+        return tokens
 
     # Plain JSON — migrate to encrypted
     try:
         tokens = json.loads(data.decode("utf-8"))
         if isinstance(tokens, dict):
-            logger.info("Migrating plain-text tokens to encrypted storage: %s", file_path)
-            try:
-                print(f"[ENCRYPT] Encrypting token file: {os.path.basename(file_path)}")
-            except UnicodeEncodeError:
-                print(f"[ENCRYPT] Encrypting token file: {os.path.basename(file_path)}")
+            _storage_log("🔐 Migrating unencrypted credentials to encrypted storage", file_path)
             save_encrypted_tokens(tokens, file_path)
             return tokens
     except (json.JSONDecodeError, UnicodeDecodeError):
-        logger.warning("Token file is neither encrypted nor valid JSON: %s", file_path)
+        logger.warning("⚠️ Credential file is neither encrypted nor valid JSON: %s", os.path.basename(file_path))
 
     return None
 

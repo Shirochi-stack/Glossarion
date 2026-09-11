@@ -637,10 +637,11 @@ class AuthGemTokenStore:
                     # token_encryption module not available — read plain JSON
                     with open(self._token_file, "r", encoding="utf-8") as f:
                         self._tokens = json.load(f)
+                        logger.warning("🔓 AuthGem: loaded UNENCRYPTED credentials; encryption module is unavailable")
                 except Exception as dec_exc:
                     # Decryption failed — file is corrupt or from a different
                     # user/machine.  Delete it so re-login creates a fresh one.
-                    logger.warning("AuthGem token decryption failed (%s) — removing corrupt file", dec_exc)
+                    logger.warning("❌ AuthGem token decryption failed (%s) — removing corrupt file", type(dec_exc).__name__)
                     try:
                         os.remove(self._token_file)
                     except OSError:
@@ -668,13 +669,14 @@ class AuthGemTokenStore:
                     save_encrypted_tokens(tokens, self._token_file)
                     saved = True
                 except ImportError:
-                    pass
+                    logger.warning("⚠️ AuthGem: encryption module unavailable; falling back to UNENCRYPTED JSON storage")
                 except Exception as enc_exc:
-                    logger.warning("AuthGem token encryption failed (%s) — saving as plain JSON", enc_exc)
+                    logger.warning("⚠️ AuthGem token encryption failed (%s) — saving as plain JSON", type(enc_exc).__name__)
                 if not saved:
                     # Fallback: plain JSON (still better than losing tokens)
                     with open(self._token_file, "w", encoding="utf-8") as f:
                         json.dump(tokens, f, indent=2)
+                    logger.warning("🔓 AuthGem: credentials saved WITHOUT ENCRYPTION (plain JSON fallback)")
                 logger.debug("AuthGem tokens saved to %s", self._token_file)
             except Exception as exc:
                 logger.warning("Failed to save authgem tokens: %s", exc)

@@ -879,8 +879,9 @@ class AuthGrokTokenStore:
             except ImportError:
                 with open(self._token_file, "r", encoding="utf-8") as handle:
                     self._tokens = json.load(handle)
+                    logger.warning("🔓 AuthGrok: loaded UNENCRYPTED credentials; encryption module is unavailable")
             except Exception as exc:
-                logger.warning("AuthGrok token decryption failed (%s); removing corrupt file", exc)
+                logger.warning("❌ AuthGrok token decryption failed (%s); removing corrupt file", type(exc).__name__)
                 try:
                     os.remove(self._token_file)
                 except OSError:
@@ -901,12 +902,13 @@ class AuthGrokTokenStore:
                     save_encrypted_tokens(self._tokens, self._token_file)
                     saved = True
                 except ImportError:
-                    pass
+                    logger.warning("⚠️ AuthGrok: encryption module unavailable; falling back to UNENCRYPTED JSON storage")
                 except Exception as exc:
-                    logger.warning("AuthGrok token encryption failed (%s); saving plain JSON", exc)
+                    logger.warning("⚠️ AuthGrok token encryption failed (%s); saving plain JSON", type(exc).__name__)
                 if not saved:
                     with open(self._token_file, "w", encoding="utf-8") as handle:
                         json.dump(self._tokens, handle, indent=2)
+                    logger.warning("🔓 AuthGrok: credentials saved WITHOUT ENCRYPTION (plain JSON fallback)")
             except Exception as exc:
                 logger.warning("Failed to save AuthGrok tokens: %s", exc)
         self._fire_change_callbacks()

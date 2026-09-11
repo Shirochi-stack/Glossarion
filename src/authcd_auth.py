@@ -304,8 +304,9 @@ class AuthCDTokenStore:
                 except ImportError:
                     with open(self._token_file, "r", encoding="utf-8") as f:
                         self._tokens = json.load(f)
+                        logger.warning("🔓 AuthCD: loaded UNENCRYPTED credentials; encryption module is unavailable")
                 except Exception as dec_exc:
-                    logger.warning("AuthCD token decryption failed (%s) — removing corrupt file", dec_exc)
+                    logger.warning("❌ AuthCD token decryption failed (%s) — removing corrupt file", type(dec_exc).__name__)
                     try:
                         os.remove(self._token_file)
                     except OSError:
@@ -338,12 +339,13 @@ class AuthCDTokenStore:
                     save_encrypted_tokens(tokens, self._token_file)
                     saved = True
                 except ImportError:
-                    pass
+                    logger.warning("⚠️ AuthCD: encryption module unavailable; falling back to UNENCRYPTED JSON storage")
                 except Exception as enc_exc:
-                    logger.warning("AuthCD token encryption failed (%s) — saving as plain JSON", enc_exc)
+                    logger.warning("⚠️ AuthCD token encryption failed (%s) — saving as plain JSON", type(enc_exc).__name__)
                 if not saved:
                     with open(self._token_file, "w", encoding="utf-8") as f:
                         json.dump(tokens, f, indent=2)
+                    logger.warning("🔓 AuthCD: credentials saved WITHOUT ENCRYPTION (plain JSON fallback)")
                 logger.debug("AuthCD tokens saved to %s", self._token_file)
             except Exception as exc:
                 logger.warning("Failed to save authcd tokens: %s", exc)

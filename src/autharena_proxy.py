@@ -1764,7 +1764,7 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
                         "Saved login does not guarantee CAPTCHA acceptance.")
                     snapshot = (slot, identities)
                     if snapshot != self.account_snapshot:
-                        self.progress.emit("Arena: restored " + ("account pool " if slot is None else "account ") + identities + " from encrypted storage.")
+                        self.progress.emit("🔓 Arena: restored " + ("account pool " if slot is None else "account ") + identities + " from encrypted storage.")
                     self.account_snapshot = snapshot
                 else:
                     self.login_button.setToolTip("Log into Arena in the automatically installed internal browser")
