@@ -732,3 +732,21 @@ def test_frozen_arena_entrypoint_runs_helper_before_gui_imports(monkeypatch):
         exec(compile(ast.Module(body=[branch], type_ignores=[]), 'entrypoint', 'exec'), namespace)
     assert result.value.code == 0
     assert called == [True]
+
+
+def test_login_restores_only_selected_encrypted_account_including_refresh_cookie(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    accounts = {
+        '1': {'expires_at': 1, 'cookies': [{'name': 'arena-auth-prod-v1', 'value': 'saved-refresh-session'}]},
+        '2': {'cookies': [{'name': 'arena-auth-prod-v1', 'value': 'other-account'}]},
+    }
+    monkeypatch.setattr(arena, '_load', lambda name: accounts)
+    restored = []
+    async def add(cookies): restored.append(cookies)
+    context = SimpleNamespace(add_cookies=add)
+    asyncio.run(arena._restore_login_session(context, 1))
+    assert restored == [accounts['1']['cookies']]
+    asyncio.run(arena._restore_login_session(context, None))
+    asyncio.run(arena._restore_login_session(context, 3))
+    assert restored == [accounts['1']['cookies']]

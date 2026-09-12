@@ -10663,6 +10663,10 @@ class UnifiedClient:
                     print("OpenCode Antigravity setup/authentication error - not retrying")
                     raise
 
+                if self.client_type == "autharena" and e.error_type == "autharena_verification_error":
+                    print("🔐 Arena rejected browser verification; this does not mean the saved login was lost.")
+                    raise
+
                 if self.client_type == "autharena" and e.error_type in ("auth_error", "config_error"):
                     print("Arena setup/authentication error - use Arena Login before retrying")
                     raise
@@ -27738,6 +27742,8 @@ class UnifiedClient:
                 kind = "autharena_stream_error"
             elif status == 429:
                 kind = "rate_limit"
+            elif status == 403 and "captcha" in str(exc).lower():
+                kind = "autharena_verification_error"
             elif status in (401, 403):
                 kind = "auth_error"
             elif 500 <= status < 600:

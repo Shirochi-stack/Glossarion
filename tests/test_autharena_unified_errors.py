@@ -216,3 +216,15 @@ def test_translation_retry_handler_preserves_no_replay_errors(handlers, message)
     with pytest.raises(handlers.error_type) as caught:
         _translation_error_handler(handlers.error_type)(error)
     assert caught.value is error
+
+
+def test_captcha_rejection_is_not_reported_as_lost_login(handlers, capsys):
+    handlers.fail(arena.ArenaStreamError('Arena HTTP 403: recaptcha validation failed', 403))
+    with pytest.raises(handlers.error_type) as caught:
+        handlers.client._send_internal([], 0.2, 1024, request_id='captcha')
+    assert caught.value.error_type == 'autharena_verification_error'
+    assert caught.value.http_status == 403
+    assert len(handlers.calls) == 1
+    assert handlers.waits == []
+    output = capsys.readouterr().out
+    assert 'use Arena Login before retrying' not in output

@@ -29,7 +29,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 22
+ADAPTER_VERSION = 23
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 ARENA_RECAPTCHA_V3_SITEKEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0"
 UV_VERSION = "0.8.22"
@@ -1036,6 +1036,18 @@ def _persist_session(slot, cookies, expected_token=None):
     return session
 
 
+async def _restore_login_session(context, slot):
+    """Seed a fresh login profile from the selected account's encrypted cookies."""
+    if slot is None:
+        return  # + N must open a separate, unsigned-in account.
+    with disk_lock():
+        account = _load("accounts.enc").get(str(slot))
+    if account:
+        # Preserve expired access sessions too: their refresh cookie may still
+        # allow Arena's session client to renew them after navigation.
+        await context.add_cookies(account.get("cookies", []))
+
+
 async def _serve_worker(key, qt_helper_command=None):
     """Authenticated loopback broker; independent browser/bridge state per request."""
     global _qt_host_command
@@ -1084,6 +1096,7 @@ async def _serve_worker(key, qt_helper_command=None):
             except Exception as exc:
                 raise HTTPException(503, f"Arena Qt browser startup failed after automatic recovery: {exc}")
             try:
+                await _restore_login_session(context, body.get("slot"))
                 page = context.pages[0] if context.pages else await context.new_page()
                 await page.goto("https://arena.ai/", wait_until="domcontentloaded")
                 await page.bring_to_front()
