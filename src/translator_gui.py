@@ -18734,6 +18734,7 @@ Recent translations to summarize:
                 match = _re.fullmatch(r'authgem_tokens_(\d+)\.json', path.name)
                 if match:
                     pool_ids['authgem'].add(int(match.group(1)))
+            pool_ids['authgem'].update(getattr(self, '_authgem_pending_account_ids', set()))
 
         if authgpt_pool_requested:
             pool_ids['authgpt'].add(0)
@@ -18837,6 +18838,8 @@ Recent translations to summarize:
                         combo.addItem("+ N", _AUTHGROK_ADD_ACCOUNT_SENTINEL)
                     if provider == 'authgpt':
                         combo.addItem("+ N", "__authgpt_add_account__")
+                    if provider == 'authgem' and vertex_pool_requested:
+                        combo.addItem("+ N", "__authgem_add_account__")
                     combo.setCurrentIndex(cur_idx)
                     combo.blockSignals(False)
                     combo.show()
@@ -18865,16 +18868,17 @@ Recent translations to summarize:
             return
         combo = getattr(self, f'{provider}_acct_combo', None)
         selected_data = combo.itemData(index) if combo is not None else None
-        if provider == 'authgpt' and selected_data == '__authgpt_add_account__':
-            ids = set(self._auth_account_ids.get('authgpt', [0]))
+        if provider in ('authgpt', 'authgem') and selected_data == f'__{provider}_add_account__':
+            pending_name = f'_{provider}_pending_account_ids'
+            pending = getattr(self, pending_name, set())
+            ids = set(self._auth_account_ids.get(provider, [0])) | pending
             account_id = max(ids, default=0) + 1
-            pending = getattr(self, '_authgpt_pending_account_ids', set())
             pending.add(account_id)
-            self._authgpt_pending_account_ids = pending
-            self._auth_account_ids['authgpt'] = sorted(ids | pending)
-            self._auth_account_idx['authgpt'] = self._auth_account_ids['authgpt'].index(account_id)
+            setattr(self, pending_name, pending)
+            self._auth_account_ids[provider] = sorted(ids | pending)
+            self._auth_account_idx[provider] = self._auth_account_ids[provider].index(account_id)
             self._refresh_auth_account_arrows()
-            QTimer.singleShot(0, self._authgpt_login_clicked)
+            QTimer.singleShot(0, getattr(self, f'_{provider}_login_clicked'))
             return
         if (
             provider == 'authgrok'
