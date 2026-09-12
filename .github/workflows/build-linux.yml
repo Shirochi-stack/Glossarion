@@ -1,0 +1,186 @@
+name: Build Linux
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    tags:
+      - 'v*'  # Also trigger on version tags
+
+jobs:
+  build-linux:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            python3-dev \
+            pkg-config \
+            cmake \
+            zip \
+            libpango1.0-dev \
+            libpangocairo-1.0-0 \
+            libcairo2-dev \
+            libgdk-pixbuf-2.0-dev \
+            libffi-dev \
+            libgirepository1.0-dev \
+            gir1.2-pango-1.0 \
+            libgl1 \
+            libegl1 \
+            libnss3 \
+            libasound2t64 \
+            libgbm1 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxrandr2 \
+            libxtst6 \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-keysyms1 \
+            libxcb-shape0 \
+            libxcb-xinerama0 \
+            libxcb-image0 \
+            libxcb-render-util0
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # NoCuda requirements pin CPU-only PyTorch; RapidOCR supplies bundled OCR models.
+          python -m pip install --no-cache-dir -r requirements_NoCuda.txt rapidocr-onnxruntime
+
+      - name: Check NoCuda dependencies and Qt WebEngine
+        run: |
+          python - <<'PY'
+          import torch
+          from torchvision.ops import nms
+          import numpy as np
+          from onnx import TensorProto, helper
+          import onnxruntime
+          import rapidocr_onnxruntime
+          from PySide6 import QtWebEngineCore, QtWebEngineWidgets, QtWebChannel
+
+          if torch.version.cuda is not None:
+              raise SystemExit('NoCuda requires CPU-only PyTorch')
+          if 'CPUExecutionProvider' not in onnxruntime.get_available_providers():
+              raise SystemExit('ONNX Runtime CPU provider is missing')
+          if {'CUDAExecutionProvider', 'TensorrtExecutionProvider'} & set(onnxruntime.get_available_providers()):
+              raise SystemExit('NoCuda requires CPU ONNX Runtime')
+          boxes = torch.tensor([[0.0, 0.0, 1.0, 1.0]])
+          if nms(boxes, torch.tensor([1.0]), 0.5).tolist() != [0]:
+              raise SystemExit('CPU Torchvision operation failed')
+          graph = helper.make_graph(
+              [helper.make_node('Identity', ['input'], ['output'])], 'cpu-check',
+              [helper.make_tensor_value_info('input', TensorProto.FLOAT, [1])],
+              [helper.make_tensor_value_info('output', TensorProto.FLOAT, [1])],
+          )
+          model = helper.make_model(graph, opset_imports=[helper.make_opsetid('', 13)], ir_version=8)
+          session = onnxruntime.InferenceSession(model.SerializeToString(), providers=['CPUExecutionProvider'])
+          value = np.array([1.0], dtype=np.float32)
+          if not np.array_equal(session.run(None, {'input': value})[0], value):
+              raise SystemExit('ONNX Runtime CPU inference failed')
+          print('CPU PyTorch', torch.__version__)
+          print('Qt WebEngine', QtWebEngineCore.qWebEngineVersion())
+          PY
+
+      - name: Build with PyInstaller
+        run: pyinstaller translator_linux_NoCuda.spec --noconfirm
+        working-directory: src
+
+      - name: Verify bundled NoCuda and Qt WebEngine
+        working-directory: src
+        run: |
+          python - <<'PY'
+          import fnmatch
+          from pathlib import Path
+          from PyInstaller.archive.readers import CArchiveReader
+          from app_version import get_spec_app_name
+
+          binary = Path('dist') / get_spec_app_name('translator_linux_NoCuda.spec')
+          archive = CArchiveReader(str(binary))
+          members = [name.replace('\\', '/') for name in archive.toc]
+          required = [
+              'torch/_C*.so',
+              'torch/lib/libtorch_cpu.so',
+              'torch/lib/libtorch_python.so',
+              'torch/lib/libc10.so',
+              'onnxruntime/capi/onnxruntime_pybind11_state*.so',
+              'rapidocr_onnxruntime/models/*.onnx',
+              'PySide6/QtWebEngineCore*.so',
+              'PySide6/QtWebEngineWidgets*.so',
+              'PySide6/QtWebChannel*.so',
+              '*libQt6WebEngineCore.so*',
+              '*libQt6WebEngineWidgets.so*',
+              'PySide6/Qt/libexec/QtWebEngineProcess',
+              'PySide6/Qt/libexec/qt.conf',
+              'PySide6/Qt/resources/icudtl.dat',
+              'PySide6/Qt/resources/qtwebengine_resources.pak',
+              'PySide6/Qt/resources/qtwebengine_resources_100p.pak',
+              'PySide6/Qt/resources/qtwebengine_resources_200p.pak',
+              'PySide6/Qt/resources/qtwebengine_devtools_resources.pak',
+              'PySide6/Qt/resources/v8_context_snapshot*.bin',
+              'PySide6/Qt/translations/qtwebengine_locales/en-US.pak',
+          ]
+          missing = [pattern for pattern in required if not any(fnmatch.fnmatchcase(name, pattern) for name in members)]
+          if missing:
+              raise SystemExit('Missing bundled NoCuda/Qt WebEngine files: ' + ', '.join(missing))
+          python_modules = set()
+          for name, entry in archive.toc.items():
+              if entry[-1] == 'z':
+                  python_modules.update(archive.open_embedded_archive(name).toc)
+          required_modules = ['torch', 'transformers', 'diffusers', 'ultralytics', 'onnxruntime', 'rapidocr_onnxruntime']
+          missing_modules = [module for module in required_modules if module not in python_modules and f'{module}/__init__.py' not in members]
+          if missing_modules:
+              raise SystemExit('Missing NoCuda Python modules: ' + ', '.join(missing_modules))
+          gpu_libraries = [
+              '*libtorch_cuda*.so*', '*libc10_cuda*.so*', '*libcudart.so*',
+              '*libcudnn*.so*', '*libcublas*.so*', '*libcufft*.so*',
+              '*libcurand*.so*', '*libcusolver*.so*', '*libcusparse*.so*',
+              '*libnvrtc*.so*', '*libnvjitlink*.so*', '*libnccl*.so*',
+              '*onnxruntime_providers_cuda.so', '*onnxruntime_providers_tensorrt.so',
+          ]
+          unexpected = [name for name in members if any(fnmatch.fnmatchcase(name.lower(), pattern) for pattern in gpu_libraries)]
+          if unexpected:
+              raise SystemExit('Unexpected CUDA libraries in NoCuda build: ' + ', '.join(unexpected))
+          print(f'Verified CPU PyTorch, ONNX Runtime, RapidOCR, and Qt WebEngine in {binary.name}')
+          PY
+
+      - name: Create Linux ZIP
+        id: package
+        working-directory: src
+        run: |
+          LINUX_BINARY="$(python -c 'from app_version import get_spec_app_name; print(get_spec_app_name("translator_linux_NoCuda.spec"))')"
+          LINUX_PACKAGE="${LINUX_BINARY/#N_Glossarion_NoCuda_/Z_Glossarion_}"
+          cd dist
+          chmod +x "$LINUX_BINARY"
+          zip -9 "${LINUX_PACKAGE}.zip" "$LINUX_BINARY"
+          echo "name=$LINUX_PACKAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: src/dist/*.zip
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload to Release (if tagged)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: src/dist/*.zip
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
