@@ -29,11 +29,12 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 21
+ADAPTER_VERSION = 22
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 ARENA_RECAPTCHA_V3_SITEKEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0"
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
+_qt_host_command = None
 _lock = threading.RLock()
 _file_locks = {"state": threading.RLock(), "setup": threading.RLock()}
 _cancel = threading.Event()
@@ -145,9 +146,45 @@ async def _open_arena_login(page, navigation):
     return False
 
 
+def _qt_helper_command():
+    if _qt_host_command is not None:
+        return list(_qt_host_command)
+    import importlib.util
+    try:
+        available = all(importlib.util.find_spec(name) is not None for name in (
+            "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets"))
+    except (ImportError, ValueError):
+        available = False
+    if not available:
+        raise RuntimeError("Arena requires Qt6 WebEngine in the running application. "
+                           "This installation/build does not include it; no Qt download was attempted.")
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--autharena-qt-browser"]
+    return [sys.executable, str(_source_file("autharena_proxy.py")), "--qt-browser"]
+
+
 def _qt_browser_helper(visible=False):
     """Own Qt pages on the GUI thread; the bridge drives them over loopback CDP."""
-    from PySide6.QtCore import QObject, Signal, QTimer, QUrl
+    # Windowed PyInstaller builds set Python's stdio objects to None even
+    # when the parent supplied pipes. Recover those inherited handles.
+    if os.name == "nt" and (sys.stdin is None or sys.stderr is None):
+        import ctypes
+        import msvcrt
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetStdHandle.argtypes = [ctypes.c_ulong]
+        kernel.GetStdHandle.restype = ctypes.c_void_p
+        for name, number, mode, flags in (("stdin", -10, "r", os.O_RDONLY),
+                                          ("stderr", -12, "w", os.O_WRONLY)):
+            if getattr(sys, name) is None:
+                handle = kernel.GetStdHandle(number & 0xffffffff)
+                fd = msvcrt.open_osfhandle(handle, flags)
+                setattr(sys, name, os.fdopen(fd, mode, encoding="utf-8", buffering=1))
+    from PySide6.QtCore import QObject, Signal, QTimer, QUrl, qInstallMessageHandler
+    if sys.stderr is not None:
+        def qt_message(kind, context, message):
+            sys.stderr.write(message + "\n")
+            sys.stderr.flush()
+        qInstallMessageHandler(qt_message)
     from PySide6.QtWidgets import QApplication
     from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
     from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -322,7 +359,7 @@ async def _open_qt_browser(playwright, visible=False):
         with tempfile.TemporaryFile(mode="w+b") as startup_log:
             try:
                 process = subprocess.Popen(
-                    [sys.executable, str(_source_file("autharena_proxy.py")), "--qt-browser"]
+                    _qt_helper_command()
                     + (["--visible"] if visible else []),
                     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=startup_log,
                     text=True, encoding="utf-8", env=_qt_browser_env(port, visible, attempt > 0),
@@ -548,13 +585,17 @@ def _run(args, log_fn=print):
 
 
 def _ensure_browser(runtime, python, log_fn=print, refresh=False):
-    marker = runtime / "qt-browser-ready"
+    marker = runtime / "qt-bridge-ready"
     if not refresh and marker.exists():
         return
-    log_fn("🌐 Arena: installing Qt6 WebEngine browser support…")
-    uv = data_dir() / ("uv.exe" if os.name == "nt" else "uv")
-    _run([uv, "pip", "install", "--python", python, "PySide6>=6.8", "playwright>=1.60"], log_fn)
-    _run([python, "-c", "from PySide6.QtWebEngineCore import QWebEngineProfile; from playwright.async_api import BrowserType; import inspect; assert 'no_defaults' in inspect.signature(BrowserType.connect_over_cdp).parameters"], log_fn)
+    probe = [python, "-c", "from playwright.async_api import BrowserType; import inspect; assert 'no_defaults' in inspect.signature(BrowserType.connect_over_cdp).parameters"]
+    try:
+        _run(probe, log_fn)
+    except RuntimeError:
+        log_fn("🌐 Arena: updating Playwright bridge support (Qt WebEngine is reused from the app)…")
+        uv = data_dir() / ("uv.exe" if os.name == "nt" else "uv")
+        _run([uv, "pip", "install", "--python", python, "playwright>=1.60"], log_fn)
+        _run(probe, log_fn)
     marker.write_text("qt6", encoding="ascii")
 
 
@@ -658,6 +699,7 @@ def ensure_proxy_running(log_fn=print, notify_started=True):
             return status
         if status.get("outdated"):
             requests.post(status["url"] + "/shutdown", headers={"Authorization": "Bearer " + status["key"]}, timeout=5).raise_for_status()
+        qt_command = _qt_helper_command()
         runtime, python = _ensure_runtime(log_fn or print)
         for name in ("autharena_proxy.py", "token_encryption.py"):
             shutil.copy2(_source_file(name), runtime / name)
@@ -666,7 +708,7 @@ def ensure_proxy_running(log_fn=print, notify_started=True):
         _owned = subprocess.Popen([str(python), str(runtime / "autharena_proxy.py"), "--worker"],
                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  env=_env(), cwd=runtime, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        _owned.stdin.write(json.dumps({"key": key}).encode() + b"\n")
+        _owned.stdin.write(json.dumps({"key": key, "qt_helper_command": qt_command}).encode() + b"\n")
         _owned.stdin.close()
         # Worker publishes state without taking the parent-held setup lock.
         for _ in range(120):
@@ -994,8 +1036,10 @@ def _persist_session(slot, cookies, expected_token=None):
     return session
 
 
-async def _serve_worker(key):
+async def _serve_worker(key, qt_helper_command=None):
     """Authenticated loopback broker; independent browser/bridge state per request."""
+    global _qt_host_command
+    _qt_host_command = qt_helper_command
     import asyncio
     import copy
     import importlib
@@ -2021,7 +2065,8 @@ if __name__ == "__main__":
         sys.exit(_qt_browser_helper("--visible" in sys.argv))
     elif "--worker" in sys.argv:
         import asyncio
-        asyncio.run(_serve_worker(json.loads(sys.stdin.readline())["key"]))
+        startup = json.loads(sys.stdin.readline())
+        asyncio.run(_serve_worker(startup["key"], startup.get("qt_helper_command")))
     else:
         import argparse
         parser = argparse.ArgumentParser(description="Manage Glossarion's Arena proxy; no arguments starts the service until Ctrl+C.")

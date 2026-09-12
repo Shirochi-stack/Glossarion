@@ -180,7 +180,7 @@ def test_cached_runtime_does_not_download_or_require_system_python(monkeypatch):
     (runtime / "ready").touch()
     browser = runtime / "chromium.exe"
     browser.touch()
-    (runtime / "qt-browser-ready").write_text("qt6", encoding="utf-8")
+    (runtime / "qt-bridge-ready").write_text("qt6", encoding="utf-8")
     monkeypatch.setattr(arena, "_download", lambda *args: pytest.fail("Unexpected download"))
     assert arena._ensure_runtime() == (runtime, python)
 
@@ -402,10 +402,10 @@ def test_internal_browser_installs_automatically_and_reuses_cache(tmp_path, monk
         return str(browser) if "-c" in args else ""
     monkeypatch.setattr(arena, "_run", run)
     arena._ensure_browser(runtime, "managed-python", lambda message: None)
-    assert calls[0][1:] == ["pip", "install", "--python", "managed-python", "PySide6>=6.8", "playwright>=1.60"]
-    assert len(calls) == 2
+    assert calls[0][0:2] == ["managed-python", "-c"]
+    assert len(calls) == 1
     arena._ensure_browser(runtime, "managed-python", lambda message: None)
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert arena._env()["PLAYWRIGHT_BROWSERS_PATH"] == str(arena.data_dir() / "browsers")
 
 
@@ -415,7 +415,7 @@ def test_failed_browser_install_is_not_cached(tmp_path, monkeypatch):
     monkeypatch.setattr(arena, "_run", fail)
     with pytest.raises(RuntimeError, match="download failed"):
         arena._ensure_browser(tmp_path, "managed-python", lambda message: None)
-    assert not (tmp_path / "qt-browser-ready").exists()
+    assert not (tmp_path / "qt-bridge-ready").exists()
 
 
 @pytest.mark.parametrize("version", [None, 1])
@@ -680,3 +680,55 @@ def test_qt_linux_environment_preserves_display_auth_and_software_rendering(monk
     assert "--disable-dev-shm-usage" in env["QTWEBENGINE_CHROMIUM_FLAGS"]
     assert "--disable-software-rasterizer" not in env["QTWEBENGINE_CHROMIUM_FLAGS"]
     assert arena._qt_browser_env(12345, visible=False)["QT_QPA_PLATFORM"] == "offscreen"
+
+
+def test_qt_helper_uses_application_python_or_frozen_executable(monkeypatch):
+    monkeypatch.setattr(arena, "_qt_host_command", None)
+    monkeypatch.setattr(arena.sys, "frozen", False, raising=False)
+    assert arena._qt_helper_command() == [arena.sys.executable, str(arena._source_file("autharena_proxy.py")), "--qt-browser"]
+    monkeypatch.setattr(arena.sys, "frozen", True)
+    assert arena._qt_helper_command() == [arena.sys.executable, "--autharena-qt-browser"]
+    monkeypatch.setattr(arena, "_qt_host_command", ["app.exe", "--autharena-qt-browser"])
+    assert arena._qt_helper_command() == ["app.exe", "--autharena-qt-browser"]
+
+
+def test_missing_bundled_webengine_is_reported_without_downloading(monkeypatch):
+    import importlib.util
+    monkeypatch.setattr(arena, "_qt_host_command", None)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(arena, "_run", lambda *args: pytest.fail("Qt must not be downloaded"))
+    with pytest.raises(RuntimeError, match="no Qt download was attempted"):
+        arena._qt_helper_command()
+
+
+def test_bridge_upgrade_never_installs_pyside(tmp_path, monkeypatch):
+    calls = []
+    def run(args, log_fn):
+        calls.append(args)
+        if len(calls) == 1:
+            raise RuntimeError("old Playwright")
+        return ''
+    monkeypatch.setattr(arena, '_run', run)
+    arena._ensure_browser(tmp_path, 'managed-python', lambda text: None)
+    assert len(calls) == 3
+    assert calls[1][1:] == ['pip', 'install', '--python', 'managed-python', 'playwright>=1.60']
+    assert all('PySide6' not in str(call) for call in calls)
+
+
+def test_frozen_arena_entrypoint_runs_helper_before_gui_imports(monkeypatch):
+    import ast
+    import sys
+    from types import SimpleNamespace
+    source = Path(arena.__file__).with_name('translator_gui.py').read_text(encoding='utf-8-sig')
+    tree = ast.parse(source)
+    entry = tree.body[0]
+    branch = next(node for node in entry.body if isinstance(node, ast.If)
+                  and '--autharena-qt-browser' in ast.unparse(node.test))
+    called = []
+    monkeypatch.setitem(sys.modules, 'autharena_proxy', SimpleNamespace(
+        _qt_browser_helper=lambda visible: called.append(visible) or 0))
+    namespace = {'_early_sys': SimpleNamespace(argv=['Glossarion.exe', '--autharena-qt-browser', '--visible'])}
+    with pytest.raises(SystemExit) as result:
+        exec(compile(ast.Module(body=[branch], type_ignores=[]), 'entrypoint', 'exec'), namespace)
+    assert result.value.code == 0
+    assert called == [True]

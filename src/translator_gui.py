@@ -33,6 +33,12 @@ if __name__ == '__main__':
             )
             raise SystemExit(1)
 
+    # Use the executable's bundled PySide6 for Arena's isolated browser helper.
+    # Exit here before importing or opening the full translator GUI.
+    if "--autharena-qt-browser" in _early_sys.argv:
+        from autharena_proxy import _qt_browser_helper
+        raise SystemExit(_qt_browser_helper("--visible" in _early_sys.argv))
+
     # PyInstaller-safe AuthND token helper entrypoint.  authnd_auth.py cannot
     # run itself via ``sys.executable script.py`` once bundled because
     # sys.executable is the Glossarion app exe.  Handle this tiny helper command
