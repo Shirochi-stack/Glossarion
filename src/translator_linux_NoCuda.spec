@@ -1148,6 +1148,8 @@ GPU_LIBRARY_PREFIXES = (
     'libc10_cuda',
     'libonnxruntime_providers_cuda',
     'libonnxruntime_providers_tensorrt',
+    'onnxruntime_providers_cuda',
+    'onnxruntime_providers_tensorrt',
     'libnvinfer',
     'libnvonnxparser',
     'libpaddle_cuda',
