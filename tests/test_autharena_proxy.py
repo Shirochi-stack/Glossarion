@@ -180,7 +180,7 @@ def test_cached_runtime_does_not_download_or_require_system_python(monkeypatch):
     (runtime / "ready").touch()
     browser = runtime / "chromium.exe"
     browser.touch()
-    (runtime / "browser-ready").write_text(str(browser), encoding="utf-8")
+    (runtime / "qt-browser-ready").write_text("qt6", encoding="utf-8")
     monkeypatch.setattr(arena, "_download", lambda *args: pytest.fail("Unexpected download"))
     assert arena._ensure_runtime() == (runtime, python)
 
@@ -402,7 +402,7 @@ def test_internal_browser_installs_automatically_and_reuses_cache(tmp_path, monk
         return str(browser) if "-c" in args else ""
     monkeypatch.setattr(arena, "_run", run)
     arena._ensure_browser(runtime, "managed-python", lambda message: None)
-    assert calls[0] == ["managed-python", "-m", "playwright", "install", "chromium"]
+    assert calls[0][1:] == ["pip", "install", "--python", "managed-python", "PySide6>=6.8", "playwright>=1.60"]
     assert len(calls) == 2
     arena._ensure_browser(runtime, "managed-python", lambda message: None)
     assert len(calls) == 2
@@ -415,7 +415,7 @@ def test_failed_browser_install_is_not_cached(tmp_path, monkeypatch):
     monkeypatch.setattr(arena, "_run", fail)
     with pytest.raises(RuntimeError, match="download failed"):
         arena._ensure_browser(tmp_path, "managed-python", lambda message: None)
-    assert not (tmp_path / "browser-ready").exists()
+    assert not (tmp_path / "qt-browser-ready").exists()
 
 
 @pytest.mark.parametrize("version", [None, 1])
@@ -667,3 +667,16 @@ def test_sse_status_is_numeric_and_interrupted_reasoning_is_partial():
     with pytest.raises(arena.ArenaStreamError) as partial:
         arena.consume_stream([event({"reasoning_content": "Thinking"})], log_stream=False)
     assert partial.value.partial_response is True
+
+
+def test_qt_linux_environment_preserves_display_auth_and_software_rendering(monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":1")
+    monkeypatch.setenv("XAUTHORITY", "/tmp/test-xauthority")
+    monkeypatch.setattr(arena.platform, "system", lambda: "Linux")
+    env = arena._qt_browser_env(12345, visible=True, recovery=True)
+    assert env["XAUTHORITY"] == "/tmp/test-xauthority"
+    assert env["QT_QPA_PLATFORM"] == "xcb"
+    assert env["QTWEBENGINE_REMOTE_DEBUGGING"] == "127.0.0.1:12345"
+    assert "--disable-dev-shm-usage" in env["QTWEBENGINE_CHROMIUM_FLAGS"]
+    assert "--disable-software-rasterizer" not in env["QTWEBENGINE_CHROMIUM_FLAGS"]
+    assert arena._qt_browser_env(12345, visible=False)["QT_QPA_PLATFORM"] == "offscreen"

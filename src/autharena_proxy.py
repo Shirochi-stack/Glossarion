@@ -29,7 +29,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 20
+ADAPTER_VERSION = 21
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 ARENA_RECAPTCHA_V3_SITEKEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0"
 UV_VERSION = "0.8.22"
@@ -145,92 +145,223 @@ async def _open_arena_login(page, navigation):
     return False
 
 
-def _regular_browser_executable():
-    """Prefer installed Chrome; never open or copy its personal profile."""
-    candidates = []
-    if platform.system() == "Windows":
-        for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
-            if os.environ.get(variable):
-                candidates.append(Path(os.environ[variable]) / "Google/Chrome/Application/chrome.exe")
-    elif platform.system() == "Darwin":
-        candidates.extend([Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-                           Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"])
-    else:
-        for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
-            found = shutil.which(name)
-            if found:
-                candidates.append(Path(found))
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    marker = data_dir() / ("bridge-" + REVISION) / "browser-ready"
-    if marker.exists():
-        candidate = Path(marker.read_text(encoding="utf-8"))
-        if candidate.is_file():
-            return candidate
-    raise RuntimeError("Arena could not find Chrome or its installed Chromium browser. Retry Arena Login after setup finishes.")
+def _qt_browser_helper(visible=False):
+    """Own Qt pages on the GUI thread; the bridge drives them over loopback CDP."""
+    from PySide6.QtCore import QObject, Signal, QTimer, QUrl
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+
+    app = QApplication(["Arena Browser"])
+    app.setQuitOnLastWindowClosed(False)
+    # Off-the-record profile: Arena cookies are persisted only in our encrypted store.
+    profile = QWebEngineProfile(app)
+    profile.setHttpCacheType(QWebEngineProfile.MemoryHttpCache)
+    profile.setHttpCacheMaximumSize(16 * 1024 * 1024)
+    profile.setPersistentCookiesPolicy(QWebEngineProfile.NoPersistentCookies)
+    pages = {}
+
+    class Page(QWebEnginePage):
+        def createWindow(self, window_type):
+            return create_page(True).page()
+
+    def create_page(show=False):
+        view = QWebEngineView()
+        view.setPage(Page(profile, view))
+        view.setWindowTitle("Arena Login / Verification")
+        view.resize(1100, 780)
+        target = view.page().devToolsId()
+        pages[target] = view
+        view.setUrl(QUrl("about:blank"))
+        if show:
+            view.show()
+        return view
+
+    class Commands(QObject):
+        received = Signal(object)
+    commands = Commands()
+    def execute(command):
+        action = command.get("action")
+        if action == "new":
+            create_page(True)  # Offscreen helpers still need an active rendered view.
+        elif action == "show":
+            view = pages.get(command.get("target"))
+            if view:
+                view.show(); view.raise_(); view.activateWindow()
+        elif action == "close":
+            view = pages.pop(command.get("target"), None)
+            if view:
+                view.close(); view.deleteLater()
+        elif action == "quit":
+            app.quit()
+    commands.received.connect(execute)
+    def read_commands():
+        for line in sys.stdin:
+            try:
+                commands.received.emit(json.loads(line))
+            except (ValueError, RuntimeError):
+                break
+        commands.received.emit({"action": "quit"})
+    threading.Thread(target=read_commands, daemon=True).start()
+    create_page(False)  # Keeper page for profile cookie operations.
+    result = app.exec()
+    for view in pages.values():
+        view.close()
+        view.deleteLater()
+    return result
+
+
+class _QtArenaPage:
+    def __init__(self, owner, page, target):
+        self.owner, self.page, self.target = owner, page, target
+
+    def __getattr__(self, name):
+        return getattr(self.page, name)
+
+    async def close(self):
+        if self in self.owner._pages:
+            self.owner._pages.remove(self)
+        self.owner.command("close", self.target)
+
+    async def bring_to_front(self):
+        self.owner.command("show", self.target)
+
+
+class _QtArenaContext:
+    """Adapt Qt-owned pages to the small BrowserContext surface used by Arena."""
+    def __init__(self, process, browser):
+        self.process, self.browser = process, browser
+        self.context = browser.contexts[0]
+        self._pages = []
+        self._closed = False
+
+    def is_connected(self):
+        return not self._closed and self.process.poll() is None and self.browser.is_connected()
+
+    @property
+    def pages(self):
+        return [p for p in self._pages if not p.page.is_closed()]
+
+    def command(self, action, target=None):
+        if self.process.poll() is not None:
+            raise RuntimeError("Arena Qt browser exited.")
+        self.process.stdin.write(json.dumps({"action": action, "target": target}) + "\n")
+        self.process.stdin.flush()
+
+    async def new_page(self):
+        async with self.context.expect_page(timeout=15000) as pending:
+            self.command("new")
+        page = await pending.value
+        session = await self.context.new_cdp_session(page)
+        try:
+            info = await session.send("Target.getTargetInfo")
+        finally:
+            await session.detach()
+        wrapped = _QtArenaPage(self, page, info["targetInfo"]["targetId"])
+        self._pages.append(wrapped)
+        return wrapped
+
+    async def _cookie_command(self, name, args=None):
+        session = await self.context.new_cdp_session(self.context.pages[0])
+        try:
+            return await session.send(name, args or {})
+        finally:
+            await session.detach()
+
+    async def add_cookies(self, cookies):
+        await self._cookie_command("Network.setCookies", {"cookies": cookies})
+
+    async def cookies(self, urls=None):
+        if isinstance(urls, str):
+            urls = [urls]
+        method = "Network.getCookies" if urls else "Network.getAllCookies"
+        result = await self._cookie_command(method, {"urls": urls} if urls else {})
+        return result["cookies"]
+
+    async def close(self):
+        import asyncio
+        if self._closed:
+            return
+        self._closed = True
+        if self.process.poll() is None:
+            with contextlib.suppress(Exception):
+                self.command("quit")
+            try:
+                await asyncio.to_thread(self.process.wait, timeout=3)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                await asyncio.to_thread(self.process.wait)
+        with contextlib.suppress(Exception):
+            await self.browser.close()
+        self.process.stdin.close()
+
+
+def _qt_browser_env(port, visible, recovery=False):
+    env = _env()
+    env["QTWEBENGINE_REMOTE_DEBUGGING"] = f"127.0.0.1:{port}"
+    # Keep software rasterization available on Linux machines without a GPU.
+    env["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu --disable-dev-shm-usage"
+    if not visible:
+        env["QT_QPA_PLATFORM"] = "offscreen"
+    elif recovery and platform.system() == "Linux" and env.get("DISPLAY"):
+        env["QT_QPA_PLATFORM"] = "xcb"
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        env["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
+    return env
+
+
+async def _open_qt_browser(playwright, visible=False):
+    """Retry startup only, before any login or translation has been submitted."""
+    import asyncio
+    import socket
+    for attempt in range(2):
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        process = browser = None
+        with tempfile.TemporaryFile(mode="w+b") as startup_log:
+            try:
+                process = subprocess.Popen(
+                    [sys.executable, str(_source_file("autharena_proxy.py")), "--qt-browser"]
+                    + (["--visible"] if visible else []),
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=startup_log,
+                    text=True, encoding="utf-8", env=_qt_browser_env(port, visible, attempt > 0),
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        raise RuntimeError(f"Qt WebEngine exited during startup (exit {process.returncode}).")
+                    startup_log.seek(0)
+                    output = startup_log.read().decode("utf-8", errors="replace")
+                    endpoint = re.search(
+                        rf"DevTools listening on (ws://127\.0\.0\.1:{port}/devtools/browser/[a-fA-F0-9-]+)", output)
+                    if endpoint:
+                        browser = await playwright.chromium.connect_over_cdp(
+                            endpoint.group(1), no_defaults=True, timeout=15000)
+                        return _QtArenaContext(process, browser)
+                    await asyncio.sleep(.1)
+                raise RuntimeError("Qt WebEngine did not become ready.")
+            except BaseException as exc:
+                if process is not None:
+                    if process.poll() is None:
+                        process.kill()
+                    await asyncio.to_thread(process.wait)
+                    process.stdin.close()
+                if browser is not None:
+                    with contextlib.suppress(Exception):
+                        await browser.close()
+                if not isinstance(exc, Exception) or attempt == 1:
+                    raise
+                print("🔄 Arena: browser startup failed; retrying with a fresh Qt WebEngine process…", flush=True)
 
 
 @contextlib.asynccontextmanager
 async def _regular_login_browser(playwright):
-    """Launch a normal browser profile, then attach only to this owned process."""
-    import asyncio
-    import socket
-    executable = _regular_browser_executable()
-    profiles = data_dir() / "login-profiles"
-    profiles.mkdir(parents=True, exist_ok=True)
-    profile = Path(tempfile.mkdtemp(prefix="login-", dir=profiles))
-    process = None
-    connected = None
+    context = await _open_qt_browser(playwright, visible=True)
     try:
-        # Chrome treats a literal debugging port of 0 as an automated launch.
-        # Allocate a concrete loopback port instead; keep browser security and
-        # page JavaScript unchanged. A raced port fails startup rather than
-        # attaching to whichever service happens to own that port.
-        with socket.socket() as reservation:
-            reservation.bind(("127.0.0.1", 0))
-            port = reservation.getsockname()[1]
-        startup_log = profile / "browser-startup.log"
-        with startup_log.open("wb") as stderr:
-            process = subprocess.Popen(
-                [str(executable), "--user-data-dir=" + str(profile),
-                 f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1",
-                 "--no-first-run", "--no-default-browser-check", "about:blank"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr,
-                env=_env(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        deadline = time.monotonic() + 45
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise RuntimeError("Arena's login browser closed before it was ready. Click Arena Login to retry.")
-            # Use the unique endpoint emitted by OUR child, not an unverified
-            # /json/version response from a potentially unrelated process.
-            endpoint = re.search(
-                rf"DevTools listening on (ws://127\.0\.0\.1:{port}/devtools/browser/[a-fA-F0-9-]+)",
-                startup_log.read_text(encoding="utf-8", errors="replace"))
-            if endpoint:
-                connected = await playwright.chromium.connect_over_cdp(endpoint.group(1), timeout=15000)
-                # Use the regular profile context, not an incognito context.
-                yield connected.contexts[0]
-                return
-            await asyncio.sleep(.1)
-        raise RuntimeError("Arena's login browser did not become ready. Close its window and retry Arena Login.")
+        yield context
     finally:
-        if connected is not None:
-            with contextlib.suppress(Exception):
-                session = await connected.new_browser_cdp_session()
-                await session.send("Browser.close")
-            with contextlib.suppress(Exception):
-                await connected.close()
-        if process is not None and process.poll() is None:
-            try:
-                await asyncio.to_thread(process.wait, timeout=5)
-            except subprocess.TimeoutExpired:
-                process.terminate()
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    await asyncio.to_thread(process.wait, timeout=5)
-        # This fresh app-owned profile is disposable; only Arena credentials
-        # captured by the caller are retained in the encrypted account store.
-        await asyncio.to_thread(shutil.rmtree, profile, ignore_errors=True)
+        await context.close()
 
 
 def set_proxy_started_callback(callback):
@@ -399,7 +530,7 @@ def _env():
     # Do not inherit translation prompts or API keys into compiler/runtime processes.
     keep = {"systemroot", "windir", "comspec", "path", "pathext", "temp", "tmp",
             "home", "userprofile", "localappdata", "appdata", "programfiles", "programfiles(x86)", "lang", "lc_all",
-            "display", "wayland_display", "xdg_runtime_dir", "xdg_config_home", "dbus_session_bus_address"}
+            "display", "xauthority", "wayland_display", "xdg_session_type", "xdg_runtime_dir", "xdg_config_home", "dbus_session_bus_address"}
     env = {k: v for k, v in os.environ.items() if k.lower() in keep}
     env.update(PYTHONUTF8="1", PYTHONUNBUFFERED="1", UV_PYTHON_INSTALL_DIR=str(data_dir() / "python"))
     env["AUTHARENA_PROXY_DATA_DIR"] = str(data_dir())
@@ -417,17 +548,14 @@ def _run(args, log_fn=print):
 
 
 def _ensure_browser(runtime, python, log_fn=print, refresh=False):
-    marker = runtime / "browser-ready"
-    if not refresh and marker.exists() and Path(marker.read_text(encoding="utf-8")).is_file():
+    marker = runtime / "qt-browser-ready"
+    if not refresh and marker.exists():
         return
-    log_fn("Arena: installing the internal browser…")
-    _run([python, "-m", "playwright", "install", "chromium"], log_fn)
-    executable = _run([python, "-c", "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()"], log_fn)
-    if not Path(executable).is_file():
-        raise RuntimeError("Arena internal browser installation did not produce an executable.")
-    temporary = marker.with_suffix(".tmp")
-    temporary.write_text(executable, encoding="utf-8")
-    os.replace(temporary, marker)
+    log_fn("🌐 Arena: installing Qt6 WebEngine browser support…")
+    uv = data_dir() / ("uv.exe" if os.name == "nt" else "uv")
+    _run([uv, "pip", "install", "--python", python, "PySide6>=6.8", "playwright>=1.60"], log_fn)
+    _run([python, "-c", "from PySide6.QtWebEngineCore import QWebEngineProfile; from playwright.async_api import BrowserType; import inspect; assert 'no_defaults' in inspect.signature(BrowserType.connect_over_cdp).parameters"], log_fn)
+    marker.write_text("qt6", encoding="ascii")
 
 
 def _download(url, target):
@@ -880,12 +1008,9 @@ async def _serve_worker(key):
     import uvicorn
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    browser = None
-    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(data_dir() / "browsers")
     playwright = await async_playwright().start()
     slots = {}
     slot_pool_lock = asyncio.Lock()
-    connect_lock = asyncio.Lock()
     login_lock = asyncio.Lock()
     cursor = 0
     jobs = {}
@@ -901,20 +1026,6 @@ async def _serve_worker(key):
         except Exception:
             return JSONResponse({"detail": "Arena operation failed. Reconnect with Arena Login."}, status_code=503)
 
-    async def connect():
-        async with connect_lock:
-            return await connect_once()
-
-    async def connect_once():
-        nonlocal browser
-        if browser is not None and browser.is_connected():
-            return browser
-        try:
-            browser = await playwright.chromium.launch(headless=True, timeout=60000)
-        except Exception as exc:
-            raise HTTPException(503, f"Arena could not open its internal browser: {exc}")
-        return browser
-
     @app.get("/health")
     async def health():
         return {"revision": REVISION, "adapter_version": ADAPTER_VERSION}
@@ -927,7 +1038,7 @@ async def _serve_worker(key):
             try:
                 context = await login_browser.__aenter__()
             except Exception as exc:
-                raise HTTPException(503, f"Arena could not open its regular login browser: {exc}")
+                raise HTTPException(503, f"Arena Qt browser startup failed after automatic recovery: {exc}")
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
                 await page.goto("https://arena.ai/", wait_until="domcontentloaded")
@@ -991,11 +1102,10 @@ async def _serve_worker(key):
     async def get_slot(slot):
         """Reserve an idle context, or create another for overlapping requests."""
         while True:
-            chrome = await connect()
             async with slot_pool_lock:
                 pool = slots.setdefault(slot, [])
                 for state in list(pool):
-                    if state["context"] not in chrome.contexts:
+                    if not state["context"].is_connected():
                         state["retired"] = True
                         pool.remove(state)
                         if not state["lock"].locked():
@@ -1042,18 +1152,23 @@ async def _serve_worker(key):
             main.chat_sessions.clear()
             main.conversation_tokens.clear()
             main.request_failed_tokens.clear()
+            async with slot_pool_lock:
+                pool = slots.get(state.get("slot"), [])
+                if not state["retired"] and any(other is not state and not other["lock"].locked() for other in pool):
+                    state["retired"] = True
+                    if state in pool:
+                        pool.remove(state)
             if state["retired"]:
                 await close_slot(state)
         finally:
             state["lock"].release()
 
     async def restore_context(slot, refresh=False):
-        chrome = await connect()
         with disk_lock():
             account = _load("accounts.enc").get(str(slot))
         if not account:
             raise HTTPException(401, f"Arena account {slot} needs Arena Login.")
-        context = await chrome.new_context()
+        context = await _open_qt_browser(playwright)
         try:
             await context.add_cookies(account["cookies"])
             if refresh or account.get("expires_at", 0) <= time.time() + 60:
@@ -1162,7 +1277,7 @@ async def _serve_worker(key):
         main.get_initial_data = refresh_initial_data
         main.STRICT_BROWSER_FETCH_MODELS = {m["publicName"] for m in models}
         state = {"main": main, "context": context, "lock": asyncio.Lock(), "models": models,
-                 "namespace": namespace, "retired": False, "submitted": False, "usage": None}
+                 "namespace": namespace, "slot": slot, "retired": False, "submitted": False, "usage": None}
 
         async def fetch(http_method, url, payload, auth_token="", timeout_seconds=120, **kwargs):
             verification = bool(kwargs.pop("_verification", False))
@@ -1646,10 +1761,6 @@ async def _serve_worker(key):
         for pool in slots.values():
             for state in pool:
                 await close_slot(state)
-        # This browser belongs exclusively to the Arena worker.
-        if browser is not None:
-            with contextlib.suppress(Exception):
-                await browser.close()
         await playwright.stop()
 
 
@@ -1850,7 +1961,7 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             self.login_button.setToolTip("Log into Arena in the automatically installed internal browser")
             if error:
                 self.progress.emit("Arena Login: " + error)
-                QMessageBox.warning(self, "Arena Login", error)
+                self.login_button.setToolTip(error)
             else:
                 account, original, update_route = result
                 if get_model() == original:
@@ -1906,7 +2017,9 @@ def install_combo_login(parent, combo, log_fn=print, on_login=None):
 
 
 if __name__ == "__main__":
-    if "--worker" in sys.argv:
+    if "--qt-browser" in sys.argv:
+        sys.exit(_qt_browser_helper("--visible" in sys.argv))
+    elif "--worker" in sys.argv:
         import asyncio
         asyncio.run(_serve_worker(json.loads(sys.stdin.readline())["key"]))
     else:
