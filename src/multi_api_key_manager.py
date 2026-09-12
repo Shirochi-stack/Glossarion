@@ -2589,6 +2589,7 @@ class MultiAPIKeyDialog(QDialog):
             or model.startswith('authcd')
             or model.startswith('authgem')
             or model.startswith('authza')
+            or model.startswith('autharena')
         )
 
     def _has_pending_google_creds_model(self):
@@ -2616,8 +2617,8 @@ class MultiAPIKeyDialog(QDialog):
                 continue
         return False
 
-    def _has_pending_authgrok_pool_model(self):
-        """Check live model fields for the AuthGrok rotating-pool route."""
+    def _has_pending_authgrok_pool_model(self, provider='authgrok'):
+        """Check live model fields for a rotating account-pool route."""
         import re
 
         widget_names = [
@@ -2636,13 +2637,25 @@ class MultiAPIKeyDialog(QDialog):
             combo = getattr(self, name, None)
             try:
                 model = str(combo.currentText() if combo else '').strip().lower()
-                if re.match(r'^authgrok0(?:/|$)', model):
+                if re.match(r'^' + re.escape(provider) + r'0(?:/|$)', model):
                     return True
             except RuntimeError:
                 continue
             except Exception:
                 continue
         return False
+
+    def _pending_autharena_model(self):
+        """Report live Arena routes to the main GUI without creating login widgets."""
+        import re
+        for combo in getattr(self, '_model_search_combos', []) or []:
+            try:
+                model = str(combo.currentText() or '').strip()
+                if re.match(r'^autharena\d{0,4}(?:/|$)', model, re.I):
+                    return model
+            except RuntimeError:
+                continue
+        return ''
 
     def _refresh_parent_model_requirements(self, save_config=False):
         """Ask the parent GUI to refresh provider buttons from saved and live manager state."""
@@ -2653,6 +2666,8 @@ class MultiAPIKeyDialog(QDialog):
                 pass
 
         try:
+            self.translator_gui._multi_key_manager_autharena_model_hint = self._pending_autharena_model()
+            self.translator_gui._multi_key_manager_authgpt_pool_hint = self._has_pending_authgrok_pool_model('authgpt')
             setattr(
                 self.translator_gui,
                 '_multi_key_manager_needs_google_creds_hint',
@@ -8402,10 +8417,6 @@ class MultiAPIKeyDialog(QDialog):
             registered_combos.append(combo)
         self._model_search_combos = registered_combos
         MultiAPIKeyDialog._install_authza_login_button(self, combo)
-        from autharena_proxy import install_combo_login
-        gui = getattr(self, 'translator_gui', None)
-        install_combo_login(self, combo, getattr(gui, 'append_log', logger.info),
-                            getattr(gui, '_autharena_catalog_after_login', None))
 
     def _notify_authgpt_visibility(self):
         """Notify the translator GUI to re-evaluate AuthGPT/AuthGem login button visibility."""

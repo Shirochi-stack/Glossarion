@@ -12947,6 +12947,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
     # Coalesced wake-up for the worker-to-GUI log queue. Unlike log_signal,
     # this emits at most once while a drain is pending, so high-volume runs do
     # not create an unbounded number of Qt events.
+    auth_status_ready_signal = Signal(object, object)
     log_queue_ready_signal = Signal()
     # Qt Signal for notifying when threads complete
     thread_complete_signal = Signal()
@@ -13270,6 +13271,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
 
         # Connect the log signal to append_log_direct
         self.log_signal.connect(self.append_log_direct)
+        self.auth_status_ready_signal.connect(self._receive_auth_status_snapshot)
         self.log_queue_ready_signal.connect(self._schedule_gui_log_drain)
         # Connect thread complete signal to update buttons
         self.thread_complete_signal.connect(self.update_run_button)
@@ -18253,7 +18255,7 @@ Recent translations to summarize:
         if hasattr(self, 'authgpt_login_btn'):
             import re as _re
             _gpt_match = _re.match(r'^authgpt\d{0,4}/', model)
-            needs_authgpt = _gpt_match is not None
+            needs_authgpt = _gpt_match is not None or self._authgpt_pool_route_requested(model)
             
             # Also check enabled key pools for authgpt models
             if not needs_authgpt:
@@ -18320,8 +18322,8 @@ Recent translations to summarize:
                 if hasattr(self, 'authgem_project_combo'):
                     if needs_vertex:
                         try:
-                            store = self._get_authgem_store_for_current_model()
-                            if store.has_tokens:
+                            store = self._auth_status_snapshot("authgem")
+                            if store is not None and store.has_tokens:
                                 if self.authgem_project_combo.count() == 0:
                                     self._fetch_authgem_projects()
                                 else:
@@ -18480,6 +18482,29 @@ Recent translations to summarize:
             for _pool_key, _toggle_key, model in self._iter_enabled_key_pool_models():
                 import re as _re
                 if _re.match(r'^authgrok\d{0,4}/', str(model or '').strip().lower()):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _authgpt_pool_route_requested(self, model=None):
+        """Return whether authgpt0/ is active in the GUI or a key manager pool."""
+        import re as _re
+
+        active_model = str(
+            model if model is not None
+            else (getattr(self, 'model_var', '') or self.config.get('model', ''))
+        ).strip().lower()
+        if _re.match(r'^authgpt0(?:/|$)', active_model):
+            return True
+        if bool(getattr(self, '_multi_key_manager_authgpt_pool_hint', False)):
+            return True
+        try:
+            for _pool_key, _toggle_key, pool_model in self._iter_enabled_key_pool_models():
+                if _re.match(
+                    r'^authgpt0(?:/|$)',
+                    str(pool_model or '').strip().lower(),
+                ):
                     return True
         except Exception:
             pass
@@ -18690,7 +18715,7 @@ Recent translations to summarize:
         model = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
         pool_ids = self._collect_auth_account_ids_from_pools()
         authgrok_pool_requested = self._authgrok_pool_route_requested(model)
-        authgpt_pool_requested = bool(_re.match(r'^authgpt0(?:/|$)', model))
+        authgpt_pool_requested = self._authgpt_pool_route_requested(model)
         if authgpt_pool_requested:
             pool_ids['authgpt'].add(0)
             from pathlib import Path
@@ -18705,8 +18730,8 @@ Recent translations to summarize:
             # the default slot plus any numbered credentials already on disk.
             pool_ids['authgrok'].add(0)
             try:
-                from authgrok_auth import get_saved_account_ids
-                pool_ids['authgrok'].update(get_saved_account_ids())
+                from authgrok_auth import _numbered_account_ids
+                pool_ids['authgrok'].update(_numbered_account_ids())
             except Exception:
                 pass
             pool_ids['authgrok'].update(
@@ -18924,7 +18949,9 @@ Recent translations to summarize:
     def _update_authcd_login_status(self):
         """Update the AuthCD login button text based on current token state."""
         try:
-            store = self._get_authcd_store_for_current_model()
+            store = self._auth_status_snapshot("authcd")
+            if store is None:
+                return
             acct_id = self._get_authcd_account_id()
             acct_suffix = f" #{acct_id}" if acct_id else ""
             if store.has_tokens:
@@ -19131,14 +19158,19 @@ Recent translations to summarize:
         model = str(getattr(self, 'model_var', '') or self.config.get('model', ''))
         if ROUTE_RE.match(model.strip()):
             return model
-        pools = {'multi_api_keys': 'use_multi_api_keys', 'fallback_keys': 'use_fallback_keys',
-                 'glossary_keys': 'use_glossary_keys', 'glossary_refinement_keys': 'use_glossary_refinement_keys',
-                 'rolling_summary_keys': 'use_rolling_summary_keys', 'truncation_retry_keys': 'use_truncation_retry_keys'}
-        for pool, toggle in pools.items():
-            if self.config.get(toggle):
-                for item in self.config.get(pool, []):
-                    if isinstance(item, dict) and item.get('enabled', True) and ROUTE_RE.match(str(item.get('model', '')).strip()):
-                        return item['model']
+        hint = str(getattr(self, '_multi_key_manager_autharena_model_hint', '') or '')
+        if ROUTE_RE.match(hint.strip()):
+            return hint
+        first_pool_model = None
+        for _pool, _toggle, pool_model in self._iter_enabled_key_pool_models():
+            match = ROUTE_RE.match(str(pool_model or '').strip())
+            if match:
+                if match.group(1) == '0':
+                    return pool_model
+                if first_pool_model is None:
+                    first_pool_model = pool_model
+        if first_pool_model is not None:
+            return first_pool_model
         return model
 
     @Slot()
@@ -19170,13 +19202,58 @@ Recent translations to summarize:
         idx = getattr(self, '_auth_account_idx', {}).get('authgpt', 0)
         import re as _re
         model = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
-        if _re.match(r'^authgpt0(?:/|$)', model) and 0 <= idx < len(ids_list):
+        if self._authgpt_pool_route_requested(model) and 0 <= idx < len(ids_list):
             return ids_list[idx]
         # Fallback: parse model string
         m = _re.match(r'^authgpt(\d{1,4})(?:/|$)', model)
         if m:
             return int(m.group(1))
         return 0
+
+    def _auth_status_snapshot(self, provider):
+        """Read only cached identity metadata on the GUI thread, never token locks."""
+        account_id = (0 if provider in ('antigravity', 'ocagy')
+                      else getattr(self, f'_get_{provider}_account_id')())
+        key = (provider, account_id)
+        if not hasattr(self, '_auth_status_cache'):
+            self._auth_status_cache = {}
+            self._auth_status_pending = set()
+        if key not in self._auth_status_pending and not getattr(self, '_applying_auth_status', False):
+            self._auth_status_pending.add(key)
+            def load():
+                try:
+                    import importlib
+                    from types import SimpleNamespace
+                    if provider == 'antigravity':
+                        result = importlib.import_module('antigravity_proxy').get_stored_account_summary()
+                    elif provider == 'ocagy':
+                        result = importlib.import_module('ocagy_cli').get_account_summary()
+                    else:
+                        store = importlib.import_module(provider + '_auth').get_store(account_id)
+                        result = SimpleNamespace(has_tokens=bool(store.has_tokens), account_info=dict(store.account_info))
+                except Exception:
+                    result = None
+                try:
+                    self.auth_status_ready_signal.emit(key, result)
+                except RuntimeError:
+                    pass
+            threading.Thread(target=load, daemon=True, name=f'{provider} account status').start()
+        return self._auth_status_cache.get(key)
+
+    @Slot(object, object)
+    def _receive_auth_status_snapshot(self, key, result):
+        self._auth_status_pending.discard(key)
+        if result is None:
+            return
+        self._auth_status_cache[key] = result
+        provider, account_id = key
+        if provider not in ('antigravity', 'ocagy') and getattr(self, f'_get_{provider}_account_id')() != account_id:
+            return
+        self._applying_auth_status = True
+        try:
+            getattr(self, f'_update_{provider}_login_status')()
+        finally:
+            self._applying_auth_status = False
 
     def _get_authgpt_store_for_current_model(self):
         """Return the AuthGPTTokenStore for the currently selected model's account slot."""
@@ -19186,7 +19263,9 @@ Recent translations to summarize:
     def _update_authgpt_login_status(self):
         """Update the AuthGPT login button text based on current token state."""
         try:
-            store = self._get_authgpt_store_for_current_model()
+            store = self._auth_status_snapshot("authgpt")
+            if store is None:
+                return
             acct_id = self._get_authgpt_account_id()
             acct_suffix = f" #{acct_id}" if acct_id else ""
             if store.has_tokens:
@@ -19329,7 +19408,9 @@ Recent translations to summarize:
 
     def _update_authgrok_login_status(self):
         try:
-            store = self._get_authgrok_store_for_current_model()
+            store = self._auth_status_snapshot("authgrok")
+            if store is None:
+                return
             account_id = self._get_authgrok_account_id()
             suffix = f" #{account_id}" if account_id else ""
             if store.has_tokens:
@@ -19495,7 +19576,9 @@ Recent translations to summarize:
         acct_suffix = f" #{account_id}" if account_id else ""
         
         try:
-            store = self._get_authgem_store_for_current_model()
+            store = self._auth_status_snapshot("authgem")
+            if store is None:
+                return
             if store.has_tokens:
                 info = store.account_info
                 email = info.get('email', '')
@@ -19961,10 +20044,8 @@ Recent translations to summarize:
             return
         status = getattr(self, '_ocagy_status_data', None) or {}
         try:
-            # Reading the plugin's account file is cheap and avoids leaving the
-            # button stale after the external OAuth flow completes.
-            from ocagy_cli import get_account_summary
-            local_summary = get_account_summary()
+            # Account files are encrypted; decryption must stay off the UI thread.
+            local_summary = self._auth_status_snapshot('ocagy') or {}
             local_count = int(local_summary.get('account_count', 0) or 0)
             cached_count = int(status.get('account_count', 0) or 0)
             if local_count >= cached_count and local_count:
@@ -20404,17 +20485,16 @@ Recent translations to summarize:
 
         Never call the local proxy here. This method runs from UI paths like
         model-change, so blocking HTTP here freezes the entire Qt window. The
-        local account file is cheap to read and prevents a stale cached count
-        after an OAuth login adds another account.
+        encrypted account file is read in a background worker to refresh
+        the cached count after an OAuth login adds another account.
         """
         summary = getattr(self, '_antigravity_status_data', {}) or {}
         accounts = summary.get("accounts") or [] if summary.get("healthy") else []
         try:
-            # Cheap local-file check only. Do not query the proxy from this UI path.
+            # Cached snapshot only; never decrypt or query the proxy on the UI thread.
             # Prefer it when it contains at least as many accounts as the cached
             # network status, which is commonly stale immediately after login.
-            from antigravity_proxy import get_stored_account_summary
-            stored_summary = get_stored_account_summary()
+            stored_summary = self._auth_status_snapshot('antigravity') or {}
             stored_accounts = stored_summary.get("accounts") or []
             if len(stored_accounts) >= len(accounts):
                 if stored_accounts:
@@ -22668,8 +22748,7 @@ Recent translations to summarize:
             self, "_autharena_catalog_after_login", Qt.QueuedConnection))
         self.autharena_controls = create_login_controls(
             self, self._autharena_control_model, self.model_combo.setCurrentText,
-            self.append_log, self._autharena_catalog_after_login,
-            selector_enabled=lambda: self.model_combo.currentText().strip().lower().startswith("autharena"))
+            self.append_log, self._autharena_catalog_after_login)
         self.autharena_login_btn = self.autharena_controls.login_button
         self.autharena_acct_combo = self.autharena_controls.accounts
         model_btn_layout.addWidget(self.autharena_controls)

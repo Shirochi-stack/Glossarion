@@ -1284,6 +1284,27 @@ def test_proxy_start_poll_ignores_failed_attempt_but_reuses_fresh_success(tmp_pa
     )
 
 
+@pytest.mark.parametrize('saved', [True, False])
+def test_arena_catalog_restores_saved_login_when_proxy_stopped(tmp_path, monkeypatch, saved):
+    import autharena_proxy as arena
+    _isolated_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(arena, 'list_accounts', lambda: [{'slot': 0}] if saved else [])
+    monkeypatch.setattr(arena, 'check_proxy_health', lambda: {'running': False})
+    starts = []
+    def start():
+        starts.append(True)
+        return {'url': 'http://arena.test', 'key': 'test-only'}
+    monkeypatch.setattr(arena, 'ensure_proxy_running', start)
+    monkeypatch.setattr(arena.requests, 'get', lambda *args, **kwargs: SimpleNamespace(
+        ok=True, json=lambda: {'data': [{'id': 'test-model'}]},
+    ))
+    result = model_options.refresh_provider_model_catalogs(
+        active_model='autharena/test-model', only_provider='autharena',
+    )
+    assert len(starts) == int(saved)
+    assert result.statuses['autharena'] == ('online (1 models)' if saved else 'waiting for Arena Login')
+
+
 def test_arena_startup_respects_persisted_successful_cache(tmp_path, monkeypatch):
     import autharena_proxy
     import translator_gui
