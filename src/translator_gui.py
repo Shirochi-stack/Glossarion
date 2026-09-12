@@ -18303,7 +18303,8 @@ Recent translations to summarize:
         if hasattr(self, 'authgem_login_btn'):
             import re as _re
             _ag_match = _re.match(r'^authgem(?:-vertex)?\d{0,4}/', model)
-            needs_authgem = _ag_match is not None
+            vertex_model = self._authgem_vertex_control_model()
+            needs_authgem = _ag_match is not None or bool(vertex_model)
             
             # Also check enabled key pools for authgem models
             if not needs_authgem:
@@ -18312,7 +18313,7 @@ Recent translations to summarize:
             # GCP project dropdown is ONLY needed for authgem-vertex/ (Vertex AI)
             # authgem/ uses AI Studio which doesn't require a GCP project
             _vx_match = _re.match(r'^authgem-vertex\d{0,4}/', model)
-            needs_vertex = _vx_match is not None or self._has_authgem_vertex_in_key_pools()
+            needs_vertex = bool(vertex_model)
             
             if needs_authgem:
                 self.authgem_login_btn.show()
@@ -18344,7 +18345,10 @@ Recent translations to summarize:
 
         # Show/hide OpenCode Antigravity OAuth controls
         if hasattr(self, 'ocagy_login_btn'):
-            needs_ocagy = (model or '').strip().lower().startswith('ocagy')
+            needs_ocagy = (
+                (model or '').strip().lower().startswith('ocagy')
+                or bool(getattr(self, '_multi_key_manager_ocagy_hint', False))
+            )
             if not needs_ocagy:
                 needs_ocagy = self._has_ocagy_in_key_pools()
             if needs_ocagy:
@@ -18366,7 +18370,10 @@ Recent translations to summarize:
 
         # Show/hide Antigravity proxy controls
         if hasattr(self, 'antigravity_login_btn'):
-            needs_antigravity = (model or '').strip().lower().startswith('antigravity')
+            needs_antigravity = (
+                (model or '').strip().lower().startswith('antigravity')
+                or bool(getattr(self, '_multi_key_manager_antigravity_hint', False))
+            )
             if not needs_antigravity:
                 needs_antigravity = self._has_antigravity_in_key_pools()
 
@@ -18717,6 +18724,17 @@ Recent translations to summarize:
         pool_ids = self._collect_auth_account_ids_from_pools()
         authgrok_pool_requested = self._authgrok_pool_route_requested(model)
         authgpt_pool_requested = self._authgpt_pool_route_requested(model)
+        vertex_model = self._authgem_vertex_control_model()
+        vertex_pool_requested = bool(_re.match(r'^authgem-vertex0(?:/|$)', vertex_model))
+        if vertex_pool_requested:
+            pool_ids['authgem'].add(0)
+            # Enumerate filenames only; never decrypt accounts on the UI thread.
+            from pathlib import Path
+            for path in (Path.home() / '.glossarion').glob('authgem_tokens_*.json'):
+                match = _re.fullmatch(r'authgem_tokens_(\d+)\.json', path.name)
+                if match:
+                    pool_ids['authgem'].add(int(match.group(1)))
+
         if authgpt_pool_requested:
             pool_ids['authgpt'].add(0)
             from pathlib import Path
@@ -18807,6 +18825,8 @@ Recent translations to summarize:
                 )
                 if provider == 'authgpt':
                     show_combo = authgpt_pool_requested and hasattr(self, main_btn_name)
+                if provider == 'authgem' and vertex_model:
+                    show_combo = vertex_pool_requested and hasattr(self, main_btn_name)
                 if show_combo:
                     # Repopulate items (block signals to avoid triggering change handler)
                     combo.blockSignals(True)
@@ -19539,6 +19559,22 @@ Recent translations to summarize:
     # AuthGem (Gemini Login) – mirrors the AuthGPT pattern
     # ==================================================================
 
+    def _authgem_vertex_control_model(self):
+        """Resolve the Vertex route from the main field, live editor, or enabled pools."""
+        import re
+        primary = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
+        pattern = r'^authgem-vertex\d{0,4}(?:/|$)'
+        if re.match(pattern, primary):
+            return primary
+        hint = str(getattr(self, '_multi_key_manager_authgem_vertex_model_hint', '') or '').strip().lower()
+        if re.match(pattern, hint):
+            return hint
+        for _, _, route in self._iter_enabled_key_pool_models():
+            route = str(route or '').strip().lower()
+            if re.match(pattern, route):
+                return route
+        return ''
+
     def _get_authgem_account_id(self) -> int:
         """Return the numeric account ID for the AuthGem provider.
 
@@ -19546,6 +19582,11 @@ Recent translations to summarize:
         the currently-selected slot.  Otherwise falls back to parsing the
         model prefix string.
         """
+        import re
+        vertex_model = self._authgem_vertex_control_model()
+        if vertex_model and not re.match(r'^authgem-vertex0(?:/|$)', vertex_model):
+            match = re.match(r'^authgem-vertex(\d{1,4})(?:/|$)', vertex_model)
+            return int(match.group(1)) if match else 0
         # Arrow switcher override
         ids_list = getattr(self, '_auth_account_ids', {}).get('authgem', [])
         idx = getattr(self, '_auth_account_idx', {}).get('authgem', 0)
@@ -19571,7 +19612,7 @@ Recent translations to summarize:
         import re as _re
         # Auto-detect if not explicitly provided
         if needs_vertex is None:
-            needs_vertex = bool(_re.match(r'^authgem-vertex\d{0,4}/', self.model_var)) or self._has_authgem_vertex_in_key_pools()
+            needs_vertex = bool(self._authgem_vertex_control_model())
         
         account_id = self._get_authgem_account_id()
         acct_suffix = f" #{account_id}" if account_id else ""
@@ -19579,6 +19620,10 @@ Recent translations to summarize:
         try:
             store = self._auth_status_snapshot("authgem")
             if store is None:
+                # The selected slot is known before its encrypted status loads.
+                # Do not leave the previous account's label/checkmark visible.
+                self.authgem_login_btn.setText(f"⏳ Gemini{acct_suffix}")
+                self.authgem_login_btn.setToolTip("Checking saved Gemini account status…")
                 return
             if store.has_tokens:
                 info = store.account_info

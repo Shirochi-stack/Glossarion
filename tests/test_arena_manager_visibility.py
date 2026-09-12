@@ -121,3 +121,63 @@ def test_parent_arena_visibility_uses_enabled_pools_and_primary_precedence():
     gui.model_var = 'authgpt/model'
     gui._multi_key_manager_autharena_model_hint = ''
     assert fn(gui) == 'authgpt/model'
+
+
+def test_proxy_live_hints_refresh_parent_and_clear_after_edit():
+    from types import MethodType
+    pending = method('multi_api_key_manager.py', 'MultiAPIKeyDialog', '_has_pending_proxy_model')
+    refresh = method('multi_api_key_manager.py', 'MultiAPIKeyDialog', '_refresh_parent_model_requirements')
+    texts = [' Antigravity/model ', 'ocagy/model']
+    observed = []
+    gui = SimpleNamespace()
+    gui.on_model_change = lambda: observed.append((
+        gui._multi_key_manager_antigravity_hint, gui._multi_key_manager_ocagy_hint))
+    manager = SimpleNamespace(
+        translator_gui=gui,
+        _model_search_combos=[SimpleNamespace(currentText=lambda i=i: texts[i]) for i in range(2)],
+        _pending_autharena_model=lambda *args: '',
+        _has_pending_authgrok_pool_model=lambda *args: False,
+        _has_pending_google_creds_model=lambda: False,
+    )
+    manager._has_pending_proxy_model = MethodType(pending, manager)
+    refresh(manager)
+    assert observed[-1] == (True, True)
+    texts[:] = ['authgpt/model', 'ocagy-unrelated/model']
+    refresh(manager)
+    assert observed[-1] == (False, False)
+
+
+def test_main_gui_proxy_controls_follow_live_hints():
+    tree = ast.parse((ROOT / 'translator_gui.py').read_text(encoding='utf-8-sig'))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'TranslatorGUI')
+    change = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'on_model_change')
+    class Button:
+        def show(self): self.visible = True
+        def hide(self): self.visible = False
+    for provider in ('antigravity', 'ocagy'):
+        # Execute the actual provider visibility block without constructing the full app.
+        block = next(n for n in change.body if isinstance(n, ast.If)
+                     and ast.unparse(n.test) == f"hasattr(self, '{provider}_login_btn')")
+        gui = SimpleNamespace(**{
+            provider + '_login_btn': Button(),
+            '_multi_key_manager_' + provider + '_hint': True,
+            '_has_' + provider + '_in_key_pools': lambda: False,
+            '_update_' + provider + '_login_status': lambda: None,
+        })
+        code = compile(ast.Module(body=[block], type_ignores=[]), 'visibility', 'exec')
+        exec(code, {'self': gui, 'model': 'authgpt/model'})
+        assert getattr(gui, provider + '_login_btn').visible
+        setattr(gui, '_multi_key_manager_' + provider + '_hint', False)
+        exec(code, {'self': gui, 'model': 'authgpt/model'})
+        assert not getattr(gui, provider + '_login_btn').visible
+
+
+def test_vertex_live_model_hint_accepts_bare_and_numbered_prefixes():
+    fn = method('multi_api_key_manager.py', 'MultiAPIKeyDialog', '_pending_autharena_model')
+    text = ['authgem-vertex']
+    manager = SimpleNamespace(_model_search_combos=[SimpleNamespace(currentText=lambda: text[0])])
+    for value in ('authgem-vertex', 'authgem-vertex0/', 'authgem-vertex3/model'):
+        text[0] = value
+        assert fn(manager, 'authgem-vertex') == value
+    text[0] = 'authgem/model'
+    assert fn(manager, 'authgem-vertex') == ''

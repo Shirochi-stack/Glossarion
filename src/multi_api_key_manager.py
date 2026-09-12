@@ -2646,17 +2646,28 @@ class MultiAPIKeyDialog(QDialog):
                 continue
         return False
 
-    def _pending_autharena_model(self):
-        """Report live Arena routes to the main GUI without creating login widgets."""
+    def _pending_autharena_model(self, provider="autharena"):
+        """Report live numbered routes without creating login widgets."""
         import re
         for combo in getattr(self, '_model_search_combos', []) or []:
             try:
                 model = str(combo.currentText() or '').strip()
-                if re.match(r'^autharena\d{0,4}(?:/|$)', model, re.I):
+                if re.match(r'^' + re.escape(provider) + r'\d{0,4}(?:/|$)', model, re.I):
                     return model
             except RuntimeError:
                 continue
         return ''
+
+    def _has_pending_proxy_model(self, provider):
+        """Check live model text only; account loading belongs to the parent GUI."""
+        for combo in getattr(self, '_model_search_combos', []) or []:
+            try:
+                model = str(combo.currentText() or '').strip().lower()
+                if model == provider or model.startswith(provider + '/'):
+                    return True
+            except RuntimeError:
+                continue
+        return False
 
     def _refresh_parent_model_requirements(self, save_config=False):
         """Ask the parent GUI to refresh provider buttons from saved and live manager state."""
@@ -2667,7 +2678,11 @@ class MultiAPIKeyDialog(QDialog):
                 pass
 
         try:
+            for provider in ('antigravity', 'ocagy'):
+                setattr(self.translator_gui, '_multi_key_manager_' + provider + '_hint',
+                        self._has_pending_proxy_model(provider))
             self.translator_gui._multi_key_manager_autharena_model_hint = self._pending_autharena_model()
+            self.translator_gui._multi_key_manager_authgem_vertex_model_hint = self._pending_autharena_model('authgem-vertex')
             self.translator_gui._multi_key_manager_authgpt_pool_hint = self._has_pending_authgrok_pool_model('authgpt')
             setattr(
                 self.translator_gui,
