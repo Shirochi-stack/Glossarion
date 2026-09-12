@@ -208,6 +208,43 @@ class LoginNavigationTest(unittest.TestCase):
                         await context.close()
         asyncio.run(run())
 
+    @unittest.skipUnless(os.name == "nt", "Windows desktop visibility check")
+    def test_background_qt_pages_never_show_native_windows(self):
+        async def run():
+            import ctypes
+            from ctypes import wintypes
+            from playwright.async_api import async_playwright
+            user32 = ctypes.WinDLL("user32")
+            callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            user32.IsWindowVisible.argtypes = [wintypes.HWND]
+            async with async_playwright() as playwright:
+                context = await arena._open_qt_browser(playwright)
+                try:
+                    seen = []
+                    @callback_type
+                    def inspect(hwnd, unused):
+                        pid = wintypes.DWORD()
+                        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                        if pid.value == context.process.pid and user32.IsWindowVisible(hwnd):
+                            seen.append(hwnd)
+                        return True
+                    async def create_and_raise():
+                        page = await context.new_page()
+                        await page.bring_to_front()
+                        await page.set_content('<button>test</button>')
+                        await page.get_by_role('button').click()
+                    operation = asyncio.create_task(create_and_raise())
+                    while not operation.done():
+                        user32.EnumWindows(inspect, 0)
+                        await asyncio.sleep(.01)
+                    await operation
+                    user32.EnumWindows(inspect, 0)
+                    self.assertEqual(seen, [])
+                finally:
+                    await context.close()
+        asyncio.run(run())
+
     def test_qt_browser_profile_and_cleanup(self):
         async def run():
             from playwright.async_api import async_playwright

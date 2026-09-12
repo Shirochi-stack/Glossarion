@@ -29,7 +29,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 24
+ADAPTER_VERSION = 25
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
@@ -178,7 +178,9 @@ def _qt_browser_helper(visible=False):
                 handle = kernel.GetStdHandle(number & 0xffffffff)
                 fd = msvcrt.open_osfhandle(handle, flags)
                 setattr(sys, name, os.fdopen(fd, mode, encoding="utf-8", buffering=1))
-    from PySide6.QtCore import QObject, Signal, QTimer, QUrl, qInstallMessageHandler
+    if not visible:
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PySide6.QtCore import QObject, Signal, QTimer, QUrl, Qt, qInstallMessageHandler
     if sys.stderr is not None:
         def qt_message(kind, context, message):
             sys.stderr.write(message + "\n")
@@ -203,6 +205,10 @@ def _qt_browser_helper(visible=False):
 
     def create_page(show=False):
         view = QWebEngineView()
+        if not visible:
+            # Render for Chromium input/layout without ever mapping a desktop window.
+            view.setAttribute(Qt.WA_DontShowOnScreen, True)
+            view.setAttribute(Qt.WA_ShowWithoutActivating, True)
         view.setPage(Page(profile, view))
         view.setWindowTitle("Arena Login / Verification")
         view.resize(1100, 780)
@@ -220,7 +226,7 @@ def _qt_browser_helper(visible=False):
         action = command.get("action")
         if action == "new":
             create_page(True)  # Offscreen helpers still need an active rendered view.
-        elif action == "show":
+        elif action == "show" and visible:
             view = pages.get(command.get("target"))
             if view:
                 view.show(); view.raise_(); view.activateWindow()
@@ -250,6 +256,10 @@ def _qt_browser_helper(visible=False):
 class _QtArenaPage:
     def __init__(self, owner, page, target):
         self.owner, self.page, self.target = owner, page, target
+
+    @property
+    def context(self):
+        return self.owner
 
     def __getattr__(self, name):
         return getattr(self.page, name)
@@ -337,6 +347,7 @@ class _QtArenaContext:
 
 def _qt_browser_env(port, visible, recovery=False):
     env = _env()
+    env["PYINSTALLER_SUPPRESS_SPLASH_SCREEN"] = "1"
     env["QTWEBENGINE_REMOTE_DEBUGGING"] = f"127.0.0.1:{port}"
     # Keep software rasterization available on Linux machines without a GPU.
     env["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu --disable-dev-shm-usage"
@@ -1350,15 +1361,23 @@ async def _serve_worker(key, qt_helper_command=None):
                 return self
             async def new_context(self, **kwargs):
                 return context
+            async def new_page(self, **kwargs):
+                return await context.new_page()
             async def __aexit__(self, *args):
                 # The upstream response may still be streaming on these pages.
                 # The response wrapper below closes them after consumption.
                 pass
         main.AsyncCamoufox = ContextLease
         main._cancel_background_task = _bridge_cancel_compat(main._cancel_background_task)
-        async def refresh_initial_data():
-            models[:] = await _ensure_catalog(context)
-        main.get_initial_data = refresh_initial_data
+        # Keep the bridge's discovery intact: it also reads CAPTCHA settings
+        # and server actions from Arena's JavaScript, not just model names.
+        discovery_pages = set(context.pages)
+        try:
+            await main.get_initial_data()
+        finally:
+            for page in list(context.pages):
+                if page not in discovery_pages:
+                    await page.close()
         main.STRICT_BROWSER_FETCH_MODELS = {m["publicName"] for m in models}
         state = {"main": main, "context": context, "lock": asyncio.Lock(), "models": models,
                  "namespace": namespace, "slot": slot, "retired": False, "submitted": False, "usage": None}
