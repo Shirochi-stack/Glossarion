@@ -574,7 +574,9 @@ def open_login(log_fn=print, account_id=0):
 
 
 def list_models(timeout=30):
-    if not check_proxy_health().get("running"):
+    # A stopped local worker is not a logged-out account. Catalog polling runs
+    # off the GUI thread; _request starts the worker and restores saved sessions.
+    if not list_accounts():
         return []
     return _request("/v1/models", timeout=timeout).get("data", [])
 
@@ -1668,15 +1670,26 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(3)
             self.accounts = QComboBox(self)
-            self.accounts.setMinimumWidth(65)
+            self.accounts.setFixedWidth(54)
+            self.accounts.setStyleSheet(
+                "QComboBox { background-color: #2a3a4a; color: #ccc; font-weight: bold; "
+                "font-size: 9pt; padding: 1px 2px 1px 4px; border: 1px solid #555; border-radius: 3px; "
+                "min-width: 28px; max-width: 46px; } "
+                "QComboBox:hover { background-color: #3a4a5a; color: white; border-color: #888; } "
+                "QComboBox::drop-down { width: 12px; border: none; } "
+                "QComboBox::down-arrow { image: none; border: none; width: 0px; } "
+                "QComboBox QAbstractItemView { background-color: #2a3a4a; color: #e0e0e0; "
+                "selection-background-color: #4a6a8a; border: 1px solid #555; }"
+            )
+            self.login_slot = 0
             self.login_button = QPushButton("Arena Login", self)
             self.login_button.setStyleSheet(
                 "background-color: #10a37f; color: white; font-weight: bold; "
                 "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
             )
             self.login_button.setToolTip("Log into Arena in the automatically installed internal browser")
-            row.addWidget(self.accounts)
             row.addWidget(self.login_button)
+            row.addWidget(self.accounts)
             self.login_button.clicked.connect(self.login)
             self.accounts.activated.connect(self.select_account)
             self.completed.connect(self.finished)
@@ -1753,19 +1766,24 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             if self.accounts_checked_at is None or time.monotonic() - self.accounts_checked_at >= 5:
                 self.load_accounts_async()
             saved_accounts = self.saved_accounts
-            selected_accounts = saved_accounts if slot is None else [a for a in saved_accounts if a["slot"] == slot]
+            login_slot = self.login_slot if slot is None else slot
+            account_suffix = f" #{login_slot}" if login_slot else ""
+            selected_accounts = [a for a in saved_accounts if a["slot"] == login_slot]
             if not self.busy:
-                self.login_button.setText("✅ Arena" if selected_accounts else "Arena Login")
+                self.login_button.setText(
+                    f"✅ Arena{account_suffix}" if selected_accounts
+                    else f"Arena{account_suffix} Login"
+                )
                 if selected_accounts:
                     identities = ", ".join(f"#{a['slot']} ({a.get('email') or 'saved account'})" for a in selected_accounts)
                     self.login_button.setToolTip(
-                        ("Rotation pool: " if slot is None else "Saved Arena account: ") + identities
+                        ("Selected pool account: " if slot is None else "Saved Arena account: ") + identities
                         + ". Credentials are encrypted and restored automatically. Click to reconnect. "
                         "Saved login does not guarantee CAPTCHA acceptance.")
-                    snapshot = (slot, identities)
+                    snapshot = (login_slot, identities)
                     if snapshot != self.account_snapshot:
                         first = selected_accounts[0]
-                        summary = f"{len(selected_accounts)} accounts" if slot is None else f"account #{slot}"
+                        summary = f"account #{login_slot}"
                         self.progress.emit(f"🔓 Arena: restored {summary} from encrypted storage — first: {first.get('email') or 'email unavailable'}.")
                     self.account_snapshot = snapshot
                 else:
@@ -1773,13 +1791,13 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
                     self.account_snapshot = None
             self.accounts.blockSignals(True)
             self.accounts.clear()
-            ids = sorted({0, *[a["slot"] for a in saved_accounts], *([] if slot is None else [slot])})
+            ids = sorted({0, login_slot, *[a["slot"] for a in saved_accounts]})
             for aid in ids:
                 self.accounts.addItem(f"#{aid}", aid)
-            self.accounts.addItem("+ New", "new")
-            self.accounts.setCurrentIndex(max(0, self.accounts.findData(slot)))
+            self.accounts.addItem("+ N", "new")
+            self.accounts.setCurrentIndex(max(0, self.accounts.findData(self.login_slot if slot is None else slot)))
             self.accounts.blockSignals(False)
-            self.accounts.setVisible(bool(match.group(1)) and slot is not None and (selector_enabled is None or selector_enabled()))
+            self.accounts.setVisible(match.group(1) == "0" and (selector_enabled is None or selector_enabled()))
             self.accounts.setEnabled(not self.busy and self.accounts_ready)
             self.login_button.setEnabled(not self.busy and self.accounts_ready)
             if not self.accounts_ready:
@@ -1788,21 +1806,15 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
         def select_account(self, index):
             selected = self.accounts.itemData(index)
             if selected == "new":
-                self.start(None, True)
+                self.start(None, False)
             else:
-                _, model = parse_route(get_model())
-                set_model(route_for_slot(selected, model))
+                self.login_slot = selected
                 self.refresh()
 
         def login(self):
             slot, _ = parse_route(get_model())
             if slot is None:
-                entries = self.saved_accounts
-                labels = [f"#{a['slot']}" for a in entries] + ["+ New"]
-                choice, ok = QInputDialog.getItem(self, "Arena Login", "Account", labels, 0, False)
-                if not ok:
-                    return
-                slot = None if choice == "+ New" else int(choice.removeprefix("#"))
+                slot = self.login_slot
             self.start(slot, False)
 
         def start(self, slot, update_route):
@@ -1841,6 +1853,8 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
                 QMessageBox.warning(self, "Arena Login", error)
             else:
                 account, original, update_route = result
+                if get_model() == original:
+                    self.login_slot = account["slot"]
                 if update_route and get_model() == original:
                     _, model = parse_route(original)
                     set_model(route_for_slot(account["slot"], model))

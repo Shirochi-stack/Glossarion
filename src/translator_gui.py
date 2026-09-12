@@ -18690,6 +18690,16 @@ Recent translations to summarize:
         model = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
         pool_ids = self._collect_auth_account_ids_from_pools()
         authgrok_pool_requested = self._authgrok_pool_route_requested(model)
+        authgpt_pool_requested = bool(_re.match(r'^authgpt0(?:/|$)', model))
+        if authgpt_pool_requested:
+            pool_ids['authgpt'].add(0)
+            from pathlib import Path
+            from authgpt_auth import _DEFAULT_TOKEN_DIR
+            for path in Path(_DEFAULT_TOKEN_DIR).glob('authgpt_tokens_*.json'):
+                match = _re.fullmatch(r'authgpt_tokens_(\d+)\.json', path.name)
+                if match:
+                    pool_ids['authgpt'].add(int(match.group(1)))
+            pool_ids['authgpt'].update(getattr(self, '_authgpt_pending_account_ids', set()))
         if authgrok_pool_requested:
             # Pool mode is useful before the first login too, so always expose
             # the default slot plus any numbered credentials already on disk.
@@ -18769,6 +18779,8 @@ Recent translations to summarize:
                     and authgrok_pool_requested
                     and hasattr(self, main_btn_name)
                 )
+                if provider == 'authgpt':
+                    show_combo = authgpt_pool_requested and hasattr(self, main_btn_name)
                 if show_combo:
                     # Repopulate items (block signals to avoid triggering change handler)
                     combo.blockSignals(True)
@@ -18777,6 +18789,8 @@ Recent translations to summarize:
                         combo.addItem(f"#{aid}", aid)
                     if provider == 'authgrok' and authgrok_pool_requested:
                         combo.addItem("+ N", _AUTHGROK_ADD_ACCOUNT_SENTINEL)
+                    if provider == 'authgpt':
+                        combo.addItem("+ N", "__authgpt_add_account__")
                     combo.setCurrentIndex(cur_idx)
                     combo.blockSignals(False)
                     combo.show()
@@ -18805,6 +18819,17 @@ Recent translations to summarize:
             return
         combo = getattr(self, f'{provider}_acct_combo', None)
         selected_data = combo.itemData(index) if combo is not None else None
+        if provider == 'authgpt' and selected_data == '__authgpt_add_account__':
+            ids = set(self._auth_account_ids.get('authgpt', [0]))
+            account_id = max(ids, default=0) + 1
+            pending = getattr(self, '_authgpt_pending_account_ids', set())
+            pending.add(account_id)
+            self._authgpt_pending_account_ids = pending
+            self._auth_account_ids['authgpt'] = sorted(ids | pending)
+            self._auth_account_idx['authgpt'] = self._auth_account_ids['authgpt'].index(account_id)
+            self._refresh_auth_account_arrows()
+            QTimer.singleShot(0, self._authgpt_login_clicked)
+            return
         if (
             provider == 'authgrok'
             and selected_data == _AUTHGROK_ADD_ACCOUNT_SENTINEL
@@ -19143,12 +19168,12 @@ Recent translations to summarize:
         # Arrow switcher override
         ids_list = getattr(self, '_auth_account_ids', {}).get('authgpt', [])
         idx = getattr(self, '_auth_account_idx', {}).get('authgpt', 0)
-        if len(ids_list) > 1 and 0 <= idx < len(ids_list):
+        import re as _re
+        model = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
+        if _re.match(r'^authgpt0(?:/|$)', model) and 0 <= idx < len(ids_list):
             return ids_list[idx]
         # Fallback: parse model string
-        model = getattr(self, 'model_var', '') or self.config.get('model', '')
-        import re as _re
-        m = _re.match(r'^authgpt(\d{1,4})/', model)
+        m = _re.match(r'^authgpt(\d{1,4})(?:/|$)', model)
         if m:
             return int(m.group(1))
         return 0
@@ -22481,7 +22506,7 @@ Recent translations to summarize:
         self.authgpt_acct_combo = QComboBox()
         self.authgpt_acct_combo.setStyleSheet(_acct_combo_style)
         self.authgpt_acct_combo.setToolTip("Select ChatGPT account slot")
-        self.authgpt_acct_combo.setFixedWidth(46)
+        self.authgpt_acct_combo.setFixedWidth(54)
         self.authgpt_acct_combo.currentIndexChanged.connect(lambda idx: self._on_auth_acct_combo_changed('authgpt', idx))
         self.authgpt_acct_combo.hide()
         model_btn_layout.addWidget(self.authgpt_acct_combo)

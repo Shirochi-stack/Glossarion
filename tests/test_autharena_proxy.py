@@ -234,6 +234,8 @@ def test_account_selector_visibility_and_numeric_labels(qt, monkeypatch):
     model = ["autharena/model"]
     parent = widgets.QWidget()
     control = arena.create_login_controls(parent, lambda: model[0], lambda value: model.__setitem__(0, value))
+    assert control.layout().itemAt(0).widget() is control.login_button
+    assert control.layout().itemAt(1).widget() is control.accounts
     from PySide6.QtTest import QTest
     deadline = time.monotonic() + 2
     while not control.accounts_ready and time.monotonic() < deadline:
@@ -243,14 +245,29 @@ def test_account_selector_visibility_and_numeric_labels(qt, monkeypatch):
     assert control.accounts.isHidden()
     model[0] = "autharena0/model"
     control.refresh()
-    assert control.accounts.isHidden()
+    assert not control.accounts.isHidden()
+    assert [control.accounts.itemText(i) for i in range(control.accounts.count())] == ["#0", "#1", "+ N"]
+    control.select_account(1)
+    control.refresh()
+    assert control.accounts.currentData() == 1
+    assert control.login_button.text() == "✅ Arena #1"
+    assert model[0] == "autharena0/model"
     model[0] = "autharena1/model"
     control.refresh()
-    assert not control.accounts.isHidden()
-    assert [control.accounts.itemText(i) for i in range(control.accounts.count())] == ["#0", "#1", "+ New"]
+    assert control.accounts.isHidden()
     assert control.accounts.currentData() == 1
-    control.select_account(0)
-    assert model[0] == "autharena/model"
+    assert control.login_button.text() == "✅ Arena #1"
+    model[0] = "autharena2/model"
+    control.refresh()
+    assert control.login_button.text() == "Arena #2 Login"
+    # Pool login status belongs to the selected slot, not any other saved slot.
+    control.saved_accounts = [{"slot": 0}]
+    model[0] = "autharena0/model"
+    control.refresh()
+    assert control.login_button.text() == "Arena #1 Login"
+    model[0] = "autharena/model"
+    control.refresh()
+    assert control.login_button.text() == "✅ Arena"
     parent.close()
 
 
@@ -285,7 +302,7 @@ def test_login_animates_immediately_and_resets(qt, monkeypatch, failure):
     assert not control.spinner.isActive()
     assert control.login_button.isEnabled()
     assert control.login_button.icon().isNull()
-    assert control.login_button.text() == "Arena Login"
+    assert control.login_button.text() == "Arena #1 Login"
     parent.close()
 
 

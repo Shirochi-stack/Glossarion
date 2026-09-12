@@ -1563,8 +1563,8 @@ def refresh_provider_model_catalogs(
     eligible: List[Tuple[ProviderCatalogSpec, str]] = []
     for spec in specs:
         if spec.name == "autharena":
-            from autharena_proxy import list_accounts, check_proxy_health
-            if not list_accounts() or not check_proxy_health().get("running"):
+            from autharena_proxy import list_accounts
+            if not list_accounts():
                 statuses[spec.name] = "waiting for Arena Login"
                 continue
         key = _provider_key(spec, active_provider, active_api_key, provider_keys)
