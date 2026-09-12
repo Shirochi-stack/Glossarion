@@ -29,9 +29,8 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 23
+ADAPTER_VERSION = 24
 CATALOG_TTL_SECONDS = 24 * 60 * 60
-ARENA_RECAPTCHA_V3_SITEKEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0"
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
 _qt_host_command = None
@@ -304,6 +303,9 @@ class _QtArenaContext:
             return await session.send(name, args or {})
         finally:
             await session.detach()
+
+    async def add_init_script(self, script=None, path=None):
+        await self.context.add_init_script(script=script, path=path)
 
     async def add_cookies(self, cookies):
         await self._cookie_command("Network.setCookies", {"cookies": cookies})
@@ -1036,6 +1038,47 @@ def _persist_session(slot, cookies, expected_token=None):
     return session
 
 
+def _bridge_error_metadata(page):
+    """Pass the HTTP error body into upstream's metadata-based error handling."""
+    errors = []
+    def on_response(response):
+        from urllib.parse import urlparse
+        parsed = urlparse(response.url)
+        if response.status >= 400 and parsed.hostname in ("arena.ai", "lmarena.ai") and parsed.path.startswith("/nextjs-api/stream/"):
+            errors.append(response)
+    page.on("response", on_response)
+    expose = page.expose_binding
+    async def expose_binding(name, callback, **kwargs):
+        if name != "reportChunk":
+            return await expose(name, callback, **kwargs)
+        async def report(source, line):
+            try:
+                meta = json.loads(line)
+            except (ValueError, TypeError):
+                meta = None
+            if isinstance(meta, dict) and meta.get("__type") == "meta" and meta.get("status", 0) >= 400:
+                response = next((r for r in reversed(errors) if r.status == meta["status"]), None)
+                if response is not None:
+                    meta["text"] = await response.text()
+                    line = json.dumps(meta, separators=(",", ":"))
+            return await callback(source, line)
+        return await expose(name, report, **kwargs)
+    page.expose_binding = expose_binding
+
+
+def _bridge_cancel_compat(cancel_background_task):
+    """Do not mistake a cancelled child fetch for cancellation of its caller."""
+    async def cancel(task, **kwargs):
+        import asyncio
+        try:
+            await cancel_background_task(task, **kwargs)
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if (caller is not None and caller.cancelling()) or task is None or not task.cancelled():
+                raise
+    return cancel
+
+
 async def _restore_login_session(context, slot):
     """Seed a fresh login profile from the selected account's encrypted cookies."""
     if slot is None:
@@ -1298,37 +1341,21 @@ async def _serve_worker(key, qt_helper_command=None):
         main.DEBUG = False
         main.debug_print = lambda *args, **kwargs: None
         main.print = lambda *args, **kwargs: None
-        # Discovery and requests use isolated contexts in the app-owned browser.
-        # No extension, personal browser profile, or CAPTCHA solver is used.
+        # Supply Qt as the browser backend. Keep upstream CAPTCHA functions,
+        # site keys, payload fields, and retry policy intact.
         class ContextLease:
             def __init__(self, **kwargs):
-                self.before = set(context.pages)
+                pass
             async def __aenter__(self):
+                return self
+            async def new_context(self, **kwargs):
                 return context
             async def __aexit__(self, *args):
-                for p in context.pages:
-                    if p not in self.before:
-                        await p.close()
-        async def no_challenge_click(*args, **kwargs):
-            return False
+                # The upstream response may still be streaming on these pages.
+                # The response wrapper below closes them after consumption.
+                pass
         main.AsyncCamoufox = ContextLease
-        main.click_turnstile = no_challenge_click
-        main._userscript_proxy_is_active = lambda: False
-        main.find_chrome_executable = lambda: "managed-chromium"
-        async def no_refresh(*args, **kwargs):
-            return None
-        main.maybe_refresh_expired_auth_tokens = no_refresh
-        main.maybe_refresh_expired_auth_tokens_via_lmarena_http = no_refresh
-        # Keep upstream cache/refresh; mint only in this account's request page.
-        captcha_page = None
-        async def mint_for_slot():
-            if captcha_page is None:
-                return None
-            return await recaptcha._mint_recaptcha_v3_token_in_page(
-                captcha_page, sitekey=ARENA_RECAPTCHA_V3_SITEKEY, action="chat_submit")
-        recaptcha.get_recaptcha_v3_token = mint_for_slot
-        main.refresh_recaptcha_token = recaptcha.refresh_recaptcha_token
-        main.get_cached_recaptcha_token = recaptcha.get_cached_recaptcha_token
+        main._cancel_background_task = _bridge_cancel_compat(main._cancel_background_task)
         async def refresh_initial_data():
             models[:] = await _ensure_catalog(context)
         main.get_initial_data = refresh_initial_data
@@ -1336,308 +1363,86 @@ async def _serve_worker(key, qt_helper_command=None):
         state = {"main": main, "context": context, "lock": asyncio.Lock(), "models": models,
                  "namespace": namespace, "slot": slot, "retired": False, "submitted": False, "usage": None}
 
-        async def fetch(http_method, url, payload, auth_token="", timeout_seconds=120, **kwargs):
-            verification = bool(kwargs.pop("_verification", False))
-            interactive = bool(kwargs.pop("_interactive", verification))
-            if interactive:
-                timeout_seconds = max(timeout_seconds, 360)
+        upstream_fetch = transport.fetch_lmarena_stream_via_camoufox
+
+        async def submit_once(http_method, url, payload, auth_token="", **kwargs):
             from urllib.parse import urlparse
             parsed = urlparse(url)
             if parsed.hostname not in ("arena.ai", "lmarena.ai"):
                 raise RuntimeError("Unexpected Arena transport origin")
-            if (http_method.upper() == "POST"
-                    and parsed.path.rstrip("/") == "/nextjs-api/stream/create-evaluation"
-                    and payload.get("mode") == "direct"):
-                # Arena's current Direct UI creates direct-battle sessions.
-                # Legacy direct sessions can continue but cannot be created.
-                # Each Glossarion request is a fresh first turn with model A.
-                payload = dict(payload, mode="direct-battle")
-            page = await context.new_page()
-            queue = asyncio.Queue(maxsize=32)
-            headers_ready = asyncio.Event()
-            done_event = asyncio.Event()
-            upstream_activity = asyncio.Event()
-            result = {"status": 502, "headers": {}}
-            state["upstream_error"] = None
-            request_events = state["events"]
-            request_dispatch_ack = state.get("dispatch_ack")
-            async def emit(source, item):
-                if item.get("activity"):
-                    upstream_activity.set()
-                elif item.get("dispatching"):
-                    if request_dispatch_ack is not None:
-                        request_dispatch_ack.clear()
-                        await request_events.put({"arena_progress": "dispatch"})
-                        await request_dispatch_ack.wait()
-                    state["dispatched"] = True
-                elif item.get("token_received"):
-                    await request_events.put({"arena_progress": "token"})
-                elif "status" in item:
-                    upstream_activity.set()
-                    result.update(item)
-                    if item["status"] >= 400:
-                        state["upstream_error"] = {
-                            "message": f"Arena HTTP {item['status']}: {item.get('error_body', '')}",
-                            "status_code": item["status"],
-                            "retry_after": (item.get("headers", {}).get("retry-after")
-                                            or item.get("headers", {}).get("Retry-After")),
-                        }
-                    headers_ready.set()
-                    await request_events.put({"arena_progress": "headers:" + str(item["status"])})
-                elif "line" in item:
-                    upstream_activity.set()
-                    await queue.put(item["line"])
-            await page.expose_binding("arenaEmit", emit)
-            navigation = await page.goto("https://arena.ai/", wait_until="domcontentloaded")
-            if interactive:
-                await page.bring_to_front()
-            # A security interstitial has no Arena reCAPTCHA loader. Waiting for
-            # grecaptcha there can never work; allow the user to verify first.
-            if "just a moment" in (await page.title()).lower():
-                if not interactive:
-                    await page.close()
-                    raise RuntimeError("ARENA_BROWSER_CHALLENGE")
-                await state["events"].put({"arena_progress": "browser_verification"})
-                try:
-                    await page.wait_for_function(
-                        "() => !document.title.toLowerCase().includes('just a moment') && !!document.querySelector('script[src*=\"recaptcha/\"]')",
-                        timeout=180000)
-                except Exception as exc:
-                    await page.close()
-                    raise RuntimeError("Arena security verification did not complete. If the challenge is unresponsive, check DNS/network access to its challenge domain. No translation was submitted.") from exc
-            elif navigation is not None and navigation.status >= 400:
-                await page.close()
-                raise RuntimeError(f"Arena homepage returned HTTP {navigation.status}; no translation was submitted.")
-            sitekey, action = main.get_recaptcha_settings(cfg)
-            # Arena's getRecaptchaV3Token uses this distinct v3 key. The loader
-            # render parameter may instead be its v2 widget key; they are not
-            # interchangeable. The pinned bridge still ships an older v3 key.
-            sitekey = ARENA_RECAPTCHA_V3_SITEKEY
-            async def pump():
-                nonlocal captcha_page
-                try:
-                    await state["events"].put({"arena_progress": "captcha"})
-                    captcha_page = page
-                    token = await recaptcha.refresh_recaptcha_token(force_new=True)
-                    if not token:
-                        raise RuntimeError("Arena: LMArenaBridge could not obtain a CAPTCHA token; no translation was submitted.")
-                    request_payload = dict(payload)
-                    request_payload.pop("recaptchaV2Token", None)
-                    request_payload["recaptchaV3Token"] = token
-                    await emit(None, {"token_received": True})
-                    await emit(None, {"dispatching": True})
-                    await _run_stream_with_idle_timeout(page.evaluate(r"""async ({url, method, payload}) => {
-                        const response = await fetch(url, {method, credentials:'include',
-                            headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-                        if (!response.ok) {
-                            // Buffer errors before publishing headers: the bridge's
-                            // synchronous raise_for_status needs the response body.
-                            const reader = response.body?.getReader();
-                            const decoder = new TextDecoder(); let errorBody = '';
-                            if (reader) {
-                                try {
-                                    while (errorBody.length < 8192) {
-                                        const {done,value} = await reader.read();
-                                        if (done) break;
-                                        errorBody += decoder.decode(value, {stream:true});
-                                    }
-                                    errorBody += decoder.decode();
-                                } finally { await reader.cancel(); }
-                            }
-                            await arenaEmit({status:response.status,
-                                headers:Object.fromEntries(response.headers), error_body:errorBody.slice(0,8192)});
-                            return;
-                        }
-                        await arenaEmit({status:response.status, headers:Object.fromEntries(response.headers)});
-                        const reader = response.body.getReader(); const decoder = new TextDecoder(); let pending='';
-                        while (true) { const {done,value} = await reader.read();
-                            if (value?.length) await arenaEmit({activity:true});
-                            pending += decoder.decode(value || new Uint8Array(), {stream:!done});
-                            let end; while ((end=pending.indexOf('\n')) >= 0) {
-                                await arenaEmit({line:pending.slice(0,end).replace(/\r$/, '')}); pending=pending.slice(end+1);
-                            }
-                            if (done) break;
-                        }
-                        if (pending) await arenaEmit({line:pending});
-                    }""", {"url": "https://arena.ai" + parsed.path, "method": http_method, "payload": request_payload}),
-                        upstream_activity, state["stream_timeout"])
-                finally:
-                    headers_ready.set()
-                    captcha_page = None
-                    done_event.set()
-            task = asyncio.create_task(pump())
-            request_tasks = state["transport_tasks"]
-            request_tasks.add(task)
-            task.add_done_callback(request_tasks.discard)
-            try:
-                await asyncio.wait_for(headers_ready.wait(), 300)
-                if task.done() and task.exception():
-                    raise task.exception()
-            except BaseException as exc:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
-                await page.close()
-                if isinstance(exc, asyncio.TimeoutError):
-                    raise RuntimeError("Arena browser setup timed out before response headers arrived.") from exc
-                raise
-            class Response(transport.BrowserFetchStreamResponse):
-                async def aiter_lines(self):
-                    async for line in super().aiter_lines():
-                        value = line.removeprefix("data:").strip()
-                        if value.startswith("ad:"):
-                            metadata = json.loads(value[3:])
-                            if not metadata.get("finishReason"):
-                                raise RuntimeError("Arena omitted the finish reason")
-                            state["usage"] = metadata.get("usage") or state["usage"]
-                        elif value.startswith("{"):
-                            event = json.loads(value)
-                            state["usage"] = event.get("usage") or state["usage"]
-                            for choice in event.get("choices", []):
-                                if choice.get("finish_reason"):
-                                    yield line
-                                    yield "ad:" + json.dumps({"finishReason": choice["finish_reason"]})
-                                    break
-                            else:
-                                yield line
-                            continue
-                        yield line
-                    await task
-                async def aclose(self):
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await task
-                    with contextlib.suppress(Exception):
-                        cookies = await context.cookies(["https://arena.ai/", "https://lmarena.ai/"])
-                        if not state["retired"]:
-                            _persist_session(slot, cookies)
-                    await page.close()
-                async def __aexit__(self, *args):
-                    await self.aclose()
-            return Response(result["status"], result["headers"], text=result.get("error_body", ""),
-                            lines_queue=queue if result["status"] < 400 else None,
-                            done_event=done_event, method=http_method, url=url)
-        async def interactive_fetch(args, kwargs, verification):
-            nonlocal context
-            await state["events"].put({"arena_progress": "verification" if verification else "browser_verification"})
-            async with login_lock:
-                original_context = context
-                lease = _regular_login_browser(playwright)
-                context = await lease.__aenter__()
-                try:
-                    await context.add_cookies(await original_context.cookies(["https://arena.ai/", "https://lmarena.ai/"]))
-                    verified = await fetch(*args, **dict(kwargs, _interactive=True, _verification=verification))
-                    if not verification and verified.status_code == 403 and "captcha" in verified.text.lower():
-                        await verified.aclose()
-                        await state["events"].put({"arena_progress": "verification"})
-                        verified = await fetch(*args, **dict(kwargs, _interactive=True, _verification=True))
-                except BaseException:
-                    await lease.__aexit__(None, None, None)
-                    context = original_context
-                    raise
-                original_close = verified.aclose
-                closed = False
-                async def close_verified():
-                    nonlocal context, closed
-                    if closed:
-                        return
-                    closed = True
-                    try:
-                        await original_close()
-                        await original_context.add_cookies(await context.cookies(["https://arena.ai/", "https://lmarena.ai/"]))
-                    finally:
-                        await lease.__aexit__(None, None, None)
-                        context = original_context
-                verified.aclose = close_verified
-                if verified.status_code >= 400:
-                    detail = f"Arena HTTP {verified.status_code}: {verified.text}"
-                    if verified.status_code == 403 and "captcha" in verified.text.lower():
-                        detail += " Arena rejected the refreshed CAPTCHA token."
-                    await verified.aclose()
-                    state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=detail)
-                    return state["terminal_error"]
-                return verified
-
-        async def submit_once(*args, **kwargs):
-            nonlocal context
-            request_tasks = state["transport_tasks"]
-            transport_task = asyncio.current_task()
-            request_tasks.add(transport_task)
-            transport_task.add_done_callback(request_tasks.discard)
             if state["submitted"]:
-                return state.get("terminal_error") or transport.BrowserFetchStreamResponse(
-                    400, {}, text="Arena response was interrupted after submission; it was not replayed. Retry the request explicitly.")
+                return transport.BrowserFetchStreamResponse(
+                    400, {}, text="Arena request already submitted; no automatic replay was attempted.")
             state["submitted"] = True
-            for attempt in range(2):
-                state["dispatched"] = False
-                before = set(context.pages)
-                try:
-                    response = await fetch(*args, **kwargs)
-                    if response.status_code not in (401, 403):
-                        if response.status_code >= 400:
-                            # The pinned bridge retries 429/5xx internally,
-                            # delaying the actual rejection behind keepalives.
-                            # Stop that loop with its non-retryable status;
-                            # upstream_chunks preserves the real status/body
-                            # and Retry-After from state["upstream_error"].
-                            detail = f"Arena HTTP {response.status_code}: {response.text}"
-                            await response.aclose()
-                            state["terminal_error"] = transport.BrowserFetchStreamResponse(
-                                400, {}, text=detail)
-                            return state["terminal_error"]
-                        return response
-                    detail = f"Arena HTTP {response.status_code}: {response.text}"
-                    captcha_rejected = response.status_code == 403 and "captcha" in response.text.lower()
+            # Preserve the current Arena conversation schema, without changing
+            # either of the proxy's CAPTCHA token fields.
+            if parsed.path.rstrip("/") == "/nextjs-api/stream/create-evaluation" and payload.get("mode") == "direct":
+                payload = dict(payload, mode="direct-battle")
+            before = set(context.pages)
+            original_new_page = context.new_page
+            dispatched = False
+
+            async def observed_page():
+                page = await original_new_page()
+                _bridge_error_metadata(page)
+                async def before_dispatch(route):
+                    nonlocal dispatched
+                    request = route.request
+                    if request.method.upper() == http_method.upper():
+                        if not dispatched:
+                            await state["events"].put({"arena_progress": "token"})
+                            if state.get("dispatch_ack") is not None:
+                                state["dispatch_ack"].clear()
+                                await state["events"].put({"arena_progress": "dispatch"})
+                                await state["dispatch_ack"].wait()
+                            dispatched = True
+                    await route.continue_()
+                # Observe actual dispatch without rewriting the proxy's request.
+                await page.route("**/nextjs-api/stream/**", before_dispatch)
+                return page
+
+            async def cleanup():
+                with contextlib.suppress(Exception):
+                    _persist_session(slot, await context.cookies(["https://arena.ai/", "https://lmarena.ai/"]))
+                for page in list(context.pages):
+                    if page not in before:
+                        with contextlib.suppress(Exception):
+                            await page.close()
+
+            context.new_page = observed_page
+            try:
+                await state["events"].put({"arena_progress": "captcha"})
+                response = await upstream_fetch(http_method, url, payload, auth_token, **kwargs)
+                if response is None:
+                    raise RuntimeError("LMArenaBridge browser transport could not complete the request.")
+                await state["events"].put({"arena_progress": "headers:" + str(response.status_code)})
+                if response.status_code >= 400:
+                    state["upstream_error"] = {
+                        "message": f"Arena HTTP {response.status_code}: {response.text}",
+                        "status_code": response.status_code,
+                        "retry_after": response.headers.get("retry-after"),
+                    }
                     await response.aclose()
-                    if captcha_rejected:
-                        if attempt == 0:
-                            return await interactive_fetch(args, kwargs, verification=True)
-                        detail += " Arena rejected a fresh CAPTCHA token. Complete any verification offered on Arena's website before retrying."
-                        state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=detail)
-                        return state["terminal_error"]
-                    safe_to_retry = True  # Explicit rejection, no accepted stream.
-                except asyncio.CancelledError:
-                    for page in list(context.pages):
-                        if page not in before:
-                            with contextlib.suppress(Exception):
-                                await page.close()
-                    raise
-                except Exception as exc:
-                    if str(exc) == "ARENA_BROWSER_CHALLENGE" and not state["dispatched"]:
-                        try:
-                            return await interactive_fetch(args, kwargs, verification=False)
-                        except Exception as interactive_error:
-                            state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=str(interactive_error))
-                            return state["terminal_error"]
-                    if "ARENA_CAPTCHA_" in str(exc):
-                        marker = re.search(r"ARENA_CAPTCHA_[A-Z_]+", str(exc)).group(0)
-                        detail = ("Arena verification was cancelled; no additional translation was submitted."
-                                  if "CANCELLED" in str(exc) else
-                                  f"Arena CAPTCHA could not complete ({marker}); no additional translation was submitted. Check the Arena Verification window and whether verification scripts are blocked.")
-                        state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=detail)
-                        return state["terminal_error"]
-                    detail = f"Arena browser connection failed ({type(exc).__name__})."
-                    safe_to_retry = not state["dispatched"]
-                    for page in list(context.pages):
-                        if page not in before:
-                            with contextlib.suppress(Exception):
-                                await page.close()
-                if attempt == 0 and safe_to_retry:
-                    with contextlib.suppress(Exception):
-                        await context.close()
+                    await cleanup()
+                    # The browser transport has already completed its retries.
+                    # Prevent the outer API loop from submitting another job.
+                    return transport.BrowserFetchStreamResponse(400, {}, text=state["upstream_error"]["message"])
+                close_response = response.aclose
+                async def close():
                     try:
-                        context, restored = await restore_context(slot, refresh=True)
-                        state["context"] = context
-                        cfg.update(auth_token=restored["token"], auth_tokens=[restored["token"]],
-                                   browser_cookies={c["name"]: c["value"] for c in restored["cookies"]})
-                        continue
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        detail += " Automatic session reconnection failed. Use Arena Login if the session was revoked."
-                # Stop upstream retry loops from masking the actual rejection.
-                state["terminal_error"] = transport.BrowserFetchStreamResponse(400, {}, text=detail)
-                return state["terminal_error"]
+                        await close_response()
+                    finally:
+                        await cleanup()
+                response.aclose = close
+                return response
+            except BaseException:
+                await cleanup()
+                raise
+            finally:
+                context.new_page = original_new_page
+
+        # Qt runs the upstream in-page transport; no custom CAPTCHA minting or
+        # retry transport remains. Both bridge routes share this implementation.
         main.fetch_lmarena_stream_via_chrome = submit_once
         main.fetch_lmarena_stream_via_camoufox = submit_once
         return state
