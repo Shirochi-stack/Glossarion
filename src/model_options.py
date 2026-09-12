@@ -740,16 +740,23 @@ def numbered_model_completion_values(
     return rendered
 
 
+class PolledModelKeys(frozenset):
+    """Normalize a catalog once, not once per painted/filtered model row."""
+    def __new__(cls, values=()):
+        if isinstance(values, cls):
+            return values
+        return super().__new__(cls, (
+            str(value).strip().casefold() for value in (values or ())
+            if str(value).strip()
+        ))
+
+
 def model_has_polled_marker(model: str, polled_model_keys: Iterable[str]) -> bool:
     """Match a displayed model, including a rendered numbered route, to poll state."""
     value = str(model or "").strip().casefold()
     if not value:
         return False
-    keys = {
-        str(candidate).strip().casefold()
-        for candidate in (polled_model_keys or ())
-        if str(candidate).strip()
-    }
+    keys = PolledModelKeys(polled_model_keys)
     if value in keys:
         return True
 

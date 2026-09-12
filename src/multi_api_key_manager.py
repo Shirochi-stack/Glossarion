@@ -94,6 +94,7 @@ from model_options import (
     get_model_options,
     merge_saved_model_options,
     model_has_polled_marker,
+    PolledModelKeys,
     numbered_model_completion_values,
 )
 # Dialog for configuring per-key endpoint
@@ -7916,11 +7917,12 @@ class MultiAPIKeyDialog(QDialog):
                 checked_icon = create_icon() if callable(create_icon) else QIcon()
             except Exception:
                 checked_icon = QIcon()
-        return polled_model_keys, checked_icon, hide_unpolled
+        return PolledModelKeys(polled_model_keys), checked_icon, hide_unpolled
 
     @staticmethod
     def _apply_model_combo_poll_rows(combo, polled_model_keys, checked_icon, hide_unpolled):
         """Apply marker icons and row visibility without changing item text."""
+        polled_model_keys = PolledModelKeys(polled_model_keys)
         empty_icon = QIcon()
         line_edit = combo.lineEdit() if combo.isEditable() else None
         current_index = combo.currentIndex()
@@ -8260,7 +8262,7 @@ class MultiAPIKeyDialog(QDialog):
                 super().__init__([], parent)
                 self._search = ""
                 self._base_model_values = list(base_model_values)
-                self._polled_model_keys = set(polled_model_keys or set())
+                self._polled_model_keys = PolledModelKeys(polled_model_keys)
                 self._checked_icon = checked_icon
                 self._hide_unpolled = bool(hide_unpolled)
                 self.set_search_text("")
@@ -8325,7 +8327,7 @@ class MultiAPIKeyDialog(QDialog):
                     self.setStringList(ranked)
 
             def set_polled_state(self, polled_model_keys, checked_icon, hide_unpolled):
-                self._polled_model_keys = set(polled_model_keys or set())
+                self._polled_model_keys = PolledModelKeys(polled_model_keys)
                 self._checked_icon = checked_icon
                 self._hide_unpolled = bool(hide_unpolled)
                 previous_values = self.stringList()

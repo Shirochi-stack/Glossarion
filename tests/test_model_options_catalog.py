@@ -11,6 +11,25 @@ import pytest
 from unified_api_client import UnifiedClient, UnifiedClientError
 
 
+def test_prepared_poll_catalog_is_not_rescanned_per_model_row():
+    class NoIteration(model_options.PolledModelKeys):
+        def __iter__(self):
+            raise AssertionError('Prepared catalog was rebuilt during a row lookup')
+    keys = NoIteration([' AUTHARENA/Model-A ', 'AUTHGPT/GPT-TEST'])
+    assert model_options.PolledModelKeys(keys) is keys
+    for _ in range(100):
+        assert model_options.model_has_polled_marker('autharena0/model-a', keys)
+        assert model_options.model_has_polled_marker('authgpt4/gpt-test', keys)
+        assert not model_options.model_has_polled_marker('autharena/missing', keys)
+
+
+def test_unprepared_poll_catalog_still_normalizes_and_observes_changes():
+    keys = {' AUTHARENA/Model-A '}
+    assert model_options.model_has_polled_marker('autharena1/model-a', keys)
+    keys.clear()
+    assert not model_options.model_has_polled_marker('autharena1/model-a', keys)
+
+
 def _isolated_cache(tmp_path, monkeypatch):
     cache_path = tmp_path / "model_catalog_cache.json"
     monkeypatch.setenv("GLOSSARION_MODEL_CATALOG_CACHE", str(cache_path))

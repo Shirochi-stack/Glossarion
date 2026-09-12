@@ -865,6 +865,7 @@ from model_options import (
     get_model_options,
     merge_saved_model_options,
     model_has_polled_marker,
+    PolledModelKeys,
     numbered_model_completion_values,
     provider_model_catalog_supports_anonymous_poll,
     provider_model_catalog_refresh_due,
@@ -21777,11 +21778,11 @@ Recent translations to summarize:
             for provider, models in catalogs.items()
         }
         self._polled_online_models_by_provider = by_provider
-        self._polled_online_model_ids = {
+        self._polled_online_model_ids = PolledModelKeys(
             model
             for models in by_provider.values()
             for model in models
-        }
+        )
         if isinstance(self, QObject) and not hasattr(self, '_model_poll_marker_expiry_timer'):
             self._model_poll_marker_expiry_timer = QTimer(self)
             self._model_poll_marker_expiry_timer.setInterval(60_000)
@@ -21819,7 +21820,8 @@ Recent translations to summarize:
         """Decorate/filter a combo popup without changing any stored model text."""
         if combo is None:
             return
-        combo._model_poll_marker_keys = set(polled_model_keys or ())
+        polled_model_keys = PolledModelKeys(polled_model_keys)
+        combo._model_poll_marker_keys = polled_model_keys
         empty_icon = QIcon()
         line_edit = combo.lineEdit() if combo.isEditable() else None
         current_index = combo.currentIndex()
@@ -22010,7 +22012,7 @@ Recent translations to summarize:
             for models in polled_by_provider.values()
             for model in models
         }
-        self._polled_online_model_ids = polled_model_keys
+        self._polled_online_model_ids = PolledModelKeys(polled_model_keys)
         refresh_search_markers = getattr(self, '_refresh_model_search_poll_state', None)
         if callable(refresh_search_markers):
             refresh_search_markers()
@@ -22276,7 +22278,7 @@ Recent translations to summarize:
                 super().__init__([], parent)
                 self._search = ""
                 self._base_model_values = list(base_model_values)
-                self._polled_model_keys = set(polled_model_keys or set())
+                self._polled_model_keys = PolledModelKeys(polled_model_keys)
                 self._checked_icon = checked_icon
                 self._hide_unpolled = bool(hide_unpolled)
                 self.set_search_text("")
@@ -22349,7 +22351,7 @@ Recent translations to summarize:
 
             def set_polled_state(self, polled_model_keys, checked_icon, hide_unpolled):
                 """Update icons/filtering without replacing the completer object."""
-                self._polled_model_keys = set(polled_model_keys or set())
+                self._polled_model_keys = PolledModelKeys(polled_model_keys)
                 self._checked_icon = checked_icon
                 self._hide_unpolled = bool(hide_unpolled)
                 previous_values = self.stringList()
