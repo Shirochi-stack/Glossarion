@@ -120,21 +120,52 @@ def _write_adapter(directory):
 def patch_antigravity(runtime_dir):
     path = Path(runtime_dir) / "src" / "auth" / "storage.ts"
     source = path.read_text(encoding="utf-8")
+    legacy_save = (
+        "const temporary = ACCOUNTS_FILE + '.' + randomUUID() + '.tmp';\n"
+        "    try {\n"
+        "      await writeFile(temporary, encryptSerialized(JSON.stringify(config, null, 2)), {mode:0o600});\n"
+        "      await rename(temporary, ACCOUNTS_FILE);\n"
+        "    } finally { await unlink(temporary).catch(() => {}); }"
+    )
+    queued_save = (
+        "const serialized = JSON.stringify(config, null, 2);\n"
+        "    const save = pendingAccountSave.then(async () => {\n"
+        "      const temporary = ACCOUNTS_FILE + '.' + randomUUID() + '.tmp';\n"
+        "      try {\n"
+        "        await writeFile(temporary, encryptSerialized(serialized), {mode:0o600});\n"
+        "        await rename(temporary, ACCOUNTS_FILE);\n"
+        "      } finally { await unlink(temporary).catch(() => {}); }\n"
+        "    });\n"
+        "    pendingAccountSave = save.catch(() => {});\n"
+        "    await save;"
+    )
+    queue_declaration = "let pendingAccountSave: Promise<void> = Promise.resolve();"
     if "glossarion-token-storage.mjs" in source:
-        _write_adapter(path.parent)
-        return
-    replacements = {
-        "const data = await file.json();": "const data = JSON.parse(decryptSerialized(await file.text()));",
-        "await Bun.write(ACCOUNTS_FILE, JSON.stringify(config, null, 2));":
-            "const temporary = ACCOUNTS_FILE + '.' + randomUUID() + '.tmp';\n    try {\n      await writeFile(temporary, encryptSerialized(JSON.stringify(config, null, 2)), {mode:0o600});\n      await rename(temporary, ACCOUNTS_FILE);\n    } finally { await unlink(temporary).catch(() => {}); }",
-        'console.error("Failed to load accounts:", e);': 'throw e;',
-        'console.error("Failed to save accounts:", e);': 'throw e;',
-    }
-    for old, new in replacements.items():
-        if source.count(old) != 1:
-            raise RuntimeError("Antigravity credential adapter is incompatible; refusing plaintext storage")
-        source = source.replace(old, new)
-    source = 'import {encryptSerialized, decryptSerialized} from "./glossarion-token-storage.mjs";\nimport {writeFile, rename, unlink} from "node:fs/promises";\nimport {randomUUID} from "node:crypto";\n' + source
+        if queue_declaration in source and queued_save in source:
+            _write_adapter(path.parent)
+            return
+        # Upgrade the original encrypted adapter in already-downloaded runtimes.
+        if source.count(legacy_save) != 1:
+            raise RuntimeError("Antigravity credential adapter is incompatible; cannot serialize account saves")
+        source = source.replace(legacy_save, queued_save)
+    else:
+        replacements = {
+            "const data = await file.json();": "const data = JSON.parse(decryptSerialized(await file.text()));",
+            "await Bun.write(ACCOUNTS_FILE, JSON.stringify(config, null, 2));": queued_save,
+            'console.error("Failed to load accounts:", e);': 'throw e;',
+            'console.error("Failed to save accounts:", e);': 'throw e;',
+        }
+        for old, new in replacements.items():
+            if source.count(old) != 1:
+                raise RuntimeError("Antigravity credential adapter is incompatible; refusing plaintext storage")
+            source = source.replace(old, new)
+        source = 'import {encryptSerialized, decryptSerialized} from "./glossarion-token-storage.mjs";\nimport {writeFile, rename, unlink} from "node:fs/promises";\nimport {randomUUID} from "node:crypto";\n' + source
+    save_function = "export async function saveConfig("
+    if source.count(save_function) != 1:
+        raise RuntimeError("Antigravity credential adapter is incompatible; cannot serialize account saves")
+    # Quota refreshes save several accounts concurrently. Windows cannot reliably
+    # replace the same destination concurrently, so queue writes and snapshot input.
+    source = source.replace(save_function, queue_declaration + "\n\n" + save_function)
     _write_adapter(path.parent)
     path.write_text(source, encoding="utf-8")
 
@@ -142,26 +173,67 @@ def patch_antigravity(runtime_dir):
 def patch_ocagy(plugin_root):
     path = Path(plugin_root) / "dist" / "src" / "plugin" / "storage.js"
     source = path.read_text(encoding="utf-8")
-    if "glossarion-token-storage.mjs" in source:
-        _write_adapter(path.parent)
-        _patch_ocagy_oauth(plugin_root)
-        return
-    replacements = {
-        'const content = await fs.readFile(path, "utf-8");': ('const content = decryptSerialized(await fs.readFile(path, "utf-8"));', 2),
-        'const content = JSON.stringify(merged, null, 2);': ('const content = encryptSerialized(JSON.stringify(merged, null, 2));', 1),
-        'const content = JSON.stringify(storage, null, 2);': ('const content = encryptSerialized(JSON.stringify(storage, null, 2));', 1),
-        'await fs.writeFile(path, JSON.stringify({ version: 4, accounts: [], activeIndex: 0 }, null, 2),': ('await fs.writeFile(path, encryptSerialized(JSON.stringify({ version: 4, accounts: [], activeIndex: 0 }, null, 2)),', 1),
-    }
-    for old, (new, count) in replacements.items():
-        if source.count(old) != count:
-            raise RuntimeError("OcAgy credential adapter is incompatible; refusing plaintext storage")
-        source = source.replace(old, new)
-    # Do not turn unreadable credentials into an empty store that may overwrite them.
-    source = source.replace('catch (error) {', 'catch (error) {\n        if (error.code === "GLOSSARION_CREDENTIAL_CRYPTO") throw error;')
-    source = 'import {encryptSerialized, decryptSerialized} from "./glossarion-token-storage.mjs";\n' + source
+    if "glossarion-token-storage.mjs" not in source:
+        replacements = {
+            'const content = await fs.readFile(path, "utf-8");': ('const content = decryptSerialized(await fs.readFile(path, "utf-8"));', 2),
+            'const content = JSON.stringify(merged, null, 2);': ('const content = encryptSerialized(JSON.stringify(merged, null, 2));', 1),
+            'const content = JSON.stringify(storage, null, 2);': ('const content = encryptSerialized(JSON.stringify(storage, null, 2));', 1),
+            'await fs.writeFile(path, JSON.stringify({ version: 4, accounts: [], activeIndex: 0 }, null, 2),': ('await fs.writeFile(path, encryptSerialized(JSON.stringify({ version: 4, accounts: [], activeIndex: 0 }, null, 2)),', 1),
+        }
+        for old, (new, count) in replacements.items():
+            if source.count(old) != count:
+                raise RuntimeError("OcAgy credential adapter is incompatible; refusing plaintext storage")
+            source = source.replace(old, new)
+        # Do not turn unreadable credentials into an empty store that may overwrite them.
+        source = source.replace('catch (error) {', 'catch (error) {\n        if (error.code === "GLOSSARION_CREDENTIAL_CRYPTO") throw error;')
+        source = 'import {encryptSerialized, decryptSerialized} from "./glossarion-token-storage.mjs";\n' + source
+    source = _patch_ocagy_save_serialization(source)
     _write_adapter(path.parent)
     path.write_text(source, encoding="utf-8")
     _patch_ocagy_oauth(plugin_root)
+
+
+def _patch_ocagy_save_serialization(source):
+    marker = "// Glossarion serialized encrypted account saves v2"
+    if marker in source:
+        return source
+    lock_function = "async function withFileLock(path, fn) {"
+    retry_options = "retries: {\n        retries: 5,"
+    save_functions = [f"export async function {name}(storage) {{" for name in (
+        "saveAccounts", "saveAccountsReplace"
+    )]
+    preparation = (
+        "    const configDir = dirname(path);\n"
+        "    await fs.mkdir(configDir, { recursive: true });\n"
+        "    await ensureGitignore(configDir);\n"
+    )
+    if source.count(preparation) != 2 or any(
+        source.count(text) != 1 for text in [lock_function, retry_options, *save_functions]
+    ):
+        raise RuntimeError("OcAgy credential adapter is incompatible; cannot serialize account saves")
+    # DPAPI increases time spent holding the lock. Keep cross-process locking,
+    # but give contending OpenCode processes time to finish encrypted saves.
+    source = source.replace(retry_options, "retries: {\n        retries: 30,")
+    for signature in save_functions:
+        source = source.replace(signature, signature + "\n    storage = JSON.parse(JSON.stringify(storage));")
+    source = source.replace(preparation, "")
+    # Queue before acquiring the filesystem lock so calls from this process do
+    # not compete or change order while preparing the storage directory.
+    source = source.replace(lock_function, marker + """
+const accountSaveQueues = new Map();
+async function withFileLock(path, fn) {
+    const previous = accountSaveQueues.get(path) || Promise.resolve();
+    const operation = previous.catch(() => {}).then(() => withFileLockUnqueued(path, fn));
+    accountSaveQueues.set(path, operation);
+    try {
+        return await operation;
+    } finally {
+        if (accountSaveQueues.get(path) === operation) accountSaveQueues.delete(path);
+    }
+}
+async function withFileLockUnqueued(path, fn) {
+""" + preparation.rstrip())
+    return source
 
 
 def _patch_ocagy_oauth(plugin_root):
