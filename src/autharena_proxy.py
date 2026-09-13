@@ -29,7 +29,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 31
+ADAPTER_VERSION = 32
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
@@ -133,7 +133,7 @@ async def _open_arena_login(page, navigation):
                     return True
                 except Exception:
                     # Hydration/navigation can replace a control. Retry next poll.
-                    return False
+                    continue
         return False
 
     async def click_login():
@@ -147,18 +147,27 @@ async def _open_arena_login(page, navigation):
     if await click_login():
         navigation["retry_login_at"] = time.monotonic() + 1
         return await login_visible()
-    if not navigation.get("sidebar_opened"):
+    collapsed = await page.locator('[data-state="collapsed"][data-side]').count() > 0
+    if not navigation.get("sidebar_opened") or collapsed:
+        if time.monotonic() < navigation.get("retry_sidebar_at", 0):
+            return False
         triggers = page.get_by_role("button", name=re.compile(
-            r"(open|expand|toggle).*sidebar|sidebar.*(open|expand|toggle)|^menu$", re.I
+            r"^(open|expand) sidebar$", re.I
         ))
         opened = await click_visible(triggers)
         if not opened:
             opened = await click_visible(page.locator(
                 'button[data-sidebar="trigger"], button[data-slot="sidebar-trigger"], '
+                'button[class~="group/toggle-btn"], '
                 'button:has(svg.lucide-panel-left), button:has(svg.lucide-panel-left-open)'
             ))
+        if not opened:
+            opened = await click_visible(page.get_by_role("button", name=re.compile(
+                r"(open|expand|toggle).*sidebar|sidebar.*(open|expand|toggle)|^menu$", re.I
+            )))
         if opened:
             navigation["sidebar_opened"] = True
+            navigation["retry_sidebar_at"] = time.monotonic() + 2
             if await click_login():
                 navigation["retry_login_at"] = time.monotonic() + 1
             return await login_visible()
@@ -775,10 +784,10 @@ def _request(path, payload=None, timeout=600, status=None):
 
 def open_login(log_fn=print, account_id=0):
     if log_fn:
-        log_fn("Arena Login: preparing the proxy and internal browser…")
+        log_fn("⚙️ Arena Login: preparing the proxy and internal browser…")
     status = ensure_proxy_running(log_fn=log_fn)
     if log_fn:
-        log_fn("Arena Login: opening the internal browser. Finish sign-in on the Arena page.")
+        log_fn("🌐 Arena Login: opening the internal browser. Finish sign-in on the Arena page.")
     return _request("/login", {"slot": account_id}, timeout=660, status=status)
 
 
@@ -1937,7 +1946,8 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             self.login_button.setText("Arena Login")
             self.login_button.setToolTip("Log into Arena in the automatically installed internal browser")
             if error:
-                self.progress.emit("Arena Login: " + error)
+                icon = "🦀" if "Sign-in cancelled:" in error else "⚠️"
+                self.progress.emit(f"{icon} Arena Login: " + error)
                 self.login_button.setToolTip(error)
             else:
                 account, original, update_route = result

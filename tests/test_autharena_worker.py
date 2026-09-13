@@ -334,6 +334,20 @@ class LoginNavigationTest(unittest.TestCase):
                     # Once visible, never click the sidebar/login button again.
                     await page.evaluate("() => { document.querySelector('button').onclick = () => document.querySelector('h2').hidden = true; }")
                     self.assertTrue(await arena._open_arena_login(page, navigation))
+                    await page.set_content("""<div data-side="left" data-state="collapsed">
+                        <button aria-label="Open sidebar">Open</button>
+                        <button hidden onclick="document.querySelector('h2').hidden=false">Log In</button>
+                        </div><h2 hidden>Log In or Create Account</h2>""")
+                    navigation = {}
+                    self.assertFalse(await arena._open_arena_login(page, navigation))
+                    await page.evaluate("""() => {
+                        document.querySelector('button').onclick = () => {
+                            document.querySelector('[data-side]').dataset.state = 'expanded';
+                            document.querySelector('button[hidden]').hidden = false;
+                        };
+                    }""")
+                    navigation['retry_sidebar_at'] = 0
+                    self.assertTrue(await arena._open_arena_login(page, navigation))
                 finally:
                     await browser.close()
         asyncio.run(run())
