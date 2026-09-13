@@ -263,6 +263,38 @@ class LoginNavigationTest(unittest.TestCase):
                     self.assertIsNotNone(context.process.poll())
         asyncio.run(run())
 
+    def test_closing_qt_login_window_cancels_request(self):
+        import httpx
+        import uvicorn
+        async def run():
+            @contextlib.asynccontextmanager
+            async def login_browser(playwright):
+                context = await arena._open_qt_browser(playwright)
+                async def route(r):
+                    await r.fulfill(content_type='text/html', body='<button>Log In</button>')
+                await context.context.route('**/*', route)
+                try:
+                    yield context
+                finally:
+                    await context.close()
+            async def close_window(page, navigation):
+                # Runs the same QWidget.close() path as the native close button.
+                page.owner.command('close', page.target)
+                return False
+            async def serve(server, sockets):
+                try:
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.config.app), base_url='http://test', headers={'Authorization':'Bearer test'}) as client:
+                        response = await asyncio.wait_for(client.post('/login', json={'slot': None}), 15)
+                        self.assertEqual(response.status_code, 499, response.text)
+                        self.assertIn('login window was closed', response.json()['detail'])
+                finally:
+                    for sock in sockets:
+                        sock.close()
+            with tempfile.TemporaryDirectory() as root:
+                with patch.dict(os.environ, {'AUTHARENA_PROXY_DATA_DIR': root}), patch.object(arena, '_regular_login_browser', login_browser), patch.object(arena, '_open_arena_login', close_window), patch.object(uvicorn.Server, 'serve', serve):
+                    await arena._serve_worker('test', arena._qt_helper_command())
+        asyncio.run(run())
+
     def test_sidebar_and_login_navigation(self):
         async def run():
             from playwright.async_api import async_playwright

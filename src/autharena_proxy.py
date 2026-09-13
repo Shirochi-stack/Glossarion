@@ -29,7 +29,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 30
+ADAPTER_VERSION = 31
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
@@ -42,6 +42,7 @@ _responses = set()
 _pending_requests = {}
 _owned = None
 _started_callback = None
+_accounts_restore_logged = False
 
 
 class ArenaStreamError(RuntimeError):
@@ -222,8 +223,14 @@ def _qt_browser_helper(visible=False):
         def createWindow(self, window_type):
             return create_page(True).page()
 
+    class View(QWebEngineView):
+        def closeEvent(self, event):
+            pages.pop(self.page().devToolsId(), None)
+            super().closeEvent(event)
+
     def create_page(show=False):
-        view = QWebEngineView()
+        view = View()
+        view.setAttribute(Qt.WA_DeleteOnClose, True)
         if not visible:
             # Render for Chromium input/layout without ever mapping a desktop window.
             view.setAttribute(Qt.WA_DontShowOnScreen, True)
@@ -252,7 +259,7 @@ def _qt_browser_helper(visible=False):
         elif action == "close":
             view = pages.pop(command.get("target"), None)
             if view:
-                view.close(); view.deleteLater()
+                view.close()
         elif action == "quit":
             app.quit()
     commands.received.connect(execute)
@@ -266,7 +273,7 @@ def _qt_browser_helper(visible=False):
     threading.Thread(target=read_commands, daemon=True).start()
     create_page(False)  # Keeper page for profile cookie operations.
     result = app.exec()
-    for view in pages.values():
+    for view in list(pages.values()):
         view.close()
         view.deleteLater()
     return result
@@ -1228,9 +1235,17 @@ async def _serve_worker(key, qt_helper_command=None):
                 context = await login_browser.__aenter__()
             except Exception as exc:
                 raise HTTPException(503, f"Arena Qt browser startup failed after automatic recovery: {exc}")
+            page = None
+            browser_closed = False
+            login_task = asyncio.current_task()
+            def on_login_closed(*args):
+                nonlocal browser_closed
+                browser_closed = True
+                login_task.cancel()
             try:
                 await _restore_login_session(context, body.get("slot"))
                 page = context.pages[0] if context.pages else await context.new_page()
+                page.on("close", on_login_closed)
                 await page.goto("https://arena.ai/", wait_until="domcontentloaded")
                 await page.bring_to_front()
                 clicked = False
@@ -1285,7 +1300,13 @@ async def _serve_worker(key, qt_helper_command=None):
                         clicked = await _open_arena_login(page, navigation)
                     await asyncio.sleep(1 if clicked else .2)
                 raise HTTPException(408, "Arena Login timed out before a signed-in session was available.")
+            except asyncio.CancelledError:
+                if browser_closed:
+                    raise HTTPException(499, "Sign-in cancelled: the Arena login window was closed.") from None
+                raise
             finally:
+                if page is not None:
+                    page.remove_listener("close", on_login_closed)
                 with contextlib.suppress(Exception):
                     await login_browser.__aexit__(None, None, None)
 
@@ -1766,7 +1787,6 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             self.spinner.setInterval(80)
             self.spinner.timeout.connect(self.animate)
             self.spinner_angle = 0
-            self.account_snapshot = None
             self.saved_accounts = []
             self.accounts_ready = False
             self.accounts_loading = False
@@ -1791,11 +1811,19 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
 
         @Slot(object, object)
         def receive_accounts(self, accounts, error):
+            global _accounts_restore_logged
             self.accounts_loading = False
             self.accounts_checked_at = time.monotonic()
             if error is None:
                 self.saved_accounts = accounts
                 self.accounts_ready = True
+                if accounts and not _accounts_restore_logged:
+                    _accounts_restore_logged = True
+                    first = min(accounts, key=lambda account: account["slot"])
+                    noun = "account" if len(accounts) == 1 else "accounts"
+                    self.progress.emit(
+                        f"🔓 Arena: restored {len(accounts)} {noun} from encrypted storage — "
+                        f"first: {first.get('email') or 'email unavailable'}.")
             else:
                 self.progress.emit("⚠️ Arena: could not load saved accounts: " + error)
                 QTimer.singleShot(5000, self.refresh)
@@ -1847,15 +1875,8 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
                         ("Selected pool account: " if slot is None else "Saved Arena account: ") + identities
                         + ". Credentials are encrypted and restored automatically. Click to reconnect. "
                         "Saved login does not guarantee CAPTCHA acceptance.")
-                    snapshot = (login_slot, identities)
-                    if snapshot != self.account_snapshot:
-                        first = selected_accounts[0]
-                        summary = f"account #{login_slot}"
-                        self.progress.emit(f"🔓 Arena: restored {summary} from encrypted storage — first: {first.get('email') or 'email unavailable'}.")
-                    self.account_snapshot = snapshot
                 else:
                     self.login_button.setToolTip("Log into Arena in the automatically installed internal browser")
-                    self.account_snapshot = None
             self.accounts.blockSignals(True)
             self.accounts.clear()
             ids = sorted({0, login_slot, *[a["slot"] for a in saved_accounts]})
