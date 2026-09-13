@@ -113,6 +113,7 @@ tests/**
 !tests/test_extract_glossary_parser.py
 !tests/test_parallel_epub_visibility.py
 !tests/test_glossary_source_preparation.py
+!tests/test_glossary_log_numbering.py
 !tests/test_glossary_interior_special_files.py
 !tests/test_manga_ocr_io.py
 !tests/test_manga_drag_drop.py

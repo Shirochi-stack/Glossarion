@@ -142,7 +142,7 @@ def test_main_reads_epub_once_and_preserves_chapter_metadata(
         expected_skips[2] = "skipped_title_header_only"
     assert context.chapter_status_overrides == expected_skips
     output = capsys.readouterr().out
-    assert output.count("Reading EPUB archive and chapter list") == 1
+    assert output.count("Reading EPUB archive and HTML file list") == 1
     assert output.count("EPUB text extraction complete") == 1
     assert "Skipped 1 special file(s)" in output
 

@@ -16,7 +16,8 @@ import re
 import tempfile
 import shutil
 from ebooklib import epub
-from chapter_display_numbering import nonreset_chapter_display_numbers
+from chapter_display_numbering import filename_chapter_number, nonreset_chapter_display_numbers
+from Chapter_Extractor import _is_configured_special_file
 from chapter_splitter import ChapterSplitter
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import List, Dict, Tuple
@@ -717,7 +718,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             pass
     elif chapter_idx is not None or chapter_num is not None:
         try:
-            chap_num = int(chapter_num) if chapter_num is not None else int(chapter_idx) + 1
+            chap_num = int(chapter_num) if chapter_num is not None else _glossary_chapter_actual_num(chapter_idx)
         except Exception:
             chap_num = chapter_num if chapter_num is not None else chapter_idx
         if chunk_idx and total_chunks:
@@ -857,9 +858,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         if chapter_num is not None:
                             chap_val = chapter_num
                         else:
-                            chap_val = (chapter_idx + 1) if isinstance(chapter_idx, int) else (
-                                int(chapter_idx) + 1 if chapter_idx is not None and str(chapter_idx).isdigit() else chapter_idx
-                            )
+                            chap_val = _glossary_chapter_actual_num(chapter_idx) if chapter_idx is not None else None
                         client.set_chapter_context(
                             chapter=chap_val if (chapter_idx is not None or chapter_num is not None) else None,
                             chunk=chunk_idx,
@@ -1903,31 +1902,22 @@ def _glossary_chapter_actual_num(idx: int, context=None) -> int:
     except (TypeError, ValueError):
         return int(idx) + 1
 
-def _glossary_chapter_display_total(total_chapters=None, context=None) -> int:
-    """Return the visible chapter total from the same numbering used by progress rows."""
-    _progress_file, _output_file, positions, numbers, _filenames, context_total = _progress_context_values(context)
-    number_values = [value for value in _unique_int_list((numbers or {}).values()) if value > 0]
-    if number_values:
-        return max(number_values)
-
-    position_values = [value for value in _unique_int_list((positions or {}).values()) if value > 0]
-    if position_values:
-        return max(position_values)
-
+def _glossary_chapter_log_label(idx, total_chapters=None, context=None) -> str:
+    """Keep the spine's file counter separate from its displayed chapter number."""
+    chapter_num = _glossary_chapter_actual_num(idx, context=context)
+    _progress_file, _output_file, _positions, _numbers, filenames, context_total = _progress_context_values(context)
+    is_epub = any(
+        os.path.splitext(name)[1].lower() in (".html", ".xhtml", ".htm")
+        for name in filenames.values()
+    )
+    if not filenames:
+        is_epub = os.getenv("EPUB_PATH", "").lower().endswith(".epub")
     try:
-        return int(total_chapters or context_total or 0)
+        total = int(total_chapters if total_chapters is not None else context_total)
     except (TypeError, ValueError):
-        return 0
-
-def _glossary_chapter_log_label(chapter_num, total_chapters=None, context=None) -> str:
-    """Return the bracketed chapter label used by glossary progress logs."""
-    try:
-        chapter_num = int(chapter_num)
-    except (TypeError, ValueError):
-        chapter_num = str(chapter_num)
-    total_chapters = _glossary_chapter_display_total(total_chapters, context=context)
-    if total_chapters > 0:
-        return f"[Chapter {chapter_num}/{total_chapters}]"
+        total = 0
+    if is_epub and total > 0:
+        return f"[Spine {int(idx) + 1}/{total} — Chapter {chapter_num}]"
     return f"[Chapter {chapter_num}]"
 
 def _parse_glossary_chapter_range(value):
@@ -2057,15 +2047,15 @@ def _glossary_chapter_number_from_filename(value):
     info.xhtml) as Chapter 0, so glossary request cards must do the same instead
     of falling back to that file's spine position.
     """
-    name = os.path.basename(str(value or "").strip())
+    name = os.path.basename(str(value or "").strip().replace("\\", "/"))
     if not name:
         return None
     stem, extension = os.path.splitext(name)
     numbers = re.findall(r"[0-9]+", stem)
+    if extension.lower() in (".html", ".xhtml", ".htm"):
+        return filename_chapter_number(name, is_special=_is_configured_special_file(name))
     if numbers:
         return int(numbers[-1])
-    if extension.lower() in (".html", ".xhtml", ".htm"):
-        return 0
     return None
 
 
@@ -3800,7 +3790,7 @@ def extract_chapters_from_epub(
                 chapters = format_chapters(cached_documents)
                 print(
                     f"📦 Glossary EPUB fingerprint and extraction settings match; "
-                    f"loaded {len(chapters):,} chapters from text cache "
+                    f"loaded {len(chapters):,} HTML files from text cache "
                     f"without reparsing the EPUB ({time.monotonic() - preparation_started:.1f}s).",
                     flush=True,
                 )
@@ -3830,7 +3820,7 @@ def extract_chapters_from_epub(
         if should_stop():
             return []
 
-        print("📖 Reading EPUB archive and chapter list...", flush=True)
+        print("📖 Reading EPUB archive and HTML file list...", flush=True)
         book = epub.read_epub(epub_path)
         # Prefer spine order to match content.opf reading order
         try:
@@ -3926,7 +3916,7 @@ def extract_chapters_from_epub(
         except Exception as e:
             cacheable = False
             name = item.get_name() if hasattr(item, 'get_name') else repr(item)
-            print(f"[Warning] Skipped corrupted chapter {name}: {e}")
+            print(f"[Warning] Skipped corrupted HTML file {name}: {e}")
 
     if skipped_special:
         print(f"⏭️ Skipped {len(skipped_special)} special file(s) for glossary extraction: {', '.join(skipped_special)}")
@@ -3944,7 +3934,7 @@ def extract_chapters_from_epub(
 
     chapters = format_chapters(chapters)
     print(
-        f"✅ EPUB text extraction complete: {len(chapters):,} chapters ready "
+        f"✅ EPUB text extraction complete: {len(chapters):,} HTML files ready "
         f"in {time.monotonic() - preparation_started:.1f}s.",
         flush=True,
     )
@@ -6479,7 +6469,7 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
             if check_stop():
                 break
             display_idx = _glossary_chapter_actual_num(idx)
-            chapter_label = _glossary_chapter_log_label(display_idx, config.get("total_chapters") or None)
+            chapter_label = _glossary_chapter_log_label(idx, config.get("total_chapters") or None)
                 
             # Get system and user prompts
             system_prompt, user_prompt = build_prompt(chap)
@@ -6629,7 +6619,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                                   chapter_num: int = None,
                                   before_send_callback=None) -> Dict:
     """Process a single chapter API call with thread-safe payload handling"""
-    display_chapter_num = chapter_num if chapter_num is not None else idx + 1
+    display_chapter_num = chapter_num if chapter_num is not None else _glossary_chapter_actual_num(idx)
     
     # Early exit: skip immediately if stop/graceful-stop is already flagged
     if stop_check_fn() or os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
@@ -6861,7 +6851,7 @@ def process_single_chapter_with_split(idx: int,
     Wrapper that performs chapter-level splitting (using output-limit budget) before calling the API.
     Aggregates all chunk results into a single result dict to keep batch accounting identical.
     """
-    display_chapter_num = chapter_num if chapter_num is not None else idx + 1
+    display_chapter_num = chapter_num if chapter_num is not None else _glossary_chapter_actual_num(idx)
 
     # Decide if splitting is needed
     chapter_tokens = chapter_splitter.count_tokens(chap)
@@ -7020,7 +7010,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
         msgs = [{"role": "system", "content": system_prompt}] + assistant_prefill_msgs + [{"role": "user", "content": user_prompt}]
         result = process_single_chapter_api_call(
             idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout,
-            chapter_num=(chapter_num_map or {}).get(idx, idx + 1),
+            chapter_num=(chapter_num_map or {}).get(idx, _glossary_chapter_actual_num(idx)),
             before_send_callback=before_send_callback,
         )
         return {'results': [result], 'merged_indices': []}
@@ -7031,7 +7021,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
     chapter_nums = []
     
     for idx, chap in merge_group:
-        chapter_num = (chapter_num_map or {}).get(idx, idx + 1)
+        chapter_num = (chapter_num_map or {}).get(idx, _glossary_chapter_actual_num(idx))
         chapter_nums.append(chapter_num)
         merged_parts.append(chap)
     
@@ -7442,6 +7432,8 @@ def main(log_callback=None, stop_callback=None):
     is_pdf_file = epub_path.lower().endswith('.pdf')
     is_sdlxliff_file = epub_path.lower().endswith('.sdlxliff')
     is_subtitle_source = is_subtitle_glossary_source(epub_path)
+    is_epub_source = not (is_text_file or is_pdf_file or is_sdlxliff_file or is_subtitle_source)
+    source_unit = "HTML files" if is_epub_source else "chapters"
     # Source paths are enough for setup; parse chapter contents once below.
     file_base = os.path.splitext(os.path.basename(epub_path))[0]
     use_spine_order = os.getenv("USE_SPINE_ORDER", "0") == "1"
@@ -7957,9 +7949,9 @@ def main(log_callback=None, stop_callback=None):
                         if _pos is not None:
                             _chapter_positions[_ci] = _pos
                 if _chapter_positions:
-                    print(f"📊 Spine order: mapped {len(_chapter_positions)}/{len(chapters)} chapters to OPF positions")
+                    print(f"📊 Spine order: mapped {len(_chapter_positions)}/{len(chapters)} HTML files to OPF positions")
                 else:
-                    print("⚠️ Spine order: could not map chapters to OPF positions, falling back to filename numbering")
+                    print("⚠️ Spine order: could not map HTML files to OPF positions, falling back to filename numbering")
             except Exception as exc:
                 print(f"⚠️ Spine order: failed to read content.opf from EPUB: {exc}")
         # Fallback: use the rightmost number in each filename.
@@ -7994,7 +7986,7 @@ def main(log_callback=None, stop_callback=None):
     progress_context.chapter_status_overrides = dict(structural_progress_statuses)
 
     if not chapters:
-        print("No chapters found. Exiting.")
+        print(f"No {source_unit} found. Exiting.")
         return
 
     # Check for stop before starting processing
@@ -8017,7 +8009,8 @@ def main(log_callback=None, stop_callback=None):
         before = len(completed)
         completed[:] = [idx for idx in completed if idx not in failed]
         if before != len(completed):
-            print(f"🔄 {len(failed)} previously failed chapter(s) will be retried: {[i+1 for i in sorted(failed)]}")
+            retry_chapters = [_glossary_chapter_actual_num(i, context=progress_context) for i in sorted(failed)]
+            print(f"🔄 {len(failed)} previously failed {source_unit} will be retried (Chapters: {retry_chapters})")
         failed.clear()  # Reset failed list for this run
         _GLOSSARY_QA_ISSUES_FOUND.clear()
     # Load existing glossary from output file (if it exists) instead of progress file
@@ -8108,12 +8101,12 @@ def main(log_callback=None, stop_callback=None):
     )
     if image_only_count:
         print(
-            f"📸 Marked {image_only_count} image-only chapter(s) as skipped "
+            f"📸 Marked {image_only_count} image-only {source_unit} as skipped "
             "(no API request)"
         )
     if title_header_only_count:
         print(
-            f"🏷️ Marked {title_header_only_count} title/header-only chapter(s) "
+            f"🏷️ Marked {title_header_only_count} title/header-only {source_unit} "
             "as skipped (no API request)"
         )
 
@@ -8206,7 +8199,7 @@ def main(log_callback=None, stop_callback=None):
     request_merge_count = int(os.getenv('GLOSSARY_REQUEST_MERGE_COUNT', os.getenv('REQUEST_MERGE_COUNT', '3')))
     
     if request_merging_enabled and request_merge_count > 1:
-        print(f"\n🔗 REQUEST MERGING ENABLED: Combining up to {request_merge_count} chapters per request")
+        print(f"\n🔗 REQUEST MERGING ENABLED: Combining up to {request_merge_count} {source_unit} per request")
     
     # Get both settings
     contextual_enabled = os.getenv('CONTEXTUAL', '1') == '1'
@@ -8231,7 +8224,7 @@ def main(log_callback=None, stop_callback=None):
             chapters_to_process.append((idx, chap))
     
     if len(chapters_to_process) < total_chapters:
-        print(f"📊 Processing {len(chapters_to_process)} out of {total_chapters} chapters")
+        print(f"📊 Processing {len(chapters_to_process)} out of {total_chapters} {source_unit}")
     
     _prime_glossary_source_script_from_chapters(chapters_to_process)
 
@@ -8286,7 +8279,7 @@ def main(log_callback=None, stop_callback=None):
 
                         merge_groups.append(group)
 
-                print(f"🔗 Created {len(merge_groups)} merge groups from {len(chapters_to_process)} chapters (budget-aware)")
+                print(f"🔗 Created {len(merge_groups)} merge groups from {len(chapters_to_process)} {source_unit} (budget-aware)")
                 units_to_process = merge_groups
                 is_merged_mode = True
             else:
@@ -8307,7 +8300,7 @@ def main(log_callback=None, stop_callback=None):
                         else:
                             break
                     merge_groups.append(group)
-                print(f"🔗 Created {len(merge_groups)} merge groups from {len(chapters_to_process)} chapters (count-based)")
+                print(f"🔗 Created {len(merge_groups)} merge groups from {len(chapters_to_process)} {source_unit} (count-based)")
                 units_to_process = merge_groups
                 is_merged_mode = True
         else:
@@ -8420,7 +8413,7 @@ def main(log_callback=None, stop_callback=None):
             chapters_in_batch = sum(len(unit) for unit in current_batch_units)
             
             if is_merged_mode:
-                print(f"\n🔄 Processing Batch {batch_num+1}/{total_batches} ({len(current_batch_units)} merged groups, {chapters_in_batch} chapters)")
+                print(f"\n🔄 Processing Batch {batch_num+1}/{total_batches} ({len(current_batch_units)} merged groups, {chapters_in_batch} {source_unit})")
             else:
                 current_batch = [unit[0] for unit in current_batch_units]
                 chapter_nums = sorted(
@@ -8656,7 +8649,7 @@ def main(log_callback=None, stop_callback=None):
                                         entry_type = entry.get("type", "?")
                                         raw_name = entry.get("raw_name", "?")
                                         trans_name = entry.get("translated_name", "?")
-                                        chapter_label = _glossary_chapter_log_label(display_idx, total_chapters, context=progress_context)
+                                        chapter_label = _glossary_chapter_log_label(idx, total_chapters, context=progress_context)
                                         print(f'{chapter_label} [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
                                         glossary.append(entry)
                                 
@@ -8697,7 +8690,7 @@ def main(log_callback=None, stop_callback=None):
                                 if mi not in merged_indices:
                                     merged_indices.append(mi)
 
-                            print(f"✅ Merged group done: {len(results)} chapters")
+                            print(f"✅ Merged group done: {len(results)} {source_unit}")
                         else:
                             # Handle single chapter result
                             idx, chap = unit[0]
@@ -8750,7 +8743,7 @@ def main(log_callback=None, stop_callback=None):
                                     raw_name = entry.get("raw_name", "?")
                                     trans_name = entry.get("translated_name", "?")
                                     
-                                    chapter_label = _glossary_chapter_log_label(display_idx, total_chapters, context=progress_context)
+                                    chapter_label = _glossary_chapter_log_label(idx, total_chapters, context=progress_context)
                                     print(f'{chapter_label} [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
                                     
                                     # Add entry immediately WITHOUT deduplication
@@ -9153,7 +9146,7 @@ def main(log_callback=None, stop_callback=None):
             # Print batch summary
             if batch_entry_count > 0:
                 print(f"\n📊 Batch {batch_num+1}/{total_batches} Summary:")
-                print(f"   • Chapters processed: {chapters_in_batch}")
+                print(f"   • {source_unit if is_epub_source else 'Chapters'} processed: {chapters_in_batch}")
                 print(f"   • Total entries extracted: {batch_entry_count}")
                 print(f"   • Glossary size: {len(glossary)} unique entries")
             
@@ -9313,8 +9306,12 @@ def main(log_callback=None, stop_callback=None):
                 mode_label = "budget-aware" if chapter_split_enabled else "count-based"
                 multi_groups = {p: g for p, g in merge_groups.items() if len(g) > 1}
                 if multi_groups:
-                    group_descs = [f"{p+1}+{[g[0]+1 for g in grp[1:]]}" for p, grp in sorted(multi_groups.items())]
-                    print(f"   📎 {len(multi_groups)} merge groups ({mode_label}): {', '.join(group_descs)}")
+                    group_descs = [
+                        f"{_glossary_chapter_actual_num(p, context=progress_context)}+"
+                        f"{[_glossary_chapter_actual_num(g[0], context=progress_context) for g in grp[1:]]}"
+                        for p, grp in sorted(multi_groups.items())
+                    ]
+                    print(f"   📎 {len(multi_groups)} merge groups ({mode_label}, Chapters): {', '.join(group_descs)}")
                 print(f"   📊 Created {len(merge_groups)} merge groups total ({mode_label})")
         
         for idx, chap in enumerate(chapters):
@@ -9346,9 +9343,8 @@ def main(log_callback=None, stop_callback=None):
                     # Track skipped chapters for summary (don't print individually)
                     if '_skipped_chapters' not in globals():
                         _skipped_chapters = []
-                    is_text_chapter = hasattr(chap, 'filename') and chap.get('filename', '').endswith('.txt')
-                    terminology = "Section" if is_text_chapter else "Chapter"
-                    _skipped_chapters.append((chapter_num, terminology))
+                    terminology = "Section" if is_text_file else "Chapter"
+                    _skipped_chapters.append((_glossary_chapter_actual_num(idx, context=progress_context), terminology))
                     continue
                 
             if idx in completed:
@@ -9361,8 +9357,10 @@ def main(log_callback=None, stop_callback=None):
             # Show filename alongside chapter number when available
             _fname = _chapter_filenames.get(idx, '')
             _chap_num = _glossary_chapter_actual_num(idx, context=progress_context)
-            _chap_total = _glossary_chapter_display_total(total_chapters, context=progress_context)
-            _chap_label = f"Chapter {_chap_num}/{_chap_total}" if _chap_total > 0 else f"Chapter {_chap_num}"
+            _chap_label = (
+                f"Spine {idx + 1}/{total_chapters} — Chapter {_chap_num}"
+                if is_epub_source else f"Chapter {_chap_num}/{total_chapters}"
+            )
             if _fname:
                 print(f"🔄 Processing {_chap_label} ({_fname})")
             else:
@@ -9372,7 +9370,7 @@ def main(log_callback=None, stop_callback=None):
             chapter_content = chap
             if idx in merge_groups:
                 group = merge_groups[idx]
-                print(f"\n🔗 MERGING {len(group)} chapters into single request...")
+                print(f"\n🔗 MERGING {len(group)} {source_unit} into single request...")
                 merged_contents = []
                 for g_idx, g_chap in group:
                     # Don't add separators - glossary extraction doesn't need them
@@ -9896,7 +9894,7 @@ def main(log_callback=None, stop_callback=None):
                         raw_name = entry.get("raw_name", "?")
                         trans_name = entry.get("translated_name", "?")
                         
-                        chapter_label = _glossary_chapter_log_label(_chap_num, total_chapters, context=progress_context)
+                        chapter_label = _glossary_chapter_log_label(idx, total_chapters, context=progress_context)
                         print(f'{chapter_label} [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → {entry_type}: {raw_name} ({trans_name})')
                     
                 # Check if this was actually a failure (empty/refused content)
@@ -10029,9 +10027,9 @@ def main(log_callback=None, stop_callback=None):
             except Exception as e:
                 if _glossary_is_hard_stop_requested(stop_callback):
                     _restore_glossary_in_progress_for_hard_stop(locals().get('current_progress_indices', [idx]))
-                    print(f"❌ Glossary extraction stopped after error in chapter {locals().get('_chap_num', idx + 1)}")
+                    print(f"❌ Glossary extraction stopped after error in chapter {_glossary_chapter_actual_num(idx, context=progress_context)}")
                     return
-                print(f"Error at chapter {locals().get('_chap_num', idx + 1)}: {e}")
+                print(f"Error at chapter {_glossary_chapter_actual_num(idx, context=progress_context)}: {e}")
                 import traceback
                 print(f"Full traceback: {traceback.format_exc()}")
                 _mark_glossary_failed(failed, idx, "API_ERROR")
@@ -10049,13 +10047,14 @@ def main(log_callback=None, stop_callback=None):
                 )
                 # Check for stop even after error
                 if check_stop():
-                    print(f"❌ Glossary extraction stopped after error in chapter {locals().get('_chap_num', idx + 1)}")
+                    print(f"❌ Glossary extraction stopped after error in chapter {_glossary_chapter_actual_num(idx, context=progress_context)}")
                     return
     
     # Print skip summary if any chapters were skipped
     if '_skipped_chapters' in globals() and _skipped_chapters:
         skipped = _skipped_chapters
-        print(f"\n📊 Skipped {len(skipped)} chapters outside range {range_start}-{range_end}")
+        range_unit = "Spine" if use_spine_order and is_epub_source else "chapter"
+        print(f"\n📊 Skipped {len(skipped)} {source_unit} outside {range_unit} range {range_start}-{range_end}")
         if len(skipped) <= 10:
             chapter_list = ', '.join([f"{term} {num}" for num, term in skipped])
             print(f"   Skipped: {chapter_list}")
@@ -10068,7 +10067,7 @@ def main(log_callback=None, stop_callback=None):
     # Print failed chapters summary
     if failed:
         issue_map = _normalize_glossary_qa_issues(_GLOSSARY_QA_ISSUES_FOUND)
-        print(f"\n⚠️ {len(failed)} chapter(s) failed and will be retried on next run:")
+        print(f"\n⚠️ {len(failed)} {source_unit} failed and will be retried on next run:")
         issue_set = set()
         for idx in sorted(failed):
             issues = issue_map.get(idx) or ["UNKNOWN"]
