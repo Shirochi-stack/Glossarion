@@ -16,9 +16,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: Lite
-            spec: translator_lite_linux.spec
-            requirements: requirements.txt
           - variant: Standard
             spec: translator_linux.spec
             requirements: requirements.txt
