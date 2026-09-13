@@ -276,7 +276,7 @@ class LoginNavigationTest(unittest.TestCase):
                             <script>window.sidebarClicks=0;window.loginClicks=0;</script>
                             <button aria-label="Toggle Sidebar" onclick="window.sidebarClicks++;document.querySelector('aside').hidden=false">Sidebar</button>
                             <button hidden>Log In</button>
-                            <aside %s><button onclick="window.loginClicks++">Log In</button></aside>
+                            <aside %s><button onclick="window.loginClicks++;document.querySelector('h2').hidden=false">Log In</button></aside><h2 hidden>Log In or Create Account</h2>
                         ''' % ("" if expanded else "hidden"))
                         self.assertTrue(await arena._open_arena_login(page, {}))
                         self.assertEqual(await page.evaluate("window.sidebarClicks"), 0 if expanded else 1)
@@ -290,9 +290,18 @@ class LoginNavigationTest(unittest.TestCase):
                     self.assertFalse(await arena._open_arena_login(page, navigation))
                     self.assertFalse(await arena._open_arena_login(page, navigation))
                     self.assertEqual(await page.evaluate("window.sidebarClicks"), 1)
-                    await page.evaluate("""document.body.insertAdjacentHTML('beforeend', '<a href="#" onclick="window.loginClicks++">Log In</a>')""")
+                    await page.evaluate("html => document.body.insertAdjacentHTML('beforeend', html)", """<a href="#" onclick="window.loginClicks++;document.querySelector('h2').hidden=false">Log In</a><h2 hidden>Log In or Create Account</h2>""")
                     self.assertTrue(await arena._open_arena_login(page, navigation))
                     self.assertEqual(await page.evaluate("window.loginClicks"), 1)
+                    await page.set_content('<button>Log In</button><h2 hidden>Log In or Create Account</h2>')
+                    navigation = {}
+                    self.assertFalse(await arena._open_arena_login(page, navigation))
+                    await page.evaluate("() => { document.querySelector('button').onclick = () => document.querySelector('h2').hidden = false; }")
+                    navigation['retry_login_at'] = 0
+                    self.assertTrue(await arena._open_arena_login(page, navigation))
+                    # Once visible, never click the sidebar/login button again.
+                    await page.evaluate("() => { document.querySelector('button').onclick = () => document.querySelector('h2').hidden = true; }")
+                    self.assertTrue(await arena._open_arena_login(page, navigation))
                 finally:
                     await browser.close()
         asyncio.run(run())

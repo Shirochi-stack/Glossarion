@@ -29,7 +29,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 29
+ADAPTER_VERSION = 30
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
@@ -106,7 +106,23 @@ async def _run_stream_with_idle_timeout(awaitable, activity, timeout):
 
 
 async def _open_arena_login(page, navigation):
-    """Reveal the sidebar once if necessary, then activate the visible login control."""
+    """Open login and confirm its UI appeared before stopping navigation polls."""
+    async def login_visible():
+        for controls in (
+            page.get_by_role("heading", name=re.compile(r"log\s*in or create account|sign\s*in to arena", re.I)),
+            page.get_by_role("button", name=re.compile(r"^continue with (google|email)$", re.I)),
+        ):
+            for index in range(await controls.count()):
+                if await controls.nth(index).is_visible():
+                    return True
+        return False
+
+    if await login_visible():
+        return True
+    # React can render a clickable button before attaching its login handler.
+    # A successful click alone does not mean the dialog opened.
+    if time.monotonic() < navigation.get("retry_login_at", 0):
+        return False
     async def click_visible(controls):
         for index in range(await controls.count()):
             control = controls.nth(index)
@@ -128,7 +144,8 @@ async def _open_arena_login(page, navigation):
         return False
 
     if await click_login():
-        return True
+        navigation["retry_login_at"] = time.monotonic() + 1
+        return await login_visible()
     if not navigation.get("sidebar_opened"):
         triggers = page.get_by_role("button", name=re.compile(
             r"(open|expand|toggle).*sidebar|sidebar.*(open|expand|toggle)|^menu$", re.I
@@ -141,7 +158,9 @@ async def _open_arena_login(page, navigation):
             ))
         if opened:
             navigation["sidebar_opened"] = True
-            return await click_login()
+            if await click_login():
+                navigation["retry_login_at"] = time.monotonic() + 1
+            return await login_visible()
     return False
 
 
