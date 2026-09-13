@@ -29,7 +29,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 25
+ADAPTER_VERSION = 27
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
@@ -943,7 +943,10 @@ def send_message_stream(messages, model, temperature=0.7, max_tokens=None, timeo
             if stage.startswith("headers:"):
                 log_fn("📥 Arena: response headers received (HTTP " + stage.split(":", 1)[1] + ")")
                 return
-            labels = {"captcha": "🔐 Arena: requesting a fresh captcha token…",
+            if isinstance(stage, str) and stage.startswith("stream_summary:"):
+                log_fn("📊 Arena: upstream stream ended — " + stage.split(":", 1)[1])
+            labels = {"bridge_retry": "🔁 Arena: LMArenaBridge is retrying this request after an unusable response (not a batch request).",
+                      "captcha": "🔐 Arena: requesting a fresh captcha token…",
                       "token": "✅ Arena: captcha token received",
                       "retry": "🔁 Arena: captcha rejected; retrying with a fresh token",
                       "verification": "🔄 Arena: CAPTCHA rejected; LMArenaBridge is obtaining a fresh token in the Arena browser…",
@@ -1047,6 +1050,47 @@ def _persist_session(slot, cookies, expected_token=None):
             accounts[str(slot)] = session
             _save("accounts.enc", accounts)
     return session
+
+
+class _ArenaBridgeResponse:
+    """Keep browser pages alive through streaming and close them on context exit."""
+    def __init__(self, response, cleanup, events):
+        self.response, self.cleanup, self.events = response, cleanup, events
+        self.closed = False
+
+    def __getattr__(self, name):
+        return getattr(self.response, name)
+
+    async def __aenter__(self):
+        await self.response.__aenter__()
+        return self
+
+    async def __aexit__(self, *args):
+        await self.aclose()
+        return False
+
+    async def aiter_lines(self):
+        count = 0
+        types = {}
+        async for line in self.response.aiter_lines():
+            count += 1
+            value = str(line).strip().removeprefix("data:").lstrip()
+            # Count wire formats only; never log chapter text or token contents.
+            match = re.match(r"^(a[0-9a-z]):", value)
+            kind = match.group(1) if match else ("json" if value.startswith("{") else "other")
+            types[kind] = types.get(kind, 0) + 1
+            yield line
+        summary = ", ".join(f"{name}={number}" for name, number in sorted(types.items())) or "empty"
+        await self.events.put({"arena_progress": f"stream_summary:{count} lines ({summary})"})
+
+    async def aclose(self):
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            await self.response.aclose()
+        finally:
+            await self.cleanup()
 
 
 def _bridge_error_metadata(page):
@@ -1368,6 +1412,10 @@ async def _serve_worker(key, qt_helper_command=None):
                 # The response wrapper below closes them after consumption.
                 pass
         main.AsyncCamoufox = ContextLease
+        # Upstream's separate Chrome token helper hardcodes headless=False.
+        # With the Qt backend selected, advertise no standalone Chrome so its
+        # existing fallback stays inside our offscreen, account-owned context.
+        recaptcha.find_chrome_executable = lambda: None
         main._cancel_background_task = _bridge_cancel_compat(main._cancel_background_task)
         # Keep the bridge's discovery intact: it also reads CAPTCHA settings
         # and server actions from Arena's JavaScript, not just model names.
@@ -1390,8 +1438,7 @@ async def _serve_worker(key, qt_helper_command=None):
             if parsed.hostname not in ("arena.ai", "lmarena.ai"):
                 raise RuntimeError("Unexpected Arena transport origin")
             if state["submitted"]:
-                return transport.BrowserFetchStreamResponse(
-                    400, {}, text="Arena request already submitted; no automatic replay was attempted.")
+                await state["events"].put({"arena_progress": "bridge_retry"})
             state["submitted"] = True
             # Preserve the current Arena conversation schema, without changing
             # either of the proxy's CAPTCHA token fields.
@@ -1446,14 +1493,7 @@ async def _serve_worker(key, qt_helper_command=None):
                     # The browser transport has already completed its retries.
                     # Prevent the outer API loop from submitting another job.
                     return transport.BrowserFetchStreamResponse(400, {}, text=state["upstream_error"]["message"])
-                close_response = response.aclose
-                async def close():
-                    try:
-                        await close_response()
-                    finally:
-                        await cleanup()
-                response.aclose = close
-                return response
+                return _ArenaBridgeResponse(response, cleanup, state["events"])
             except BaseException:
                 await cleanup()
                 raise
