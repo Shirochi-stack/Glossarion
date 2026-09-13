@@ -345,6 +345,7 @@ def is_encrypted(file_path: str) -> bool:
 _storage_log_lock = threading.Lock()
 _storage_log_pending = {}
 _storage_log_timer = None
+_storage_decryption_logged = False
 
 
 def _credential_email(tokens):
@@ -364,10 +365,13 @@ def _credential_email(tokens):
 
 
 def _flush_storage_logs():
-    global _storage_log_timer
+    global _storage_log_timer, _storage_decryption_logged
     with _storage_log_lock:
         pending = dict(_storage_log_pending)
         _storage_log_pending.clear()
+        if pending.get("decrypted"):
+            # Claim the session's summary before concurrent reads can queue another.
+            _storage_decryption_logged = True
         timer, _storage_log_timer = _storage_log_timer, None
         if timer is not None:
             timer.cancel()
@@ -382,7 +386,7 @@ def _flush_storage_logs():
 
 
 def _storage_success(operation, tokens, file_path):
-    """Summarize successful account operations within a short batch window."""
+    """Batch successful account operations; summarize decryption once per session."""
     global _storage_log_timer
     if os.path.basename(file_path).startswith("models."):
         return  # Arena's model catalog is not an account credential store.
@@ -398,6 +402,8 @@ def _storage_success(operation, tokens, file_path):
         ) else {"single": tokens}
     path = os.path.normcase(os.path.abspath(file_path))
     with _storage_log_lock:
+        if operation == "decrypted" and _storage_decryption_logged:
+            return
         accounts = _storage_log_pending.setdefault(operation, {})
         for slot, value in records.items():
             accounts[(path, str(slot))] = _credential_email(value)

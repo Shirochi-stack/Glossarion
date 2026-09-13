@@ -11,8 +11,9 @@ import token_encryption as storage
 
 
 @pytest.fixture(autouse=True)
-def flush_storage_logs():
+def flush_storage_logs(monkeypatch):
     storage._flush_storage_logs()
+    monkeypatch.setattr(storage, "_storage_decryption_logged", False)
     yield
     storage._flush_storage_logs()
 
@@ -30,8 +31,8 @@ def test_encryption_and_decryption_logs_exclude_credentials(tmp_path, capsys):
     assert "private-token-value" not in output.err
 
 
-@pytest.mark.parametrize("combined", [False, True])
-def test_thirty_accounts_log_one_summary_per_operation(tmp_path, capsys, combined, monkeypatch):
+@pytest.fixture
+def deferred_storage_timer(monkeypatch):
     class DeferredTimer:
         def __init__(self, *args):
             pass
@@ -40,6 +41,10 @@ def test_thirty_accounts_log_one_summary_per_operation(tmp_path, capsys, combine
         def cancel(self):
             pass
     monkeypatch.setattr(storage.threading, "Timer", DeferredTimer)
+
+
+@pytest.mark.parametrize("combined", [False, True])
+def test_thirty_accounts_log_one_summary_per_operation(tmp_path, capsys, combined, deferred_storage_timer):
     accounts = {str(i): {"email": f"account{i}@example.com", "access_token": "secret"} for i in range(30)}
     records = {"accounts.enc": accounts} if combined else {
         f"authgpt_tokens_{i}.json": account for i, account in accounts.items()
@@ -53,6 +58,58 @@ def test_thirty_accounts_log_one_summary_per_operation(tmp_path, capsys, combine
     lines = capsys.readouterr().err.splitlines()
     assert lines == ["🔒 30 accounts encrypted — first: account0@example.com",
                      "🔓 30 accounts decrypted — first: account0@example.com"]
+
+
+def test_decryption_summary_only_once_per_session(tmp_path, capsys, deferred_storage_timer):
+    path = str(tmp_path / "accounts.enc")
+    accounts = {str(i): {"email": f"account{i}@example.com", "access_token": "secret"} for i in range(6)}
+    storage.save_encrypted_tokens(accounts, path)
+    storage._flush_storage_logs()
+    capsys.readouterr()
+
+    assert storage.load_encrypted_tokens(path) == accounts
+    storage._flush_storage_logs()
+    assert capsys.readouterr().err.splitlines() == [
+        "🔓 6 accounts decrypted — first: account0@example.com"
+    ]
+
+    # Later refreshes can read different stores and account counts in this session.
+    refreshed = {key: accounts[key] for key in ("0", "1", "2", "3")}
+    other_path = str(tmp_path / "other_accounts.enc")
+    storage.save_encrypted_tokens(refreshed, other_path)
+    for _ in range(2):
+        assert storage.load_encrypted_tokens(path) == accounts
+        assert storage.load_encrypted_tokens(other_path) == refreshed
+        storage._flush_storage_logs()
+    assert capsys.readouterr().err.splitlines() == [
+        "🔒 4 accounts encrypted — first: account0@example.com"
+    ]
+
+    # Suppressing success summaries must not hide a subsequent decryption failure.
+    Path(path).write_bytes(storage._ENCRYPTED_HEADER + b"invalid")
+    with pytest.raises(ValueError):
+        storage.load_encrypted_tokens(path)
+    assert "❌ Credential decryption failed" in capsys.readouterr().err
+
+
+def test_decryption_during_summary_emission_does_not_queue_another(
+    tmp_path, monkeypatch, deferred_storage_timer
+):
+    path = str(tmp_path / "test_tokens.json")
+    secret = {"access_token": "private-token-value"}
+    storage.save_encrypted_tokens(secret, path)
+    storage._flush_storage_logs()
+    messages = []
+
+    def log_and_refresh(message):
+        messages.append(message)
+        assert storage.load_encrypted_tokens(path) == secret
+
+    monkeypatch.setattr(storage, "_storage_log", log_and_refresh)
+    assert storage.load_encrypted_tokens(path) == secret
+    storage._flush_storage_logs()
+    storage._flush_storage_logs()
+    assert messages == ["🔓 1 account decrypted"]
 
 
 @pytest.mark.parametrize("operation", ["encrypt", "decrypt"])
