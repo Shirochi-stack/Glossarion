@@ -1193,7 +1193,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     _retry_per_key = getattr(client, '_per_key_api_delay', None)
                     base_delay = float(_retry_per_key) if _retry_per_key and float(_retry_per_key) > 0 else float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
                     retry_delay = random.uniform(base_delay / 2, base_delay)
-                    print(f"   ⏳ Waiting {retry_delay:.1f}s before retry...")
+                    print(f"   ⏳ {chapter_label}: Waiting {retry_delay:.1f}s before retry...")
                     time.sleep(retry_delay)
 
                     # Clear the queue and continue retry loop
@@ -1204,7 +1204,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                             break
                     continue
                 else:
-                    print(f"❌ Max timeout retries ({max_timeout_retries}) reached")
+                    print(f"❌ {chapter_label}: Max timeout retries ({max_timeout_retries}) reached")
                     raise
             else:
                 # Other errors, re-raise immediately
@@ -1931,7 +1931,7 @@ def _parse_glossary_chapter_range(value):
     return None
 
 
-def glossary_progress_completion(progress_data):
+def glossary_progress_completion(progress_data, *, is_epub=False):
     """Return ``(complete, represented, total, reason)`` for refinement gating.
 
     Completion is deliberately stricter than the progress bar: every zero-based
@@ -1939,6 +1939,8 @@ def glossary_progress_completion(progress_data):
     merged state, and no retry/reset state may remain.
     """
     data = progress_data if isinstance(progress_data, dict) else {}
+    count_label = "HTML file" if is_epub else "chapter"
+    source_unit = "HTML file(s)" if is_epub else "chapter(s)"
     try:
         total = max(0, int(data.get("chapter_count", 0) or 0))
     except (TypeError, ValueError):
@@ -1994,16 +1996,16 @@ def glossary_progress_completion(progress_data):
     manually_removed &= valid_range
     represented = len(done)
     if total <= 0:
-        return False, represented, total, "chapter count is unavailable"
+        return False, represented, total, f"{count_label} count is unavailable"
     if failed:
-        return False, represented, total, f"{len(failed)} chapter(s) failed"
+        return False, represented, total, f"{len(failed)} {source_unit} failed"
     if in_progress:
-        return False, represented, total, f"{len(in_progress)} chapter(s) are still in progress"
+        return False, represented, total, f"{len(in_progress)} {source_unit} are still in progress"
     if manually_removed:
-        return False, represented, total, f"{len(manually_removed)} chapter(s) were manually reset"
+        return False, represented, total, f"{len(manually_removed)} {source_unit} were manually reset"
     missing = valid_range - done
     if missing:
-        return False, represented, total, f"{len(missing)} chapter(s) are not represented in progress"
+        return False, represented, total, f"{len(missing)} {source_unit} are not represented in progress"
     return True, represented, total, "complete"
 
 def _glossary_chapter_key(idx: int) -> str:
@@ -7087,7 +7089,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
         # Extract response text
         resp = ""
         if raw is None:
-            print(f"⚠️ API returned None for merged group")
+            print(f"⚠️ Merged group (Chapters {chapter_nums}): API returned None")
             return {
                 'results': [{'idx': idx, 'data': [], 'resp': '', 'chap': chap, 'model_name': request_model_name, 'key_identifier': request_key_identifier, 'key_pool': request_key_pool, 'error': 'API returned None'}
                            for idx, chap in merge_group],
@@ -7181,7 +7183,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
             raise
         else:
             # Actual API error (timeout, etc.)
-            print(f"❌ Merged group failed: {e} (NOTE: API Error triggered cancellation logic)")
+            print(f"❌ Merged group (Chapters {chapter_nums}) failed: {e} (NOTE: API Error triggered cancellation logic)")
             
             return {
                 'results': [{'idx': idx, 'data': [], 'resp': '', 'chap': chap, 'error': str(e)}
@@ -7189,7 +7191,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
                 'merged_indices': []
             }
     except Exception as e:
-        print(f"❌ Merged group failed: {e}")
+        print(f"❌ Merged group (Chapters {chapter_nums}) failed: {e}")
         import traceback
         print(f"   Traceback: {traceback.format_exc()}")
         
@@ -9508,6 +9510,10 @@ def main(log_callback=None, stop_callback=None):
                     chapter_glossary_data = []  # Collect data from all chunks
                     
                     for chunk_html, chunk_idx, total_chunks in chunks:
+                        chunk_label = (
+                            f"{_glossary_chapter_log_label(idx, total_chapters, context=progress_context)} "
+                            f"Chunk {chunk_idx}/{total_chunks}"
+                        )
                         if check_stop():
                             print(f"❌ Glossary extraction stopped during chunk {chunk_idx} of chapter {_chap_num}")
                             _restore_glossary_in_progress_for_hard_stop(current_progress_indices)
@@ -9611,22 +9617,22 @@ def main(log_callback=None, stop_callback=None):
                                 chapter_had_truncated_chunk = True
                         except UnifiedClientError as e:
                             if "stopped by user" in str(e).lower():
-                                print(f"❌ Glossary extraction stopped during chunk {chunk_idx} API call")
+                                print(f"❌ {chunk_label}: Glossary extraction stopped during API call")
                                 _restore_glossary_in_progress_for_hard_stop(current_progress_indices)
                                 return
                             elif "timeout" in str(e).lower():
-                                print(f"⚠️ Chunk {chunk_idx} API call timed out: {e}")
+                                print(f"⚠️ {chunk_label}: API call timed out: {e}")
                                 continue  # Skip this chunk
                             else:
-                                print(f"❌ Chunk {chunk_idx} API error: {e}")
+                                print(f"❌ {chunk_label}: API error: {e}")
                                 continue  # Skip this chunk
                         except Exception as e:
-                            print(f"❌ Unexpected error in chunk {chunk_idx}: {e}")
+                            print(f"❌ {chunk_label}: Unexpected error: {e}")
                             continue  # Skip this chunk
                         
                         # Process chunk response
                         if chunk_raw is None:
-                            print(f"❌ API returned None for chunk {chunk_idx}")
+                            print(f"❌ {chunk_label}: API returned None")
                             continue
 
                         # Handle different response types
@@ -9639,17 +9645,17 @@ def main(log_callback=None, stop_callback=None):
                         elif hasattr(chunk_raw, 'text'):
                             chunk_resp = chunk_raw.text if chunk_raw.text is not None else ""
                         else:
-                            print(f"❌ Unexpected response type for chunk {chunk_idx}: {type(chunk_raw)}")
+                            print(f"❌ {chunk_label}: Unexpected response type: {type(chunk_raw)}")
                             chunk_resp = str(chunk_raw) if chunk_raw is not None else ""
 
                         # Ensure resp is a string
                         if not isinstance(chunk_resp, str):
-                            print(f"⚠️ Converting non-string response to string for chunk {chunk_idx}")
+                            print(f"⚠️ {chunk_label}: Converting non-string response to string")
                             chunk_resp = str(chunk_resp) if chunk_resp is not None else ""
 
                         # Check if response is empty
                         if not chunk_resp or chunk_resp.strip() == "":
-                            print(f"⚠️ Empty response for chunk {chunk_idx}, skipping...")
+                            print(f"⚠️ {chunk_label}: Empty response, skipping...")
                             continue
                         
                         # Save chunk response with thread-safe location
@@ -9677,7 +9683,7 @@ def main(log_callback=None, stop_callback=None):
                         chunk_resp_data = parse_api_response(chunk_resp)
 
                         if not chunk_resp_data:
-                            print(f"[Warning] No data found in chunk {chunk_idx}, skipping...")
+                            print(f"[Warning] {chunk_label}: No data found, skipping...")
                             continue
 
                         # The parse_api_response already returns parsed data, no need to parse again
@@ -9691,7 +9697,7 @@ def main(log_callback=None, stop_callback=None):
                                         entry['raw_name'] = entry['raw_name'].strip()
                                     valid_chunk_data.append(entry)
                                 else:
-                                    print(f"[Debug] Skipped invalid entry in chunk {chunk_idx}: {entry}")
+                                    print(f"[Debug] {chunk_label}: Skipped invalid entry: {entry}")
                             
                             chapter_glossary_data.extend(valid_chunk_data)
                             print(f"✅ Chunk {chunk_idx}/{total_chunks}: extracted {len(valid_chunk_data)} entries")
@@ -9708,17 +9714,17 @@ def main(log_callback=None, stop_callback=None):
                                         raw_assistant_object=chunk_raw_obj
                                     )
                                 except Exception as e:
-                                    print(f"⚠️ Failed to save chunk {chunk_idx} history: {e}")
+                                    print(f"⚠️ {chunk_label}: Failed to save history: {e}")
 
                         except Exception as e:
-                            print(f"[Warning] Error processing chunk {chunk_idx} data: {e}")
+                            print(f"[Warning] {chunk_label}: Error processing data: {e}")
                             continue
                         
                         # Add delay between chunks (but not after last chunk)
                         if chunk_idx < total_chunks:
                             print(f"⏱️  Waiting {api_delay}s before next chunk...")
                             if not interruptible_sleep(api_delay, check_stop, 0.1):
-                                print(f"❌ Glossary extraction stopped during chunk delay")
+                                print(f"❌ {chunk_label}: Glossary extraction stopped during chunk delay")
                                 _restore_glossary_in_progress_for_hard_stop(current_progress_indices)
                                 return
                     
@@ -10124,12 +10130,12 @@ def main(log_callback=None, stop_callback=None):
         except Exception:
             completion_data = {}
         is_complete, represented_count, completion_total, completion_reason = glossary_progress_completion(
-            completion_data
+            completion_data, is_epub=is_epub_source
         )
         if not is_complete:
             print(
                 "⏸️ Glossary refinement deferred until extraction reaches 100%: "
-                f"{represented_count}/{completion_total} complete ({completion_reason})."
+                f"{represented_count} out of {completion_total} {source_unit} complete ({completion_reason})."
             )
             refinement_allowed = False
 
