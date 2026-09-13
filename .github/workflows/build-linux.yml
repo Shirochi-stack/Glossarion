@@ -8,9 +8,30 @@ on:
 
 jobs:
   build-linux:
+    name: Build Linux ${{ matrix.variant }}
     permissions:
       contents: write
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: Lite
+            spec: translator_lite_linux.spec
+            requirements: requirements.txt
+          - variant: Standard
+            spec: translator_linux.spec
+            requirements: requirements.txt
+          - variant: NoCuda
+            spec: translator_linux_NoCuda.spec
+            requirements: requirements_NoCuda.txt
+          - variant: TurboLite
+            spec: translator_linux_TurboLite.spec
+            requirements: requirements.txt
+    env:
+      BUILD_SPEC: ${{ matrix.spec }}
+      BUILD_VARIANT: ${{ matrix.variant }}
+      REQUIREMENTS_FILE: ${{ matrix.requirements }}
 
     steps:
       - name: Checkout code
@@ -58,10 +79,22 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # NoCuda requirements pin CPU-only PyTorch; RapidOCR supplies bundled OCR models.
-          python -m pip install --no-cache-dir -r requirements_NoCuda.txt rapidocr-onnxruntime
+          # sentence-transformers also needs torch in the non-NoCuda build environments.
+          # Preinstall CPU wheels to avoid downloading CUDA dependencies.
+          python -m pip install --no-cache-dir torch==2.10.0+cpu torchvision==0.25.0+cpu --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --no-cache-dir -r "$REQUIREMENTS_FILE"
 
-      - name: Check NoCuda dependencies and Qt WebEngine
+      - name: Install NoCuda OCR models
+        if: matrix.variant == 'NoCuda'
+        run: python -m pip install --no-cache-dir rapidocr-onnxruntime
+
+      - name: Check Qt WebEngine imports
+        if: matrix.variant != 'TurboLite'
+        run: |
+          python -c 'from PySide6 import QtWebEngineCore, QtWebEngineWidgets, QtWebChannel; print("Qt WebEngine", QtWebEngineCore.qWebEngineVersion())'
+
+      - name: Check NoCuda dependencies
+        if: matrix.variant == 'NoCuda'
         run: |
           python - <<'PY'
           import torch
@@ -70,7 +103,6 @@ jobs:
           from onnx import TensorProto, helper
           import onnxruntime
           import rapidocr_onnxruntime
-          from PySide6 import QtWebEngineCore, QtWebEngineWidgets, QtWebChannel
 
           if torch.version.cuda is not None:
               raise SystemExit('NoCuda requires CPU-only PyTorch')
@@ -92,32 +124,35 @@ jobs:
           if not np.array_equal(session.run(None, {'input': value})[0], value):
               raise SystemExit('ONNX Runtime CPU inference failed')
           print('CPU PyTorch', torch.__version__)
-          print('Qt WebEngine', QtWebEngineCore.qWebEngineVersion())
           PY
 
       - name: Build with PyInstaller
-        run: pyinstaller translator_linux_NoCuda.spec --noconfirm
+        run: pyinstaller "$BUILD_SPEC" --noconfirm
         working-directory: src
 
-      - name: Verify bundled NoCuda and Qt WebEngine
+      - name: Verify Linux package contents
         working-directory: src
         run: |
           python - <<'PY'
           import fnmatch
+          import os
           from pathlib import Path
           from PyInstaller.archive.readers import CArchiveReader
           from app_version import get_spec_app_name
 
-          binary = Path('dist') / get_spec_app_name('translator_linux_NoCuda.spec')
+          variant = os.environ['BUILD_VARIANT']
+          binary = Path('dist') / get_spec_app_name(os.environ['BUILD_SPEC'])
           archive = CArchiveReader(str(binary))
           members = [name.replace('\\', '/') for name in archive.toc]
           required = [
-              'torch/_C*.so',
-              'torch/lib/libtorch_cpu.so',
-              'torch/lib/libtorch_python.so',
-              'torch/lib/libc10.so',
-              'onnxruntime/capi/onnxruntime_pybind11_state*.so',
-              'rapidocr_onnxruntime/models/*.onnx',
+              'PySide6/QtCore*.so',
+              'PySide6/QtGui*.so',
+              'PySide6/QtWidgets*.so',
+              '*libQt6Core.so*',
+              '*libQt6Gui.so*',
+              '*libQt6Widgets.so*',
+          ]
+          webengine_files = [
               'PySide6/QtWebEngineCore*.so',
               'PySide6/QtWebEngineWidgets*.so',
               'PySide6/QtWebChannel*.so',
@@ -133,9 +168,27 @@ jobs:
               'PySide6/Qt/resources/v8_context_snapshot*.bin',
               'PySide6/Qt/translations/qtwebengine_locales/en-US.pak',
           ]
+          if variant == 'TurboLite':
+              webengine = [name for name in members if any(token in name.lower() for token in ('qtwebengine', 'qt6webengine'))]
+              if webengine:
+                  raise SystemExit('Unexpected Qt WebEngine in TurboLite: ' + ', '.join(webengine))
+          else:
+              required.extend(webengine_files)
+          if variant == 'NoCuda':
+              required.extend([
+                  'torch/_C*.so',
+                  'torch/lib/libtorch_cpu.so',
+                  'torch/lib/libtorch_python.so',
+                  'torch/lib/libc10.so',
+                  'onnxruntime/capi/onnxruntime_pybind11_state*.so',
+                  'rapidocr_onnxruntime/models/*.onnx',
+              ])
           missing = [pattern for pattern in required if not any(fnmatch.fnmatchcase(name, pattern) for name in members)]
           if missing:
-              raise SystemExit('Missing bundled NoCuda/Qt WebEngine files: ' + ', '.join(missing))
+              raise SystemExit(f'Missing bundled {variant} files: ' + ', '.join(missing))
+          if variant != 'NoCuda':
+              print(f'Verified {variant} package contents in {binary.name}')
+              raise SystemExit(0)
           python_modules = set()
           for name, entry in archive.toc.items():
               if entry[-1] == 'z':
@@ -161,8 +214,9 @@ jobs:
         id: package
         working-directory: src
         run: |
-          LINUX_BINARY="$(python -c 'from app_version import get_spec_app_name; print(get_spec_app_name("translator_linux_NoCuda.spec"))')"
-          LINUX_PACKAGE="${LINUX_BINARY/#N_Glossarion_NoCuda_/Z_Glossarion_}"
+          LINUX_BINARY="$(python -c 'import os; from app_version import get_spec_app_name; print(get_spec_app_name(os.environ["BUILD_SPEC"]))')"
+          LINUX_PACKAGE="${LINUX_BINARY#L_}"
+          LINUX_PACKAGE="Z_${LINUX_PACKAGE#N_}"
           cd dist
           chmod +x "$LINUX_BINARY"
           zip -9 "${LINUX_PACKAGE}.zip" "$LINUX_BINARY"

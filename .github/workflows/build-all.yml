@@ -825,7 +825,7 @@ jobs:
         working-directory: src
         run: |
           LINUX_BINARY="$(python -c 'from app_version import get_spec_app_name; print(get_spec_app_name("translator_linux_NoCuda.spec"))')"
-          LINUX_PACKAGE="${LINUX_BINARY/#N_Glossarion_NoCuda_/Z_Glossarion_}"
+          LINUX_PACKAGE="${LINUX_BINARY/#N_/Z_}"
           cd dist
           chmod +x "$LINUX_BINARY"
           zip -9 "${LINUX_PACKAGE}.zip" "$LINUX_BINARY"

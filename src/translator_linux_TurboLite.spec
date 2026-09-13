@@ -1,0 +1,1363 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""
+Glossarion TurboLite - PyInstaller Specification File (Linux)
+Enhanced Translation Tool with QA Scanner, and AI Hunter
+"""
+
+import sys
+import os
+
+SPEC_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+if SPEC_DIR not in sys.path:
+    sys.path.insert(0, SPEC_DIR)
+from app_version import get_spec_app_name
+
+from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+APP_NAME = get_spec_app_name("translator_linux_TurboLite.spec")  # Turbo Lite: no EPUB reader / Chromium / PDF / Vertex
+ENABLE_CONSOLE = False  # Console disabled for production
+ENABLE_UPX = False      # Compression (smaller file size but slower startup)
+ONE_FILE = True         # Single executable for Linux
+
+# ============================================================================
+# BLOCK CIPHER (for code obfuscation - optional)
+# ============================================================================
+
+block_cipher = None  # Set to pyi_crypto.PyiBlockCipher() if needed
+
+# ============================================================================
+# COLLECT DYNAMIC IMPORTS
+# ============================================================================
+
+# Collect all data files from specific packages
+datas = []
+binaries = []
+hiddenimports = []
+
+# Collect data files from packages that need them
+for package in ['langdetect', 'certifi', 'tiktoken_ext', 'chardet', 'charset_normalizer']:
+    try:
+        data, bins, hidden = collect_all(package)
+        datas.extend(data)
+        binaries.extend(bins)
+        hiddenimports.extend(hidden)
+    except:
+        pass
+
+# ============================================================================
+# APPLICATION FILES
+# ============================================================================
+
+# Main application files
+
+# Main application files
+app_files = [
+    ('manga_ocr_io.py', '.'),
+    ('gemini_policy.py', '.'),
+    ('epub_package.py', '.'),
+    ('epub_special_files.py', '.'),
+    ('gender_tracking.py', '.'),
+    ('title_tag_translation.py', '.'),
+    ('chapter_chunk_progress.py', '.'),
+    ('chapter_display_numbering.py', '.'),
+    # Core GUI
+    ('translator_gui.py', '.'),
+    ('parallel_epub_glossary.py', '.'),
+    ('metadata_translation_worker.py', '.'),
+    ('language_options.py', '.'),
+    ('metadata_progress.py', '.'),
+    ('translation_artifacts.py', '.'),
+    ('splash_utils.py', '.'),
+    ('dpi_setup.py', '.'),
+    ('other_settings.py', '.'),
+    ('GlossaryManager.py', '.'),
+    ('GlossaryManager_GUI.py', '.'),
+    ('glossary_paths.py', '.'),
+    ('Retranslation_GUI.py', '.'),
+    ('QA_Scanner_GUI.py', '.'),
+    ('Chapter_Extractor.py', '.'),
+    ('PatternManager.py', '.'),
+    
+    # Translation modules
+    ('TransateKRtoEN.py', '.'),
+    ('subtitle_processor.py', '.'),
+    ('refinement_prompts.py', '.'),
+    ('unified_api_client.py', '.'),
+    ('google_free_translate.py', '.'),
+    
+    # File processors
+    ('epub_converter.py', '.'),
+    ('image_archive_epub.py', '.'),
+    ('html_archive_epub.py', '.'),
+    ('html_tag_entities.py', '.'),
+    ('emoticon_patterns.py', '.'),
+    ('qa_scan_runtime.py', '.'),
+    ('txt_processor.py', '.'),
+    ('chapter_splitter.py', '.'),
+    
+    # Glossary extractors
+    ('extract_glossary_from_epub.py', '.'),
+    ('glossary_usage.py', '.'),
+    ('glossary_refinement.py', '.'),
+    ('extract_glossary_from_txt.py', '.'),
+    ('glossary_process_worker.py', '.'),  # Glossary subprocess worker
+    ('chapter_extraction_worker.py', '.'),  # Chapter extraction subprocess worker
+    ('sdlxliff_extraction_worker.py', '.'),
+    ('sdlxliff_extraction_manager.py', '.'),
+    ('sdlxliff_extractor.py', '.'),
+    ('sdlxliff_converter.py', '.'),
+    ('sdlxliff_sidecar_writer.py', '.'),
+    ('md_txt_sidecar_writer.py', '.'),  # MD/TXT sidecar writer (html2text)
+    ('_compress_worker.py', '.'),  # Lightweight image compression worker
+    ('_empty_attr_fix.py', '.'),  # Shared LLM Token Fix (empty-attr) helper
+    ('html_duplicate_cleanup.py', '.'),
+    ('_pdf_worker.py', '.'),  # PDF generation subprocess worker
+    ('pdf_generation_manager.py', '.'),  # PDF generation manager
+    ('chapter_extraction_manager.py', '.'),  # Chapter extraction manager
+    
+    # Utilities
+    ('scan_html_folder.py', '.'),
+    ('history_manager.py', '.'),
+    ('image_translator.py', '.'),
+    ('check_epub_directory.py', '.'),
+    ('direct_imports.py', '.'),
+    ('api_key_encryption.py', '.'), 
+    ('http_logger.py', '.'),
+    ('shutdown_utils.py', '.'),
+    
+    # AI Hunter Enhanced
+    ('ai_hunter_enhanced.py', '.'),
+    
+    # Dialog animations
+    ('dialog_animations.py', '.'),
+    
+    # Spinning icon helper
+    ('spinning.py', '.'),
+    
+    # Rotatable label widget for animations
+    ('rotatable_label.py', '.'),
+    
+    # Update Manager
+    ('update_manager.py', '.'),
+	
+	# Async Processing
+    ('async_api_processor.py', '.'),
+	
+	# Metadata and header batch translation
+    ('metadata_batch_translator.py', '.'),
+    ('translate_headers_standalone.py', '.'),
+    ('review_dialog.py', '.'),
+    ('review_generator.py', '.'),
+    
+    # Resources
+    ('Halgakos.ico', '.'),
+	
+	('enhanced_text_extractor.py', '.'),	
+	('pdf_extractor.py', '.'),
+	('_pdf_extraction_worker.py', '.'),
+	('pdf_extraction_manager.py', '.'),
+	('pdf_bookmarks.py', '.'),
+	('output_workspace.py', '.'),
+	('pdf_fast_extractor.py', '.'),
+	('pdf_workspace_compiler.py', '.'),
+	('workspace_reader.py', '.'),
+	('reader_overlay.py', '.'),
+	('pdf_output_naming.py', '.'),
+	('installer_utils.py', '.'),
+	
+	('multi_api_key_manager.py', '.'),
+	('individual_endpoint_dialog.py', '.'),
+	('model_options.py', '.'),
+	('hyphen_textwrap.py', '.'),
+	
+	# Duplicate detection
+	('duplicate_detection_config.py', '.'),
+
+	# Environment variable size limit workaround
+	('large_env.py', '.'),
+
+	# AuthGPT - ChatGPT subscription OAuth
+	('authgpt_auth.py', '.'),
+	('reasoning_compatibility.py', '.'),
+	('authgrok_auth.py', '.'),  # xAI Grok subscription OAuth
+	('authgem_auth.py', '.'),
+	('authcd_auth.py', '.'),  # Claude subscription OAuth
+	('glm_proxy.py', '.'),
+	('gemini_free.py', '.'),  # Google Search/Gemini browser-backed route
+	('token_encryption.py', '.'),
+	('proxy_token_storage.py', '.'),
+
+	# Antigravity Cloud Code proxy
+	('ocagy_cli.py', '.'),  # OpenCode + opencode-antigravity-auth
+	('autharena_proxy.py', '.'),
+	('antigravity_proxy.py', '.'),
+
+	# gRPC Gemini client
+	('grpc_gemini_client.py', '.'),
+
+	# EPUB Library & Reader: EXCLUDED in TurboLite (saves ~152 MB — removes Chromium)
+	# ('epub_library.py', '.'),
+
+	# RPG Maker handler
+	('rpgmaker_handler.py', '.'),
+]
+# Add application files to datas
+datas.extend(app_files)
+datas.append(('memory_usage_reporter.py', '.'))
+datas.append(('tqdm_safety.py', '.'))
+datas.append(('debug_env_vars.py', '.'))
+datas.append(('enable_debug_mode.py', '.'))
+
+# ============================================================================
+# HIDDEN IMPORTS (Organized by category)
+# ============================================================================
+
+# Application modules
+app_modules = [
+    'manga_ocr_io',
+    'gemini_policy',
+    'epub_package',
+    'epub_special_files',
+    'gender_tracking',
+    'title_tag_translation',
+    'chapter_chunk_progress',
+    'chapter_display_numbering',
+    'TransateKRtoEN',
+    'metadata_translation_worker',
+    'subtitle_processor',
+    'language_options',
+    'metadata_progress',
+    'translation_artifacts',
+    'refinement_prompts',
+    'extract_glossary_from_epub',
+    'parallel_epub_glossary',
+    'glossary_usage',
+    'glossary_refinement',
+    'extract_glossary_from_txt',
+    'glossary_process_worker',  # Glossary subprocess worker
+    'chapter_extraction_worker',  # Chapter extraction subprocess worker
+    'sdlxliff_extraction_worker',
+    'sdlxliff_extraction_manager',
+    'sdlxliff_extractor',
+    'sdlxliff_converter',
+    'sdlxliff_sidecar_writer',
+    'md_txt_sidecar_writer',  # MD/TXT sidecar writer (html2text)
+    '_compress_worker',  # Lightweight image compression worker
+    '_empty_attr_fix',  # Shared LLM Token Fix (empty-attr) helper
+    'html_duplicate_cleanup',
+    '_pdf_worker',  # PDF generation subprocess worker
+    'pdf_generation_manager',  # PDF generation manager
+    'chapter_extraction_manager',  # Chapter extraction manager
+    'GlossaryManager',
+    'GlossaryManager_GUI',
+    'glossary_paths',
+    'Retranslation_GUI',
+    'QA_Scanner_GUI',
+    'Chapter_Extractor',
+    'PatternManager',
+    'epub_converter',
+    'image_archive_epub',
+    'html_archive_epub',
+    'html_tag_entities',
+    'emoticon_patterns',
+    'qa_scan_runtime',
+    'txt_processor',
+    'scan_html_folder',
+    'unified_api_client',
+    'google_free_translate',
+    'chapter_splitter',
+    'history_manager',
+    'image_translator',
+    'check_epub_directory',
+    'direct_imports',
+    'splash_utils',
+    'dpi_setup',
+    'other_settings',      # Other Settings module
+    'ai_hunter_enhanced',  # AI Hunter Enhanced module
+    'dialog_animations',   # Dialog fade animations
+    'spinning',            # Spinning icon helper
+    'rotatable_label',     # Rotatable label widget
+    'update_manager',
+    'api_key_encryption',
+	'http_logger',
+	'shutdown_utils',
+	'async_api_processor',
+	'metadata_batch_translator',
+	'translate_headers_standalone',
+	'review_dialog',
+	'review_generator',
+	'enhanced_text_extractor.py',
+	'pdf_extractor',
+	'_pdf_extraction_worker',
+	'pdf_extraction_manager',
+	'pdf_bookmarks',
+	'output_workspace',
+	'pdf_fast_extractor',
+	'pdf_workspace_compiler',
+	'workspace_reader',
+	'reader_overlay',
+	'pdf_output_naming',
+	'installer_utils',
+	'multi_api_key_manager.py',
+	'individual_endpoint_dialog.py',
+	'model_options',
+	'hyphen_textwrap',
+	'duplicate_detection_config',
+	'large_env',
+	'authgpt_auth',  # ChatGPT subscription OAuth
+	'reasoning_compatibility',
+	'authgrok_auth',  # xAI Grok subscription OAuth
+	'authgem_auth',  # Gemini subscription OAuth
+	'authcd_auth',  # Claude subscription OAuth
+	'glm_proxy',  # Z.AI Coding Plan login proxy
+	'gemini_free',  # Google Search/Gemini browser-backed route
+	'token_encryption',  # Encrypted token storage
+	'proxy_token_storage',  # Encrypted proxy token storage
+	'ocagy_cli',  # OpenCode + opencode-antigravity-auth
+	'autharena_proxy',
+	'antigravity_proxy',  # Antigravity Cloud Code proxy
+	'grpc_gemini_client',  # gRPC Gemini client
+	# 'epub_library',  # EXCLUDED in TurboLite — removes Chromium WebEngine (152 MB)
+	'rpgmaker_handler',  # RPG Maker game file handler
+]
+# GUI Framework
+gui_modules = [
+    # TTKBootstrap
+    'ttkbootstrap',
+    'ttkbootstrap.constants',
+    'ttkbootstrap.themes',
+    'ttkbootstrap.style',
+    'ttkbootstrap.utility',
+    'ttkbootstrap.widgets',
+    'ttkbootstrap.dialogs',
+    'ttkbootstrap.tooltip',
+    'ttkbootstrap.validation',
+    'ttkbootstrap.scrolled',
+    'ttkbootstrap.icons',
+    'ttkbootstrap.colorutils',
+    'ttkbootstrap.themes.standard',
+    'ttkbootstrap.themes.user',
+]
+
+# EPUB/HTML Processing
+epub_modules = [
+    # EbookLib
+    'ebooklib',
+    'ebooklib.epub',
+    'ebooklib.utils',
+    'ebooklib.plugins',
+    
+    # BeautifulSoup
+    'bs4',
+    'bs4.element',
+    'bs4.builder',
+    'bs4.builder._html5lib',
+    'bs4.builder._htmlparser',
+    'bs4.builder._lxml',
+    'soupsieve',
+    
+    # LXML
+    'lxml',
+    'lxml.etree',
+    'lxml._elementpath',
+    'lxml.html',
+    'lxml.html.clean',
+    'lxml.builder',
+    'lxml.cssselect',
+    
+    # HTML processing
+    'html5lib',
+    'html5lib.treebuilders',
+    'html5lib.treewalkers',
+    'html5lib.serializer',
+    'html',
+    'html.parser',
+    'html.entities',
+    'cgi',
+    'xml',
+    'xml.etree',
+    'xml.etree.ElementTree',
+    'xml.dom',
+    'xml.dom.minidom',
+    'xml.parsers',
+    'xml.parsers.expat',
+]
+
+# Image Processing (Enhanced for Manga)
+image_modules = [
+    'PIL',
+    'PIL.Image',
+    'PIL.ImageTk',
+    'PIL.ImageDraw',
+    'PIL.ImageFont',
+    'PIL.ImageEnhance',
+    'PIL.ImageFilter',
+    'PIL.ImageOps',
+    'PIL.ImageChops',
+    'PIL.ImageStat',
+    'PIL.ImagePalette',
+    'PIL.ImageSequence',
+    'PIL.ImageGrab',
+    'PIL.ImageMath',
+    'PIL.ImageMode',
+    'PIL.ImageShow',
+    'PIL.ImageTransform',
+    'PIL.ImageQt',
+    'PIL.ImageCms',
+    'PIL._binary',
+    'PIL._imaging',
+    'PIL._imagingft',
+    'PIL._imagingmath',
+    'PIL._imagingtk',
+    'PIL._imagingcms',
+    'PIL._webp',
+    
+    # Image format plugins
+    'PIL.BmpImagePlugin',
+    'PIL.GifImagePlugin',
+    'PIL.JpegImagePlugin',
+    'PIL.PngImagePlugin',
+    'PIL.PpmImagePlugin',
+    'PIL.TiffImagePlugin',
+    'PIL.WebPImagePlugin',
+    'PIL.IcoImagePlugin',
+    'PIL.ImImagePlugin',
+    'PIL.Jpeg2KImagePlugin',
+    'PIL.MspImagePlugin',
+    'PIL.PcxImagePlugin',
+    'PIL.SgiImagePlugin',
+    'PIL.TgaImagePlugin',
+    'PIL.XbmImagePlugin',
+    'PIL.XpmImagePlugin',
+    'PIL.DdsImagePlugin',
+    'PIL.BlpImagePlugin',
+    'PIL.FtexImagePlugin',
+    
+    'olefile',
+]
+
+# AI/API Clients (Including Google Cloud Vision)
+api_modules = [
+    # Google AI
+    'google',
+	'google.genai',
+	'google.genai.types',
+    'google.auth',
+    'google.auth.transport',
+    'google.auth.transport.requests',
+    'google.auth.transport.grpc',
+    'google.auth.crypt',
+    'google.auth.exceptions',
+    'google.oauth2',
+    'google.oauth2.credentials',
+    'google.api_core',
+    'google.api_core.client_options',
+    'google.api_core.exceptions',
+    'google.api_core.gapic_v1',
+    'google.api_core.operations_v1',
+    'google.api_core.protobuf_helpers',
+    'google.protobuf',
+    'google.protobuf.message',
+    'google.protobuf.descriptor',
+    'google.protobuf.json_format',
+    'google.protobuf.internal',
+    'google.protobuf.reflection',
+    'google.rpc',
+    'google.type',
+    
+    # Azure (for Azure OpenAI endpoints - NOT Computer Vision)
+    'azure',
+    'azure.core',
+    'azure.core.credentials',
+    'azure.core.exceptions',
+    'azure.core.pipeline',
+    'azure.core.pipeline.transport',
+    'azure.core.pipeline.policies',
+    'azure.core.rest',
+    'azure.core.tracing',
+    'azure.core.utils',
+    'azure.identity',
+    'azure.common',
+    
+    # Additional Azure dependencies
+    'isodate',  # Required by Azure
+    'oauthlib',  # May be required for Azure auth
+    'requests_oauthlib',  # May be required for Azure auth
+	
+	# Google Cloud Translate
+	'google.cloud.translate',
+	'google.cloud.translate_v2',
+	'google.cloud.translate_v3',
+	'google.cloud.translate_v3.types',
+	'google.cloud.translate_v3.services',
+	'google.cloud.translate_v3.services.translation_service',
+	
+	# DeepL
+	'deepl',
+	'deepl.translator',
+	'deepl.exceptions',
+	'deepl.api',
+	'deepl.http',
+	'deepl.util',
+	'deepl.auth',
+	'deepl.model',	
+    
+    'proto',
+    'proto.message',
+    'grpcio',
+    'grpcio_status',
+    'googleapis_common_protos',
+	
+	# Google Vertex AI:
+    # NOTE: aiplatform_v1 and aiplatform_v1beta1 are omitted — they are
+    # auto-generated proto stub trees (~60 MB packed) stripped in a.pure below.
+    
+    # OpenAI
+    'openai',
+    'openai.api_resources',
+    'openai.error',
+    'openai.util',
+    'openai.version',
+    'openai.api_requestor',
+    'openai.openai_response',
+    'openai._base_client',
+    'openai._constants',
+    'openai._models',
+    'openai._response',
+    'openai._legacy_response',
+    'openai._streaming',
+    'openai._exceptions',
+    'openai.resources',
+    'openai.resources.chat',
+    'openai.resources.completions',
+    'openai.types',
+    'openai.types.chat',
+    
+    # Anthropic
+    'anthropic',
+    'anthropic._client',
+    'anthropic._base_client',
+    'anthropic._constants',
+    'anthropic._models',
+    'anthropic._response',
+    'anthropic._streaming',
+    'anthropic._exceptions',
+    'anthropic.resources',
+    'anthropic.resources.messages',
+    'anthropic.types',
+    'anthropic.types.message',
+    'anthropic.types.content_block',
+    'anthropic.types.usage',
+    
+    # HTTP clients
+    'httpx',
+    'httpx._client',
+    'httpx._config',
+    'httpx._models',
+    'httpx._transports',
+    'httpx._types',
+    'httpcore',
+    'httpcore._sync',
+    'httpcore._async',
+    'h11',
+    'h11._connection',
+    'h11._events',
+    'h11._state',
+    'h11._util',
+    'h11._writers',
+    'h2',
+    'hyperframe',
+    'hpack',
+    'socksio',
+    'sniffio',
+    'anyio',
+    'anyio._core',
+    'anyio._core._eventloop',
+    'anyio.streams',
+    'anyio.streams.memory',
+]
+
+# Text Processing & NLP
+text_modules = [
+
+    # Language detection
+    'langdetect',
+    'langdetect.detector',
+    'langdetect.lang_detect_exception',
+    'langdetect.language',
+    'langdetect.detector_factory',
+    'langdetect.utils',
+	
+	# Fuzzy string matching (ADD THIS SECTION)
+    'rapidfuzz',
+    'rapidfuzz.fuzz',
+    'rapidfuzz.process',
+    'rapidfuzz.distance',
+    'rapidfuzz.utils',
+    
+    # Token counting
+    'tiktoken',
+    'tiktoken_ext',
+    'tiktoken_ext.openai_public',
+    'tiktoken.core',
+    'tiktoken.registry',
+    'tiktoken.load',
+    'tiktoken.model',
+	
+	# Markdown2
+	'markdown2',
+    'markdown2.extras',
+
+    # HTML to text conversion
+    'html2text',
+    'html2text.__init__',
+    'html2text.config',
+    'html2text.compat',
+    'html2text.utils',
+	
+	# ilru cache
+	'functools',
+	'lru',
+ 
+    # AI Hunter (Datasketch)
+    'datasketch',
+    'datasketch.minhash',
+    'datasketch.lsh',
+    'datasketch.lshensemble',
+    'datasketch.weighted_minhash',
+    'datasketch.hyperloglog',
+    'datasketch.lshforest',
+    'datasketch.lean_minhash',
+    'datasketch.hashfunc',
+    'datasketch.storage',
+    'datasketch.experimental',
+    'datasketch.version',
+    
+    # Regex
+    'regex',
+    'regex._regex',
+    'regex._regex_core',
+    're',
+    '_sre',
+    'sre_compile',
+    'sre_parse',
+    'sre_constants',
+    
+    # JSON processing
+    'json',
+    'json.decoder',
+    'json.encoder',
+    'json.scanner',
+    '_json',
+    'simplejson',  # fallback
+]
+
+# Network & System
+network_modules = [
+    'requests',
+    'requests.models',
+    'requests.sessions',
+    'requests.auth',
+    'requests.cookies',
+    'requests.exceptions',
+    'requests.packages',
+    'requests.packages.urllib3',
+    'requests.adapters',
+    'requests.api',
+    'requests.structures',
+    'requests.utils',
+    'urllib',
+    'urllib.parse',
+    'urllib.request',
+    'urllib.error',
+    'urllib.response',
+    'urllib3',
+    'urllib3.connection',
+    'urllib3.connectionpool',
+    'urllib3.poolmanager',
+    'urllib3.response',
+    'urllib3.util',
+    'urllib3.util.ssl_',
+    'urllib3.util.retry',
+    'urllib3.contrib',
+    'certifi',
+    'certifi.core',
+    'ssl',
+    '_ssl',
+    'socket',
+    '_socket',
+    'select',
+    'selectors',
+    'socketserver',
+    'http',
+    'http.client',
+    'http.server',
+    'http.cookies',
+    'http.cookiejar',
+    'email',
+    'email.utils',
+    'email.message',
+    'email.header',
+    'email.charset',
+    'email.encoders',
+    'email.errors',
+    'email.generator',
+    'email.iterators',
+    'email.mime',
+    'email.parser',
+    'email.policy',
+    'mimetypes',
+    'base64',
+    'binascii',
+    'quopri',
+    'uu',
+]
+
+# Data Processing
+data_modules = [
+    'csv',
+    '_csv',
+    'pickle',
+    '_pickle',
+    'cPickle',
+    'cpickle',
+    'shelve',
+    'dbm',
+    'sqlite3',
+    '_sqlite3',
+    'gzip',
+    'zlib',
+    'bz2',
+    '_bz2',
+    'lzma',
+    '_lzma',
+    'zipfile',
+    'tarfile',
+    'shutil',
+    'glob',
+    'fnmatch',
+    'pathlib',
+    'tempfile',
+    'io',
+    '_io',
+    'StringIO',
+    'BytesIO',
+    'hashlib',
+    '_hashlib',
+    '_blake2',
+    '_sha3',
+    'hmac',
+    'secrets',
+    '_random',
+    'bisect',
+    '_bisect',
+    'heapq',
+    '_heapq',
+    'array',
+    'collections',
+    'collections.abc',
+    '_collections',
+    '_collections_abc',
+]
+
+# System & OS
+system_modules = [
+    'os',
+    'os.path',
+    'ntpath',
+    'posixpath',
+    'genericpath',
+    'stat',
+    '_stat',
+    'sys',
+    'platform',
+    'subprocess',
+    '_subprocess',
+    '_winapi',
+    'msvcrt',
+    '_msvcrt',
+    'errno',
+    'signal',
+    '_signal',
+    'atexit',
+    'gc',
+    '_gc',
+    'multiprocessing',
+    'multiprocessing.freeze_support',
+    'multiprocessing.connection',
+    'multiprocessing.pool',
+    'multiprocessing.process',
+    'threading',
+    'queue',
+    'concurrent',
+    'concurrent.futures',
+    'concurrent.futures._base',
+    'asyncio',
+    'asyncio.base_events',
+    'asyncio.events',
+    'asyncio.futures',
+    'asyncio.tasks',
+    'asyncio.protocols',
+    'asyncio.streams',
+    'asyncio.subprocess',
+    'asyncio.queues',
+    'ctypes',
+    'ctypes.util',
+    'ctypes.wintypes',
+    'aiohttp',
+    'aiofiles',
+	'yarl',  # URL handling for aiohttp
+    'multidict',  # Required by aiohttp
+    'async_timeout',  # Required by aiohttp
+    'attrs',  # Required by aiohttp
+    'charset_normalizer',  # Encoding detection
+]
+
+# Date & Time
+datetime_modules = [
+    'datetime',
+    'time',
+    'calendar',
+    'zoneinfo',
+    '_zoneinfo',
+    'tzdata',
+    'pytz',
+    'dateutil',
+    'dateutil.parser',
+    'dateutil.tz',
+    'dateutil.relativedelta',
+    'dateutil.rrule',
+]
+
+# Utilities & Helpers
+utility_modules = [
+    'tqdm',
+    'tqdm.auto',
+	'dataclasses',
+    'tqdm.std',
+    'tqdm.gui',
+	'dataclasses',
+    'tqdm.notebook',
+	'concurrent.futures',
+    'tqdm.utils',
+    'tqdm.cli',
+    'logging',
+    'logging.handlers',
+    'logging.config',
+    'warnings',
+    'traceback',
+    'contextlib',
+    'functools',
+    'itertools',
+    'operator',
+    'copy',
+    'weakref',
+    'gc',
+    'atexit',
+    'signal',
+    'locale',
+    'gettext',
+    'uuid',
+    'random',
+    'math',
+    'decimal',
+    'fractions',
+    'numbers',
+    'cmath',
+    'statistics',
+    'argparse',
+    'getopt',
+    'cmd',
+    'shlex',
+    'pprint',
+    'reprlib',
+    'dis',
+    'inspect',
+    'ast',
+    'importlib',
+    'importlib.util',
+    'importlib.machinery',
+    'importlib.metadata',
+    'importlib.resources',
+    'pkg_resources',
+    'pkg_resources._vendor',
+    'pkg_resources.extern',
+    'setuptools',
+    'distutils',
+    'sysconfig',
+    'site',
+    'sitecustomize',
+    'usercustomize',
+    'dotenv',
+    'python-dotenv',
+    'os.environ',
+    'dotenv.main',
+    'dotenv.parser',
+    'dataclasses',  # For manga TextRegion dataclass
+    # ADDED: Version parsing for update manager
+    'packaging',
+    'packaging.version',
+    'packaging.specifiers',
+    'packaging.requirements',
+	'cryptography',
+    'cryptography.fernet',
+    'cryptography.hazmat',
+    'cryptography.hazmat.primitives',
+    'cryptography.hazmat.primitives.kdf',
+    'cryptography.hazmat.primitives.kdf.pbkdf2',
+    'cryptography.hazmat.primitives.hashes',
+    'cryptography.hazmat.backends',
+    'cryptography.hazmat.backends.openssl',
+	'numpy',
+]
+
+# Encoding support
+encoding_modules = [
+    'encodings',
+    'encodings.utf_8',
+    'encodings.ascii',
+    'encodings.latin_1',
+    'encodings.cp1252',
+    'encodings.cp437',
+    'encodings.utf_16',
+    'encodings.utf_16_le',
+    'encodings.utf_16_be',
+    'encodings.utf_32',
+    'encodings.utf_32_le',
+    'encodings.utf_32_be',
+    'encodings.unicode_escape',
+    'encodings.raw_unicode_escape',
+    'encodings.idna',
+    'encodings.aliases',
+    'codecs',
+]
+
+# Combine all hidden imports
+hiddenimports.append('memory_usage_reporter')
+hiddenimports.append('tqdm_safety')
+hiddenimports.extend(app_modules)
+hiddenimports.extend(gui_modules)
+hiddenimports.extend(epub_modules)
+hiddenimports.extend(image_modules)
+hiddenimports.extend(api_modules)
+hiddenimports.extend(text_modules)
+hiddenimports.extend(network_modules)
+hiddenimports.extend(data_modules)
+hiddenimports.extend(system_modules)
+hiddenimports.extend(datetime_modules)
+hiddenimports.extend(utility_modules)
+hiddenimports.extend(encoding_modules)
+
+# Remove duplicates
+hiddenimports = list(set(hiddenimports))
+
+# ============================================================================
+# EXCLUSIONS (Packages to exclude to reduce size)
+# ============================================================================
+
+excludes = [
+    # POE / websocket-client (no longer needed; imports guarded by try/except)
+    'poe_api_wrapper', 'poe_api_wrapper.*',
+    'ballyregan', 'ballyregan.*',
+    'websocket', 'websocket.*',
+
+    # ============================================================================
+    # MACHINE LEARNING & AI FRAMEWORKS (MAJOR SIZE REDUCTION)
+    # ============================================================================
+    
+    # PyTorch ecosystem (~800MB)
+    'torch', 'torch.*','torch-*',
+    'torchvision', 'torchvision.*', 
+    'torchaudio', 'torchaudio.*',
+    'torch.nn', 'torch.nn.*',
+    'torch.cuda', 'torch.cuda.*',
+    'torch.jit', 'torch.onnx', 'torch.autograd',
+    'torch.optim', 'torch.utils', 'torch.distributed',
+    'torch.multiprocessing', 'torch.serialization',
+    'torch.nn.modules.*',
+    
+    # HuggingFace ecosystem (~400MB)
+    'transformers', 'transformers.*',
+    'tokenizers', 'tokenizers.*',
+    'huggingface_hub', 'huggingface_hub.*',
+    'safetensors', 'safetensors.*',
+    'accelerate', 'accelerate.*',
+    
+    # Computer Vision & YOLO (~200MB)
+    'ultralytics', 'ultralytics.*',
+    'ultralytics-thop',
+    
+    # ONNX Runtime (~300MB)
+    'onnx', 'onnx.*',
+    'onnxruntime', 'onnxruntime.*',
+    'onnxruntime-gpu',
+    'onnxruntime.capi', 'onnxruntime.capi.*',
+    'onnxruntime.tools', 'onnxruntime.transformers',
+    'onnxruntime.backend', 'onnxruntime.backend.*',
+    'onnxruntime_extensions', 'onnxruntime_extensions.*',
+    
+    # OCR Libraries (~300MB) - MAJOR ADDITION
+    'easyocr', 'easyocr.*',
+    'manga-ocr', 'manga_ocr.*',
+    'paddleocr', 'paddleocr.*',
+    'paddlepaddle', 'paddlepaddle.*',
+    'paddlex', 'paddlex.*',
+    'python-doctr', 'python_doctr.*',
+    
+    # Multiple OpenCV versions (~150MB) - MAJOR ADDITION
+    'opencv-contrib-python',
+    'opencv-python',  # Keep opencv-python-headless only
+	'cv2',
+    'cv2.contrib',
+    
+    # Scientific Computing (Optional)
+    'matplotlib', 'matplotlib.*',
+    'pandas', 'pandas.*',
+    'scikit-image', 'skimage', 'skimage.*',
+    'sklearn', 'sklearn.*',
+    
+    # Silent truncation detection deps (optional, too heavy for lite build ~100MB)
+    'sentence_transformers', 'sentence_transformers.*',
+    'deep_translator', 'deep_translator.*',
+    'scikit-learn',
+    
+	# Remove AVIF support if not needed (7MB)
+    'PIL._avif',
+    'pillow.libs',
+    
+    # Remove PDF support if not needed (5MB)
+    'pypdfium2', 'pypdfium2.*',
+    'pypdfium2_raw',
+	
+	# Scientific/Data formats (15MB savings)
+    'h5py', 'h5py.*',
+    'tables', 'tables.*',
+    
+    # Geographic/Geometry (2MB)
+    'shapely', 'shapely.*',
+    'Shapely', 'Shapely.*',
+    
+    # Audio processing (2MB)
+    'soundfile', 'soundfile.*',
+    '_soundfile_data',
+    'librosa', 'librosa.*',
+	
+	# Fix numpy source directory issue
+    'numpy.f2py',
+    'numpy.f2py.*',
+    'numpy.testing',
+    'numpy.testing.*',
+    'numpy.tests',
+    'numpy.distutils',
+    'numpy.distutils.*',
+    'docstring_parser.numpydoc',  # This is pulling in numpy incorrectly
+    'numpy.doc',
+    'numpy.conftest',
+    # ============================================================================
+    # CUDA & GPU LIBRARIES
+    # ============================================================================
+    'nvidia', 'nvidia.*',
+    'cuda', 'cudart', 'cublas', 'curand', 'cusparse', 'cufft',
+    'cutlass', 'nccl', 'nvtx', 'cudnn',
+    
+    # ============================================================================
+    # OTHER ML FRAMEWORKS
+    # ============================================================================
+    'tensorflow', 'tensorflow.*',
+    'tensorflow_hub', 'tensorboard',
+    'keras', 'keras.*',
+    'jax', 'jax.*', 'flax', 'flax.*',
+    'xformers', 'triton',
+    
+    # ============================================================================
+    # DEVELOPMENT & TESTING TOOLS
+    # ============================================================================
+    'pytest', 'nose', 'unittest', 'doctest', 'test', 'tests',
+    'IPython', 'jupyter', 'notebook', 'ipykernel', 'ipywidgets',
+    'pylint', 'black', 'flake8', 'mypy', 'coverage',
+    'sphinx', 'docutils',
+    
+    # ============================================================================
+    # ALTERNATIVE GUI FRAMEWORKS
+    # ============================================================================
+    'PyQt5', 'PyQt6', 'PySide2',
+    'wx', 'kivy', 'pygame',
+    
+    # ============================================================================
+    # TKINTER (No longer used)
+    # ============================================================================
+    'tkinter', 'tkinter.*', '_tkinter',
+    
+    # ============================================================================
+    # WEB FRAMEWORKS
+    # ============================================================================
+    'tornado', 'flask', 'django', 'fastapi', 'uvicorn',
+    
+    # ============================================================================
+    # OPTIONAL/RARELY USED PACKAGES
+    # ============================================================================
+    'dask', 'dask.*',
+    'cupy', 'sparse',
+    'colorama',  # Unless you need colored console output
+    'win32com', 'pythoncom',  # Unless you need Windows COM
+    
+    # ============================================================================
+    # ADDITIONAL HEAVY PACKAGES FROM YOUR ENVIRONMENT
+    # ============================================================================
+    'modelscope', 'modelscope.*',
+    # Argos Translate (exclude from lite)
+    'argostranslate', 'argostranslate.*',
+    'aistudio-sdk',
+    'bce-python-sdk',
+    'briefcase',
+    'cookiecutter',
+    'fugashi', 'unidic-lite', 'jaconv',  # Japanese text processing
+    'python-bidi',  # BiDi text
+	
+		
+	# MORE AGGRESSIVE EXCLUDES
+	'bitsandbytes', 'bitsandbytes.*',
+	'polars', 'polars.*',
+	'pyarrow', 'pyarrow.*',
+    'scipy', 'scipy.*',
+    'scipy.libs',
+	
+	# Force exclude ALL torch variants
+	'*torch*',
+	'torch*',
+	'_torch*',
+
+    # ============================================================================
+    # PLAYWRIGHT - 98 MB uncompressed bundled Node.js runtime
+    # ============================================================================
+    'playwright', 'playwright.*',
+
+    # ============================================================================
+    # QTWEBENGINE / CHROMIUM - excluded to save ~152 MB exe size.
+    # epub_library.py is not bundled in TurboLite, so this is safe.
+    # ============================================================================
+    'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore',
+    'PySide6.QtWebEngineQuick',
+
+    # ============================================================================
+    # WEASYPRINT + GTK/Cairo/Pango stack - excluded in TurboLite.
+    # PDF generation is not needed; omit its native rendering libraries.
+    # ============================================================================
+    'weasyprint', 'weasyprint.*',
+    'cairocffi', 'cairocffi.*',
+    'cairosvg', 'cairosvg.*',
+    'tinycss2', 'tinycss2.*',
+    'cssselect2', 'cssselect2.*',
+    'pydyf', 'pydyf.*',
+    'zopfli', 'zopfli.*',
+    'brotli',
+
+    # ============================================================================
+    # PDF STACK — TurboLite has no PDF output or viewing
+    # ============================================================================
+    'pymupdf', 'pymupdf.*', 'fitz', 'fitz.*',
+    'reportlab', 'reportlab.*',
+    'fontTools', 'fontTools.*',
+    'pypdf', 'pypdf.*',
+    'pdfminer', 'pdfminer.*',
+    'pyhanko', 'pyhanko.*',
+    'pyhanko_certvalidator', 'pyhanko_certvalidator.*',
+    'uritools',        # pyhanko dependency
+    'qrcode', 'qrcode.*',
+    'barcode', 'barcode.*',
+
+    # ============================================================================
+    # UNUSED PYTHON PACKAGES — TurboLite
+    # ============================================================================
+    'pygments', 'pygments.*',    # syntax highlighter (~3.6 MB)
+    'redis', 'redis.*',          # Redis client (~1.3 MB)
+    'rich', 'rich.*',            # terminal pretty-printer (~1 MB)
+    'ttkbootstrap', 'ttkbootstrap.*',  # legacy tkinter theme, not used
+    # NOTE: setuptools/pkg_resources/distutils are NOT in excludes because
+    # PyInstaller's hook-distutils.py aliases them internally and crashes if
+    # they are pre-excluded. They are stripped via a.pure filter instead.
+
+    # ============================================================================
+    # VERTEX AI / GOOGLE CLOUD AIPLATFORM - TurboLite: intentionally excluded
+    # Most users use Gemini/OpenAI directly; the full dep chain is ~60 MB.
+    # ============================================================================
+    'google.cloud.aiplatform', 'google.cloud.aiplatform.*',
+    'google.cloud.aiplatform_v1', 'google.cloud.aiplatform_v1.*',
+    'google.cloud.resourcemanager', 'google.cloud.resourcemanager.*',
+    'google.cloud.resourcemanager_v3', 'google.cloud.resourcemanager_v3.*',
+    'google.cloud.bigquery', 'google.cloud.bigquery.*',
+    'vertexai', 'vertexai.*',
+]
+
+# ============================================================================
+# ANALYSIS
+# ============================================================================
+
+a = Analysis(
+    ['translator_gui.py'],
+    pathex=[],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=['.'],  # Use custom hooks in current directory (bypasses PySide6.QtNetwork SSL check)
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=excludes,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+# Retain the TurboLite cleanup policy using Linux shared-library names.
+a.binaries = [b for b in a.binaries if not any([
+    os.path.basename(b[0]).startswith('libopencv_videoio_ffmpeg'),
+    'scipy.libs' in b[0],
+    '_avif' in b[0],
+    'pypdfium' in b[0],
+    'metrics_cpp_avx2' in b[0],
+    os.path.basename(b[0]).startswith('libhdf5'),
+    'libsndfile' in b[0],
+    os.path.basename(b[0]).startswith('libgeos'),
+    # Strip playwright binary driver (Node.js runtime, 85 MB uncompressed)
+    b[0].startswith('playwright'),
+    # Strip QtWebEngine Chromium binaries (~152 MB uncompressed)
+    'Qt6WebEngineCore' in b[0],
+    'QtWebEngineProcess' in b[0],
+    'Qt6WebEngine' in b[0],
+    # Strip pymupdf — PDF rendering, not needed in TurboLite
+    b[0].startswith('pymupdf/'),
+    'mupdfcpp' in b[0],
+    '_mupdf' in b[0],
+    # ---- TurboLite: unused PySide6 components ----
+    # FFmpeg codecs — no video playback in the app (~17 MB)
+    os.path.basename(b[0]).startswith('libavcodec'),
+    os.path.basename(b[0]).startswith('libavformat'),
+    os.path.basename(b[0]).startswith('libavutil'),
+    os.path.basename(b[0]).startswith('libswresample'),
+    # Qt Quick / QML engine — not used (~11 MB)
+    'Qt6Quick' in b[0],
+    'Qt6Qml' in b[0],
+    'Qt6QmlMeta' in b[0],
+    'Qt6QmlModels' in b[0],
+    'Qt6QmlWorker' in b[0],
+    # Qt Pdf — no PDF viewer in TurboLite (~5 MB)
+    os.path.basename(b[0]).startswith('libQt6Pdf.so'),
+    # Qt OpenGL module — only needed for OpenGL widgets, app uses software rendering
+    os.path.basename(b[0]).startswith('libQt6OpenGL.so'),
+    # Qt Multimedia — no audio/video playback (~1 MB)
+    'Qt6Multimedia' in b[0],
+    # Qt Quick Controls / Shapes / Templates
+    'Qt6QuickControls' in b[0],
+    'Qt6QuickShapes' in b[0],
+    'Qt6QuickTemplates' in b[0],
+    'Qt6QuickDialogs' in b[0],
+    'Qt6VirtualKeyboard' in b[0],
+    'Qt6Charts' in b[0],
+    'Qt6DataVisualization' in b[0],
+    'Qt6Location' in b[0],
+    'Qt6Positioning' in b[0],
+    'Qt6RemoteObjects' in b[0],
+    'Qt6Sensors' in b[0],
+    'Qt6SerialBus' in b[0],
+    'Qt6SerialPort' in b[0],
+    'Qt6Sql' in b[0],
+    'Qt6Test' in b[0],
+    'Qt6TextToSpeech' in b[0],
+    'Qt6WebSockets' in b[0],
+    'Qt6Xml' in b[0],
+])]
+
+# Remove torch, playwright data, QtWebEngine/WeasyPrint/PDF data files
+a.datas = [d for d in a.datas if not any([
+    'torch' in d[0].lower(),
+    'torch-' in d[0],
+    '.dist-info' in d[0] and 'torch' in d[0].lower(),
+    # Playwright data
+    d[0].startswith('playwright'),
+    # QtWebEngine resource files (icudtl.dat, *.pak devtools)
+    'qtwebengine' in d[0].lower(),
+    d[0] in ('PySide6/Qt/resources/icudtl.dat', 'PySide6/resources/icudtl.dat'),
+    # pymupdf data
+    d[0].startswith('pymupdf'),
+    # PySide6 translations (~6.6 MB) — UI locale files not needed
+    d[0].startswith('PySide6/Qt/translations/'),
+    d[0].startswith('PySide6/translations'),
+    # PySide6 QML plugins — not needed without Qt Quick
+    d[0].startswith('PySide6/Qt/qml/'),
+    d[0].startswith('PySide6/qml'),
+])]
+
+a.pure = [p for p in a.pure if not any([
+    'torch' in str(p).lower(),
+    'pytorch' in str(p).lower(),
+    '_torchcodec' in str(p),
+    # Playwright Python modules
+    str(p[0]).startswith('playwright'),
+    # ---- TurboLite: strip entire Vertex AI / aiplatform stack (~60 MB) ----
+    # Most users don't use Vertex Model Garden on TurboLite.
+    str(p[0]).startswith('google.cloud.aiplatform'),
+    str(p[0]).startswith('google.cloud.resourcemanager'),
+    str(p[0]).startswith('google.cloud.bigquery'),
+    str(p[0]).startswith('vertexai'),
+    # ---- TurboLite: PDF stack (not used, WeasyPrint excluded) ----
+    str(p[0]).startswith('pymupdf'),
+    str(p[0]).startswith('fitz'),
+    str(p[0]).startswith('reportlab'),
+    str(p[0]).startswith('fontTools'),
+    str(p[0]).startswith('pypdf'),
+    str(p[0]).startswith('pdfminer'),
+    str(p[0]).startswith('pyhanko'),
+    str(p[0]).startswith('pyhanko_certvalidator'),
+    str(p[0]).startswith('uritools'),          # pyhanko dep
+    str(p[0]).startswith('barcode'),           # pyhanko dep
+    str(p[0]).startswith('qrcode'),            # pyhanko dep
+    # ---- TurboLite: unused Python packages ----
+    str(p[0]).startswith('pygments'),          # syntax highlighter (~3.6 MB)
+    str(p[0]).startswith('redis'),             # Redis client (~1.3 MB)
+    str(p[0]).startswith('rich'),              # terminal pretty-printer (~1 MB)
+    str(p[0]).startswith('ttkbootstrap'),      # old tkinter theme, not used (~0.8 MB)
+    str(p[0]).startswith('tkinter'),           # tkinter itself
+    str(p[0]).startswith('_tkinter'),
+    # NOTE: setuptools / pkg_resources / distutils are intentionally NOT stripped
+    # here. PyInstaller injects pyi_rth_pkgres.py as a runtime hook which imports
+    # pkg_resources unconditionally before any user code runs → stripping it
+    # causes "No module named 'pkg_resources'" and the exe won't launch.
+])]
+
+# ============================================================================
+# PYZ (Python Zip archive)
+# ============================================================================
+
+pyz = PYZ(
+    a.pure,
+    a.zipped_data,
+    cipher=block_cipher
+)
+
+# ============================================================================
+# EXECUTABLE CONFIGURATION (Linux single file)
+# ============================================================================
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name=APP_NAME,
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=ENABLE_UPX,
+    runtime_tmpdir=None,
+    console=ENABLE_CONSOLE,
+    disable_windowed_traceback=False,
+)
+
+# Build from src with: pyinstaller translator_linux_TurboLite.spec
+# TurboLite keeps cloud API translation, glossary tools and QA scanning.
+# Local ML, EPUB reader/Chromium, PDF and Vertex AI are intentionally excluded.
