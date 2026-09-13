@@ -750,3 +750,24 @@ def test_login_restores_only_selected_encrypted_account_including_refresh_cookie
     asyncio.run(arena._restore_login_session(context, None))
     asyncio.run(arena._restore_login_session(context, 3))
     assert restored == [accounts['1']['cookies']]
+
+
+def test_verification_cookie_survives_encrypted_session_restore():
+    session = {'user': {'id': 'user', 'email': 'user@example.test'}, 'expires_at': time.time() + 3600}
+    token = 'base64-' + base64.urlsafe_b64encode(json.dumps(session).encode()).decode()
+    auth = {'name': 'arena-auth-prod-v1', 'domain': '.arena.ai', 'value': token}
+    verification = {'name': '_GRECAPTCHA', 'domain': '.google.com', 'value': 'verification-cookie'}
+    rejected = [
+        {'name': 'SID', 'domain': '.google.com', 'value': 'google-login'},
+        {'name': '_GRECAPTCHA', 'domain': 'google.com.example.test', 'value': 'unrelated'},
+    ]
+    account = arena.session_from_cookies([auth, verification, *rejected])
+    assert account['cookies'] == [auth, verification]
+    arena._save('accounts.enc', {'1': account})
+    restored = []
+    class Context:
+        async def add_cookies(self, cookies):
+            restored.extend(cookies)
+    import asyncio
+    asyncio.run(arena._restore_login_session(Context(), 1))
+    assert restored == [auth, verification]

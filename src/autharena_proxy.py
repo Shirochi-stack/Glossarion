@@ -29,7 +29,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 27
+ADAPTER_VERSION = 29
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
@@ -943,9 +943,12 @@ def send_message_stream(messages, model, temperature=0.7, max_tokens=None, timeo
             if stage.startswith("headers:"):
                 log_fn("📥 Arena: response headers received (HTTP " + stage.split(":", 1)[1] + ")")
                 return
+            if isinstance(stage, str) and stage.startswith("stream_error:"):
+                log_fn("❌ Arena upstream error (inside HTTP 200 stream): " + stage.split(":", 1)[1])
+                return
             if isinstance(stage, str) and stage.startswith("stream_summary:"):
                 log_fn("📊 Arena: upstream stream ended — " + stage.split(":", 1)[1])
-            labels = {"bridge_retry": "🔁 Arena: LMArenaBridge is retrying this request after an unusable response (not a batch request).",
+            labels = {"bridge_retry": "🔁 Arena: LMArenaBridge is retrying because the previous stream contained no usable model output; see any upstream error above.",
                       "captcha": "🔐 Arena: requesting a fresh captcha token…",
                       "token": "✅ Arena: captcha token received",
                       "retry": "🔁 Arena: captcha rejected; retrying with a fresh token",
@@ -1009,7 +1012,13 @@ atexit.register(shutdown_proxy)
 
 
 def session_from_cookies(cookies):
-    allowed = [c for c in cookies if c.get("domain", "").lstrip(".") in ("arena.ai", "lmarena.ai")]
+    # Qt uses an in-memory profile. Retain reCAPTCHA's verification cookie
+    # in the encrypted account snapshot too, without saving Google login cookies.
+    allowed = [c for c in cookies if (
+        c.get("domain", "").lstrip(".").lower() in ("arena.ai", "lmarena.ai")
+        or (c.get("name") == "_GRECAPTCHA" and c.get("domain", "").lstrip(".").lower()
+            in ("google.com", "www.google.com", "recaptcha.google.com", "recaptcha.net", "www.recaptcha.net"))
+    )]
     chunks = {c["name"]: c["value"] for c in allowed}
     token = chunks.get("arena-auth-prod-v1", "")
     if not token:
@@ -1079,6 +1088,13 @@ class _ArenaBridgeResponse:
             match = re.match(r"^(a[0-9a-z]):", value)
             kind = match.group(1) if match else ("json" if value.startswith("{") else "other")
             types[kind] = types.get(kind, 0) + 1
+            if kind == "a3":
+                try:
+                    error = json.loads(value[3:])
+                    message = error if isinstance(error, str) else json.dumps(error, ensure_ascii=False)
+                except (ValueError, TypeError):
+                    message = "Arena returned a malformed a3 error event."
+                await self.events.put({"arena_progress": "stream_error:" + message[:2000]})
             yield line
         summary = ", ".join(f"{name}={number}" for name, number in sorted(types.items())) or "empty"
         await self.events.put({"arena_progress": f"stream_summary:{count} lines ({summary})"})
@@ -1202,7 +1218,7 @@ async def _serve_worker(key, qt_helper_command=None):
                 navigation = {}
                 deadline = time.monotonic() + 300
                 while time.monotonic() < deadline:
-                    cookies = await context.cookies(["https://arena.ai/", "https://lmarena.ai/"])
+                    cookies = await context.cookies()
                     account = session_from_cookies(cookies)
                     if account and body.get("slot") is not None:
                         expected = next((item for item in list_accounts() if item["slot"] == int(body["slot"])), None)
@@ -1333,7 +1349,7 @@ async def _serve_worker(key, qt_helper_command=None):
                     # Let Arena's own session client refresh its saved session.
                     # Access-token expiry alone must not discard a refresh token.
                     for _ in range(60):
-                        restored = _persist_session(slot, await context.cookies(["https://arena.ai/", "https://lmarena.ai/"]),
+                        restored = _persist_session(slot, await context.cookies(),
                                                     expected_token=account.get("token"))
                         if restored:
                             account = restored
@@ -1462,14 +1478,14 @@ async def _serve_worker(key, qt_helper_command=None):
                                 await state["events"].put({"arena_progress": "dispatch"})
                                 await state["dispatch_ack"].wait()
                             dispatched = True
-                    await route.continue_()
+                    await route.fallback()
                 # Observe actual dispatch without rewriting the proxy's request.
                 await page.route("**/nextjs-api/stream/**", before_dispatch)
                 return page
 
             async def cleanup():
                 with contextlib.suppress(Exception):
-                    _persist_session(slot, await context.cookies(["https://arena.ai/", "https://lmarena.ai/"]))
+                    _persist_session(slot, await context.cookies())
                 for page in list(context.pages):
                     if page not in before:
                         with contextlib.suppress(Exception):
