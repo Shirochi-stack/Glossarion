@@ -8,9 +8,11 @@ import base64
 import contextlib
 import importlib
 import importlib.util
+import fnmatch
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import tempfile
 import time
@@ -28,11 +30,42 @@ class Page:
         self.context = context
         self.token = f"upstream-test-token-{context.browser.page_sequence}"
         context.browser.page_sequence += 1
+        self.listeners = {}
+        self.login_visible = False
+        self.routes = []
+        self.url = "about:blank"
+        self.evaluations = set()
+        self.challenge_visible = False
+
+    def on(self, event, callback):
+        self.listeners.setdefault(event, []).append(callback)
+
+    def remove_listener(self, event, callback):
+        self.listeners[event].remove(callback)
 
     async def expose_binding(self, name, callback):
-        self.emit = callback
+        self.report_chunk = callback
+
+    async def emit(self, source, value):
+        if "line" in value:
+            line = value["line"]
+        else:
+            if value.get("error_body"):
+                class Response:
+                    url = "https://arena.ai/nextjs-api/stream/create-evaluation"
+                    status = value["status"]
+                    async def text(self):
+                        return value["error_body"]
+                for callback in self.listeners.get("response", ()):
+                    callback(Response())
+            line = json.dumps({"__type": "meta", "status": value["status"], "headers": value["headers"]}, separators=(",", ":"))
+        await self.report_chunk(source, line)
+
+    async def route(self, pattern, handler):
+        self.routes.append((pattern, handler))
 
     async def goto(self, *args, **kwargs):
+        self.url = args[0]
         self.context.browser.urls.append(args[0])
         if self.context.browser.refreshed_cookie:
             self.context.saved_cookies = [self.context.browser.refreshed_cookie]
@@ -43,12 +76,25 @@ class Page:
     async def title(self):
         if self.context.browser.challenge_pages:
             self.context.browser.challenge_pages -= 1
+            self.challenge_visible = True
             return "Just a moment..."
         return "Arena"
 
+    async def query_selector(self, selector):
+        if selector != "#lm-bridge-turnstile" or not self.challenge_visible:
+            return None
+        page = self
+        class Challenge:
+            async def content_frame(self):
+                return None
+            async def click(self, **kwargs):
+                assert len(page.context.browser.sent) == page.context.browser.before_challenge
+                page.context.browser.verifications += 1
+                page.challenge_visible = False
+        return Challenge()
+
     async def wait_for_function(self, *args, **kwargs):
-        assert len(self.context.browser.sent) == self.context.browser.before_challenge
-        self.context.browser.verifications += 1
+        pass
 
     def get_by_role(self, role, name):
         page = self
@@ -59,11 +105,15 @@ class Page:
             def first(self):
                 return self
             async def count(self):
-                return 1
+                if role == "heading":
+                    return int(page.login_visible)
+                label = "Log In"
+                return int(role == "button" and (bool(name.search(label)) if hasattr(name, "search") else name == label))
             async def is_visible(self):
-                return True
+                return bool(await self.count())
             async def click(self, **kwargs):
                 page.context.browser.login_clicks += 1
+                page.login_visible = True
                 session = {"user": page.context.browser.login_user, "expires_at": int(time.time()) + 3600}
                 page.context.saved_cookies = [{"name": "arena-auth-prod-v1", "domain": ".arena.ai", "path": "/",
                                                "value": "base64-" + base64.urlsafe_b64encode(json.dumps(session).encode()).decode()}]
@@ -72,19 +122,54 @@ class Page:
     async def close(self):
         if self in self.context.pages:
             self.context.pages.remove(self)
+            for callback in self.listeners.get("close", ()):
+                callback()
+        current = asyncio.current_task()
+        evaluations = [task for task in self.evaluations if task is not current and not task.done()]
+        for task in evaluations:
+            task.cancel()
+        await asyncio.gather(*evaluations, return_exceptions=True)
 
-    async def evaluate(self, script, args):
+    async def evaluate(self, script, args=None):
+        task = asyncio.current_task()
+        self.evaluations.add(task)
+        try:
+            return await self._evaluate(script, args)
+        finally:
+            self.evaluations.discard(task)
+
+    async def _evaluate(self, script, args=None):
+        if "navigator.userAgent" in script:
+            return "Qt WebEngine test browser"
+        if "__token_result" in script:
+            if "g.execute" in script and self.context.browser.mint_gate is not None:
+                self.context.browser.mint_started.set()
+                await self.context.browser.mint_gate.wait()
+            return self.token
+        if "g.render" in script:
+            return "v2-" + self.token
         if "LM_BRIDGE_MINT_RECAPTCHA_V3" in script:
             assert args["action"] == "chat_submit"
             if self.context.browser.mint_gate is not None:
                 self.context.browser.mint_started.set()
                 await self.context.browser.mint_gate.wait()
             return self.token
-        assert args["payload"]["mode"] == "direct-battle"
-        assert args["payload"]["modelAId"] == "test-model-id"
-        self.context.browser.sent.append((self.context.saved_cookies, args["payload"]))
+        assert args is not None and "body" in args, "Unexpected browser evaluation"
+        payload = json.loads(args["body"])
+        assert payload["mode"] == "direct-battle"
+        assert payload["modelAId"] == "test-model-id"
+        class Request:
+            url, method = args["url"], args["method"]
+        class Route:
+            request = Request()
+            async def fallback(self):
+                pass
+        for pattern, handler in reversed(self.routes):
+            if fnmatch.fnmatchcase(args["url"], pattern):
+                await handler(Route())
+        self.context.browser.sent.append((self.context.saved_cookies, payload))
         if self.context.browser.response_handler is not None:
-            await self.context.browser.response_handler(self, args["payload"])
+            await self.context.browser.response_handler(self, payload)
             return
         if self.context.browser.reject_once:
             self.context.browser.reject_once = False
@@ -107,22 +192,32 @@ class Context:
 
     def __init__(self, browser):
         self.browser = browser
+        self.context = self
         self.pages = []
         self.saved_cookies = []
 
     async def add_cookies(self, cookies):
-        self.saved_cookies = cookies
+        from urllib.parse import urlparse
+        def key(cookie):
+            return (cookie["name"], cookie.get("domain") or urlparse(cookie.get("url", "")).hostname,
+                    cookie.get("path", "/"))
+        saved = {key(cookie): dict(cookie) for cookie in self.saved_cookies}
+        saved.update({key(cookie): dict(cookie) for cookie in cookies})
+        self.saved_cookies = list(saved.values())
 
     async def new_page(self):
         page = Page(self)
         self.pages.append(page)
         return page
 
-    async def cookies(self, urls):
+    async def cookies(self, urls=None):
         return list(self.saved_cookies)
 
     async def close(self):
-        self.browser.contexts.remove(self)
+        for page in list(self.pages):
+            await page.close()
+        if self in self.browser.contexts:
+            self.browser.contexts.remove(self)
 
 
 class Browser:
@@ -158,35 +253,33 @@ class Browser:
         return context
 
 
-@unittest.skipUnless(importlib.util.find_spec("playwright") and importlib.util.find_spec("PySide6") and (RUNTIME / "bridge").exists(),
-                     "Run with installed Arena managed Python for local browser tests")
+@unittest.skipUnless(importlib.util.find_spec("PySide6"), "Requires Qt6 WebEngine")
 class LoginNavigationTest(unittest.TestCase):
+    @unittest.skipUnless((RUNTIME / "bridge").exists(), "Requires pinned bridge checkout")
     def test_upstream_captcha_loader_and_token_generation(self):
         async def run():
             sys.path.insert(0, str(RUNTIME))
+            with patch.object(arena, "__file__", str(RUNTIME / "autharena_proxy.py")):
+                arena._prepare_qt_bridge_import("bridge")
             from bridge.src.recaptcha import _mint_recaptcha_v3_token_in_page
-            from playwright.async_api import async_playwright
-            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(RUNTIME.parent / "browsers")
-            async with async_playwright() as p:
-                browser = await arena._open_qt_browser(p)
-                try:
-                    page = await browser.new_page()
-                    await page.route("**/recaptcha/**", lambda route: route.fulfill(
-                        content_type="application/javascript",
-                        body="window.grecaptcha={enterprise:{ready:fn=>fn(),execute:async(key,opts)=>{if(key!=='test-key'||opts.action!=='chat_submit') throw Error('wrong configuration');return 'upstream-token';}}};"))
-                    await page.goto("about:blank")
-                    token = await _mint_recaptcha_v3_token_in_page(page, sitekey="test-key", action="chat_submit")
-                    self.assertEqual(token, "upstream-token")
-                    await page.evaluate("grecaptcha.enterprise.execute=async()=>''")
-                    self.assertEqual(await _mint_recaptcha_v3_token_in_page(page, sitekey="test-key", action="chat_submit"), "")
-                finally:
-                    await browser.close()
+            browser = await arena._open_qt_browser(visible=False)
+            try:
+                page = await browser.new_page()
+                await page.route("**/recaptcha/**", lambda route: route.fulfill(
+                    content_type="application/javascript",
+                    body="window.grecaptcha={enterprise:{ready:fn=>fn(),execute:async(key,opts)=>{if(key!=='test-key'||opts.action!=='chat_submit') throw Error('wrong configuration');return 'upstream-token';}}};"))
+                await page.goto("about:blank")
+                token = await _mint_recaptcha_v3_token_in_page(page, sitekey="test-key", action="chat_submit")
+                self.assertEqual(token, "upstream-token")
+                await page.evaluate("grecaptcha.enterprise.execute=async()=>''")
+                self.assertEqual(await _mint_recaptcha_v3_token_in_page(page, sitekey="test-key", action="chat_submit"), "")
+            finally:
+                await browser.close()
         asyncio.run(run())
 
     def test_qt_startup_failure_retries_before_opening_page(self):
         async def run():
             import io
-            from playwright.async_api import async_playwright
             real_popen = arena.subprocess.Popen
             attempts = []
             class FailedProcess:
@@ -197,15 +290,14 @@ class LoginNavigationTest(unittest.TestCase):
             def popen(*args, **kwargs):
                 attempts.append(kwargs.get("env", {}))
                 return FailedProcess() if len(attempts) == 1 else real_popen(*args, **kwargs)
-            async with async_playwright() as playwright:
-                with patch.object(arena.subprocess, "Popen", popen):
-                    context = await arena._open_qt_browser(playwright)
-                    try:
-                        self.assertEqual(len(attempts), 2)
-                        page = await context.new_page()
-                        self.assertEqual(await page.evaluate("2 + 3"), 5)
-                    finally:
-                        await context.close()
+            with patch.object(arena.subprocess, "Popen", popen):
+                context = await arena._open_qt_browser(visible=False)
+                try:
+                    self.assertEqual(len(attempts), 2)
+                    page = await context.new_page()
+                    self.assertEqual(await page.evaluate("2 + 3"), 5)
+                finally:
+                    await context.close()
         asyncio.run(run())
 
     @unittest.skipUnless(os.name == "nt", "Windows desktop visibility check")
@@ -213,63 +305,60 @@ class LoginNavigationTest(unittest.TestCase):
         async def run():
             import ctypes
             from ctypes import wintypes
-            from playwright.async_api import async_playwright
             user32 = ctypes.WinDLL("user32")
             callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
             user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
             user32.IsWindowVisible.argtypes = [wintypes.HWND]
-            async with async_playwright() as playwright:
-                context = await arena._open_qt_browser(playwright)
-                try:
-                    seen = []
-                    @callback_type
-                    def inspect(hwnd, unused):
-                        pid = wintypes.DWORD()
-                        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                        if pid.value == context.process.pid and user32.IsWindowVisible(hwnd):
-                            seen.append(hwnd)
-                        return True
-                    async def create_and_raise():
-                        page = await context.new_page()
-                        await page.bring_to_front()
-                        await page.set_content('<button>test</button>')
-                        await page.get_by_role('button').click()
-                    operation = asyncio.create_task(create_and_raise())
-                    while not operation.done():
-                        user32.EnumWindows(inspect, 0)
-                        await asyncio.sleep(.01)
-                    await operation
+            context = await arena._open_qt_browser(visible=False)
+            try:
+                seen = []
+                @callback_type
+                def inspect(hwnd, unused):
+                    pid = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    if pid.value == context.process.pid and user32.IsWindowVisible(hwnd):
+                        seen.append(hwnd)
+                    return True
+                async def create_and_raise():
+                    page = await context.new_page()
+                    await page.bring_to_front()
+                    await page.set_content('<button>test</button>')
+                    await page.get_by_role('button').click()
+                operation = asyncio.create_task(create_and_raise())
+                while not operation.done():
                     user32.EnumWindows(inspect, 0)
-                    self.assertEqual(seen, [])
-                finally:
-                    await context.close()
+                    await asyncio.sleep(.01)
+                await operation
+                user32.EnumWindows(inspect, 0)
+                self.assertEqual(seen, [])
+            finally:
+                await context.close()
         asyncio.run(run())
 
     def test_qt_browser_profile_and_cleanup(self):
         async def run():
-            from playwright.async_api import async_playwright
-            async with async_playwright() as playwright:
-                for attempt in range(2):
-                    context = await arena._open_qt_browser(playwright)
-                    try:
-                        page = await context.new_page()
-                        self.assertEqual(await context.cookies("https://arena.ai/"), [])
-                        await context.add_cookies([{"name": "isolation-test", "value": "test", "url": "https://arena.ai/"}])
-                        self.assertEqual(len(await context.cookies("https://arena.ai/")), 1)
-                        await page.expose_binding("arenaTest", lambda source, value: value + 1)
-                        self.assertEqual(await page.evaluate("arenaTest(4)"), 5)
-                    finally:
-                        await context.close()
-                    self.assertIsNotNone(context.process.poll())
+            for attempt in range(2):
+                context = await arena._open_qt_browser(visible=False)
+                try:
+                    page = await context.new_page()
+                    self.assertEqual(await context.cookies("https://arena.ai/"), [])
+                    await context.add_cookies([{"name": "isolation-test", "value": "test", "url": "https://arena.ai/"}])
+                    self.assertEqual(len(await context.cookies("https://arena.ai/")), 1)
+                    await page.expose_binding("arenaTest", lambda source, value: value + 1)
+                    self.assertEqual(await page.evaluate("arenaTest(4)"), 5)
+                finally:
+                    await context.close()
+                self.assertIsNotNone(context.process.poll())
         asyncio.run(run())
 
+    @unittest.skipUnless((RUNTIME / "bridge").exists(), "Requires pinned bridge checkout")
     def test_closing_qt_login_window_cancels_request(self):
         import httpx
         import uvicorn
         async def run():
             @contextlib.asynccontextmanager
-            async def login_browser(playwright):
-                context = await arena._open_qt_browser(playwright)
+            async def login_browser():
+                context = await arena._open_qt_browser(visible=False)
                 async def route(r):
                     await r.fulfill(content_type='text/html', body='<button>Log In</button>')
                 await context.context.route('**/*', route)
@@ -279,7 +368,7 @@ class LoginNavigationTest(unittest.TestCase):
                     await context.close()
             async def close_window(page, navigation):
                 # Runs the same QWidget.close() path as the native close button.
-                page.owner.command('close', page.target)
+                page.context.command('close', page.target)
                 return False
             async def serve(server, sockets):
                 try:
@@ -297,87 +386,68 @@ class LoginNavigationTest(unittest.TestCase):
 
     def test_sidebar_and_login_navigation(self):
         async def run():
-            from playwright.async_api import async_playwright
-            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(RUNTIME.parent / "browsers")
-            async with async_playwright() as playwright:
-                browser = await arena._open_qt_browser(playwright)
-                try:
-                    page = await browser.new_page()
-                    for expanded in (False, True):
-                        await page.set_content('''
-                            <script>window.sidebarClicks=0;window.loginClicks=0;</script>
-                            <button aria-label="Toggle Sidebar" onclick="window.sidebarClicks++;document.querySelector('aside').hidden=false">Sidebar</button>
-                            <button hidden>Log In</button>
-                            <aside %s><button onclick="window.loginClicks++;document.querySelector('h2').hidden=false">Log In</button></aside><h2 hidden>Log In or Create Account</h2>
-                        ''' % ("" if expanded else "hidden"))
-                        self.assertTrue(await arena._open_arena_login(page, {}))
-                        self.assertEqual(await page.evaluate("window.sidebarClicks"), 0 if expanded else 1)
-                        self.assertEqual(await page.evaluate("window.loginClicks"), 1)
-                    # Icon-only trigger; login arrives after the sidebar animation/hydration.
+            browser = await arena._open_qt_browser(visible=False)
+            try:
+                page = await browser.new_page()
+                for expanded in (False, True):
                     await page.set_content('''
                         <script>window.sidebarClicks=0;window.loginClicks=0;</script>
-                        <button data-sidebar="trigger" onclick="window.sidebarClicks++">Sidebar</button>
-                    ''')
-                    navigation = {}
-                    self.assertFalse(await arena._open_arena_login(page, navigation))
-                    self.assertFalse(await arena._open_arena_login(page, navigation))
-                    self.assertEqual(await page.evaluate("window.sidebarClicks"), 1)
-                    await page.evaluate("html => document.body.insertAdjacentHTML('beforeend', html)", """<a href="#" onclick="window.loginClicks++;document.querySelector('h2').hidden=false">Log In</a><h2 hidden>Log In or Create Account</h2>""")
-                    self.assertTrue(await arena._open_arena_login(page, navigation))
+                        <button aria-label="Toggle Sidebar" onclick="window.sidebarClicks++;document.querySelector('aside').hidden=false">Sidebar</button>
+                        <button hidden>Log In</button>
+                        <aside %s><button onclick="window.loginClicks++;document.querySelector('h2').hidden=false">Log In</button></aside><h2 hidden>Log In or Create Account</h2>
+                    ''' % ("" if expanded else "hidden"))
+                    self.assertTrue(await arena._open_arena_login(page, {}))
+                    self.assertEqual(await page.evaluate("window.sidebarClicks"), 0 if expanded else 1)
                     self.assertEqual(await page.evaluate("window.loginClicks"), 1)
-                    await page.set_content('<button>Log In</button><h2 hidden>Log In or Create Account</h2>')
-                    navigation = {}
-                    self.assertFalse(await arena._open_arena_login(page, navigation))
-                    await page.evaluate("() => { document.querySelector('button').onclick = () => document.querySelector('h2').hidden = false; }")
-                    navigation['retry_login_at'] = 0
-                    self.assertTrue(await arena._open_arena_login(page, navigation))
-                    # Once visible, never click the sidebar/login button again.
-                    await page.evaluate("() => { document.querySelector('button').onclick = () => document.querySelector('h2').hidden = true; }")
-                    self.assertTrue(await arena._open_arena_login(page, navigation))
-                    await page.set_content("""<div data-side="left" data-state="collapsed">
-                        <button aria-label="Open sidebar">Open</button>
-                        <button hidden onclick="document.querySelector('h2').hidden=false">Log In</button>
-                        </div><h2 hidden>Log In or Create Account</h2>""")
-                    navigation = {}
-                    self.assertFalse(await arena._open_arena_login(page, navigation))
-                    await page.evaluate("""() => {
-                        document.querySelector('button').onclick = () => {
-                            document.querySelector('[data-side]').dataset.state = 'expanded';
-                            document.querySelector('button[hidden]').hidden = false;
-                        };
-                    }""")
-                    navigation['retry_sidebar_at'] = 0
-                    self.assertTrue(await arena._open_arena_login(page, navigation))
-                finally:
-                    await browser.close()
+                # Icon-only trigger; login arrives after the sidebar animation/hydration.
+                await page.set_content('''
+                    <script>window.sidebarClicks=0;window.loginClicks=0;</script>
+                    <button data-sidebar="trigger" onclick="window.sidebarClicks++">Sidebar</button>
+                ''')
+                navigation = {}
+                self.assertFalse(await arena._open_arena_login(page, navigation))
+                self.assertFalse(await arena._open_arena_login(page, navigation))
+                self.assertEqual(await page.evaluate("window.sidebarClicks"), 1)
+                await page.evaluate("html => document.body.insertAdjacentHTML('beforeend', html)", """<a href="#" onclick="window.loginClicks++;document.querySelector('h2').hidden=false">Log In</a><h2 hidden>Log In or Create Account</h2>""")
+                self.assertTrue(await arena._open_arena_login(page, navigation))
+                self.assertEqual(await page.evaluate("window.loginClicks"), 1)
+                await page.set_content('<button>Log In</button><h2 hidden>Log In or Create Account</h2>')
+                navigation = {}
+                self.assertFalse(await arena._open_arena_login(page, navigation))
+                await page.evaluate("() => { document.querySelector('button').onclick = () => document.querySelector('h2').hidden = false; }")
+                navigation['retry_login_at'] = 0
+                self.assertTrue(await arena._open_arena_login(page, navigation))
+                # Once visible, never click the sidebar/login button again.
+                await page.evaluate("() => { document.querySelector('button').onclick = () => document.querySelector('h2').hidden = true; }")
+                self.assertTrue(await arena._open_arena_login(page, navigation))
+                await page.set_content("""<div data-side="left" data-state="collapsed">
+                    <button aria-label="Open sidebar">Open</button>
+                    <button hidden onclick="document.querySelector('h2').hidden=false">Log In</button>
+                    </div><h2 hidden>Log In or Create Account</h2>""")
+                navigation = {}
+                self.assertFalse(await arena._open_arena_login(page, navigation))
+                await page.evaluate("""() => {
+                    document.querySelector('button').onclick = () => {
+                        document.querySelector('[data-side]').dataset.state = 'expanded';
+                        document.querySelector('button[hidden]').hidden = false;
+                    };
+                }""")
+                navigation['retry_sidebar_at'] = 0
+                self.assertTrue(await arena._open_arena_login(page, navigation))
+            finally:
+                await browser.close()
         asyncio.run(run())
 
 
-@unittest.skipUnless(importlib.util.find_spec("camoufox") and (RUNTIME / "bridge").exists(),
+@unittest.skipUnless((RUNTIME / "bridge").exists(),
                      "Run with installed Arena managed Python for the offline bridge integration test")
 class WorkerTest(unittest.TestCase):
-    def setUp(self):
-        async def open_context(playwright, visible=False):
-            browser = await playwright.chromium.launch(headless=not visible)
-            return await browser.new_context()
-        patcher = patch.object(arena, "_open_qt_browser", open_context)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_upstream_http_errors_are_prompt_and_preserve_status(self):
+    def test_upstream_http_errors_preserve_status_and_bounded_retries(self):
         import httpx
         browser = Browser()
 
-        class Playwright:
-            async def start(self):
-                self.chromium = self
-                return self
-
-            async def launch(self, **kwargs):
-                return browser
-
-            async def stop(self):
-                pass
+        async def open_context(visible=False):
+            return await browser.new_context()
 
         catalog = [{"id": "test-model-id", "publicName": "test-model", "organization": "test", "capabilities": {}}]
 
@@ -385,6 +455,11 @@ class WorkerTest(unittest.TestCase):
             return catalog
 
         original_import = importlib.import_module
+        upstream_sleeps = []
+
+        async def short_retry_sleep(seconds):
+            upstream_sleeps.append(seconds)
+            await asyncio.sleep(0)
 
         def import_bridge(name, *args, **kwargs):
             module = original_import(name, *args, **kwargs)
@@ -392,6 +467,8 @@ class WorkerTest(unittest.TestCase):
                 async def discovery():
                     module.save_models(catalog)
                 module.get_initial_data = discovery
+                transport = original_import(name.rsplit(".", 1)[0] + ".transport")
+                transport.asyncio = SimpleNamespace(**{**vars(asyncio), "sleep": short_retry_sleep})
             return module
 
         async def serve(server, sockets):
@@ -407,8 +484,10 @@ class WorkerTest(unittest.TestCase):
 
                             browser.response_handler = reject
                             before = len(browser.sent)
-                            # Retry-After must reach Glossarion, not become a hidden
-                            # two-minute bridge sleep followed by another submission.
+                            waits_before = len(upstream_sleeps)
+                            attempts = 5 if status == 429 else 1
+                            # Preserve the pinned bridge's bounded 429 retries;
+                            # the outer API must not submit the whole job again.
                             response = await asyncio.wait_for(client.post("/v1/chat/completions", json=payload), 5)
                             self.assertEqual(response.status_code, 200, response.text)
                             with self.assertRaisesRegex(arena.ArenaStreamError, "test rejection " + str(status)) as caught:
@@ -416,14 +495,15 @@ class WorkerTest(unittest.TestCase):
                             self.assertEqual(caught.exception.http_status, status)
                             self.assertEqual(caught.exception.retry_after, "120")
                             self.assertFalse(caught.exception.partial_response)
-                            self.assertEqual(len(browser.sent), before + 1)
+                            self.assertEqual(len(browser.sent), before + attempts)
+                            self.assertEqual(upstream_sleeps[waits_before:], [5] * (attempts - 1))
                             self.assertTrue(all(not context.pages for context in browser.contexts))
 
                             contexts = list(browser.contexts)
                             browser.response_handler = None
                             recovered = await asyncio.wait_for(client.post("/v1/chat/completions", json=payload), 5)
                             self.assertEqual(arena.consume_stream(recovered.text.splitlines(), log_stream=False)["content"], "hello")
-                            self.assertEqual(len(browser.sent), before + 2)
+                            self.assertEqual(len(browser.sent), before + attempts + 1)
                             self.assertEqual(browser.contexts, contexts)
             finally:
                 for sock in sockets:
@@ -432,7 +512,7 @@ class WorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"AUTHARENA_PROXY_DATA_DIR": root}), \
                 patch.object(arena, "__file__", str(RUNTIME / "autharena_proxy.py")), \
                 patch.object(arena, "_discover_catalog", discover_catalog), \
-                patch("playwright.async_api.async_playwright", Playwright), \
+                patch.object(arena, "_open_qt_browser", open_context), \
                 patch("uvicorn.Server.serve", serve), patch("importlib.import_module", import_bridge):
             expiration = int(time.time()) + 3600
             token = "base64-" + base64.urlsafe_b64encode(json.dumps({"access_token": "test-access",
@@ -446,24 +526,16 @@ class WorkerTest(unittest.TestCase):
         import httpx
         browser = Browser()
 
+        async def open_context(visible=False):
+            return await browser.new_context()
+
         @contextlib.asynccontextmanager
-        async def login_browser(playwright):
+        async def login_browser():
             context = await browser.new_context()
             try:
                 yield context
             finally:
                 await context.close()
-
-        class Playwright:
-            async def start(self):
-                self.chromium = self
-                return self
-
-            async def launch(self, **kwargs):
-                return browser
-
-            async def stop(self):
-                pass
 
         catalog = [{"id": "test-model-id", "publicName": "test-model", "organization": "test", "capabilities": {}}]
 
@@ -515,7 +587,8 @@ class WorkerTest(unittest.TestCase):
                     parsed = arena.consume_stream(response.text.splitlines(), log_stream=False)
                     self.assertEqual(parsed["content"], "answer " + label)
                     self.assertEqual(parsed["reasoning_content"], "thinking " + label)
-                    self.assertEqual(parsed["usage"], {"total_tokens": 8})
+                    # The pinned bridge does not emit ad.usage in its SSE output.
+                    self.assertIsNone(parsed["usage"])
 
                 try:
                     first = launch("first")
@@ -532,7 +605,7 @@ class WorkerTest(unittest.TestCase):
                     self.assertEqual(first_context.saved_cookies[0]["value"], "slot-0")
                     self.assertEqual(second_context.saved_cookies[0]["value"], "slot-0")
                     first_context.saved_cookies.append({"name": "request-local", "value": "first", "domain": ".arena.ai", "path": "/"})
-                    self.assertEqual(len(second_context.saved_cookies), 1)
+                    self.assertNotIn("request-local", {cookie["name"] for cookie in second_context.saved_cookies})
                     self.assertEqual(browser.contexts[0].saved_cookies, [])
 
                     gates["first"].set()
@@ -582,7 +655,7 @@ class WorkerTest(unittest.TestCase):
                 patch.object(arena, "__file__", str(RUNTIME / "autharena_proxy.py")), \
                 patch.object(arena, "_regular_login_browser", login_browser), \
                 patch.object(arena, "_discover_catalog", discover_catalog), \
-                patch("playwright.async_api.async_playwright", Playwright), \
+                patch.object(arena, "_open_qt_browser", open_context), \
                 patch("uvicorn.Server.serve", serve), patch("importlib.import_module", import_bridge):
             expiration = int(time.time()) + 3600
             token = "base64-" + base64.urlsafe_b64encode(json.dumps({
@@ -596,27 +669,17 @@ class WorkerTest(unittest.TestCase):
         import httpx
         browser = Browser()
 
+        async def open_context(visible=False):
+            self.assertFalse(visible)
+            return await browser.new_context()
+
         @contextlib.asynccontextmanager
-        async def login_browser(playwright):
+        async def login_browser():
             context = await browser.new_context()
             try:
                 yield context
             finally:
                 await context.close()
-
-        class Playwright:
-            chromium = None
-
-            async def start(self):
-                self.chromium = self
-                return self
-
-            async def launch(self, **kwargs):
-                assert kwargs["headless"] is True
-                return browser
-
-            async def stop(self):
-                pass
 
         original_import = importlib.import_module
 
@@ -643,7 +706,7 @@ class WorkerTest(unittest.TestCase):
                         assert response.headers["X-Arena-Account-Slot"] == str(slot)
                     result = arena.consume_stream(response.text.splitlines(), log_stream=False)
                     assert result["content"] == "hello", response.text
-                    assert result["usage"] == {"total_tokens": 8}, response.text
+                    assert result["usage"] is None, response.text
                     assert result["reasoning_content"] == "reasoning", response.text
                 assert len(browser.sent) == 4
                 cookie_ids = [cookies[0]["value"] for cookies, payload in browser.sent]
@@ -668,7 +731,7 @@ class WorkerTest(unittest.TestCase):
                 assert login.status_code == 200, login.text
                 assert login.json()["slot"] == 2
                 assert browser.login_clicks == 1
-                assert all(url == "https://arena.ai/" for url in browser.urls)
+                assert all(url in ("https://arena.ai/", "https://arena.ai/?mode=direct") for url in browser.urls)
                 assert arena._load("accounts.enc")["2"]["user_id"] == "new-user"
                 mismatch = await client.post("/login", json={"slot": 0})
                 assert mismatch.status_code == 409, mismatch.text
@@ -701,6 +764,11 @@ class WorkerTest(unittest.TestCase):
                     "value": "base64-" + base64.urlsafe_b64encode(json.dumps(refreshed).encode()).decode()}
                 browser.reject_once = True
                 before = len(browser.sent)
+                rejected = await client.post("/v1/chat/completions", json={"model": "test-model", "messages": [{"role": "user", "content": "test"}], "account_slot": 0})
+                with self.assertRaisesRegex(arena.ArenaStreamError, "session needs refresh") as caught:
+                    arena.consume_stream(rejected.text.splitlines(), log_stream=False)
+                self.assertEqual(caught.exception.http_status, 403)
+                self.assertEqual(len(browser.sent), before + 1)
                 recovered = await client.post("/v1/chat/completions", json={"model": "test-model", "messages": [{"role": "user", "content": "test"}], "account_slot": 0})
                 self.assertEqual(arena.consume_stream(recovered.text.splitlines(), log_stream=False)["content"], "hello")
                 self.assertEqual(len(browser.sent), before + 2)
@@ -713,7 +781,7 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual(arena.consume_stream(recovered.text.splitlines(), log_stream=False)["content"], "hello")
                 self.assertEqual(len(browser.sent), before + 2)
                 self.assertEqual(browser.contexts, contexts_before)
-                browser.challenge_pages = 2  # Headless page, then visible verification.
+                browser.challenge_pages = 1  # Upstream handles the challenge before dispatch.
                 browser.before_challenge = len(browser.sent)
                 recovered = await client.post("/v1/chat/completions", json={"model": "test-model", "messages": [{"role": "user", "content": "test"}], "account_slot": 0})
                 self.assertEqual(arena.consume_stream(recovered.text.splitlines(), log_stream=False)["content"], "hello")
@@ -749,7 +817,7 @@ class WorkerTest(unittest.TestCase):
                 patch.object(arena, "__file__", str(RUNTIME / "autharena_proxy.py")), \
                 patch.object(arena, "_regular_login_browser", login_browser), \
                 patch.object(arena, "_discover_catalog", discover_catalog), \
-                patch("playwright.async_api.async_playwright", Playwright), \
+                patch.object(arena, "_open_qt_browser", open_context), \
                 patch("uvicorn.Server.serve", serve), patch("importlib.import_module", import_bridge):
             expiration = int(time.time()) + 3600
             b64 = lambda value: base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")

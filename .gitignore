@@ -97,6 +97,8 @@ tests/
 tests/**
 !tests/test_autharena_proxy.py
 !tests/test_autharena_worker.py
+!tests/test_autharena_browser.py
+!tests/test_autharena_upstream_transport.py
 !tests/test_glm_proxy.py
 !tests/test_sdlxliff_support.py
 !tests/test_sdlxliff_json_batch.py

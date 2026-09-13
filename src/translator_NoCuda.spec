@@ -285,6 +285,7 @@ app_files = [
 	# Antigravity Cloud Code proxy
 	('ocagy_cli.py', '.'),  # OpenCode + opencode-antigravity-auth
 	('autharena_proxy.py', '.'),
+	('autharena_browser.py', '.'),
 	('antigravity_proxy.py', '.'),
 
 	# gRPC Gemini client
@@ -560,6 +561,7 @@ app_modules = [
 	'proxy_token_storage',  # Encrypted proxy token storage
 	'ocagy_cli',  # OpenCode + opencode-antigravity-auth
 	'autharena_proxy',
+	'autharena_browser',
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
 	'epub_library',  # EPUB Library & Reader

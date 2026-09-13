@@ -1,21 +1,26 @@
 # Arena Login
 
 `autharena_proxy.py` installs uv, managed Python 3.12, and the pinned
-CloudWaddie/LMArenaBridge runtime and its Chromium browser under
-`~/.glossarion/autharena_proxy`.
-Neither system Python nor an extension is required. Frozen builds include the
-worker's source and the existing token-encryption module as data files.
+CloudWaddie/LMArenaBridge runtime under `~/.glossarion/autharena_proxy`.
+Arena uses the app's Qt6 WebEngine in a separate app-owned process;
+`autharena_browser.py` controls it directly through the Chrome DevTools Protocol
+(CDP). Setup does not install Playwright, Camoufox, or a separate browser.
+Older managed runtimes may still contain unused packages from previous installs.
+Neither system Python nor an extension is required for packaged builds. Frozen
+builds include the worker, browser adapter, and existing token-encryption module
+as data files.
+Builds that exclude Qt WebEngine (such as Windows Lite/TurboLite and Linux
+TurboLite) cannot run Arena; they report the missing browser component instead
+of downloading another browser.
 
 Use **Arena Login** beside the model selector or in a multi-key model field.
-For login, the app opens installed Chrome with a fresh, app-owned regular
-profile (not an incognito context). If Chrome is unavailable, it uses the
-automatically installed Chromium executable with the same regular-profile flow. It navigates
-to Arena's homepage, and activates its sign-in control. No existing browser or
-remote-debugging setup is needed. Finish sign-in and any website challenge in
-that window; the app captures the Arena session automatically. Google may still
-reject sign-in from a connected browser; this change does not guarantee Google
-login acceptance. This is session
-authentication, not an official Arena OAuth API.
+For login, the app opens a visible Qt6 WebEngine window with a fresh, isolated
+in-memory profile. It navigates to Arena's homepage and activates its sign-in
+control. No existing browser or remote-debugging setup is needed. Finish sign-in
+and any website challenge in that window; the app captures the Arena session
+automatically. Google may still reject sign-in from an embedded browser; this
+change does not guarantee Google login acceptance. This is session authentication,
+not an official Arena OAuth API.
 
 | Model prefix | Account |
 | --- | --- |
@@ -40,7 +45,7 @@ Reconnecting an account retires its old contexts after their active requests
 finish. New requests use Arena's current
 `direct-battle` creation mode (the Direct UI route), retaining the selected
 model for the first turn; the pinned bridge's legacy `direct` value is adapted.
-Translation runs headlessly; only an explicit
+Translation runs in offscreen Qt6 WebEngine processes; only an explicit
 Arena Login opens a visible browser. Upstream HTTP errors include Arena's response
 details when provided, rather than only the status code. The app owns and closes this browser;
 personal browser profiles are not used. Credentials use Glossarion's existing encrypted
@@ -73,29 +78,29 @@ Browser tasks are stopped before a request's context and state can be reused.
 Dispatch failures are provider errors unless a real cancellation was requested.
 Upstream errors retain Arena's HTTP status and Retry-After value when supplied,
 including HTTP 429, instead of reporting them as CAPTCHA failures.
-HTTP rejections are forwarded promptly to Glossarion's normal API error handling;
-the bridge does not hold them in its own rate-limit retry loop. Failures returned
-before streaming begins also preserve their HTTP status. Partial streams remain
+HTTP rejections retain the pinned bridge's bounded retry policy. Once that
+transport returns a failure, the adapter forwards it to Glossarion without an
+additional outer retry. Failures returned before streaming begins also preserve
+their HTTP status. Partial streams remain
 protected from automatic replay, including errors reported after reasoning.
 Detailed HTTP logging records headers and a streaming-body placeholder without
 reading the response stream. Reading it in the logger delays dispatch events
 until the worker times out and causes a local acknowledgment conflict.
 
-If Arena serves a security interstitial instead of its homepage, the proxy opens
-an app-owned browser and waits for interactive verification before obtaining a
-CAPTCHA token or submitting a translation. An interstitial is no longer treated
-as a missing reCAPTCHA loader. The wait is cancellable and bounded to three minutes,
-within the upstream five-minute total browser-setup budget;
-blocked challenge scripts or DNS failures still require working network access.
+If Arena serves a security interstitial instead of its homepage, the pinned
+bridge attempts its challenge handling within the request's Qt6 WebEngine
+process. Background requests remain offscreen. Use Arena Login when interactive
+verification is required; blocked challenge scripts or DNS failures still require
+working network access.
 
-`AUTHARENA_PROXY_DATA_DIR` changes the runtime and browser installation location.
+`AUTHARENA_PROXY_DATA_DIR` changes the runtime and encrypted account-storage location.
 The proxy stores full model IDs and metadata in `models.enc`, separately from
 the GUI's display-name catalog. It reuses this cache across restarts for 24 hours
 and retains the last successful records if a refresh is blocked or fails.
 Arena Login also captures these records from its browser. A cache failure now
 reports whether the page was blocked or its model data could not be parsed.
-Personal browser cookie databases are never read. The temporary login profile
-is removed after its browser closes; only captured Arena credentials are retained
+Personal browser cookie databases are never read. The in-memory login profile
+is discarded when its browser closes; captured session cookies are retained only
 in the encrypted account store. Simultaneous translations use separate contexts,
 even when they select the same account.
 
@@ -103,10 +108,10 @@ For standalone use, run `python src/autharena_proxy.py` to keep the proxy runnin
 `python src/autharena_proxy.py --status` for a read-only health check, or
 `python src/autharena_proxy.py --login autharena/` to sign into account `#0`.
 
-Windows runtime installation, authenticated startup, and a minimal onefile
-executable bootstrap have been exercised. An offline test against the pinned
-bridge checks streaming, concurrent account isolation, rotation, fresh request
-IDs, and cancellation before dispatch using a simulated managed browser.
-Windows automatic Chromium installation and launch have also been exercised.
-macOS/Linux installation paths are implemented but require native
-validation. Live signed-in Arena generation also requires end-to-end validation.
+Offline tests exercise the pinned bridge's streaming, concurrent account
+isolation, rotation, cancellation, and streaming inactivity limits. Real Qt6
+WebEngine tests also cover browser callbacks, request/response interception,
+cross-origin frame input, login-window closure, and streamed answers through
+the worker with Playwright and Camoufox imports blocked. These use simulated
+website responses; signed-in Arena generation and packaged-build validation
+remain necessary. macOS/Linux paths require native validation.

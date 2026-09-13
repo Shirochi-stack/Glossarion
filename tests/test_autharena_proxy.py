@@ -178,9 +178,7 @@ def test_cached_runtime_does_not_download_or_require_system_python(monkeypatch):
     python.parent.mkdir(parents=True)
     python.touch()
     (runtime / "ready").touch()
-    browser = runtime / "chromium.exe"
-    browser.touch()
-    (runtime / "qt-bridge-ready").write_text("qt6", encoding="utf-8")
+    (runtime / "qt-native-ready").write_text("qt6-native", encoding="utf-8")
     monkeypatch.setattr(arena, "_download", lambda *args: pytest.fail("Unexpected download"))
     assert arena._ensure_runtime() == (runtime, python)
 
@@ -391,7 +389,7 @@ def test_frozen_specs_include_managed_worker_source():
         ast.parse(text)
 
 
-def test_internal_browser_installs_automatically_and_reuses_cache(tmp_path, monkeypatch):
+def test_qt_connection_dependency_reuses_cache(tmp_path, monkeypatch):
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     browser = tmp_path / "managed-browser.exe"
@@ -406,7 +404,7 @@ def test_internal_browser_installs_automatically_and_reuses_cache(tmp_path, monk
     assert len(calls) == 1
     arena._ensure_browser(runtime, "managed-python", lambda message: None)
     assert len(calls) == 1
-    assert arena._env()["PLAYWRIGHT_BROWSERS_PATH"] == str(arena.data_dir() / "browsers")
+    assert "PLAYWRIGHT_BROWSERS_PATH" not in arena._env()
 
 
 def test_failed_browser_install_is_not_cached(tmp_path, monkeypatch):
@@ -415,7 +413,7 @@ def test_failed_browser_install_is_not_cached(tmp_path, monkeypatch):
     monkeypatch.setattr(arena, "_run", fail)
     with pytest.raises(RuntimeError, match="download failed"):
         arena._ensure_browser(tmp_path, "managed-python", lambda message: None)
-    assert not (tmp_path / "qt-bridge-ready").exists()
+    assert not (tmp_path / "qt-native-ready").exists()
 
 
 @pytest.mark.parametrize("version", [None, 1])
@@ -701,18 +699,70 @@ def test_missing_bundled_webengine_is_reported_without_downloading(monkeypatch):
         arena._qt_helper_command()
 
 
-def test_bridge_upgrade_never_installs_pyside(tmp_path, monkeypatch):
+def test_bridge_upgrade_installs_only_qt_connection_dependency(tmp_path, monkeypatch):
     calls = []
     def run(args, log_fn):
         calls.append(args)
         if len(calls) == 1:
-            raise RuntimeError("old Playwright")
+            raise RuntimeError("missing websockets.asyncio")
         return ''
     monkeypatch.setattr(arena, '_run', run)
     arena._ensure_browser(tmp_path, 'managed-python', lambda text: None)
     assert len(calls) == 3
-    assert calls[1][1:] == ['pip', 'install', '--python', 'managed-python', 'playwright>=1.60']
-    assert all('PySide6' not in str(call) for call in calls)
+    assert calls[1][1:] == ['pip', 'install', '--python', 'managed-python', 'websockets>=15,<17']
+    assert all(not any(package in str(call) for package in ('PySide6', 'playwright', 'camoufox')) for call in calls)
+
+
+def test_qt_requirements_exclude_external_browser_dependencies():
+    source = 'fastapi\ncamoufox\nplaywright>=1.60\nhttpx\npython-multipart\n'
+    assert arena._qt_bridge_requirements(source).splitlines() == ['fastapi', 'httpx', 'python-multipart']
+
+
+def test_bridge_factory_import_never_loads_external_browsers(tmp_path, monkeypatch):
+    import importlib.abc
+    import sys
+    import types
+    root = tmp_path / 'bridge'
+    package_path = root / 'src'
+    package_path.mkdir(parents=True)
+    (package_path / '__init__.py').write_text('')
+    (package_path / 'main.py').write_text(
+        'from camoufox.async_api import AsyncCamoufox\n'
+        'from . import helper\n')
+    (package_path / 'helper.py').write_text('def current_main():\n    from . import main\n    return main\n')
+    package = types.ModuleType('arena_import_test')
+    package.__path__ = [str(root)]
+    monkeypatch.setitem(sys.modules, package.__name__, package)
+    monkeypatch.setattr(arena, '__file__', str(tmp_path / 'autharena_proxy.py'))
+    class RejectExternalBrowsers(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname.split('.')[0] in ('camoufox', 'playwright'):
+                raise AssertionError('Unexpected external browser import: ' + fullname)
+    monkeypatch.setattr(sys, 'meta_path', [RejectExternalBrowsers(), *sys.meta_path])
+    try:
+        arena._prepare_qt_bridge_import(package.__name__)
+        main = sys.modules[package.__name__ + '.src.main']
+        assert main.AsyncCamoufox.__module__ == 'autharena_browser'
+        assert main.helper.current_main() is main
+        # Reloading an account namespace must update relative imports too.
+        arena._prepare_qt_bridge_import(package.__name__)
+        new = sys.modules[package.__name__ + '.src.main']
+        assert new is not main
+        assert new.helper.current_main() is new
+    finally:
+        for name in list(sys.modules):
+            if name.startswith(package.__name__ + '.'):
+                sys.modules.pop(name, None)
+
+
+def test_old_playwright_ready_marker_requires_native_dependency_probe(tmp_path, monkeypatch):
+    (tmp_path / 'qt-bridge-ready').write_text('qt6')
+    calls = []
+    monkeypatch.setattr(arena, '_run', lambda args, log_fn: calls.append(args))
+    arena._ensure_browser(tmp_path, 'managed-python')
+    assert len(calls) == 1
+    assert 'websockets.asyncio.client' in calls[0][-1]
+    assert (tmp_path / 'qt-native-ready').exists()
 
 
 def test_frozen_arena_entrypoint_runs_helper_before_gui_imports(monkeypatch):

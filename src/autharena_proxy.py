@@ -29,7 +29,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 32
+ADAPTER_VERSION = 33
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
@@ -77,13 +77,21 @@ def _http_response_error(response):
     return ArenaStreamError(message, status, retry_after)
 
 
-async def _run_stream_with_idle_timeout(awaitable, activity, timeout):
+async def _run_stream_with_idle_timeout(awaitable, activity, timeout, started=None):
     """Allow a long active response; time out only when upstream stops sending."""
     import asyncio
     task = asyncio.create_task(awaitable)
     try:
         if timeout is None:
             return await task
+        if started is not None and not started.is_set():
+            gate = asyncio.create_task(started.wait())
+            try:
+                await asyncio.wait((task, gate), return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                gate.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await gate
         while not task.done():
             activity.clear()
             wake = asyncio.create_task(activity.wait())
@@ -288,98 +296,6 @@ def _qt_browser_helper(visible=False):
     return result
 
 
-class _QtArenaPage:
-    def __init__(self, owner, page, target):
-        self.owner, self.page, self.target = owner, page, target
-
-    @property
-    def context(self):
-        return self.owner
-
-    def __getattr__(self, name):
-        return getattr(self.page, name)
-
-    async def close(self):
-        if self in self.owner._pages:
-            self.owner._pages.remove(self)
-        self.owner.command("close", self.target)
-
-    async def bring_to_front(self):
-        self.owner.command("show", self.target)
-
-
-class _QtArenaContext:
-    """Adapt Qt-owned pages to the small BrowserContext surface used by Arena."""
-    def __init__(self, process, browser):
-        self.process, self.browser = process, browser
-        self.context = browser.contexts[0]
-        self._pages = []
-        self._closed = False
-
-    def is_connected(self):
-        return not self._closed and self.process.poll() is None and self.browser.is_connected()
-
-    @property
-    def pages(self):
-        return [p for p in self._pages if not p.page.is_closed()]
-
-    def command(self, action, target=None):
-        if self.process.poll() is not None:
-            raise RuntimeError("Arena Qt browser exited.")
-        self.process.stdin.write(json.dumps({"action": action, "target": target}) + "\n")
-        self.process.stdin.flush()
-
-    async def new_page(self):
-        async with self.context.expect_page(timeout=15000) as pending:
-            self.command("new")
-        page = await pending.value
-        session = await self.context.new_cdp_session(page)
-        try:
-            info = await session.send("Target.getTargetInfo")
-        finally:
-            await session.detach()
-        wrapped = _QtArenaPage(self, page, info["targetInfo"]["targetId"])
-        self._pages.append(wrapped)
-        return wrapped
-
-    async def _cookie_command(self, name, args=None):
-        session = await self.context.new_cdp_session(self.context.pages[0])
-        try:
-            return await session.send(name, args or {})
-        finally:
-            await session.detach()
-
-    async def add_init_script(self, script=None, path=None):
-        await self.context.add_init_script(script=script, path=path)
-
-    async def add_cookies(self, cookies):
-        await self._cookie_command("Network.setCookies", {"cookies": cookies})
-
-    async def cookies(self, urls=None):
-        if isinstance(urls, str):
-            urls = [urls]
-        method = "Network.getCookies" if urls else "Network.getAllCookies"
-        result = await self._cookie_command(method, {"urls": urls} if urls else {})
-        return result["cookies"]
-
-    async def close(self):
-        import asyncio
-        if self._closed:
-            return
-        self._closed = True
-        if self.process.poll() is None:
-            with contextlib.suppress(Exception):
-                self.command("quit")
-            try:
-                await asyncio.to_thread(self.process.wait, timeout=3)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                await asyncio.to_thread(self.process.wait)
-        with contextlib.suppress(Exception):
-            await self.browser.close()
-        self.process.stdin.close()
-
-
 def _qt_browser_env(port, visible, recovery=False):
     env = _env()
     env["PYINSTALLER_SUPPRESS_SPLASH_SCREEN"] = "1"
@@ -395,10 +311,11 @@ def _qt_browser_env(port, visible, recovery=False):
     return env
 
 
-async def _open_qt_browser(playwright, visible=False):
+async def _open_qt_browser(visible=False):
     """Retry startup only, before any login or translation has been submitted."""
     import asyncio
     import socket
+    from autharena_browser import QtArenaContext
     for attempt in range(2):
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
@@ -421,9 +338,8 @@ async def _open_qt_browser(playwright, visible=False):
                     endpoint = re.search(
                         rf"DevTools listening on (ws://127\.0\.0\.1:{port}/devtools/browser/[a-fA-F0-9-]+)", output)
                     if endpoint:
-                        browser = await playwright.chromium.connect_over_cdp(
-                            endpoint.group(1), no_defaults=True, timeout=15000)
-                        return _QtArenaContext(process, browser)
+                        browser = await QtArenaContext.connect(process, endpoint.group(1))
+                        return browser
                     await asyncio.sleep(.1)
                 raise RuntimeError("Qt WebEngine did not become ready.")
             except BaseException as exc:
@@ -441,8 +357,8 @@ async def _open_qt_browser(playwright, visible=False):
 
 
 @contextlib.asynccontextmanager
-async def _regular_login_browser(playwright):
-    context = await _open_qt_browser(playwright, visible=True)
+async def _regular_login_browser():
+    context = await _open_qt_browser(visible=True)
     try:
         yield context
     finally:
@@ -619,7 +535,6 @@ def _env():
     env = {k: v for k, v in os.environ.items() if k.lower() in keep}
     env.update(PYTHONUTF8="1", PYTHONUNBUFFERED="1", UV_PYTHON_INSTALL_DIR=str(data_dir() / "python"))
     env["AUTHARENA_PROXY_DATA_DIR"] = str(data_dir())
-    env["PLAYWRIGHT_BROWSERS_PATH"] = str(data_dir() / "browsers")
     return env
 
 
@@ -633,18 +548,18 @@ def _run(args, log_fn=print):
 
 
 def _ensure_browser(runtime, python, log_fn=print, refresh=False):
-    marker = runtime / "qt-bridge-ready"
+    marker = runtime / "qt-native-ready"
     if not refresh and marker.exists():
         return
-    probe = [python, "-c", "from playwright.async_api import BrowserType; import inspect; assert 'no_defaults' in inspect.signature(BrowserType.connect_over_cdp).parameters"]
+    probe = [python, "-c", "from websockets.asyncio.client import connect; import inspect; assert 'proxy' in inspect.signature(connect).parameters"]
     try:
         _run(probe, log_fn)
     except RuntimeError:
-        log_fn("🌐 Arena: updating Playwright bridge support (Qt WebEngine is reused from the app)…")
+        log_fn("🌐 Arena: installing the Qt WebEngine connection library…")
         uv = data_dir() / ("uv.exe" if os.name == "nt" else "uv")
-        _run([uv, "pip", "install", "--python", python, "playwright>=1.60"], log_fn)
+        _run([uv, "pip", "install", "--python", python, "websockets>=15,<17"], log_fn)
         _run(probe, log_fn)
-    marker.write_text("qt6", encoding="ascii")
+    marker.write_text("qt6-native", encoding="ascii")
 
 
 def _download(url, target):
@@ -680,6 +595,43 @@ def _source_file(name):
         if p.is_file():
             return p
     raise RuntimeError(f"Arena packaged runtime source missing: {name}")
+
+
+def _qt_bridge_requirements(source):
+    """Exclude the pinned bridge's unused external browser backends."""
+    return "\n".join(line for line in source.splitlines() if not re.match(
+        r"^\s*(?:camoufox|playwright)(?:\s|[<>=!~;\[]|$)", line, re.I)) + "\n"
+
+
+def _prepare_qt_bridge_import(namespace):
+    """Load the pinned entry point with Qt as its only browser factory.
+
+    Adapt the one eager backend import before executing main. This is scoped
+    to the account's module namespace: no fake third-party packages, global
+    import hooks, or edits to the downloaded upstream checkout are required.
+    configure_slot binds the factory to that account before calling upstream.
+    """
+    import importlib
+    import importlib.util
+    parent = importlib.import_module(namespace + ".src")
+    name = namespace + ".src.main"
+    source = Path(__file__).parent / "bridge/src/main.py"
+    code = source.read_text(encoding="utf-8")
+    old_import = "from camoufox.async_api import AsyncCamoufox"
+    if code.count(old_import) != 1:
+        raise RuntimeError("Pinned LMArenaBridge browser factory is incompatible with Qt WebEngine.")
+    code = code.replace(old_import, "from autharena_browser import QtBrowserFactory as AsyncCamoufox")
+    spec = importlib.util.spec_from_file_location(name, source)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    parent.main = module
+    try:
+        exec(compile(code, str(source), "exec"), module.__dict__)
+    except BaseException:
+        sys.modules.pop(name, None)
+        if getattr(parent, "main", None) is module:
+            del parent.main
+        raise
 
 
 def _ensure_runtime(log_fn=print):
@@ -722,7 +674,14 @@ def _ensure_runtime(log_fn=print):
         _run([uv, "python", "install", "3.12"], log_fn)
         _run([uv, "venv", "--python", "3.12", runtime / "venv"], log_fn)
         log_fn("Arena: installing proxy dependencies…")
-        _run([uv, "pip", "install", "--python", python, "-r", runtime / "bridge/requirements.txt", "requests", "cryptography"], log_fn)
+        # The pinned bridge's generic requirements include external browser
+        # automation packages. Qt is provided by the app; install only its
+        # service dependencies and our lightweight CDP connection library.
+        requirements = runtime / "qt-requirements.txt"
+        requirements.write_text(_qt_bridge_requirements(
+            (runtime / "bridge/requirements.txt").read_text(encoding="utf-8")), encoding="utf-8")
+        _run([uv, "pip", "install", "--python", python, "-r", requirements,
+              "requests", "cryptography", "websockets>=15,<17"], log_fn)
         _ensure_browser(runtime, python, log_fn, refresh=True)
         (runtime / "ready").write_text(REVISION, encoding="ascii")
     return runtime, python
@@ -749,7 +708,7 @@ def ensure_proxy_running(log_fn=print, notify_started=True):
             requests.post(status["url"] + "/shutdown", headers={"Authorization": "Bearer " + status["key"]}, timeout=5).raise_for_status()
         qt_command = _qt_helper_command()
         runtime, python = _ensure_runtime(log_fn or print)
-        for name in ("autharena_proxy.py", "token_encryption.py"):
+        for name in ("autharena_proxy.py", "autharena_browser.py", "token_encryption.py"):
             shutil.copy2(_source_file(name), runtime / name)
         key = secrets.token_urlsafe(32)
         # The child binds port 0 itself and publishes its authenticated endpoint.
@@ -1144,7 +1103,7 @@ class _ArenaBridgeResponse:
             await self.cleanup()
 
 
-def _bridge_error_metadata(page):
+def _bridge_error_metadata(page, activity=None):
     """Pass the HTTP error body into upstream's metadata-based error handling."""
     errors = []
     def on_response(response):
@@ -1158,6 +1117,8 @@ def _bridge_error_metadata(page):
         if name != "reportChunk":
             return await expose(name, callback, **kwargs)
         async def report(source, line):
+            if activity is not None:
+                activity.set()
             try:
                 meta = json.loads(line)
             except (ValueError, TypeError):
@@ -1209,11 +1170,9 @@ async def _serve_worker(key, qt_helper_command=None):
     from fastapi import FastAPI, HTTPException, Request
     globals()["Request"] = Request  # FastAPI resolves postponed endpoint annotations.
     from starlette.responses import JSONResponse, StreamingResponse
-    from playwright.async_api import async_playwright
     import uvicorn
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    playwright = await async_playwright().start()
     slots = {}
     slot_pool_lock = asyncio.Lock()
     login_lock = asyncio.Lock()
@@ -1239,7 +1198,7 @@ async def _serve_worker(key, qt_helper_command=None):
     async def login(request: Request):
         body = await request.json()
         async with login_lock:
-            login_browser = _regular_login_browser(playwright)
+            login_browser = _regular_login_browser()
             try:
                 context = await login_browser.__aenter__()
             except Exception as exc:
@@ -1388,7 +1347,7 @@ async def _serve_worker(key, qt_helper_command=None):
             account = _load("accounts.enc").get(str(slot))
         if not account:
             raise HTTPException(401, f"Arena account {slot} needs Arena Login.")
-        context = await _open_qt_browser(playwright)
+        context = await _open_qt_browser()
         try:
             await context.add_cookies(account["cookies"])
             if refresh or account.get("expires_at", 0) <= time.time() + 60:
@@ -1426,6 +1385,7 @@ async def _serve_worker(key, qt_helper_command=None):
         package = types.ModuleType(namespace)
         package.__path__ = [str(Path(__file__).parent / "bridge")]
         sys.modules[namespace] = package
+        _prepare_qt_bridge_import(namespace)
         main = importlib.import_module(namespace + ".src.main")
         config_module = importlib.import_module(namespace + ".src.config")
         auth = importlib.import_module(namespace + ".src.auth")
@@ -1438,6 +1398,9 @@ async def _serve_worker(key, qt_helper_command=None):
         cfg = {"auth_tokens": [account["token"]], "auth_token": account["token"], "api_keys": [{"key": key, "rpm": 100000}],
                "persist_arena_auth_cookie": False, "browser_cookies": {c["name"]: c["value"] for c in account["cookies"]}}
         config_module._apply_config_defaults(cfg)
+        # The optional vision solver launches its own external browser. Keep
+        # legacy runtimes with that extra installed on the Qt-only path too.
+        cfg["vision_recaptcha_solver"] = {"enabled": False}
         # Upstream's default 120s outer timeout includes navigation, interactive
         # verification, token minting and dispatch acknowledgment together.
         cfg["chrome_fetch_outer_timeout_seconds"] = 300
@@ -1477,9 +1440,12 @@ async def _serve_worker(key, qt_helper_command=None):
                 # The response wrapper below closes them after consumption.
                 pass
         main.AsyncCamoufox = ContextLease
-        # Upstream's separate Chrome token helper hardcodes headless=False.
-        # With the Qt backend selected, advertise no standalone Chrome so its
-        # existing fallback stays inside our offscreen, account-owned context.
+        # Skip the standalone Chrome token path (which imports Playwright).
+        # The upstream fallback uses ContextLease and our Qt page instead.
+        async def no_external_browser_token(*args, **kwargs):
+            return None
+        recaptcha.get_recaptcha_v3_token_with_chrome = no_external_browser_token
+        main.get_recaptcha_v3_token_with_chrome = no_external_browser_token
         recaptcha.find_chrome_executable = lambda: None
         main._cancel_background_task = _bridge_cancel_compat(main._cancel_background_task)
         # Keep the bridge's discovery intact: it also reads CAPTCHA settings
@@ -1515,7 +1481,7 @@ async def _serve_worker(key, qt_helper_command=None):
 
             async def observed_page():
                 page = await original_new_page()
-                _bridge_error_metadata(page)
+                _bridge_error_metadata(page, state.get("stream_activity"))
                 async def before_dispatch(route):
                     nonlocal dispatched
                     request = route.request
@@ -1527,6 +1493,8 @@ async def _serve_worker(key, qt_helper_command=None):
                                 await state["events"].put({"arena_progress": "dispatch"})
                                 await state["dispatch_ack"].wait()
                             dispatched = True
+                            if state.get("stream_started") is not None:
+                                state["stream_started"].set()
                     await route.fallback()
                 # Observe actual dispatch without rewriting the proxy's request.
                 await page.route("**/nextjs-api/stream/**", before_dispatch)
@@ -1646,6 +1614,8 @@ async def _serve_worker(key, qt_helper_command=None):
         state["terminal_error"] = None
         state["usage"] = None
         state["stream_timeout"] = stream_timeout
+        state["stream_started"] = asyncio.Event()
+        state["stream_activity"] = asyncio.Event()
         state["upstream_error"] = None
         state["events"] = asyncio.Queue(maxsize=64)
         state["transport_tasks"] = set()
@@ -1689,9 +1659,12 @@ async def _serve_worker(key, qt_helper_command=None):
             end = object()
             async def produce():
                 upstream = upstream_chunks()
-                try:
+                async def forward():
                     async for chunk in upstream:
                         await events.put(chunk)
+                try:
+                    await _run_stream_with_idle_timeout(forward(), state["stream_activity"],
+                                                        stream_timeout, state["stream_started"])
                 except asyncio.CancelledError:
                     with contextlib.suppress(asyncio.QueueFull):
                         events.put_nowait(asyncio.CancelledError())
@@ -1718,6 +1691,12 @@ async def _serve_worker(key, qt_helper_command=None):
                         continue
                     if item is end:
                         break
+                    if isinstance(item, Exception):
+                        # Headers may already have been sent. Preserve the
+                        # actual browser/idle-timeout failure in the SSE body
+                        # so the client can reject partial output explicitly.
+                        yield "data: " + json.dumps({"error": {"message": str(item)}}) + "\n\n"
+                        return
                     if isinstance(item, BaseException):
                         raise item
                     yield "data: " + json.dumps(item) + "\n\n" if isinstance(item, dict) else item
@@ -1747,7 +1726,6 @@ async def _serve_worker(key, qt_helper_command=None):
         for pool in slots.values():
             for state in pool:
                 await close_slot(state)
-        await playwright.stop()
 
 
 def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=None, selector_enabled=None):
@@ -1784,7 +1762,7 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
                 "background-color: #10a37f; color: white; font-weight: bold; "
                 "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
             )
-            self.login_button.setToolTip("Log into Arena in the automatically installed internal browser")
+            self.login_button.setToolTip("Log into Arena in the app's Qt6 WebEngine browser")
             row.addWidget(self.login_button)
             row.addWidget(self.accounts)
             self.login_button.clicked.connect(self.login)
@@ -1885,7 +1863,7 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
                         + ". Credentials are encrypted and restored automatically. Click to reconnect. "
                         "Saved login does not guarantee CAPTCHA acceptance.")
                 else:
-                    self.login_button.setToolTip("Log into Arena in the automatically installed internal browser")
+                    self.login_button.setToolTip("Log into Arena in the app's Qt6 WebEngine browser")
             self.accounts.blockSignals(True)
             self.accounts.clear()
             ids = sorted({0, login_slot, *[a["slot"] for a in saved_accounts]})
@@ -1944,7 +1922,7 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             self.spinner.stop()
             self.login_button.setIcon(QIcon())
             self.login_button.setText("Arena Login")
-            self.login_button.setToolTip("Log into Arena in the automatically installed internal browser")
+            self.login_button.setToolTip("Log into Arena in the app's Qt6 WebEngine browser")
             if error:
                 icon = "🦀" if "Sign-in cancelled:" in error else "⚠️"
                 self.progress.emit(f"{icon} Arena Login: " + error)
