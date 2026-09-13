@@ -1,10 +1,128 @@
 """Native Qt/CDP regressions. All pages and network responses are local fixtures."""
 import asyncio
+import contextlib
 import json
+import subprocess
+import sys
 
 import pytest
 
-from autharena_browser import _CDP
+from autharena_browser import _CDP, _QtPipeSocket
+
+
+@pytest.fixture
+def qt_relay_process():
+    processes = []
+
+    def start(mode="echo"):
+        process = subprocess.Popen(
+            [sys.executable, "-u", "-c", r'''
+import json
+import sys
+
+mode = sys.argv[1]
+def emit(event, **fields):
+    print(json.dumps(dict(event=event, **fields)), flush=True)
+
+for line in sys.stdin:
+    command = json.loads(line)
+    action = command["action"]
+    if action == "connect":
+        if mode == "connect_error":
+            emit("error", message="fixture connection refused")
+        elif mode == "connect_closed":
+            emit("closed")
+        elif mode == "connect_eof":
+            break
+        else:
+            emit("connected")
+    elif action == "cdp":
+        if mode == "relay_error":
+            emit("error", message="fixture socket failed")
+        elif mode == "relay_closed":
+            emit("closed")
+        elif mode == "relay_eof":
+            break
+        else:
+            emit("message", data=command["message"])
+    elif action == "disconnect" and mode != "unresponsive":
+        emit("closed")
+    elif action == "quit":
+        break
+''', mode], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        processes.append(process)
+        return process
+
+    yield start
+    for process in processes:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        with contextlib.suppress(OSError, ValueError):
+            process.stdin.close()
+        process.stdout.close()
+
+
+def test_qt_pipe_relays_unicode_and_disconnect_stops_reader(qt_relay_process):
+    async def run():
+        process = qt_relay_process()
+        socket = await _QtPipeSocket.connect(process, "ws://127.0.0.1:9222/devtools/browser/test")
+        message = json.dumps({"text": "مرحبا 世界\nnext line"}, ensure_ascii=False)
+        await socket.send(message)
+        assert await asyncio.wait_for(anext(socket), 2) == message
+        await socket.close()
+        await socket.close()
+        assert not socket._reader.is_alive()
+        assert process.stdout.closed
+        with pytest.raises(StopAsyncIteration):
+            await anext(socket)
+        with pytest.raises(RuntimeError, match="closed"):
+            await socket.send("{}")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["connect_error", "connect_closed", "connect_eof"])
+def test_qt_pipe_connect_failure_closes_response_pipe(qt_relay_process, mode):
+    async def run():
+        process = qt_relay_process(mode)
+        with pytest.raises(RuntimeError, match="connection refused|before connecting"):
+            await asyncio.wait_for(_QtPipeSocket.connect(process, "ws://127.0.0.1:1/"), 3)
+        assert process.stdout.closed
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["relay_error", "relay_closed", "relay_eof"])
+def test_qt_pipe_terminal_events_fail_pending_cdp_calls(qt_relay_process, mode):
+    async def run():
+        socket = await _QtPipeSocket.connect(qt_relay_process(mode), "ws://127.0.0.1:9222/")
+        cdp = _CDP(socket, lambda *args: None, lambda: None)
+        try:
+            with pytest.raises(RuntimeError, match="disconnected"):
+                await asyncio.wait_for(cdp.send("Runtime.evaluate", timeout=None), 3)
+            assert not cdp._pending
+            assert cdp.closed
+        finally:
+            await cdp.close()
+        assert not socket._reader.is_alive()
+
+    asyncio.run(run())
+
+
+def test_qt_pipe_unresponsive_helper_is_reaped_on_close(qt_relay_process, monkeypatch):
+    async def run():
+        process = qt_relay_process("unresponsive")
+        socket = await _QtPipeSocket.connect(process, "ws://127.0.0.1:9222/")
+        monkeypatch.setattr(socket, "_CLOSE_TIMEOUT", .5)
+        await asyncio.wait_for(socket.close(), 3)
+        assert process.poll() is not None
+        assert not socket._reader.is_alive()
+        assert process.stdout.closed
+
+    asyncio.run(run())
 
 
 class Socket:
@@ -167,6 +285,9 @@ def test_real_qt_bindings_cross_origin_clicks_and_page_cleanup():
             await context.close()
         assert not context._tasks
         assert not context._cdp._pending
+        assert context.process.returncode == 0
+        assert context.process.stdout.closed
+        assert not context._cdp.socket._reader.is_alive()
 
     asyncio.run(run())
 

@@ -3,8 +3,12 @@
 `autharena_proxy.py` installs uv, managed Python 3.12, and the pinned
 CloudWaddie/LMArenaBridge runtime under `~/.glossarion/autharena_proxy`.
 Arena uses the app's Qt6 WebEngine in a separate app-owned process;
-`autharena_browser.py` controls it directly through the Chrome DevTools Protocol
-(CDP). Setup does not install Playwright, Camoufox, or a separate browser.
+`autharena_browser.py` controls it through the Chrome DevTools Protocol (CDP).
+The helper uses the app's bundled Qt WebSockets module for that connection;
+the managed worker exchanges messages with the helper over standard pipes.
+Browser startup does not probe, install, or upgrade Python connection libraries,
+Qt, Playwright, Camoufox, or a separate browser. An existing managed service
+runtime is reused without a dependency installation check.
 Older managed runtimes may still contain unused packages from previous installs.
 Neither system Python nor an extension is required for packaged builds. Frozen
 builds include the worker, browser adapter, and existing token-encryption module
@@ -112,6 +116,9 @@ Offline tests exercise the pinned bridge's streaming, concurrent account
 isolation, rotation, cancellation, and streaming inactivity limits. Real Qt6
 WebEngine tests also cover browser callbacks, request/response interception,
 cross-origin frame input, login-window closure, and streamed answers through
-the worker with Playwright and Camoufox imports blocked. These use simulated
-website responses; signed-in Arena generation and packaged-build validation
-remain necessary. macOS/Linux paths require native validation.
+the worker with Playwright and Camoufox imports blocked. A Windows windowed
+one-file helper smoke test also verifies the native Qt pipe connection, large
+Unicode transfers, and clean shutdown with Qt and Python WebSocket packages
+unavailable to the worker. These use simulated website responses; signed-in
+Arena generation and full application packaging checks remain necessary.
+macOS/Linux paths require native validation.

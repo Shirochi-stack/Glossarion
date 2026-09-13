@@ -1,7 +1,7 @@
 """The Arena bridge's async browser surface, backed by Qt6 WebEngine CDP.
 
 Qt owns the profile, views and Chromium processes. This module only sends
-DevTools messages to the loopback socket opened by the application's Qt helper;
+DevTools messages through the application's Qt helper over standard I/O;
 it neither installs nor launches a separate browser or automation driver.
 """
 from __future__ import annotations
@@ -13,18 +13,156 @@ import inspect
 import json
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-
-import websockets
-
 
 class QtBrowserFactory:
     """Import placeholder replaced with the account's bound Qt context lease."""
 
     def __init__(self, **kwargs):
         raise RuntimeError("Arena's Qt browser factory must be bound to an account context.")
+
+
+def _write_helper(process, message):
+    # All writes run synchronously on the owning event loop, so window commands
+    # and CDP messages cannot interleave within a JSON line.
+    if process.poll() is not None:
+        raise RuntimeError("Arena Qt browser exited.")
+    try:
+        process.stdin.write(json.dumps(message) + "\n")
+        process.stdin.flush()
+    except (AttributeError, OSError, ValueError) as exc:
+        raise RuntimeError("Arena Qt browser command pipe is closed.") from exc
+
+
+class _QtPipeSocket:
+    """Async CDP stream relayed by the helper's bundled Qt WebSocket client."""
+
+    _CLOSE_TIMEOUT = 3
+
+    def __init__(self, process):
+        self.process = process
+        self._loop = asyncio.get_running_loop()
+        self._incoming = asyncio.Queue()
+        self._connected = self._loop.create_future()
+        self._stopped = asyncio.Event()
+        self._close_lock = asyncio.Lock()
+        self._closed = False
+        self._terminal = False
+        self._disposed = False
+        self._reader = threading.Thread(target=self._read_pipe, daemon=True,
+                                        name="Arena Qt relay reader")
+        self._reader.start()
+
+    @classmethod
+    async def connect(cls, process, endpoint):
+        if process.stdout is None:
+            raise RuntimeError("Arena Qt browser response pipe is unavailable.")
+        self = cls(process)
+        try:
+            _write_helper(process, {"action": "connect", "endpoint": endpoint})
+            await asyncio.wait_for(self._connected, 15)
+            return self
+        except BaseException:
+            if not self._connected.done():
+                self._connected.cancel()
+            elif not self._connected.cancelled():
+                self._connected.exception()
+            await self.close()
+            raise
+
+    def _dispatch(self, callback, *args):
+        # Shutdown must not leave a reader trying to use an already closed loop.
+        with contextlib.suppress(RuntimeError):
+            self._loop.call_soon_threadsafe(callback, *args)
+
+    def _read_pipe(self):
+        try:
+            for line in self.process.stdout:
+                try:
+                    event = json.loads(line)
+                    if not isinstance(event, dict):
+                        raise ValueError("Expected a Qt relay event")
+                    if event.get("event") not in ("connected", "message", "error", "closed"):
+                        raise ValueError("Unknown Qt relay event")
+                    if event["event"] == "message" and not isinstance(event.get("data"), str):
+                        raise ValueError("Expected a CDP message string")
+                except (TypeError, ValueError) as exc:
+                    self._dispatch(self._finish, RuntimeError(f"Arena Qt browser sent an invalid relay event: {exc}"))
+                    break
+                self._dispatch(self._receive, event)
+                if event.get("event") in ("error", "closed"):
+                    break
+        except (OSError, ValueError) as exc:
+            self._dispatch(self._finish, RuntimeError(f"Arena Qt browser response pipe failed: {exc}"))
+        finally:
+            self._dispatch(self._finish)
+            self._dispatch(self._stopped.set)
+
+    def _finish(self, error=None):
+        if self._terminal:
+            return
+        self._closed = self._terminal = True
+        if not self._connected.done():
+            self._connected.set_exception(error or RuntimeError("Arena Qt browser disconnected before connecting."))
+        self._incoming.put_nowait(error)
+
+    def _receive(self, event):
+        if self._terminal:
+            return
+        kind = event.get("event")
+        if kind == "connected":
+            if not self._connected.done():
+                self._connected.set_result(None)
+        elif kind == "message":
+            self._incoming.put_nowait(event["data"])
+        elif kind == "error":
+            self._finish(RuntimeError("Arena Qt browser relay failed: " + str(event.get("message", "unknown error"))))
+        elif kind == "closed":
+            self._finish()
+
+    async def send(self, message):
+        if self._closed:
+            raise RuntimeError("Arena Qt browser connection is closed.")
+        _write_helper(self.process, {"action": "cdp", "message": message})
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._terminal and self._incoming.empty():
+            raise StopAsyncIteration
+        message = await self._incoming.get()
+        if message is None:
+            raise StopAsyncIteration
+        if isinstance(message, Exception):
+            raise message
+        return message
+
+    async def close(self):
+        async with self._close_lock:
+            if self._disposed:
+                return
+            self._closed = True
+            if not self._stopped.is_set():
+                if not self._terminal:
+                    with contextlib.suppress(RuntimeError):
+                        _write_helper(self.process, {"action": "disconnect"})
+                try:
+                    await asyncio.wait_for(self._stopped.wait(), self._CLOSE_TIMEOUT)
+                except TimeoutError:
+                    # This helper belongs only to this context. If Qt no longer
+                    # responds, ending it releases the blocked stdout reader.
+                    if self.process.poll() is None:
+                        self.process.kill()
+                    await asyncio.to_thread(self.process.wait, timeout=self._CLOSE_TIMEOUT)
+                    await asyncio.wait_for(self._stopped.wait(), self._CLOSE_TIMEOUT)
+            self._finish()
+            self._reader.join(timeout=self._CLOSE_TIMEOUT)
+            self.process.stdout.close()
+            self._disposed = True
 
 
 class _CDP:
@@ -117,7 +255,7 @@ class QtArenaContext:
     @classmethod
     async def connect(cls, process, endpoint):
         self = cls(process)
-        socket = await websockets.connect(endpoint, open_timeout=15, max_size=None, proxy=None)
+        socket = await _QtPipeSocket.connect(process, endpoint)
         self._cdp = _CDP(socket, self._event, self._disconnected)
         try:
             result = await self._cdp.send("Target.getTargets")
@@ -213,10 +351,7 @@ class QtArenaContext:
                 if target != self._keeper and not page.is_closed() and page._ready.is_set()]
 
     def command(self, action, target=None):
-        if self.process.poll() is not None:
-            raise RuntimeError("Arena Qt browser exited.")
-        self.process.stdin.write(json.dumps({"action": action, "target": target}) + "\n")
-        self.process.stdin.flush()
+        _write_helper(self.process, {"action": action, "target": target})
 
     async def new_page(self):
         async with self._new_lock:
@@ -277,6 +412,8 @@ class QtArenaContext:
         for task in list(self._tasks):
             task.cancel()
         await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        # Keep the response pipe open until Qt has finished emitting its
+        # shutdown signals. Closing stdout first breaks windowed exe shutdown.
         if self.process.poll() is None:
             with contextlib.suppress(Exception):
                 self.command("quit")
@@ -288,7 +425,8 @@ class QtArenaContext:
         if self._cdp:
             await self._cdp.close()
         if self.process.stdin:
-            self.process.stdin.close()
+            with contextlib.suppress(OSError, ValueError):
+                self.process.stdin.close()
 
 
 def _expression(script, arg=None):

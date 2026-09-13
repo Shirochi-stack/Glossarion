@@ -29,7 +29,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 33
+ADAPTER_VERSION = 34
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
@@ -188,11 +188,11 @@ def _qt_helper_command():
     import importlib.util
     try:
         available = all(importlib.util.find_spec(name) is not None for name in (
-            "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets"))
+            "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebSockets"))
     except (ImportError, ValueError):
         available = False
     if not available:
-        raise RuntimeError("Arena requires Qt6 WebEngine in the running application. "
+        raise RuntimeError("Arena requires Qt6 WebEngine and Qt WebSockets in the running application. "
                            "This installation/build does not include it; no Qt download was attempted.")
     if getattr(sys, "frozen", False):
         return [sys.executable, "--autharena-qt-browser"]
@@ -203,13 +203,14 @@ def _qt_browser_helper(visible=False):
     """Own Qt pages on the GUI thread; the bridge drives them over loopback CDP."""
     # Windowed PyInstaller builds set Python's stdio objects to None even
     # when the parent supplied pipes. Recover those inherited handles.
-    if os.name == "nt" and (sys.stdin is None or sys.stderr is None):
+    if os.name == "nt" and any(getattr(sys, name) is None for name in ("stdin", "stdout", "stderr")):
         import ctypes
         import msvcrt
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel.GetStdHandle.argtypes = [ctypes.c_ulong]
         kernel.GetStdHandle.restype = ctypes.c_void_p
         for name, number, mode, flags in (("stdin", -10, "r", os.O_RDONLY),
+                                          ("stdout", -11, "w", os.O_WRONLY),
                                           ("stderr", -12, "w", os.O_WRONLY)):
             if getattr(sys, name) is None:
                 handle = kernel.GetStdHandle(number & 0xffffffff)
@@ -217,18 +218,42 @@ def _qt_browser_helper(visible=False):
                 setattr(sys, name, os.fdopen(fd, mode, encoding="utf-8", buffering=1))
     if not visible:
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
-    from PySide6.QtCore import QObject, Signal, QTimer, QUrl, Qt, qInstallMessageHandler
+    from PySide6.QtCore import QObject, Signal, QTimer, QUrl, Qt, QCoreApplication, QEvent, qInstallMessageHandler
     if sys.stderr is not None:
         def qt_message(kind, context, message):
             sys.stderr.write(message + "\n")
             sys.stderr.flush()
         qInstallMessageHandler(qt_message)
     from PySide6.QtWidgets import QApplication
+    from PySide6.QtNetwork import QNetworkProxy
+    from PySide6.QtWebSockets import QWebSocket
     from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
     from PySide6.QtWebEngineWidgets import QWebEngineView
 
     app = QApplication(["Arena Browser"])
     app.setQuitOnLastWindowClosed(False)
+
+    relay_finished = False
+
+    def relay_event(event, **values):
+        nonlocal relay_finished
+        if relay_finished:
+            return
+        # Qt may emit disconnected after an error or our explicit close reply.
+        # The worker stops reading on the first terminal event.
+        if event in ("error", "closed"):
+            relay_finished = True
+        sys.stdout.write(json.dumps({"event": event, **values}, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
+
+    # Use the app's Qt networking library. The managed worker exchanges CDP
+    # messages over its existing pipes and needs no WebSocket Python package.
+    socket = QWebSocket(parent=app)
+    socket.setProxy(QNetworkProxy(QNetworkProxy.NoProxy))
+    socket.connected.connect(lambda: relay_event("connected"))
+    socket.textMessageReceived.connect(lambda message: relay_event("message", data=message))
+    socket.errorOccurred.connect(lambda error: relay_event("error", message=socket.errorString()))
+    socket.disconnected.connect(lambda: relay_event("closed"))
     # Off-the-record profile: Arena cookies are persisted only in our encrypted store.
     profile = QWebEngineProfile(app)
     profile.setHttpCacheType(QWebEngineProfile.MemoryHttpCache)
@@ -267,7 +292,22 @@ def _qt_browser_helper(visible=False):
     commands = Commands()
     def execute(command):
         action = command.get("action")
-        if action == "new":
+        if action == "connect":
+            endpoint = command.get("endpoint", "")
+            match = re.fullmatch(r"ws://127\.0\.0\.1:(\d+)/devtools/browser/[a-fA-F0-9-]+", endpoint) if isinstance(endpoint, str) else None
+            if not match or not 0 < int(match.group(1)) < 65536:
+                relay_event("error", message="Arena Qt browser endpoint must use a local loopback socket.")
+                return
+            socket.open(QUrl(endpoint))
+        elif action == "cdp":
+            message = command.get("message")
+            if isinstance(message, str):
+                socket.sendTextMessage(message)
+        elif action == "disconnect":
+            socket.close()
+            # A socket that already failed need not emit disconnected again.
+            relay_event("closed")
+        elif action == "new":
             create_page(True)  # Offscreen helpers still need an active rendered view.
         elif action == "show" and visible:
             view = pages.get(command.get("target"))
@@ -290,9 +330,19 @@ def _qt_browser_helper(visible=False):
     threading.Thread(target=read_commands, daemon=True).start()
     create_page(False)  # Keeper page for profile cookie operations.
     result = app.exec()
+    socket.abort()
+    # deleteLater() cannot run through the main event loop after app.exec()
+    # returns. Destroy every page while its profile is still alive, then drain
+    # the profile's deletion too; Qt WebEngine otherwise crashes during exit.
     for view in list(pages.values()):
         view.close()
         view.deleteLater()
+    pages.clear()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    profile.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     return result
 
 
@@ -326,7 +376,7 @@ async def _open_qt_browser(visible=False):
                 process = subprocess.Popen(
                     _qt_helper_command()
                     + (["--visible"] if visible else []),
-                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=startup_log,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=startup_log,
                     text=True, encoding="utf-8", env=_qt_browser_env(port, visible, attempt > 0),
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 deadline = time.monotonic() + 30
@@ -347,7 +397,9 @@ async def _open_qt_browser(visible=False):
                     if process.poll() is None:
                         process.kill()
                     await asyncio.to_thread(process.wait)
-                    process.stdin.close()
+                    for pipe in (process.stdin, process.stdout):
+                        with contextlib.suppress(OSError):
+                            pipe.close()
                 if browser is not None:
                     with contextlib.suppress(Exception):
                         await browser.close()
@@ -547,21 +599,6 @@ def _run(args, log_fn=print):
     return result.stdout.strip()
 
 
-def _ensure_browser(runtime, python, log_fn=print, refresh=False):
-    marker = runtime / "qt-native-ready"
-    if not refresh and marker.exists():
-        return
-    probe = [python, "-c", "from websockets.asyncio.client import connect; import inspect; assert 'proxy' in inspect.signature(connect).parameters"]
-    try:
-        _run(probe, log_fn)
-    except RuntimeError:
-        log_fn("🌐 Arena: installing the Qt WebEngine connection library…")
-        uv = data_dir() / ("uv.exe" if os.name == "nt" else "uv")
-        _run([uv, "pip", "install", "--python", python, "websockets>=15,<17"], log_fn)
-        _run(probe, log_fn)
-    marker.write_text("qt6-native", encoding="ascii")
-
-
 def _download(url, target):
     with requests.get(url, stream=True, timeout=(15, 180)) as response:
         response.raise_for_status()
@@ -639,7 +676,6 @@ def _ensure_runtime(log_fn=print):
     runtime = root / ("bridge-" + REVISION)
     python = runtime / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     if (runtime / "ready").exists() and python.exists():
-        _ensure_browser(runtime, python, log_fn)
         return runtime, python
     log_fn("Arena: downloading the managed Python runtime and LMArenaBridge…")
     machine = platform.machine().lower()
@@ -676,13 +712,13 @@ def _ensure_runtime(log_fn=print):
         log_fn("Arena: installing proxy dependencies…")
         # The pinned bridge's generic requirements include external browser
         # automation packages. Qt is provided by the app; install only its
-        # service dependencies and our lightweight CDP connection library.
+        # service dependencies. The application's Qt helper owns the browser
+        # and its native WebSocket connection; the worker uses stdlib pipes.
         requirements = runtime / "qt-requirements.txt"
         requirements.write_text(_qt_bridge_requirements(
             (runtime / "bridge/requirements.txt").read_text(encoding="utf-8")), encoding="utf-8")
         _run([uv, "pip", "install", "--python", python, "-r", requirements,
-              "requests", "cryptography", "websockets>=15,<17"], log_fn)
-        _ensure_browser(runtime, python, log_fn, refresh=True)
+              "requests", "cryptography"], log_fn)
         (runtime / "ready").write_text(REVISION, encoding="ascii")
     return runtime, python
 

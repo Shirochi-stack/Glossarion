@@ -172,15 +172,22 @@ def test_large_translation_environment_not_inherited(monkeypatch):
     assert sum(len(k) + len(v) for k, v in env.items()) < 32767
 
 
-def test_cached_runtime_does_not_download_or_require_system_python(monkeypatch):
+@pytest.mark.parametrize('frozen', [False, True])
+@pytest.mark.parametrize('legacy_marker', [None, 'qt-bridge-ready', 'qt-native-ready'])
+def test_cached_runtime_never_probes_or_installs_browser_dependencies(monkeypatch, frozen, legacy_marker):
     runtime = arena.data_dir() / ("bridge-" + arena.REVISION)
     python = runtime / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     python.parent.mkdir(parents=True)
     python.touch()
     (runtime / "ready").touch()
-    (runtime / "qt-native-ready").write_text("qt6-native", encoding="utf-8")
+    if legacy_marker:
+        (runtime / legacy_marker).touch()
+    monkeypatch.setattr(arena.sys, 'frozen', frozen, raising=False)
     monkeypatch.setattr(arena, "_download", lambda *args: pytest.fail("Unexpected download"))
-    assert arena._ensure_runtime() == (runtime, python)
+    monkeypatch.setattr(arena, '_run', lambda *args: pytest.fail('Unexpected dependency probe or install'))
+    logs = []
+    assert arena._ensure_runtime(logs.append) == (runtime, python)
+    assert logs == []
 
 
 def test_install_lock_does_not_block_gui_accounts_or_cancellation():
@@ -387,33 +394,6 @@ def test_frozen_specs_include_managed_worker_source():
         assert "('autharena_proxy.py', '.')" in text, spec.name
         assert "('token_encryption.py', '.')" in text, spec.name
         ast.parse(text)
-
-
-def test_qt_connection_dependency_reuses_cache(tmp_path, monkeypatch):
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-    browser = tmp_path / "managed-browser.exe"
-    browser.touch()
-    calls = []
-    def run(args, log_fn):
-        calls.append(args)
-        return str(browser) if "-c" in args else ""
-    monkeypatch.setattr(arena, "_run", run)
-    arena._ensure_browser(runtime, "managed-python", lambda message: None)
-    assert calls[0][0:2] == ["managed-python", "-c"]
-    assert len(calls) == 1
-    arena._ensure_browser(runtime, "managed-python", lambda message: None)
-    assert len(calls) == 1
-    assert "PLAYWRIGHT_BROWSERS_PATH" not in arena._env()
-
-
-def test_failed_browser_install_is_not_cached(tmp_path, monkeypatch):
-    def fail(*args):
-        raise RuntimeError("download failed")
-    monkeypatch.setattr(arena, "_run", fail)
-    with pytest.raises(RuntimeError, match="download failed"):
-        arena._ensure_browser(tmp_path, "managed-python", lambda message: None)
-    assert not (tmp_path / "qt-native-ready").exists()
 
 
 @pytest.mark.parametrize("version", [None, 1])
@@ -699,18 +679,23 @@ def test_missing_bundled_webengine_is_reported_without_downloading(monkeypatch):
         arena._qt_helper_command()
 
 
-def test_bridge_upgrade_installs_only_qt_connection_dependency(tmp_path, monkeypatch):
+def test_fresh_runtime_installs_only_bridge_service_dependencies(monkeypatch):
+    (arena.data_dir() / ('uv.exe' if os.name == 'nt' else 'uv')).touch()
+    monkeypatch.setattr(arena, '_download', lambda *args: None)
+    def extract(archive, target):
+        source = target / 'upstream/src'
+        source.mkdir(parents=True)
+        (source / 'main.py').write_text('async def api_chat_completions\nasync def get_initial_data\nSTRICT_BROWSER_FETCH_MODELS')
+        (source.parent / 'requirements.txt').write_text('fastapi\nuvicorn\ncamoufox\nplaywright\nhttpx\n')
+    monkeypatch.setattr(arena, '_extract', extract)
     calls = []
-    def run(args, log_fn):
-        calls.append(args)
-        if len(calls) == 1:
-            raise RuntimeError("missing websockets.asyncio")
-        return ''
-    monkeypatch.setattr(arena, '_run', run)
-    arena._ensure_browser(tmp_path, 'managed-python', lambda text: None)
-    assert len(calls) == 3
-    assert calls[1][1:] == ['pip', 'install', '--python', 'managed-python', 'websockets>=15,<17']
-    assert all(not any(package in str(call) for package in ('PySide6', 'playwright', 'camoufox')) for call in calls)
+    monkeypatch.setattr(arena, '_run', lambda args, log_fn: calls.append([str(arg) for arg in args]))
+    runtime, python = arena._ensure_runtime(lambda message: None)
+    assert len(calls) == 3  # Managed Python, venv, and service dependencies only.
+    assert calls[-1][1:5] == ['pip', 'install', '--python', str(python)]
+    assert calls[-1][-2:] == ['requests', 'cryptography']
+    assert all(not any(package in str(call) for package in ('websockets', 'PySide6', 'playwright', 'camoufox')) for call in calls)
+    assert (runtime / 'qt-requirements.txt').read_text().splitlines() == ['fastapi', 'uvicorn', 'httpx']
 
 
 def test_qt_requirements_exclude_external_browser_dependencies():
@@ -753,16 +738,6 @@ def test_bridge_factory_import_never_loads_external_browsers(tmp_path, monkeypat
         for name in list(sys.modules):
             if name.startswith(package.__name__ + '.'):
                 sys.modules.pop(name, None)
-
-
-def test_old_playwright_ready_marker_requires_native_dependency_probe(tmp_path, monkeypatch):
-    (tmp_path / 'qt-bridge-ready').write_text('qt6')
-    calls = []
-    monkeypatch.setattr(arena, '_run', lambda args, log_fn: calls.append(args))
-    arena._ensure_browser(tmp_path, 'managed-python')
-    assert len(calls) == 1
-    assert 'websockets.asyncio.client' in calls[0][-1]
-    assert (tmp_path / 'qt-native-ready').exists()
 
 
 def test_frozen_arena_entrypoint_runs_helper_before_gui_imports(monkeypatch):

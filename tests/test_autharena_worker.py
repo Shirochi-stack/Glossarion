@@ -285,6 +285,7 @@ class LoginNavigationTest(unittest.TestCase):
             class FailedProcess:
                 returncode = 1
                 stdin = io.StringIO()
+                stdout = io.StringIO()
                 def poll(self): return 1
                 def wait(self, **kwargs): return 1
             def popen(*args, **kwargs):
