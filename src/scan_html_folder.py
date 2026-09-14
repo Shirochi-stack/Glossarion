@@ -27,6 +27,7 @@ import json
 import zipfile
 import csv
 from bs4 import BeautifulSoup, Comment, NavigableString
+from bs4.element import CData, RubyTextString, RubyParenthesisString
 from _empty_attr_fix import count_empty_attr_tags, find_empty_attr_tags
 from langdetect import detect, LangDetectException
 from difflib import SequenceMatcher
@@ -985,24 +986,30 @@ def _foreign_character_qa_text(
     headers_only=False,
 ):
     """Return text eligible for foreign-character QA under the title policy."""
-    if _scan_should_translate_title_tags(qa_settings):
+    translate_titles = _scan_should_translate_title_tags(qa_settings)
+    # BeautifulSoup's default get_text() omits RubyTextString (<rt>) and
+    # RubyParenthesisString (<rp>), even when their content is untranslated.
+    if translate_titles and not re.search(r'<(?:ruby|rb|rt|rp|rtc)\b', str(html_content or ''), re.I):
         return str(fallback_text or "")
     if not isinstance(html_content, str) or not html_content.strip():
         return str(fallback_text or "")
 
     try:
         soup = BeautifulSoup(html_content, "html.parser")
+        text_types = (NavigableString, CData, RubyTextString, RubyParenthesisString)
         if headers_only:
             return "\n".join(
-                tag.get_text(" ", strip=True)
+                tag.get_text(" ", strip=True, types=text_types)
                 for tag in soup.find_all(
                     ["h1", "h2", "h3", "h4", "h5", "h6"]
+                    + (["title"] if translate_titles else [])
                 )
-                if tag.get_text(" ", strip=True)
+                if tag.get_text(" ", strip=True, types=text_types)
             ).strip()
-        for title_tag in soup.find_all("title"):
-            title_tag.decompose()
-        return soup.get_text(separator="\n", strip=True)
+        if not translate_titles:
+            for title_tag in soup.find_all("title"):
+                title_tag.decompose()
+        return soup.get_text(separator="\n", strip=True, types=text_types)
     except Exception:
         return str(fallback_text or "")
 
@@ -1396,8 +1403,9 @@ def detect_non_english_content(text, qa_settings=None):
             if char in all_excluded_chars:
                 continue
             
-            # Skip whitespace and common punctuation
-            if char.isspace() or char in '[](){}.,;:!?\'"-':
+            # Unicode blocks also contain punctuation (e.g. Japanese ・/･).
+            # Punctuation is not evidence of untranslated language.
+            if char.isspace() or unicodedata.category(char).startswith('P'):
                 continue
                 
             code_point = ord(char)

@@ -1162,6 +1162,61 @@ def test_sequential_title_only_path_uses_isolated_message_builder():
     assert "if not title_tag_only_request and config.CONTEXTUAL" in sequential_source
 
 
+@pytest.mark.parametrize("punctuation", ["・", "･", "•", "゠", "،", "؟", "־", "。"])
+def test_foreign_qa_does_not_count_unicode_punctuation(punctuation):
+    settings = {"target_language": "english", "foreign_char_threshold": 0}
+    assert detect_non_english_content(
+        f"{punctuation * 18} English bullet point.", settings
+    ) == (False, [])
+    flagged, issues = detect_non_english_content(f"{punctuation} あ", settings)
+    assert flagged
+    assert issues == ["Japanese_text_found_1_chars_[あ]"]
+
+
+@pytest.mark.parametrize("skip_titles", [False, True])
+@pytest.mark.parametrize("markup", [
+    "<ruby>あいう</ruby>",
+    "<ruby><rb>あいう</rb><rt>reading</rt></ruby>",
+    "<ruby>English<rt>あいう</rt></ruby>",
+    "<ruby>English<rtc><rt>あいう</rt></rtc></ruby>",
+    "<ruby>English<rp>あいう</rp></ruby>",
+])
+def test_foreign_qa_includes_ruby_text_and_chunk_location(markup, skip_titles):
+    settings = {
+        "target_language": "english", "foreign_char_threshold": 0,
+        "skip_title_tag_translation": skip_titles,
+    }
+    html = f"<h2>{markup}</h2><p>English text.</p>"
+    fallback = BeautifulSoup(html, "html.parser").get_text("\n", strip=True)
+    for headers_only in (False, True):
+        text = _foreign_character_qa_text(
+            fallback, html, settings, headers_only=headers_only
+        )
+        assert "あいう" in text
+        flagged, issues = detect_non_english_content(text, settings)
+        assert flagged
+        assert _chunk_issue_matches(issues[0], html, fallback, "", settings)
+        assert not _chunk_issue_matches(
+            issues[0], "<p>English only.</p>", "English only.", "", settings
+        )
+
+
+def test_scan_worker_preserves_ruby_readings_for_foreign_qa(tmp_path):
+    html = "<p>・ English <ruby>name<rb>base</rb><rt>あいう</rt></ruby></p>"
+    (tmp_path / "chapter.html").write_text(html, encoding="utf-8")
+    settings = default_qa_scan_settings()
+    settings.update(skip_title_tag_translation=False, foreign_char_threshold=0,
+                    target_language="english")
+    results = process_html_file_batch((
+        [(0, "chapter.html")], str(tmp_path), settings, "quick-scan",
+        {}, {}, False, {}, {},
+    ))
+    assert len(results) == 1
+    assert detect_non_english_content(results[0]["foreign_qa_text"], settings) == (
+        True, ["Japanese_text_found_3_chars_[あいう]"]
+    )
+
+
 def test_scanner_foreign_character_filter_respects_title_skip_setting():
     html = (
         "<html><head><title>義妹生活</title></head>"
