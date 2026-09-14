@@ -27249,6 +27249,15 @@ class RetranslationMixin:
             elif _st in ('failed', 'qa_failed', 'refine_failed'):
                 failed += 1
 
+        # Failure navigation includes child rows, so count those failures too.
+        failed += sum(
+            1 for info in chapter_display_info
+            if info.get('is_chunk_progress')
+            and not self._progress_entry_is_skipped_special(info)
+            and self._progress_display_status(info, _stats_data)
+            in ('failed', 'qa_failed', 'refine_failed')
+        )
+
         # Create labels (outside the if/else so they always appear)
         stats_font = QFont('Arial', 9)
         
@@ -31919,6 +31928,7 @@ class RetranslationMixin:
                 expanded.append({
                     "key": f"chunk:{chunk_key}:{chunk_index}",
                     "num": parent.get("num"),
+                    "display_num": parent.get("display_num", parent.get("num")),
                     "info": record,
                     "output_file": parent.get("output_file", ""),
                     "status": record.get("status", "pending"),
@@ -33380,6 +33390,13 @@ class RetranslationMixin:
                 pending = sum(1 for status in display_statuses if status == 'pending')
                 missing = sum(1 for status in display_statuses if status in ['not_translated', 'not_refined', 'no_tts'])
                 failed = sum(1 for status in display_statuses if status in ['failed', 'qa_failed', 'refine_failed'])
+                failed += sum(
+                    1 for info in data.get('chapter_display_info', [])
+                    if info.get('is_chunk_progress')
+                    and not self._progress_entry_is_skipped_special(info)
+                    and self._progress_display_status(info, data)
+                    in ('failed', 'qa_failed', 'refine_failed')
+                )
             
             mode = self._current_progress_output_mode(data)
             stats_fingerprint = (
