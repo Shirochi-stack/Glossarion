@@ -1217,6 +1217,26 @@ def test_scan_worker_preserves_ruby_readings_for_foreign_qa(tmp_path):
     )
 
 
+@pytest.mark.parametrize('target', ['english', 'spanish', 'french', 'german', 'portuguese', 'italian'])
+def test_cyrillic_lookalikes_whitelisted_for_latin_targets(target):
+    settings = {'target_language': target, 'foreign_char_threshold': 0}
+    lookalikes = '\u043e\u0430\u0435\u0441\u0440\u0445\u0443'
+    assert detect_non_english_content(lookalikes, settings) == (False, [])
+    assert detect_non_english_content(lookalikes + '\u0436', settings) == (
+        True, ['Cyrillic_text_found_1_chars_[ж]']
+    )
+
+
+@pytest.mark.parametrize('target', ['japanese', 'chinese', 'korean', 'arabic'])
+def test_cyrillic_lookalikes_remain_foreign_for_non_latin_targets(target):
+    flagged, issues = detect_non_english_content(
+        '\u043e\u0430\u0435\u0441\u0440\u0445\u0443',
+        {'target_language': target, 'foreign_char_threshold': 0},
+    )
+    assert flagged
+    assert issues[0].startswith('Cyrillic_text_found_7_chars_')
+
+
 def test_scanner_foreign_character_filter_respects_title_skip_setting():
     html = (
         "<html><head><title>義妹生活</title></head>"

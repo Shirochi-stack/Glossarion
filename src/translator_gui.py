@@ -28202,7 +28202,7 @@ Recent translations to summarize:
         """Keep the target-language placeholder hint label present."""
         try:
             if hasattr(self, 'target_lang_warning') and self.target_lang_warning:
-                self.target_lang_warning.setText("Targe Language Placeholder {target_lang}")
+                self.target_lang_warning.setText("Target Language Placeholder {target_lang}")
                 self.target_lang_warning.show()
         except Exception:
             pass

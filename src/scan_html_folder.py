@@ -1276,6 +1276,10 @@ def detect_non_english_content(text, qa_settings=None):
     
     # Latin-based languages that need language detection
     latin_languages = ['english', 'spanish', 'french', 'german', 'portuguese', 'italian']
+    if target_language in latin_languages:
+        # Accepted Cyrillic lookalikes: Latin o, a, e, c, p, x, y.
+        # This is a QA whitelist only; the saved text remains unchanged.
+        all_excluded_chars.update('\u043e\u0430\u0435\u0441\u0440\u0445\u0443')
     
     if target_language in latin_languages and len(filtered_text.strip()) > 100:
         # Try to detect the actual language of the text
