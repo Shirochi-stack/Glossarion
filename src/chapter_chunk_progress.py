@@ -7,6 +7,7 @@ importing the full translation pipeline.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import os
 import re
@@ -328,6 +329,8 @@ def record_chunk_result(
     key = str(index)
     entry.setdefault("chunks", {})[key] = result
     record = _chunk_record(entry, index, create=True)
+    record.pop("previous_progress_entry", None)
+    record.pop("previous_chunk_metadata", None)
     record.update({
         "index": index,
         "status": "completed",
@@ -378,6 +381,21 @@ def set_chunk_runtime_status(
     if record is None:
         return False
     key = str(_positive_int(chunk_index))
+    if status == "pending":
+        # Runtime cancellation restores earlier work; destructive resets use
+        # reset_chunks_for_retranslation instead.
+        restored = _restore_chunk_runtime_record(entry, key)
+        if restored:
+            _sync_chunk_runtime_summary(entry)
+        return restored
+    if record.get("status") != "in_progress":
+        record["previous_progress_entry"] = copy.deepcopy({
+            field: value for field, value in record.items()
+            if field not in {"previous_progress_entry", "previous_chunk_metadata"}
+        })
+        record["previous_chunk_metadata"] = copy.deepcopy(
+            entry.get("chunk_metadata", {}).get(key)
+        )
     record["status"] = status
     if model_name:
         record["model_name"] = str(model_name).strip()
@@ -395,6 +413,11 @@ def set_chunk_runtime_status(
             current_metadata["key_identifier"] = str(key_identifier).strip()
         metadata[key] = current_metadata
     record["last_updated"] = time.time()
+    _sync_chunk_runtime_summary(entry)
+    return True
+
+
+def _sync_chunk_runtime_summary(entry):
     ensure_chunk_entry_schema(entry)
     statuses = {
         str(value.get("status") or "pending").lower()
@@ -410,11 +433,34 @@ def set_chunk_runtime_status(
     else:
         entry["chapter_status"] = "completed"
     entry["last_updated"] = time.time()
+
+
+def _restore_chunk_runtime_record(entry, key):
+    record = entry.get("entries", {}).get(key)
+    if not isinstance(record, dict) or record.get("status") != "in_progress":
+        return False
+    previous = record.pop("previous_progress_entry", None)
+    metadata = record.pop("previous_chunk_metadata", None)
+    if isinstance(previous, dict):
+        record.clear()
+        record.update(copy.deepcopy(previous))
+        if isinstance(metadata, dict):
+            entry.setdefault("chunk_metadata", {})[key] = copy.deepcopy(metadata)
+        else:
+            entry.get("chunk_metadata", {}).pop(key, None)
+    else:
+        # Legacy interrupted rows have no dispatch snapshot. Keep known QA
+        # findings when their saved result still exists.
+        record["status"] = (
+            "qa_failed" if record.get("qa_issues_found")
+            and key in entry.get("chunks", {}) else "pending"
+        )
+    record["last_updated"] = time.time()
     return True
 
 
 def reset_in_progress_chunks(entry):
-    """Return all interrupted in-flight chunks to resumable pending state."""
+    """Restore interrupted chunks without changing committed results."""
     if not isinstance(entry, dict):
         return []
     ensure_chunk_entry_schema(entry)
@@ -422,27 +468,14 @@ def reset_in_progress_chunks(entry):
     for raw_index, record in entry.get("entries", {}).items():
         if not isinstance(record, dict):
             continue
-        if str(record.get("status") or "").lower() != "in_progress":
+        if not _restore_chunk_runtime_record(entry, raw_index):
             continue
-        record["status"] = "pending"
-        record["last_updated"] = time.time()
         try:
             reset.append(int(raw_index))
         except (TypeError, ValueError):
             pass
     if reset:
-        statuses = {
-            str(value.get("status") or "pending").lower()
-            for value in entry.get("entries", {}).values()
-            if isinstance(value, dict)
-        }
-        entry["chapter_status"] = (
-            "qa_failed"
-            if statuses.intersection({"qa_failed", "failed"})
-            else "incomplete"
-        )
-        entry["last_updated"] = time.time()
-        ensure_chunk_entry_schema(entry)
+        _sync_chunk_runtime_summary(entry)
     return sorted(reset)
 
 
@@ -455,6 +488,8 @@ def set_chunk_qa(entry, chunk_index, issues, previews=None, confidence=0):
     if record is None:
         return False
     issues = list(issues or [])
+    record.pop("previous_progress_entry", None)
+    record.pop("previous_chunk_metadata", None)
     record["qa_issues_found"] = issues
     record["qa_issue_previews"] = dict(previews or {})
     record["qa_timestamp"] = time.time()
@@ -496,6 +531,7 @@ def reset_chunks_for_retranslation(entry, chunk_indices: Iterable[int]):
         for field in (
             "result_sha256", "model_name", "key_identifier", "qa_timestamp",
             "duplicate_confidence",
+            "previous_progress_entry", "previous_chunk_metadata",
         ):
             record.pop(field, None)
         record["status"] = "pending"

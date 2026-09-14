@@ -100,6 +100,7 @@ from chapter_chunk_progress import (
     chunk_failure_summary,
     effective_parent_status,
     ensure_chunk_entry_schema,
+    extract_marked_chunks,
     is_multi_chunk_entry,
     remove_chunk_segments_from_file,
     reset_chunks_for_retranslation,
@@ -118,7 +119,7 @@ _MISSING_IMAGE_QA_RE = re.compile(
 )
 
 
-def _sync_parent_chunk_qa_summary(prog, parent_key, chunk_key):
+def _sync_parent_chunk_qa_summary(prog, parent_key, chunk_key, output_dir=None):
     """Mirror aggregate child QA state without failing the parent chapter."""
     if not isinstance(prog, dict):
         return None
@@ -147,7 +148,169 @@ def _sync_parent_chunk_qa_summary(prog, parent_key, chunk_key):
     }
     if not failed_indices:
         parent.pop("chunk_qa_issues_found", None)
+    status = str(parent.get("status") or "").lower()
+    if summary["pending"] and status == "completed":
+        parent["status"] = "pending"
+        parent["last_updated"] = time.time()
+    elif (
+        summary["total"] and not summary["pending"] and output_dir
+        and (status == "pending" or parent.get("manual_editing_pending"))
+        and status != "in_progress"
+    ):
+        output_path = _pending_mark_output_path(
+            {"status": "pending", "info": parent}, output_dir
+        )
+        blocks = _pending_mark_chunk_blocks(output_path, chunk_key, chunk_entry)
+        expected = set(range(1, summary["total"] + 1))
+        if set(blocks) == expected:
+            _restore_pending_mark_record(parent)
     return summary
+
+
+def _pending_mark_output_path(info, output_dir):
+    """Resolve only this pending row's exact translated HTML output."""
+    if not isinstance(info, dict) or str(info.get("status") or "").lower() != "pending":
+        return None
+    record = info.get("info") or {}
+    output = info.get("output_file") or record.get("output_file")
+    if not isinstance(output, str) or not output.lower().endswith((".html", ".xhtml", ".htm")):
+        return None
+    path = os.path.normpath(os.path.join(output_dir, output.replace("\\", "/")))
+    return path if os.path.isfile(path) else None
+
+
+def _pending_mark_chunk_blocks(path, chunk_key, entry):
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as source:
+            blocks = extract_marked_chunks(source.read(), chunk_key)
+        total = int(entry.get("total") or 0)
+        return {
+            index: block for index, block in blocks.items()
+            if 1 <= index <= total and block.get("total") == total
+            and block.get("content", "").strip()
+        }
+    except (OSError, ValueError, UnicodeError):
+        return {}
+
+
+def _restore_pending_mark_record(record):
+    previous = record.get("previous_progress_entry")
+    if isinstance(previous, dict):
+        for field in (
+            "qa_issues", "qa_issues_found", "qa_issue_previews", "qa_timestamp",
+            "duplicate_confidence", "model_name", "key_identifier",
+            "refinement_status", "refined_at", "unrefined_backup_file",
+        ):
+            if field not in record and field in previous:
+                record[field] = copy.deepcopy(previous[field])
+    has_qa = bool(record.get("qa_issues_found") or record.get("qa_issues"))
+    record["status"] = "qa_failed" if has_qa else "completed"
+    for field in (
+        "manual_editing_pending", "previous_status", "previous_status_unknown",
+        "previous_progress_entry", "previous_chunk_metadata",
+    ):
+        record.pop(field, None)
+    record["last_updated"] = time.time()
+
+
+def _recover_pending_marks(prog, output_dir, selected_infos):
+    """Apply explicit recovery to fresh state, never to a cached UI snapshot."""
+    recovered = skipped = 0
+    chapters = prog.get("chapters", {})
+    seen = set()
+    for info in selected_infos:
+        is_chunk = bool(info.get("is_chunk_progress"))
+        parent_key = info.get("parent_progress_key") if is_chunk else (
+            info.get("progress_key") or info.get("key")
+        )
+        parent = chapters.get(parent_key)
+        if not isinstance(parent, dict):
+            # Older display rows may omit their key. Only an unambiguous,
+            # exact output filename match may identify their progress entry.
+            matches = [
+                (key, row) for key, row in chapters.items()
+                if isinstance(row, dict) and info.get("output_file")
+                and row.get("output_file") == info.get("output_file")
+            ]
+            if is_chunk or len(matches) != 1:
+                skipped += 1
+                continue
+            parent_key, parent = matches[0]
+        chunk_key = str(parent.get("content_hash") or parent_key)
+        chunk_entry = prog.get("chapter_chunks", {}).get(chunk_key)
+        if is_chunk and str(info.get("chunk_progress_key") or "") != chunk_key:
+            skipped += 1
+            continue
+        identity = (parent_key, str(info.get("chunk_index")) if is_chunk else None)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        status = str(parent.get("status") or "").lower()
+        if status == "in_progress":
+            skipped += 1
+            continue
+        if not is_chunk and status != "pending" and not parent.get("manual_editing_pending"):
+            skipped += 1
+            continue
+        path = _pending_mark_output_path({"status": "pending", "info": parent}, output_dir)
+        if not path:
+            skipped += 1
+            continue
+        if is_multi_chunk_entry(chunk_entry):
+            ensure_chunk_entry_schema(chunk_entry)
+            blocks = _pending_mark_chunk_blocks(path, chunk_key, chunk_entry)
+            records = chunk_entry.get("entries", {})
+            indices = [str(info.get("chunk_index"))] if is_chunk else list(records)
+            changed = 0
+            for key in indices:
+                record = records.get(key)
+                if not isinstance(record, dict) or record.get("status") != "pending":
+                    continue
+                block = blocks.get(record.get("index"))
+                if block is None:
+                    continue
+                # The saved HTML is authoritative for this explicit recovery;
+                # never overwrite it with an older cached response.
+                result = block["content"]
+                chunk_entry.setdefault("chunks", {})[key] = result
+                record["result_sha256"] = hashlib.sha256(result.encode("utf-8")).hexdigest()
+                _restore_pending_mark_record(record)
+                changed += 1
+            if changed:
+                ensure_chunk_entry_schema(chunk_entry)
+                summary = chunk_failure_summary(chunk_entry)
+                chunk_entry["chapter_status"] = (
+                    "qa_failed" if summary["failed"] else
+                    "incomplete" if summary["pending"] else "completed"
+                )
+                chunk_entry["last_updated"] = time.time()
+            previous_state = (parent.get("status"), parent.get("manual_editing_pending"))
+            if changed or not is_chunk:
+                _sync_parent_chunk_qa_summary(prog, parent_key, chunk_key, output_dir)
+            if changed or (parent.get("status"), parent.get("manual_editing_pending")) != previous_state:
+                recovered += changed or 1
+            else:
+                skipped += 1
+        elif is_chunk:
+            skipped += 1
+        else:
+            _restore_pending_mark_record(parent)
+            recovered += 1
+    return {"recovered": recovered, "skipped": skipped}
+
+
+def _remove_pending_marks(progress_file, output_dir, selected_infos):
+    """Persist a user-requested recovery using the latest progress snapshot."""
+    with _retranslation_progress_lock(progress_file):
+        with open(progress_file, "r", encoding="utf-8") as source:
+            baseline = json.load(source)
+        changed = copy.deepcopy(baseline)
+        result = _recover_pending_marks(changed, output_dir, selected_infos)
+        if result["recovered"]:
+            _merge_and_write_retranslation_progress(progress_file, baseline, changed)
+        return result
 
 
 class _KeepOpenActionMenu(QMenu):
@@ -27501,6 +27664,26 @@ class RetranslationMixin:
             message = "Successfully " + ", ".join(message_parts) + "." if message_parts else "No in-progress marks were changed."
             self._styled_msgbox(QMessageBox.Information, data.get('dialog', self), "In Progress Restored", message)
         
+        def remove_pending_marks(selected_infos):
+            try:
+                result = _remove_pending_marks(
+                    data['progress_file'], data['output_dir'], selected_infos
+                )
+            except (OSError, ValueError, TypeError) as error:
+                self._styled_msgbox(
+                    QMessageBox.Warning, data.get('dialog', self),
+                    "Remove Pending Mark", f"Could not update progress: {error}",
+                )
+                return
+            self._refresh_retranslation_data(data)
+            self._styled_msgbox(
+                QMessageBox.Information, data.get('dialog', self),
+                "Remove Pending Mark",
+                f"Restored {result['recovered']} pending entries. "
+                f"Skipped {result['skipped']} ineligible selections. "
+                "Existing QA findings were preserved.",
+            )
+
         def remove_qa_failed_mark():
             selected_items = data['listbox'].selectedItems()
             if not selected_items:
@@ -27546,6 +27729,7 @@ class RetranslationMixin:
                             data['prog'],
                             info.get("parent_progress_key"),
                             chunk_key,
+                            data['output_dir'],
                         )
                         cleared_count += 1
                         progress_updated = True
@@ -30297,9 +30481,11 @@ class RetranslationMixin:
             act_delete_audio = act_notepad_qa = act_retranslate = None
             act_resolve_qa = None
             act_insert_img = act_remove_qa = act_remove_refinement = None
+            act_remove_pending = None
             act_restore_in_progress = None
             act_copy_qa = act_open_epub_reader = None
             selected_infos = []
+            pending_selected_infos = []
 
             if _skip_keyword:
                 act_do_not_skip = menu.addAction(
@@ -30331,6 +30517,8 @@ class RetranslationMixin:
                     act_insert_img = menu.addAction("🖼️ Insert Missing Image")
 
                 act_remove_qa = menu.addAction("🧹 Remove QA Failed Mark")
+                if _pending_mark_output_path(display_info, data['output_dir']):
+                    act_remove_pending = menu.addAction("Remove Pending Mark")
                 act_remove_refinement = menu.addAction(
                     "⭐ Remove refinement status"
                 )
@@ -30341,6 +30529,13 @@ class RetranslationMixin:
                         selected_infos.append(wrapper.get('info', {}))
                 except RuntimeError:
                     selected_infos = [display_info]
+                pending_selected_infos = [
+                    {key: selected.get(key) for key in (
+                        'progress_key', 'key', 'output_file', 'is_chunk_progress',
+                        'chunk_progress_key', 'parent_progress_key', 'chunk_index',
+                    )}
+                    for selected in selected_infos
+                ]
                 if any((info or {}).get('status') == 'in_progress' for info in selected_infos):
                     act_restore_in_progress = menu.addAction("Restore In Progress Status")
             chosen = menu.exec(listbox.mapToGlobal(pos))
@@ -30560,6 +30755,8 @@ class RetranslationMixin:
                         "from Other Settings.\nMatching files will no longer "
                         "be skipped during translation.",
                         parent=data.get('dialog', self))
+            elif act_remove_pending and chosen == act_remove_pending:
+                remove_pending_marks(pending_selected_infos)
             elif chosen == act_remove_qa:
                 remove_qa_failed_mark()
             elif chosen == act_remove_refinement:

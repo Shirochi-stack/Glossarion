@@ -5314,7 +5314,11 @@ class ProgressManager:
 
         if previous_status in ("not_translated", "not translated", "not_completed", ""):
             if previous_status:
-                return None
+                restored = dict(info)
+                restored["status"] = "pending"
+                for field in ("previous_status", "previous_progress_entry", "previous_status_unknown"):
+                    restored.pop(field, None)
+                return restored
             if info.get("output_file"):
                 restored = dict(info)
                 restored["status"] = "failed"
@@ -5531,7 +5535,7 @@ class ProgressManager:
             self._progress_output_reverse_index = None
             self._progress_output_index_signature = None
 
-    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None, chapter_obj=None, merged_chapters=None, qa_issues_found=None, *, prefer_thread_model=None, model_name=None, key_identifier=None):
+    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None, chapter_obj=None, merged_chapters=None, qa_issues_found=None, *, prefer_thread_model=None, model_name=None, key_identifier=None, seed_pending_only=False):
         """Update progress for a chapter"""
         # Use helper method to get consistent key
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
@@ -5546,6 +5550,11 @@ class ProgressManager:
             if isinstance(candidate, dict) and candidate:
                 chapter_key = indexed_key
                 existing_info = candidate
+
+        # Queue admission is not a translation attempt. Existing QA/completion
+        # state survives until dispatch takes its restorable snapshot.
+        if seed_pending_only and status == "pending" and existing_info:
+            return
 
         # A completed parent is impossible while its persisted chunk plan still
         # contains pending or failed work. This guard is deliberately applied
@@ -5982,6 +5991,10 @@ class ProgressManager:
         chapter_info = self.prog.get("chapters", {}).get(chapter_key)
         if not isinstance(chapter_info, dict) or str(chapter_info.get("status", "")).lower() != "in_progress":
             return False
+        chunk_key = str(content_hash or chapter_info.get("content_hash") or chapter_key)
+        chunk_entry = self.prog.get("chapter_chunks", {}).get(chunk_key)
+        if isinstance(chunk_entry, dict):
+            reset_in_progress_chunks(chunk_entry)
         if not os.path.exists(self.PROGRESS_FILE):
             self._mark_all_known_progress_failed_after_file_delete()
             return True
@@ -6140,6 +6153,12 @@ class ProgressManager:
                     if failed:
                         chapters[chapter_key] = failed
             changed += 1
+        for chunk_entry in self.prog.get("chapter_chunks", {}).values():
+            if isinstance(chunk_entry, dict) and any(
+                isinstance(record, dict) and record.get("status") == "in_progress"
+                for record in chunk_entry.get("entries", {}).values()
+            ):
+                reset_in_progress_chunks(chunk_entry)
         return changed
 
     def update_refinement_status(self, idx, actual_num, content_hash, output_file, refinement_status, chapter_obj=None, error=None):
@@ -11667,20 +11686,17 @@ class BatchTranslationProcessor:
                                     self.save_progress_fn()
                                 print(f"⚠️ Chapter {log_num} stopped (graceful stop) — saved truncated response")
                             else:
-                                # An unsplit chapter is still represented internally as
-                                # chunk 1/1. A graceful stop with no captured response is
-                                # resumable pending work, not a PARTIAL QA failure.
+                                # No replacement response was captured. Restore
+                                # the saved state, including any earlier QA findings.
                                 with self.progress_lock:
-                                    self.update_progress_fn(
-                                        chapter_progress_idx, actual_num, content_hash, fname,
-                                        status="pending",
-                                        chapter_obj=chapter,
+                                    self._restore_cancelled_chapter_progress(
+                                        chapter_progress_idx, actual_num, content_hash, chapter
                                     )
                                     if chapter_chunk_progress_enabled:
-                                        self.progress_manager.set_chapter_chunk_qa(
+                                        self.progress_manager.set_chapter_chunk_runtime_status(
                                             content_hash,
                                             chunk_idx,
-                                            [],
+                                            "pending",
                                         )
                                     self.save_progress_fn()
                             # This worker has no committed result. Keep draining
@@ -12419,8 +12435,9 @@ class BatchTranslationProcessor:
                                 chapter_obj=chapter,
                             )
                         else:
-                            # Reset only truly resumable graceful-stop skips back to pending.
-                            self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="pending", chapter_obj=chapter)
+                            self._restore_cancelled_chapter_progress(
+                                chapter_progress_idx, actual_num, content_hash, chapter
+                            )
                         self.save_progress_fn()
                 except Exception:
                     pass
@@ -28980,6 +28997,7 @@ def main(log_callback=None, stop_callback=None):
                     raw_num=queue_record.get("raw_num"),
                     chapter_obj=c,
                     prefer_thread_model=False,
+                    seed_pending_only=True,
                 )
 
         units_to_process = []
@@ -31384,12 +31402,14 @@ def main(log_callback=None, stop_callback=None):
                     else:
                         # No provider response was captured. Chunk 1/1 is only
                         # the internal representation of an unsplit chapter.
-                        progress_manager.update(idx, actual_num, content_hash, fname, status="pending", chapter_obj=c)
+                        progress_manager.restore_in_progress(
+                            actual_num, fname, chapter_obj=c, content_hash=content_hash
+                        )
                         if chunk_progress_enabled:
-                            progress_manager.set_chapter_chunk_qa(
+                            progress_manager.set_chapter_chunk_runtime_status(
                                 chapter_key_str,
                                 chunk_idx,
-                                [],
+                                "pending",
                             )
                         progress_manager.save()
                     chunk_abort = True

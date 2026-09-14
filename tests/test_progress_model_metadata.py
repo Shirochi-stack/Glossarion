@@ -3941,3 +3941,239 @@ def test_refinement_override_checkbox_label_background_is_transparent():
 
     assert "background-color: transparent;" in checkbox_style
     assert "border: none;" in checkbox_style
+
+
+@pytest.mark.parametrize("status", ["completed", "qa_failed", "pending", "in_progress"])
+def test_pending_queue_preserves_existing_entry(tmp_path, status):
+    manager = ProgressManager(str(tmp_path))
+    previous = {
+        "actual_num": 13, "content_hash": "hash-13", "output_file": "chapter.html",
+        "status": status, "qa_issues_found": ["Japanese_text_found"],
+        "model_name": "previous-model", "refinement_status": "refined",
+    }
+    manager.prog["chapters"]["13"] = copy.deepcopy(previous)
+    manager.update(13, 13, "hash-13", "chapter.html", status="pending", seed_pending_only=True)
+    assert manager.prog["chapters"]["13"] == previous
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+@pytest.mark.parametrize("status", ["completed", "qa_failed", "pending"])
+def test_pending_queue_cancellation_restores_prior_state(tmp_path, bulk, status):
+    manager = ProgressManager(str(tmp_path))
+    previous = {
+        "actual_num": 13, "content_hash": "hash-13", "output_file": "chapter.html",
+        "status": status, "model_name": "previous-model", "refinement_status": "refined",
+    }
+    if status == "qa_failed":
+        previous["qa_issues_found"] = ["Japanese_text_found"]
+    manager.prog["chapters"]["13"] = copy.deepcopy(previous)
+    manager.update(13, 13, "hash-13", "chapter.html", status="pending", seed_pending_only=True)
+    manager.save()
+    assert manager.restore_all_in_progress_for_hard_stop() == 0
+    manager.update(13, 13, "hash-13", "chapter.html", status="in_progress")
+    manager.save()
+    if bulk:
+        assert manager.restore_all_in_progress_for_hard_stop() == 1
+    else:
+        assert manager.restore_in_progress(13, "chapter.html", content_hash="hash-13")
+    assert manager.prog["chapters"]["13"] == previous
+
+
+def test_pending_new_request_cancelled_without_result_stays_pending(tmp_path):
+    manager = ProgressManager(str(tmp_path))
+    manager.update(1, 1, "new", "new.html", status="in_progress")
+    manager.save()
+    assert manager.restore_in_progress(1, "new.html", content_hash="new")
+    assert manager.prog["chapters"]["1"]["status"] == "pending"
+
+
+@pytest.mark.parametrize("cancel_one", [False, True])
+def test_pending_chunk_cancellation_preserves_qa_and_previous_model(cancel_one):
+    from chapter_chunk_progress import record_chunk_result, set_chunk_qa, set_chunk_runtime_status, reset_in_progress_chunks
+
+    entry = {"total": 2}
+    record_chunk_result(entry, 1, "old result", model_name="old-model", key_identifier="old-key")
+    set_chunk_qa(entry, 1, ["Japanese_text_found"])
+    set_chunk_runtime_status(entry, 1, "in_progress", model_name="new-model", key_identifier="new-key")
+    set_chunk_runtime_status(entry, 1, "in_progress", model_name="retry-model")
+    if cancel_one:
+        assert set_chunk_runtime_status(entry, 1, "pending")
+    else:
+        assert reset_in_progress_chunks(entry) == [1]
+    record = entry["entries"]["1"]
+    assert record["status"] == "qa_failed"
+    assert record["qa_issues_found"] == ["Japanese_text_found"]
+    assert record["model_name"] == "old-model"
+    assert entry["chunk_metadata"]["1"]["key_identifier"] == "old-key"
+    assert entry["chunks"]["1"] == "old result"
+    assert "previous_progress_entry" not in record
+
+
+@pytest.mark.parametrize("terminal", ["completed", "truncated", "reset"])
+def test_pending_chunk_cancel_does_not_regress_committed_or_reset_state(terminal):
+    from chapter_chunk_progress import record_chunk_result, set_chunk_qa, set_chunk_runtime_status, reset_in_progress_chunks
+
+    entry = {"total": 2}
+    record_chunk_result(entry, 1, "old result")
+    set_chunk_runtime_status(entry, 1, "in_progress")
+    if terminal == "reset":
+        reset_chunks_for_retranslation(entry, [1])
+    else:
+        record_chunk_result(entry, 1, "replacement")
+        if terminal == "truncated":
+            set_chunk_qa(entry, 1, ["TRUNCATED"])
+    expected = copy.deepcopy(entry)
+    assert reset_in_progress_chunks(entry) == []
+    assert not set_chunk_runtime_status(entry, 1, "pending")
+    assert entry == expected
+
+
+@pytest.mark.parametrize("suffix", [".html", ".xhtml", ".htm", ".txt"])
+@pytest.mark.parametrize("status", ["pending", "completed", "in_progress"])
+def test_pending_menu_requires_existing_translated_html(tmp_path, suffix, status):
+    from Retranslation_GUI import _pending_mark_output_path
+
+    output = tmp_path / ("translated" + suffix)
+    info = {"status": status, "output_file": output.name, "original_filename": "source.html"}
+    (tmp_path / "source.html").write_text("source", encoding="utf-8")
+    assert _pending_mark_output_path(info, str(tmp_path)) is None
+    output.write_text("translated", encoding="utf-8")
+    expected = str(output) if status == "pending" and suffix != ".txt" else None
+    assert _pending_mark_output_path(info, str(tmp_path)) == expected
+
+
+def _pending_recovery_fixture(tmp_path, *, include_second=True, qa=False):
+    entry = {"total": 2}
+    ensure_chunk_entry_schema(entry)
+    if qa:
+        entry["entries"]["2"]["qa_issues_found"] = ["Japanese_text_found"]
+    parent = {"status": "pending", "content_hash": "hash", "output_file": "chapter.html"}
+    prog = {"chapters": {"1": parent}, "chapter_chunks": {"hash": entry}}
+    output = wrap_chunk_html("hash", 1, 2, "<p>First</p>")
+    if include_second:
+        output += wrap_chunk_html("hash", 2, 2, "<p>Second</p>")
+    (tmp_path / "chapter.html").write_text(output, encoding="utf-8")
+    selection = [
+        {"is_chunk_progress": True, "parent_progress_key": "1", "chunk_progress_key": "hash", "chunk_index": i}
+        for i in [1, 2]
+    ]
+    return prog, selection
+
+
+@pytest.mark.parametrize("qa", [False, True])
+def test_pending_chunk_recovery_completes_parent_without_discarding_qa(tmp_path, qa):
+    from Retranslation_GUI import _recover_pending_marks
+
+    prog, selection = _pending_recovery_fixture(tmp_path, qa=qa)
+    original_html = (tmp_path / "chapter.html").read_bytes()
+    assert _recover_pending_marks(prog, str(tmp_path), selection[:1])["recovered"] == 1
+    assert prog["chapters"]["1"]["status"] == "pending"
+    assert _recover_pending_marks(prog, str(tmp_path), selection[1:])["recovered"] == 1
+    assert prog["chapters"]["1"]["status"] == "completed"
+    assert prog["chapters"]["1"]["has_chunk_qa_failures"] is qa
+    entry = prog["chapter_chunks"]["hash"]
+    assert entry["entries"]["2"]["status"] == ("qa_failed" if qa else "completed")
+    assert entry["chunks"] == {"1": "<p>First</p>", "2": "<p>Second</p>"}
+    assert (tmp_path / "chapter.html").read_bytes() == original_html
+
+
+def test_pending_parent_recovery_does_not_certify_missing_chunk(tmp_path):
+    from Retranslation_GUI import _recover_pending_marks
+
+    prog, _ = _pending_recovery_fixture(tmp_path, include_second=False)
+    result = _recover_pending_marks(prog, str(tmp_path), [{"progress_key": "1"}])
+    assert result["recovered"] == 1
+    assert prog["chapters"]["1"]["status"] == "pending"
+    assert prog["chapter_chunks"]["hash"]["entries"]["2"]["status"] == "pending"
+
+
+def test_pending_parent_updates_when_last_chunk_qa_mark_is_cleared(tmp_path):
+    from chapter_chunk_progress import record_chunk_result, set_chunk_qa
+    from Retranslation_GUI import _sync_parent_chunk_qa_summary
+
+    prog, _ = _pending_recovery_fixture(tmp_path)
+    entry = prog["chapter_chunks"]["hash"]
+    record_chunk_result(entry, 1, "<p>First</p>")
+    record_chunk_result(entry, 2, "<p>Second</p>")
+    set_chunk_qa(entry, 2, ["Japanese_text_found"])
+    set_chunk_qa(entry, 2, [])
+    _sync_parent_chunk_qa_summary(prog, "1", "hash", str(tmp_path))
+    assert prog["chapters"]["1"]["status"] == "completed"
+
+
+def test_pending_recovery_rechecks_files_and_latest_state_and_persists(tmp_path):
+    from Retranslation_GUI import _remove_pending_marks
+
+    path = tmp_path / "translation_progress.json"
+    saved = {"chapters": {str(i): {
+        "status": "pending", "output_file": f"chapter{i}.html", "model_name": "old-model",
+        "refinement_status": "refined",
+    } for i in range(1, 5)}}
+    for i in range(1, 5):
+        (tmp_path / f"chapter{i}.html").write_text("<p>Saved result</p>", encoding="utf-8")
+    selected = [{"progress_key": str(i)} for i in range(1, 5)]
+    # Simulate changes while the menu is open: deletion, another worker's
+    # completion, and newly recorded QA findings.
+    (tmp_path / "chapter2.html").unlink()
+    saved["chapters"]["3"]["status"] = "completed"
+    saved["chapters"]["4"]["qa_issues_found"] = ["Japanese_text_found"]
+    saved["chapters"]["4"]["manual_editing_pending"] = True
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    result = _remove_pending_marks(str(path), str(tmp_path), selected)
+    assert result == {"recovered": 2, "skipped": 2}
+    after = json.loads(path.read_text(encoding="utf-8"))
+    assert after["chapters"]["1"]["status"] == "completed"
+    assert after["chapters"]["2"] == saved["chapters"]["2"]
+    assert after["chapters"]["3"] == saved["chapters"]["3"]
+    restored = after["chapters"]["4"]
+    assert restored["status"] == "qa_failed"
+    assert restored["qa_issues_found"] == ["Japanese_text_found"]
+    assert restored["model_name"] == "old-model"
+    assert restored["refinement_status"] == "refined"
+    assert "manual_editing_pending" not in restored
+
+
+def test_pending_recovery_clears_manual_parent_flag(tmp_path):
+    from chapter_chunk_progress import record_chunk_result
+    from Retranslation_GUI import _recover_pending_marks
+
+    prog, _ = _pending_recovery_fixture(tmp_path)
+    entry = prog["chapter_chunks"]["hash"]
+    record_chunk_result(entry, 1, "<p>First</p>")
+    record_chunk_result(entry, 2, "<p>Second</p>")
+    parent = prog["chapters"]["1"]
+    parent.update(status="completed", manual_editing_pending=True)
+    assert _recover_pending_marks(prog, str(tmp_path), [{"progress_key": "1"}])["recovered"] == 1
+    assert parent["status"] == "completed"
+    assert "manual_editing_pending" not in parent
+
+
+def test_pending_recovery_legacy_chunks_require_concrete_saved_content(tmp_path):
+    from Retranslation_GUI import _recover_pending_marks
+
+    prog, selection = _pending_recovery_fixture(tmp_path)
+    prog["chapter_chunks"]["hash"] = {"total": 2}
+    assert _recover_pending_marks(prog, str(tmp_path), selection)["recovered"] == 2
+    assert prog["chapters"]["1"]["status"] == "completed"
+
+
+def test_pending_queue_creates_new_entry_and_committed_result_survives_stop(tmp_path):
+    manager = ProgressManager(str(tmp_path))
+    manager.update(1, 1, "new", "new.html", status="pending", seed_pending_only=True)
+    assert manager.prog["chapters"]["1"]["status"] == "pending"
+    manager.update(1, 1, "new", "new.html", status="in_progress")
+    manager.update(1, 1, "new", "new.html", status="completed")
+    manager.save()
+    assert manager.restore_all_in_progress_for_hard_stop() == 0
+    assert manager.prog["chapters"]["1"]["status"] == "completed"
+
+
+def test_pending_recovery_rejects_stale_chunk_identity_and_in_progress(tmp_path):
+    from Retranslation_GUI import _recover_pending_marks
+
+    prog, selection = _pending_recovery_fixture(tmp_path)
+    selection[0]["chunk_progress_key"] = "old-hash"
+    prog["chapter_chunks"]["hash"]["entries"]["2"]["status"] = "in_progress"
+    before = copy.deepcopy(prog)
+    assert _recover_pending_marks(prog, str(tmp_path), selection) == {"recovered": 0, "skipped": 2}
+    assert prog == before
