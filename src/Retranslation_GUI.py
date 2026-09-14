@@ -119,6 +119,12 @@ _MISSING_IMAGE_QA_RE = re.compile(
 )
 
 
+def _progress_total_label(total, chunks):
+    if chunks:
+        return f"Total: {total} ({total - chunks} chapters + {chunks} chunks)"
+    return f"Total: {total}"
+
+
 def _sync_parent_chunk_qa_summary(prog, parent_key, chunk_key, output_dir=None):
     """Mirror aggregate child QA state without failing the parent chapter."""
     if not isinstance(prog, dict):
@@ -27224,11 +27230,8 @@ class RetranslationMixin:
         # their own legend status and are excluded from the regular
         # status counts so they aren't double-counted as Not Translated.
         _stats_data = {'prog': prog}
-        _stats_entries = spine_chapters if spine_chapters else [
-            info
-            for info in chapter_display_info
-            if not info.get("is_chunk_progress")
-        ]
+        _stats_entries = chapter_display_info or spine_chapters or []
+        chunk_count = sum(bool(info.get("is_chunk_progress")) for info in _stats_entries)
         total_chapters = len(_stats_entries)
         completed = merged = in_progress = pending = missing = failed = skipped = 0
         for ch in _stats_entries:
@@ -27249,21 +27252,12 @@ class RetranslationMixin:
             elif _st in ('failed', 'qa_failed', 'refine_failed'):
                 failed += 1
 
-        # Failure navigation includes child rows, so count those failures too.
-        failed += sum(
-            1 for info in chapter_display_info
-            if info.get('is_chunk_progress')
-            and not self._progress_entry_is_skipped_special(info)
-            and self._progress_display_status(info, _stats_data)
-            in ('failed', 'qa_failed', 'refine_failed')
-        )
-
         # Create labels (outside the if/else so they always appear)
         stats_font = QFont('Arial', 9)
         
-        lbl_total = QLabel(f"Total: {total_chapters} | ")
+        lbl_total = QLabel(_progress_total_label(total_chapters, chunk_count))
         lbl_total.setFont(stats_font)
-        stats_layout.addWidget(lbl_total)
+        title_layout.insertWidget(1, lbl_total)
         
         lbl_completed = QLabel(f"✅ Completed: {completed} | ")
         lbl_completed.setFont(stats_font)
@@ -33349,11 +33343,8 @@ class RetranslationMixin:
         
         if stats_labels:
             # Recalculate statistics from chapter_display_info (works for both OPF and non-OPF)
-            chapter_display_info = [
-                info
-                for info in data.get('chapter_display_info', [])
-                if not info.get("is_chunk_progress")
-            ]
+            chapter_display_info = data.get('chapter_display_info', [])
+            chunk_count = sum(bool(info.get("is_chunk_progress")) for info in chapter_display_info)
             pdf_rows = [info for info in chapter_display_info if info.get('pdf_ocr')]
             if pdf_rows and len(pdf_rows) == len(chapter_display_info):
                 pdf_info = pdf_rows[0].get('info') or {}
@@ -33390,17 +33381,11 @@ class RetranslationMixin:
                 pending = sum(1 for status in display_statuses if status == 'pending')
                 missing = sum(1 for status in display_statuses if status in ['not_translated', 'not_refined', 'no_tts'])
                 failed = sum(1 for status in display_statuses if status in ['failed', 'qa_failed', 'refine_failed'])
-                failed += sum(
-                    1 for info in data.get('chapter_display_info', [])
-                    if info.get('is_chunk_progress')
-                    and not self._progress_entry_is_skipped_special(info)
-                    and self._progress_display_status(info, data)
-                    in ('failed', 'qa_failed', 'refine_failed')
-                )
-            
+
             mode = self._current_progress_output_mode(data)
             stats_fingerprint = (
                 total_chapters,
+                chunk_count,
                 completed,
                 merged,
                 in_progress,
@@ -33416,7 +33401,7 @@ class RetranslationMixin:
 
             # Update labels
             if 'total' in stats_labels:
-                stats_labels['total'].setText(f"Total: {total_chapters} | ")
+                stats_labels['total'].setText(_progress_total_label(total_chapters, chunk_count))
             if 'completed' in stats_labels:
                 stats_labels['completed'].setText(f"✅ Completed: {completed} | ")
             if 'merged' in stats_labels:

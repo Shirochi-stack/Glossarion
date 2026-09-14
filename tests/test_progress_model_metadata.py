@@ -12,6 +12,47 @@ import zipfile
 import pytest
 from bs4 import BeautifulSoup
 
+
+def test_progress_legend_counts_all_chunk_statuses_and_refreshes():
+    class Label:
+        def setText(self, value):
+            self.text = value
+
+        def setVisible(self, value):
+            self.visible = value
+
+        def setStyleSheet(self, value):
+            pass
+
+    labels = {key: Label() for key in (
+        'total', 'completed', 'merged', 'in_progress', 'pending', 'missing',
+        'failed', 'skipped',
+    )}
+    harness = types.SimpleNamespace(
+        _progress_entry_is_skipped_special=lambda info: info.get('skipped', False),
+        _progress_display_status=lambda info, data: info['status'],
+        _current_progress_output_mode=lambda data: 'translation',
+    )
+    rows = [{'status': 'completed'}]
+    rows.extend({'status': status, 'is_chunk_progress': True} for status in (
+        'completed', 'in_progress', 'pending', 'not_translated', 'qa_failed', 'merged',
+    ))
+    rows.append({'status': 'not_translated', 'is_chunk_progress': True, 'skipped': True})
+    data = {'container': None, '_stats_labels': labels, 'chapter_display_info': rows}
+    RetranslationMixin._update_statistics_display(harness, data)
+    assert labels['total'].text == 'Total: 8 (1 chapters + 7 chunks)'
+    assert labels['completed'].text == '✅ Completed: 2 | '
+    for key in ('in_progress', 'pending', 'missing', 'failed', 'merged'):
+        assert labels[key].text.endswith(': 1 | ')
+    assert labels['in_progress'].visible
+    assert labels['skipped'].text == '⏭️ Skipped: 1'
+
+    data['chapter_display_info'] = [{'status': 'completed'} for _ in range(48)]
+    RetranslationMixin._update_statistics_display(harness, data)
+    assert labels['total'].text == 'Total: 48'
+    assert labels['completed'].text == '✅ Completed: 48 | '
+    assert not labels['in_progress'].visible
+
 from chapter_chunk_progress import (
     chunk_entry_needs_translation,
     effective_parent_status,
