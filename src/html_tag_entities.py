@@ -1,4 +1,4 @@
-"""Helpers for safely rehydrating escaped HTML tag entities."""
+"""Helpers for preserving HTML markup and escaping angle-bracket prose."""
 
 from __future__ import annotations
 
@@ -24,10 +24,22 @@ VALID_ENTITY_TAGS = frozenset({
     'center', 'font', 'base',
 })
 
-_TAG_ENTITY_RE = re.compile(
-    r'(&lt;|&LT;|&#0*60;|&#x0*3[cC];)(.*?)(&gt;|&GT;|&#0*62;|&#x0*3[eE];)',
+_LT_ENTITY = r'&(?:lt|LT|#0*60|#[xX]0*3[cC]);'
+_GT_ENTITY = r'&(?:gt|GT|#0*62|#[xX]0*3[eE]);'
+_DOUBLE_QUOTE_ENTITY = r'&(?:quot|QUOT|#0*34|#[xX]0*22);'
+_SINGLE_QUOTE_ENTITY = r'&(?:apos|#0*39|#[xX]0*27);'
+_ANGLE_OPEN_RE = re.compile(rf'<|{_LT_ENTITY}')
+# Consume whole quoted attribute values before looking for a tag boundary.
+# Quotes only become delimiters after '=', so apostrophes in prose such as
+# <A hero's journey> cannot swallow the following markup.
+_TAG_BOUNDARY_RE = re.compile(
+    rf'''(?P<attribute>=\s*(?:"[^"]*"|'[^']*'|'''
+    rf'{_DOUBLE_QUOTE_ENTITY}(?:(?!{_DOUBLE_QUOTE_ENTITY}).)*{_DOUBLE_QUOTE_ENTITY}|'
+    rf'{_SINGLE_QUOTE_ENTITY}(?:(?!{_SINGLE_QUOTE_ENTITY}).)*{_SINGLE_QUOTE_ENTITY}))'
+    rf'|(?P<opening><|{_LT_ENTITY})|(?P<closing>>|{_GT_ENTITY})',
     re.DOTALL,
 )
+_COMMENT_END_RE = re.compile(rf'--(?P<closing>>|{_GT_ENTITY})')
 _STRAY_P_GT_USER_RE = re.compile(
     r"([.,#!$%\^&\*;:{}=\-_`~()?\"'\u2019\u201c\u201d\u00bb\u00ab\]]|<p>)"
     r"[\u200b\s]*p(?:&gt;|>)[\r\n]*",
@@ -89,21 +101,86 @@ def looks_like_valid_html_tag(inner: str, valid_tags=None) -> bool:
     return bool(_ATTR_ASSIGN_RE.search(remainder))
 
 
+def _iter_tag_spans(text: str):
+    """Yield outer/inner boundaries, ignoring brackets in quoted attributes."""
+    position = 0
+    while opening := _ANGLE_OPEN_RE.search(text, position):
+        start, inner_start = opening.span()
+        position = inner_start
+        entity_depth = 0
+        while True:
+            # Comments may contain both angle brackets and quotation marks.
+            if text.startswith('!--', inner_start):
+                comment_end = _COMMENT_END_RE.search(text, inner_start + 3)
+                if comment_end:
+                    yield start, inner_start, comment_end.start('closing'), comment_end.end()
+                    position = comment_end.end()
+                    break
+
+            boundary = _TAG_BOUNDARY_RE.search(text, position)
+            if boundary is None:
+                return
+            position = boundary.end()
+            if boundary.lastgroup == 'opening':
+                if text[start] == '<' and text[boundary.start()] == '&':
+                    # Encoded angle prose inside a raw candidate is text,
+                    # e.g. <A hero &lt;Prison Detective&gt; arrives>.
+                    entity_depth += 1
+                    continue
+                # An unquoted nested '<' starts a new candidate rather than
+                # letting malformed prose consume the next real element.
+                start, inner_start = boundary.span()
+                entity_depth = 0
+            elif boundary.lastgroup == 'closing':
+                if entity_depth and text[boundary.start()] == '&':
+                    entity_depth -= 1
+                    continue
+                yield start, inner_start, boundary.start(), boundary.end()
+                break
+
+
 def unescape_valid_html_tag_entities(text: str) -> str:
     """Rehydrate known tags and complete comments while preserving angle-bracket prose."""
     if not isinstance(text, str) or '&' not in text:
         return text
 
-    def repl(match: re.Match) -> str:
-        inner = html.unescape(match.group(2))
-        stripped = inner.strip()
-        if not stripped:
-            return match.group(0)
-        if looks_like_valid_html_tag(stripped):
-            return f'<{inner}>'
-        return match.group(0)
+    pieces = []
+    previous = 0
+    for start, inner_start, inner_end, end in _iter_tag_spans(text):
+        # Raw tags are traversed too, keeping encoded markup inside their
+        # attributes opaque (e.g. title="&lt;em&gt;").
+        if text[start] != '&' or text[inner_end] != '&':
+            continue
+        inner = html.unescape(text[inner_start:inner_end])
+        if looks_like_valid_html_tag(inner):
+            pieces.extend((text[previous:start], f'<{inner}>'))
+            previous = end
 
-    return _TAG_ENTITY_RE.sub(repl, text)
+    pieces.append(text[previous:])
+    return ''.join(pieces)
+
+
+def escape_invalid_html_tags(text: str) -> str:
+    """Escape angle-bracket prose without splitting real tags at URL brackets."""
+    if not isinstance(text, str) or '<' not in text:
+        return text
+
+    pieces = []
+    previous = 0
+    for start, inner_start, inner_end, end in _iter_tag_spans(text):
+        # A nested candidate can leave an unmatched '<' in the preceding
+        # prose. Escape it too, so parsing cannot discard that text.
+        pieces.append(text[previous:start].replace('<', '&lt;'))
+        inner = text[inner_start:inner_end]
+        if text[start] == '<' and not looks_like_valid_html_tag(inner):
+            inner = inner.replace('<', '&lt;').replace('>', '&gt;')
+            pieces.append(f'&lt;{inner}&gt;')
+        else:
+            pieces.append(text[start:end])
+        previous = end
+
+    pieces.append(text[previous:].replace('<', '&lt;'))
+    return ''.join(pieces)
 
 
 def fix_stray_p_gt_artifacts(text: str) -> str:

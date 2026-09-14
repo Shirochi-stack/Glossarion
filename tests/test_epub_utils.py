@@ -1282,6 +1282,86 @@ def test_valid_html_tag_entities_rehydrate_real_markup():
     )
 
 
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [("&lt;", "&gt;"), ("&#60;", "&#62;"), ("&#x3c;", "&#x3e;")],
+    ids=("named", "decimal", "hex"),
+)
+@pytest.mark.parametrize(
+    "quote", ['"', "'", "&quot;", "&#39;"],
+    ids=("double-quote", "single-quote", "named-quote", "numeric-quote"),
+)
+def test_valid_html_tag_entities_rehydrate_navigation_wrapped_href(
+    left, right, quote
+):
+    from lxml import html as lxml_html
+
+    escaped = (
+        f"{left}a href={quote}{left}xhtml/p-004.xhtml#toc-001{right}"
+        f"{quote}{right}Prologue: &lt;Prison Detective&gt;{left}/a{right}"
+    )
+
+    converted = unescape_valid_html_tag_entities(escaped)
+    document = lxml_html.fragment_fromstring(converted, create_parent=True)
+    anchors = document.xpath(".//a")
+
+    assert len(anchors) == 1
+    assert anchors[0].get("href") == "<xhtml/p-004.xhtml#toc-001>"
+    assert anchors[0].text_content() == "Prologue: <Prison Detective>"
+    assert list(anchors[0]) == []
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "quote", "escaped_markup"),
+    [
+        ("", "", '"', False),
+        ("<", ">", '"', False),
+        ("<", ">", "'", False),
+        ("&lt;", "&gt;", '"', False),
+        ("&#60;", "&#62;", "'", False),
+        ("&lt;", "&gt;", '"', True),
+        ("&lt;", "&gt;", "&quot;", True),
+        ("&#x3c;", "&#x3e;", "&#39;", True),
+    ],
+    ids=(
+        "normal", "literal-double", "literal-single", "named-wrapper",
+        "numeric-wrapper", "escaped-tag", "escaped-quotes", "numeric-escaped",
+    ),
+)
+def test_xhtml_converter_preserves_navigation_wrapped_hrefs(
+    monkeypatch, left, right, quote, escaped_markup
+):
+    from lxml import etree
+
+    monkeypatch.setenv("ANGLE_BRACKET_OUTPUT", "entity")
+    monkeypatch.setenv("EPUB_USE_HTML_METHOD", "0")
+    tag_left, tag_right = ("&lt;", "&gt;") if escaped_markup else ("<", ">")
+    expected = [
+        ("xhtml/p-cover.xhtml", "Cover"),
+        ("xhtml/p-toc-001.xhtml", "CONTENTS"),
+        ("xhtml/p-004.xhtml#toc-001", "Prologue: <Prison Detective>"),
+    ]
+    links = "".join(
+        f"{tag_left}li{tag_right}"
+        f"{tag_left}a href={quote}{left}{href}{right}{quote}{tag_right}"
+        f"{label}{tag_left}/a{tag_right}{tag_left}/li{tag_right}"
+        for href, label in expected
+    )
+    sample = (
+        f"{tag_left}nav{tag_right}{tag_left}ol{tag_right}"
+        f"{links}{tag_left}/ol{tag_right}{tag_left}/nav{tag_right}"
+        "<p>The title is <Prison Detective>.</p>"
+    )
+
+    converted = epub_converter.XHTMLConverter.ensure_compliance(sample, "Navigation")
+    document = etree.fromstring(converted.encode("utf-8"))
+    anchors = document.xpath("//*[local-name()='nav']//*[local-name()='a']")
+
+    assert [(anchor.get("href"), "".join(anchor.itertext())) for anchor in anchors] == expected
+    assert all(len(anchor) == 0 for anchor in anchors)
+    assert "The title is <Prison Detective>." in "".join(document.itertext())
+
+
 def test_valid_html_tag_entities_rehydrate_complete_html_comments_only():
     marker = (
         "&lt;!-- GLOSSARION_CHUNK_START key=3074ef4c7a008874 "
@@ -1294,6 +1374,36 @@ def test_valid_html_tag_entities_rehydrate_complete_html_comments_only():
     assert unescape_valid_html_tag_entities("&lt;!-- unterminated&gt;") == (
         "&lt;!-- unterminated&gt;"
     )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("<A hero's journey>", "<A hero's journey>"),
+        ('<A hero says "go">', '<A hero says "go">'),
+        ("<A hero <Prison Detective> arrives>", "<A hero <Prison Detective> arrives>"),
+        ("<A hero &lt;Prison Detective&gt; arrives>", "<A hero <Prison Detective> arrives>"),
+        ("<A hero &#60;Prison Detective&#62; arrives>", "<A hero <Prison Detective> arrives>"),
+        ("<Prison Detective&gt;", "<Prison Detective>"),
+    ],
+)
+def test_xhtml_converter_preserves_quoted_and_nested_angle_prose(source, expected):
+    from lxml import etree
+
+    converted = epub_converter.XHTMLConverter.ensure_compliance(
+        f'<p>{source}</p><p><a href="chapter.xhtml">Next</a></p>', "Story"
+    )
+    document = etree.fromstring(converted.encode("utf-8"))
+    paragraphs = document.xpath("//*[local-name()='p']")
+    assert "".join(paragraphs[0].itertext()) == expected
+    assert len(paragraphs[0]) == 0
+    anchors = document.xpath("//*[local-name()='a']")
+    assert [(a.get("href"), a.text) for a in anchors] == [("chapter.xhtml", "Next")]
+
+
+def test_valid_html_tag_entities_preserve_encoded_markup_in_raw_attributes():
+    sample = '<a href="chapter.xhtml" title="&lt;em&gt;Hint&lt;/em&gt;">Next</a>'
+    assert unescape_valid_html_tag_entities(sample) == sample
 
 
 @pytest.mark.parametrize(

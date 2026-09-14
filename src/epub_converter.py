@@ -24,7 +24,7 @@ from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import (
     VALID_ENTITY_TAGS as _VALID_ENTITY_TAGS,
     fix_stray_p_gt_artifacts as _fix_stray_p_gt_artifacts,
-    looks_like_valid_html_tag as _looks_like_valid_html_tag,
+    escape_invalid_html_tags as _escape_invalid_html_tags,
     unescape_valid_html_tag_entities as _unescape_valid_html_tag_entities,
 )
 from epub_package import (
@@ -1147,33 +1147,7 @@ class XHTMLConverter:
             # PREVENT malformed "fake tags" like <You are a farmer.> from being parsed as tags
             # We only keep real HTML-like tag syntax; prose in angle brackets must
             # remain visible text instead of being parsed as empty attributes.
-            def _escape_plaintext_angle_brackets(txt: str) -> str:
-                def repl(m):
-                    inner = m.group(1)
-                    if _looks_like_valid_html_tag(inner):
-                        return m.group(0)
-                    return f'&lt;{inner}&gt;'
-
-                # Match <...> where content matches non-brackets.
-                # Allow single words without spaces (e.g. <luck>)
-                pattern = r'<([^<>]+)>'
-                txt = re.sub(pattern, repl, txt)
-
-                # Also handle cases where closing bracket is already an entity.
-                # IMPORTANT: Don't let this match across *real tags* like:
-                #   <a href="&lt;part0009.html#id&gt;">...
-                # because it will convert the *start tag* into literal text (&lt;a ...), breaking TOC links.
-                def repl_gt(m):
-                    inner = m.group(1)
-                    if _looks_like_valid_html_tag(inner):
-                        return m.group(0)
-                    return f'&lt;{inner}&gt;'
-
-                pattern_gt = r'<([^<>]+)&gt;'
-                txt = re.sub(pattern_gt, repl_gt, txt)
-                return txt
-
-            html_content = _escape_plaintext_angle_brackets(html_content)
+            html_content = _escape_invalid_html_tags(html_content)
             
             # Parse with lxml
             from lxml import html as lxml_html, etree
