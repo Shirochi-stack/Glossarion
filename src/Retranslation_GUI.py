@@ -30518,7 +30518,7 @@ class RetranslationMixin:
 
                 act_remove_qa = menu.addAction("🧹 Remove QA Failed Mark")
                 if _pending_mark_output_path(display_info, data['output_dir']):
-                    act_remove_pending = menu.addAction("Remove Pending Mark")
+                    act_remove_pending = menu.addAction("🧽 Remove Pending Mark")
                 act_remove_refinement = menu.addAction(
                     "⭐ Remove refinement status"
                 )
