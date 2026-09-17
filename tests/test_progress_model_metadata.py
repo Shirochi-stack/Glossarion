@@ -380,6 +380,22 @@ def test_sequential_translation_assigns_log_number_before_first_use():
     assert assignment < first_use
 
 
+def test_sequential_pre_send_callback_captures_filename_before_dispatch():
+    source_file = inspect.getsourcefile(ProgressManager)
+    translation_source = Path(source_file).read_text(encoding="utf-8")
+    callback_start = translation_source.index(
+        "def _mark_sequential_progress_on_send("
+    )
+    callback_end = translation_source.index(
+        "result, finish_reason, raw_obj = translation_processor.translate_with_retry",
+        callback_start,
+    )
+    callback_source = translation_source[callback_start:callback_end]
+
+    assert "_progress_fname=progress_fname" in callback_source
+    assert "content_hash, fname" not in callback_source
+
+
 def test_all_requested_chapter_views_use_shared_nonreset_numbering():
     source_root = Path(__file__).resolve().parents[1] / "src"
     progress_source = (source_root / "Retranslation_GUI.py").read_text(

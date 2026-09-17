@@ -31266,13 +31266,41 @@ def main(log_callback=None, stop_callback=None):
                         )
                     progress_manager.save()
 
-                def _mark_sequential_progress_on_send():
+                # Resolve the filename before registering the provider-boundary
+                # callback. ``fname`` is assigned later when translated chunks
+                # are written, so closing over it here breaks the first API call
+                # and can reuse a stale chapter filename on later calls.
+                if (
+                    (is_text_file or is_pdf_file)
+                    and c.get('is_chunk', False)
+                    and isinstance(c.get('num'), float)
+                ):
+                    progress_fname = FileUtilities.create_chapter_filename(
+                        c,
+                        c['num'],
+                    )
+                else:
+                    progress_fname = FileUtilities.create_chapter_filename(
+                        c,
+                        actual_num,
+                    )
+
+                def _mark_sequential_progress_on_send(
+                    _progress_fname=progress_fname,
+                ):
                     if merge_info:
                         for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
                             g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
                             progress_manager.update(g_idx, g_actual_num, g_content_hash, g_fname, status="in_progress", chapter_obj=g_chapter)
                     else:
-                        progress_manager.update(idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=c)
+                        progress_manager.update(
+                            idx,
+                            actual_num,
+                            content_hash,
+                            _progress_fname,
+                            status="in_progress",
+                            chapter_obj=c,
+                        )
                     if chunk_progress_enabled:
                         chunk_model, chunk_key_identifier = (
                             _capture_thread_actual_request_metadata()
