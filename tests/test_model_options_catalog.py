@@ -68,6 +68,23 @@ def test_multi_key_test_timeout_uses_optional_api_key_classification(
     assert multi_api_key_manager._api_key_test_timeout_seconds("example/model") == expected_timeout
 
 
+@pytest.mark.parametrize(
+    "model",
+    ["autharena/model", "autharena2/model", "authgpt/model", "authnd/model"],
+)
+def test_browser_backed_models_allow_blank_pool_api_keys(model):
+    entry = {"api_key": "", "model": model, "enabled": True}
+
+    assert UnifiedClient._model_needs_api_key(model) is False
+    assert UnifiedClient._key_data_is_usable(entry) is True
+
+
+def test_direct_pool_entry_rejects_disabled_keyless_model():
+    entry = {"api_key": "", "model": "autharena/model", "enabled": False}
+
+    assert UnifiedClient._key_data_is_usable(entry) is False
+
+
 def test_multi_key_trees_share_persistent_keyboard_and_wheel_zoom():
     import multi_api_key_manager
 

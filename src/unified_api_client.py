@@ -2940,7 +2940,16 @@ class UnifiedClient:
         return False
     
     # Models/prefixes that authenticate without a traditional API key
-    _NO_API_KEY_PREFIXES = ('autharena', 'authgpt/', 'authgpt', 'authgrok/', 'authgrok', 'authgem', 'authgem-vertex', 'vertex/', 'ocagy/', 'ocagy', 'antigravity/', 'antigravity', 'authza/', 'authza', 'authnd/', 'authnd', 'search/', 'search', 'authcd/', 'authcd')
+    _NO_API_KEY_PREFIXES = (
+        'autharena/', 'autharena',
+        'authgpt/', 'authgpt',
+        'authgrok/', 'authgrok',
+        'authgem', 'authgem-vertex',
+        'vertex/', 'ocagy/', 'ocagy',
+        'antigravity/', 'antigravity',
+        'authza/', 'authza', 'authnd/', 'authnd',
+        'search/', 'search', 'authcd/', 'authcd',
+    )
     # NOTE: 'authgem' (without /) intentionally matches authgem/, authgem-key/, authgem-vertex/,
     # AND all numbered variants (authgem1/, authgem2/, authgem-vertex3/, etc.)
     _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
@@ -3199,6 +3208,17 @@ class UnifiedClient:
         if key_data.get('use_individual_endpoint') and endpoint:
             return False
         return cls._model_needs_api_key(model)
+
+    @classmethod
+    def _key_data_is_usable(cls, key_data: dict) -> bool:
+        """Return whether a configured pool entry may be attempted directly."""
+        if not isinstance(key_data, dict) or key_data.get('enabled') is False:
+            return False
+        model = str(key_data.get('model') or '').strip()
+        if not model:
+            return False
+        api_key = str(key_data.get('api_key') or '').strip()
+        return bool(api_key) or not cls._key_data_needs_api_key(key_data, model)
 
     @classmethod
     def setup_multi_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
@@ -12151,8 +12171,13 @@ class UnifiedClient:
         
         try:
             configured_glossary_keys = json.loads(glossary_keys_json)
-            # Filter to only keys with valid data
-            configured_glossary_keys = [gk for gk in configured_glossary_keys if gk.get('api_key') and gk.get('model')]
+            # Match normal pool admission: skip disabled entries, while allowing
+            # blank API keys for OAuth/browser-backed models such as authgpt,
+            # autharena, and authnd.
+            configured_glossary_keys = [
+                gk for gk in configured_glossary_keys
+                if self._key_data_is_usable(gk)
+            ]
             if not configured_glossary_keys:
                 raise UnifiedClientError(f"{pool_label.title()} key pool is enabled but has no usable keys; refusing fallback to another pool", error_type="no_keys")
             print(f"[GLOSSARY DIRECT] 🔑 Loaded {len(configured_glossary_keys)} {pool_label} key{'s' if len(configured_glossary_keys) != 1 else ''}")
