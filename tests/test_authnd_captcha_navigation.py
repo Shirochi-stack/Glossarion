@@ -144,6 +144,49 @@ def test_fetch_available_models_uses_paginated_build_free_chat_catalog(monkeypat
     assert requested_pages == [0, 1]
 
 
+@pytest.mark.parametrize(
+    ("catalog_name", "expected"),
+    [
+        ("glm-5-3", "z-ai/glm-5.3"),
+        ("glm-5-3-flash", "z-ai/glm-5.3-flash"),
+        ("glm-5.2", "z-ai/glm-5.2"),
+    ],
+)
+def test_catalog_model_id_normalizes_zai_glm_version_slug(catalog_name, expected):
+    entry = _catalog_endpoint(
+        catalog_name,
+        "z-ai",
+        values=("chat", "Free Endpoint"),
+    )
+
+    assert authnd._catalog_model_id(entry) == expected
+
+
+def test_resolve_metadata_prefers_publisher_qualified_payload_model(monkeypatch):
+    page_html = r'''
+        {\"model\":\"glm-5-3-flash\",\"namespace\":\"test-org\",
+         \"artifactName\":\"glm-5-3-flash\",
+         \"nvcfFunctionId\":\"function-id\"}
+        {\"requestJson\":\"{\\n \\\"model\\\": \\\"z-ai/glm-5.3-flash\\\"\"}
+        {\"model\":\"z-ai/glm-5.3-flash\"}
+    '''
+    monkeypatch.setattr(authnd, "_metadata_cache", {})
+    monkeypatch.setattr(
+        authnd.requests,
+        "get",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            text=page_html,
+            raise_for_status=lambda: None,
+        ),
+    )
+
+    metadata = authnd._resolve_model_metadata(
+        "https://build.nvidia.com/z-ai/glm-5-3-flash"
+    )
+
+    assert metadata["payload_model"] == "z-ai/glm-5.3-flash"
+
+
 def test_fetch_available_models_rejects_incomplete_pagination(monkeypatch):
     monkeypatch.setattr(authnd, "CATALOG_PAGE_SIZE", 1)
     first_model = _catalog_endpoint(

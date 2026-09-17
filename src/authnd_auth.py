@@ -669,6 +669,12 @@ def _resolve_model_metadata(page_url: str) -> Dict[str, str]:
                 return match.group(1)
         return ""
 
+    def _matches(patterns: Iterable[str]) -> List[str]:
+        values: List[str] = []
+        for pattern in patterns:
+            values.extend(re.findall(pattern, html))
+        return values
+
     function_id = os.getenv("AUTHND_NVCF_FUNCTION_ID", "").strip() or _match((
         r'\\"nvcfFunctionId\\":\\"([^"\\]+)\\"',
         r'"nvcfFunctionId"\s*:\s*"([^"]+)"',
@@ -677,10 +683,19 @@ def _resolve_model_metadata(page_url: str) -> Dict[str, str]:
         r'\\"artifactName\\":\\"([^"\\]+)\\"',
         r'"artifactName"\s*:\s*"([^"]+)"',
     ))
-    payload_model = _match((
-        r'\\"model\\"\s*:\s*\\"([^"\\]+)\\"',
+    payload_model_candidates = _matches((
+        r'\\+"model\\+"\s*:\s*\\+"([^"\\]+)\\+"',
         r'"model"\s*:\s*"([^"]+)"',
     ))
+    # Next.js route state also contains a generic `model` field holding the
+    # Build page slug (for example ``glm-5-3-flash``).  It can precede the
+    # OpenAPI request example, whose publisher-qualified value is the actual
+    # chat payload model (``z-ai/glm-5.3-flash``).  Prefer that canonical ID
+    # instead of blindly accepting the first model-shaped field in the page.
+    payload_model = next(
+        (value for value in payload_model_candidates if "/" in value),
+        payload_model_candidates[0] if payload_model_candidates else "",
+    )
     namespace = os.getenv("AUTHND_NGC_ORG", "").strip("/") or _match((
         r'\\"namespace\\":\\"([^"\\]+)\\"',
         r'"namespace"\s*:\s*"([^"]+)"',
@@ -767,6 +782,17 @@ def _catalog_model_id(entry: Dict[str, Any]) -> Optional[str]:
         or entry.get("name")
         or ""
     ).strip("/")
+    # NVIDIA's Build catalog exposes new Z.ai GLM versions using URL-slug
+    # spelling (glm-5-3[-flash]), while their OpenAI-compatible payload IDs
+    # use dotted version spelling (glm-5.3[-flash]).  Return the usable model
+    # ID from polling; _build_page_model_slug still supplies a valid page URL.
+    if publisher.casefold() == "z-ai":
+        display_name = re.sub(
+            r"^(glm-\d+)-(\d+)(?=$|-)",
+            r"\1.\2",
+            display_name,
+            flags=re.IGNORECASE,
+        )
     model = f"{publisher}/{display_name}" if publisher and display_name else ""
     if (
         not model
