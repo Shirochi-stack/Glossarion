@@ -347,6 +347,13 @@ def _interruptible_transport(fn):
     def wrapped(*args, **kwargs):
         generation = getattr(_thread_local, "cancel_generation", _cancel_generation)
         check = getattr(_thread_local, "cancel_check", None)
+        # Keep the logical API worker in the helper's name.  AuthND performs
+        # the blocking HTTP/SSE work on this helper so hard cancellation can
+        # release the caller immediately.  Without the parent identity, GUI
+        # stream listeners see ``AuthNDTransport`` as a second request and
+        # render the live stream beside the final response from the API worker.
+        caller_thread_name = threading.current_thread().name
+        transport_thread_name = f"AuthNDTransport[{caller_thread_name}]"
         results = queue.Queue(maxsize=1)
         def run():
             _thread_local.cancel_generation = generation
@@ -365,7 +372,11 @@ def _interruptible_transport(fn):
                     finally:
                         with _active_sessions_lock:
                             _active_sessions.discard(session)
-        threading.Thread(target=run, name="AuthNDTransport", daemon=True).start()
+        threading.Thread(
+            target=run,
+            name=transport_thread_name,
+            daemon=True,
+        ).start()
         while True:
             if generation.is_set() or _is_cancelled():
                 raise RuntimeError("stream cancelled")

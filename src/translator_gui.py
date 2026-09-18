@@ -9726,13 +9726,25 @@ class _InputOutputDialog(QDialog):
         # An API worker is sometimes mentioned inside a record that is emitted
         # by its parent orchestration thread. Prefer that explicit worker ID;
         # generic provider tags such as ``[gemini-native]`` are not request IDs.
-        match = re.search(
-            r"\[((?:Thread|Dummy)-[^\]]+)\]",
-            str(line or ""),
+        # Browser-backed providers can also consume their stream on an
+        # interruptible transport helper.  Those helpers retain the logical
+        # worker as ``ProviderTransport[Thread-N (...)]`` so every stream event
+        # and the final response resolve to one Direct Text request card.
+        transport_match = re.fullmatch(
+            r"[^\[\]]*Transport\[(.+)\]",
+            str(source_thread or "").strip(),
             flags=re.IGNORECASE,
         )
-        if match:
-            return match.group(1).strip()
+        if transport_match:
+            return transport_match.group(1).strip()
+        for candidate in (line, source_thread):
+            match = re.search(
+                r"\[((?:Thread|Dummy)-[^\]]+)\]",
+                str(candidate or ""),
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return match.group(1).strip()
         return str(source_thread or "").strip()
 
     def _begin_request_segment(self, line, source_thread=None):

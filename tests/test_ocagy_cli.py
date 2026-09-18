@@ -1500,6 +1500,38 @@ def test_authnd_completed_done_stream_is_accepted_without_duplicate_retry(
     assert attempts == [1]
 
 
+def test_authnd_interruptible_transport_retains_caller_thread_identity(monkeypatch):
+    import authnd_auth
+
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+    monkeypatch.delenv("GRACEFUL_STOP", raising=False)
+    authnd_auth.reset_cancel()
+    observed_names = []
+
+    @authnd_auth._interruptible_transport
+    def fake_transport():
+        observed_names.append(threading.current_thread().name)
+        return "ok"
+
+    caller_name = threading.current_thread().name
+    assert fake_transport() == "ok"
+    assert observed_names == [f"AuthNDTransport[{caller_name}]"]
+
+
+def test_direct_text_maps_authnd_transport_logs_to_api_worker():
+    import translator_gui
+
+    resolve = translator_gui._InputOutputDialog._thread_key_from_log
+    source = "AuthNDTransport[Thread-2 (api_call)]"
+
+    assert resolve("🧠 [authnd] Thinking...", source) == "Thread-2 (api_call)"
+    assert resolve("translated text", source) == "Thread-2 (api_call)"
+    assert (
+        resolve("translated text", "AuthNDTransport[TranslationWorker_7]")
+        == "TranslationWorker_7"
+    )
+
+
 @pytest.mark.parametrize(
     "provider,model,send_attr,result",
     MISSING_FINISH_PROVIDERS,
