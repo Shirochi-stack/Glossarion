@@ -28330,6 +28330,8 @@ class UnifiedClient:
                     if self._is_local_cancel_requested():
                         return True
                     return bool(
+                        not authnd_watchdog_marked
+                        and
                         not getattr(self, '_ignore_graceful_stop', False)
                         and (
                             os.environ.get('GRACEFUL_STOP') == '1'
@@ -28405,7 +28407,18 @@ class UnifiedClient:
                         "inferred_finish_reason": finish_reason,
                         "finish_reason_inference": inference,
                     }
-                    if self._force_missing_finish_as_prohibited(None):
+                    # NVIDIA streams commonly finish with a valid [DONE] frame
+                    # but no finish_reason.  The completed framing plus content
+                    # is authoritative; retrying the whole request here sends a
+                    # second browser-backed prediction and duplicates Direct
+                    # Text replies.
+                    if content and inference == "done_without_finish_reason":
+                        response_finish_reason = finish_reason or "stop"
+                        print(
+                            "AuthND: completed stream omitted finish_reason; "
+                            "accepting the [DONE] boundary as stop."
+                        )
+                    elif self._force_missing_finish_as_prohibited(None):
                         print(
                             "AuthND: missing finish_reason fallback triggered; toggle is ON, "
                             f"routing the response as prohibited_content (inferred {finish_reason}: {inference})."

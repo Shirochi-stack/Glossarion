@@ -1313,6 +1313,9 @@ def test_authnd_graceful_stop_preserves_claimed_provider_call(monkeypatch):
         kwargs["before_send_callback"]()
         provider_started.set()
         assert release_provider.wait(2.0)
+        # AuthND checks this repeatedly while consuming SSE chunks.  A graceful
+        # stop must not turn it true after the provider boundary was claimed.
+        assert kwargs["cancel_check"]() is False
         return {
             "content": "translated",
             "finish_reason": "stop",
@@ -1359,7 +1362,7 @@ def test_authnd_graceful_stop_preserves_claimed_provider_call(monkeypatch):
 
 @pytest.mark.parametrize(
     "provider,model,send_attr,result",
-    MISSING_FINISH_PROVIDERS,
+    MISSING_FINISH_PROVIDERS[:1],
 )
 def test_missing_finish_reason_toggle_on_routes_to_prohibited_content(
     monkeypatch,
@@ -1407,7 +1410,7 @@ def test_missing_finish_reason_toggle_on_routes_to_prohibited_content(
 
 @pytest.mark.parametrize(
     "provider,model,send_attr,result",
-    MISSING_FINISH_PROVIDERS,
+    MISSING_FINISH_PROVIDERS[:1],
 )
 def test_missing_finish_reason_toggle_off_is_api_error_and_globally_retried(
     monkeypatch,
@@ -1462,6 +1465,39 @@ def test_missing_finish_reason_toggle_off_is_api_error_and_globally_retried(
     assert "toggle is off" in output.lower()
     assert "api_error for global retry" in output.lower()
     assert "server error (api error)" in output.lower()
+
+
+def test_authnd_completed_done_stream_is_accepted_without_duplicate_retry(
+    monkeypatch,
+):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_authnd_send(**_kwargs):
+        attempts.append(1)
+        return dict(MISSING_FINISH_PROVIDERS[1][3])
+
+    monkeypatch.setattr(unified, "_authnd_send", fake_authnd_send)
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    unified, client = _make_missing_finish_client(
+        monkeypatch, "authnd/z-ai/glm-5.1",
+    )
+
+    content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "Hi"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id="authnd-completed-done",
+    )
+
+    assert content == "translated"
+    assert finish_reason == "stop"
+    assert attempts == [1]
 
 
 @pytest.mark.parametrize(

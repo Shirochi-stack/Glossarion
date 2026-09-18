@@ -2415,7 +2415,11 @@ def _post_prediction(
     )
 
     def check_retry_cancel():
-        if _is_cancelled() or os.getenv("GRACEFUL_STOP") == "1" or (callable(cancel_check) and cancel_check()):
+        # The caller's request-scoped check owns the graceful pre-dispatch
+        # boundary.  Once the provider call is claimed, graceful stop must let
+        # the active HTTP stream finish; _is_cancelled() still handles hard
+        # stop and request-local force cancellation immediately.
+        if _is_cancelled() or (callable(cancel_check) and cancel_check()):
             raise RuntimeError("stream cancelled")
 
     sent = False
