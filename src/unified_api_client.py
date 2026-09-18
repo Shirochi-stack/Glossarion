@@ -4779,6 +4779,14 @@ class UnifiedClient:
                     # Only log key assignment for non-glossary keys (glossary rotation is too noisy)
                     if os.getenv("BATCH_TRANSLATION", "0") == "1" and not _is_glossary_pool:
                         defer_batch_log(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
+                    elif getattr(self, 'context', None) == 'review' and not _is_glossary_pool:
+                        # Review has its own live log surface.  Report the
+                        # effective pool entry/model without exposing key data.
+                        print(
+                            f"🔑 Review route selected: Translation Keys → "
+                            f"{self.key_identifier}",
+                            flush=True,
+                        )
                     
                     # Setup client with new key. For per-key endpoints, apply the
                     # endpoint before provider validation so arbitrary local model

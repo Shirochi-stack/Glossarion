@@ -800,9 +800,14 @@ def generate_review(
                     key_count = len(pool._keys)
             except Exception:
                 key_count = 2
-        if key_count > 1:
-            log_fn(f"📤 Sending {content_tokens:,} tokens ({key_count} keys available)...")
+        if is_multi:
+            log_fn(
+                f"🔑 Review key source: Translation Keys (Main Pool; "
+                f"{key_count} key{'s' if key_count != 1 else ''} available)"
+            )
+            log_fn(f"📤 Sending {content_tokens:,} tokens via Translation Keys...")
         else:
+            log_fn(f"🔑 Review key source: Main GUI key ({model})")
             log_fn(f"📤 Sending {content_tokens:,} tokens to {model}...")
 
         log_fn("🚀 Sending API request (single call)...")

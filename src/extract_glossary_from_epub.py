@@ -510,7 +510,12 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config, con
     """
     
     # ── Step 1: Determine which key pool to use ──────────────────────────
-    use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
+    # Dedicated glossary pools must never capture review (or other) traffic
+    # merely because their toggle remains enabled in the GUI.
+    use_glossary_keys = (
+        context == 'glossary'
+        and os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
+    )
     use_refinement_keys = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1' or config.get('use_glossary_refinement_keys', False)
     refinement_keys = []
     if use_refinement_keys:
@@ -597,7 +602,12 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config, con
     elif config.get('use_multi_api_keys', False) and config.get('multi_api_keys'):
         # ── MULTI-KEY MODE (no glossary keys) ────────────────────────────
         # Fall back to regular translation multi-keys
-        print("🔑 Multi API Key mode enabled for glossary extraction")
+        if context == 'review':
+            print("🔑 Translation Keys enabled for review generation")
+        elif context == 'glossary':
+            print("🔑 Multi API Key mode enabled for glossary extraction")
+        else:
+            print(f"🔑 Multi API Key mode enabled for {context}")
         
         os.environ['USE_MULTI_API_KEYS'] = '1'
         os.environ['USE_MULTI_KEYS'] = '1'
@@ -622,7 +632,7 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config, con
         
     # Create UnifiedClient normally - it will check environment variables
     client = UnifiedClient(api_key=api_key, model=model, output_dir=output_dir)
-    client.context = 'glossary'
+    client.context = context
     
     # Check if fallback keys should be used
     # FORCE enable if env var is '1' (handled by GUI toggle)

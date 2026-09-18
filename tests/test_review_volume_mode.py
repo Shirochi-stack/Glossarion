@@ -111,6 +111,59 @@ def test_generate_review_sends_ordered_files_in_one_request(tmp_path, monkeypatc
     assert all(path.read_text(encoding="utf-8") == result for path in review_output_paths)
 
 
+def test_review_uses_translation_pool_when_glossary_pool_toggle_is_also_on(
+    monkeypatch, tmp_path
+):
+    import extract_glossary_from_epub as extractor
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, api_key, model, output_dir):
+            self.context = None
+
+        @classmethod
+        def set_in_memory_glossary_keys(cls, keys, **kwargs):
+            calls.append(("glossary", keys))
+
+        @classmethod
+        def set_in_memory_multi_keys(cls, keys, **kwargs):
+            calls.append(("translation", keys))
+
+    translation_keys = [{"api_key": "translation", "model": "pool-model"}]
+    glossary_keys = [{"api_key": "glossary", "model": "glossary-model"}]
+    monkeypatch.setattr(extractor, "UnifiedClient", FakeClient)
+    monkeypatch.setenv("USE_GLOSSARY_KEYS", "1")
+    monkeypatch.setenv("GLOSSARY_API_KEYS", "[]")
+
+    client = extractor.create_client_with_multi_key_support(
+        "main-key",
+        "main-model",
+        str(tmp_path),
+        {
+            "use_multi_api_keys": True,
+            "multi_api_keys": translation_keys,
+            "glossary_keys": glossary_keys,
+        },
+        context="review",
+    )
+
+    assert calls == [("translation", translation_keys)]
+    assert client.context == "review"
+
+
+def test_review_dialog_uses_live_streaming_toggle_for_both_start_paths():
+    pytest.importorskip("PySide6")
+    import inspect
+    import review_dialog
+
+    source = inspect.getsource(review_dialog.ReviewDialog)
+    assert source.count("'enable_streaming_var'") == 2
+    assert source.count(
+        "os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'"
+    ) == 2
+
+
 def test_volume_filename_sort_is_numerical():
     pytest.importorskip("PySide6")
     from review_dialog import _natural_path_key

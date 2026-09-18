@@ -1745,6 +1745,12 @@ class ReviewDialog(QDialog):
         endpoint = os.environ.get('ENDPOINT', '') or gui.config.get('endpoint', '')
         temperature = float(gui.config.get('translation_temperature', 0.3))
         config = dict(gui.config)
+        # The non-modal key manager and settings controls update live GUI state.
+        # Freeze that effective state for this run instead of relying on a
+        # potentially older config snapshot.
+        config['use_multi_api_keys'] = bool(
+            gui.config.get('use_multi_api_keys', False)
+        )
 
         # Get input token limit
         try:
@@ -1805,6 +1811,12 @@ class ReviewDialog(QDialog):
         except Exception:
             pass
 
+        # Message queue for thread → main-thread communication.  Create it
+        # before installing either redirect so no early message can target a
+        # queue left over from a previous run.
+        import queue
+        self._review_queue = queue.Queue()
+
         # ── Hijack translator_gui.append_log ──
         # Save original and replace with a wrapper that also writes to review dialog
         self._original_append_log = self.translator_gui.append_log
@@ -1818,10 +1830,6 @@ class ReviewDialog(QDialog):
                 self._review_log_backlog.append(str(message))
 
         self.translator_gui.append_log = _hijacked_append_log
-
-        # Message queue for thread → main-thread communication
-        import queue
-        self._review_queue = queue.Queue()
 
         # ── Hijack sys.stdout so print() calls from streaming/thinking code
         #    are routed through the review dialog queue instead of main GUI ──
@@ -1839,7 +1847,11 @@ class ReviewDialog(QDialog):
         sys.stdout = _ReviewStdoutWriter()
 
         # ── Respect the streaming toggle from settings ──
-        stream_on = bool(self.translator_gui.config.get('enable_streaming', False))
+        stream_on = bool(getattr(
+            self.translator_gui,
+            'enable_streaming_var',
+            self.translator_gui.config.get('enable_streaming', False),
+        ))
         os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'
 
 
@@ -1994,6 +2006,9 @@ class ReviewDialog(QDialog):
         endpoint = os.environ.get('ENDPOINT', '') or gui.config.get('endpoint', '')
         temperature = float(gui.config.get('translation_temperature', 0.3))
         config = dict(gui.config)
+        config['use_multi_api_keys'] = bool(
+            gui.config.get('use_multi_api_keys', False)
+        )
 
         try:
             token_limit = int(gui.token_limit_entry.text().replace(',', '').strip())
@@ -2062,6 +2077,11 @@ class ReviewDialog(QDialog):
         except Exception:
             pass
 
+        # Create a fresh queue before installing redirects (same as
+        # _on_start_review).
+        import queue
+        self._review_queue = queue.Queue()
+
         # Bug fix #2: Hijack translator_gui.append_log (same as _on_start_review)
         self._original_append_log = self.translator_gui.append_log
         self._review_log_active = True
@@ -2073,10 +2093,6 @@ class ReviewDialog(QDialog):
                 self._review_log_backlog.append(str(message))
 
         self.translator_gui.append_log = _hijacked_append_log
-
-        # Message queue for thread → main-thread
-        import queue
-        self._review_queue = queue.Queue()
 
         # Hijack sys.stdout so print() from streaming/thinking goes to review dialog
         self._original_stdout = sys.stdout
@@ -2093,7 +2109,11 @@ class ReviewDialog(QDialog):
         sys.stdout = _ReviewStdoutWriter()
 
         # Respect the streaming toggle from settings
-        stream_on = bool(self.translator_gui.config.get('enable_streaming', False))
+        stream_on = bool(getattr(
+            self.translator_gui,
+            'enable_streaming_var',
+            self.translator_gui.config.get('enable_streaming', False),
+        ))
         os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'
 
 
