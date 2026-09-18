@@ -54,6 +54,35 @@ DEFAULT_AI_ARTIFACT_PATTERNS = [
     "I've translated",
 ]
 
+HTML_LIKE_EXTENSIONS = frozenset({".htm", ".html", ".xhtml"})
+
+
+def is_html_like_path(path):
+    """Return whether *path* ends in one or more HTML-family extensions.
+
+    Treat compound output names such as ``chapter.htm.xhtml`` and
+    ``chapter.html.xhtml`` as HTML documents.  Splitting repeatedly also
+    makes the intended compound-extension behavior explicit instead of
+    depending on scattered string-suffix checks.
+    """
+    if not isinstance(path, (str, os.PathLike)):
+        return False
+
+    basename = os.path.basename(os.fspath(path)).casefold()
+    stem, extension = os.path.splitext(basename)
+    if extension not in HTML_LIKE_EXTENSIONS:
+        return False
+
+    # Consume any additional HTML-family suffixes. The final suffix is what
+    # identifies the file; this loop deliberately supports double/triple
+    # variants without accepting unrelated trailing suffixes such as .bak.
+    while stem:
+        next_stem, next_extension = os.path.splitext(stem)
+        if next_extension not in HTML_LIKE_EXTENSIONS:
+            break
+        stem = next_stem
+    return True
+
 
 def normalize_target_language(display_text):
     if not display_text:

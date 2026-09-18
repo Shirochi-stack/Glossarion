@@ -24,6 +24,7 @@ from qa_scan_runtime import (
     automatic_qa_output_candidates,
     default_qa_scan_settings,
     is_direct_text_qa_path,
+    is_html_like_path,
     run_qa_scan_path,
 )
 from scan_html_folder import (
@@ -52,6 +53,30 @@ from scan_html_folder import (
 class _AITruncationYesClient:
     def send(self, messages, temperature=0.0, max_tokens=None, context=None):
         return "YES"
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "chapter.htm",
+        "chapter.html",
+        "chapter.xhtml",
+        "chapter.htm.xhtml",
+        "chapter.html.xhtml",
+        "chapter.HTM.XHTML",
+        "chapter.xhtml.html.htm",
+    ],
+)
+def test_html_like_path_accepts_single_and_compound_extensions(filename):
+    assert is_html_like_path(filename)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["chapter", "chapter.xml", "chapter.xhtml.bak", "chapter.html.txt"],
+)
+def test_html_like_path_rejects_non_html_final_extensions(filename):
+    assert not is_html_like_path(filename)
 
 
 def test_ai_truncation_issue_previews_source_and_output_last_nonempty_html_p():

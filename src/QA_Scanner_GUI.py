@@ -20,6 +20,7 @@ import traceback
 
 from language_options import TARGET_LANGUAGES
 from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS
+from qa_scan_runtime import is_html_like_path
 
 DEFAULT_AI_ARTIFACT_PATTERNS = [
     'Sure',
@@ -2026,10 +2027,13 @@ class QAScannerMixin:
 
                                 if text_file_mode:
                                     # For text mode, check for both .txt AND .html files (PDFs generate .html)
-                                    target_files = [f for f in files if f.lower().endswith(('.txt', '.html', '.xhtml', '.htm'))]
+                                    target_files = [
+                                        f for f in files
+                                        if f.lower().endswith('.txt') or is_html_like_path(f)
+                                    ]
                                     file_type = "TXT/HTML"
                                 else:
-                                    target_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                                    target_files = [f for f in files if is_html_like_path(f)]
                                     file_type = "HTML/XHTML"
 
                                 if target_files:
@@ -2091,10 +2095,13 @@ class QAScannerMixin:
 
                     if text_file_mode:
                         # For text mode, check for both .txt AND .html files (PDFs generate .html)
-                        target_files = [f for f in files if f.lower().endswith(('.txt', '.html', '.xhtml', '.htm'))]
+                        target_files = [
+                            f for f in files
+                            if f.lower().endswith('.txt') or is_html_like_path(f)
+                        ]
                         file_type = "TXT/HTML"
                     else:
-                        target_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                        target_files = [f for f in files if is_html_like_path(f)]
                         file_type = "HTML/XHTML"
 
                     if target_files:

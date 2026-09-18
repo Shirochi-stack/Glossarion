@@ -56,6 +56,7 @@ from emoticon_patterns import (
 )
 from epub_package import find_epub_opf_member
 from title_tag_translation import should_translate_title_tags
+from qa_scan_runtime import is_html_like_path
 from chapter_chunk_progress import (
     chunk_failure_summary,
     ensure_chunk_entry_schema,
@@ -1043,7 +1044,7 @@ import re
 
 def check_html_structure(file_path):
     """Check if an HTML file has proper HTML tags"""
-    if not file_path.lower().endswith(('.html', '.xhtml', '.htm')):
+    if not is_html_like_path(file_path):
         return True
         
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -10887,7 +10888,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         ]
         log(f"📄 Text file mode enabled - scanning section files (response_ prefix ignored for comparison)")
     else:
-        html_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith((".html", ".xhtml", ".htm"))])
+        html_files = sorted([f for f in os.listdir(folder_path) if is_html_like_path(f)])
 
     # These three translated artifacts are intentionally scanned separately
     # from HTML. Their source/audit fields contain foreign text by design, so
