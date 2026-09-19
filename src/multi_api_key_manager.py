@@ -25,8 +25,11 @@ try:
         QCompleter, QDialogButtonBox, QInputDialog, QAbstractSpinBox,
         QStyledItemDelegate, QStyleOptionViewItem, QStyle, QToolButton
     )
-    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot, QSize, QRect
-    from PySide6.QtGui import QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform
+    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot, QSize, QRect, QEvent
+    from PySide6.QtGui import (
+        QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform,
+        QColor, QPainter, QPen, QBrush, QConicalGradient,
+    )
     from spinning import create_icon_label, animate_icon
     HAS_GUI = True
 except ImportError:
@@ -81,6 +84,153 @@ except ImportError:
     Slot = lambda *args, **kwargs: (lambda func: func)
     create_icon_label = lambda *args, **kwargs: None
     animate_icon = lambda *args, **kwargs: None
+
+
+if HAS_GUI:
+    class _ModelComboCompletionPopupFilter(QObject):
+        """Route the custom arrow button to the ranked autocomplete popup."""
+
+        def __init__(self, combo, completer, completion_model, arrow_width=32):
+            super().__init__(combo)
+            self._combo = combo
+            self._completer = completer
+            self._completion_model = completion_model
+            self._arrow_width = max(1, int(arrow_width))
+
+        def eventFilter(self, watched, event):
+            mouse_events = (
+                QEvent.MouseButtonPress,
+                QEvent.MouseButtonRelease,
+                QEvent.MouseButtonDblClick,
+            )
+            if watched is self._combo and event.type() in mouse_events:
+                try:
+                    if event.button() != Qt.LeftButton:
+                        return False
+                    position = event.position() if hasattr(event, 'position') else event.pos()
+                    if position.x() < self._combo.width() - self._arrow_width:
+                        return False
+
+                    # Consume release/double-click too; otherwise QComboBox
+                    # opens its native editable list over this completer and
+                    # renders the current editor text as a catalog row.
+                    if event.type() != QEvent.MouseButtonPress:
+                        event.accept()
+                        return True
+
+                    popup = self._completer.popup()
+                    if (
+                        popup.isVisible()
+                        and not getattr(self._completion_model, '_search', '')
+                    ):
+                        popup.hide()
+                    else:
+                        query = self._combo.currentText().strip().casefold()
+                        # Typing keeps the compact filtered completion model.
+                        # The arrow mirrors a normal combo: show every allowed
+                        # model, then jump to the first relevant catalog row.
+                        self._completion_model.set_search_text("")
+                        self._completer.setCompletionPrefix("")
+                        popup.setMinimumWidth(self._combo.width())
+                        self._completer.complete()
+                        if query:
+                            popup_model = popup.model()
+                            best_index = None
+                            best_score = 99
+                            for row in range(popup_model.rowCount()):
+                                index = popup_model.index(row, 0)
+                                value = str(index.data(Qt.DisplayRole) or '')
+                                lowered = value.casefold()
+                                if lowered == query:
+                                    score = 0
+                                elif lowered.startswith(query):
+                                    score = 1
+                                elif any(
+                                    part.startswith(query)
+                                    for part in lowered.split('/')[1:]
+                                ):
+                                    score = 2
+                                elif query in lowered:
+                                    score = 3
+                                else:
+                                    continue
+                                if score < best_score:
+                                    best_index = index
+                                    best_score = score
+                                    if score == 0:
+                                        break
+                            if best_index is not None:
+                                popup.setCurrentIndex(best_index)
+                                popup.scrollTo(
+                                    best_index,
+                                    QAbstractItemView.PositionAtTop,
+                                )
+                    event.accept()
+                    return True
+                except RuntimeError:
+                    return False
+            return super().eventFilter(watched, event)
+
+
+    class _ModelCatalogPollBorder(QWidget):
+        """Animated perimeter shown while an online model catalog is polled."""
+
+        def __init__(self, parent):
+            super().__init__(parent)
+            self._phase = 0
+            self.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setGeometry(parent.rect())
+            parent.installEventFilter(self)
+            self._timer = QTimer(self)
+            self._timer.setInterval(40)
+            self._timer.timeout.connect(self._advance)
+            self.hide()
+
+        def eventFilter(self, watched, event):
+            if watched is self.parentWidget() and event.type() in (QEvent.Resize, QEvent.Show):
+                self.setGeometry(watched.rect())
+            return super().eventFilter(watched, event)
+
+        def start(self):
+            parent = self.parentWidget()
+            if parent is not None:
+                self.setGeometry(parent.rect())
+            self.show()
+            self.raise_()
+            if not self._timer.isActive():
+                self._timer.start()
+            self.update()
+
+        def stop(self):
+            self._timer.stop()
+            self.hide()
+
+        def isAnimating(self):
+            return self._timer.isActive() and self.isVisible()
+
+        def _advance(self):
+            self._phase = (self._phase + 5) % 360
+            self.update()
+
+        def paintEvent(self, _event):
+            if self.width() < 4 or self.height() < 4:
+                return
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setBrush(Qt.NoBrush)
+            rect = self.rect().adjusted(1, 1, -2, -2)
+            painter.setPen(QPen(QColor(56, 189, 248, 72), 3))
+            painter.drawRoundedRect(rect, 5, 5)
+            gradient = QConicalGradient(rect.center(), self._phase)
+            gradient.setColorAt(0.00, QColor(103, 232, 249, 235))
+            gradient.setColorAt(0.16, QColor(167, 139, 250, 230))
+            gradient.setColorAt(0.38, QColor(59, 130, 246, 95))
+            gradient.setColorAt(0.70, QColor(30, 41, 59, 55))
+            gradient.setColorAt(0.88, QColor(34, 211, 238, 210))
+            gradient.setColorAt(1.00, QColor(103, 232, 249, 235))
+            painter.setPen(QPen(QBrush(gradient), 2))
+            painter.drawRoundedRect(rect, 5, 5)
 import json
 import threading
 import time
@@ -152,7 +302,7 @@ if HAS_GUI:
                 content.height(),
             )
             color = (
-                opt.palette.highlightedText().color()
+                QColor("#ffffff")
                 if option.state & QStyle.State_Selected
                 else opt.palette.text().color()
             )
@@ -2406,12 +2556,12 @@ class MultiAPIKeyDialog(QDialog):
         icon_path = self._halgakos_icon_path().replace('\\', '/')
         arrow_style = f"""
             QComboBox {{
-                padding-right: 50px;
+                padding-right: 0px;
             }}
             QComboBox::drop-down {{
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 48px;
+                width: 32px;
                 border-left: 1px solid #4a5568;
             }}
             QComboBox::down-arrow {{
@@ -5848,10 +5998,6 @@ class MultiAPIKeyDialog(QDialog):
         combo = QComboBox()
         combo.setEditable(True)
         combo.setInsertPolicy(QComboBox.NoInsert)
-        # The completer has its own model; it does not populate the combo's
-        # arrow popup. Keep the actual combo model populated as well so the
-        # custom Halgakos drop-down button opens a usable list.
-        combo.addItems(all_models)
         self._attach_model_autofill(combo, None, model_values=all_models)
         combo.setCurrentText(current_value)
         self._apply_combobox_icon(combo)
@@ -7984,6 +8130,125 @@ class MultiAPIKeyDialog(QDialog):
                 pass
         _install_model_field_poll_marker(combo, checked_icon)
 
+    @staticmethod
+    def _set_combo_model_poll_border_active(combo, active):
+        """Mirror translator_gui's animated catalog-poll perimeter."""
+        try:
+            border = getattr(combo, '_model_catalog_poll_border', None)
+            if border is None:
+                border = _ModelCatalogPollBorder(combo)
+                combo._model_catalog_poll_border = border
+            if active:
+                border.start()
+            else:
+                border.stop()
+        except RuntimeError:
+            pass
+
+    def _show_model_context_menu(self, combo, global_position):
+        """Show the translator model field's edit and catalog actions."""
+        line_edit = combo.lineEdit() if combo.isEditable() else None
+        clipboard = QApplication.clipboard()
+        menu = QMenu(combo)
+
+        cut_action = menu.addAction("✂️ Cut")
+        cut_action.setShortcut("Ctrl+X")
+        cut_action.setEnabled(bool(
+            line_edit is not None
+            and not line_edit.isReadOnly()
+            and line_edit.hasSelectedText()
+        ))
+
+        copy_action = menu.addAction("📋 Copy")
+        copy_action.setShortcut("Ctrl+C")
+        copy_action.setEnabled(bool(
+            (line_edit is not None and line_edit.hasSelectedText())
+            or combo.currentText()
+        ))
+
+        paste_action = menu.addAction("📥 Paste")
+        paste_action.setShortcut("Ctrl+V")
+        paste_action.setEnabled(bool(
+            line_edit is not None
+            and not line_edit.isReadOnly()
+            and clipboard.text()
+        ))
+
+        menu.addSeparator()
+        refresh_action = menu.addAction("🌐 Refresh Online Models")
+        manage_action = menu.addAction("⚙️ Manage Models...")
+        action = menu.exec(global_position)
+
+        if action == refresh_action:
+            MultiAPIKeyDialog._set_combo_model_poll_border_active(combo, True)
+            translator = getattr(self, 'translator_gui', None)
+            active_model = combo.currentText().strip().lower()
+            started = False
+            if active_model.startswith('antigravity'):
+                refresh = getattr(
+                    translator, '_start_provider_catalog_refresh_with_antigravity', None,
+                )
+            else:
+                refresh = getattr(
+                    translator, '_start_provider_model_catalog_refresh', None,
+                )
+            if callable(refresh):
+                try:
+                    result = refresh(show_feedback=True)
+                    # Antigravity preflight is asynchronous and intentionally
+                    # returns no result before it starts the catalog worker.
+                    started = result is not False
+                except RuntimeError:
+                    started = False
+            if not started:
+                thread = getattr(translator, '_provider_model_catalog_thread', None)
+                if thread is None or not thread.is_alive():
+                    MultiAPIKeyDialog._set_combo_model_poll_border_active(combo, False)
+        elif action == manage_action:
+            open_manager = getattr(getattr(self, 'translator_gui', None), '_open_model_manager', None)
+            if callable(open_manager):
+                open_manager()
+        elif action == cut_action and line_edit is not None:
+            line_edit.cut()
+        elif action == copy_action:
+            if line_edit is not None and line_edit.hasSelectedText():
+                line_edit.copy()
+            else:
+                clipboard.setText(combo.currentText())
+        elif action == paste_action and line_edit is not None:
+            line_edit.paste()
+
+    def _install_model_context_menu(self, combo):
+        """Install the shared model menu on both the combo and its editor."""
+        if getattr(combo, '_model_context_menu_installed', False):
+            return
+        combo.setContextMenuPolicy(Qt.CustomContextMenu)
+        combo.customContextMenuRequested.connect(
+            lambda point, target=combo: MultiAPIKeyDialog._show_model_context_menu(
+                self, target, target.mapToGlobal(point)
+            )
+        )
+        editor = combo.lineEdit() if combo.isEditable() else None
+        if editor is not None:
+            editor.setContextMenuPolicy(Qt.CustomContextMenu)
+            editor.customContextMenuRequested.connect(
+                lambda point, target=combo, source=editor: MultiAPIKeyDialog._show_model_context_menu(
+                    self, target, source.mapToGlobal(point)
+                )
+            )
+        combo._model_context_menu_installed = True
+
+    def _set_all_model_poll_borders_active(self, active):
+        """Stop or start catalog animation on every live manager model field."""
+        live_combos = []
+        for combo in list(getattr(self, '_model_search_combos', []) or []):
+            try:
+                MultiAPIKeyDialog._set_combo_model_poll_border_active(combo, active)
+                live_combos.append(combo)
+            except RuntimeError:
+                continue
+        self._model_search_combos = live_combos
+
     def _refresh_model_poll_markers(self):
         """Refresh every registered model picker after polling/filter changes."""
         polled_model_keys, checked_icon, hide_unpolled = (
@@ -8067,6 +8332,13 @@ class MultiAPIKeyDialog(QDialog):
                 continue
         self._model_search_combos = live_combos
         MultiAPIKeyDialog._refresh_model_poll_markers(self)
+        if not getattr(
+            getattr(self, 'translator_gui', None),
+            '_provider_model_catalog_poll_active',
+            False,
+        ):
+            for combo in live_combos:
+                MultiAPIKeyDialog._set_combo_model_poll_border_active(combo, False)
 
     @staticmethod
     def _set_authza_editor_button_margin(combo, visible):
@@ -8267,6 +8539,10 @@ class MultiAPIKeyDialog(QDialog):
         """Attach the same prefix-priority contains completer used by translator_gui."""
         from PySide6.QtCore import QStringListModel
 
+        # Model text is saved by the key editor itself. Never let an editable
+        # QComboBox silently append a partial typed value to its catalog.
+        combo.setInsertPolicy(QComboBox.NoInsert)
+
         class _PrefixPriorityCompletionModel(QStringListModel):
             """Rank only matching models without a Python-sorted Qt proxy."""
 
@@ -8392,6 +8668,14 @@ class MultiAPIKeyDialog(QDialog):
             _ModelPollMarkerDelegate(checked_icon, completer.popup())
         )
         combo.setCompleter(completer)
+        popup_filter = _ModelComboCompletionPopupFilter(
+            combo,
+            completer,
+            completion_model,
+            arrow_width=32,
+        )
+        combo.installEventFilter(popup_filter)
+        combo._model_completion_popup_filter = popup_filter
 
         # Store callback for changes. This used to call the parent model refresh
         # synchronously on every keystroke, which made all key-pool model fields
@@ -8437,6 +8721,7 @@ class MultiAPIKeyDialog(QDialog):
         if combo not in registered_combos:
             registered_combos.append(combo)
         self._model_search_combos = registered_combos
+        MultiAPIKeyDialog._install_model_context_menu(self, combo)
         MultiAPIKeyDialog._install_authza_login_button(self, combo)
 
     def _notify_authgpt_visibility(self):

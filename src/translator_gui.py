@@ -538,7 +538,7 @@ try:
                                     QScrollArea, QTabWidget, QCheckBox, QComboBox, QSpinBox,
                                     QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton,
                                     QGraphicsOpacityEffect, QStyledItemDelegate,
-                                    QStyleOptionViewItem)
+                                    QStyleOptionViewItem, QAbstractItemView)
     from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QRect, QEvent, QPropertyAnimation, QEasingCurve, Property, QObject, QEventLoop, QMetaObject
     from PySide6.QtGui import QFont, QFontMetrics, QColor, QIcon, QPixmap, QPainter, QPen, QBrush, QConicalGradient, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform, QShortcut
     try:
@@ -706,7 +706,7 @@ class _ModelPollMarkerDelegate(QStyledItemDelegate):
             content.height(),
         )
         color = (
-            opt.palette.highlightedText().color()
+            QColor("#ffffff")
             if option.state & QStyle.State_Selected
             else opt.palette.text().color()
         )
@@ -722,6 +722,84 @@ class _ModelPollMarkerDelegate(QStyledItemDelegate):
             painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, rendered)
         finally:
             painter.restore()
+
+
+class _ModelComboCompletionPopupFilter(QObject):
+    """Show the full model catalog from the arrow and jump to typed text."""
+
+    def __init__(self, combo, completer, completion_model, arrow_width=30):
+        super().__init__(combo)
+        self._combo = combo
+        self._completer = completer
+        self._completion_model = completion_model
+        self._arrow_width = max(1, int(arrow_width))
+
+    def eventFilter(self, watched, event):
+        mouse_events = (
+            QEvent.MouseButtonPress,
+            QEvent.MouseButtonRelease,
+            QEvent.MouseButtonDblClick,
+        )
+        if watched is self._combo and event.type() in mouse_events:
+            try:
+                if event.button() != Qt.LeftButton:
+                    return False
+                position = event.position() if hasattr(event, 'position') else event.pos()
+                if position.x() < self._combo.width() - self._arrow_width:
+                    return False
+                if event.type() != QEvent.MouseButtonPress:
+                    event.accept()
+                    return True
+
+                popup = self._completer.popup()
+                if (
+                    popup.isVisible()
+                    and not getattr(self._completion_model, '_search', '')
+                ):
+                    popup.hide()
+                else:
+                    query = self._combo.currentText().strip().casefold()
+                    self._completion_model.set_search_text("")
+                    self._completer.setCompletionPrefix("")
+                    popup.setMinimumWidth(self._combo.width())
+                    self._completer.complete()
+                    if query:
+                        popup_model = popup.model()
+                        best_index = None
+                        best_score = 99
+                        for row in range(popup_model.rowCount()):
+                            index = popup_model.index(row, 0)
+                            value = str(index.data(Qt.DisplayRole) or '')
+                            lowered = value.casefold()
+                            if lowered == query:
+                                score = 0
+                            elif lowered.startswith(query):
+                                score = 1
+                            elif any(
+                                part.startswith(query)
+                                for part in lowered.split('/')[1:]
+                            ):
+                                score = 2
+                            elif query in lowered:
+                                score = 3
+                            else:
+                                continue
+                            if score < best_score:
+                                best_index = index
+                                best_score = score
+                                if score == 0:
+                                    break
+                        if best_index is not None:
+                            popup.setCurrentIndex(best_index)
+                            popup.scrollTo(
+                                best_index,
+                                QAbstractItemView.PositionAtTop,
+                            )
+                event.accept()
+                return True
+            except RuntimeError:
+                return False
+        return super().eventFilter(watched, event)
 
 
 class _ModelCatalogPollBorder(QWidget):
@@ -22031,6 +22109,25 @@ Recent translations to summarize:
             set_poll_border = getattr(self, '_set_model_poll_border_active', None)
             if callable(set_poll_border):
                 set_poll_border(False)
+            # Multi-key model editors share the same polling animation. Stop
+            # them here as well, including failed/empty polls that return below
+            # before the refreshed catalog is propagated.
+            try:
+                key_dialogs = [
+                    value for name, value in vars(self).items()
+                    if name.startswith('_multi_api_key_dialog') and value is not None
+                ]
+            except (AttributeError, TypeError):
+                key_dialogs = []
+            for key_dialog in key_dialogs:
+                stop_poll_borders = getattr(
+                    key_dialog, '_set_all_model_poll_borders_active', None,
+                )
+                if callable(stop_poll_borders):
+                    try:
+                        stop_poll_borders(False)
+                    except RuntimeError:
+                        pass
         explicit_poll = bool(
             getattr(result, 'restore_removed_models', False)
         )
@@ -22354,6 +22451,9 @@ Recent translations to summarize:
         from PySide6.QtWidgets import QCompleter
         from PySide6.QtCore import Qt, QStringListModel
 
+        # The active text is configuration state, not a new catalog entry.
+        self.model_combo.setInsertPolicy(QComboBox.NoInsert)
+
         class _PrefixPriorityCompletionModel(QStringListModel):
             """Keep only ranked matches without a Python-sorted Qt proxy.
 
@@ -22498,6 +22598,23 @@ Recent translations to summarize:
             _ModelPollMarkerDelegate(checked_icon, completer_popup)
         )
         self.model_combo.setCompleter(completer)
+        old_popup_filter = getattr(
+            self.model_combo, '_model_completion_popup_filter', None,
+        )
+        if old_popup_filter is not None:
+            try:
+                self.model_combo.removeEventFilter(old_popup_filter)
+                old_popup_filter.deleteLater()
+            except RuntimeError:
+                pass
+        popup_filter = _ModelComboCompletionPopupFilter(
+            self.model_combo,
+            completer,
+            completion_model,
+            arrow_width=30,
+        )
+        self.model_combo.installEventFilter(popup_filter)
+        self.model_combo._model_completion_popup_filter = popup_filter
         self.model_combo.view().setObjectName("modelComboPopup")
         _style_model_popup_view(self.model_combo.view())
 
@@ -22538,6 +22655,7 @@ Recent translations to summarize:
         # Create editable combobox
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
+        self.model_combo.setInsertPolicy(QComboBox.NoInsert)
         self.model_combo.addItems(models)
         self.model_combo.setCurrentText(default_model)
         self._apply_combobox_mousewheel_lock(self.model_combo, 'model_mousewheel_locked', True)

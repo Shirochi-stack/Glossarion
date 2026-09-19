@@ -1677,6 +1677,49 @@ def test_model_completer_ranks_matches_without_python_sort_proxy(monkeypatch):
     app.processEvents()
 
 
+def test_translator_model_arrow_shows_full_catalog_and_jumps_to_match(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_test = pytest.importorskip("PySide6.QtTest")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    models = [
+        "or/deepseek/deepseek-v4-flash-latest",
+        "authnd/z-ai/glm-5-3-flash",
+        "or/google/gemini-3.6-flash",
+    ]
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    combo.addItems(models)
+    combo.resize(420, 32)
+    harness = SimpleNamespace(model_combo=combo)
+    translator_gui.TranslatorGUI._install_model_completer(harness, models)
+    combo.setEditText("gemini-3.6")
+    qt_test.QTest.keyClick(combo.lineEdit(), qt_core.Qt.Key_Return)
+    combo.show()
+    app.processEvents()
+
+    qt_test.QTest.mouseClick(
+        combo,
+        qt_core.Qt.LeftButton,
+        pos=qt_core.QPoint(combo.width() - 4, combo.height() // 2),
+    )
+    app.processEvents()
+
+    assert combo.insertPolicy() == qt_widgets.QComboBox.NoInsert
+    assert combo.count() == len(models)
+    assert combo.findText("gemini-3.6") == -1
+    assert harness._model_completer_proxy.stringList() == sorted(models)
+    assert combo.completer().popup().isVisible()
+    assert not combo.view().isVisible()
+    assert combo.completer().popup().model().rowCount() == len(models)
+    assert combo.completer().popup().currentIndex().data() == (
+        "or/google/gemini-3.6-flash"
+    )
+
+
 def test_model_field_check_survives_focus_and_catalog_changes(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLineEdit
@@ -1851,54 +1894,104 @@ def test_main_model_search_marks_polled_rows_and_hides_unpolled_without_changing
     app.processEvents()
 
 
-def test_multi_key_change_model_dialog_populates_arrow_dropdown(monkeypatch):
+def test_multi_key_dropdown_icon_has_compact_click_target(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
-    qt_core = pytest.importorskip("PySide6.QtCore")
     qt_widgets = pytest.importorskip("PySide6.QtWidgets")
     import multi_api_key_manager
 
     app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
-    models = ["authnd/model-a", "authnd/model-b"]
-    owner = qt_widgets.QWidget()
-    owner._get_model_options_for_dropdown = lambda: list(models)
-    owner._set_icon = lambda _dialog: None
-    owner._attach_model_autofill = lambda *_args, **_kwargs: None
-    owner._apply_combobox_icon = lambda combo: combo
-    observed = {}
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    combo.resize(400, 32)
+    owner = SimpleNamespace(_halgakos_icon_path=lambda: "Halgakos.ico")
 
-    def inspect_and_close_dialog():
-        dialog = app.activeModalWidget()
-        assert isinstance(dialog, qt_widgets.QDialog)
-        combo = dialog.findChild(qt_widgets.QComboBox)
-        observed["items"] = [combo.itemText(i) for i in range(combo.count())]
-        dialog.reject()
+    multi_api_key_manager.MultiAPIKeyDialog._apply_combobox_icon(owner, combo)
+    combo.show()
+    app.processEvents()
 
-    qt_core.QTimer.singleShot(0, inspect_and_close_dialog)
-    _value, accepted = (
-        multi_api_key_manager.MultiAPIKeyDialog._show_model_selection_dialog(
-            owner,
-            current_value="authnd/model-a",
-            title="Change Model",
-        )
+    assert "padding-right: 0px" in combo.styleSheet()
+    assert "width: 32px" in combo.styleSheet()
+    editor_right = combo.lineEdit().x() + combo.lineEdit().width()
+    dropdown_left = combo.width() - 32
+    assert 0 <= dropdown_left - editor_right <= 3
+
+
+def test_multi_key_arrow_shows_full_catalog_and_jumps_to_matching_area(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_gui = pytest.importorskip("PySide6.QtGui")
+    qt_test = pytest.importorskip("PySide6.QtTest")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import multi_api_key_manager
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    models = [
+        "or/deepseek/deepseek-v4-flash-latest",
+        "authnd/z-ai/glm-5-3-flash",
+        "or/google/gemini-3.6-flash",
+    ]
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    combo.addItems(models)
+    combo.resize(420, 32)
+    translator = SimpleNamespace(
+        config={"model_manager_hide_unpolled_models": False},
+        _polled_online_model_ids=set(),
+        _model_polled_icon=qt_gui.QIcon(),
+    )
+    owner = SimpleNamespace(translator_gui=translator)
+    multi_api_key_manager.MultiAPIKeyDialog._attach_model_autofill(
+        owner,
+        combo,
+        model_values=models,
+    )
+    combo.setEditText("gemini-3.6")
+    qt_test.QTest.keyClick(combo.lineEdit(), qt_core.Qt.Key_Return)
+    combo.show()
+    app.processEvents()
+
+    qt_test.QTest.mouseClick(
+        combo,
+        qt_core.Qt.LeftButton,
+        pos=qt_core.QPoint(combo.width() - 4, combo.height() // 2),
+    )
+    app.processEvents()
+
+    assert combo.insertPolicy() == qt_widgets.QComboBox.NoInsert
+    assert combo.count() == len(models)
+    assert combo.findText("gemini-3.6") == -1
+    assert combo._model_completer_proxy.stringList() == sorted(models)
+    assert combo.completer().popup().isVisible()
+    assert not combo.view().isVisible()
+    assert combo.completer().popup().model().rowCount() == len(models)
+    assert combo.completer().popup().currentIndex().data() == (
+        "or/google/gemini-3.6-flash"
     )
 
-    assert accepted is False
-    assert observed["items"] == models
 
-
-def test_multi_key_dropdown_icon_has_wide_click_target(monkeypatch):
+def test_multi_key_model_poll_border_animates_and_stops(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     qt_widgets = pytest.importorskip("PySide6.QtWidgets")
     import multi_api_key_manager
 
-    _app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
     combo = qt_widgets.QComboBox()
-    owner = SimpleNamespace(_halgakos_icon_path=lambda: "Halgakos.ico")
+    combo.resize(420, 32)
+    combo.show()
+    app.processEvents()
 
-    multi_api_key_manager.MultiAPIKeyDialog._apply_combobox_icon(owner, combo)
+    multi_api_key_manager.MultiAPIKeyDialog._set_combo_model_poll_border_active(
+        combo, True,
+    )
+    app.processEvents()
+    border = combo._model_catalog_poll_border
+    assert border.isAnimating()
+    assert border.geometry() == combo.rect()
 
-    assert "padding-right: 50px" in combo.styleSheet()
-    assert "width: 48px" in combo.styleSheet()
+    multi_api_key_manager.MultiAPIKeyDialog._set_combo_model_poll_border_active(
+        combo, False,
+    )
+    assert not border.isAnimating()
 
 
 def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeypatch):
@@ -1943,6 +2036,9 @@ def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeyp
     )
     completion_model = combo._model_completer_proxy
 
+    assert combo._model_context_menu_installed is True
+    assert combo.contextMenuPolicy() == qt_core.Qt.CustomContextMenu
+    assert combo.lineEdit().contextMenuPolicy() == qt_core.Qt.CustomContextMenu
     assert not isinstance(completion_model, qt_core.QSortFilterProxyModel)
     assert combo.completer().popup().iconSize() == qt_core.QSize(14, 14)
     assert combo.iconSize() == qt_core.QSize(14, 14)
