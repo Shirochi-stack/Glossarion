@@ -113,6 +113,7 @@ transformers
 diffusers>=0.36.0
 accelerate
 huggingface-hub<1.0.0
+hf-xet>=1.2.0
 
 # Encryption/Decryption
 cryptography

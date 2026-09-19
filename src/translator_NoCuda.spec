@@ -120,6 +120,10 @@ hiddenimports.extend([
     'onnx.helper',
     'onnx.numpy_helper',
     'onnx.shape_inference',
+    # Optional Hugging Face Xet backend. It is imported dynamically by
+    # huggingface_hub, so PyInstaller cannot reliably discover it itself.
+    'hf_xet',
+    'hf_xet.hf_xet',
 ])
 
 # ============================================================================
