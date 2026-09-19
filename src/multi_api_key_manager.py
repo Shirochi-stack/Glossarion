@@ -5848,6 +5848,10 @@ class MultiAPIKeyDialog(QDialog):
         combo = QComboBox()
         combo.setEditable(True)
         combo.setInsertPolicy(QComboBox.NoInsert)
+        # The completer has its own model; it does not populate the combo's
+        # arrow popup. Keep the actual combo model populated as well so the
+        # custom Halgakos drop-down button opens a usable list.
+        combo.addItems(all_models)
         self._attach_model_autofill(combo, None, model_values=all_models)
         combo.setCurrentText(current_value)
         self._apply_combobox_icon(combo)

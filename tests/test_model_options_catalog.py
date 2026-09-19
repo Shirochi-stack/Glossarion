@@ -1851,6 +1851,41 @@ def test_main_model_search_marks_polled_rows_and_hides_unpolled_without_changing
     app.processEvents()
 
 
+def test_multi_key_change_model_dialog_populates_arrow_dropdown(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import multi_api_key_manager
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    models = ["authnd/model-a", "authnd/model-b"]
+    owner = qt_widgets.QWidget()
+    owner._get_model_options_for_dropdown = lambda: list(models)
+    owner._set_icon = lambda _dialog: None
+    owner._attach_model_autofill = lambda *_args, **_kwargs: None
+    owner._apply_combobox_icon = lambda combo: combo
+    observed = {}
+
+    def inspect_and_close_dialog():
+        dialog = app.activeModalWidget()
+        assert isinstance(dialog, qt_widgets.QDialog)
+        combo = dialog.findChild(qt_widgets.QComboBox)
+        observed["items"] = [combo.itemText(i) for i in range(combo.count())]
+        dialog.reject()
+
+    qt_core.QTimer.singleShot(0, inspect_and_close_dialog)
+    _value, accepted = (
+        multi_api_key_manager.MultiAPIKeyDialog._show_model_selection_dialog(
+            owner,
+            current_value="authnd/model-a",
+            title="Change Model",
+        )
+    )
+
+    assert accepted is False
+    assert observed["items"] == models
+
+
 def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     qt_core = pytest.importorskip("PySide6.QtCore")
