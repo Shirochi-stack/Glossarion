@@ -26,7 +26,7 @@ for msys_path in msys2_paths:
         print(f"  Added {msys_path} to PATH for WeasyPrint")
         break
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files, copy_metadata
 
 # ============================================================================
 # CONFIGURATION
@@ -52,6 +52,10 @@ block_cipher = None  # Set to pyi_crypto.PyiBlockCipher() if needed
 datas = []
 binaries = []
 hiddenimports = []
+
+# huggingface_hub checks hf_xet availability through importlib.metadata rather
+# than module discovery, so its distribution metadata must exist when frozen.
+datas.extend(copy_metadata('hf-xet'))
 
 # Add custom DLL and CPP files
 binaries.extend([
