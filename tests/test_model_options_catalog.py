@@ -1696,8 +1696,9 @@ def test_translator_model_arrow_shows_full_catalog_and_jumps_to_match(monkeypatc
     combo.resize(420, 32)
     harness = SimpleNamespace(model_combo=combo)
     translator_gui.TranslatorGUI._install_model_completer(harness, models)
-    combo.setEditText("gemini-3.6")
-    qt_test.QTest.keyClick(combo.lineEdit(), qt_core.Qt.Key_Return)
+    # Match the Edit Model dialog: its initial text is assigned
+    # programmatically, without any textEdited signal.
+    combo.setCurrentText("gemini-3.6")
     combo.show()
     app.processEvents()
 
@@ -1718,6 +1719,14 @@ def test_translator_model_arrow_shows_full_catalog_and_jumps_to_match(monkeypatc
     assert combo.completer().popup().currentIndex().data() == (
         "or/google/gemini-3.6-flash"
     )
+    qt_test.QTest.mouseClick(
+        combo,
+        qt_core.Qt.LeftButton,
+        pos=qt_core.QPoint(combo.width() - 4, combo.height() // 2),
+    )
+    app.processEvents()
+    assert not combo.completer().popup().isVisible()
+    assert not combo._model_completion_popup_filter._arrow_popup_open
 
 
 def test_model_field_check_survives_focus_and_catalog_changes(monkeypatch):
@@ -1945,8 +1954,8 @@ def test_multi_key_arrow_shows_full_catalog_and_jumps_to_matching_area(monkeypat
         combo,
         model_values=models,
     )
-    combo.setEditText("gemini-3.6")
-    qt_test.QTest.keyClick(combo.lineEdit(), qt_core.Qt.Key_Return)
+    # Match startup: the saved value is assigned without user typing.
+    combo.setCurrentText("gemini-3.6")
     combo.show()
     app.processEvents()
 
@@ -1967,6 +1976,14 @@ def test_multi_key_arrow_shows_full_catalog_and_jumps_to_matching_area(monkeypat
     assert combo.completer().popup().currentIndex().data() == (
         "or/google/gemini-3.6-flash"
     )
+    qt_test.QTest.mouseClick(
+        combo,
+        qt_core.Qt.LeftButton,
+        pos=qt_core.QPoint(combo.width() - 4, combo.height() // 2),
+    )
+    app.processEvents()
+    assert not combo.completer().popup().isVisible()
+    assert not combo._model_completion_popup_filter._arrow_popup_open
 
 
 def test_multi_key_model_poll_border_animates_and_stops(monkeypatch):

@@ -540,7 +540,7 @@ try:
                                     QGraphicsOpacityEffect, QStyledItemDelegate,
                                     QStyleOptionViewItem, QAbstractItemView)
     from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QRect, QEvent, QPropertyAnimation, QEasingCurve, Property, QObject, QEventLoop, QMetaObject
-    from PySide6.QtGui import QFont, QFontMetrics, QColor, QIcon, QPixmap, QPainter, QPen, QBrush, QConicalGradient, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform, QShortcut
+    from PySide6.QtGui import QFont, QFontMetrics, QColor, QIcon, QPixmap, QPainter, QPen, QBrush, QConicalGradient, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform, QShortcut, QCursor
     try:
         dpi_setup.install_qt_message_filter()
     except Exception:
@@ -733,8 +733,68 @@ class _ModelComboCompletionPopupFilter(QObject):
         self._completer = completer
         self._completion_model = completion_model
         self._arrow_width = max(1, int(arrow_width))
+        self._arrow_popup_open = False
+        self._completer.popup().installEventFilter(self)
+        self._completer.activated.connect(self._mark_popup_closed)
+
+    def _mark_popup_closed(self, *_args):
+        self._arrow_popup_open = False
+
+    def _jump_to_query(self, query):
+        """Select and reveal the best match after Qt lays out the popup."""
+        try:
+            popup = self._completer.popup()
+            popup_model = popup.model()
+            best_index = None
+            best_score = 99
+            for row in range(popup_model.rowCount()):
+                index = popup_model.index(row, 0)
+                value = str(index.data(Qt.DisplayRole) or '')
+                lowered = value.casefold()
+                if lowered == query:
+                    score = 0
+                elif lowered.startswith(query):
+                    score = 1
+                elif any(
+                    part.startswith(query) for part in lowered.split('/')[1:]
+                ):
+                    score = 2
+                elif query in lowered:
+                    score = 3
+                else:
+                    continue
+                if score < best_score:
+                    best_index = index
+                    best_score = score
+                    if score == 0:
+                        break
+            if best_index is not None:
+                popup.setCurrentIndex(best_index)
+                popup.scrollTo(best_index, QAbstractItemView.PositionAtTop)
+        except RuntimeError:
+            pass
 
     def eventFilter(self, watched, event):
+        try:
+            popup = self._completer.popup()
+        except RuntimeError:
+            return False
+        if watched is popup:
+            if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+                self._arrow_popup_open = False
+            elif event.type() == QEvent.Hide:
+                try:
+                    local_pos = self._combo.mapFromGlobal(QCursor.pos())
+                    over_arrow = (
+                        self._combo.rect().contains(local_pos)
+                        and local_pos.x() >= self._combo.width() - self._arrow_width
+                    )
+                    if not over_arrow:
+                        self._arrow_popup_open = False
+                except RuntimeError:
+                    self._arrow_popup_open = False
+            return super().eventFilter(watched, event)
+
         mouse_events = (
             QEvent.MouseButtonPress,
             QEvent.MouseButtonRelease,
@@ -751,50 +811,21 @@ class _ModelComboCompletionPopupFilter(QObject):
                     event.accept()
                     return True
 
-                popup = self._completer.popup()
-                if (
-                    popup.isVisible()
-                    and not getattr(self._completion_model, '_search', '')
-                ):
+                if self._arrow_popup_open:
                     popup.hide()
+                    self._arrow_popup_open = False
                 else:
                     query = self._combo.currentText().strip().casefold()
                     self._completion_model.set_search_text("")
                     self._completer.setCompletionPrefix("")
                     popup.setMinimumWidth(self._combo.width())
                     self._completer.complete()
+                    self._arrow_popup_open = True
                     if query:
-                        popup_model = popup.model()
-                        best_index = None
-                        best_score = 99
-                        for row in range(popup_model.rowCount()):
-                            index = popup_model.index(row, 0)
-                            value = str(index.data(Qt.DisplayRole) or '')
-                            lowered = value.casefold()
-                            if lowered == query:
-                                score = 0
-                            elif lowered.startswith(query):
-                                score = 1
-                            elif any(
-                                part.startswith(query)
-                                for part in lowered.split('/')[1:]
-                            ):
-                                score = 2
-                            elif query in lowered:
-                                score = 3
-                            else:
-                                continue
-                            if score < best_score:
-                                best_index = index
-                                best_score = score
-                                if score == 0:
-                                    break
-                        if best_index is not None:
-                            popup.setCurrentIndex(best_index)
-                            popup.scrollTo(
-                                best_index,
-                                QAbstractItemView.PositionAtTop,
-                            )
+                        QTimer.singleShot(
+                            0,
+                            lambda target=query: self._jump_to_query(target),
+                        )
                 event.accept()
                 return True
             except RuntimeError:
