@@ -1886,6 +1886,21 @@ def test_multi_key_change_model_dialog_populates_arrow_dropdown(monkeypatch):
     assert observed["items"] == models
 
 
+def test_multi_key_dropdown_icon_has_wide_click_target(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import multi_api_key_manager
+
+    _app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    owner = SimpleNamespace(_halgakos_icon_path=lambda: "Halgakos.ico")
+
+    multi_api_key_manager.MultiAPIKeyDialog._apply_combobox_icon(owner, combo)
+
+    assert "padding-right: 50px" in combo.styleSheet()
+    assert "width: 48px" in combo.styleSheet()
+
+
 def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     qt_core = pytest.importorskip("PySide6.QtCore")

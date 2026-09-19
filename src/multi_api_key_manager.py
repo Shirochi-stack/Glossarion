@@ -2406,12 +2406,12 @@ class MultiAPIKeyDialog(QDialog):
         icon_path = self._halgakos_icon_path().replace('\\', '/')
         arrow_style = f"""
             QComboBox {{
-                padding-right: 24px;
+                padding-right: 50px;
             }}
             QComboBox::drop-down {{
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 22px;
+                width: 48px;
                 border-left: 1px solid #4a5568;
             }}
             QComboBox::down-arrow {{
