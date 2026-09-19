@@ -1360,6 +1360,46 @@ def test_authnd_graceful_stop_preserves_claimed_provider_call(monkeypatch):
     unified._api_watchdog_reset()
 
 
+def test_graceful_stop_blocks_next_empty_truncation_retry(monkeypatch):
+    """A claimed AuthND call may finish, but it must not launch retry N+1."""
+    import unified_api_client as unified
+
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.setenv("TRANSLATION_CANCELLED", "0")
+    monkeypatch.setenv("RETRY_TRUNCATED", "1")
+    monkeypatch.setenv("TRUNCATION_RETRY_ATTEMPTS", "3")
+    unified, client = _make_missing_finish_client(
+        monkeypatch, "authnd/moonshotai/kimi-k3",
+    )
+    provider_requests = []
+
+    def fake_send_internal(**_kwargs):
+        provider_requests.append(True)
+        # This represents Stop being pressed while the already-claimed AuthND
+        # stream is running. Its truncated result is still allowed to return.
+        monkeypatch.setenv("GRACEFUL_STOP", "1")
+        return "", "length"
+
+    monkeypatch.setattr(client, "_send_internal", fake_send_internal)
+
+    with pytest.raises(unified.UnifiedClientError) as exc_info:
+        client._retry_empty_truncated_response(
+            messages=[{"role": "user", "content": "translate"}],
+            temperature=0.2,
+            max_tokens=1024,
+            max_completion_tokens=None,
+            context="glossary",
+            retry_reason=None,
+            request_id="authnd-truncation-graceful-stop",
+            image_data=None,
+            finish_reason="length",
+        )
+
+    assert exc_info.value.error_type == "cancelled"
+    assert provider_requests == [True]
+
+
 @pytest.mark.parametrize(
     "provider,model,send_attr,result",
     MISSING_FINISH_PROVIDERS[:1],
@@ -1529,6 +1569,44 @@ def test_direct_text_maps_authnd_transport_logs_to_api_worker():
     assert (
         resolve("translated text", "AuthNDTransport[TranslationWorker_7]")
         == "TranslationWorker_7"
+    )
+
+
+def test_direct_text_displays_authnd_queue_state_on_request_card():
+    import translator_gui
+
+    dialog_type = translator_gui._InputOutputDialog
+    segment = {"phase": "processing", "complete": False}
+
+    class Harness:
+        _DIRECT_RESPONSE_PAYLOAD_PREFIX = dialog_type._DIRECT_RESPONSE_PAYLOAD_PREFIX
+        _DIRECT_GLOSSARY_STREAM_START_PREFIX = (
+            dialog_type._DIRECT_GLOSSARY_STREAM_START_PREFIX
+        )
+        _HIDDEN_STREAM_START_LOG_PHRASES = (
+            dialog_type._HIDDEN_STREAM_START_LOG_PHRASES
+        )
+        _STREAM_END_LOG_PHRASES = dialog_type._STREAM_END_LOG_PHRASES
+        _PIPELINE_LOG_PHRASES = dialog_type._PIPELINE_LOG_PHRASES
+        _stream_phase_by_thread = {}
+
+        @staticmethod
+        def _request_segment_for_thread(_source_thread=None, create=True):
+            assert create is True
+            return segment
+
+    kind = dialog_type._classify_line(
+        Harness(),
+        "⏳ AuthND: NVIDIA queue / prefill — response headers received "
+        "in 12.4s; waiting for first token",
+        "Thread-2 (api_call)",
+        channel_hint="processing",
+    )
+
+    assert kind == "log"
+    assert segment["phase"] == "queue"
+    assert segment["status_label"] == (
+        "NVIDIA queue / prefill · Headers in 12.4s · Waiting for first token"
     )
 
 

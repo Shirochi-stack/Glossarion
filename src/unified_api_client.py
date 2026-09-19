@@ -2312,7 +2312,8 @@ class UnifiedClient:
         )
         if already_in_retry:
             return None
-        if self._is_stop_requested():
+        if self._should_abort_retry():
+            print("  Truncation retry skipped (graceful stop/stop requested)")
             raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
 
         try:
@@ -2339,8 +2340,8 @@ class UnifiedClient:
         best_truncated_finish_reason = "length"
 
         for attempt_idx in range(retry_attempts):
-            if self._is_stop_requested():
-                print("  Truncation retry cancelled by user")
+            if self._should_abort_retry():
+                print("  Truncation retry stopped before starting another provider request")
                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
 
             pool_state = None
@@ -10445,8 +10446,13 @@ class UnifiedClient:
 
                             print(f"  📊 Truncation retries: {allowed_attempts} attempt(s) at base max_tokens={new_max_tokens}")
                             # Abort retry if graceful stop or user stop is active
-                            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                            if graceful_stop_active or self._is_stop_requested():
+                            def _graceful_stop_blocks_truncation_retry():
+                                return (
+                                    os.environ.get('GRACEFUL_STOP') == '1'
+                                    or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+                                ) and not getattr(self, '_ignore_graceful_stop', False)
+
+                            if self._should_abort_retry():
                                 if not self._is_stale_request_run():
                                     print("  ⏹️ Truncation retry skipped (graceful stop/stop requested)")
                                 try:
@@ -10457,15 +10463,27 @@ class UnifiedClient:
                                 return extracted_content, finish_reason
                             trunc_success_logged = False
                             for attempt_idx in range(allowed_attempts):
-                                # Check for cancellation before each retry attempt
-                                if self._is_stop_requested():
+                                # Graceful stop lets the claimed provider call finish, but
+                                # must prevent this loop from claiming another request.
+                                if self._should_abort_retry():
+                                    if _graceful_stop_blocks_truncation_retry():
+                                        if not self._is_stale_request_run():
+                                            print("  ⏹️ Truncation retry stopped before starting another provider request")
+                                        return extracted_content, finish_reason
                                     if not self._is_stale_request_run():
                                         print(f"  🛑 Truncation retry cancelled by user")
                                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                                 
                                 try:
                                     # Check again right before retry
-                                    if self._is_stop_requested():
+                                    if self._should_abort_retry():
+                                        if _graceful_stop_blocks_truncation_retry():
+                                            if not self._is_stale_request_run():
+                                                print(
+                                                    f"  ⏹️ Truncation retry #{attempt_idx+1}/{allowed_attempts} "
+                                                    "stopped before starting another provider request"
+                                                )
+                                            return extracted_content, finish_reason
                                         if not self._is_stale_request_run():
                                             print(f"  🛑 Truncation retry #{attempt_idx+1}/{allowed_attempts} cancelled before starting")
                                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")

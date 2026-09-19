@@ -472,6 +472,7 @@ def test_send_chat_completion_retries_token_helper_failure(monkeypatch):
     authnd._cancel_event.clear()
     token_calls = []
     logs = []
+    monkeypatch.setattr(authnd, "_resolve_model_metadata", lambda _page: {})
 
     def fake_get_token(page_url, timeout, log_fn=None):
         token_calls.append((page_url, timeout, log_fn))
@@ -505,6 +506,7 @@ def test_send_chat_completion_honors_request_local_queue_cancel(monkeypatch):
     authnd._cancel_event.clear()
     state = {"cancelled": False}
     post_calls = []
+    monkeypatch.setattr(authnd, "_resolve_model_metadata", lambda _page: {})
 
     def fake_get_token(page_url, timeout, log_fn=None, cancel_check=None):
         assert callable(cancel_check)
@@ -537,8 +539,14 @@ def test_authnd_provider_boundary_callback_runs_immediately_before_post(monkeypa
 
     monkeypatch.setattr(
         authnd,
+        "_resolve_model_metadata",
+        lambda _page: events.append("metadata") or {},
+    )
+
+    monkeypatch.setattr(
+        authnd,
         "_get_captcha_token_for_request",
-        lambda *args, **kwargs: "fresh-token",
+        lambda *args, **kwargs: events.append("token") or "fresh-token",
     )
 
     def fake_post_prediction(**kwargs):
@@ -555,7 +563,31 @@ def test_authnd_provider_boundary_callback_runs_immediately_before_post(monkeypa
     )
 
     assert result["content"] == "ok"
-    assert events == ["boundary", "post"]
+    assert events == ["metadata", "token", "boundary", "post"]
+
+
+def test_authnd_stream_logs_queue_and_prefill_timing(monkeypatch):
+    logs = []
+    timestamps = iter((130.0, 130.0, 140.0, 140.0))
+    monkeypatch.setattr(authnd.time, "time", lambda: next(timestamps))
+
+    result = authnd._parse_sse_lines(
+        [
+            'data: {"choices":[{"delta":{"reasoning_content":"plan"}}]}',
+            "data: [DONE]",
+        ],
+        log_fn=logs.append,
+        log_stream=True,
+        t_start=100.0,
+        headers_received_at=120.0,
+    )
+
+    assert result["reasoning_content"] == "plan"
+    assert any(
+        "First token in 30.0s (response headers 20.0s; "
+        "post-header queue/prefill 10.0s)" in message
+        for message in logs
+    )
 
 
 def test_hcaptcha_timeout_hint_is_actionable(monkeypatch):
@@ -712,6 +744,10 @@ def test_kimi_k3_max_reaches_transport(reasoning_transport, monkeypatch):
     assert 'chat_template_kwargs' not in calls[0]
     if calls[0]['stream']:
         assert 'Chapter 1 API call in progress (reasoning_effort: max)' in logs
+        assert any(
+            'NVIDIA queue / prefill — response headers received in' in message
+            for message in logs
+        )
 
 
 @pytest.mark.parametrize('requested,supported,expected', [

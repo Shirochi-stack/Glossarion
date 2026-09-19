@@ -9841,6 +9841,11 @@ class _InputOutputDialog(QDialog):
             processing_label = f"Thinking ({thinking_tokens:,} tokens)"
         elif phase == "text":
             processing_label = f"Generating Text ({text_tokens:,} tokens)"
+        elif phase == "queue":
+            processing_label = str(
+                segment.get("status_label", "")
+                or "NVIDIA queue / prefill · Waiting for first token"
+            )
         else:
             processing_label = "Processing"
         response_label = str(segment.get("label", "") or "").strip()
@@ -10100,6 +10105,31 @@ class _InputOutputDialog(QDialog):
             self._begin_request_segment(raw, source_thread)
             self._in_thinking = False
             self._streaming_text = False
+            return "log"
+
+        if "authnd: nvidia queue / prefill" in low:
+            segment = self._request_segment_for_thread(source_thread)
+            segment["phase"] = "queue"
+            segment["complete"] = False
+            if "response headers received" in low:
+                import re
+
+                elapsed_match = re.search(
+                    r"response headers received in\s+([0-9.]+s)",
+                    stripped,
+                    flags=re.IGNORECASE,
+                )
+                elapsed = elapsed_match.group(1) if elapsed_match else ""
+                segment["status_label"] = (
+                    "NVIDIA queue / prefill · Headers in "
+                    f"{elapsed} · Waiting for first token"
+                    if elapsed
+                    else "NVIDIA queue / prefill · Waiting for first token"
+                )
+            else:
+                segment["status_label"] = (
+                    "NVIDIA queue / prefill · Waiting for response"
+                )
             return "log"
 
         # A provider completion record is the hard boundary between streamed

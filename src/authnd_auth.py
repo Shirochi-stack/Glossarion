@@ -2029,6 +2029,7 @@ def _parse_sse_lines(
     log_fn: Optional[Callable[[str], None]] = None,
     log_stream: bool = True,
     t_start: Optional[float] = None,
+    headers_received_at: Optional[float] = None,
     requested_max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     parts: List[str] = []
@@ -2053,7 +2054,19 @@ def _parse_sse_lines(
         if first_token_ts is None:
             first_token_ts = time.time()
             if log_stream:
-                _log(log_fn, f"📡 AuthND: First token in {first_token_ts - stream_started_ts:.1f}s, streaming...")
+                total_wait = first_token_ts - stream_started_ts
+                timing = ""
+                if headers_received_at is not None:
+                    header_wait = max(0.0, headers_received_at - stream_started_ts)
+                    token_wait = max(0.0, first_token_ts - headers_received_at)
+                    timing = (
+                        f" (response headers {header_wait:.1f}s; "
+                        f"post-header queue/prefill {token_wait:.1f}s)"
+                    )
+                _log(
+                    log_fn,
+                    f"📡 AuthND: First token in {total_wait:.1f}s{timing}, streaming...",
+                )
 
     def _emit_stream_text(fragment: str) -> None:
         if not log_fn or not log_stream or not fragment:
@@ -2205,6 +2218,7 @@ def _parse_sse_response(
     log_fn: Optional[Callable[[str], None]] = None,
     log_stream: bool = True,
     t_start: Optional[float] = None,
+    headers_received_at: Optional[float] = None,
     requested_max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     return _parse_sse_lines(
@@ -2213,6 +2227,7 @@ def _parse_sse_response(
         log_fn=log_fn,
         log_stream=log_stream,
         t_start=t_start,
+        headers_received_at=headers_received_at,
         requested_max_tokens=requested_max_tokens,
     )
 
@@ -2336,8 +2351,9 @@ def _post_prediction(
     log_fn: Optional[Callable[[str], None]] = None,
     suppress_chat_template_kwargs: bool = False,
     cancel_check: Optional[Callable[[], bool]] = None,
+    metadata: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
-    metadata = _resolve_model_metadata(page_url)
+    metadata = dict(metadata) if metadata is not None else _resolve_model_metadata(page_url)
     org_id = metadata.get("namespace") or DEFAULT_ORG_ID
     endpoint_id = metadata.get("endpoint_id") or model_id
     payload_model = _select_payload_model(metadata.get("payload_model") or "", model_path, log_fn=log_fn)
@@ -2510,6 +2526,7 @@ def _send_prediction_payload(
                 json=payload,
                 timeout=_timeout,
             ) as response:
+                headers_received_at = time.time()
                 closer = _register_response_closer(response.close)
                 if _is_cancelled():
                     _unregister_response_closer(closer)
@@ -2535,6 +2552,20 @@ def _send_prediction_payload(
                     raise RuntimeError("stream cancelled")
                 if progress_label:
                     _log(log_fn, progress_label)
+                header_wait = max(0.0, headers_received_at - request_started)
+                nvcf_status = str(response.headers.get("nvcf-status", "") or "").strip()
+                nvcf_reqid = str(response.headers.get("nvcf-reqid", "") or "").strip()
+                nvcf_details = ""
+                if nvcf_status:
+                    nvcf_details += f"; NVCF status={nvcf_status}"
+                if nvcf_reqid:
+                    nvcf_details += f"; request={nvcf_reqid[:12]}"
+                _log(
+                    log_fn,
+                    "⏳ AuthND: NVIDIA queue / prefill — response headers "
+                    f"received in {header_wait:.1f}s; waiting for first token"
+                    f"{nvcf_details}",
+                )
                 if log_stream is None or log_stream:
                     _log(log_fn, f"📡 AuthND: Stream opened (status={response.status_code}, transport=httpx)")
                 try:
@@ -2544,6 +2575,7 @@ def _send_prediction_payload(
                         log_fn=log_fn,
                         log_stream=_stream_logging_enabled() if log_stream is None else bool(log_stream),
                         t_start=request_started,
+                        headers_received_at=headers_received_at,
                         requested_max_tokens=max_tokens,
                     )
                 finally:
@@ -2567,6 +2599,7 @@ def _send_prediction_payload(
         stream=stream,
         allow_redirects=False,
     )
+    headers_received_at = time.time()
     response_closer = _register_response_closer(response.close)
     try:
         if _is_cancelled():
@@ -2592,6 +2625,20 @@ def _send_prediction_payload(
                 raise RuntimeError("stream cancelled")
             if progress_label:
                 _log(log_fn, progress_label)
+            header_wait = max(0.0, headers_received_at - request_started)
+            nvcf_status = str(response.headers.get("nvcf-status", "") or "").strip()
+            nvcf_reqid = str(response.headers.get("nvcf-reqid", "") or "").strip()
+            nvcf_details = ""
+            if nvcf_status:
+                nvcf_details += f"; NVCF status={nvcf_status}"
+            if nvcf_reqid:
+                nvcf_details += f"; request={nvcf_reqid[:12]}"
+            _log(
+                log_fn,
+                "⏳ AuthND: NVIDIA queue / prefill — response headers "
+                f"received in {header_wait:.1f}s; waiting for first token"
+                f"{nvcf_details}",
+            )
             if log_stream is None or log_stream:
                 _log(log_fn, f"📡 AuthND: Stream opened (status={response.status_code})")
             closer = _register_response_closer(response.close)
@@ -2601,6 +2648,7 @@ def _send_prediction_payload(
                     log_fn=log_fn,
                     log_stream=_stream_logging_enabled() if log_stream is None else bool(log_stream),
                     t_start=request_started,
+                    headers_received_at=headers_received_at,
                     requested_max_tokens=max_tokens,
                 )
             finally:
@@ -2651,10 +2699,16 @@ def send_chat_completion(
     if use_stream is None:
         use_stream = os.getenv("AUTHND_STREAM", "1").lower() not in ("0", "false", "no")
 
+    normalized_messages = _normalize_messages(messages)
+    # Resolve the public Build-page route before minting the short-lived captcha
+    # token.  A cold metadata lookup is an extra network request; doing it after
+    # token acquisition made that local delay look like NVIDIA queue time and
+    # unnecessarily consumed part of the token's usable lifetime.
+    if log_fn:
+        log_fn(f"🌐 AuthND: resolving NVIDIA Build route for {page_url}")
+    metadata = _resolve_model_metadata(page_url)
     if log_fn:
         log_fn(f"🌐 AuthND: opening browser token flow for {page_url}")
-
-    normalized_messages = _normalize_messages(messages)
     _log(
         log_fn,
         "🔎 AuthND debug request: "
@@ -2720,6 +2774,11 @@ def send_chat_completion(
             debug_only=True,
         )
         _log(log_fn, "📨 AuthND: captcha token acquired; sending NVIDIA request")
+        _log(
+            log_fn,
+            "⏳ AuthND: NVIDIA queue / prefill — request submitted; "
+            "waiting for response headers",
+        )
         if callable(before_send_callback):
             before_send_callback()
         post_progress_label = progress_label or f"📤 [{threading.current_thread().name}] API call in progress"
@@ -2743,6 +2802,7 @@ def send_chat_completion(
                 log_fn=log_fn,
                 suppress_chat_template_kwargs=suppress_chat_template_kwargs,
                 cancel_check=cancel_check,
+                metadata=metadata,
             )
             result["model"] = model_id
             result["page_url"] = page_url
