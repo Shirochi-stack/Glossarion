@@ -108,16 +108,42 @@ endpoint.searchParams.set("app_version", appVersion);
 // the `${platform}-${arch}` fingerprint, so mirror it here.
 const platform = `${process.env.ZCODE_IDENTITY_PLATFORM || process.platform}-${process.env.ZCODE_IDENTITY_ARCH || os.arch()}`;
 endpoint.searchParams.set("platform", platform);
+// The billing gateway wants the full desktop identity fingerprint, not just a
+// bearer token — it requires a stable X-Device-Mid and rejects a request that
+// is missing it. Build the headers with zcode-api's own helper so this probe
+// cannot drift from the shape the proxy uses everywhere else.
+let headers = {
+  "Authorization": `Bearer ${credential.jwt}`,
+  "HTTP-Referer": "https://zcode.z.ai",
+  "User-Agent": `ZCode/${appVersion}`,
+  "X-Title": "Z Code@glossarion",
+  "X-ZCode-App-Version": appVersion,
+  "X-Platform": platform,
+  "Accept": "application/json",
+};
+try {
+  const [{ buildIdentityHeaders }, { loadConfig }] = await Promise.all([
+    import("./src/proxy/identity.ts"),
+    import("./src/config/loader.ts"),
+  ]);
+  const config = loadConfig(process.env.ZCODE_PROXY_CONFIG);
+  const identityHeaders = buildIdentityHeaders(config.identity);
+  // The claim client drops X-ZCode-Agent for zcode.z.ai control-plane calls;
+  // the billing gateway follows the same precedent.
+  delete identityHeaders["X-ZCode-Agent"];
+  headers = {
+    ...identityHeaders,
+    "Authorization": `Bearer ${credential.jwt}`,
+    "Accept": "application/json",
+  };
+} catch (error) {
+  // Older runtimes may not expose these modules; the literal headers above
+  // still carry the fingerprint fields the gateway checks.
+  console.error(`identity headers unavailable: ${String(error).slice(0, 200)}`);
+}
 const timeoutMs = Number(process.env.ZCODE_MODEL_CATALOG_TIMEOUT_MS || "10000");
 const response = await fetch(endpoint, {
-  headers: {
-    "Authorization": `Bearer ${credential.jwt}`,
-    "HTTP-Referer": "https://zcode.z.ai",
-    "User-Agent": `ZCode/${appVersion}`,
-    "X-Title": "Z Code@glossarion",
-    "X-ZCode-Agent": "glm",
-    "X-ZCode-App-Version": appVersion,
-  },
+  headers,
   signal: AbortSignal.timeout(Math.max(1000, timeoutMs)),
 });
 const text = await response.text();
@@ -125,7 +151,10 @@ let payload = {};
 try { payload = JSON.parse(text); } catch {}
 if (!response.ok || (payload.code !== undefined && ![0, 200].includes(payload.code))) {
   const detail = payload.msg || payload.message || text.slice(0, 300) || "unknown error";
-  throw new Error(`Z.AI model catalog HTTP ${response.status}: ${detail}`);
+  const code = payload.code !== undefined ? ` code=${payload.code}` : "";
+  throw new Error(
+    `Z.AI model catalog HTTP ${response.status}${code}: ${detail} (${endpoint.toString()})`,
+  );
 }
 const models = [];
 const seen = new Set();
