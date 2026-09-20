@@ -53,7 +53,7 @@ PROXY_DEFAULT_REVISION = "9cec45e7268190050b4af6074ea4d852f8241b8a"
 PROXY_DEFAULT_VERSION = "2.6.0"
 PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
 PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS = 90
-RUNTIME_PATCH_VERSION = "2026-08-27-zcode-dual-access-v6"
+RUNTIME_PATCH_VERSION = "2026-09-20-zcode-dual-access-v7"
 ZCODE_APP_VERSION = "3.9.2"
 
 DEFAULT_PROXY_HOST = "127.0.0.1"
@@ -623,6 +623,15 @@ def _patch_credentials_store(runtime_dir: str) -> None:
 
     patterns = (
         (
+            # zcode-api 4.x resolves the store path through helper functions so
+            # tests can redirect it; hook the file-level helper so per-account
+            # and general-API credential filenames still work.
+            r"(function\s+storeFile\s*\(\s*\)\s*:\s*string\s*\{\s*return\s+)"
+            r"join\(storeDir\(\),\s*[\"']credentials\.json[\"']\)",
+            r'\g<1>process.env.ZCODE_PROXY_CREDENTIALS_PATH '
+            r'?? join(storeDir(), "credentials.json")',
+        ),
+        (
             r"const STORE_FILE\s*=\s*join\(homedir\(\),\s*[\"']\.zcode-proxy[\"'],\s*[\"']credentials\.json[\"']\)\s*;",
             'const STORE_FILE = process.env.ZCODE_PROXY_CREDENTIALS_PATH '
             '?? join(homedir(), ".zcode-proxy", "credentials.json");',
@@ -657,11 +666,24 @@ def _patch_credentials_store(runtime_dir: str) -> None:
 
 def _patch_numbered_account_switch(runtime_dir: str) -> None:
     """Route numbered logins through Z.AI's own switch-account screen."""
-    index_path = os.path.join(runtime_dir, "src", "index.ts")
-    try:
-        source = Path(index_path).read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError(f"Downloaded zcode-api has no CLI entrypoint: {exc}") from exc
+    # zcode-api 4.x moved the launcher out of the CLI entrypoint into its own
+    # shared module; keep accepting either location.
+    candidates = [
+        os.path.join(runtime_dir, "src", "runtime", "open-browser.ts"),
+        os.path.join(runtime_dir, "src", "index.ts"),
+    ]
+    index_path = None
+    source = ""
+    for candidate in candidates:
+        try:
+            text = Path(candidate).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if "function openBrowser" in text:
+            index_path, source = candidate, text
+            break
+    if index_path is None:
+        raise RuntimeError("Downloaded zcode-api has no browser launcher")
     marker = "GLOSSARION_AUTHZA_ACCOUNT_SWITCH"
     if marker in source:
         return
@@ -702,13 +724,16 @@ def _patch_login_plan_only_auth(runtime_dir: str) -> None:
     if marker in source:
         return
 
-    old_login = '''    const { accessToken, userId, jwt } = await runOAuth(provider);
-    console.log("\\nResolving API key...");
-    const resolver = new KeyResolver();
-    cred = await resolver.resolveCodingPlanCredential(accessToken, provider, userId);
-    if (jwt) cred.jwt = jwt;'''
-    new_login = f'''    const {{ accessToken, userId, jwt }} = await runOAuth(provider);
-    // {marker}
+    # zcode-api 4.x added a paste-mode argument to runOAuth; match either
+    # arity and keep whatever call the downloaded source actually makes.
+    login_pattern = re.compile(
+        r"(?P<oauth>[ \t]*const \{ accessToken, userId, jwt \} = await runOAuth\([^)]*\);\n)"
+        r"[ \t]*console\.log\(\"\\nResolving API key\.\.\.\"\);\n"
+        r"[ \t]*const resolver = new KeyResolver\(\);\n"
+        r"[ \t]*cred = await resolver\.resolveCodingPlanCredential\(accessToken, provider, userId\);\n"
+        r"[ \t]*if \(jwt\) cred\.jwt = jwt;"
+    )
+    new_login = f'''    // {marker}
     if (process.env.GLOSSARION_ZCODE_LOGIN_PLAN_ONLY === "1" && provider === "zai") {{
       if (!jwt) throw new Error("ZCode login did not return a login-plan JWT");
       cred = {{ apiKey: "zcode-login", provider: "zai", userId, jwt }};
@@ -719,9 +744,13 @@ def _patch_login_plan_only_auth(runtime_dir: str) -> None:
       cred = await resolver.resolveCodingPlanCredential(accessToken, provider, userId);
       if (jwt) cred.jwt = jwt;
     }}'''
-    if old_login not in source:
+    patched, login_count = login_pattern.subn(
+        lambda match: match.group("oauth") + new_login,
+        source,
+        count=1,
+    )
+    if not login_count:
         raise RuntimeError("Could not patch zcode-api's API-key-provisioning login path")
-    patched = source.replace(old_login, new_login, 1)
 
     api_key_log = '  console.log(`  API Key: ${cred.apiKey.substring(0, 12)}...`);'
     credential_log = (
@@ -744,7 +773,8 @@ def _patch_zcode_login_plan_endpoint(runtime_dir: str) -> None:
 
     zcode-api 2.6.0 still points ``start-plan`` at the retired OpenAI-style
     ``/api/v1/zcode-plan/chat/completions`` route.  Current ZCode desktop uses
-    the login JWT with ``/api/v1/zcode-plan/anthropic/v1/messages`` instead.
+    the login JWT with ``/api/v1/zcode-plan/anthropic/v1/messages`` instead;
+    zcode-api 4.x already routes there, so that half becomes a no-op.
     General-API mode instead uses the provisioned project key with Z.AI's
     OpenAI-compatible ``/api/paas/v4`` endpoint. Keep one OpenAI-compatible
     local surface and select the upstream format from the managed config.
@@ -758,7 +788,10 @@ def _patch_zcode_login_plan_endpoint(runtime_dir: str) -> None:
         raise RuntimeError(f"Downloaded zcode-api has no proxy routing sources: {exc}") from exc
 
     upstream_marker = "GLOSSARION_ZCODE_LOGIN_PLAN_ANTHROPIC"
-    if upstream_marker not in upstream:
+    already_anthropic = re.search(
+        r'return\s+`\$\{STARTPLAN_[A-Z_]+\}(/anthropic)?/v1/messages`\s*;', upstream
+    )
+    if upstream_marker not in upstream and not already_anthropic:
         upstream, base_count = re.subn(
             r'const\s+STARTPLAN_OPENAI_BASE\s*=\s*["\'][^"\']+["\']\s*;',
             f'// {upstream_marker}\nconst STARTPLAN_ANTHROPIC_BASE = '
@@ -777,11 +810,14 @@ def _patch_zcode_login_plan_endpoint(runtime_dir: str) -> None:
 
     handler_marker = "GLOSSARION_ZCODE_DUAL_ACCESS_ROUTING"
     if handler_marker not in handler:
+        # 2.6.0 derived the translation flags from the plan; 4.x hardcodes the
+        # Anthropic upstream. Match either shape and impose the dual-access
+        # routing general-API mode needs.
         routing_pattern = re.compile(
             r'const\s+startPlan\s*=\s*config\.plan\s*===\s*["\']start-plan["\']\s*;\s*'
-            r'const\s+translateAnthropicToOpenAI\s*=\s*format\s*===\s*["\']anthropic["\']\s*&&\s*startPlan\s*;\s*'
-            r'const\s+translateOpenAIToAnthropic\s*=\s*format\s*===\s*["\']openai["\']\s*&&\s*!startPlan\s*;\s*'
-            r'const\s+upstreamFormat:\s*Format\s*=\s*startPlan\s*\?\s*["\']openai["\']\s*:\s*["\']anthropic["\']\s*;',
+            r'const\s+translateAnthropicToOpenAI\s*=\s*[^;]+;\s*'
+            r'const\s+translateOpenAIToAnthropic\s*=\s*[^;]+;\s*'
+            r'const\s+upstreamFormat:\s*Format\s*=\s*[^;]+;',
             re.MULTILINE,
         )
         replacement = (

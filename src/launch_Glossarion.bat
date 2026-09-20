@@ -2,22 +2,22 @@
 REM ensure we're in the script's folder:
 cd /d "%~dp0"
 
-REM Find system Python first before adding MSYS2
-FOR /F "tokens=*" %%i IN ('where python.exe 2^>nul') DO SET SYSTEM_PYTHON=%%i & GOTO :found_python
-:found_python
+REM Use the restored Python 3.12.9 installation directly.  Do not rely on the
+REM PATH inherited from Explorer, which can remain stale after a Windows reset.
+SET "SYSTEM_PYTHON=C:\Users\ADMIN\AppData\Local\Programs\Python\Python312\python.exe"
+
+IF NOT EXIST "%SYSTEM_PYTHON%" (
+    echo Error: Python 3.12.9 was not found at:
+    echo %SYSTEM_PYTHON%
+    pause
+    exit /b 1
+)
 
 REM Add MSYS2 DLLs to PATH for WeasyPrint (PREPEND to override Tesseract-OCR's incompatible DLLs)
 SET PATH=C:\msys64\mingw64\bin;%PATH%
 
-REM call the real python using the path we found earlier
-IF DEFINED SYSTEM_PYTHON (
-    "%SYSTEM_PYTHON%" translator_gui.py
-) ELSE (
-    python translator_gui.py
-)
-
-REM or, alternatively:
-REM py -3 translator_gui.py
+REM Launch with the exact interpreter whose packages were restored.
+"%SYSTEM_PYTHON%" translator_gui.py
 
 REM Pause to see any errors
 pause
