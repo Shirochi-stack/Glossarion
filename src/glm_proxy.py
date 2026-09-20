@@ -54,7 +54,9 @@ PROXY_DEFAULT_VERSION = "2.6.0"
 PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
 PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS = 90
 RUNTIME_PATCH_VERSION = "2026-09-20-zcode-dual-access-v7"
-ZCODE_APP_VERSION = "3.9.2"
+# Must track zcode-api's DEFAULT_APP_VERSION; the control plane validates
+# `app_version` on the billing endpoints.
+ZCODE_APP_VERSION = "3.14.0"
 
 DEFAULT_PROXY_HOST = "127.0.0.1"
 DEFAULT_PROXY_PORT = 18870
@@ -93,13 +95,19 @@ DEFAULT_MODELS = (
 # current ZCode desktop's account-specific model discovery from
 # data.balances[].capabilities entries named "model:*".
 _LOGIN_PLAN_MODEL_CATALOG_SCRIPT = r'''
+import os from "node:os";
 import { loadCredential } from "./src/auth/store.ts";
 
 const credential = await loadCredential();
 if (!credential?.jwt) throw new Error("Z.AI login JWT is unavailable; sign in again");
-const appVersion = process.env.ZCODE_APP_VERSION || "3.9.2";
+const appVersion = process.env.ZCODE_APP_VERSION || "3.14.0";
 const endpoint = new URL(process.env.ZCODE_LOGIN_PLAN_MODELS_ENDPOINT);
 endpoint.searchParams.set("app_version", appVersion);
+// The billing gateway rejects the call with "parameter error" (HTTP 400)
+// unless `platform` accompanies `app_version`. ZCode's own claim client sends
+// the `${platform}-${arch}` fingerprint, so mirror it here.
+const platform = `${process.env.ZCODE_IDENTITY_PLATFORM || process.platform}-${process.env.ZCODE_IDENTITY_ARCH || os.arch()}`;
+endpoint.searchParams.set("platform", platform);
 const timeoutMs = Number(process.env.ZCODE_MODEL_CATALOG_TIMEOUT_MS || "10000");
 const response = await fetch(endpoint, {
   headers: {
@@ -158,7 +166,7 @@ const response = await fetch(endpoint, {
   headers: {
     "Authorization": `Bearer ${credentialString(credential)}`,
     "Accept-Language": "en-US,en",
-    "User-Agent": `Glossarion/${process.env.ZCODE_APP_VERSION || "3.9.2"}`,
+    "User-Agent": `Glossarion/${process.env.ZCODE_APP_VERSION || "3.14.0"}`,
   },
   signal: AbortSignal.timeout(Math.max(1000, timeoutMs)),
 });
