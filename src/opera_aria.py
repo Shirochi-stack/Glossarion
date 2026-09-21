@@ -247,6 +247,7 @@ OPERA_FALLBACK_VERSION = "136.0.6008.22"
 
 _install_lock = threading.Lock()
 _install_attempted = False
+_MINT_LOCK = threading.Lock()  # serialize token minting across parallel batch threads
 
 
 def _opera_arch() -> str:
@@ -519,6 +520,33 @@ def mint_opera_token(log_fn=None) -> str:
             "mints its token by briefly launching Opera's built-in Ask AI — no account or API key.",
             error_type="config_error")
 
+    # Prefer headless (no visible window, far lighter on CPU/GPU). Fall back to a
+    # hidden off-screen window only if the Aria service worker doesn't appear headless.
+    headless_pref = _env("OPERA_ARIA_HEADLESS", "1") != "0"
+    modes = [True, False] if headless_pref else [False]
+    last_err: Optional[Exception] = None
+    for i, headless in enumerate(modes):
+        try:
+            token = _launch_and_harvest(opera, headless, log_fn)
+            if token:
+                _log(log_fn, "🔑 Opera Aria: token minted and cached (~1h)")
+                return token
+        except OperaAriaError as exc:
+            if getattr(exc, "error_type", "") == "cancelled":
+                raise
+            last_err = exc
+        if i < len(modes) - 1:
+            _log(log_fn, "↩️ Opera Aria: Aria worker not found headless; retrying hidden off-screen")
+    if last_err:
+        raise last_err
+    raise OperaAriaError(
+        "Opera Aria: could not locate the Aria service worker over CDP. Ensure this Opera "
+        "build includes Ask AI/Aria, or set OPERA_ARIA_EXTENSION_ID.",
+        error_type="auth_error")
+
+
+def _launch_and_harvest(opera: str, headless: bool, log_fn=None) -> Optional[str]:
+    """Launch Opera (hidden), evaluate getAccessToken over CDP, kill Opera. None if no worker."""
     port = _free_port()
     profile = _profile_dir()
     try:
@@ -536,27 +564,27 @@ def mint_opera_token(log_fn=None) -> str:
         "--disable-dev-shm-usage",
         "--disable-gpu",
     ]
-    if _env("OPERA_ARIA_HEADLESS", "0") == "1":
+    if headless:
         args.append("--headless=new")
+    else:
+        # visible-mode fallback: shove the window off-screen and make it tiny
+        args += ["--window-position=-32000,-32000", "--window-size=1,1"]
     env = os.environ.copy()
     if not sys.platform.startswith("win") and sys.platform != "darwin":
         args.insert(1, "--no-sandbox")
         env.setdefault("DISPLAY", ":1")
 
-    _log(log_fn, f"🎭 Opera Aria: minting accountless token via {os.path.basename(opera)} (CDP:{port})")
+    _log(log_fn, f"🎭 Opera Aria: minting accountless token via {os.path.basename(opera)} "
+                 f"(CDP:{port}{', headless' if headless else ''})")
     proc = popen_no_window(args, env=env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         deadline = time.time() + float(_env("OPERA_ARIA_CDP_WAIT") or CDP_TARGET_WAIT)
         worker = _cdp_find_aria_worker(port, deadline, log_fn)
         if not worker:
-            raise OperaAriaError(
-                "Opera Aria: could not locate the Aria service worker over CDP. Ensure this "
-                "Opera build includes Ask AI/Aria, or set OPERA_ARIA_EXTENSION_ID.",
-                error_type="auth_error")
+            return None
         token = _cdp_eval_token(worker["webSocketDebuggerUrl"], log_fn)
         _save_cached_token(token)
-        _log(log_fn, "🔑 Opera Aria: token minted and cached (~1h)")
         return token
     finally:
         terminate_subprocess_tree(proc, kill=True)
@@ -567,7 +595,14 @@ def get_token(force_refresh: bool = False, log_fn=None) -> str:
         cached = _load_cached_token()
         if cached:
             return cached
-    return mint_opera_token(log_fn)
+    # Serialize minting so parallel batch threads don't each launch a browser
+    # (the thundering herd that spikes CPU and stutters the GUI).
+    with _MINT_LOCK:
+        if not force_refresh:
+            cached = _load_cached_token()  # another thread may have just minted
+            if cached:
+                return cached
+        return mint_opera_token(log_fn)
 
 
 # ---------------------------------------------------------------------------
