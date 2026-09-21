@@ -8,6 +8,7 @@ and the editor cannot drift apart.
 from __future__ import annotations
 
 import os
+import re
 from collections import Counter
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -32,6 +33,50 @@ def normalize_gender(value: Any) -> str:
         "feminine": "female",
     }
     return aliases.get(gender, gender)
+
+
+# What a gender column can legitimately hold, beyond male / female and their
+# aliases. Lifted from parse_api_response, which already used it to notice a
+# description sitting in the gender position.
+_GENDER_WORDS = frozenset({
+    "male", "female", "unknown", "nonbinary", "non-binary", "ambiguous", "mixed",
+    "various", "n/a", "na", "none", "-", "other", "neutral", "both", "genderless",
+    "androgynous", "?",
+})
+_GLUED_GENDER_RE = re.compile(r"^\s*([A-Za-z/\-?]{1,12}),(?=\S)")
+
+
+def looks_like_gender_value(value: Any) -> bool:
+    return normalize_gender(value) in _GENDER_WORDS
+
+
+def _reads_like_a_sentence(text: str) -> bool:
+    # Deliberately conservative: a short label this module does not know
+    # (여성, a custom value) is left alone; only prose is moved.
+    return len(text) > 30 or len(text.split()) >= 5
+
+
+def repair_gender_description(gender: Any, description: Any) -> Tuple[str, str]:
+    """Put a gender and a description back in their own columns.
+
+    Two shapes older glossaries contain, both from rows whose column count
+    did not match the header:
+
+    * the description sitting in the gender slot -- `[A nervous recruit ...]`;
+    * the gender glued onto the description -- `male,A temporary ...`
+      (no space after the comma: it is a column join, not prose).
+    """
+    gender = str(gender or "").strip()
+    description = str(description or "").strip()
+    if gender and not looks_like_gender_value(gender) and _reads_like_a_sentence(gender):
+        description = gender if not description else f"{gender} {description}"
+        gender = ""
+    if not gender:
+        glued = _GLUED_GENDER_RE.match(description)
+        if glued and looks_like_gender_value(glued.group(1)):
+            gender = glued.group(1)
+            description = description[glued.end():].lstrip()
+    return gender, description
 
 
 def display_gender(value: Any) -> str:
@@ -63,8 +108,17 @@ def normalize_entries_gender(entries: Any) -> Any:
     else:
         return entries
     for row in rows:
-        if isinstance(row, dict) and row.get("gender"):
-            row["gender"] = display_gender(row["gender"])
+        if not isinstance(row, dict):
+            continue
+        # The description key keeps whatever casing the user configured.
+        desc_key = next((k for k in row if isinstance(k, str) and k.strip().lower() == "description"), None)
+        old_gender = str(row.get("gender") or "")
+        old_desc = str(row.get(desc_key) or "") if desc_key else ""
+        gender, description = repair_gender_description(old_gender, old_desc)
+        if description != old_desc.strip():
+            row[desc_key or "description"] = description
+        if gender or old_gender:
+            row["gender"] = display_gender(gender)
     return entries
 
 

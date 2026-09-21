@@ -5,7 +5,7 @@ import os
 import re
 import os
 from glossary_matching import is_entry_type_token, section_name_for_type
-from gender_tracking import display_gender
+from gender_tracking import display_gender, looks_like_gender_value, repair_gender_description
 import sys
 import threading
 import tempfile
@@ -1634,15 +1634,33 @@ def _convert_to_token_efficient_format(csv_lines):
         # Add entries in new format
         for line in entries:
             parts = _gsplit(line, sep)
+            # A gender the header has no column for (the run asked for no
+            # gender, the AI sent one anyway, or the row was merged in from
+            # a glossary that had the column).
+            stray_gender = ''
 
             if header_parts and len(parts) < len(header_parts):
                 parts += [''] * (len(header_parts) - len(parts))
             elif header_parts and len(parts) > len(header_parts):
                 # If unquoted commas split the description, merge overflow into the description column
                 if desc_idx != -1 and desc_idx < len(header_parts):
-                    parts = parts[:desc_idx] + [",".join(parts[desc_idx:])]
+                    overflow = parts[desc_idx:]
+                    if gender_idx == -1 and len(overflow) > 1 and looks_like_gender_value(overflow[0]):
+                        # Not part of the description: gluing it on wrote
+                        # `366번 = 366: male,A temporary designation ...`.
+                        stray_gender, overflow = overflow[0], overflow[1:]
+                    # ", " not ",": the split stripped the space that followed
+                    # each comma in the prose.
+                    parts = parts[:desc_idx] + [", ".join(p.strip() for p in overflow)]
                 else:
                     parts = parts[:len(header_parts)]
+
+            # Rows are aligned to the header by position. When the AI drops
+            # the gender FIELD instead of leaving it empty, the description
+            # slides into the gender slot and used to be written as
+            # `1번 = Number One [A nervous recruit ...]`.
+            if gender_idx != -1 and desc_idx != -1 and len(parts) > max(gender_idx, desc_idx):
+                parts[gender_idx], parts[desc_idx] = repair_gender_description(parts[gender_idx], parts[desc_idx])
 
             # Extract core fields using header positions when available
             entry_type_val = (parts[type_idx] if type_idx != -1 and len(parts) > type_idx else entry_type).lower()
@@ -1654,8 +1672,8 @@ def _convert_to_token_efficient_format(csv_lines):
             entry_line = f"* {raw_name} = {translated_name}"
 
             # Gender support — only for character entries (mirrors extract script's has_gender check)
-            if entry_type_val == 'character' and gender_idx != -1 and len(parts) > gender_idx:
-                gender_val = display_gender(parts[gender_idx])
+            if entry_type_val == 'character' and (stray_gender or (gender_idx != -1 and len(parts) > gender_idx)):
+                gender_val = display_gender(stray_gender or parts[gender_idx])
                 if gender_val and gender_val != 'Unknown':
                     entry_line += f" [{gender_val}]"
 
@@ -1666,7 +1684,7 @@ def _convert_to_token_efficient_format(csv_lines):
             if desc_idx == -1:
                 core_max = max(idx for idx in [type_idx, raw_idx, trans_idx, gender_idx] if idx != -1) if any(idx != -1 for idx in [type_idx, raw_idx, trans_idx, gender_idx]) else 2
                 if len(parts) > core_max + 1:
-                    desc_tail = ",".join(parts[core_max + 1:]).strip()
+                    desc_tail = ", ".join(p.strip() for p in parts[core_max + 1:] if p.strip())
                     if desc_tail and not desc_val:
                         desc_val = desc_tail
             extra_segments = []

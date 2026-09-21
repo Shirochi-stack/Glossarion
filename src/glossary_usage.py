@@ -15,6 +15,7 @@ from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 from epub_package import find_epub_opf_member
 
+from gender_tracking import repair_gender_description
 from glossary_matching import (
     _ASCII_FOLD_TABLE as _gm_ascii_fold_table,
     _TOKEN_RE as _gm_token_re,
@@ -207,6 +208,10 @@ def _parse_token_entry_line(line, current_type="terms", source_index=0):
 
     if not raw_name and not translated_name:
         return None
+
+    # Old rows can carry the description in the gender brackets, or the
+    # gender glued onto the description; see repair_gender_description.
+    gender, desc = repair_gender_description(gender, desc)
 
     return _normalize_entry(
         {

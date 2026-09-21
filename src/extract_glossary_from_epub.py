@@ -7,6 +7,7 @@ import re
 import argparse
 from glossary_matching import section_name_for_type, type_for_section
 from gender_tracking import display_gender as _display_gender, normalize_entries_gender as _normalize_entries_gender
+from gender_tracking import looks_like_gender_value as _shared_looks_like_gender_value
 import zipfile
 import time
 import sys
@@ -4331,12 +4332,8 @@ def parse_api_response(response_text: str) -> List[Dict]:
     custom_types = get_custom_entry_types()
     enabled_types = [t for t, cfg in custom_types.items() if cfg.get('enabled', True)]
 
-    def _looks_like_gender_value(value) -> bool:
-        normalized = _normalize_gender_value(value)
-        return normalized in {
-            'male', 'female', 'unknown', 'nonbinary', 'non-binary',
-            'ambiguous', 'mixed', 'various', 'n/a', 'na', 'none', '-'
-        }
+    # Shared with the Minimal writer and the loaders (gender_tracking).
+    _looks_like_gender_value = _shared_looks_like_gender_value
     
     # First try JSON parsing
     try:
