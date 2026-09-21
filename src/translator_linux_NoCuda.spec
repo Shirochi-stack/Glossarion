@@ -253,6 +253,19 @@ app_files = [
 
     # RPG Maker handler
     ('rpgmaker_handler.py', '.'),
+
+    # Added: src scripts that were missing from this spec
+    ('app_version.py', '.'),
+    ('config_backup.py', '.'),
+    ('duplicate_detection_config.py', '.'),
+    ('epub_metadata_utils.py', '.'),
+    ('glossary_compressor.py', '.'),
+    ('glossary_match_shadow.py', '.'),
+    ('glossary_matching.py', '.'),
+    ('glossary_translit.py', '.'),
+    ('html_output_utils.py', '.'),
+    ('onnx_cpp_backend.py', '.'),
+    ('unified_glossary.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -402,6 +415,20 @@ app_modules = [
     'networks',
     'networks.mat',
 
+    # Added: src modules that were missing from this spec
+    'app_version',
+    'config_backup',
+    'duplicate_detection_config',
+    'epub_metadata_utils',
+    'glossary_compressor',
+    'glossary_match_shadow',
+    'glossary_matching',
+    'glossary_translit',
+    'html_output_utils',
+    'onnx_cpp_backend',
+    'tqdm_safety',
+    'unified_glossary',
+    'vision_ocr_source_epub',
 ]
 
 # GUI Framework

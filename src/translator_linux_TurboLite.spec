@@ -205,6 +205,19 @@ app_files = [
 
 	# RPG Maker handler
 	('rpgmaker_handler.py', '.'),
+
+    # Added: src scripts that were missing from this spec
+    ('app_version.py', '.'),
+    ('authnd_auth.py', '.'),
+    ('config_backup.py', '.'),
+    ('epub_metadata_utils.py', '.'),
+    ('glossary_compressor.py', '.'),
+    ('glossary_match_shadow.py', '.'),
+    ('glossary_matching.py', '.'),
+    ('glossary_translit.py', '.'),
+    ('html_output_utils.py', '.'),
+    ('unified_glossary.py', '.'),
+    ('vision_ocr_source_epub.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -325,6 +338,24 @@ app_modules = [
 	'grpc_gemini_client',  # gRPC Gemini client
 	# 'epub_library',  # EXCLUDED in TurboLite — removes Chromium WebEngine (152 MB)
 	'rpgmaker_handler',  # RPG Maker game file handler
+
+    # Added: src modules that were missing from this spec
+    'app_version',
+    'authnd_auth',
+    'config_backup',
+    'enhanced_text_extractor',
+    'epub_library',
+    'epub_metadata_utils',
+    'glossary_compressor',
+    'glossary_match_shadow',
+    'glossary_matching',
+    'glossary_translit',
+    'html_output_utils',
+    'individual_endpoint_dialog',
+    'multi_api_key_manager',
+    'tqdm_safety',
+    'unified_glossary',
+    'vision_ocr_source_epub',
 ]
 # GUI Framework
 gui_modules = [
