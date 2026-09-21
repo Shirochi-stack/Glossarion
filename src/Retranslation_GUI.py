@@ -23768,9 +23768,35 @@ class RetranslationMixin:
                 _add_unrepresented(_d.get('failed', []), fail)
                 _add_unrepresented(_d.get('merged_indices', []), merg)
                 _add_unrepresented(_d.get('in_progress', []), in_prog)
+
+                # A chapter whose only entry is a stale failure counts as
+                # "represented", so the plain helper above would drop the
+                # top-level in_progress marker for exactly the chapter being
+                # retried. Honour that marker when the entry representing the
+                # chapter is itself a failure; a completed/skipped/merged entry
+                # still wins, since those are final.
+                for value in _gp_int_list(_d.get('in_progress', [])):
+                    ci = _gp_index_for_progress_value(value, _d)
+                    if ci is None or ci in comp or ci in skipped or ci in merg:
+                        continue
+                    if ci in fail:
+                        in_prog.add(ci)
+                # Precedence between conflicting markers for the same chapter.
+                #
+                # A live in_progress supersedes a failure left over from an
+                # earlier attempt: if the chapter is being retried right now,
+                # the old failure is history. This used to read
+                #   in_prog -= comp | skipped | fail | merg
+                # which did the opposite -- a stale failed entry cancelled the
+                # in_progress marker, so a chapter actively streaming showed as
+                # Failed for the whole retry.
+                #
+                # Completions, skips and merges are final states, so they still
+                # win over an in_progress marker stranded by an interrupted run.
+                in_prog -= comp | skipped | merg
+                fail -= in_prog
                 comp -= fail
                 skipped -= fail
-                in_prog -= comp | skipped | fail | merg
                 issues = _gp_qa_issue_map(_d)
                 return {
                     'completed': comp,

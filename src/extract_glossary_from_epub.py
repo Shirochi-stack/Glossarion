@@ -10571,6 +10571,25 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         else:
             in_progress_clean = _unique_int_list(in_progress)
         completed_set = set(completed_clean)
+
+        # A chapter the caller is actively working on right now supersedes a
+        # failure recorded by an earlier attempt at the same chapter: the
+        # retry is the current truth and the old failure is history. Clearing
+        # it here is what stops a live retry from being displayed as Failed --
+        # previously `failed_set` sat in `done_set` below, so the stale
+        # failure cancelled the in_progress assignment instead of the other
+        # way round, and the row stayed red for the whole retry.
+        if in_progress is not None:
+            explicitly_started = set(_unique_int_list(in_progress))
+            superseded_failures = explicitly_started & failed_set
+            if superseded_failures:
+                failed_clean = [idx for idx in failed_clean if idx not in superseded_failures]
+                failed_set = set(failed_clean)
+                if failed is not None:
+                    failed[:] = failed_clean
+
+        # Completions and merges are final states and still win over a stale
+        # in_progress marker left behind by an interrupted run.
         done_set = completed_set | failed_set | merged_set
         in_progress_clean = [idx for idx in in_progress_clean if idx not in done_set]
         if manual_removed_indices:
