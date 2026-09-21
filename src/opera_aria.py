@@ -124,7 +124,12 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _think_harder_enabled() -> bool:
+def _think_harder_for(model: str) -> bool:
+    """Think-harder is selected by the model name (search/opera-think), with an
+    optional OPERA_ARIA_THINK_HARDER env override for power users."""
+    m = str(model or "").lower().replace("_", "-")
+    if "think" in m or "reason" in m:
+        return True
     return _env_bool("OPERA_ARIA_THINK_HARDER", False)
 
 
@@ -715,7 +720,8 @@ def _accumulate(acc: str, piece: str) -> str:
     return acc + piece
 
 
-def _post_chat(token: str, query: str, timeout: int, stream: bool = True):
+def _post_chat(token: str, query: str, timeout: int, stream: bool = True,
+               think: bool = False):
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -726,7 +732,7 @@ def _post_chat(token: str, query: str, timeout: int, stream: bool = True):
         "X-Opera-UI-Language": "en_US",
     }
     payload = {"query": query, "stream": stream, "request_source": "side_panel"}
-    if _think_harder_enabled():
+    if think:
         payload["think_harder"] = True
     return requests.post(CHAT_ENDPOINT_V2, headers=headers, json=payload,
                          stream=stream, timeout=timeout)
@@ -739,17 +745,15 @@ def _run_chat(messages: Iterable[Dict[str, Any]], *, model: str, timeout: int,
         raise OperaAriaError("Opera Aria: empty query", error_type="config_error")
 
     token = get_token(log_fn=log_fn)
-    think_on = _think_harder_enabled()
+    think_on = _think_harder_for(model)
     _log(log_fn, f"🎭 Opera Aria: sending request ({len(query):,} chars, model={model}"
                  f"{', think harder' if think_on else ''})")
-    if think_on:
-        _log(log_fn, "🧠 Opera Aria: thinking mode enabled (think harder)")
-    resp = _post_chat(token, query, timeout)
+    resp = _post_chat(token, query, timeout, think=think_on)
 
     if resp.status_code in (401, 403):
         _log(log_fn, "⚠️ Opera Aria: token rejected; re-minting and retrying")
         token = get_token(force_refresh=True, log_fn=log_fn)
-        resp = _post_chat(token, query, timeout)
+        resp = _post_chat(token, query, timeout, think=think_on)
 
     if resp.status_code != 200:
         raise OperaAriaError(

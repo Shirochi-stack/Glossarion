@@ -32732,11 +32732,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['STREAM_THINKING_LOGS'] = '1' if stream_thinking else '0'
             except Exception:
                 pass
-            try:
-                opera_think = bool(getattr(self, 'opera_aria_think_harder_var', self.config.get('opera_aria_think_harder', False)))
-                os.environ['OPERA_ARIA_THINK_HARDER'] = '1' if opera_think else '0'
-            except Exception:
-                pass
             if _force_stream:
                 self._apply_forced_streaming_environment()
                 self.append_log("🛰️ Live view: all streaming toggles forced ON for this run")
@@ -35916,7 +35911,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ALLOW_BATCH_STREAM_LOGS': '1' if bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False))) else '0',
             'ALLOW_AUTHGPT_BATCH_STREAM_LOGS': '1' if bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False))) else '0',
             'STREAM_THINKING_LOGS': '1' if bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False))) else '0',
-            'OPERA_ARIA_THINK_HARDER': '1' if bool(getattr(self, 'opera_aria_think_harder_var', self.config.get('opera_aria_think_harder', False))) else '0',
             'AUTHZA_USE_GENERAL_API': '1' if bool(getattr(self, 'authza_use_general_api_var', self.config.get('authza_use_general_api', False))) else '0',
             'AUTHND_TOKEN_CONCURRENCY_AUTO': authnd_auto_flag,
             'AUTHND_TOKEN_CONCURRENCY': authnd_token_limit,
@@ -36457,11 +36451,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
             try:
                 stream_thinking = _force_stream or bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False)))
                 os.environ['STREAM_THINKING_LOGS'] = '1' if stream_thinking else '0'
-            except Exception:
-                pass
-            try:
-                opera_think = bool(getattr(self, 'opera_aria_think_harder_var', self.config.get('opera_aria_think_harder', False)))
-                os.environ['OPERA_ARIA_THINK_HARDER'] = '1' if opera_think else '0'
             except Exception:
                 pass
             if _force_stream:
@@ -47279,7 +47268,6 @@ Important rules:
                 ('save_prohibited_results', ['save_prohibited_results_checkbox', 'save_prohibited_results_var'], False, bool),
                 ('disable_empty_safety_heuristic', ['disable_empty_safety_heuristic_checkbox', 'disable_empty_safety_heuristic_var'], True, bool),
                 ('missing_finish_as_prohibited', ['unknown_finish_as_prohibited_checkbox', 'unknown_finish_as_prohibited_var'], False, bool),
-                ('opera_aria_think_harder', ['opera_aria_think_harder_checkbox', 'opera_aria_think_harder_var'], False, bool),
 
                 # HTTP/Network tuning - prioritize entry widgets over vars
                 ('chunk_timeout', ['chunk_timeout_var'], 1800, lambda v: safe_int(v, 1800)),
@@ -48226,7 +48214,6 @@ Important rules:
                 ('ALLOW_AUTHGPT_BATCH_STREAM_LOGS', '1' if bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False))) else '0'),
                 ('ENABLE_THOUGHTS', '1' if self.config.get('enable_thoughts', True) else '0'),
                 ('STREAM_THINKING_LOGS', '1' if bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False))) else '0'),
-                ('OPERA_ARIA_THINK_HARDER', '1' if bool(getattr(self, 'opera_aria_think_harder_var', self.config.get('opera_aria_think_harder', False))) else '0'),
                 ('AUTHZA_USE_GENERAL_API', '1' if _bool_config('authza_use_general_api', False) else '0'),
                 ('HTML2TEXT_ESCAPE_SNOB', '1' if self.config.get('html2text_escape_snob', False) else '0'),
                 ('CONVERT_BR_TO_PARAGRAPHS', '1' if self.config.get('convert_br_to_paragraphs', True) else '0'),
