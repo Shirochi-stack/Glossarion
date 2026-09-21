@@ -7384,6 +7384,14 @@ def _record_minimal_pass_progress(status, context=None, **fields):
     if not progress_file:
         return
     payload = {"status": str(status or "unknown"), "updated_at": time.time()}
+    # Recorded under the same key the chapter rows use, so the progress dialog
+    # renders "-> model" for this row exactly as it does for every other one.
+    try:
+        model_name = _current_glossary_model_name({}, prefer_thread=True)
+    except Exception:
+        model_name = os.getenv("MODEL", "")
+    if model_name:
+        payload["model_name"] = str(model_name)
     payload.update({k: v for k, v in fields.items() if v is not None})
     try:
         with _progress_lock, _locked_glossary_progress_file(progress_file):

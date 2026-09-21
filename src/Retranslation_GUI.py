@@ -24032,18 +24032,25 @@ class RetranslationMixin:
                     status_label = 'Not Translated'
                 else:
                     status_label = status.replace('_', ' ').title()
-                detail = ''
+                # The "Minimal Pass" prefix already names the row, so nothing
+                # else is needed ahead of the model -- chapter rows put a
+                # filename there only because they need one to be told apart.
+                parts = [f"Minimal Pass | {icon} {status_label:20s}"]
+                if status in ("in_progress", "completed", "failed"):
+                    # Only states that reached an API call name a model.
+                    model_name = _progress_entry_model_for_display(info)
+                    parts.append(model_name or '(model unknown)')
                 try:
                     count = int(info.get('entry_count'))
                 except (TypeError, ValueError):
                     count = None
                 if count:
-                    detail = f" | {count} entries"
-                elif status == 'in_progress':
-                    detail = ' | scanning source text'
-                elif status == 'not_completed':
-                    detail = ' | queued before extraction'
-                display = f"Minimal Pass | {icon} {status_label:20s} | Glossary seed{detail}"
+                    parts.append(f"{count} entries")
+                elif status == 'failed':
+                    error = str(info.get('error') or '').strip()
+                    if error:
+                        parts.append(error[:80])
+                display = " | ".join(parts)
                 return ('minimal_pass', display, status)
 
             def _gp_minimal_pass_status_counts(_d):
