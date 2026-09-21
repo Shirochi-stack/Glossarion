@@ -495,11 +495,61 @@ Open it with **Glossary Manager** / **Extract Glossary**.
 **Tab 2 — Automatic Generation (the glossary built *during* translation):**
 - **Append Glossary to System Prompt** — sends the terms to the AI every request (the consistency switch).
 - **Compress Glossary Prompt** ✅ — "Only send glossary entries that appear in the current text. Saves tokens and cost; recommended ON."
+- **Consider Translated Column** — also keeps an entry when the *translated* name appears in the source text, not just the original. Default OFF.
+- **Strict Gender Entry Matching** — character entries are sent only when the **whole** name appears. Default OFF, which lets one part of a name (even a single CJK character) keep the entry.
+- **Precise Term Matching** — the smarter matcher described just below. Default OFF.
+- **Log Match Differences** — preview what Precise Term Matching *would* change, without changing anything. Default OFF.
 - **Add Additional Glossary** — always include an extra external glossary file (CSV/JSON/TXT/PDF/MD).
 - **Include Gender Context** — expands snippets with surrounding sentences so the AI can infer each character's gender (costs more; it's the master switch that unlocks the gender-nuance and description options).
 - **Enable Gender Nuance Analysis** — an extra pronoun/honorific-aware scoring pass that prioritizes sentences which reveal gender (slightly higher CPU/time).
 - **Include Description Column** — adds a description/context field to every entry (only available while Gender Context is on).
 - **Disable Smart Filtering** — "Bypass all filtering and send the entire novel to the extractor. Extremely expensive; debugging only." **⚠️ Leave OFF.**
+
+#### Precise Term Matching (a narrower, more accurate glossary)
+
+**The problem it fixes.** To decide whether a glossary entry belongs in this chapter, Glossarion checks whether the term appears in the text. The original check is a plain "is this string anywhere in the chapter" search, which has no idea where words begin and end. In languages written without spaces that is very loose:
+
+| Glossary entry | Chapter actually says | Old result |
+|---|---|---|
+| `유리` (a character) | `유리병` — "glass bottle" | ✅ kept (wrong) |
+| `아린` (a character) | `아린다` — "it stings" | ✅ kept (wrong) |
+| `白` (a surname) | `白天` — "daytime" | ✅ kept (wrong) |
+| `Al` (a character) | `Already` | ✅ kept (wrong) |
+
+It is looser still for names stored with a space. `신 라이언` is kept whenever the single character `신` turns up anywhere — and `신` also means "god," so in a fantasy novel that is every chapter. Each wrong entry is wasted tokens and one more chance for the AI to use a name that isn't in the scene.
+
+**What the toggle changes.** Precise Term Matching understands where words end:
+
+- **English and other Latin text** — whole words only, so `Al` stops matching inside `Already`.
+- **Korean** — knows the particles that follow a name (`루나는`, `루나가`, `루나에게` all still count) but rejects a term buried in an unrelated word.
+- **Japanese** — uses the kana/kanji change as a word edge, so `太郎は` counts and `大地` inside `大地震` does not.
+- **Chinese** — uses grammatical particles (`宋家的人` counts) and surnames (`小明` inside `王小明` counts), while `天下` inside `天下第一楼` does not.
+
+It also **finds terms the old check missed**: half-width `ｱﾘｽ` when your glossary says `アリス`, full-width or differently-capitalised Latin, a glossary name written `미샤 랄토스` when the chapter runs it together as `미샤랄토스`, and `루나님` when the chapter just says `루나`.
+
+On a real 2,971-entry glossary this cut a chapter's glossary from 250 entries to 142 — about **40% fewer** — without dropping anything genuinely in the scene.
+
+**It isn't perfect, and here's where it slips.** Korean can build a new word by sticking a suffix on a noun (`순애` → `순애충`). Glossarion can't tell that apart from a coincidental match, so if a term *only ever* appears inside such a compound in a chapter, it gets dropped. If the word also appears on its own anywhere in that chapter, it's kept. This is the trade for correctly rejecting `유리` inside `유리병` — and the reason for the preview toggle below.
+
+#### Log Match Differences (try it before you trust it)
+
+Turn this on **with Precise Term Matching OFF** and translate as normal. Nothing about your translation changes — Glossarion just runs both the old and new check side by side and writes down every entry they disagree about.
+
+Look in your **logs** folder (the same one that holds `run.log`), in `glossary_match_shadow`:
+
+- **`report.md`** — the one to read. Every changed entry grouped by term, with a snippet of the surrounding text so you can judge it without opening the chapter, plus which rule made the call.
+- **`verdicts.csv`** — the same list with an empty **verdict** column.
+- `*.jsonl` — the raw data the other two are built from; you can ignore it.
+
+If the report looks right, tick **Precise Term Matching** and carry on.
+
+**Overruling a decision.** If you disagree with a call, open `verdicts.csv`, type `keep` or `drop` in the **verdict** column next to that term, save, and run:
+
+```
+python tools/glossary_match_report.py --apply-verdicts
+```
+
+That writes a small `<glossary>_match_allowlist.json` next to your glossary. Terms listed there are forced from then on, so a decision you make once isn't argued again on every later chapter. Rows you leave blank change nothing, so you can review a handful of terms at a time. The file is plain text and safe to edit by hand.
 
 #### The gender tracker (`*_gender_tracker.json`)
 
