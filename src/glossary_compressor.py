@@ -32,6 +32,7 @@ from gender_tracking import (
     tracker_path_for_glossary as _shared_tracker_path_for_glossary,
 )
 from glossary_matching import (
+    TIER_HONORIFIC,
     TIER_WEAK,
     MatchConfig,
     allowlist_path_for,
@@ -214,16 +215,43 @@ def _match_engine():
     return value if value in ("legacy", "shadow", "new") else "legacy"
 
 
+def _is_unified_glossary_path(path):
+    stem = os.path.splitext(os.path.basename(str(path or "")))[0]
+    return stem.lower() == "glossary_unified"
+
+
+def _unified_whole_term_enabled():
+    return str(_setting("UNIFIED_GLOSSARY_WHOLE_TERM_MATCHING", "1")).strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def _unified_min_term_length():
+    try:
+        return max(1, int(str(_setting("UNIFIED_GLOSSARY_MIN_TERM_LENGTH", "2")).strip()))
+    except (TypeError, ValueError):
+        return 2
+
+
 class _MatchContext:
     """Per-chapter matcher state: engine choice, config, index, recorder.
 
     Built once per compress_glossary() call. The prepared index is the reason
     this exists at all — without it every term would re-normalize the whole
     chapter, which is what makes the tiered matcher affordable.
+
+    ``whole_term_only`` is set for the cross-novel unified glossary. Keeping a
+    multi-word entry because one word of it appears is a recall safeguard for
+    a single book's few hundred names (surname / given name). Across tens of
+    thousands of entries from other novels it is the opposite: half of them
+    are multi-word, and their parts are ordinary nouns (길드, 제국, 마법 …), so
+    the token rule alone keeps over a thousand unrelated entries per chapter.
+    There the whole term has to be present.
     """
 
     __slots__ = ("engine", "cfg", "prepared", "recorder", "source_text",
-                 "glossary_path", "chapter_ref", "always_keep", "always_drop")
+                 "glossary_path", "chapter_ref", "always_keep", "always_drop",
+                 "whole_term_only", "min_term_length")
 
     def __init__(self, source_text, glossary_path=None, chapter_ref=None):
         self.engine = _match_engine()
@@ -235,8 +263,17 @@ class _MatchContext:
         self.recorder = None
         self.always_keep = frozenset()
         self.always_drop = frozenset()
+        self.whole_term_only = (
+            _is_unified_glossary_path(glossary_path) and _unified_whole_term_enabled()
+        )
+        self.min_term_length = _unified_min_term_length() if self.whole_term_only else 1
         if self.engine != "legacy":
             self.cfg = MatchConfig.from_getter(_setting)
+            if self.whole_term_only:
+                # Exact / normalized / despaced / honorific-stripped forms of
+                # the whole term still count; a part of it never does.
+                self.cfg.min_tier = max(self.cfg.min_tier, TIER_HONORIFIC)
+                self.cfg.allow_weak_token = False
             self.prepared = prepare_source_text(self.source_text, self.cfg)
             # Overrides apply to the tiered verdict only: the legacy engine is
             # the untouched path and must stay bit-identical.
@@ -253,10 +290,18 @@ class _MatchContext:
 
     def decide(self, term, is_character=False, *, translated_name="", entry_type=""):
         """Return whether this term counts as present in the chapter."""
-        legacy = legacy_text_contains_term(
-            self.source_text, term, is_character=is_character,
-            strict_gender=_strict_gender_name_matching_enabled(),
-        )
+        if self.whole_term_only:
+            whole = str(term or "").strip()
+            # A one-character entry from another novel (그, 신, 왕 …) is a
+            # common word here, not that novel's character.
+            if len(whole) < self.min_term_length:
+                return False
+            legacy = whole in self.source_text
+        else:
+            legacy = legacy_text_contains_term(
+                self.source_text, term, is_character=is_character,
+                strict_gender=_strict_gender_name_matching_enabled(),
+            )
         if self.engine == "legacy":
             return legacy
 
@@ -310,6 +355,11 @@ def _run_with_zero_match_relaxation(ctx, run, count_matches, label):
     """
     result = run()
     if ctx.engine != "new" or ctx.cfg is None or not _relax_on_zero_enabled():
+        return result
+    if getattr(ctx, "whole_term_only", False):
+        # For the unified glossary "nothing from other novels is in this
+        # chapter" is a normal result, not a cliff, and relaxing would switch
+        # the part-of-a-name rule straight back on.
         return result
     if count_matches(result) > 0:
         return result

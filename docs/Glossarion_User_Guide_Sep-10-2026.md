@@ -500,6 +500,9 @@ Open it with **Glossary Manager** / **Extract Glossary**.
 - **Precise Term Matching** — the smarter matcher described just below. Default OFF.
 - **Log Match Differences** — preview what Precise Term Matching *would* change, without changing anything. Default OFF.
 - **Add Additional Glossary** — always include an extra external glossary file (CSV/JSON/TXT/PDF/MD).
+- **Enable Unified Glossary** — keep one deduplicated `glossary_unified.csv` shared by *all* your novels (per source and target language) and send it alongside the book's own glossary. Described below. Default OFF.
+- **Generate Unified Glossary** — rebuild that shared glossary from every book folder at the start of the next glossary run. Skipped automatically when nothing changed. Default OFF.
+- **Unified Glossary Settings** (button) — pick the source language (Auto reuses the one detected during extraction) or tick **Combine all languages** if detection fails for a book.
 - **Include Gender Context** — expands snippets with surrounding sentences so the AI can infer each character's gender (costs more; it's the master switch that unlocks the gender-nuance and description options).
 - **Enable Gender Nuance Analysis** — an extra pronoun/honorific-aware scoring pass that prioritizes sentences which reveal gender (slightly higher CPU/time).
 - **Include Description Column** — adds a description/context field to every entry (only available while Gender Context is on).
@@ -550,6 +553,24 @@ python tools/glossary_match_report.py --apply-verdicts
 ```
 
 That writes a small `<glossary>_match_allowlist.json` next to your glossary. Terms listed there are forced from then on, so a decision you make once isn't argued again on every later chapter. Rows you leave blank change nothing, so you can review a handful of terms at a time. The file is plain text and safe to edit by hand.
+
+#### Unified Glossary (one glossary across all your novels)
+
+Every book gets its own glossary in `Glossary/<book>/`. **Enable Unified Glossary** keeps a second, shared one on top of that: every book's entries merged and deduplicated into
+
+```
+Glossary/Unified Glossary/<source>-<target>/glossary_unified.csv
+```
+
+so terms you already settled in one novel (a recurring sect name, a system message, a title) carry over to the next. There is one file per language pair (`korean-english`, `japanese-english`, …); the target is your Output Language, the source is detected for each book.
+
+**How it stays current.** Deduplication is the slow part, so it only runs twice per glossary run: once at the start (fold this book in, or rebuild) and once at the end (fold in what the run found). It is never run per chapter. The file is written with your Anti-Duplicate settings, so the same fuzzy threshold and algorithm apply.
+
+**What gets sent to the AI.** Beside the book's own glossary Glossarion writes a copy, `glossary_unified.csv`, that leaves out every entry the book's glossary already has — so nothing is sent twice. That copy goes through **Compress Glossary Prompt** and all of its sub-toggles (Strict Gender, Consider Translated Column, Precise Term Matching, Log Match Differences) exactly like the main glossary and the Additional Glossary do. In the log it shares the glossary line: `🗜️ Glossary: … chars, … tokens | Unified Glossary: … chars, … tokens`.
+
+**Generate Unified Glossary** rebuilds the shared file from *every* folder under `Glossary/` instead of just the current book — useful the first time you turn the feature on, or after editing several old glossaries by hand. The files are read in parallel using the **Parallel Extraction** worker count from Other Settings, and the rebuild is fingerprinted: it only happens when a book glossary actually changed since the last one, so you can leave the toggle on.
+
+**Unified Glossary Settings** holds the language controls. **Source language** is `Auto` by default and reuses the language Glossarion already detected for the book; set it only when that detection is wrong. **Combine all languages** is the escape hatch if detection keeps failing — everything goes into one `all-<target>` glossary instead.
 
 #### The gender tracker (`*_gender_tracker.json`)
 
@@ -1023,6 +1044,7 @@ You do **not** need Glossarion's local proxy, port `3000`, or an API key when us
 | **A character's gender/pronouns flip mid-book** | Gender tracker is off | Turn **Include Gender Context** on and keep the `*_gender_tracker.json` sidecar (Section 8.5). |
 | **The glossary sent to the AI is full of names that aren't in the chapter** | The default matcher searches for the term anywhere in the text, so short names match inside unrelated words | Turn on **Precise Term Matching** (Section 8.5). Preview it first with **Log Match Differences**. |
 | **A term you expected went missing after turning on Precise Term Matching** | In that chapter the word only appears inside a longer compound | Check `report.md` in the `glossary_match_shadow` logs folder, then force it back with a `keep` verdict (Section 8.5). |
+| **The unified glossary landed in the wrong language folder** (e.g. `other-english`) | Language detection had nothing to go on for that book | Open **Unified Glossary Settings** and set **Source language**, or tick **Combine all languages**; then turn on **Generate Unified Glossary** for one run to rebuild. |
 | **EPUB won't build** | Missing/broken files in the folder | Run **Validate EPUB Structure** in Other Settings (Section 12). |
 | **`authnd/` model won't work** | Using a `Lite`/`TurboLite` build | Those builds drop the EPUB Library and `authnd/` routing — use the standard `L_Glossarion` build (Section 2). |
 | **`antigravity/...` model won't launch** | Node/npm or Bun is not installed, login is unfinished, or port `3000` is busy | Install **Node.js LTS** or **Bun**, finish **🔐 Antigravity Login**, and check [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |

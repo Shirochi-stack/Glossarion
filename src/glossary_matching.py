@@ -509,7 +509,10 @@ def strip_name_honorific(term, cfg):
     return ""
 
 
-@lru_cache(maxsize=8192)
+# Sized for the cross-novel unified glossary (tens of thousands of terms). At
+# 8192 every request evicted and recomputed most of them; an entry is a few
+# short strings, so holding them all costs single-digit megabytes.
+@lru_cache(maxsize=131072)
 def _variants_cached(term, cache_key):
     nfkc, despaced, despaced_latin, honorific, honorific_min_residual = cache_key
     cfg = MatchConfig(

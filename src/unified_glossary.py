@@ -160,9 +160,36 @@ def _language_from_script(script):
 
 
 def detect_text_language(text):
+    """Language from script counts, with the CJK rules the chapter extractor uses.
+
+    Taking the single most common script is wrong for Japanese: a Japanese
+    glossary is mostly kanji names (太郎, 魔法学院) with some katakana, so Han
+    outnumbers kana and it would be filed under Chinese. Any real kana
+    presence means Japanese, exactly as Chapter_Extractor decides it for
+    chapter text (kana share of the CJK characters), just with a lower bar
+    because glossary names carry less kana than prose does.
+    """
     if not text:
         return "other"
-    script = _extractor()._detect_dominant_script_glossary(text, max_chars=20000)
+    sample = text[:20000]
+    hangul = kana = han = 0
+    for char in sample:
+        code = ord(char)
+        if 0xAC00 <= code <= 0xD7AF or 0x1100 <= code <= 0x11FF or 0x3130 <= code <= 0x318F:
+            hangul += 1
+        elif 0x3040 <= code <= 0x30FF:
+            kana += 1
+        elif 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF:
+            han += 1
+    cjk = hangul + kana + han
+    if cjk:
+        if hangul >= cjk * 0.3:
+            return "korean"
+        if kana >= max(1, cjk * 0.05):
+            return "japanese"
+        if han >= cjk * 0.3:
+            return "chinese"
+    script = _extractor()._detect_dominant_script_glossary(sample, max_chars=20000)
     return _language_from_script(script)
 
 

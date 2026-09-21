@@ -342,6 +342,9 @@ def test_manual_completion_immediately_refreshes_all_refinement_rows(glossary_pr
         "_refresh_refinement_rows": lambda data, keep_updates_disabled: calls.append(
             ("refresh_all", data, keep_updates_disabled)
         ),
+        # The handler also refreshes the Minimal Pass row; it is a closure
+        # sibling in the dialog, so the extracted snippet needs a stand-in.
+        "_refresh_minimal_pass_row": lambda _data, keep_updates_disabled=False: None,
         "_apply_gp_stats": lambda _stats: None,
     })
     exec(glossary_progress_codes["_apply_gp_mark_completed_result"], namespace)

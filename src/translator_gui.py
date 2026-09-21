@@ -26794,6 +26794,28 @@ Recent translations to summarize:
         )
         return '1' if enabled else '0'
 
+    def _glossary_match_engine_env_value(self):
+        """Resolve Precise Term Matching / Log Match Differences into the engine.
+
+        Must be exported with every run. It used to be set only by the
+        Glossary Settings toggle and Save handlers, so after a restart a
+        ticked Precise Term Matching box did nothing until that dialog was
+        opened and saved again: compression silently ran the legacy matcher.
+        """
+        precise = self._live_bool_setting(
+            'precise_matching_checkbox',
+            'compress_glossary_precise_matching_var',
+            'compress_glossary_precise_matching',
+            False,
+        )
+        shadow = self._live_bool_setting(
+            'shadow_log_matching_checkbox',
+            'compress_glossary_shadow_log_var',
+            'compress_glossary_shadow_log',
+            False,
+        )
+        return 'new' if precise else ('shadow' if shadow else 'legacy')
+
     def _unified_glossary_env_dict(self):
         """The four unified-glossary variables, for every env export site.
 
@@ -35756,6 +35778,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
             'ADD_ADDITIONAL_GLOSSARY': "1" if self.config.get('add_additional_glossary', False) else "0",
             'ADDITIONAL_GLOSSARY_PATH': self.config.get('additional_glossary_path', ''),
+            'GLOSSARY_MATCH_ENGINE': self._glossary_match_engine_env_value(),
             **self._unified_glossary_env_dict(),
             'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var else "0",
 
@@ -37675,6 +37698,7 @@ Important rules:
                     'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
                     'GLOSSARY_SKIP_TITLE_HEADER_ONLY': self._glossary_skip_title_header_only_env_value(),
                     'GLOSSARY_ADD_MINIMAL_PASS': self._glossary_add_minimal_pass_env_value(),
+                    'GLOSSARY_MATCH_ENGINE': self._glossary_match_engine_env_value(),
                     **self._unified_glossary_env_dict(),
                     'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL': '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', True)) else '0',
                     # Optional assistant prefill prompt
@@ -48364,6 +48388,7 @@ Important rules:
                 ('GLOSSARY_ENABLE_CHAPTER_SPLIT', env_glossary_chapter_split),
                 ('GLOSSARY_SKIP_TITLE_HEADER_ONLY', self._glossary_skip_title_header_only_env_value()),
                 ('GLOSSARY_ADD_MINIMAL_PASS', self._glossary_add_minimal_pass_env_value()),
+                ('GLOSSARY_MATCH_ENGINE', self._glossary_match_engine_env_value()),
                 *self._unified_glossary_env_dict().items(),
                 ('GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', True)) else '0'),
 
