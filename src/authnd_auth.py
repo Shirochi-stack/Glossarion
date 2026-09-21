@@ -75,6 +75,11 @@ _active_sessions: set = set()
 _active_sessions_lock = threading.Lock()
 _active_response_closers: set = set()
 _active_response_lock = threading.Lock()
+# Transports a cancel_stream() teardown thread already owns, so the many
+# workers that call cancel_stream() on one Stop do not each taskkill the
+# same browser helpers.
+_cancel_teardown_claimed: set = set()
+_cancel_teardown_lock = threading.Lock()
 
 
 def _debug_enabled() -> bool:
@@ -252,29 +257,67 @@ def _stream_thinking_logging_enabled() -> bool:
     return str(value).strip().lower() not in ("0", "false", "no", "off")
 
 
+def _abort_active_transports(closers, sessions, helpers) -> None:
+    """Close live connections and kill browser helper trees. Runs off the caller's thread."""
+    try:
+        for closer in closers:
+            try:
+                closer()
+            except Exception:
+                pass
+        for session in sessions:
+            try:
+                session.close()
+            except Exception:
+                pass
+        for proc in helpers:
+            _terminate_process_tree(proc, kill=True)
+    finally:
+        with _cancel_teardown_lock:
+            _cancel_teardown_claimed.difference_update(closers, sessions, helpers)
+
+
 def cancel_stream() -> None:
-    """Signal any active AuthND stream/request to stop."""
+    """Signal any active AuthND stream/request to stop.
+
+    Must never block: Stop handlers reach this through set_stop_flag() and
+    hard_cancel_all(), some of them on the GUI thread. close() can wait on the
+    thread that is reading the stream, and each helper tree is a taskkill of up
+    to 3s, so only the flags are set inline. Every AuthND wait loop polls them
+    within 0.1s, which is what releases the workers; closing the connections
+    and killing the helpers happens on a daemon thread.
+
+    The transports are snapshotted here, not on that thread, so a teardown that
+    runs late can never reach into the next run's requests.
+    """
     with _cancel_lock:
         _cancel_event.set()
         _cancel_generation.set()
     with _active_response_lock:
         closers = list(_active_response_closers)
-    for closer in closers:
-        try:
-            closer()
-        except Exception:
-            pass
     with _active_sessions_lock:
         sessions = list(_active_sessions)
-    for session in sessions:
-        try:
-            session.close()
-        except Exception:
-            pass
     with _active_helper_lock:
         helpers = list(_active_helper_processes)
-    for proc in helpers:
-        _terminate_process_tree(proc, kill=True)
+    with _cancel_teardown_lock:
+        closers = [item for item in closers if item not in _cancel_teardown_claimed]
+        sessions = [item for item in sessions if item not in _cancel_teardown_claimed]
+        helpers = [item for item in helpers if item not in _cancel_teardown_claimed]
+        _cancel_teardown_claimed.update(closers, sessions, helpers)
+    if not (closers or sessions or helpers):
+        return
+    try:
+        threading.Thread(
+            target=_abort_active_transports,
+            args=(closers, sessions, helpers),
+            name="AuthNDCancel",
+            daemon=True,
+        ).start()
+    except Exception:
+        # No thread to be had (interpreter shutting down). The flags are set, so
+        # each worker still tears its own request down; just release the claim.
+        with _cancel_teardown_lock:
+            _cancel_teardown_claimed.difference_update(closers, sessions, helpers)
 
 
 def reset_cancel() -> None:

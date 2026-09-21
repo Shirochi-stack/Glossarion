@@ -334,16 +334,40 @@ def _safe_url_for_log(url: Any, limit: int = 500) -> str:
 
 
 def cancel_stream() -> None:
-    """Cancel an active helper subprocess if the translation run is stopped."""
+    """Cancel an active helper subprocess if the translation run is stopped.
+
+    Must never block: Stop handlers reach this through set_stop_flag() and
+    hard_cancel_all(), some of them on the GUI thread, and each helper tree is a
+    taskkill of up to 3s. The flag is set inline (the waiting worker polls it
+    every 0.1s and kills its own helper); the sweep runs on a daemon thread.
+    The helpers are snapshotted here so a late sweep cannot reach the next run's.
+    """
     _cancel_event.set()
-    _terminate_active_helper_processes(kill=True)
+    with _active_helper_lock:
+        helpers = list(_active_helper_processes)
+    if not helpers:
+        return
+    try:
+        threading.Thread(
+            target=_terminate_helper_processes,
+            args=(helpers,),
+            kwargs={"kill": True},
+            name="GeminiFreeCancel",
+            daemon=True,
+        ).start()
+    except Exception:
+        pass
+
+
+def _terminate_helper_processes(helpers, *, kill: bool = False) -> None:
+    for proc in helpers:
+        _terminate_process_tree(proc, kill=kill)
 
 
 def _terminate_active_helper_processes(*, kill: bool = False) -> None:
     with _active_helper_lock:
         helpers = list(_active_helper_processes)
-    for proc in helpers:
-        _terminate_process_tree(proc, kill=kill)
+    _terminate_helper_processes(helpers, kill=kill)
 
 
 def reset_cancel() -> None:

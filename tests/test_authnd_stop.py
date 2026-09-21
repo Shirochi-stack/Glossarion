@@ -2,6 +2,7 @@
 import contextlib
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -83,7 +84,11 @@ def test_stop_closes_client_and_ignores_late_result_after_reset(monkeypatch, pha
     try:
         assert entered.wait(2)
         authnd.cancel_stream()
-        assert clients[0].closed  # Registered even before headers arrive.
+        # Registered even before headers arrive. Closed off the caller's thread.
+        deadline = time.time() + 2
+        while not clients[0].closed and time.time() < deadline:
+            time.sleep(0.01)
+        assert clients[0].closed
         authnd.reset_cancel()
         assert not authnd._is_cancelled()  # A new run may proceed.
         thread.join(1)
