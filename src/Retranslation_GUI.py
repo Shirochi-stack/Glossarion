@@ -1786,6 +1786,10 @@ def _combine_glossary_progress_legend_stats(
         normalized_refinement.get('in_progress', 0)
         + normalized_refinement.get('partially_in_progress', 0)
     )
+    # A non-chapter row that has not run yet (the Minimal pass before it
+    # starts) is outstanding work, so it belongs in the same bucket the
+    # legend shows as "Not Translated".
+    result['remaining'] += normalized_refinement.get('not_completed', 0)
     result['not_refined'] = normalized_refinement.get('not_refined', 0)
     result['refine_failed'] = (
         normalized_refinement.get('refine_failed', 0)
@@ -23940,6 +23944,89 @@ class RetranslationMixin:
                 panel_state['_glossary_path'] = None
                 return []
 
+            def _gp_minimal_pass_toggle_enabled():
+                """Whether 'Add minimal glossary pass' is currently on.
+
+                Read live rather than cached: the dialog can be open while the
+                setting is flipped in Glossary Manager, and the row should
+                appear or vanish on the next refresh.
+                """
+                try:
+                    checkbox = getattr(self, 'glossary_add_minimal_pass_checkbox', None)
+                    if checkbox is not None:
+                        return bool(checkbox.isChecked())
+                except Exception:
+                    pass
+                try:
+                    config = getattr(self, 'config', None)
+                    if isinstance(config, dict) and 'glossary_add_minimal_pass' in config:
+                        return bool(config.get('glossary_add_minimal_pass'))
+                except Exception:
+                    pass
+                return str(os.environ.get('GLOSSARY_ADD_MINIMAL_PASS', '0')).strip().lower() in (
+                    '1', 'true', 'yes', 'on'
+                )
+
+            def _gp_minimal_pass_row(_d):
+                """The Minimal-pass row, or None when the pass never ran.
+
+                extract_glossary_from_epub only writes the `minimal_pass` key
+                when the toggle is on, so presence of the key is what keeps
+                this row hidden otherwise -- and what makes it appear as soon
+                as the pass starts, since the dialog re-reads the file on a
+                timer.
+                """
+                if not isinstance(_d, dict):
+                    _d = {}
+                info = _d.get('minimal_pass')
+                if not isinstance(info, dict) or not info:
+                    # The pass has not run yet. Still show the row -- as an
+                    # outstanding item -- whenever the toggle is on, so the
+                    # work it represents is visible before it starts rather
+                    # than appearing from nowhere mid-run.
+                    if not _gp_minimal_pass_toggle_enabled():
+                        return None
+                    info = {'status': 'not_completed'}
+                raw_status = str(info.get('status') or 'unknown').strip().lower()
+                status = 'failed' if raw_status in ('failed', 'error') else raw_status
+                icon_map = {
+                    'completed': '\u2705',
+                    'skipped': '\u23ed\ufe0f',
+                    'failed': '\u274c',
+                    'in_progress': '\U0001f504',
+                    'not_completed': '\u2b1c',
+                }
+                icon = icon_map.get(status, '\u2b1c')
+                reason = str(info.get('reason') or '').strip().lower()
+                if status == 'skipped' and reason == 'no_entries':
+                    status_label = 'Skipped - No Entries'
+                elif status == 'skipped' and reason == 'stopped':
+                    status_label = 'Skipped - Stopped'
+                elif status == 'not_completed':
+                    status_label = 'Not Translated'
+                else:
+                    status_label = status.replace('_', ' ').title()
+                detail = ''
+                try:
+                    count = int(info.get('entry_count'))
+                except (TypeError, ValueError):
+                    count = None
+                if count:
+                    detail = f" | {count} entries"
+                elif status == 'in_progress':
+                    detail = ' | scanning source text'
+                elif status == 'not_completed':
+                    detail = ' | queued before extraction'
+                display = f"Minimal Pass | {icon} {status_label:20s} | Glossary seed{detail}"
+                return ('minimal_pass', display, status)
+
+            def _gp_minimal_pass_status_counts(_d):
+                row = _gp_minimal_pass_row(_d)
+                if not row:
+                    return {}
+                status = str(row[2] or 'unknown').lower().replace(' ', '_')
+                return {status: 1}
+
             def _gp_refinement_rows(_d):
                 from glossary_refinement import _find_type_refinement_progress
 
@@ -24030,6 +24117,18 @@ class RetranslationMixin:
                 for _key, _display, status in _gp_refinement_rows(_d):
                     status = str(status or 'unknown').lower().replace(' ', '_')
                     counts[status] = counts.get(status, 0) + 1
+                return counts
+
+            def _gp_extra_row_status_counts(_d):
+                """Non-chapter rows that still count toward the header totals.
+
+                The legend's second input is "everything that is not a chapter",
+                so the Minimal-pass row is tallied here alongside refinement and
+                shows up in Total/Completed/In Progress like any other entry.
+                """
+                counts = dict(_gp_refinement_status_counts(_d))
+                for status, count in _gp_minimal_pass_status_counts(_d).items():
+                    counts[status] = counts.get(status, 0) + count
                 return counts
 
             def _gp_color_for(status):
@@ -24297,7 +24396,7 @@ class RetranslationMixin:
             n_merged = len(_merg_set_init)
             n_in_progress = len(_in_prog_set_init)
             n_remaining = max(0, panel_state['total'] - len(_comp_set_init | _skip_set_init | _fail_set_init | _merg_set_init | _in_prog_set_init))
-            _gp_ref_counts_init = _gp_refinement_status_counts(gp_data)
+            _gp_ref_counts_init = _gp_extra_row_status_counts(gp_data)
             _legend_stats_init = _combine_glossary_progress_legend_stats(
                 {
                     'total': panel_state['total'],
@@ -24416,6 +24515,35 @@ class RetranslationMixin:
                 item.setData(Qt.UserRole + 1, ci)  # Store chapter index for deletion
                 self._add_compact_inline_list_item(gp_listbox, item)
 
+            def _refresh_minimal_pass_row(_d, keep_updates_disabled=False):
+                """Keep the Minimal-pass row as the first entry in the list."""
+                row_data = _gp_minimal_pass_row(_d)
+                fingerprint = tuple(row_data) if row_data else None
+                if fingerprint == panel_state.get('_minimal_pass_fingerprint'):
+                    return False
+                if not keep_updates_disabled:
+                    gp_listbox.setUpdatesEnabled(False)
+                try:
+                    for row in range(gp_listbox.count() - 1, -1, -1):
+                        item = gp_listbox.item(row)
+                        if item and item.data(Qt.UserRole + 4):
+                            gp_listbox.takeItem(row)
+                    if row_data:
+                        key, display, status = row_data
+                        item = QListWidgetItem(display)
+                        item.setForeground(QColor(_gp_color_for(status)))
+                        item.setData(Qt.UserRole, status)
+                        item.setData(Qt.UserRole + 1, None)
+                        item.setData(Qt.UserRole + 4, key)
+                        self._set_compact_inline_item_size(gp_listbox, item)
+                        gp_listbox.insertItem(0, item)
+                    panel_state['_minimal_pass_fingerprint'] = fingerprint
+                finally:
+                    if not keep_updates_disabled:
+                        gp_listbox.setUpdatesEnabled(True)
+                        gp_listbox.viewport().update()
+                return True
+
             def _refresh_refinement_rows(_d, keep_updates_disabled=False):
                 refinement_rows = _gp_refinement_rows(_d)
                 refinement_fingerprint = tuple(refinement_rows)
@@ -24465,6 +24593,19 @@ class RetranslationMixin:
                 new_chapter_items = {}
                 new_fingerprints = {}
                 state = {'ci': 0}
+                # Placed before the chapter rows are laid out so the index
+                # offset below is stable for the whole population pass.
+                _refresh_minimal_pass_row(_d, keep_updates_disabled=True)
+
+                def _gp_leading_rows():
+                    """Rows pinned above the chapters (currently the Minimal pass).
+
+                    Chapter rows are addressed by list index, so every index
+                    below has to be shifted by however many rows sit above
+                    them or the list silently mismatches chapter data.
+                    """
+                    first = gp_listbox.item(0) if gp_listbox.count() else None
+                    return 1 if (first is not None and first.data(Qt.UserRole + 4)) else 0
 
                 def _add_chunk():
                     if generation != panel_state.get('populate_generation'):
@@ -24476,15 +24617,21 @@ class RetranslationMixin:
                     try:
                         gp_listbox.blockSignals(True)
                         gp_listbox.setUpdatesEnabled(False)
+                        lead = _gp_leading_rows()
                         for ci in range(start_ci, end_ci):
+                            row_index = ci + lead
                             fname = chapter_map.get(ci, f'chapter {ci + 1}')
                             display, status = _gp_display_for(ci, fname, _d, cache)
                             color = _gp_color_for(status)
-                            item = gp_listbox.item(ci) if ci < gp_listbox.count() else None
-                            if item is None or item.data(Qt.UserRole + 3):
+                            item = (
+                                gp_listbox.item(row_index)
+                                if row_index < gp_listbox.count()
+                                else None
+                            )
+                            if item is None or item.data(Qt.UserRole + 3) or item.data(Qt.UserRole + 4):
                                 item = QListWidgetItem(display)
                                 self._set_compact_inline_item_size(gp_listbox, item)
-                                gp_listbox.insertItem(ci, item)
+                                gp_listbox.insertItem(row_index, item)
                             elif item.text() != display:
                                 item.setText(display)
                             self._set_compact_inline_item_size(gp_listbox, item)
@@ -24514,14 +24661,17 @@ class RetranslationMixin:
                             gp_listbox.setUpdatesEnabled(False)
                             # Remove obsolete chapter rows without clearing the
                             # live list or collapsing its scrollbar range.
-                            for row in range(gp_listbox.count() - 1, total - 1, -1):
+                            lead = _gp_leading_rows()
+                            for row in range(gp_listbox.count() - 1, total + lead - 1, -1):
                                 item = gp_listbox.item(row)
-                                if item and not item.data(Qt.UserRole + 3):
+                                if item and not item.data(Qt.UserRole + 3) and not item.data(Qt.UserRole + 4):
                                     gp_listbox.takeItem(row)
                             panel_state['_chapter_items'] = new_chapter_items
                             panel_state['_row_fingerprints'] = new_fingerprints
                             panel_state['_refinement_fingerprint'] = None
+                            panel_state['_minimal_pass_fingerprint'] = None
                             _refresh_refinement_rows(_d, keep_updates_disabled=True)
+                            _refresh_minimal_pass_row(_d, keep_updates_disabled=True)
                             sb = gp_listbox.verticalScrollBar()
                             sb.setValue(min(saved_scroll, sb.maximum()))
                         finally:
@@ -24541,7 +24691,7 @@ class RetranslationMixin:
                 _merg2 = _cache2['merged']
                 _prog2 = _cache2['in_progress']
                 _total = panel_state['total']
-                _ref_counts2 = _gp_refinement_status_counts(_d)
+                _ref_counts2 = _gp_extra_row_status_counts(_d)
                 return _combine_glossary_progress_legend_stats(
                     {
                         'total': _total,
@@ -24819,6 +24969,7 @@ class RetranslationMixin:
                     try:
                         if payload.get('refresh_refinement_rows') and _d:
                             _refresh_refinement_rows(_d, keep_updates_disabled=True)
+                            _refresh_minimal_pass_row(_d, keep_updates_disabled=True)
                         gp_listbox.setUpdatesEnabled(updates_were_enabled['value'])
                         gp_listbox.viewport().update()
                     except RuntimeError:
@@ -26282,6 +26433,7 @@ class RetranslationMixin:
                             gp_listbox.setUpdatesEnabled(True)
                             gp_listbox.viewport().update()
                     _refresh_refinement_rows(_d)
+                    _refresh_minimal_pass_row(_d)
                 except Exception as e:
                     print(f"⚠️ Could not apply glossary progress refresh: {e}")
                 finally:
@@ -26405,7 +26557,7 @@ class RetranslationMixin:
                             _fail = _cache['failed']
                             _merg = _cache['merged']
                             _prog = _cache['in_progress']
-                            _ref_counts = _gp_refinement_status_counts(_d)
+                            _ref_counts = _gp_extra_row_status_counts(_d)
 
                             _item_updates = []
                             for ci in range(_snap_total):

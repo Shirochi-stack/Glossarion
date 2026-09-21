@@ -7365,6 +7365,59 @@ def _extract_sdlxliff_chapters_for_glossary(sdlxliff_path, check_stop=None):
 
 
 # Update main function to support batch processing:
+MINIMAL_PASS_PROGRESS_KEY = "minimal_pass"
+
+
+def _record_minimal_pass_progress(status, context=None, **fields):
+    """Write the Minimal pass's state into the glossary progress file.
+
+    The pass runs before the chapter loop, so it cannot ride along with
+    save_progress(); it merges into the same file on its own. The progress
+    dialog polls that file, so each call here is what makes the row move in
+    real time.
+
+    The key is only ever written when the pass actually runs, which is what
+    keeps the row out of the dialog when the toggle is off.
+    """
+    progress_file = _resolved_glossary_progress_file(context)
+    if not progress_file:
+        return
+    payload = {"status": str(status or "unknown"), "updated_at": time.time()}
+    payload.update({k: v for k, v in fields.items() if v is not None})
+    try:
+        with _progress_lock, _locked_glossary_progress_file(progress_file):
+            data = {}
+            if os.path.exists(progress_file):
+                try:
+                    with open(progress_file, "r", encoding="utf-8") as fh:
+                        loaded = json.load(fh)
+                    if isinstance(loaded, dict):
+                        data = loaded
+                except (OSError, ValueError):
+                    data = {}
+            previous = data.get(MINIMAL_PASS_PROGRESS_KEY)
+            if isinstance(previous, dict):
+                # Keep started_at across the in_progress -> completed update.
+                merged = dict(previous)
+                merged.update(payload)
+                payload = merged
+            data[MINIMAL_PASS_PROGRESS_KEY] = payload
+
+            progress_dir = os.path.dirname(progress_file) or "."
+            os.makedirs(progress_dir, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=progress_dir, delete=False, suffix=".tmp"
+            ) as temp_f:
+                temp_path = temp_f.name
+                json.dump(data, temp_f, ensure_ascii=False, indent=2)
+                temp_f.flush()
+                os.fsync(temp_f.fileno())
+            _atomic_replace_file(temp_path, progress_file)
+    except Exception as e:
+        # Progress tracking must never break the pass it is tracking.
+        print(f"⚠️ Could not record Minimal pass progress: {e}")
+
+
 def _add_minimal_pass_enabled():
     """Whether to seed the Balanced/Full run with a Minimal extraction pass."""
     return str(os.getenv("GLOSSARY_ADD_MINIMAL_PASS", "0")).strip().lower() in (
@@ -7394,10 +7447,12 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None):
         return []
 
     print("📑 Minimal glossary pass: running before Balanced/Full extraction…")
+    _record_minimal_pass_progress("in_progress", started_at=time.time())
     try:
         import GlossaryManager
     except Exception as e:
         print(f"⚠️ Minimal glossary pass skipped (GlossaryManager unavailable): {e}")
+        _record_minimal_pass_progress("failed", error=str(e)[:200])
         return []
 
     # save_glossary() consumes chapter dicts and reads chapter["body"]; this
@@ -7411,10 +7466,12 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None):
     try:
         if callable(check_stop) and check_stop():
             print("⏹️ Minimal glossary pass cancelled before it started")
+            _record_minimal_pass_progress("skipped", reason="stopped")
             return []
         GlossaryManager.save_glossary(pass_dir, minimal_chapters, "")
     except Exception as e:
         print(f"⚠️ Minimal glossary pass failed, continuing without it: {e}")
+        _record_minimal_pass_progress("failed", error=str(e)[:200])
         return []
 
     # save_glossary writes glossary.csv into the directory it is given.
@@ -7434,8 +7491,14 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None):
     entries = [e for e in entries if isinstance(e, dict)]
     if entries:
         print(f"✅ Minimal glossary pass: {len(entries)} entries to merge")
+        _record_minimal_pass_progress(
+            "completed", entry_count=len(entries), completed_at=time.time()
+        )
     else:
         print("ℹ️ Minimal glossary pass produced no entries")
+        _record_minimal_pass_progress(
+            "skipped", reason="no_entries", entry_count=0, completed_at=time.time()
+        )
     return entries
 
 
@@ -10364,6 +10427,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
 
         existing_chapters_by_idx = {}
         existing_refinement = {}
+        existing_minimal_pass = {}
         existing_extracted_entries = {}
         preserved_in_progress = []
         externally_failed = []
@@ -10380,6 +10444,12 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                     manual_removed_indices = _unique_int_list(existing_progress.get("manual_removed_indices", []))
                 if isinstance(existing_progress, dict) and isinstance(existing_progress.get("refinement"), dict):
                     existing_refinement = existing_progress.get("refinement", {})
+                if isinstance(existing_progress, dict) and isinstance(
+                    existing_progress.get(MINIMAL_PASS_PROGRESS_KEY), dict
+                ):
+                    existing_minimal_pass = existing_progress.get(
+                        MINIMAL_PASS_PROGRESS_KEY, {}
+                    )
                 if isinstance(existing_progress, dict) and isinstance(existing_progress.get("chapter_extracted_entries"), dict):
                     existing_extracted_entries = {
                         str(k): v
@@ -10746,6 +10816,8 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             progress_data["key_pool"] = progress_key_pool
         if existing_refinement:
             progress_data["refinement"] = existing_refinement
+        if existing_minimal_pass:
+            progress_data[MINIMAL_PASS_PROGRESS_KEY] = existing_minimal_pass
         entry_index = dict(existing_extracted_entries)
         if isinstance(extracted_entries_updates, dict):
             for idx, entries in extracted_entries_updates.items():
