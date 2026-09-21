@@ -22,15 +22,17 @@ from glossary_matching import (
     MatchConfig,
     boundary_match,
     fold_match_text,
+    in_strict_scope,
     is_gender_entry_type,
     legacy_text_contains_term,
     norm_text,
+    parse_strict_scope,
     strict_name_config,
     strict_name_in_text,
 )
 
 
-def _text_contains_term(text, term, is_character=False):
+def _text_contains_term(text, term, is_character=False, entry_type=""):
     """Source-text matching, shared with glossary_compressor.
 
     This used to import the private helper out of glossary_compressor with a
@@ -45,10 +47,13 @@ def _text_contains_term(text, term, is_character=False):
     strict_gender = str(
         os.getenv("COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0")
     ).strip().lower() in ("1", "true", "yes", "on")
-    if strict_gender and is_character:
-        # Same rule the compressor applies: the strict toggle is a precise
-        # whole-name matcher, so the usage view agrees with what is sent.
-        return strict_name_in_text(text, term, _strict_usage_config())
+    if strict_gender:
+        # Same rule and same scope the compressor applies: the strict toggle
+        # is a precise whole-term matcher for the selected entry types, so
+        # the usage view agrees with what is sent.
+        cfg, scope = _strict_usage_config()
+        if in_strict_scope(scope, entry_type, is_character):
+            return strict_name_in_text(text, term, cfg, is_character=is_character)
     return legacy_text_contains_term(
         text, term, is_character=is_character, strict_gender=False
     )
@@ -58,14 +63,20 @@ _STRICT_USAGE_CONFIG = [0.0, None]
 
 
 def _strict_usage_config():
-    """Strict-name config from the environment, refreshed every few seconds.
+    """Strict config and scope from the environment, refreshed every few seconds.
 
     Usage matching asks once per entry per chapter; rebuilding the config
     from a dozen environment reads each time would dominate the scan.
     """
     now = time.monotonic()
     if _STRICT_USAGE_CONFIG[1] is None or now - _STRICT_USAGE_CONFIG[0] > 3.0:
-        _STRICT_USAGE_CONFIG[1] = strict_name_config(MatchConfig.from_getter(os.getenv))
+        _STRICT_USAGE_CONFIG[1] = (
+            strict_name_config(MatchConfig.from_getter(os.getenv)),
+            parse_strict_scope(
+                os.getenv("COMPRESS_GLOSSARY_STRICT_MATCHING_MODE", "characters"),
+                os.getenv("COMPRESS_GLOSSARY_STRICT_MATCHING_CUSTOM_TYPES", "[]"),
+            ),
+        )
         _STRICT_USAGE_CONFIG[0] = now
     return _STRICT_USAGE_CONFIG[1]
 
@@ -450,7 +461,10 @@ def entry_matches_text(entry, source_text):
     if not raw_name:
         return False
     is_character = is_gender_entry_type(entry.get("type"), entry.get("gender"))
-    return _text_contains_term(source_text, raw_name, is_character=is_character)
+    return _text_contains_term(
+        source_text, raw_name, is_character=is_character,
+        entry_type=entry.get("type") or "",
+    )
 
 
 def match_entries_for_text(entries, source_text):

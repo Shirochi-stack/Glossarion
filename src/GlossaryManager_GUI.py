@@ -1705,6 +1705,86 @@ class GlossaryManagerMixin:
             os.environ['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = '1' if enabled else '0'
         except Exception:
             pass
+        self._apply_strict_matching_scope()
+        self._refresh_strict_matching_row()
+
+    _STRICT_MATCHING_MODES = ('characters', 'all', 'custom')
+
+    def _strict_matching_mode(self):
+        """Current Strict Precise Matching scope: characters / all / custom."""
+        mode = str(
+            getattr(self, 'compress_glossary_strict_matching_mode_var', None)
+            or self.config.get('compress_glossary_strict_matching_mode', 'characters')
+            or 'characters'
+        ).strip().lower()
+        return mode if mode in self._STRICT_MATCHING_MODES else 'characters'
+
+    def _strict_matching_custom_types(self):
+        types = getattr(self, 'compress_glossary_strict_matching_custom_types_var', None)
+        if types is None:
+            types = self.config.get('compress_glossary_strict_matching_custom_types', [])
+        return [str(t) for t in (types or [])]
+
+    def _apply_strict_matching_scope(self, mode=None, custom_types=None):
+        """Write the scope to config, the live vars and the environment."""
+        mode = self._strict_matching_mode() if mode is None else mode
+        custom_types = self._strict_matching_custom_types() if custom_types is None else list(custom_types)
+        try:
+            self.config['compress_glossary_strict_matching_mode'] = mode
+            self.config['compress_glossary_strict_matching_custom_types'] = custom_types
+            self.compress_glossary_strict_matching_mode_var = mode
+            self.compress_glossary_strict_matching_custom_types_var = custom_types
+            os.environ['COMPRESS_GLOSSARY_STRICT_MATCHING_MODE'] = mode
+            os.environ['COMPRESS_GLOSSARY_STRICT_MATCHING_CUSTOM_TYPES'] = json.dumps(custom_types, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _refresh_strict_matching_row(self):
+        """Dropdown only while the toggle is on; Configure only for Custom."""
+        try:
+            enabled = bool(self.strict_gender_compression_checkbox.isChecked())
+        except Exception:
+            enabled = False
+        combo = getattr(self, 'strict_matching_mode_combo', None)
+        button = getattr(self, 'strict_matching_configure_btn', None)
+        try:
+            if combo is not None:
+                combo.setVisible(enabled)
+            if button is not None:
+                button.setVisible(enabled and self._strict_matching_mode() == 'custom')
+                chosen = self._strict_matching_custom_types()
+                button.setToolTip(_wrapped_tooltip_html(
+                    "Entry types under strict matching: "
+                    + (", ".join(t.capitalize() for t in chosen) if chosen else "none picked yet (Characters is used)")
+                ))
+        except Exception:
+            pass
+
+    def _on_glossary_manager_strict_matching_mode_change(self, index=None):
+        try:
+            index = int(self.strict_matching_mode_combo.currentIndex())
+        except Exception:
+            index = int(index or 0)
+        index = index if 0 <= index < len(self._STRICT_MATCHING_MODES) else 0
+        self._apply_strict_matching_scope(mode=self._STRICT_MATCHING_MODES[index])
+        self._refresh_strict_matching_row()
+
+    def _open_strict_matching_types_dialog(self, parent=None):
+        """Same entry-type picker as Emergency Glossary Compliance → Custom."""
+        try:
+            from other_settings import open_glossary_entry_types_dialog
+        except Exception as e:
+            print(f"⚠️ Entry type dialog unavailable: {e}")
+            return
+        selected = open_glossary_entry_types_dialog(
+            self, parent or getattr(self, 'dialog', None),
+            "Custom Strict Matching Types",
+            "Select which entry types must match as a whole term:",
+            self._strict_matching_custom_types(),
+        )
+        if selected is not None:
+            self._apply_strict_matching_scope(custom_types=selected)
+            self._refresh_strict_matching_row()
 
     def _apply_glossary_match_engine_env(self):
         """Resolve the two matching checkboxes into GLOSSARY_MATCH_ENGINE.
@@ -1715,7 +1795,7 @@ class GlossaryManagerMixin:
         try:
             precise = bool(self.precise_matching_checkbox.isChecked())
         except Exception:
-            precise = bool(self.config.get('compress_glossary_precise_matching', False))
+            precise = bool(self.config.get('compress_glossary_precise_matching', True))
         try:
             shadow = bool(self.shadow_log_matching_checkbox.isChecked())
         except Exception:
@@ -1852,7 +1932,7 @@ class GlossaryManagerMixin:
                     ('fuzzy_auto_mapping_checkbox', 'fuzzy_auto_mapping', False),
                     ('strict_gender_compression_checkbox', 'compress_glossary_strict_gender_matching', False),
                     ('consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column', False),
-                    ('precise_matching_checkbox', 'compress_glossary_precise_matching', False),
+                    ('precise_matching_checkbox', 'compress_glossary_precise_matching', True),
                     ('shadow_log_matching_checkbox', 'compress_glossary_shadow_log', False),
                     ('glossary_add_minimal_pass_checkbox', 'glossary_add_minimal_pass', False),
                     ('enable_unified_glossary_checkbox', 'enable_unified_glossary', False),
@@ -1866,6 +1946,13 @@ class GlossaryManagerMixin:
                         cb.blockSignals(True)
                         cb.setChecked(bool(self.config.get(cfg_key, default)))
                         cb.blockSignals(False)
+                if hasattr(self, 'strict_matching_mode_combo'):
+                    self.strict_matching_mode_combo.blockSignals(True)
+                    self.strict_matching_mode_combo.setCurrentIndex(
+                        self._STRICT_MATCHING_MODES.index(self._strict_matching_mode())
+                    )
+                    self.strict_matching_mode_combo.blockSignals(False)
+                    self._refresh_strict_matching_row()
 
                 # Dialog still alive — just bring it back
                 if show:
@@ -2403,6 +2490,7 @@ class GlossaryManagerMixin:
                         elif checkbox_name == 'strict_gender_compression_checkbox':
                             self.config['compress_glossary_strict_gender_matching'] = bool(checked)
                             os.environ['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = '1' if checked else '0'
+                            self._apply_strict_matching_scope()
                         elif checkbox_name == 'consider_translated_compression_checkbox':
                             self.config['compress_glossary_consider_translated_column'] = bool(checked)
                             os.environ['COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN'] = '1' if checked else '0'
@@ -4935,22 +5023,60 @@ Do not stop after the glossary."""
         auto_layout.addWidget(strict_gender_widget)
 
         if not hasattr(self, 'strict_gender_compression_checkbox'):
-            self.strict_gender_compression_checkbox = self._create_styled_checkbox("Strict Gender Entry Precise Matching")
+            self.strict_gender_compression_checkbox = self._create_styled_checkbox("Strict Precise Entry Matching")
             self.strict_gender_compression_checkbox.setChecked(self.config.get('compress_glossary_strict_gender_matching', False))
         if not getattr(self.strict_gender_compression_checkbox, '_glossary_manager_sync_connected', False):
             self.strict_gender_compression_checkbox.stateChanged.connect(self._on_glossary_manager_strict_gender_compression_toggle)
             self.strict_gender_compression_checkbox._glossary_manager_sync_connected = True
         self.strict_gender_compression_checkbox.setToolTip(_wrapped_tooltip_html(
-            "When ON, gender-enabled entries such as characters use the precise matcher and are only sent when the "
-            "whole name appears as its own word: particles, honorifics, spacing and full/half-width differences still "
-            "count (루나님, 미샤랄토스), but a surname/given-name token alone does not, and neither does the name buried "
-            "inside another word (유 in 자유).\n"
+            "When ON, the selected entry types use the precise matcher at its strictest setting and are only sent when "
+            "the whole term appears as its own word: particles, honorifics, spacing and full/half-width differences "
+            "still count (루나님, 미샤랄토스), but one word of a multi-word entry does not, and neither does the term "
+            "buried inside another word (유 in 자유).\n"
+            "Characters: gender-enabled entries only. All: every entry. Custom: the types picked under Configure…\n"
             "Works on its own; Precise Term Matching does not need to be ON.\n"
-            "When OFF, character names stay loose and may match surname/given-name tokens, including one-character CJK names."
+            "When OFF, a surname or given name alone can keep a character entry."
         ))
         strict_gender_layout.addWidget(self.strict_gender_compression_checkbox)
 
-        strict_gender_hint = QLabel("(Optional: whole-name precise matching for character entries; default OFF keeps loose character matching)")
+        # Same Characters / All / Custom + Configure… pattern as Emergency
+        # Glossary Compliance, and the same entry-type dialog behind it.
+        if not hasattr(self, 'strict_matching_mode_combo'):
+            self.strict_matching_mode_combo = QComboBox()
+            self.strict_matching_mode_combo.addItems(["Characters", "All", "Custom"])
+            self.strict_matching_mode_combo.setFixedWidth(140)
+            try:
+                self.strict_matching_mode_combo.setStyleSheet(self.auto_glossary_mode_combo.styleSheet())
+            except Exception:
+                pass
+            self._disable_combobox_mousewheel(self.strict_matching_mode_combo)
+            self.strict_matching_mode_combo.setCurrentIndex(
+                self._STRICT_MATCHING_MODES.index(self._strict_matching_mode())
+            )
+            self.strict_matching_mode_combo.currentIndexChanged.connect(
+                self._on_glossary_manager_strict_matching_mode_change
+            )
+        self.strict_matching_mode_combo.setToolTip(_wrapped_tooltip_html(
+            "Which entries the strict rule applies to.\n"
+            "Characters — gender-enabled entries (the original behaviour).\n"
+            "All — every entry type.\n"
+            "Custom — the entry types picked under Configure…"
+        ))
+        strict_gender_layout.addWidget(self.strict_matching_mode_combo)
+
+        if not hasattr(self, 'strict_matching_configure_btn'):
+            self.strict_matching_configure_btn = QPushButton("Configure…")
+            self.strict_matching_configure_btn.setFixedWidth(100)
+            self.strict_matching_configure_btn.setStyleSheet(
+                "background-color: #3a5f8a; color: white; padding: 4px 8px; border-radius: 3px;"
+            )
+            self.strict_matching_configure_btn.clicked.connect(
+                lambda: self._open_strict_matching_types_dialog(self.strict_matching_configure_btn.window())
+            )
+        strict_gender_layout.addWidget(self.strict_matching_configure_btn)
+        self._refresh_strict_matching_row()
+
+        strict_gender_hint = QLabel("(Optional: whole-term precise matching for the chosen entry types; default OFF)")
         strict_gender_layout.addWidget(strict_gender_hint)
         strict_gender_layout.addStretch()
 
@@ -4961,18 +5087,19 @@ Do not stop after the glossary."""
 
         if not hasattr(self, 'precise_matching_checkbox'):
             self.precise_matching_checkbox = self._create_styled_checkbox("Precise Term Matching")
-            self.precise_matching_checkbox.setChecked(self.config.get('compress_glossary_precise_matching', False))
+            self.precise_matching_checkbox.setChecked(self.config.get('compress_glossary_precise_matching', True))
         if not getattr(self.precise_matching_checkbox, '_glossary_manager_sync_connected', False):
             self.precise_matching_checkbox.stateChanged.connect(self._on_glossary_manager_precise_matching_toggle)
             self.precise_matching_checkbox._glossary_manager_sync_connected = True
         self.precise_matching_checkbox.setToolTip(_wrapped_tooltip_html(
             "When ON, glossary compression uses script-aware matching: word boundaries for Latin terms, "
             "sub-word boundary checks for short CJK terms, and normalized/spacing/honorific variants.\n"
-            "When OFF, matching stays loose and may keep an entry on a single CJK character."
+            "When OFF, matching is a plain substring search and may keep an entry on a single CJK character.\n"
+            "Default ON."
         ))
         precise_matching_layout.addWidget(self.precise_matching_checkbox)
 
-        precise_matching_hint = QLabel("(Optional: narrower, more accurate compression; default OFF keeps current behavior)")
+        precise_matching_hint = QLabel("(Recommended: narrower, more accurate compression; default ON, turn OFF for the old loose matching)")
         precise_matching_layout.addWidget(precise_matching_hint)
         precise_matching_layout.addStretch()
 

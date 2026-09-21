@@ -8367,8 +8367,8 @@ def main(log_callback=None, stop_callback=None):
         glossary[:] = _seeded
 
     # Start of the glossary generation phase: fold this book into the
-    # cross-novel unified glossary (or rebuild it when Generate is on) and
-    # refresh the per-book copy that gets appended beside the glossary.
+    # cross-novel unified glossary (or rebuild it when Generate is on). It
+    # stays in Glossary/Unified Glossary/; nothing is copied beside the book.
     # No-op unless Enable Unified Glossary is on; never raises.
     try:
         import unified_glossary
@@ -10514,7 +10514,7 @@ def main(log_callback=None, stop_callback=None):
         print(f"[Warning] Could not save CSV format: {e}")
 
     # End of the glossary generation phase: merge the finished glossary into
-    # the unified glossary and refresh the per-book copy. Fingerprinted, so
+    # the unified glossary. Fingerprinted, so
     # an unchanged book costs one stat call.
     try:
         import unified_glossary

@@ -26806,7 +26806,7 @@ Recent translations to summarize:
             'precise_matching_checkbox',
             'compress_glossary_precise_matching_var',
             'compress_glossary_precise_matching',
-            False,
+            True,
         )
         shadow = self._live_bool_setting(
             'shadow_log_matching_checkbox',
@@ -26815,6 +26815,30 @@ Recent translations to summarize:
             False,
         )
         return 'new' if precise else ('shadow' if shadow else 'legacy')
+
+    def _strict_matching_env_dict(self):
+        """Scope of Strict Precise Entry Matching (characters / all / custom).
+
+        Exported beside GLOSSARY_MATCH_ENGINE at every site for the same
+        reason: a setting only the Glossary Settings dialog writes is lost
+        on restart until that dialog is opened again.
+        """
+        mode = str(
+            getattr(self, 'compress_glossary_strict_matching_mode_var', None)
+            or self.config.get('compress_glossary_strict_matching_mode', 'characters')
+            or 'characters'
+        ).strip().lower()
+        if mode not in ('characters', 'all', 'custom'):
+            mode = 'characters'
+        custom_types = getattr(self, 'compress_glossary_strict_matching_custom_types_var', None)
+        if custom_types is None:
+            custom_types = self.config.get('compress_glossary_strict_matching_custom_types', [])
+        return {
+            'COMPRESS_GLOSSARY_STRICT_MATCHING_MODE': mode,
+            'COMPRESS_GLOSSARY_STRICT_MATCHING_CUSTOM_TYPES': json.dumps(
+                [str(t) for t in (custom_types or [])], ensure_ascii=False
+            ),
+        }
 
     def _unified_glossary_env_dict(self):
         """The four unified-glossary variables, for every env export site.
@@ -35779,6 +35803,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ADD_ADDITIONAL_GLOSSARY': "1" if self.config.get('add_additional_glossary', False) else "0",
             'ADDITIONAL_GLOSSARY_PATH': self.config.get('additional_glossary_path', ''),
             'GLOSSARY_MATCH_ENGINE': self._glossary_match_engine_env_value(),
+            **self._strict_matching_env_dict(),
             **self._unified_glossary_env_dict(),
             'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var else "0",
 
@@ -37699,6 +37724,7 @@ Important rules:
                     'GLOSSARY_SKIP_TITLE_HEADER_ONLY': self._glossary_skip_title_header_only_env_value(),
                     'GLOSSARY_ADD_MINIMAL_PASS': self._glossary_add_minimal_pass_env_value(),
                     'GLOSSARY_MATCH_ENGINE': self._glossary_match_engine_env_value(),
+                    **self._strict_matching_env_dict(),
                     **self._unified_glossary_env_dict(),
                     'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL': '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', True)) else '0',
                     # Optional assistant prefill prompt
@@ -47099,6 +47125,8 @@ Important rules:
                 ('unified_glossary_combine_all_languages', ['unified_combine_all_languages_checkbox', 'unified_glossary_combine_all_languages_var'], False, bool),
                 ('compress_glossary_prompt', ['compress_glossary_checkbox', 'compress_glossary_prompt_var'], True, bool),
                 ('compress_glossary_strict_gender_matching', ['strict_gender_compression_checkbox', 'compress_glossary_strict_gender_matching_var'], False, bool),
+                ('compress_glossary_strict_matching_mode', ['compress_glossary_strict_matching_mode_var'], 'characters', str),
+                ('compress_glossary_strict_matching_custom_types', ['compress_glossary_strict_matching_custom_types_var'], [], list),
                 ('compress_glossary_consider_translated_column', ['consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column_var'], False, bool),
                 ('save_glossary_in_output', ['save_glossary_in_output_checkbox', 'save_glossary_in_output_var'], False, bool),
                 ('include_gender_context', ['include_gender_context_checkbox', 'include_gender_context_var'], False, bool),
@@ -48389,6 +48417,7 @@ Important rules:
                 ('GLOSSARY_SKIP_TITLE_HEADER_ONLY', self._glossary_skip_title_header_only_env_value()),
                 ('GLOSSARY_ADD_MINIMAL_PASS', self._glossary_add_minimal_pass_env_value()),
                 ('GLOSSARY_MATCH_ENGINE', self._glossary_match_engine_env_value()),
+                *self._strict_matching_env_dict().items(),
                 *self._unified_glossary_env_dict().items(),
                 ('GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', True)) else '0'),
 

@@ -14,6 +14,7 @@ For the same reason this module never reads settings itself.  Callers build a
 ``os.getenv`` in usage) and pass it in.
 """
 
+import json
 import os
 import re
 import threading
@@ -938,8 +939,62 @@ def strict_name_config(base=None):
     )
 
 
-def strict_name_in_text(text, term, cfg=None, prepared=None):
-    """Strict Gender Entry Precise Matching for one gendered entry.
+STRICT_SCOPE_MODES = ("characters", "all", "custom")
+
+
+def parse_strict_scope(mode, custom_types=None):
+    """Normalize the Strict Precise Matching scope to ``(mode, types)``.
+
+    Same three modes as Emergency Glossary Compliance: ``characters``
+    (gender-enabled entries), ``all``, or ``custom`` with a list of entry
+    types. The list may arrive as a list or as the JSON / comma string an
+    environment variable carries. Both singular and plural spellings are
+    accepted, because section headers say CHARACTERS and rows say
+    character. An empty custom list falls back to ``characters`` rather
+    than silently switching the toggle off.
+    """
+    mode = str(mode or "characters").strip().lower()
+    if mode in ("all_fields", "everything"):
+        mode = "all"
+    if mode not in STRICT_SCOPE_MODES:
+        mode = "characters"
+    if isinstance(custom_types, str):
+        text = custom_types.strip()
+        try:
+            custom_types = json.loads(text) if text.startswith("[") else text.split(",")
+        except ValueError:
+            custom_types = text.split(",")
+    allowed = set()
+    for item in custom_types or ():
+        name = str(item or "").strip().lower()
+        if not name:
+            continue
+        allowed.add(name)
+        allowed.add(name[:-1] if name.endswith("s") else name + "s")
+    if mode == "custom" and not allowed:
+        mode = "characters"
+    return mode, frozenset(allowed)
+
+
+DEFAULT_STRICT_SCOPE = parse_strict_scope("characters")
+
+
+def in_strict_scope(scope, entry_type="", is_character=False):
+    """Does the strict whole-term rule apply to this entry?"""
+    mode, allowed = scope or DEFAULT_STRICT_SCOPE
+    if mode == "all":
+        return True
+    if mode == "custom":
+        if str(entry_type or "").strip().lower() in allowed:
+            return True
+        # Ticking Characters covers every gender-enabled entry, including
+        # formats that carry no type column.
+        return bool(is_character) and "character" in allowed
+    return bool(is_character)
+
+
+def strict_name_in_text(text, term, cfg=None, prepared=None, is_character=True):
+    """Strict Precise Matching for one entry inside the configured scope.
 
     The old strict rule was a bare ``term in text``: it demanded the whole
     name but found it anywhere, so 유 matched inside 자유 and 유리 inside
@@ -955,7 +1010,9 @@ def strict_name_in_text(text, term, cfg=None, prepared=None):
         cfg = strict_name_config()
     if prepared is None:
         prepared = prepare_source_text_cached(text, cfg)
-    return bool(match_term(prepared, term, True, cfg))
+    # The whole-term floor lives in `cfg`; `is_character` only decides
+    # whether verb endings / noun affixes may attach (never to a name).
+    return bool(match_term(prepared, term, is_character, cfg))
 
 
 # ─── Review overrides ────────────────────────────────────────────────────────

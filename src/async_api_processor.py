@@ -3375,11 +3375,11 @@ class AsyncProcessingDialog:
         env_vars['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = "1" if strict_gender_matching else "0"
         # Two checkboxes resolve into one engine value; 'new' wins over 'shadow'.
         if hasattr(self.gui, 'compress_glossary_precise_matching_var'):
-            precise_matching = _val(self.gui.compress_glossary_precise_matching_var, False)
+            precise_matching = _val(self.gui.compress_glossary_precise_matching_var, True)
         elif hasattr(self.gui, 'precise_matching_checkbox'):
             precise_matching = _val(self.gui.precise_matching_checkbox, False)
         else:
-            precise_matching = self.gui.config.get('compress_glossary_precise_matching', False)
+            precise_matching = self.gui.config.get('compress_glossary_precise_matching', True)
         if hasattr(self.gui, 'compress_glossary_shadow_log_var'):
             shadow_log = _val(self.gui.compress_glossary_shadow_log_var, False)
         elif hasattr(self.gui, 'shadow_log_matching_checkbox'):
@@ -3398,6 +3398,8 @@ class AsyncProcessingDialog:
         env_vars['COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN'] = "1" if consider_translated_column else "0"
         # Unified glossary (cross-novel glossary_unified.csv); the GUI helper
         # reads the live checkboxes with config as the fallback.
+        if hasattr(self.gui, '_strict_matching_env_dict'):
+            env_vars.update(self.gui._strict_matching_env_dict())
         if hasattr(self.gui, '_unified_glossary_env_dict'):
             env_vars.update(self.gui._unified_glossary_env_dict())
         else:

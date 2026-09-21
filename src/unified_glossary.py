@@ -729,7 +729,7 @@ def _remove_quiet(path):
     return False
 
 
-# ─── Rebuild / merge / per-book copy ─────────────────────────────────────────
+# ─── Rebuild / merge ─────────────────────────────────────────────────────────
 
 def rebuild(shared_dir, key, current_entries=None, current_path=None, log=print,
             force=False, settings=None):
@@ -859,7 +859,6 @@ def rebuild(shared_dir, key, current_entries=None, current_path=None, log=print,
                 "signature": _signature(group_key, combine_all),
                 "inputs": inputs,
                 "output": _stat_fingerprint(g_csv),
-                "mirrors": group_state.get("mirrors") or {},
             })
             _save_state(g_state, group_state)
             log(f"📚 Unified glossary [{group_key}] updated: {len(merged):,} entries → {g_csv}")
@@ -910,7 +909,6 @@ def rebuild(shared_dir, key, current_entries=None, current_path=None, log=print,
             "signature": _signature(group_key, combine_all),
             "inputs": inputs,
             "output": _stat_fingerprint(g_csv),
-            "mirrors": {},
         })
         written[group_key] = len(deduped)
         log(
@@ -922,7 +920,7 @@ def rebuild(shared_dir, key, current_entries=None, current_path=None, log=print,
         # does not re-read every file just to learn that again.
         _save_state(state_path, {
             "signature": signature, "inputs": inputs,
-            "output": _stat_fingerprint(csv_path), "mirrors": state.get("mirrors") or {},
+            "output": _stat_fingerprint(csv_path),
         })
     if not written:
         log(f"📚 Unified glossary: nothing to build — no entries found in {len(files)} book glossaries")
@@ -1003,7 +1001,6 @@ def merge_book(shared_dir, key, book_entries, book_path=None, log=print):
         "signature": signature,
         "inputs": inputs,
         "output": _stat_fingerprint(csv_path),
-        "mirrors": state.get("mirrors") or {},
     })
     _save_state(state_path, state)
     log(
@@ -1013,65 +1010,66 @@ def merge_book(shared_dir, key, book_entries, book_path=None, log=print):
     return True
 
 
-def write_book_copy(shared_dir, key, book_entries, target_dir, book_path=None, log=print):
-    """Write ``<target_dir>/glossary_unified.csv`` = unified minus this book.
+def remove_book_copies(shared_dir, target_dirs, log=print):
+    """Delete ``glossary_unified.*`` left beside a book glossary or in an
+    output folder by earlier versions.
 
-    The copy is what gets appended to the prompt beside the book glossary, so
-    entries the book glossary already carries are left out. When nothing
-    remains the stale copy is removed so an empty file is never appended.
+    The unified glossary lives in ``Glossary/Unified Glossary/<key>/`` and
+    nowhere else. It used to be copied next to every book glossary (minus that
+    book's entries); the subtraction now happens in memory when the request is
+    built (see book_raw_names), so a copy is only a stale multi-megabyte file
+    that the prompt builder might pick up. Never touches the unified root.
     """
-    if not target_dir:
-        return False
-    folder, _json_path, csv_path, state_path = unified_paths(shared_dir, key)
-    target_json = os.path.join(target_dir, UNIFIED_BASENAME + ".json")
-    target_csv = os.path.join(target_dir, UNIFIED_BASENAME + ".csv")
-    if _path_key(target_dir) == _path_key(folder):
-        return False
-    output_fp = _stat_fingerprint(csv_path)
-    if output_fp is None:
-        _remove_quiet(target_csv)
-        _remove_quiet(target_json)
-        return False
+    root = _path_key(unified_root(shared_dir))
+    removed = 0
+    for target_dir in target_dirs or []:
+        if not target_dir:
+            continue
+        where = _path_key(target_dir)
+        if where == root or where.startswith(root + os.sep):
+            continue
+        for ext in (".csv", ".json"):
+            stale = os.path.join(target_dir, UNIFIED_BASENAME + ext)
+            if os.path.isfile(stale):
+                _remove_quiet(stale)
+                removed += not os.path.exists(stale)
+    if removed:
+        log(
+            f"📚 Unified glossary: removed {removed} old per-book copy file(s); "
+            f"it is now read from {UNIFIED_FOLDER_NAME}/ only"
+        )
+    return removed
 
-    book = _strip_non_shareable(book_entries or [])
-    on_disk = book_glossary_file(book_path)
-    state = _load_state(state_path)
-    # Content digest, not mtime: the book file is re-saved every run, and an
-    # identical re-save must not make this rewrite a 30k-entry copy.
-    book_digest = None
-    if on_disk:
-        recorded = (state.get("inputs") or {}).get(_path_key(on_disk))
-        book_digest = (_input_fingerprint(on_disk, recorded) or {}).get("digest")
-    marker = {
-        "output": output_fp,
-        "book": book_digest or _entries_digest(book),
-        "book_count": len(book),
-    }
-    mirrors = dict(state.get("mirrors") or {})
-    target_key = _path_key(target_dir)
-    previous = mirrors.get(target_key) or {}
-    if previous.get("marker") == marker and bool(previous.get("written")) == os.path.isfile(target_csv):
-        return False
 
-    own = {_raw_key(entry) for entry in book}
-    remaining = [
-        entry for entry in _strip_non_shareable(load_entries(csv_path))
-        if _raw_key(entry) not in own
-    ]
-    if remaining:
-        os.makedirs(target_dir, exist_ok=True)
-        with _LOCK:
-            _write(remaining, target_json)
-        written = True
-        log(f"📚 Unified glossary copy: {len(remaining)} cross-novel entries → {target_csv}")
-    else:
-        _remove_quiet(target_csv)
-        _remove_quiet(target_json)
-        written = False
-    mirrors[target_key] = {"marker": marker, "written": written}
-    state["mirrors"] = mirrors
-    _save_state(state_path, state)
-    return written
+_BOOK_NAMES_CACHE = {}
+
+
+def book_raw_names(book_glossary_path):
+    """Raw names (NFC, casefolded) the book's own glossary already sends.
+
+    Passed to the compressor as ``exclude_raw_names`` so the one shared
+    unified file never repeats an entry of the book being translated. Cached
+    on the file's size and mtime: it is asked for on every request, and the
+    book glossary changes a handful of times per run.
+    """
+    on_disk = book_glossary_file(book_glossary_path) if book_glossary_path else None
+    if not on_disk:
+        return frozenset()
+    fingerprint = _stat_fingerprint(on_disk)
+    key = _path_key(on_disk)
+    with _LOCK:
+        cached = _BOOK_NAMES_CACHE.get(key)
+        if cached and cached[0] == fingerprint:
+            return cached[1]
+    try:
+        names = frozenset(
+            name for name in (_raw_key(entry) for entry in load_entries(on_disk)) if name
+        )
+    except Exception:
+        names = frozenset()
+    with _LOCK:
+        _BOOK_NAMES_CACHE[key] = (fingerprint, names)
+    return names
 
 
 def sync_phase(
@@ -1082,9 +1080,10 @@ def sync_phase(
 
     ``stage`` is ``"start"`` or ``"end"``. With Generate Unified Glossary on,
     the start hook rebuilds from every book folder (fingerprint-guarded);
-    otherwise the book is merged incrementally. Every ``target_dir`` then
-    gets the per-book copy. ``merge=False`` only refreshes the copies, for
-    callers whose merge already happened elsewhere.
+    otherwise the book is merged incrementally. Nothing is written outside
+    ``Glossary/Unified Glossary/``: ``target_dirs`` are only swept for the
+    per-book copies older versions left behind. ``merge=False`` resolves the
+    language key without merging, for callers whose merge already happened.
     """
     if not enabled(settings):
         return None
@@ -1104,12 +1103,7 @@ def sync_phase(
                 )
             else:
                 merge_book(shared_dir, key, book_entries, book_path=book_glossary_path, log=log)
-        for target_dir in target_dirs or []:
-            if target_dir:
-                write_book_copy(
-                    shared_dir, key, book_entries, target_dir,
-                    book_path=book_glossary_path, log=log,
-                )
+        remove_book_copies(shared_dir, target_dirs, log=log)
         return key
     except Exception as exc:
         log(f"⚠️ Unified glossary ({stage}): {exc} — continuing")
@@ -1119,16 +1113,10 @@ def sync_phase(
 def resolve_prompt_glossary_path(actual_glossary_path=None, settings=None):
     """The unified file to append to a request, or None.
 
-    Prefers the per-book copy beside the glossary being sent (unified minus
-    that book's own entries); falls back to the canonical file.
+    Always the one shared file under ``Glossary/Unified Glossary/<key>/``.
+    The entries the book's own glossary already carries are left out when the
+    request is built (book_raw_names), not by keeping a copy per book.
     """
-    if actual_glossary_path:
-        beside = os.path.join(
-            os.path.dirname(os.path.abspath(actual_glossary_path)),
-            UNIFIED_BASENAME + ".csv",
-        )
-        if os.path.isfile(beside):
-            return beside
     try:
         shared_dir = shared_glossary_dir(settings, fallback_base=actual_glossary_path)
         key = str(_setting(settings, "UNIFIED_GLOSSARY_RESOLVED_KEY", "") or "").strip()

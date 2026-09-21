@@ -14156,8 +14156,8 @@ def _sync_unified_glossary_phase(stage, output_dir, chapters=None, glossary_path
 
     Balanced/Full and the Extract Glossary button run through
     extract_glossary_from_epub.main(), which merges at both ends of its own
-    run, so for those modes this only refreshes the per-book copy that the
-    prompt builder reads beside the glossary. Minimal and Single Pass never
+    run, so for those modes this only resolves the language folder the
+    prompt builder reads from. Minimal and Single Pass never
     reach main(): their glossary is merged here. Single Pass builds its
     glossary during translation, so its "end" is the end of translation
     (``final=True``), not the end of the pre-translation phase.
@@ -14179,7 +14179,7 @@ def _sync_unified_glossary_phase(stage, output_dir, chapters=None, glossary_path
             return
         mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower().replace(" ", "_").replace("-", "_")
         if mode in ("no_glossary", "noglossary"):
-            return  # nothing is appended in this mode, so no copy is needed
+            return  # nothing is appended in this mode
         target_dirs = [output_dir]
         if single_pass:
             glossary_dir, json_path, csv_path, _progress_path = _single_pass_glossary_paths(output_dir)
@@ -23174,7 +23174,10 @@ def build_system_prompt(
                         compressed_tokens = len(glossary_token_encoder.encode(glossary_text))
                         token_reduction = original_tokens - compressed_tokens
                         token_reduction_pct = (token_reduction / original_tokens * 100) if original_tokens > 0 else 0
-                        strict_gender_note = " (strict gender precise matching ON)" if str(_request_glossary_setting(settings, "COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0")).strip().lower() in ("1", "true", "yes", "on") else ""
+                        strict_gender_note = ""
+                        if str(_request_glossary_setting(settings, "COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0")).strip().lower() in ("1", "true", "yes", "on"):
+                            strict_scope_name = str(_request_glossary_setting(settings, "COMPRESS_GLOSSARY_STRICT_MATCHING_MODE", "characters") or "characters").strip().lower()
+                            strict_gender_note = f" (strict precise matching: {strict_scope_name})"
                         translated_column_note = " (translated column ON)" if str(_request_glossary_setting(settings, "COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN", "0")).strip().lower() in ("1", "true", "yes", "on") else ""
 
                         glossary_log_parts.append(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%), {original_tokens:,}→{compressed_tokens:,} tokens ({token_reduction_pct:.1f}%){strict_gender_note}{translated_column_note}")
@@ -23207,7 +23210,8 @@ def build_system_prompt(
             else:
                 glossary_log_parts.append("ℹ️ Glossary skipped for this chapter (no matching entries after compression)")
 
-            def _append_secondary_glossary(system_text, path, label, max_uncompressed_chars=None):
+            def _append_secondary_glossary(system_text, path, label, max_uncompressed_chars=None,
+                                           exclude_raw_names=None):
                 """Read, optionally compress, and append a companion glossary.
 
                 Shared by the glossary extension and the unified glossary so
@@ -23221,6 +23225,8 @@ def build_system_prompt(
                 its own load / compress / append lines. ``label`` is the name
                 used in that segment. ``max_uncompressed_chars`` refuses to
                 append a huge glossary that did not get compressed.
+                ``exclude_raw_names`` leaves out entries another glossary in
+                this request already carries, compressed or not.
                 """
                 nonlocal glossary_token_encoder
                 # The request is being aborted; do not start seconds of work.
@@ -23244,6 +23250,7 @@ def build_system_prompt(
                                 glossary_path=path,
                                 chapter_ref=chapter_ref,
                                 settings=settings,
+                                exclude_raw_names=exclude_raw_names,
                             )
                             was_compressed = True
                         except Exception as e:
@@ -23258,9 +23265,22 @@ def build_system_prompt(
                                 "turn on Compress Glossary Prompt)"
                             )
                             return system_text
+                        if exclude_raw_names:
+                            # Sent whole, but still without the entries the
+                            # book's own glossary carries.
+                            try:
+                                from glossary_compressor import compress_glossary
+                                secondary_text = compress_glossary(
+                                    secondary_text, " ", glossary_format='auto',
+                                    glossary_path=path, chapter_ref=chapter_ref, settings=settings,
+                                    exclude_raw_names=exclude_raw_names, keep_all=True,
+                                )
+                            except Exception as e:
+                                print(f"⚠️ {label} de-duplication failed: {e}")
+                                secondary_text = original_add_text
                         if secondary_text and secondary_text.strip():
                             system_text += f"\n\n{secondary_text}"
-                            glossary_log_parts.append(f"{label}: {original_add_length:,} chars appended")
+                            glossary_log_parts.append(f"{label}: {len(secondary_text):,} chars appended")
                         return system_text
 
                     compressed_add_length = len(secondary_text or "")
@@ -23301,24 +23321,29 @@ def build_system_prompt(
                         system, additional_glossary_path, "Glossary Extension"
                     )
 
-            # Cross-novel unified glossary (Enable Unified Glossary). The copy
-            # beside the glossary being sent is "unified minus this book", so
-            # no entry is sent twice; the canonical file is the fallback.
+            # Cross-novel unified glossary (Enable Unified Glossary). One shared
+            # file under Glossary/Unified Glossary/<key>/; the entries this
+            # book's own glossary carries are excluded here, in memory, so no
+            # entry is sent twice and no per-book copy is ever written.
             if str(_request_glossary_setting(
                 settings, "ENABLE_UNIFIED_GLOSSARY", "0"
             )) == "1":
                 unified_glossary_path = None
+                unified_exclude = None
                 try:
                     import unified_glossary
                     unified_glossary_path = unified_glossary.resolve_prompt_glossary_path(
                         actual_glossary_path, settings
                     )
+                    if unified_glossary_path:
+                        unified_exclude = unified_glossary.book_raw_names(actual_glossary_path)
                 except Exception as e:
                     print(f"⚠️ Unified glossary lookup failed: {e}")
                 if unified_glossary_path:
                     system = _append_secondary_glossary(
                         system, unified_glossary_path, "Unified Glossary",
                         max_uncompressed_chars=200_000,
+                        exclude_raw_names=unified_exclude,
                     )
 
             # One line for everything glossary-related in this request, e.g.
@@ -26325,7 +26350,7 @@ def main(log_callback=None, stop_callback=None):
     # main() and are seeded there.
     _seed_single_pass_glossary_with_minimal(chapters, out, check_stop=check_stop)
     # Unified glossary, start of phase: merge/rebuild for Minimal and Single
-    # Pass, refresh the per-book copy for every mode.
+    # Pass; every mode resolves the language folder the prompt reads from.
     _sync_unified_glossary_phase("start", out, chapters=chapters)
 
     if config.OUTPUT_MODE == "audio" and os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1":
@@ -27381,18 +27406,20 @@ def main(log_callback=None, stop_callback=None):
 
                 # Unified glossary (after the extension, same shape of report)
                 try:
-                    _unified_beside = os.path.join(os.path.dirname(glossary_file), "glossary_unified.csv")
+                    import unified_glossary as _unified_glossary
                     if os.getenv('ENABLE_UNIFIED_GLOSSARY', '0') == '1':
-                        import unified_glossary as _unified_glossary
                         _unified_path = _unified_glossary.resolve_prompt_glossary_path(glossary_file)
                         if _unified_path:
+                            _unified_total = _unified_glossary.count_entries(_unified_path)
+                            _unified_own = len(_unified_glossary.book_raw_names(glossary_file))
                             print(
-                                f"📑 Unified glossary loaded with {_unified_glossary.count_entries(_unified_path)} entries "
-                                f"({os.path.basename(os.path.dirname(_unified_path))})"
+                                f"📑 Unified glossary loaded with {_unified_total} entries "
+                                f"({os.path.basename(os.path.dirname(_unified_path))}); "
+                                f"the {_unified_own} names in this book's glossary are skipped per request"
                             )
                         else:
                             print("📑 Unified glossary enabled, but no glossary_unified.csv exists yet")
-                    elif os.path.exists(_unified_beside):
+                    elif _unified_glossary.resolve_prompt_glossary_path(glossary_file):
                         print("⏩ Skipping unified glossary - toggle disabled")
                 except Exception as e:
                     print(f"⚠️ Failed to inspect unified glossary: {e}")

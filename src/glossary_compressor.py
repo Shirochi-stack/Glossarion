@@ -16,6 +16,7 @@ import json
 import csv
 import time
 import threading
+import unicodedata
 from contextvars import ContextVar
 from io import StringIO
 from gender_tracking import (
@@ -36,10 +37,12 @@ from glossary_matching import (
     TIER_WEAK,
     MatchConfig,
     allowlist_path_for,
+    in_strict_scope,
     is_gender_entry_type,
     legacy_text_contains_term,
     match_term,
     normalize_override_terms,
+    parse_strict_scope,
     prepare_source_text,
     strict_name_config,
     strict_name_in_text,
@@ -149,9 +152,21 @@ def _get_gender_types():
 
 
 def _strict_gender_name_matching_enabled():
-    """Return True when gender-enabled entries must match the full raw name."""
+    """Return True when Strict Precise Matching is on.
+
+    The setting keeps its original name so saved configs carry over; which
+    entries it covers is _strict_matching_scope().
+    """
     return str(_setting("COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0")).strip().lower() in (
         "1", "true", "yes", "on"
+    )
+
+
+def _strict_matching_scope():
+    """Entry types under the strict whole-term rule: characters / all / custom."""
+    return parse_strict_scope(
+        _setting("COMPRESS_GLOSSARY_STRICT_MATCHING_MODE", "characters"),
+        _setting("COMPRESS_GLOSSARY_STRICT_MATCHING_CUSTOM_TYPES", "[]"),
     )
 
 
@@ -212,9 +227,14 @@ def _serialize_compression_enabled():
 
 
 def _match_engine():
-    """Which matcher decides: 'legacy' (default), 'shadow', or 'new'."""
-    value = str(_setting("GLOSSARY_MATCH_ENGINE", "legacy") or "legacy").strip().lower()
-    return value if value in ("legacy", "shadow", "new") else "legacy"
+    """Which matcher decides: 'new' (default), 'shadow', or 'legacy'.
+
+    Precise Term Matching is on by default, so an unset variable means
+    the precise engine too; a caller that forgets to export the setting
+    must not silently get a different matcher from the one the GUI shows.
+    """
+    value = str(_setting("GLOSSARY_MATCH_ENGINE", "new") or "new").strip().lower()
+    return value if value in ("legacy", "shadow", "new") else "new"
 
 
 def _is_unified_glossary_path(path):
@@ -254,9 +274,11 @@ class _MatchContext:
     __slots__ = ("engine", "cfg", "prepared", "recorder", "source_text",
                  "glossary_path", "chapter_ref", "always_keep", "always_drop",
                  "whole_term_only", "min_term_length",
-                 "strict_gender", "_strict_cfg", "_strict_prepared")
+                 "strict_gender", "strict_scope", "_strict_cfg", "_strict_prepared",
+                 "exclude", "keep_all")
 
-    def __init__(self, source_text, glossary_path=None, chapter_ref=None):
+    def __init__(self, source_text, glossary_path=None, chapter_ref=None,
+                 exclude_raw_names=None, keep_all=False):
         self.engine = _match_engine()
         self.source_text = source_text or ""
         self.glossary_path = glossary_path
@@ -271,10 +293,18 @@ class _MatchContext:
         )
         self.min_term_length = _unified_min_term_length() if self.whole_term_only else 1
         self.strict_gender = _strict_gender_name_matching_enabled()
+        self.strict_scope = _strict_matching_scope() if self.strict_gender else None
         self._strict_cfg = None
         self._strict_prepared = None
+        # Raw names (NFC, casefolded) another glossary in this request
+        # already carries; `keep_all` turns the run into that filter alone.
+        self.exclude = frozenset(exclude_raw_names or ())
+        self.keep_all = bool(keep_all)
         if self.engine != "legacy":
             self.cfg = MatchConfig.from_getter(_setting)
+            # Which entries are strict is this context's call (the scope
+            # can be any entry type), not the per-character shortcut.
+            self.cfg.strict_gender = False
             if self.whole_term_only:
                 # Exact / normalized / despaced / honorific-stripped forms of
                 # the whole term still count; a part of it never does.
@@ -297,8 +327,8 @@ class _MatchContext:
                 print(f"⚠️ Glossary shadow log unavailable: {exc}")
                 self.engine = "legacy"
 
-    def _strict_name_match(self, term):
-        """Strict Gender Entry Precise Matching, whichever engine is on.
+    def _strict_match(self, term, is_character):
+        """Strict Precise Matching, whichever engine is on.
 
         Built lazily: the toggle is usually off, and under the legacy
         engine nothing else needs a prepared index.
@@ -310,12 +340,13 @@ class _MatchContext:
                 self.prepared if self.prepared is not None
                 else prepare_source_text(self.source_text, self._strict_cfg)
             )
-        return strict_name_in_text(
-            self.source_text, term, self._strict_cfg, self._strict_prepared
-        )
+        return match_term(self._strict_prepared, term, is_character, self._strict_cfg)
 
     def decide(self, term, is_character=False, *, translated_name="", entry_type=""):
         """Return whether this term counts as present in the chapter."""
+        if self.keep_all:
+            return True
+        strict_result = None
         if self.whole_term_only:
             whole = str(term or "").strip()
             # A one-character entry from another novel (그, 신, 왕 …) is a
@@ -323,12 +354,13 @@ class _MatchContext:
             if len(whole) < self.min_term_length:
                 return False
             legacy = whole in self.source_text
-        elif is_character and self.strict_gender:
+        elif self.strict_gender and in_strict_scope(self.strict_scope, entry_type, is_character):
             # The strict toggle is a precise matcher in its own right: the
-            # whole name at a real word boundary. It replaces the loose
-            # rule under every engine, so legacy / shadow / new agree on
-            # gendered entries by construction.
-            legacy = self._strict_name_match(term)
+            # whole term at a real word boundary, never one word of it. It
+            # replaces the engine's rule for the entry types in its scope,
+            # so legacy / shadow / new agree on them by construction.
+            strict_result = self._strict_match(term, is_character)
+            legacy = bool(strict_result)
         else:
             legacy = legacy_text_contains_term(
                 self.source_text, term, is_character=is_character,
@@ -337,7 +369,9 @@ class _MatchContext:
         if self.engine == "legacy":
             return legacy
 
-        result = match_term(self.prepared, term, is_character, self.cfg)
+        result = strict_result if strict_result is not None else match_term(
+            self.prepared, term, is_character, self.cfg
+        )
         new_verdict = bool(result)
         override = ""
         if self.always_keep or self.always_drop:
@@ -671,13 +705,25 @@ def compress_glossary(
     glossary_path=None,
     chapter_ref=None,
     settings=None,
+    exclude_raw_names=None,
+    keep_all=False,
 ):
-    """Run compression with an optional thread-safe request settings snapshot."""
+    """Run compression with an optional thread-safe request settings snapshot.
+
+    ``exclude_raw_names`` drops entries whose raw name (NFC, casefolded) is
+    in the set, whatever the chapter says: it is how the unified glossary
+    leaves out what the book's own glossary already sends. ``keep_all``
+    keeps every other entry, for callers that want that filter without
+    compression.
+    """
     token = _ACTIVE_GLOSSARY_SETTINGS.set(settings)
     # Built after the settings token so the engine choice and the matcher
     # knobs come from this request's snapshot, not the ambient environment.
     match_token = _ACTIVE_MATCH_CONTEXT.set(
-        _MatchContext(source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
+        _MatchContext(
+            source_text, glossary_path=glossary_path, chapter_ref=chapter_ref,
+            exclude_raw_names=exclude_raw_names, keep_all=keep_all,
+        )
     )
     try:
         return _compress_glossary_impl(
@@ -872,6 +918,9 @@ def _entry_matches_source(source_text, raw_name, translated_name="", is_characte
     raw_name = str(raw_name or "").strip()
     translated_name = str(translated_name or "").strip()
     ctx = _active_match_context(source_text)
+    if ctx.exclude and unicodedata.normalize("NFC", raw_name).casefold() in ctx.exclude:
+        # Already sent by the book's own glossary in this same request.
+        return False
     if raw_name and ctx.decide(
         raw_name, is_character,
         translated_name=translated_name, entry_type=entry_type,
@@ -1463,9 +1512,12 @@ def _text_contains_term(text, term, is_character=False):
             require ≥2 chars to reduce false positives on
             non-character entries like terms and places.
     """
-    if is_character and _strict_gender_name_matching_enabled():
+    if _strict_gender_name_matching_enabled() and in_strict_scope(
+        _strict_matching_scope(), "", is_character
+    ):
         return strict_name_in_text(
-            text, term, strict_name_config(MatchConfig.from_getter(_setting))
+            text, term, strict_name_config(MatchConfig.from_getter(_setting)),
+            is_character=is_character,
         )
     return legacy_text_contains_term(
         text, term, is_character=is_character, strict_gender=False

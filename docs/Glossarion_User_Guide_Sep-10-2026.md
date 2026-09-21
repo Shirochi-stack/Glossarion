@@ -496,9 +496,9 @@ Open it with **Glossary Manager** / **Extract Glossary**.
 - **Append Glossary to System Prompt** — sends the terms to the AI every request (the consistency switch).
 - **Compress Glossary Prompt** ✅ — "Only send glossary entries that appear in the current text. Saves tokens and cost; recommended ON."
 - **Consider Translated Column** — also keeps an entry when the *translated* name appears in the source text, not just the original. Default OFF.
-- **Strict Gender Entry Precise Matching** — character entries are sent only when the **whole** name appears *as its own word*. It runs the precise matcher on gendered entries whether or not **Precise Term Matching** is ON: particles, honorifics, spacing and full/half-width differences still count (`루나님`, `미샤랄토스` for `미샤 랄토스`), but a surname or given name alone does not, and neither does the name buried inside another word (`유` in `자유`, `유리` in `유리한`). Default OFF, which lets one part of a name (even a single CJK character) keep the entry.
-- **Precise Term Matching** — the smarter matcher described just below. Default OFF.
-- **Log Match Differences** — preview what Precise Term Matching *would* change, without changing anything. Default OFF.
+- **Strict Precise Entry Matching** — the entry types you choose are sent only when the **whole** term appears *as its own word*. It runs the precise matcher at its strictest setting whether or not **Precise Term Matching** is ON: particles, honorifics, spacing and full/half-width differences still count (`루나님`, `미샤랄토스` for `미샤 랄토스`), but one word of a multi-word entry does not, and neither does a term buried inside another word (`유` in `자유`, `유리` in `유리한`). Next to the checkbox, a dropdown picks which entries it covers — the same control as **Emergency Glossary Compliance**: **Characters** (gender-enabled entries, the default), **All** (every entry type), or **Custom**, where **Configure…** opens the same entry-type checklist (Characters, Terms, Locations, Titles, … read from the glossary of the selected book). Custom with nothing ticked behaves like Characters. Default OFF, which lets a surname or given name alone keep a character entry.
+- **Precise Term Matching** ✅ — the smarter matcher described just below. Default ON; turn it OFF to go back to the old plain-substring check.
+- **Log Match Differences** — with Precise Term Matching OFF, preview what it *would* change, without changing anything. Default OFF.
 - **Add Additional Glossary** — always include an extra external glossary file (CSV/JSON/TXT/PDF/MD).
 - **Enable Unified Glossary** — keep one deduplicated `glossary_unified.csv` shared by *all* your novels (per source and target language) and send it alongside the book's own glossary. Described below. Default OFF.
 - **Generate Unified Glossary** — rebuild that shared glossary from every book folder at the start of the next glossary run. Skipped automatically when nothing changed. Default OFF.
@@ -536,7 +536,7 @@ On a real 2,971-entry glossary this cut a chapter's glossary from 250 entries to
 
 #### Log Match Differences (try it before you trust it)
 
-Turn this on **with Precise Term Matching OFF** and translate as normal. Nothing about your translation changes — Glossarion just runs both the old and new check side by side and writes down every entry they disagree about.
+Precise Term Matching is on by default. If you would rather check it against your own book first, turn it OFF, turn this on, and translate as normal. Nothing about your translation changes — Glossarion just runs both the old and new check side by side and writes down every entry they disagree about.
 
 Look in your **logs** folder (the same one that holds `run.log`), in `glossary_match_shadow`:
 
@@ -544,7 +544,7 @@ Look in your **logs** folder (the same one that holds `run.log`), in `glossary_m
 - **`verdicts.csv`** — the same list with an empty **verdict** column.
 - `*.jsonl` — the raw data the other two are built from; you can ignore it.
 
-If the report looks right, tick **Precise Term Matching** and carry on.
+If the report looks right, tick **Precise Term Matching** again and carry on.
 
 **Overruling a decision.** If you disagree with a call, open `verdicts.csv`, type `keep` or `drop` in the **verdict** column next to that term, save, and run:
 
@@ -566,7 +566,7 @@ so terms you already settled in one novel (a recurring sect name, a system messa
 
 **How it stays current.** Deduplication is the slow part, so it only runs twice per glossary run: once at the start (fold this book in, or rebuild) and once at the end (fold in what the run found). It is never run per chapter. The file is written with your Anti-Duplicate settings, so the same fuzzy threshold and algorithm apply.
 
-**What gets sent to the AI.** Beside the book's own glossary Glossarion writes a copy, `glossary_unified.csv`, that leaves out every entry the book's glossary already has — so nothing is sent twice. That copy goes through **Compress Glossary Prompt** and all of its sub-toggles (Strict Gender Entry Precise Matching, Consider Translated Column, Precise Term Matching, Log Match Differences) exactly like the main glossary and the Additional Glossary do. In the log it shares the glossary line: `🗜️ Glossary: … chars, … tokens | Unified Glossary: … chars, … tokens`.
+**What gets sent to the AI.** The unified glossary is never copied into a book's folder or its output folder — the file above is the only one. When a request is built, Glossarion reads it and skips every entry whose name the book's own glossary already has, so nothing is sent twice. (Older builds wrote a `glossary_unified.csv` next to each book glossary; those leftovers are deleted automatically the next time that book's glossary phase runs.) What remains goes through **Compress Glossary Prompt** and all of its sub-toggles (Strict Precise Entry Matching, Consider Translated Column, Precise Term Matching, Log Match Differences) exactly like the main glossary and the Additional Glossary do. In the log it shares the glossary line: `🗜️ Glossary: … chars, … tokens | Unified Glossary: … chars, … tokens`.
 
 **Generate Unified Glossary** rebuilds the shared file from *every* folder under `Glossary/` instead of just the current book — useful the first time you turn the feature on, or after editing several old glossaries by hand. The files are read in parallel using the **Parallel Extraction** worker count from Other Settings, and the rebuild is fingerprinted: it only happens when a book glossary actually changed since the last one, so you can leave the toggle on.
 

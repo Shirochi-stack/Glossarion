@@ -698,6 +698,131 @@ def _create_styled_checkbox(self, text):
     
     return checkbox
 
+def discover_glossary_entry_types(self):
+    """Entry types present in the glossary attached to the selected EPUB.
+
+    Falls back to the stock type list when no glossary can be found. Shared by
+    every "pick entry types" dialog (Emergency Glossary Compliance, Strict
+    Precise Matching) so they always offer the same list.
+    """
+    discovered_types = set()
+    try:
+        output_dir = os.environ.get('OUTPUT_DIR', '')
+        if not output_dir:
+            # Try to derive from selected EPUB
+            override = os.environ.get('OUTPUT_DIRECTORY', '')
+            epub_path = os.environ.get('EPUB_PATH', '')
+            if not epub_path and hasattr(self, 'selected_files') and self.selected_files:
+                for f in self.selected_files:
+                    if str(f).lower().endswith('.epub'):
+                        epub_path = str(f)
+                        break
+            if epub_path:
+                base_name = os.path.splitext(os.path.basename(epub_path))[0]
+                if override:
+                    output_dir = os.path.join(override, base_name)
+                else:
+                    output_dir = base_name
+
+        if output_dir and os.path.isdir(output_dir):
+            from TransateKRtoEN import find_glossary_file
+            gpath = find_glossary_file(output_dir)
+            if gpath and os.path.exists(gpath):
+                with open(gpath, 'r', encoding='utf-8') as gf:
+                    content = gf.read()
+                # Parse types from all formats
+                import re as _re
+                # Token-efficient: === TYPE === (keep as-is, e.g. "characters", "terms")
+                for m in _re.finditer(r'^=== (\w+) ===$', content, _re.MULTILINE):
+                    discovered_types.add(m.group(1).lower())
+                # CSV: type{sep}raw_name,...
+                _GSEP = '\x1F'
+                for line in content.split('\n'):
+                    line = line.strip()
+                    if not line or line.startswith('=') or line.startswith('*') or line.startswith('Glossary'):
+                        continue
+                    # Detect separator for this line
+                    if _GSEP in line:
+                        parts = line.split(_GSEP)
+                    elif ',' in line:
+                        parts = line.split(',')
+                    else:
+                        continue
+                    if len(parts) >= 3 and not parts[0].strip().lower().startswith('type') and _re.match(r'^[a-z_]+$', parts[0].strip()):
+                        discovered_types.add(parts[0].strip().lower())
+    except Exception:
+        pass
+
+    # Fallback defaults
+    if not discovered_types:
+        discovered_types = {'character', 'terms', 'locations', 'abilities', 'items', 'organizations', 'titles', 'book'}
+
+    # Sort: character first, then alphabetical
+    return sorted(discovered_types, key=lambda t: (0 if t.rstrip('s') == 'character' else 1, t))
+
+
+def open_glossary_entry_types_dialog(self, parent, title, prompt, current_types):
+    """Checkbox dialog for picking glossary entry types.
+
+    Returns the selected list on Save and None on Cancel. ``self`` is the
+    main GUI (for the styled checkboxes and the glossary lookup).
+    """
+    try:
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QScrollArea, QWidget
+
+        dlg = QDialog(parent)
+        dlg.setWindowTitle(title)
+        dlg.setMinimumSize(350, 300)
+        dlg_layout = QVBoxLayout(dlg)
+
+        dlg_layout.addWidget(QLabel(prompt))
+
+        type_list = discover_glossary_entry_types(self)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+
+        # A saved "terms" still ticks a glossary that spells it "term".
+        current_custom = set()
+        for saved in current_types or []:
+            saved = str(saved).strip().lower()
+            current_custom.update((saved, saved[:-1] if saved.endswith('s') else saved + 's'))
+        type_checkboxes = {}
+        for entry_type in type_list:
+            cb = self._create_styled_checkbox(entry_type.capitalize())
+            cb.setChecked(entry_type in current_custom)
+            scroll_layout.addWidget(cb)
+            type_checkboxes[entry_type] = cb
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        dlg_layout.addWidget(scroll)
+
+        btn_row = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 6px 16px;")
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 6px 16px;")
+        btn_row.addStretch()
+        btn_row.addWidget(save_btn)
+        btn_row.addWidget(cancel_btn)
+        dlg_layout.addLayout(btn_row)
+
+        result = {}
+
+        def _save_custom():
+            result['selected'] = [t for t, cb in type_checkboxes.items() if cb.isChecked()]
+            dlg.accept()
+        save_btn.clicked.connect(_save_custom)
+        cancel_btn.clicked.connect(dlg.reject)
+        dlg.exec()
+        return result.get('selected')
+    except Exception as e:
+        print(f"Error opening glossary entry types dialog: {e}")
+        return None
+
+
 def _disable_combobox_mousewheel(self, combobox):
     """Disable mousewheel scrolling on a combobox (PySide6)"""
     combobox.wheelEvent = lambda event: None
@@ -9309,108 +9434,16 @@ def _create_processing_options_section(self, parent):
     
     def _open_glossary_compliance_custom_dialog():
         """Open dialog to select custom entry types for glossary compliance"""
-        try:
-            from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QCheckBox, QPushButton, QLabel, QScrollArea, QWidget
-            
-            dlg = QDialog(self._other_settings_dialog if hasattr(self, '_other_settings_dialog') else self)
-            dlg.setWindowTitle("Custom Glossary Compliance Types")
-            dlg.setMinimumSize(350, 300)
-            dlg_layout = QVBoxLayout(dlg)
-            
-            dlg_layout.addWidget(QLabel("Select which entry types to pre-edit:"))
-            
-            # Discover types from the glossary file
-            discovered_types = set()
-            try:
-                output_dir = os.environ.get('OUTPUT_DIR', '')
-                if not output_dir:
-                    # Try to derive from selected EPUB
-                    override = os.environ.get('OUTPUT_DIRECTORY', '')
-                    epub_path = os.environ.get('EPUB_PATH', '')
-                    if not epub_path and hasattr(self, 'selected_files') and self.selected_files:
-                        for f in self.selected_files:
-                            if str(f).lower().endswith('.epub'):
-                                epub_path = str(f)
-                                break
-                    if epub_path:
-                        base_name = os.path.splitext(os.path.basename(epub_path))[0]
-                        if override:
-                            output_dir = os.path.join(override, base_name)
-                        else:
-                            output_dir = base_name
-                
-                if output_dir and os.path.isdir(output_dir):
-                    from TransateKRtoEN import find_glossary_file
-                    gpath = find_glossary_file(output_dir)
-                    if gpath and os.path.exists(gpath):
-                        with open(gpath, 'r', encoding='utf-8') as gf:
-                            content = gf.read()
-                        # Parse types from all formats
-                        import re as _re
-                        # Token-efficient: === TYPE === (keep as-is, e.g. "characters", "terms")
-                        for m in _re.finditer(r'^=== (\w+) ===$', content, _re.MULTILINE):
-                            discovered_types.add(m.group(1).lower())
-                        # CSV: type{sep}raw_name,...
-                        _GSEP = '\x1F'
-                        for line in content.split('\n'):
-                            line = line.strip()
-                            if not line or line.startswith('=') or line.startswith('*') or line.startswith('Glossary'):
-                                continue
-                            # Detect separator for this line
-                            if _GSEP in line:
-                                parts = line.split(_GSEP)
-                            elif ',' in line:
-                                parts = line.split(',')
-                            else:
-                                continue
-                            if len(parts) >= 3 and not parts[0].strip().lower().startswith('type') and _re.match(r'^[a-z_]+$', parts[0].strip()):
-                                discovered_types.add(parts[0].strip().lower())
-            except Exception:
-                pass
-            
-            # Fallback defaults
-            if not discovered_types:
-                discovered_types = {'character', 'terms', 'locations', 'abilities', 'items', 'organizations', 'titles', 'book'}
-            
-            # Sort: character first, then alphabetical
-            type_list = sorted(discovered_types, key=lambda t: (0 if t == 'character' else 1, t))
-            
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll_widget = QWidget()
-            scroll_layout = QVBoxLayout(scroll_widget)
-            
-            current_custom = list(self.emergency_glossary_compliance_custom_types_var or [])
-            type_checkboxes = {}
-            for entry_type in type_list:
-                cb = self._create_styled_checkbox(entry_type.capitalize())
-                cb.setChecked(entry_type in current_custom)
-                scroll_layout.addWidget(cb)
-                type_checkboxes[entry_type] = cb
-            scroll_layout.addStretch()
-            scroll.setWidget(scroll_widget)
-            dlg_layout.addWidget(scroll)
-            
-            btn_row = QHBoxLayout()
-            save_btn = QPushButton("Save")
-            save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 6px 16px;")
-            cancel_btn = QPushButton("Cancel")
-            cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 6px 16px;")
-            btn_row.addStretch()
-            btn_row.addWidget(save_btn)
-            btn_row.addWidget(cancel_btn)
-            dlg_layout.addLayout(btn_row)
-            
-            def _save_custom():
-                selected = [t for t, cb in type_checkboxes.items() if cb.isChecked()]
-                self.emergency_glossary_compliance_custom_types_var = selected
-                dlg.accept()
-            save_btn.clicked.connect(_save_custom)
-            cancel_btn.clicked.connect(dlg.reject)
-            dlg.exec()
-        except Exception as e:
-            print(f"Error opening custom glossary compliance dialog: {e}")
-    
+        selected = open_glossary_entry_types_dialog(
+            self,
+            self._other_settings_dialog if hasattr(self, '_other_settings_dialog') else self,
+            "Custom Glossary Compliance Types",
+            "Select which entry types to pre-edit:",
+            self.emergency_glossary_compliance_custom_types_var,
+        )
+        if selected is not None:
+            self.emergency_glossary_compliance_custom_types_var = selected
+
     glossary_compliance_configure_btn.clicked.connect(_open_glossary_compliance_custom_dialog)
     
     # Initial visibility

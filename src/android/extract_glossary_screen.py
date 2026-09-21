@@ -210,6 +210,7 @@ class ExtractGlossaryScreen(MDScreen):
         "glossary_duplicate_algorithm": ["auto", "rapidfuzz", "difflib", "simple"],
         "glossary_duplicate_key_mode": ["auto", "raw_name", "translated_name", "skip"],
         "emergency_glossary_compliance_mode": ["characters", "all_fields", "custom"],
+        "compress_glossary_strict_matching_mode": ["characters", "all", "custom"],
     }
 
     _FORCED_KEYS = {
@@ -326,6 +327,7 @@ class ExtractGlossaryScreen(MDScreen):
         "glossary_keys",
         "glossary_custom_fields",
         "emergency_glossary_compliance_custom_types",
+        "compress_glossary_strict_matching_custom_types",
     }
 
     _DICT_KEYS = {
