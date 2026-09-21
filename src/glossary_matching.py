@@ -14,6 +14,7 @@ For the same reason this module never reads settings itself.  Callers build a
 ``os.getenv`` in usage) and pass it in.
 """
 
+import os
 import re
 import unicodedata
 from collections import Counter
@@ -711,3 +712,30 @@ def match_term(prepared, term, is_character=False, cfg=None):
 def text_contains_term(text, term, is_character=False, cfg=None):
     """Convenience wrapper for callers that have no prepared index."""
     return bool(match_term(prepare_source_text(text, cfg), term, is_character, cfg))
+
+
+# ─── Review overrides ────────────────────────────────────────────────────────
+
+ALLOWLIST_SUFFIX = "_match_allowlist.json"
+
+
+def allowlist_path_for(glossary_path):
+    """Where a glossary's reviewed match overrides live.
+
+    Pure path arithmetic so the compressor (which reads the file) and the
+    verdict tool (which writes it) cannot disagree about the location.
+    Sits beside the glossary, like the gender tracker does.
+    """
+    glossary_path = str(glossary_path or "").strip()
+    if not glossary_path:
+        return ""
+    directory = os.path.dirname(glossary_path)
+    stem = os.path.splitext(os.path.basename(glossary_path))[0]
+    return os.path.join(directory, stem + ALLOWLIST_SUFFIX)
+
+
+def normalize_override_terms(values):
+    """Casefolded set for matching, ignoring blanks."""
+    return frozenset(
+        norm_text(v).casefold() for v in (values or []) if norm_text(v)
+    )

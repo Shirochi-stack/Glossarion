@@ -19,16 +19,38 @@ import os
 import threading
 import time
 
-DEFAULT_LOG_DIR = os.path.join("logs", "glossary_match_shadow")
 _FLUSH_EVERY = 200
 SAMPLES_PER_TERM = 3
+_LOG_SUBDIR = "glossary_match_shadow"
+
+
+def default_log_dir():
+    """Where shadow logs go when nothing overrides it.
+
+    translator_gui resolves a writable logs directory at startup (next to the
+    executable when frozen, LOCALAPPDATA otherwise) and exports it as
+    GLOSSARION_LOG_DIR for helper modules. Honour it: a bare relative "logs/"
+    resolves against the current working directory, which in a frozen build
+    is wherever the user happened to launch from and may not be writable.
+
+    Resolved per call, not at import, because the GUI sets the variable after
+    this module may already have been imported.
+    """
+    base = os.environ.get("GLOSSARION_LOG_DIR")
+    if base:
+        return os.path.join(os.path.expanduser(base), _LOG_SUBDIR)
+    return os.path.join("logs", _LOG_SUBDIR)
+
+
+# Kept for callers that want the path without a run in progress.
+DEFAULT_LOG_DIR = default_log_dir()
 
 
 class ShadowRecorder:
     """Buffered JSONL appender. Safe to call from translation worker threads."""
 
     def __init__(self, log_dir=None, run_id=None):
-        self.log_dir = log_dir or DEFAULT_LOG_DIR
+        self.log_dir = log_dir or default_log_dir()
         self.run_id = run_id or time.strftime("%Y%m%d-%H%M%S")
         self._lock = threading.Lock()
         self._buffer = []
@@ -181,12 +203,14 @@ def group_by_term(records):
     groups = collections.defaultdict(lambda: {
         "count": 0, "entry_type": "", "translated_name": "",
         "reasons": collections.Counter(), "samples": [], "chapters": set(),
+        "glossary_path": "",
     })
     for record in records:
         group = groups[record.get("raw_name", "")]
         group["count"] += 1
         group["entry_type"] = group["entry_type"] or record.get("entry_type", "")
         group["translated_name"] = group["translated_name"] or record.get("translated_name", "")
+        group["glossary_path"] = group["glossary_path"] or record.get("glossary_path", "")
         reason = record.get("new_reject_reason") or record.get("new_rule") or "?"
         group["reasons"][reason] += 1
         chapter = record.get("chapter") or {}
@@ -284,19 +308,20 @@ def write_verdicts(path, dropped, kept):
     with open(path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["term", "entry_type", "direction", "occurrences",
-                         "reason", "sample", "verdict"])
+                         "reason", "sample", "verdict", "glossary_path"])
         for direction, groups in (("dropped", dropped), ("kept", kept)):
             for term, group in sorted(groups.items(), key=lambda kv: -kv[1]["count"]):
                 reason = group["reasons"].most_common(1)[0][0] if group["reasons"] else ""
                 writer.writerow([
                     term, group["entry_type"], direction, group["count"], reason,
                     group["samples"][0] if group["samples"] else "", "",
+                    group["glossary_path"],
                 ])
 
 
 def write_report(log_dir=None, out_dir=None):
     """Aggregate a shadow log directory into report.md + verdicts.csv."""
-    log_dir = log_dir or DEFAULT_LOG_DIR
+    log_dir = log_dir or default_log_dir()
     records = load_records(log_dir)
     if not records:
         return None
@@ -332,3 +357,89 @@ def context_around(text, term, width=30):
     end = min(len(text), idx + len(term) + width)
     snippet = text[start:end].replace("\n", " ")
     return ("…" if start else "") + snippet + ("…" if end < len(text) else "")
+
+
+# ─── Reviewed overrides ──────────────────────────────────────────────────────
+
+def read_verdicts(path):
+    """Rows of verdicts.csv that carry a decision."""
+    rows = []
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            verdict = (row.get("verdict") or "").strip().lower()
+            if verdict in ("keep", "drop"):
+                rows.append({
+                    "term": (row.get("term") or "").strip(),
+                    "verdict": verdict,
+                    "direction": (row.get("direction") or "").strip(),
+                    "glossary_path": (row.get("glossary_path") or "").strip(),
+                })
+    return [r for r in rows if r["term"]]
+
+
+def apply_verdicts(verdicts_path, default_glossary=None):
+    """Turn reviewed verdicts into per-glossary override files.
+
+    `keep` means "this entry is relevant, whatever the matcher decides";
+    `drop` means the opposite. Rows left blank change nothing, so you can
+    review a few terms at a time rather than all of them at once.
+
+    Written beside each glossary, grouped by the glossary the term came from,
+    because two books can legitimately disagree about the same string.
+    Returns {allowlist_path: {"always_keep": [...], "always_drop": [...]}}.
+    """
+    from glossary_matching import allowlist_path_for
+
+    by_glossary = collections.defaultdict(
+        lambda: {"always_keep": set(), "always_drop": set()})
+    skipped = []
+    for row in read_verdicts(verdicts_path):
+        glossary = row["glossary_path"] or default_glossary or ""
+        if not glossary:
+            skipped.append(row["term"])
+            continue
+        bucket = "always_keep" if row["verdict"] == "keep" else "always_drop"
+        by_glossary[glossary][bucket].add(row["term"])
+
+    written = {}
+    for glossary, buckets in by_glossary.items():
+        path = allowlist_path_for(glossary)
+        if not path:
+            continue
+        existing = {"always_keep": [], "always_drop": []}
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    existing.update(json.load(handle))
+            except (OSError, ValueError):
+                pass  # a corrupt file is replaced, not inherited
+        merged = {
+            "note": (
+                "Reviewed glossary-match overrides. Terms here are forced "
+                "regardless of what the matcher decides. Generated by "
+                "tools/glossary_match_report.py --apply-verdicts; safe to edit "
+                "by hand."
+            ),
+            "glossary": os.path.basename(glossary),
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        for bucket in ("always_keep", "always_drop"):
+            other = "always_drop" if bucket == "always_keep" else "always_keep"
+            # A later verdict wins over an earlier opposite one.
+            kept = [t for t in existing.get(bucket) or []
+                    if t not in buckets[other]]
+            merged[bucket] = sorted(set(kept) | buckets[bucket])
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(merged, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            written[path] = merged
+        except OSError as exc:
+            print(f"⚠️ Could not write {path}: {exc}")
+
+    if skipped:
+        print(f"⚠️ {len(skipped)} verdict(s) had no glossary_path and were "
+              f"skipped: {', '.join(skipped[:5])}")
+        print("   Re-run with --glossary to say which glossary they belong to.")
+    return written

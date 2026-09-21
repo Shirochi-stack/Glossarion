@@ -34,9 +34,11 @@ from gender_tracking import (
 from glossary_matching import (
     TIER_WEAK,
     MatchConfig,
+    allowlist_path_for,
     is_gender_entry_type,
     legacy_text_contains_term,
     match_term,
+    normalize_override_terms,
     prepare_source_text,
 )
 
@@ -134,6 +136,49 @@ def _consider_translated_column_enabled():
         "1", "true", "yes", "on"
     )
 
+_ALLOWLIST_CACHE = {}
+_ALLOWLIST_CACHE_LOCK = threading.Lock()
+
+
+def _load_match_allowlist(glossary_path):
+    """Reviewed overrides for this glossary, as (always_keep, always_drop).
+
+    Written by `python tools/glossary_match_report.py --apply-verdicts` after
+    you fill in verdicts.csv. This is the escape hatch for terms no heuristic
+    will get right — a Korean noun inside a derived compound, say — so a
+    decision you have already made by hand is never re-litigated by the
+    matcher on the next chapter.
+
+    Cached on (path, mtime) so editing the file takes effect without a
+    restart, while a normal run reads it once.
+    """
+    path = allowlist_path_for(glossary_path)
+    if not path or not os.path.isfile(path):
+        return frozenset(), frozenset()
+    try:
+        stamp = os.path.getmtime(path)
+    except OSError:
+        return frozenset(), frozenset()
+    key = (path, stamp)
+    with _ALLOWLIST_CACHE_LOCK:
+        cached = _ALLOWLIST_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        value = (
+            normalize_override_terms(data.get("always_keep")),
+            normalize_override_terms(data.get("always_drop")),
+        )
+    except (OSError, ValueError) as exc:
+        print(f"⚠️ Glossary compression: could not read match overrides: {exc}")
+        value = (frozenset(), frozenset())
+    with _ALLOWLIST_CACHE_LOCK:
+        _ALLOWLIST_CACHE[key] = value
+    return value
+
+
 def _serialize_compression_enabled():
     """Whether to hold _COMPRESS_GIL_LOCK. Defaults on."""
     return str(_setting("GLOSSARY_COMPRESS_SERIALIZE", "1")).strip().lower() in (
@@ -156,7 +201,7 @@ class _MatchContext:
     """
 
     __slots__ = ("engine", "cfg", "prepared", "recorder", "source_text",
-                 "glossary_path", "chapter_ref")
+                 "glossary_path", "chapter_ref", "always_keep", "always_drop")
 
     def __init__(self, source_text, glossary_path=None, chapter_ref=None):
         self.engine = _match_engine()
@@ -166,9 +211,14 @@ class _MatchContext:
         self.cfg = None
         self.prepared = None
         self.recorder = None
+        self.always_keep = frozenset()
+        self.always_drop = frozenset()
         if self.engine != "legacy":
             self.cfg = MatchConfig.from_getter(_setting)
             self.prepared = prepare_source_text(self.source_text, self.cfg)
+            # Overrides apply to the tiered verdict only: the legacy engine is
+            # the untouched path and must stay bit-identical.
+            self.always_keep, self.always_drop = _load_match_allowlist(glossary_path)
         if self.engine == "shadow":
             try:
                 from glossary_match_shadow import get_recorder
@@ -189,18 +239,29 @@ class _MatchContext:
             return legacy
 
         result = match_term(self.prepared, term, is_character, self.cfg)
+        new_verdict = bool(result)
+        override = ""
+        if self.always_keep or self.always_drop:
+            key = str(term or "").strip().casefold()
+            if key in self.always_keep:
+                new_verdict, override = True, "override_keep"
+            elif key in self.always_drop:
+                new_verdict, override = False, "override_drop"
+
         if self.engine == "new":
-            return bool(result)
+            return new_verdict
 
         # Shadow: legacy still decides, the disagreement is what we record.
         # Every decision is reported, including agreements — the recorder
         # needs them for the report's denominator and drops them itself.
         if self.recorder is not None:
             self.recorder.record(
-                legacy=legacy, new=bool(result), term=term,
+                legacy=legacy, new=new_verdict, term=term,
                 translated_name=translated_name, entry_type=entry_type,
-                is_character=is_character, tier=result.tier, rule=result.rule,
-                reject_reason=result.reject_reason, source_text=self.source_text,
+                is_character=is_character, tier=result.tier,
+                rule=override or result.rule,
+                reject_reason=override or result.reject_reason,
+                source_text=self.source_text,
                 chapter_ref=self.chapter_ref, glossary_path=self.glossary_path,
             )
         return legacy
