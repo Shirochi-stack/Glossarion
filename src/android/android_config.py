@@ -84,6 +84,7 @@ DEFAULT_CONFIG = {
     'generate_unified_glossary': False,
     'unified_glossary_source_language': 'auto',
     'unified_glossary_combine_all_languages': False,
+    'unified_glossary_exclude_gender_entries': True,
 
     # Thinking mode
     'enable_gpt_thinking': True,

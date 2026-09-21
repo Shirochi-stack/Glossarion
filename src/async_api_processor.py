@@ -3407,6 +3407,7 @@ class AsyncProcessingDialog:
             env_vars['GENERATE_UNIFIED_GLOSSARY'] = "1" if self.gui.config.get('generate_unified_glossary', False) else "0"
             env_vars['UNIFIED_GLOSSARY_SOURCE_LANGUAGE'] = str(self.gui.config.get('unified_glossary_source_language', 'auto') or 'auto')
             env_vars['UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES'] = "1" if self.gui.config.get('unified_glossary_combine_all_languages', False) else "0"
+            env_vars['UNIFIED_GLOSSARY_EXCLUDE_GENDER_ENTRIES'] = "1" if self.gui.config.get('unified_glossary_exclude_gender_entries', True) else "0"
 
         # History and summary settings
         env_vars['TRANSLATION_HISTORY_ROLLING'] = "1"

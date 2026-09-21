@@ -1477,6 +1477,7 @@ async def translate(
         os.environ['GENERATE_UNIFIED_GLOSSARY'] = '1' if config.get('generate_unified_glossary', False) else '0'
         os.environ['UNIFIED_GLOSSARY_SOURCE_LANGUAGE'] = str(config.get('unified_glossary_source_language', 'auto') or 'auto')
         os.environ['UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES'] = '1' if config.get('unified_glossary_combine_all_languages', False) else '0'
+        os.environ['UNIFIED_GLOSSARY_EXCLUDE_GENDER_ENTRIES'] = '1' if config.get('unified_glossary_exclude_gender_entries', True) else '0'
         os.environ['GLOSSARY_FILTER_MODE'] = config.get('glossary_filter_mode', 'all')
         os.environ['GLOSSARY_STRIP_HONORIFICS'] = '1' if config.get('glossary_strip_honorifics', True) else '0'
         os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(config.get('glossary_fuzzy_threshold', 0.90))

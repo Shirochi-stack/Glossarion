@@ -241,6 +241,13 @@ def _unified_whole_term_enabled():
     )
 
 
+def _unified_exclude_gender_entries():
+    """Unified Glossary Settings -> Exclude gendered active entries (default ON)."""
+    return str(_setting("UNIFIED_GLOSSARY_EXCLUDE_GENDER_ENTRIES", "1")).strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
 def _unified_min_term_length():
     try:
         return max(1, int(str(_setting("UNIFIED_GLOSSARY_MIN_TERM_LENGTH", "2")).strip()))
@@ -267,7 +274,8 @@ class _MatchContext:
     __slots__ = ("engine", "cfg", "prepared", "recorder", "source_text",
                  "glossary_path", "chapter_ref", "always_keep", "always_drop",
                  "whole_term_only", "min_term_length", "matcher", "index",
-                 "exclude", "keep_all", "prepared_translated", "excluded_applied")
+                 "exclude", "keep_all", "prepared_translated", "excluded_applied",
+                 "drop_gender_entries")
 
     def __init__(self, source_text, glossary_path=None, chapter_ref=None,
                  exclude_raw_names=None, keep_all=False, translated_text=None):
@@ -297,6 +305,13 @@ class _MatchContext:
         # already carries; `keep_all` turns the run into that filter alone.
         self.exclude = frozenset(exclude_raw_names or ())
         self.keep_all = bool(keep_all)
+        # Another novel's 루나 may be another gender. The unified file is
+        # cleaned of gendered entries when it is next merged; this makes the
+        # toggle take effect on the very next request, whatever the file on
+        # disk still holds.
+        self.drop_gender_entries = (
+            _is_unified_glossary_path(glossary_path) and _unified_exclude_gender_entries()
+        )
         if self.engine != "legacy":
             self.cfg = MatchConfig.from_getter(_setting)
             scope = _strict_matching_scope()
@@ -966,6 +981,9 @@ def _entry_matches_source(source_text, raw_name, translated_name="", is_characte
     raw_name = str(raw_name or "").strip()
     translated_name = str(translated_name or "").strip()
     ctx = _active_match_context(source_text)
+    if ctx.drop_gender_entries and is_character:
+        # `is_character` = gender-enabled entry type, or a row carrying a gender.
+        return False
     if ctx.exclude and unicodedata.normalize("NFC", raw_name).casefold() in ctx.exclude:
         # Already sent by the book's own glossary in this same request.
         return False

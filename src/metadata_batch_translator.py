@@ -48,6 +48,7 @@ _GLOSSARY_CONFIG_OPTIONS = {
     'generate_unified_glossary': 'GENERATE_UNIFIED_GLOSSARY',
     'unified_glossary_source_language': 'UNIFIED_GLOSSARY_SOURCE_LANGUAGE',
     'unified_glossary_combine_all_languages': 'UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES',
+    'unified_glossary_exclude_gender_entries': 'UNIFIED_GLOSSARY_EXCLUDE_GENDER_ENTRIES',
     'auto_glossary_mode': 'AUTO_GLOSSARY_MODE',
     'manual_glossary': 'MANUAL_GLOSSARY',
     'glossary_shared_dir': 'GLOSSARY_SHARED_DIR',

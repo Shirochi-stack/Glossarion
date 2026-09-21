@@ -14029,6 +14029,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.generate_unified_glossary_var = self.config.get('generate_unified_glossary', False)
         self.unified_glossary_source_language_var = str(self.config.get('unified_glossary_source_language', 'auto') or 'auto')
         self.unified_glossary_combine_all_languages_var = self.config.get('unified_glossary_combine_all_languages', False)
+        self.unified_glossary_exclude_gender_entries_var = self.config.get('unified_glossary_exclude_gender_entries', True)
         self.glossary_use_smart_filter_var = self.config.get('glossary_use_smart_filter', True)
         self.glossary_min_frequency_var = str(self.config.get('glossary_min_frequency', 2))
         self.glossary_max_names_var = str(self.config.get('glossary_max_names', 50))
@@ -26868,7 +26869,7 @@ Recent translations to summarize:
         }
 
     def _unified_glossary_env_dict(self):
-        """The four unified-glossary variables, for every env export site.
+        """The five unified-glossary variables, for every env export site.
 
         One helper rather than four literals per site, so the three export
         sites (two dicts and the tuple list) cannot drift apart.
@@ -26891,6 +26892,12 @@ Recent translations to summarize:
             'unified_glossary_combine_all_languages',
             False,
         )
+        exclude_gender = self._live_bool_setting(
+            'unified_exclude_gender_entries_checkbox',
+            'unified_glossary_exclude_gender_entries_var',
+            'unified_glossary_exclude_gender_entries',
+            True,
+        )
         source_language = str(
             getattr(self, 'unified_glossary_source_language_var', None)
             or self.config.get('unified_glossary_source_language', 'auto')
@@ -26901,6 +26908,7 @@ Recent translations to summarize:
             'GENERATE_UNIFIED_GLOSSARY': '1' if generate else '0',
             'UNIFIED_GLOSSARY_SOURCE_LANGUAGE': source_language,
             'UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES': '1' if combine_all else '0',
+            'UNIFIED_GLOSSARY_EXCLUDE_GENDER_ENTRIES': '1' if exclude_gender else '0',
         }
 
     _LEGACY_SPECIAL_FILE_EXACT_TOKENS = frozenset({'index', 'glossary', 'glossary_extension'})
@@ -47150,6 +47158,7 @@ Important rules:
                 ('generate_unified_glossary', ['generate_unified_glossary_checkbox', 'generate_unified_glossary_var'], False, bool),
                 ('unified_glossary_source_language', ['unified_glossary_source_language_var'], 'auto', str),
                 ('unified_glossary_combine_all_languages', ['unified_combine_all_languages_checkbox', 'unified_glossary_combine_all_languages_var'], False, bool),
+                ('unified_glossary_exclude_gender_entries', ['unified_exclude_gender_entries_checkbox', 'unified_glossary_exclude_gender_entries_var'], True, bool),
                 ('compress_glossary_prompt', ['compress_glossary_checkbox', 'compress_glossary_prompt_var'], True, bool),
                 ('compress_glossary_strict_matching_mode', ['compress_glossary_strict_matching_mode_var'], 'all', str),
                 ('compress_glossary_strict_matching_custom_types', ['compress_glossary_strict_matching_custom_types_var'], [], list),

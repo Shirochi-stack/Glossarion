@@ -119,6 +119,17 @@ def combine_all_enabled(settings=None):
     return _truthy(_setting(settings, "UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES", "0"))
 
 
+def exclude_gender_entries(settings=None):
+    """Exclude gendered active entries (default ON).
+
+    루나 is a woman in one novel and a man in the next. A shared glossary
+    that carries her row hands the second novel the wrong gender the moment
+    its own glossary has not met its 루나 yet, so by default the unified
+    glossary carries no entry whose type has gender enabled.
+    """
+    return _truthy(_setting(settings, "UNIFIED_GLOSSARY_EXCLUDE_GENDER_ENTRIES", "1"))
+
+
 def configured_source_language(settings=None):
     value = _setting(settings, "UNIFIED_GLOSSARY_SOURCE_LANGUAGE", "auto")
     return _normalize_language(value) or "auto"
@@ -451,6 +462,7 @@ def _signature(key, combine_all):
     return {
         "key": key,
         "combine_all": bool(combine_all),
+        "exclude_gender": exclude_gender_entries(),
         "fuzzy_threshold": str(os.getenv("GLOSSARY_FUZZY_THRESHOLD", "0.9")),
         "algorithm": str(os.getenv("GLOSSARY_DUPLICATE_ALGORITHM", "auto")).lower(),
         "dedupe_translations": str(os.getenv("GLOSSARY_DEDUPE_TRANSLATIONS", "1")),
@@ -497,8 +509,52 @@ def _raw_key(entry):
     return unicodedata.normalize("NFC", raw).strip().casefold()
 
 
-def _strip_non_shareable(entries):
-    """Drop per-novel title rows and rows with no raw name."""
+_NO_GENDER_VALUES = frozenset({"", "unknown", "n/a", "na", "none", "-", "?"})
+
+
+def _singular(entry_type):
+    entry_type = str(entry_type or "").strip().lower()
+    return entry_type[:-1] if entry_type.endswith("s") else entry_type
+
+
+def gender_entry_types():
+    """Entry types with gender enabled (\"gender active\"), custom types included.
+
+    The same table the compressor consults (get_custom_entry_types), so
+    what is left out of the file and what is left out of a request agree.
+    """
+    try:
+        types = _extractor().get_custom_entry_types()
+        found = {
+            _singular(name) for name, cfg in types.items()
+            if isinstance(cfg, dict) and cfg.get("enabled", True) and cfg.get("has_gender", False)
+        }
+        if found:
+            return frozenset(found)
+    except Exception:
+        pass
+    return frozenset({"character"})
+
+
+def is_gender_entry(entry, gender_types=None):
+    """True for a row of a gender-enabled type, or any row that carries a
+    real gender value (a term someone filled a gender in for)."""
+    gender_types = gender_entry_types() if gender_types is None else gender_types
+    if _singular(entry.get("type")) in gender_types:
+        return True
+    return str(entry.get("gender") or "").strip().lower() not in _NO_GENDER_VALUES
+
+
+def _strip_non_shareable(entries, exclude_gender=None):
+    """Drop what must not be shared between novels: per-novel title rows,
+    rows with no raw name and -- unless the toggle is off -- gendered
+    entries. Applied to the books going in AND to the unified file being
+    merged into, so turning the toggle on cleans an existing file at the
+    next merge.
+    """
+    if exclude_gender is None:
+        exclude_gender = exclude_gender_entries()
+    gender_types = gender_entry_types() if exclude_gender else None
     kept = []
     for entry in entries or []:
         if not isinstance(entry, dict):
@@ -506,6 +562,8 @@ def _strip_non_shareable(entries):
         if str(entry.get("type") or "").strip().lower() in ("book", "books"):
             continue
         if not _raw_key(entry):
+            continue
+        if exclude_gender and is_gender_entry(entry, gender_types):
             continue
         kept.append(entry)
     return kept

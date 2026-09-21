@@ -6535,6 +6535,28 @@ Do not stop after the glossary."""
         combine_layout.addStretch()
         section_v.addWidget(combine_row)
 
+        # Exclude gendered active entries
+        gender_row = QWidget()
+        gender_layout = QHBoxLayout(gender_row)
+        gender_layout.setContentsMargins(0, 0, 0, 6)
+        gender_cb = self._create_styled_checkbox("Exclude gendered active entries")
+        gender_cb.setChecked(bool(self.config.get('unified_glossary_exclude_gender_entries', True)))
+        gender_cb.setToolTip(_wrapped_tooltip_html(
+            "Keep entries whose type has gender enabled (characters, and any custom entry type with gender "
+            "on) and any row that carries a gender OUT of the unified glossary.\n"
+            "A name can belong to a woman in one novel and a man in another. Shared across novels, that row "
+            "would hand this book the other novel's gender whenever its own glossary has not recorded the "
+            "character yet.\n"
+            "ON takes effect on the next request; the file itself is cleaned at the next glossary run. "
+            "After turning it OFF, press Rebuild Now to bring the other novels' gendered entries back."
+        ))
+        self.unified_exclude_gender_entries_checkbox = gender_cb
+        gender_layout.addWidget(gender_cb)
+        gender_hint = QLabel("(Recommended: the same name can be a different gender in another novel)")
+        gender_layout.addWidget(gender_hint)
+        gender_layout.addStretch()
+        section_v.addWidget(gender_row)
+
         location_label = QLabel()
         location_label.setStyleSheet("color: #aaa; font-size: 9pt;")
         location_label.setWordWrap(True)
@@ -6693,6 +6715,7 @@ Do not stop after the glossary."""
         settings = {
             'OUTPUT_LANGUAGE': self.config.get('output_language') or os.environ.get('OUTPUT_LANGUAGE') or 'English',
             'UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES': '1' if self.config.get('unified_glossary_combine_all_languages', False) else '0',
+            'UNIFIED_GLOSSARY_EXCLUDE_GENDER_ENTRIES': '1' if self.config.get('unified_glossary_exclude_gender_entries', True) else '0',
             'GLOSSARY_SHARED_DIR': shared_dir,
         }
 
@@ -6757,6 +6780,12 @@ Do not stop after the glossary."""
             self.config['unified_glossary_combine_all_languages'] = combine
             self.unified_glossary_combine_all_languages_var = combine
             os.environ['UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES'] = '1' if combine else '0'
+        checkbox = getattr(self, 'unified_exclude_gender_entries_checkbox', None)
+        if checkbox is not None:
+            exclude_gender = bool(checkbox.isChecked())
+            self.config['unified_glossary_exclude_gender_entries'] = exclude_gender
+            self.unified_glossary_exclude_gender_entries_var = exclude_gender
+            os.environ['UNIFIED_GLOSSARY_EXCLUDE_GENDER_ENTRIES'] = '1' if exclude_gender else '0'
         self._refresh_unified_glossary_hint()
 
     def _persist_unified_glossary_settings(self, minimize_dialog=None):
