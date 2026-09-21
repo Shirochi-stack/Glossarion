@@ -155,6 +155,11 @@ def set_all_env_vars(config):
     os.environ['COMPRESS_GLOSSARY_PROMPT'] = '1' if _get('compress_glossary_prompt', True) else '0'
     os.environ['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = '1' if _get('compress_glossary_strict_gender_matching', False) else '0'
     os.environ['COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN'] = '1' if _get('compress_glossary_consider_translated_column', False) else '0'
+    # Two checkboxes resolve into one engine value; 'new' wins over 'shadow'.
+    os.environ['GLOSSARY_MATCH_ENGINE'] = (
+        'new' if _get('compress_glossary_precise_matching', False)
+        else ('shadow' if _get('compress_glossary_shadow_log', False) else 'legacy')
+    )
     os.environ['GLOSSARY_INCLUDE_ALL_CHARACTERS'] = '1' if _get('glossary_include_all_characters', True) else '0'
 
     # Glossary append prompt

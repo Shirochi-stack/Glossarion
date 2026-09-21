@@ -3373,6 +3373,22 @@ class AsyncProcessingDialog:
         else:
             strict_gender_matching = self.gui.config.get('compress_glossary_strict_gender_matching', False)
         env_vars['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = "1" if strict_gender_matching else "0"
+        # Two checkboxes resolve into one engine value; 'new' wins over 'shadow'.
+        if hasattr(self.gui, 'compress_glossary_precise_matching_var'):
+            precise_matching = _val(self.gui.compress_glossary_precise_matching_var, False)
+        elif hasattr(self.gui, 'precise_matching_checkbox'):
+            precise_matching = _val(self.gui.precise_matching_checkbox, False)
+        else:
+            precise_matching = self.gui.config.get('compress_glossary_precise_matching', False)
+        if hasattr(self.gui, 'compress_glossary_shadow_log_var'):
+            shadow_log = _val(self.gui.compress_glossary_shadow_log_var, False)
+        elif hasattr(self.gui, 'shadow_log_matching_checkbox'):
+            shadow_log = _val(self.gui.shadow_log_matching_checkbox, False)
+        else:
+            shadow_log = self.gui.config.get('compress_glossary_shadow_log', False)
+        env_vars['GLOSSARY_MATCH_ENGINE'] = (
+            "new" if precise_matching else ("shadow" if shadow_log else "legacy")
+        )
         if hasattr(self.gui, 'compress_glossary_consider_translated_column_var'):
             consider_translated_column = _val(self.gui.compress_glossary_consider_translated_column_var, False)
         elif hasattr(self.gui, 'consider_translated_compression_checkbox'):

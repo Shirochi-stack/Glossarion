@@ -15,18 +15,36 @@ from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 from epub_package import find_epub_opf_member
 
-try:
-    from glossary_compressor import _text_contains_term
-except Exception:  # pragma: no cover - fallback for isolated imports
-    def _text_contains_term(text, term, is_character=False):
-        if not text or not term:
-            return False
-        if term in text:
-            return True
-        min_token_len = 1 if is_character else 2
-        if " " in term:
-            return any(len(tok) >= min_token_len and tok in text for tok in term.split())
-        return False
+from glossary_matching import (
+    _ASCII_FOLD_TABLE as _gm_ascii_fold_table,
+    _TOKEN_RE as _gm_token_re,
+    _WHITESPACE_RE as _gm_whitespace_re,
+    boundary_match,
+    fold_match_text,
+    is_gender_entry_type,
+    legacy_text_contains_term,
+    norm_text,
+)
+
+
+def _text_contains_term(text, term, is_character=False):
+    """Source-text matching, shared with glossary_compressor.
+
+    This used to import the private helper out of glossary_compressor with a
+    hand-copied duplicate as an ImportError fallback; the two could drift.
+    Both sides now call the same implementation in glossary_matching.
+
+    The strict-gender setting is read from the environment here rather than
+    through the compressor's ContextVar-aware _setting(): that ContextVar is
+    only populated for the duration of a compress_glossary() call, and usage
+    runs outside one, so os.environ was already the effective source.
+    """
+    strict_gender = str(
+        os.getenv("COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0")
+    ).strip().lower() in ("1", "true", "yes", "on")
+    return legacy_text_contains_term(
+        text, term, is_character=is_character, strict_gender=strict_gender
+    )
 
 
 CHECK_PREFIX = "\u2705"
@@ -34,18 +52,14 @@ WARNING_PREFIX = "\u26a0\ufe0f"
 GLOSSARY_SEP = "\x1F"
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
-_WHITESPACE_RE = re.compile(r"\s+")
-# Maximal runs of ASCII "word" characters, matching the boundary class used by
-# the output-matching regexes: (?<![A-Za-z0-9_]) ... (?![A-Za-z0-9_])
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
-# Translation table for folding ASCII text: non-alphanumeric -> space. Produces
-# byte-for-byte the same result as the char-by-char generator for ASCII input,
-# but runs ~3x faster via str.translate (used on whole output files).
-_ASCII_FOLD_TABLE = {i: (chr(i) if chr(i).isalnum() else " ") for i in range(128)}
 
-
-def _norm_text(value):
-    return str(value or "").strip()
+# These live in glossary_matching so the compression side and the output side
+# cannot disagree about what a token, a fold or a word boundary is. Aliased at
+# module level to keep the existing call sites in this file unchanged.
+_WHITESPACE_RE = _gm_whitespace_re
+_TOKEN_RE = _gm_token_re
+_ASCII_FOLD_TABLE = _gm_ascii_fold_table
+_norm_text = norm_text
 
 
 def _entry_identity(entry):
@@ -411,9 +425,7 @@ def entry_matches_text(entry, source_text):
     raw_name = _norm_text(entry.get("raw_name"))
     if not raw_name:
         return False
-    entry_type = _norm_text(entry.get("type")).lower()
-    gender = _norm_text(entry.get("gender"))
-    is_character = entry_type in {"character", "characters", "title", "titles", "nickname", "nicknames"} or bool(gender)
+    is_character = is_gender_entry_type(entry.get("type"), entry.get("gender"))
     return _text_contains_term(source_text, raw_name, is_character=is_character)
 
 
@@ -433,16 +445,8 @@ def build_usage_index(entries, chapters):
     return usage, chapter_matches
 
 
-def _fold_output_match_text(value):
-    value = unicodedata.normalize("NFKC", str(value or "")).casefold()
-    if value.isascii():
-        # Fast path for ASCII (the common case for translated English output):
-        # str.translate is far faster than a Python-level char generator and
-        # yields an identical result.
-        value = value.translate(_ASCII_FOLD_TABLE)
-    else:
-        value = "".join(ch if ch.isalnum() else " " for ch in value)
-    return _WHITESPACE_RE.sub(" ", value).strip()
+# Shared with the compression-side matcher; see glossary_matching.
+_fold_output_match_text = fold_match_text
 
 
 def _output_contains_term(output_text, term):
@@ -564,8 +568,7 @@ def build_prepared_output_index(output_texts):
     }
 
 
-def _boundary_match(term, text):
-    return re.search(r"(?<![A-Za-z0-9_])" + re.escape(term) + r"(?![A-Za-z0-9_])", text) is not None
+_boundary_match = boundary_match
 
 
 def _output_index_contains_term(index, term):

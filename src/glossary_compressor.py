@@ -31,6 +31,14 @@ from gender_tracking import (
     tracker_entry_for_raw as _shared_tracker_entry_for_raw,
     tracker_path_for_glossary as _shared_tracker_path_for_glossary,
 )
+from glossary_matching import (
+    TIER_WEAK,
+    MatchConfig,
+    is_gender_entry_type,
+    legacy_text_contains_term,
+    match_term,
+    prepare_source_text,
+)
 
 # Serialize glossary compression across translation worker threads.
 # Compression is pure-Python (terms x chapter-text substring scans); when
@@ -39,6 +47,19 @@ from gender_tracking import (
 # builds). One compression at a time keeps the GUI responsive and costs
 # almost nothing overall since API latency dominates per-chunk time.
 _COMPRESS_GIL_LOCK = threading.Lock()
+
+
+class _NullLock:
+    """Stand-in for _COMPRESS_GIL_LOCK when serialization is switched off."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+_NULL_LOCK = _NullLock()
 
 
 def _gil_yield(counter, every=64):
@@ -54,6 +75,14 @@ except ImportError:
 _gender_bias_log_seen = set()
 _ACTIVE_GLOSSARY_SETTINGS = ContextVar(
     "glossary_compressor_settings", default=None
+)
+# The matcher context for the compression currently running on this thread.
+# A ContextVar rather than a threaded parameter for the same reason the
+# settings snapshot above is one: the alternative is adding an argument to
+# eight functions that only pass it through. ContextVars are per-thread, so
+# concurrent chunk workers each see their own chapter.
+_ACTIVE_MATCH_CONTEXT = ContextVar(
+    "glossary_compressor_match_context", default=None
 )
 
 
@@ -104,6 +133,132 @@ def _consider_translated_column_enabled():
     return str(_setting("COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN", "0")).strip().lower() in (
         "1", "true", "yes", "on"
     )
+
+def _serialize_compression_enabled():
+    """Whether to hold _COMPRESS_GIL_LOCK. Defaults on."""
+    return str(_setting("GLOSSARY_COMPRESS_SERIALIZE", "1")).strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def _match_engine():
+    """Which matcher decides: 'legacy' (default), 'shadow', or 'new'."""
+    value = str(_setting("GLOSSARY_MATCH_ENGINE", "legacy") or "legacy").strip().lower()
+    return value if value in ("legacy", "shadow", "new") else "legacy"
+
+
+class _MatchContext:
+    """Per-chapter matcher state: engine choice, config, index, recorder.
+
+    Built once per compress_glossary() call. The prepared index is the reason
+    this exists at all — without it every term would re-normalize the whole
+    chapter, which is what makes the tiered matcher affordable.
+    """
+
+    __slots__ = ("engine", "cfg", "prepared", "recorder", "source_text",
+                 "glossary_path", "chapter_ref")
+
+    def __init__(self, source_text, glossary_path=None, chapter_ref=None):
+        self.engine = _match_engine()
+        self.source_text = source_text or ""
+        self.glossary_path = glossary_path
+        self.chapter_ref = chapter_ref
+        self.cfg = None
+        self.prepared = None
+        self.recorder = None
+        if self.engine != "legacy":
+            self.cfg = MatchConfig.from_getter(_setting)
+            self.prepared = prepare_source_text(self.source_text, self.cfg)
+        if self.engine == "shadow":
+            try:
+                from glossary_match_shadow import get_recorder
+                self.recorder = get_recorder(
+                    _setting("GLOSSARY_MATCH_SHADOW_LOG_DIR", None)
+                )
+            except Exception as exc:  # pragma: no cover - logging must not break a run
+                print(f"⚠️ Glossary shadow log unavailable: {exc}")
+                self.engine = "legacy"
+
+    def decide(self, term, is_character=False, *, translated_name="", entry_type=""):
+        """Return whether this term counts as present in the chapter."""
+        legacy = legacy_text_contains_term(
+            self.source_text, term, is_character=is_character,
+            strict_gender=_strict_gender_name_matching_enabled(),
+        )
+        if self.engine == "legacy":
+            return legacy
+
+        result = match_term(self.prepared, term, is_character, self.cfg)
+        if self.engine == "new":
+            return bool(result)
+
+        # Shadow: legacy still decides, the disagreement is what we record.
+        # Every decision is reported, including agreements — the recorder
+        # needs them for the report's denominator and drops them itself.
+        if self.recorder is not None:
+            self.recorder.record(
+                legacy=legacy, new=bool(result), term=term,
+                translated_name=translated_name, entry_type=entry_type,
+                is_character=is_character, tier=result.tier, rule=result.rule,
+                reject_reason=result.reject_reason, source_text=self.source_text,
+                chapter_ref=self.chapter_ref, glossary_path=self.glossary_path,
+            )
+        return legacy
+
+
+def _relax_on_zero_enabled():
+    return str(_setting("GLOSSARY_COMPRESS_RELAX_ON_ZERO", "1")).strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def _run_with_zero_match_relaxation(ctx, run, count_matches, label):
+    """Re-run `run` at progressively looser tiers if it matches nothing.
+
+    Tightening the matcher makes "0 entries survived" far more likely, and a
+    zero-match CSV result means the chapter is sent with NO glossary at all.
+    Rather than let a single strict gate cost a chapter its whole glossary,
+    step the acceptance floor down and try again; a genuine no-match chapter
+    still ends at zero, just by way of the loosest rule rather than the
+    strictest.
+
+    Only the tiered engine can hit the new cliff, so the legacy and shadow
+    paths run exactly once and are bit-for-bit unchanged.
+    """
+    result = run()
+    if ctx.engine != "new" or ctx.cfg is None or not _relax_on_zero_enabled():
+        return result
+    if count_matches(result) > 0:
+        return result
+
+    original_floor = ctx.cfg.min_tier
+    try:
+        while ctx.cfg.min_tier > TIER_WEAK:
+            ctx.cfg.min_tier -= 1
+            relaxed = run()
+            if count_matches(relaxed) > 0:
+                print(
+                    f"ℹ️ Glossary compression: 0 {label} matches at tier "
+                    f"{ctx.cfg.min_tier + 1}, relaxed to tier {ctx.cfg.min_tier}"
+                )
+                return relaxed
+    finally:
+        ctx.cfg.min_tier = original_floor
+    return result
+
+
+def _active_match_context(source_text):
+    """The context for this compression, or a legacy-only one for direct calls.
+
+    _compress_fallback_text and the private format helpers are reachable from
+    tests and from compress_glossary_file without going through the wrapper
+    that installs the ContextVar, so fall back rather than requiring it.
+    """
+    ctx = _ACTIVE_MATCH_CONTEXT.get()
+    if ctx is not None and ctx.source_text == (source_text or ""):
+        return ctx
+    return _MatchContext(source_text)
+
 
 try:
     from GlossaryManager import GLOSSARY_SEP, _gsep, _is_glossary_header
@@ -354,6 +509,11 @@ def compress_glossary(
 ):
     """Run compression with an optional thread-safe request settings snapshot."""
     token = _ACTIVE_GLOSSARY_SETTINGS.set(settings)
+    # Built after the settings token so the engine choice and the matcher
+    # knobs come from this request's snapshot, not the ambient environment.
+    match_token = _ACTIVE_MATCH_CONTEXT.set(
+        _MatchContext(source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
+    )
     try:
         return _compress_glossary_impl(
             glossary_content,
@@ -363,6 +523,7 @@ def compress_glossary(
             chapter_ref=chapter_ref,
         )
     finally:
+        _ACTIVE_MATCH_CONTEXT.reset(match_token)
         _ACTIVE_GLOSSARY_SETTINGS.reset(token)
 
 
@@ -407,7 +568,11 @@ def _compress_glossary_impl(glossary_content, source_text, glossary_format='auto
             return glossary_content
     
     # One compression at a time — see _COMPRESS_GIL_LOCK note above.
-    with _COMPRESS_GIL_LOCK:
+    # GLOSSARY_COMPRESS_SERIALIZE=0 removes the lock. Default stays on: the
+    # freeze it prevents is verified, so it should only be lifted against a
+    # benchmark (tools/glossary_match_bench.py measures the GUI-stall proxy
+    # directly), not on the assumption that the prepared index made it cheap.
+    with _COMPRESS_GIL_LOCK if _serialize_compression_enabled() else _NULL_LOCK:
         if glossary_format == 'csv':
             return _compress_csv_glossary(glossary_content, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
         elif glossary_format == 'json':
@@ -439,20 +604,27 @@ def _compress_csv_glossary(csv_content, source_text, glossary_path=None, chapter
     # Check if this is token-efficient format (has section headers like "=== CHARACTERS ===")
     is_token_efficient = any(line.strip().startswith('===') for line in lines)
     
-    if is_token_efficient:
-        result = _compress_token_efficient_format(lines, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
-    else:
-        result = _compress_legacy_csv_format(lines, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
-    
-    # If CSV parsing produced 0 data entries, fall back to text scan
-    if isinstance(result, str):
-        result_data_lines = [l for l in result.split('\n') if l.strip()
-                             and not _is_glossary_header(l)
-                             and not l.strip().startswith('===')
-                             and not l.strip().lower().startswith('glossary columns:')]
-    else:
-        result_data_lines = []
-    
+    def _run():
+        if is_token_efficient:
+            return _compress_token_efficient_format(
+                lines, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
+        return _compress_legacy_csv_format(
+            lines, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
+
+    def _data_lines(value):
+        if not isinstance(value, str):
+            return []
+        return [l for l in value.split('\n') if l.strip()
+                and not _is_glossary_header(l)
+                and not l.strip().startswith('===')
+                and not l.strip().lower().startswith('glossary columns:')]
+
+    result = _run_with_zero_match_relaxation(
+        _active_match_context(source_text), _run,
+        lambda value: len(_data_lines(value)), "CSV",
+    )
+    result_data_lines = _data_lines(result)
+
     original_data_count = sum(1 for l in lines if l.strip()
                               and not _is_glossary_header(l)
                               and not l.strip().startswith('===')
@@ -514,17 +686,29 @@ def _token_entry_identity(line):
     return name_match.group("raw").strip(), name_match.group("translated").strip(), gender
 
 
-def _entry_matches_source(source_text, raw_name, translated_name="", is_character=False):
-    """Return True if the entry is relevant to the source text."""
+def _entry_matches_source(source_text, raw_name, translated_name="", is_character=False,
+                          entry_type=""):
+    """Return True if the entry is relevant to the source text.
+
+    The single decision point for every structured format. Which matcher
+    actually answers is decided by the active _MatchContext.
+    """
     raw_name = str(raw_name or "").strip()
     translated_name = str(translated_name or "").strip()
-    if raw_name and _text_contains_term(source_text, raw_name, is_character=is_character):
+    ctx = _active_match_context(source_text)
+    if raw_name and ctx.decide(
+        raw_name, is_character,
+        translated_name=translated_name, entry_type=entry_type,
+    ):
         return True
     if (
         translated_name
         and translated_name != raw_name
         and _consider_translated_column_enabled()
-        and _text_contains_term(source_text, translated_name, is_character=is_character)
+        and ctx.decide(
+            translated_name, is_character,
+            translated_name=translated_name, entry_type=entry_type,
+        )
     ):
         return True
     return False
@@ -534,6 +718,7 @@ def _compress_token_efficient_format(lines, source_text, glossary_path=None, cha
     """Compress token-efficient glossary format with section headers."""
     filtered_lines = []
     current_section = None
+    current_section_name = ''
     current_section_has_gender = False
     _gender_types = _get_gender_types()
     gender_tracker = _load_gender_tracker(glossary_path)
@@ -562,6 +747,9 @@ def _compress_token_efficient_format(lines, source_text, glossary_path=None, cha
         # Track section headers
         if stripped.startswith('==='):
             current_section = line
+            # current_section is cleared once the header has been emitted, so
+            # keep the bare name separately for the shadow log's entry_type.
+            current_section_name = stripped.strip('= ').strip().lower()
             # Check if any gender-enabled type name appears in the header
             header_upper = stripped.upper()
             current_section_has_gender = any(
@@ -573,7 +761,9 @@ def _compress_token_efficient_format(lines, source_text, glossary_path=None, cha
         if stripped.startswith('* '):
             raw_name, translated_name, gender = _token_entry_identity(stripped)
             is_gender_entry = current_section_has_gender or _has_explicit_gender_value(gender)
-            if _entry_matches_source(source_text, raw_name, translated_name, is_character=is_gender_entry):
+            if _entry_matches_source(source_text, raw_name, translated_name,
+                                     is_character=is_gender_entry,
+                                     entry_type=current_section_name):
                 if not _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
                     continue
                 # Add section header if this is the first entry in section
@@ -633,7 +823,7 @@ def _compress_legacy_csv_format(lines, source_text, glossary_path=None, chapter_
                     gender_idx = 3
                 raw_name = parts[raw_idx].strip() if len(parts) > raw_idx else ""
                 gender = parts[gender_idx].strip() if len(parts) > gender_idx else ""
-                if entry_type in _get_gender_types() or _has_explicit_gender_value(gender):
+                if is_gender_entry_type(entry_type, gender, _get_gender_types()):
                     _remember_available_gender(available_genders, raw_name, gender)
         except Exception:
             pass
@@ -663,8 +853,10 @@ def _compress_legacy_csv_format(lines, source_text, glossary_path=None, chapter_
                 translated_name = parts[translated_idx].strip() if len(parts) > translated_idx else translated_name
                 gender = parts[gender_idx].strip() if len(parts) > gender_idx else ""
                 
-                is_char = entry_type in _get_gender_types() or _has_explicit_gender_value(gender)
-                if _entry_matches_source(source_text, raw_name, translated_name, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
+                is_char = is_gender_entry_type(entry_type, gender, _get_gender_types())
+                if _entry_matches_source(source_text, raw_name, translated_name,
+                                         is_character=is_char, entry_type=entry_type) \
+                        and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
                     emitted_gender = _emitted_gender(
                         gender_tracker,
                         raw_name,
@@ -705,7 +897,7 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
     def _is_char_entry(val):
         """Check if a JSON entry value represents a gender-enabled type."""
         if isinstance(val, dict):
-            return val.get('type', '').lower() in _get_gender_types()
+            return is_gender_entry_type(val.get('type'), val.get('gender'), _get_gender_types())
         return False
 
     def _json_translated_name(value, key=""):
@@ -765,7 +957,10 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
                 raw_name = value.get('raw_name') if isinstance(value, dict) else key
                 raw_name = raw_name or key
                 translated_name = _json_translated_name(value, key)
-                if _entry_matches_source(source_text, raw_name, translated_name, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
+                if _entry_matches_source(source_text, raw_name, translated_name,
+                                         is_character=is_char,
+                                         entry_type=(value.get('type') if isinstance(value, dict) else '') or '') \
+                        and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
                     filtered_entries[key] = _resolved_json_value(value, raw_name, gender)
             
             result = json_data.copy()
@@ -784,7 +979,10 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
                     raw_name = value.get('raw_name') if isinstance(value, dict) else key
                     raw_name = raw_name or key
                     translated_name = _json_translated_name(value, key)
-                    if _entry_matches_source(source_text, raw_name, translated_name, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
+                    if _entry_matches_source(source_text, raw_name, translated_name,
+                                         is_character=is_char,
+                                         entry_type=(value.get('type') if isinstance(value, dict) else '') or '') \
+                        and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
                         filtered_dict[key] = _resolved_json_value(value, raw_name, gender)
             return filtered_dict
     
@@ -798,8 +996,11 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
                 raw_term = entry.get('raw_name') or entry.get('original_name') or entry.get('original') or ''
                 translated_name = _json_translated_name(entry)
                 gender = entry.get("gender", "")
-                is_char = entry.get('type', '').lower() in _get_gender_types() or _has_explicit_gender_value(gender)
-                if _entry_matches_source(source_text, raw_term, translated_name, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_term, gender, chapter_ref, available_genders):
+                is_char = is_gender_entry_type(entry.get('type'), gender, _get_gender_types())
+                if _entry_matches_source(source_text, raw_term, translated_name,
+                                         is_character=is_char,
+                                         entry_type=entry.get('type') or '') \
+                        and _gender_variant_allowed(gender_tracker, raw_term, gender, chapter_ref, available_genders):
                     filtered_list.append(_resolved_json_value(entry, raw_term, gender))
         return filtered_list
     
@@ -851,12 +1052,58 @@ def _is_entry_line(line):
     return False
 
 
-def _extract_candidates(text):
+def _fallback_max_candidates():
+    try:
+        return max(1, int(str(_setting("GLOSSARY_FALLBACK_MAX_CANDIDATES", "6")).strip()))
+    except (TypeError, ValueError):
+        return 6
+
+
+def _entry_head_segment(text):
+    """The part of an entry unit that can plausibly hold the term.
+
+    The fallback used to split the WHOLE entry — description included — and
+    test every fragment as if it were a term, so a common word in a
+    description kept the entry. No amount of matcher tightening fixes that;
+    the fix is to stop offering descriptions as candidates.
+
+    The cut is at the *description* delimiter, not the first delimiter of any
+    kind: "루나 = Luna: the protagonist" keeps both 루나 and Luna and drops
+    only the description. Cutting at " = " instead would lose the term
+    entirely in glossaries written the other way round ("Luna = 루나").
+
+    Depth-aware so a colon inside brackets or parentheses does not split.
+    Continuation lines are description by definition and are dropped.
+    """
+    first_line = text.split("\n", 1)[0]
+    paren = bracket = 0
+    for idx, ch in enumerate(first_line):
+        if ch == '(' and bracket == 0:
+            paren += 1
+        elif ch == ')' and bracket == 0 and paren > 0:
+            paren -= 1
+        elif ch == '[' and paren == 0:
+            bracket += 1
+        elif ch == ']' and paren == 0 and bracket > 0:
+            bracket -= 1
+        elif ch in ':\t\x1F' and paren == 0 and bracket == 0:
+            return first_line[:idx]
+    return first_line
+
+
+def _extract_candidates(text, head_only=False):
     """Extract candidate terms from text by splitting on common delimiters.
-    
+
     Returns a list of candidate strings (stripped, non-empty, >= 2 chars,
     non-numeric). These are potential raw names to check against source text.
+
+    With head_only, only the entry's head segment is considered — see
+    _entry_head_segment. Callers fall back to the full unit when the head
+    yields nothing, since a hand-written glossary may put the term after the
+    delimiter rather than before it.
     """
+    if head_only:
+        text = _entry_head_segment(text)
     tokens = _FALLBACK_SPLIT_RE.split(text)
     candidates = []
     _skip_words = {'type', 'raw_name', 'translated_name', 'gender', 'description',
@@ -960,8 +1207,17 @@ def _compress_fallback_text(content, source_text):
             )
         elif group['type'] == 'entry':
             entry_text = '\n'.join(lines[idx] for idx in group['line_indices'])
-            candidates = _extract_candidates(entry_text)
-            group['keep'] = any(_text_contains_term(source_text, c, is_character=current_section_has_gender) for c in candidates)
+            # Prefer the entry head; fall back to the whole unit only when the
+            # head yields nothing, so an unusual manual format still works.
+            candidates = _extract_candidates(entry_text, head_only=True)
+            if not candidates:
+                candidates = _extract_candidates(entry_text)
+            candidates = candidates[:_fallback_max_candidates()]
+            _ctx = _active_match_context(source_text)
+            group['keep'] = any(
+                _ctx.decide(c, current_section_has_gender, entry_type="fallback")
+                for c in candidates
+            )
         elif group['type'] in ('meta', 'blank'):
             group['keep'] = True  # always keep meta lines and blanks (blanks filtered later)
         elif group['type'] == 'header':
@@ -1015,38 +1271,28 @@ def _text_contains_term(text, term, is_character=False):
     """
     Check if term appears in text using substring matching.
     Works well with any language — CJK, Latin, Arabic, etc.
-    
+
     For multi-word terms (e.g. "미샤 랄토스"), also checks if ANY
     individual word appears in the source text, so that a partial
     name match (family name or given name alone) still keeps the
     glossary entry.
-    
+
+    The algorithm lives in glossary_matching so that glossary_usage can
+    share it without importing this module's heavy dependency chain.
+    This wrapper only supplies the strict-gender setting.
+
     Args:
         is_character: When True (character-type entries), accept
             partial tokens of any length (≥1 char). When False,
             require ≥2 chars to reduce false positives on
             non-character entries like terms and places.
     """
-    if not term or not text:
-        return False
-    
-    # Full term match first (fast path)
-    if term in text:
-        return True
-
-    if is_character and _strict_gender_name_matching_enabled():
-        return False
-    
-    # Multi-word: check individual tokens
-    # Character entries: accept any token length (≥1 char)
-    # Non-character entries: require ≥2 chars to limit false positives
-    min_token_len = 1 if is_character else 2
-    if ' ' in term:
-        for token in term.split():
-            if len(token) >= min_token_len and token in text:
-                return True
-
-    return False
+    return legacy_text_contains_term(
+        text,
+        term,
+        is_character=is_character,
+        strict_gender=_strict_gender_name_matching_enabled(),
+    )
 
 
 def compress_glossary_file(glossary_path, source_text):

@@ -1632,6 +1632,53 @@ class GlossaryManagerMixin:
         except Exception:
             pass
 
+    def _apply_glossary_match_engine_env(self):
+        """Resolve the two matching checkboxes into GLOSSARY_MATCH_ENGINE.
+
+        Both handlers call this rather than each writing the variable, so
+        neither can leave a stale value behind when the other is toggled.
+        """
+        try:
+            precise = bool(self.precise_matching_checkbox.isChecked())
+        except Exception:
+            precise = bool(self.config.get('compress_glossary_precise_matching', False))
+        try:
+            shadow = bool(self.shadow_log_matching_checkbox.isChecked())
+        except Exception:
+            shadow = bool(self.config.get('compress_glossary_shadow_log', False))
+        engine = 'new' if precise else ('shadow' if shadow else 'legacy')
+        try:
+            os.environ['GLOSSARY_MATCH_ENGINE'] = engine
+        except Exception:
+            pass
+        return engine
+
+    def _on_glossary_manager_precise_matching_toggle(self, state=None):
+        """Sync script-aware glossary matching to config and environment."""
+        try:
+            enabled = bool(self.precise_matching_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['compress_glossary_precise_matching'] = enabled
+            self.compress_glossary_precise_matching_var = enabled
+            self._apply_glossary_match_engine_env()
+        except Exception:
+            pass
+
+    def _on_glossary_manager_shadow_log_matching_toggle(self, state=None):
+        """Sync shadow match logging to config and environment."""
+        try:
+            enabled = bool(self.shadow_log_matching_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['compress_glossary_shadow_log'] = enabled
+            self.compress_glossary_shadow_log_var = enabled
+            self._apply_glossary_match_engine_env()
+        except Exception:
+            pass
+
     def _on_glossary_manager_consider_translated_compression_toggle(self, state=None):
         """Sync translated-column glossary compression matching to config and environment."""
         try:
@@ -1659,6 +1706,8 @@ class GlossaryManagerMixin:
                     ('fuzzy_auto_mapping_checkbox', 'fuzzy_auto_mapping', False),
                     ('strict_gender_compression_checkbox', 'compress_glossary_strict_gender_matching', False),
                     ('consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column', False),
+                    ('precise_matching_checkbox', 'compress_glossary_precise_matching', False),
+                    ('shadow_log_matching_checkbox', 'compress_glossary_shadow_log', False),
                     ('save_glossary_in_output_checkbox', 'save_glossary_in_output', False),
                     ('glossary_skip_title_header_only_checkbox', 'glossary_skip_title_header_only', True),
                 ]
@@ -2154,6 +2203,8 @@ class GlossaryManagerMixin:
                     ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
                     ('strict_gender_compression_checkbox', 'compress_glossary_strict_gender_matching_var'),
                     ('consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column_var'),
+                    ('precise_matching_checkbox', 'compress_glossary_precise_matching_var'),
+                    ('shadow_log_matching_checkbox', 'compress_glossary_shadow_log_var'),
                     ('save_glossary_in_output_checkbox', 'save_glossary_in_output_var'),
                     ('enable_gender_nuance_checkbox', 'enable_gender_nuance_var'),
                     ('include_gender_context_checkbox', 'include_gender_context_var'),
@@ -2203,6 +2254,13 @@ class GlossaryManagerMixin:
                         elif checkbox_name == 'consider_translated_compression_checkbox':
                             self.config['compress_glossary_consider_translated_column'] = bool(checked)
                             os.environ['COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN'] = '1' if checked else '0'
+                        elif checkbox_name == 'precise_matching_checkbox':
+                            self.config['compress_glossary_precise_matching'] = bool(checked)
+                            # Both checkboxes feed one env var; resolve them together.
+                            self._apply_glossary_match_engine_env()
+                        elif checkbox_name == 'shadow_log_matching_checkbox':
+                            self.config['compress_glossary_shadow_log'] = bool(checked)
+                            self._apply_glossary_match_engine_env()
                         elif checkbox_name == 'save_glossary_in_output_checkbox':
                             self.config['save_glossary_in_output'] = bool(checked)
                         elif checkbox_name == 'enable_gender_nuance_checkbox':
@@ -4632,6 +4690,50 @@ Do not stop after the glossary."""
         strict_gender_hint = QLabel("(Optional: stricter compression for smart models; default OFF keeps loose character matching)")
         strict_gender_layout.addWidget(strict_gender_hint)
         strict_gender_layout.addStretch()
+
+        precise_matching_widget = QWidget()
+        precise_matching_layout = QHBoxLayout(precise_matching_widget)
+        precise_matching_layout.setContentsMargins(20, 0, 0, 15)
+        auto_layout.addWidget(precise_matching_widget)
+
+        if not hasattr(self, 'precise_matching_checkbox'):
+            self.precise_matching_checkbox = self._create_styled_checkbox("Precise Term Matching")
+            self.precise_matching_checkbox.setChecked(self.config.get('compress_glossary_precise_matching', False))
+        if not getattr(self.precise_matching_checkbox, '_glossary_manager_sync_connected', False):
+            self.precise_matching_checkbox.stateChanged.connect(self._on_glossary_manager_precise_matching_toggle)
+            self.precise_matching_checkbox._glossary_manager_sync_connected = True
+        self.precise_matching_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When ON, glossary compression uses script-aware matching: word boundaries for Latin terms, "
+            "sub-word boundary checks for short CJK terms, and normalized/spacing/honorific variants.\n"
+            "When OFF, matching stays loose and may keep an entry on a single CJK character."
+        ))
+        precise_matching_layout.addWidget(self.precise_matching_checkbox)
+
+        precise_matching_hint = QLabel("(Optional: narrower, more accurate compression; default OFF keeps current behavior)")
+        precise_matching_layout.addWidget(precise_matching_hint)
+        precise_matching_layout.addStretch()
+
+        shadow_log_widget = QWidget()
+        shadow_log_layout = QHBoxLayout(shadow_log_widget)
+        shadow_log_layout.setContentsMargins(20, 0, 0, 15)
+        auto_layout.addWidget(shadow_log_widget)
+
+        if not hasattr(self, 'shadow_log_matching_checkbox'):
+            self.shadow_log_matching_checkbox = self._create_styled_checkbox("Log Match Differences")
+            self.shadow_log_matching_checkbox.setChecked(self.config.get('compress_glossary_shadow_log', False))
+        if not getattr(self.shadow_log_matching_checkbox, '_glossary_manager_sync_connected', False):
+            self.shadow_log_matching_checkbox.stateChanged.connect(self._on_glossary_manager_shadow_log_matching_toggle)
+            self.shadow_log_matching_checkbox._glossary_manager_sync_connected = True
+        self.shadow_log_matching_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When ON, both the old and the new matcher run and their disagreements are written to "
+            "logs/glossary_match_shadow/. Translation output is unchanged.\n"
+            "Use with Precise Term Matching OFF to preview what it would change before switching."
+        ))
+        shadow_log_layout.addWidget(self.shadow_log_matching_checkbox)
+
+        shadow_log_hint = QLabel("(Optional: preview-only; writes a diff report without changing output)")
+        shadow_log_layout.addWidget(shadow_log_hint)
+        shadow_log_layout.addStretch()
 
         # Save location toggle
         output_save_widget = QWidget()
