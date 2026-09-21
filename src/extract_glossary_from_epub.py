@@ -7502,6 +7502,45 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None):
     return entries
 
 
+def seed_glossary_with_minimal_pass(
+    chapters, glossary_dir, output_file, existing=None, check_stop=None
+):
+    """Run the Minimal pass and merge its entries into an existing glossary.
+
+    Shared by every mode that can seed a glossary this way: Balanced/Full and
+    the standalone Extract Glossary button both go through main(), while
+    Single Pass extracts during translation and calls this directly.
+
+    Returns the merged entry list, or None when nothing was seeded (toggle
+    off, already-populated glossary, or the pass produced nothing).
+    """
+    if not _add_minimal_pass_enabled():
+        return None
+
+    if existing is None:
+        existing = _load_glossary_file(output_file) if output_file and os.path.exists(output_file) else []
+    existing = [e for e in (existing or []) if isinstance(e, dict)]
+    if existing:
+        # Resuming a run that already has entries: seeding again would repeat
+        # the cost for entries that are already present.
+        print("📑 Minimal glossary pass skipped: glossary already has entries")
+        return None
+
+    entries = _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=check_stop)
+    if not entries:
+        return None
+
+    merged = skip_duplicate_entries(existing + entries, glossary_path=output_file)
+    print(f"📑 Glossary seeded with {len(merged)} entries from the Minimal pass")
+    if output_file:
+        try:
+            save_glossary_json(merged, output_file)
+            save_glossary_csv(merged, output_file)
+        except Exception as exc:
+            print(f"⚠️ Could not persist the Minimal pass seed: {exc}")
+    return merged
+
+
 def main(log_callback=None, stop_callback=None):
     # Declare global variables at the very start of the function
     global _skipped_chapters
@@ -8195,21 +8234,15 @@ def main(log_callback=None, stop_callback=None):
     # every later step -- dedupe, gender resolution, refinement, saving --
     # treats its entries exactly like AI-extracted ones. Seeding here (rather
     # than merging at the end) also means a resumed run does not repeat it.
-    if _add_minimal_pass_enabled() and not glossary:
-        _minimal_entries = _run_minimal_glossary_pass(
-            chapters, glossary_dir, check_stop=check_stop
-        )
-        if _minimal_entries:
-            glossary.extend(_minimal_entries)
-            glossary[:] = skip_duplicate_entries(glossary, glossary_path=args.output)
-            print(f"📑 Glossary seeded with {len(glossary)} entries from the Minimal pass")
-            try:
-                save_glossary_json(glossary, args.output)
-                save_glossary_csv(glossary, args.output)
-            except Exception as _e:
-                print(f"⚠️ Could not persist the Minimal pass seed: {_e}")
-    elif _add_minimal_pass_enabled():
-        print("📑 Minimal glossary pass skipped: resuming a run that already has entries")
+    _seeded = seed_glossary_with_minimal_pass(
+        chapters,
+        glossary_dir,
+        args.output,
+        existing=glossary,
+        check_stop=check_stop,
+    )
+    if _seeded is not None:
+        glossary[:] = _seeded
 
     merged_indices = prog.get('merged_indices', [])
 

@@ -48292,6 +48292,7 @@ Important rules:
                 ('GLOSSARY_REQUEST_MERGE_COUNT', env_glossary_merge_count),
                 ('GLOSSARY_ENABLE_CHAPTER_SPLIT', env_glossary_chapter_split),
                 ('GLOSSARY_SKIP_TITLE_HEADER_ONLY', self._glossary_skip_title_header_only_env_value()),
+                ('GLOSSARY_ADD_MINIMAL_PASS', self._glossary_add_minimal_pass_env_value()),
                 ('GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', True)) else '0'),
 
                 # Safety/merge toggles

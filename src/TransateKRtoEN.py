@@ -14115,6 +14115,38 @@ def _single_pass_without_chapter_idx(values, chapter_idx):
         kept.append(idx_value)
     return kept
 
+def _seed_single_pass_glossary_with_minimal(chapters, output_dir, check_stop=None):
+    """Seed a Single Pass glossary with the optional Minimal extraction pass.
+
+    Single Pass merges glossary extraction into the translation request, so it
+    never calls extract_glossary_from_epub.main() where the other modes are
+    seeded. This runs the same shared helper against Single Pass's own
+    glossary directory and output file.
+
+    Silent when the mode or the toggle is off, and never raises: an optional
+    extra pass must not take down a translation run.
+    """
+    if not _single_pass_glossary_mode():
+        return
+    try:
+        import extract_glossary_from_epub as glossary_extractor
+    except Exception as e:
+        print(f"⚠️ Minimal glossary pass unavailable: {e}")
+        return
+    if not glossary_extractor._add_minimal_pass_enabled():
+        return
+    try:
+        glossary_dir, json_path, _csv_path, _progress_path = _single_pass_glossary_paths(output_dir)
+        glossary_extractor.seed_glossary_with_minimal_pass(
+            chapters,
+            glossary_dir,
+            json_path,
+            check_stop=check_stop,
+        )
+    except Exception as e:
+        print(f"⚠️ Minimal glossary pass failed for Single Pass, continuing: {e}")
+
+
 def _mark_single_pass_glossary_in_progress(output_dir, chapter_num=None, chapter_file=None):
     """Write a live in-progress row for Single Pass glossary progress."""
     global _single_pass_glossary_active_indices
@@ -26107,6 +26139,12 @@ def main(log_callback=None, stop_callback=None):
     print("\n" + "="*50)
     print("📑 GLOSSARY GENERATION PHASE")
     print("="*50)
+
+    # Single Pass builds its glossary during translation and never reaches
+    # extract_glossary_from_epub.main(), so the Minimal seed has to be started
+    # here. Balanced/Full and the Extract Glossary button both go through
+    # main() and are seeded there.
+    _seed_single_pass_glossary_with_minimal(chapters, out, check_stop=check_stop)
 
     if config.OUTPUT_MODE == "audio" and os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1":
         os.environ["ENABLE_AUTO_GLOSSARY"] = "0"
