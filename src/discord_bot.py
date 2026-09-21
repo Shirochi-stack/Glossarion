@@ -1470,6 +1470,11 @@ async def translate(
             'new' if config.get('compress_glossary_precise_matching', False)
             else ('shadow' if config.get('compress_glossary_shadow_log', False) else 'legacy')
         )
+        # Unified glossary (cross-novel glossary_unified.csv)
+        os.environ['ENABLE_UNIFIED_GLOSSARY'] = '1' if config.get('enable_unified_glossary', False) else '0'
+        os.environ['GENERATE_UNIFIED_GLOSSARY'] = '1' if config.get('generate_unified_glossary', False) else '0'
+        os.environ['UNIFIED_GLOSSARY_SOURCE_LANGUAGE'] = str(config.get('unified_glossary_source_language', 'auto') or 'auto')
+        os.environ['UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES'] = '1' if config.get('unified_glossary_combine_all_languages', False) else '0'
         os.environ['GLOSSARY_FILTER_MODE'] = config.get('glossary_filter_mode', 'all')
         os.environ['GLOSSARY_STRIP_HONORIFICS'] = '1' if config.get('glossary_strip_honorifics', True) else '0'
         os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(config.get('glossary_fuzzy_threshold', 0.90))

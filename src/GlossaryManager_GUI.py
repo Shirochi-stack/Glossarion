@@ -1666,6 +1666,65 @@ class GlossaryManagerMixin:
         except Exception:
             pass
 
+    def _unified_glossary_folder_key(self):
+        """The Unified Glossary subfolder the current settings resolve to."""
+        try:
+            import unified_glossary
+            return unified_glossary.describe_folder_key(
+                self.config.get('unified_glossary_source_language', 'auto'),
+                bool(self.config.get('unified_glossary_combine_all_languages', False)),
+                self.config.get('output_language') or os.environ.get('OUTPUT_LANGUAGE') or 'English',
+            )
+        except Exception:
+            return 'auto'
+
+    def _unified_glossary_hint_text(self):
+        return f"(Current: Glossary/Unified Glossary/{self._unified_glossary_folder_key()}/)"
+
+    def _refresh_unified_glossary_hint(self):
+        label = getattr(self, 'unified_glossary_label', None)
+        if label is None:
+            return
+        try:
+            label.setText(self._unified_glossary_hint_text())
+        except RuntimeError:
+            pass
+
+    def _set_unified_glossary_row_enabled(self, enabled):
+        """Generate Unified Glossary only means something while the master toggle is on."""
+        for widget in getattr(self, '_unified_generate_row_widgets', ()):
+            try:
+                widget.setEnabled(bool(enabled))
+            except RuntimeError:
+                pass
+
+    def _on_glossary_manager_enable_unified_glossary_toggle(self, state=None):
+        """Sync the unified glossary master toggle to config and environment."""
+        try:
+            enabled = bool(self.enable_unified_glossary_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['enable_unified_glossary'] = enabled
+            self.enable_unified_glossary_var = enabled
+            os.environ['ENABLE_UNIFIED_GLOSSARY'] = '1' if enabled else '0'
+            self._set_unified_glossary_row_enabled(enabled)
+        except Exception:
+            pass
+
+    def _on_glossary_manager_generate_unified_glossary_toggle(self, state=None):
+        """Sync the unified glossary rebuild toggle to config and environment."""
+        try:
+            enabled = bool(self.generate_unified_glossary_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['generate_unified_glossary'] = enabled
+            self.generate_unified_glossary_var = enabled
+            os.environ['GENERATE_UNIFIED_GLOSSARY'] = '1' if enabled else '0'
+        except Exception:
+            pass
+
     def _on_glossary_manager_precise_matching_toggle(self, state=None):
         """Sync script-aware glossary matching to config and environment."""
         try:
@@ -1722,6 +1781,8 @@ class GlossaryManagerMixin:
                     ('precise_matching_checkbox', 'compress_glossary_precise_matching', False),
                     ('shadow_log_matching_checkbox', 'compress_glossary_shadow_log', False),
                     ('glossary_add_minimal_pass_checkbox', 'glossary_add_minimal_pass', False),
+                    ('enable_unified_glossary_checkbox', 'enable_unified_glossary', False),
+                    ('generate_unified_glossary_checkbox', 'generate_unified_glossary', False),
                     ('save_glossary_in_output_checkbox', 'save_glossary_in_output', False),
                     ('glossary_skip_title_header_only_checkbox', 'glossary_skip_title_header_only', True),
                 ]
@@ -2220,6 +2281,8 @@ class GlossaryManagerMixin:
                     ('precise_matching_checkbox', 'compress_glossary_precise_matching_var'),
                     ('shadow_log_matching_checkbox', 'compress_glossary_shadow_log_var'),
                     ('glossary_add_minimal_pass_checkbox', 'glossary_add_minimal_pass_var'),
+                    ('enable_unified_glossary_checkbox', 'enable_unified_glossary_var'),
+                    ('generate_unified_glossary_checkbox', 'generate_unified_glossary_var'),
                     ('save_glossary_in_output_checkbox', 'save_glossary_in_output_var'),
                     ('enable_gender_nuance_checkbox', 'enable_gender_nuance_var'),
                     ('include_gender_context_checkbox', 'include_gender_context_var'),
@@ -2279,6 +2342,12 @@ class GlossaryManagerMixin:
                         elif checkbox_name == 'glossary_add_minimal_pass_checkbox':
                             self.config['glossary_add_minimal_pass'] = bool(checked)
                             os.environ['GLOSSARY_ADD_MINIMAL_PASS'] = '1' if checked else '0'
+                        elif checkbox_name == 'enable_unified_glossary_checkbox':
+                            self.config['enable_unified_glossary'] = bool(checked)
+                            os.environ['ENABLE_UNIFIED_GLOSSARY'] = '1' if checked else '0'
+                        elif checkbox_name == 'generate_unified_glossary_checkbox':
+                            self.config['generate_unified_glossary'] = bool(checked)
+                            os.environ['GENERATE_UNIFIED_GLOSSARY'] = '1' if checked else '0'
                         elif checkbox_name == 'save_glossary_in_output_checkbox':
                             self.config['save_glossary_in_output'] = bool(checked)
                         elif checkbox_name == 'enable_gender_nuance_checkbox':
@@ -4671,7 +4740,77 @@ Do not stop after the glossary."""
         additional_glossary_layout.addWidget(label_additional)
         self.additional_glossary_label = label_additional  # Store reference to update later
         additional_glossary_layout.addStretch()
-        
+
+        # Unified glossary: one deduplicated glossary across every novel,
+        # sent like the extension (below Add Additional Glossary).
+        unified_glossary_widget = QWidget()
+        unified_glossary_layout = QHBoxLayout(unified_glossary_widget)
+        unified_glossary_layout.setContentsMargins(0, 0, 0, 6)
+        auto_layout.addWidget(unified_glossary_widget)
+
+        if not hasattr(self, 'enable_unified_glossary_checkbox'):
+            self.enable_unified_glossary_checkbox = self._create_styled_checkbox("Enable Unified Glossary")
+            self.enable_unified_glossary_checkbox.setChecked(self.config.get('enable_unified_glossary', False))
+        if not getattr(self.enable_unified_glossary_checkbox, '_glossary_manager_sync_connected', False):
+            self.enable_unified_glossary_checkbox.stateChanged.connect(self._on_glossary_manager_enable_unified_glossary_toggle)
+            self.enable_unified_glossary_checkbox._glossary_manager_sync_connected = True
+        self.enable_unified_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Merge every book's glossary into one deduplicated glossary_unified.csv per language\n"
+            "(Glossary/Unified Glossary/<source>-<target>/) and send it alongside the main glossary\n"
+            "with the same compression settings.\n"
+            "Updated at the start and end of each glossary run; the copy sent to the API leaves out\n"
+            "entries the book's own glossary already has."
+        ))
+        unified_glossary_layout.addWidget(self.enable_unified_glossary_checkbox)
+
+        unified_settings_btn = QPushButton("Unified Glossary Settings")
+        unified_settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5a9fd4;
+                color: white;
+                padding: 5px 15px;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #7ab8e8; }
+            QPushButton:pressed { background-color: #4a8fc4; }
+            QPushButton:disabled { background-color: #cccccc; color: #666666; }
+        """)
+        unified_settings_btn.setToolTip(_wrapped_tooltip_html(
+            "Source language and language-combining options for the unified glossary."
+        ))
+        unified_settings_btn.clicked.connect(lambda: self._open_unified_glossary_settings_dialog(parent))
+        unified_glossary_layout.addWidget(unified_settings_btn)
+        self._unified_glossary_settings_btn = unified_settings_btn
+
+        self.unified_glossary_label = QLabel(self._unified_glossary_hint_text())
+        unified_glossary_layout.addWidget(self.unified_glossary_label)
+        unified_glossary_layout.addStretch()
+
+        generate_unified_widget = QWidget()
+        generate_unified_layout = QHBoxLayout(generate_unified_widget)
+        generate_unified_layout.setContentsMargins(20, 0, 0, 15)
+        auto_layout.addWidget(generate_unified_widget)
+
+        if not hasattr(self, 'generate_unified_glossary_checkbox'):
+            self.generate_unified_glossary_checkbox = self._create_styled_checkbox("Generate Unified Glossary")
+            self.generate_unified_glossary_checkbox.setChecked(self.config.get('generate_unified_glossary', False))
+        if not getattr(self.generate_unified_glossary_checkbox, '_glossary_manager_sync_connected', False):
+            self.generate_unified_glossary_checkbox.stateChanged.connect(self._on_glossary_manager_generate_unified_glossary_toggle)
+            self.generate_unified_glossary_checkbox._glossary_manager_sync_connected = True
+        self.generate_unified_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Rebuild the unified glossary from every book folder under Glossary/ at the start of the\n"
+            "next glossary run, reading the files in parallel (Parallel Extraction worker count).\n"
+            "Fingerprinted: the rebuild is skipped when no book glossary changed since the last one."
+        ))
+        generate_unified_layout.addWidget(self.generate_unified_glossary_checkbox)
+
+        generate_unified_hint = QLabel("(Rebuilds from every book glossary at the start of the next run; skipped when nothing changed)")
+        generate_unified_layout.addWidget(generate_unified_hint)
+        generate_unified_layout.addStretch()
+        self._unified_generate_row_widgets = (self.generate_unified_glossary_checkbox, generate_unified_hint)
+        self._set_unified_glossary_row_enabled(self.enable_unified_glossary_checkbox.isChecked())
+
         # Compress glossary toggle
         compress_widget = QWidget()
         compress_layout = QHBoxLayout(compress_widget)
@@ -6033,6 +6172,235 @@ Do not stop after the glossary."""
                 self.config['glossary_bias_common_words'] = bool(self.glossary_bias_common_words_var)
             if hasattr(self, 'glossary_bias_repetitive_phrases_var'):
                 self.config['glossary_bias_repetitive_phrases'] = bool(self.glossary_bias_repetitive_phrases_var)
+            self.save_config(show_message=False)
+        except Exception:
+            pass
+        if minimize_dialog is not None:
+            try:
+                minimize_dialog.close()
+            except Exception:
+                pass
+
+    _UNIFIED_SOURCE_LANGUAGE_OPTIONS = [
+        'Auto', 'Korean', 'Japanese', 'Chinese', 'English', 'Spanish', 'French',
+        'German', 'Italian', 'Portuguese', 'Russian', 'Arabic', 'Hindi',
+        'Turkish', 'Hebrew', 'Thai', 'Other',
+    ]
+
+    def _open_unified_glossary_settings_dialog(self, parent):
+        """Open the unified glossary settings (source language / combine all).
+
+        Same shape as the anti-duplicate dialog: parented to the glossary
+        dialog so its stylesheet cascades, reused while open, persisted on
+        close.
+        """
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+                                       QWidget, QPushButton, QGroupBox, QComboBox)
+        from PySide6.QtCore import Qt, QSize
+
+        existing = getattr(self, 'unified_glossary_settings_dialog', None)
+        if existing:
+            try:
+                existing.showNormal()
+                existing.raise_()
+                existing.activateWindow()
+                return
+            except Exception:
+                pass
+
+        dialog = QDialog(parent)
+        dialog.setWindowTitle("Unified Glossary Settings")
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        screen = QApplication.primaryScreen().geometry()
+        dialog.setMinimumSize(int(screen.width() * 0.30), int(screen.height() * 0.36))
+        dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                dialog.setWindowIcon(QIcon(icon_path))
+        except Exception:
+            pass
+
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+
+        title_label = QLabel("Unified Glossary Settings")
+        title_label.setStyleSheet("font-size: 16pt; font-weight: bold;")
+        main_layout.addWidget(title_label)
+
+        section_box = QGroupBox("🌐 Unified Glossary")
+        section_v = QVBoxLayout(section_box)
+        # Top margin clears the group title; without it the first line of the
+        # description is drawn underneath the title.
+        section_v.setContentsMargins(14, 20, 14, 14)
+        section_v.setSpacing(8)
+
+        desc_label = QLabel(
+            "One deduplicated glossary shared by every novel, kept per source and target language. "
+            "It is updated at the start and end of each glossary run and sent alongside the main "
+            "glossary with the same compression settings."
+        )
+        desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+        desc_label.setWordWrap(True)
+        desc_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        section_v.addWidget(desc_label)
+
+        def _fit_description():
+            """Give the wrapped label the height its current width needs.
+
+            A word-wrapped QLabel reports a size hint for a guessed width, so
+            the layout hands it too little height and clips the first and
+            last lines. Recomputed on every resize.
+            """
+            try:
+                width = max(200, desc_label.width())
+                desc_label.setMinimumHeight(desc_label.heightForWidth(width) + 6)
+            except RuntimeError:
+                pass
+
+        # Source language
+        lang_row = QWidget()
+        lang_layout = QHBoxLayout(lang_row)
+        lang_layout.setContentsMargins(0, 0, 0, 6)
+        lang_label = QLabel("Source language:")
+        lang_label.setToolTip(_wrapped_tooltip_html(
+            "Which unified glossary this book belongs to.\n"
+            "Auto reuses the source language already detected during extraction; pick a language "
+            "only if that detection is wrong for this book."
+        ))
+        lang_layout.addWidget(lang_label)
+
+        combo = QComboBox()
+        combo.addItems(self._UNIFIED_SOURCE_LANGUAGE_OPTIONS)
+        try:
+            _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(_ico_path):
+                _combo_icon = QIcon(_ico_path)
+                for i in range(combo.count()):
+                    combo.setItemIcon(i, _combo_icon)
+        except Exception:
+            pass
+        saved_language = str(self.config.get('unified_glossary_source_language', 'auto') or 'auto').strip().lower()
+        combo.setCurrentIndex(next(
+            (i for i, option in enumerate(self._UNIFIED_SOURCE_LANGUAGE_OPTIONS) if option.lower() == saved_language),
+            0,
+        ))
+        combo.setFixedWidth(220)
+        combo.setIconSize(QSize(18, 18))
+        combo.setStyleSheet(self.auto_glossary_mode_combo.styleSheet() if hasattr(self, 'auto_glossary_mode_combo') else "")
+        combo.wheelEvent = lambda event: None
+        self.unified_source_language_combo = combo
+        lang_layout.addWidget(combo)
+        lang_hint = QLabel("(Auto reuses the source language detected during extraction)")
+        lang_layout.addWidget(lang_hint)
+        lang_layout.addStretch()
+        section_v.addWidget(lang_row)
+
+        # Combine all languages
+        combine_row = QWidget()
+        combine_layout = QHBoxLayout(combine_row)
+        combine_layout.setContentsMargins(0, 0, 0, 6)
+        combine_cb = self._create_styled_checkbox("Combine all languages")
+        combine_cb.setChecked(bool(self.config.get('unified_glossary_combine_all_languages', False)))
+        combine_cb.setToolTip(_wrapped_tooltip_html(
+            "Put every source language into one glossary_unified.csv instead of one per language.\n"
+            "A workaround for the rare case where language detection fails; the target language "
+            "still keeps its own folder."
+        ))
+        self.unified_combine_all_languages_checkbox = combine_cb
+        combine_layout.addWidget(combine_cb)
+        combine_hint = QLabel("(Workaround if auto-detection fails: one glossary_unified.csv for every source language)")
+        combine_layout.addWidget(combine_hint)
+        combine_layout.addStretch()
+        section_v.addWidget(combine_row)
+
+        location_label = QLabel()
+        location_label.setStyleSheet("color: #aaa; font-size: 9pt;")
+        location_label.setWordWrap(True)
+        location_label.setContentsMargins(0, 6, 0, 0)
+        section_v.addWidget(location_label)
+
+        def _apply_from_widgets(*_args):
+            try:
+                self._apply_unified_glossary_settings_from_widgets()
+                location_label.setText(
+                    "Location: Glossary/Unified Glossary/"
+                    f"{self._unified_glossary_folder_key()}/glossary_unified.csv"
+                )
+            except Exception:
+                pass
+
+        combo.currentTextChanged.connect(_apply_from_widgets)
+        combine_cb.stateChanged.connect(_apply_from_widgets)
+        _apply_from_widgets()
+
+        main_layout.addWidget(section_box)
+        main_layout.addStretch()
+
+        controls = QWidget()
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 6, 0, 0)
+        controls_layout.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setMinimumWidth(220)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        # Same look as the glossary dialog's own Cancel button.
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                font-weight: bold;
+                padding: 8px 24px;
+                border-radius: 3px;
+            }
+            QPushButton:hover { background-color: #7d868e; }
+            QPushButton:pressed { background-color: #5c636a; }
+        """)
+        close_btn.clicked.connect(lambda: self._persist_unified_glossary_settings(minimize_dialog=dialog))
+        controls_layout.addWidget(close_btn)
+        controls_layout.addStretch()
+        main_layout.addWidget(controls)
+
+        self.unified_glossary_settings_dialog = dialog
+
+        def _close_on_close(event):
+            try:
+                self._persist_unified_glossary_settings()
+            except Exception:
+                pass
+            event.accept()
+        dialog.closeEvent = _close_on_close
+
+        def _on_resize(event):
+            QDialog.resizeEvent(dialog, event)
+            _fit_description()
+        dialog.resizeEvent = _on_resize
+
+        dialog.show()
+        _fit_description()
+        QTimer.singleShot(0, _fit_description)
+
+    def _apply_unified_glossary_settings_from_widgets(self):
+        """Mirror the sub-dialog widgets into config, instance vars and env."""
+        combo = getattr(self, 'unified_source_language_combo', None)
+        if combo is not None:
+            language = str(combo.currentText() or 'auto').strip().lower() or 'auto'
+            self.config['unified_glossary_source_language'] = language
+            self.unified_glossary_source_language_var = language
+            os.environ['UNIFIED_GLOSSARY_SOURCE_LANGUAGE'] = language
+        checkbox = getattr(self, 'unified_combine_all_languages_checkbox', None)
+        if checkbox is not None:
+            combine = bool(checkbox.isChecked())
+            self.config['unified_glossary_combine_all_languages'] = combine
+            self.unified_glossary_combine_all_languages_var = combine
+            os.environ['UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES'] = '1' if combine else '0'
+        self._refresh_unified_glossary_hint()
+
+    def _persist_unified_glossary_settings(self, minimize_dialog=None):
+        """Persist unified glossary settings to config and optionally close the dialog."""
+        try:
+            self._apply_unified_glossary_settings_from_widgets()
             self.save_config(show_message=False)
         except Exception:
             pass

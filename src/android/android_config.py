@@ -78,6 +78,10 @@ DEFAULT_CONFIG = {
     'compress_glossary_consider_translated_column': False,
     'compress_glossary_precise_matching': False,
     'compress_glossary_shadow_log': False,
+    'enable_unified_glossary': False,
+    'generate_unified_glossary': False,
+    'unified_glossary_source_language': 'auto',
+    'unified_glossary_combine_all_languages': False,
 
     # Thinking mode
     'enable_gpt_thinking': True,

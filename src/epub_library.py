@@ -267,7 +267,7 @@ _DEFAULT_SPECIAL_FILE_KEYWORDS = (
     "dedication, epigraph, foreword, acknowledgment, author, appendix, "
     "bibliography"
 )
-_DEFAULT_SPECIAL_FILE_EXACT = "index, glossary, glossary_extension"
+_DEFAULT_SPECIAL_FILE_EXACT = "index, glossary, glossary_extension, glossary_unified"
 
 
 def _parse_special_file_list(value: object) -> list[str]:

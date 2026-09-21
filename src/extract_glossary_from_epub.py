@@ -3640,7 +3640,7 @@ def _glossary_epub_extraction_settings(*, include_special_files=False):
         )),
         'special_file_exact': [] if translate_special else sorted(set(
             [k.strip().lower() for k in exact.split(',') if k.strip()]
-            if exact else ['index', 'glossary', 'glossary_extension']
+            if exact else ['index', 'glossary', 'glossary_extension', 'glossary_unified']
         )),
     }
 
@@ -5793,6 +5793,11 @@ def _parse_token_efficient_glossary(text: str) -> List[Dict]:
         type_map[t.lower()] = t
         if not t.lower().endswith('s'):
             type_map[f"{t.lower()}s"] = t
+    # The writer emits the book title under "=== BOOKS ===" (type_order puts
+    # 'book' first). Read it back as the same type instead of folding it into
+    # the terms section, so callers can recognise and keep/skip it.
+    type_map.setdefault('book', 'book')
+    type_map.setdefault('books', 'book')
 
     def _split_custom_field_parts(field_text: str, known_fields: list) -> dict:
         values = {}
@@ -5921,12 +5926,17 @@ def _parse_token_efficient_glossary(text: str) -> List[Dict]:
     return entries
 
 
-def _load_glossary_file(path: str) -> List[Dict]:
+def _load_glossary_file(path: str, quiet: bool = False) -> List[Dict]:
     """
     Load a glossary file that may be in token-efficient or legacy CSV format.
+
+    ``quiet`` suppresses the per-file log line; bulk readers (the unified
+    glossary rebuild reads every book folder) pass it so one run does not
+    print a hundred "Loaded" lines.
     """
     if not os.path.exists(path):
         return []
+    log = (lambda _msg: None) if quiet else print
     try:
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
@@ -5934,17 +5944,17 @@ def _load_glossary_file(path: str) -> List[Dict]:
             try:
                 data = json.loads(text)
                 if isinstance(data, list):
-                    print(f"📂 Loaded JSON glossary: {len(data)} entries")
+                    log(f"📂 Loaded JSON glossary: {len(data)} entries")
                     return [entry for entry in data if isinstance(entry, dict)]
                 if isinstance(data, dict) and isinstance(data.get("glossary"), list):
                     entries = [entry for entry in data.get("glossary", []) if isinstance(entry, dict)]
-                    print(f"📂 Loaded JSON glossary: {len(entries)} entries")
+                    log(f"📂 Loaded JSON glossary: {len(entries)} entries")
                     return entries
             except Exception:
                 pass
         token_entries = _parse_token_efficient_glossary(text)
         if token_entries:
-            print(f"📂 Loaded token-efficient glossary: {len(token_entries)} entries")
+            log(f"📂 Loaded token-efficient glossary: {len(token_entries)} entries")
             return token_entries
         # Legacy CSV
         import csv
@@ -5952,7 +5962,7 @@ def _load_glossary_file(path: str) -> List[Dict]:
         reader = csv.DictReader(text.splitlines())
         for row in reader:
             rows.append(row)
-        print(f"📂 Loaded legacy CSV glossary: {len(rows)} entries")
+        log(f"📂 Loaded legacy CSV glossary: {len(rows)} entries")
         return rows
     except Exception as e:
         print(f"⚠️ Could not load glossary file {path}: {e}")
@@ -7461,6 +7471,30 @@ def _add_minimal_pass_enabled():
 
 
 @contextlib.contextmanager
+def _environment_overrides(overrides):
+    """Temporarily set (value) or remove (None) environment variables.
+
+    Every previous value is restored on exit, so the surrounding run's
+    configuration is untouched. Shared by the Minimal pass and the unified
+    glossary writer, both of which reuse code that reads its switches from
+    the environment.
+    """
+    previous = {key: os.environ.get(key) for key in overrides}
+    try:
+        for key, value in overrides.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = str(value)
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def _minimal_pass_environment():
     """Give GlossaryManager.save_glossary the environment it requires.
 
@@ -7475,28 +7509,13 @@ def _minimal_pass_environment():
         have this pointing at the book's own glossary.
 
     Neither is a real reason to skip: the user asked for this pass explicitly.
-    Both are overridden for the duration and restored afterwards so the
-    surrounding run's configuration is untouched.
+    Both are overridden for the duration and restored afterwards.
     """
-    overrides = {
+    return _environment_overrides({
         "ENABLE_AUTO_GLOSSARY": "1",
         # Removed, not blanked: save_glossary checks os.path.exists on it.
         "MANUAL_GLOSSARY": None,
-    }
-    previous = {key: os.environ.get(key) for key in overrides}
-    try:
-        for key, value in overrides.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        yield
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+    })
 
 
 def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None, context=None):
@@ -8346,6 +8365,18 @@ def main(log_callback=None, stop_callback=None):
     )
     if _seeded is not None:
         glossary[:] = _seeded
+
+    # Start of the glossary generation phase: fold this book into the
+    # cross-novel unified glossary (or rebuild it when Generate is on) and
+    # refresh the per-book copy that gets appended beside the glossary.
+    # No-op unless Enable Unified Glossary is on; never raises.
+    try:
+        import unified_glossary
+        unified_glossary.sync_phase(
+            "start", glossary, args.output, [glossary_dir], chapters=chapters,
+        )
+    except Exception as _unified_exc:
+        print(f"⚠️ Unified glossary (start): {_unified_exc} — continuing")
 
     merged_indices = prog.get('merged_indices', [])
 
@@ -10481,6 +10512,15 @@ def main(log_callback=None, stop_callback=None):
         print(f"Also saved as CSV: {csv_path}")
     except Exception as e:
         print(f"[Warning] Could not save CSV format: {e}")
+
+    # End of the glossary generation phase: merge the finished glossary into
+    # the unified glossary and refresh the per-book copy. Fingerprinted, so
+    # an unchanged book costs one stat call.
+    try:
+        import unified_glossary
+        unified_glossary.sync_phase("end", glossary, args.output, [glossary_dir])
+    except Exception as _unified_exc:
+        print(f"⚠️ Unified glossary (end): {_unified_exc} — continuing")
 
 def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None, failed: List[int] = None, in_progress: List[int] = None, context=None, model_update_indices=None, model_updates=None, key_updates=None, extracted_entries_updates=None):
     """Save progress to JSON file (history is now managed separately)

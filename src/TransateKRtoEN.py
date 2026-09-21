@@ -14151,6 +14151,57 @@ def _seed_single_pass_glossary_with_minimal(chapters, output_dir, check_stop=Non
         print(f"⚠️ Minimal glossary pass failed for Single Pass, continuing: {e}")
 
 
+def _sync_unified_glossary_phase(stage, output_dir, chapters=None, glossary_path=None, final=False):
+    """Start/end-of-phase hook for the cross-novel unified glossary.
+
+    Balanced/Full and the Extract Glossary button run through
+    extract_glossary_from_epub.main(), which merges at both ends of its own
+    run, so for those modes this only refreshes the per-book copy that the
+    prompt builder reads beside the glossary. Minimal and Single Pass never
+    reach main(): their glossary is merged here. Single Pass builds its
+    glossary during translation, so its "end" is the end of translation
+    (``final=True``), not the end of the pre-translation phase.
+
+    Silent when the toggle is off, and never raises: an optional extra step
+    must not take down a translation run.
+    """
+    try:
+        import unified_glossary
+        if not unified_glossary.enabled():
+            return
+        import extract_glossary_from_epub as glossary_extractor
+    except Exception as e:
+        print(f"⚠️ Unified glossary unavailable: {e}")
+        return
+    try:
+        single_pass = bool(_single_pass_glossary_mode())
+        if single_pass and stage == "end" and not final:
+            return
+        mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower().replace(" ", "_").replace("-", "_")
+        if mode in ("no_glossary", "noglossary"):
+            return  # nothing is appended in this mode, so no copy is needed
+        target_dirs = [output_dir]
+        if single_pass:
+            glossary_dir, json_path, csv_path, _progress_path = _single_pass_glossary_paths(output_dir)
+            book_path = csv_path if os.path.exists(csv_path) else json_path
+            target_dirs.append(glossary_dir)
+            merge = True
+        else:
+            book_path = glossary_path or find_glossary_file(output_dir)
+            if book_path:
+                target_dirs.append(os.path.dirname(os.path.abspath(book_path)))
+            # Balanced/Full were merged inside main(); Minimal merges here.
+            merge = mode not in ("balanced", "full")
+        entries = []
+        if book_path and os.path.exists(book_path):
+            entries = glossary_extractor._load_glossary_file(book_path, quiet=True)
+        unified_glossary.sync_phase(
+            stage, entries, book_path, target_dirs, chapters=chapters, merge=merge,
+        )
+    except Exception as e:
+        print(f"⚠️ Unified glossary ({stage}) failed, continuing: {e}")
+
+
 def _mark_single_pass_glossary_in_progress(output_dir, chapter_num=None, chapter_file=None):
     """Write a live in-progress row for Single Pass glossary progress."""
     global _single_pass_glossary_active_indices
@@ -14742,7 +14793,7 @@ def is_configured_special_filename(filename):
     special_exact = (
         _parse_special_file_tokens(special_exact_env)
         if special_exact_env
-        else ['cover', 'index', 'glossary', 'glossary_extension']
+        else ['cover', 'index', 'glossary', 'glossary_extension', 'glossary_unified']
     )
     return stem in special_exact or any(keyword in stem for keyword in special_keywords)
 
@@ -17020,7 +17071,7 @@ def _vision_ocr_glossary_should_skip_special_chapter(chapter):
     special_exact = (
         [k.strip().lower() for k in special_exact_env.split(",") if k.strip()]
         if special_exact_env
-        else ["cover", "index", "glossary", "glossary_extension"]
+        else ["cover", "index", "glossary", "glossary_extension", "glossary_unified"]
     )
     return any(stem in special_exact or any(kw in stem for kw in special_keywords) for stem in stems)
 
@@ -23105,6 +23156,51 @@ def build_system_prompt(
             else:
                 defer_batch_log("ℹ️ Glossary skipped for this chapter (no matching entries after compression)")
             
+            def _append_secondary_glossary(system_text, path, label, icon):
+                """Read, optionally compress, and append a companion glossary.
+
+                Shared by the glossary extension and the unified glossary so
+                both get identical treatment: the same compress_glossary call
+                with the same settings snapshot, so every compression
+                sub-toggle (strict gender, translated column, precise
+                matching, shadow log, the allowlist beside the file) applies
+                to both exactly as it does to the main glossary.
+                """
+                title = label[0].upper() + label[1:]
+                try:
+                    defer_batch_log(f"✅ Loading {label} from: {os.path.basename(path)}")
+                    with open(path, "r", encoding="utf-8") as af:
+                        secondary_text = af.read()
+
+                    # Apply same compression logic if enabled
+                    if compress_glossary_enabled and compression_source_text:
+                        try:
+                            from glossary_compressor import compress_glossary
+                            original_add_length = len(secondary_text)
+                            secondary_text = compress_glossary(
+                                secondary_text,
+                                compression_source_text,
+                                glossary_format='auto',
+                                glossary_path=path,
+                                chapter_ref=chapter_ref,
+                                settings=settings,
+                            )
+                            compressed_add_length = len(secondary_text)
+                            add_reduction_pct = ((original_add_length - compressed_add_length) / original_add_length * 100) if original_add_length > 0 else 0
+                            defer_batch_log(f"{icon} {title} compressed: {original_add_length:,} → {compressed_add_length:,} chars ({add_reduction_pct:.1f}% reduction)")
+                        except Exception as e:
+                            print(f"⚠️ {title} compression failed: {e}")
+
+                    # Skip appending if compression returned empty (0 matching entries)
+                    if not secondary_text or not secondary_text.strip():
+                        defer_batch_log(f"ℹ️ {title} skipped for this chapter (no matching entries after compression)")
+                        return system_text
+                    system_text += f"\n\n{secondary_text}"
+                    defer_batch_log(f"✅ {title} appended ({len(secondary_text):,} characters)")
+                except Exception as e:
+                    print(f"⚠️ Failed to load {label}: {e}")
+                return system_text
+
             # Check for glossary extension file (only if ADD_ADDITIONAL_GLOSSARY is enabled)
             add_additional_glossary = str(_request_glossary_setting(
                 settings, "ADD_ADDITIONAL_GLOSSARY", "0"
@@ -23118,39 +23214,31 @@ def build_system_prompt(
                     if os.path.exists(candidate):
                         additional_glossary_path = candidate
                         break
-                
+
                 if additional_glossary_path:
-                    try:
-                        defer_batch_log(f"✅ Loading glossary extension from: {os.path.basename(additional_glossary_path)}")
-                        with open(additional_glossary_path, "r", encoding="utf-8") as af:
-                            additional_glossary_text = af.read()
-                        
-                        # Apply same compression logic if enabled
-                        if compress_glossary_enabled and compression_source_text:
-                            try:
-                                from glossary_compressor import compress_glossary
-                                original_add_length = len(additional_glossary_text)
-                                additional_glossary_text = compress_glossary(
-                                    additional_glossary_text,
-                                    compression_source_text,
-                                    glossary_format='auto',
-                                    glossary_path=additional_glossary_path,
-                                    chapter_ref=chapter_ref,
-                                    settings=settings,
-                                )
-                                compressed_add_length = len(additional_glossary_text)
-                                add_reduction_pct = ((original_add_length - compressed_add_length) / original_add_length * 100) if original_add_length > 0 else 0
-                                defer_batch_log(f"🗃️ Glossary extension compressed: {original_add_length:,} → {compressed_add_length:,} chars ({add_reduction_pct:.1f}% reduction)")
-                            except Exception as e:
-                                print(f"⚠️ Glossary extension compression failed: {e}")
-                        
-                        # Append glossary extension
-                        system += f"\n\n{additional_glossary_text}"
-                        defer_batch_log(f"✅ Glossary extension appended ({len(additional_glossary_text):,} characters)")
-                        
-                    except Exception as e:
-                        print(f"⚠️ Failed to load glossary extension: {e}")
-                
+                    system = _append_secondary_glossary(
+                        system, additional_glossary_path, "glossary extension", "🗃️"
+                    )
+
+            # Cross-novel unified glossary (Enable Unified Glossary). The copy
+            # beside the glossary being sent is "unified minus this book", so
+            # no entry is sent twice; the canonical file is the fallback.
+            if str(_request_glossary_setting(
+                settings, "ENABLE_UNIFIED_GLOSSARY", "0"
+            )) == "1":
+                unified_glossary_path = None
+                try:
+                    import unified_glossary
+                    unified_glossary_path = unified_glossary.resolve_prompt_glossary_path(
+                        actual_glossary_path, settings
+                    )
+                except Exception as e:
+                    print(f"⚠️ Unified glossary lookup failed: {e}")
+                if unified_glossary_path:
+                    system = _append_secondary_glossary(
+                        system, unified_glossary_path, "unified glossary", "📚"
+                    )
+
         except Exception as e:
             print(f"[ERROR] Could not load glossary: {e}")
             import traceback
@@ -26149,6 +26237,9 @@ def main(log_callback=None, stop_callback=None):
     # here. Balanced/Full and the Extract Glossary button both go through
     # main() and are seeded there.
     _seed_single_pass_glossary_with_minimal(chapters, out, check_stop=check_stop)
+    # Unified glossary, start of phase: merge/rebuild for Minimal and Single
+    # Pass, refresh the per-book copy for every mode.
+    _sync_unified_glossary_phase("start", out, chapters=chapters)
 
     if config.OUTPUT_MODE == "audio" and os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1":
         os.environ["ENABLE_AUTO_GLOSSARY"] = "0"
@@ -27200,6 +27291,24 @@ def main(log_callback=None, stop_callback=None):
                         if os.path.exists(additional_glossary):
                             print("⏩ Skipping glossary extension - toggle disabled")
                             break
+
+                # Unified glossary (after the extension, same shape of report)
+                try:
+                    _unified_beside = os.path.join(os.path.dirname(glossary_file), "glossary_unified.csv")
+                    if os.getenv('ENABLE_UNIFIED_GLOSSARY', '0') == '1':
+                        import unified_glossary as _unified_glossary
+                        _unified_path = _unified_glossary.resolve_prompt_glossary_path(glossary_file)
+                        if _unified_path:
+                            print(
+                                f"📑 Unified glossary loaded with {_unified_glossary.count_entries(_unified_path)} entries "
+                                f"({os.path.basename(os.path.dirname(_unified_path))})"
+                            )
+                        else:
+                            print("📑 Unified glossary enabled, but no glossary_unified.csv exists yet")
+                    elif os.path.exists(_unified_beside):
+                        print("⏩ Skipping unified glossary - toggle disabled")
+                except Exception as e:
+                    print(f"⚠️ Failed to inspect unified glossary: {e}")
                     
             except Exception as e:
                 print(f"⚠️ Failed to inspect glossary file: {e}")
@@ -27208,6 +27317,10 @@ def main(log_callback=None, stop_callback=None):
     else:
         if append_glossary_enabled:
             print("📑 No glossary file found")
+
+    # Unified glossary, end of the generation phase (Single Pass finishes at
+    # the end of translation instead).
+    _sync_unified_glossary_phase("end", out)
 
     print("="*50)
     print("🚀 STARTING MAIN TRANSLATION PHASE")
@@ -27352,7 +27465,7 @@ def main(log_callback=None, stop_callback=None):
     _special_exact = (
         [k.strip().lower() for k in _special_exact_env.split(',') if k.strip()]
         if _special_exact_env
-        else ['cover', 'index', 'glossary', 'glossary_extension']
+        else ['cover', 'index', 'glossary', 'glossary_extension', 'glossary_unified']
     )
 
     def _is_configured_special_file(fname):
@@ -33637,6 +33750,9 @@ def main(log_callback=None, stop_callback=None):
         except Exception as e:
             print("❌ EPUB build failed:", e)
             return False
+
+    # Single Pass grew its glossary during translation; this is its end of phase.
+    _sync_unified_glossary_phase("end", out, final=True)
 
     print("TRANSLATION_COMPLETE_SIGNAL")
     return True

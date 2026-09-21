@@ -850,6 +850,12 @@ class GlossarionWeb:
         
         # Additional glossary
         os.environ['ADD_ADDITIONAL_GLOSSARY'] = '1' if config('add_additional_glossary', False) else '0'
+
+        # Unified glossary (cross-novel glossary_unified.csv)
+        os.environ['ENABLE_UNIFIED_GLOSSARY'] = '1' if config('enable_unified_glossary', False) else '0'
+        os.environ['GENERATE_UNIFIED_GLOSSARY'] = '1' if config('generate_unified_glossary', False) else '0'
+        os.environ['UNIFIED_GLOSSARY_SOURCE_LANGUAGE'] = str(config('unified_glossary_source_language', 'auto') or 'auto')
+        os.environ['UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES'] = '1' if config('unified_glossary_combine_all_languages', False) else '0'
         
         # Book title translation
         os.environ['TRANSLATE_BOOK_TITLE'] = '1' if config('translate_book_title', True) else '0'

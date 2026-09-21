@@ -81,6 +81,17 @@ from translation_artifacts import (
 _IS_MACOS = (sys.platform == 'darwin')
 _MACHINE_TRANSLATION_DIR = "Machine_Translation"
 _PROGRESS_SIDECAR_FILENAMES = frozenset({"source_epub.txt"})
+# Files that live in an output folder but are never chapters. The glossary
+# extension and the unified glossary copy are written beside glossary.csv, so
+# they need the same exclusion or the Progress Manager would list them.
+_NON_CHAPTER_OUTPUT_FILENAMES = frozenset({
+    "glossary.csv", "glossary.json",
+    "glossary_extension.csv", "glossary_extension.md",
+    "glossary_extension.txt", "glossary_extension.json",
+    "glossary_unified.csv", "glossary_unified.md",
+    "glossary_unified.txt", "glossary_unified.json",
+    "metadata.json", "styles.css", "rolling_summary.txt", "source_epub.txt",
+})
 # Filesystem watchers can emit several notifications for one atomic JSON save
 # (temporary file creation, replace, directory update). Coalesce those bursts
 # before parsing and reconciling a large progress file.
@@ -19735,7 +19746,7 @@ class RetranslationMixin:
     _SPECIAL_KEYWORDS_DEFAULT = ('title, toc, copyright, preface, nav, message, '
                                  'notice, colophon, dedication, epigraph, foreword, '
                                  'acknowledgment, author, appendix, bibliography')
-    _SPECIAL_EXACT_DEFAULT = 'index, glossary, glossary_extension'
+    _SPECIAL_EXACT_DEFAULT = 'index, glossary, glossary_extension, glossary_unified'
 
     def _special_skip_keyword_lists(self):
         """Active special-file keyword lists (mirrors Other Settings)."""
@@ -20740,7 +20751,7 @@ class RetranslationMixin:
                     and (source_has_translated or not f.lower().endswith("_translated.pdf"))
                     and (source_has_translated or not f.lower().endswith("_translated.html"))
                     and f != "translation_progress.json"
-                    and f.lower() not in ("glossary.csv", "metadata.json", "styles.css", "rolling_summary.txt")
+                    and f.lower() not in _NON_CHAPTER_OUTPUT_FILENAMES
                     and f.casefold() not in _PROGRESS_SIDECAR_FILENAMES
                     and not f.lower().endswith(".epub")
                     and not f.lower().endswith(".cache")
@@ -21482,10 +21493,7 @@ class RetranslationMixin:
         else:
             # Fallback to original logic if no OPF
             # Known non-chapter files that should never appear in the progress list
-            _non_chapter_files = {
-                "glossary.csv", "metadata.json", "styles.css",
-                "rolling_summary.txt", "source_epub.txt",
-            }
+            _non_chapter_files = _NON_CHAPTER_OUTPUT_FILENAMES
             _source_has_translated = "_translated" in os.path.basename(file_path).lower()
             files_to_entries = {}
             for chapter_key, chapter_info in prog.get("chapters", {}).items():
@@ -24267,7 +24275,7 @@ class RetranslationMixin:
                             'bibliography'
                         ]
                         _exact_env = os.environ.get('SPECIAL_FILE_EXACT', '')
-                        special_exact = [k.strip().lower() for k in _exact_env.split(',') if k.strip()] if _exact_env else ['index', 'glossary', 'glossary_extension']
+                        special_exact = [k.strip().lower() for k in _exact_env.split(',') if k.strip()] if _exact_env else ['index', 'glossary', 'glossary_extension', 'glossary_unified']
                         import re as _re_spine
                         ci = 0
                         for opf_pos, href in enumerate(spine_hrefs, start=1):
@@ -31266,7 +31274,7 @@ class RetranslationMixin:
                             # accept any extension except .epub
                             and not f.lower().endswith("_translated.txt")
                             and f != "translation_progress.json"
-                            and f.lower() not in ("glossary.csv", "metadata.json", "styles.css", "rolling_summary.txt")
+                            and f.lower() not in _NON_CHAPTER_OUTPUT_FILENAMES
                             and f.casefold() not in _PROGRESS_SIDECAR_FILENAMES
                             and not f.lower().endswith(".epub")
                             and not f.lower().endswith(".cache")
@@ -31903,10 +31911,7 @@ class RetranslationMixin:
         show_special = data.get('show_special_files_state', False)
         
         # Known non-chapter files that should never appear in the progress list
-        _non_chapter_files = {
-            "glossary.csv", "metadata.json", "styles.css",
-            "rolling_summary.txt", "source_epub.txt",
-        }
+        _non_chapter_files = _NON_CHAPTER_OUTPUT_FILENAMES
         _source_has_translated = "_translated" in os.path.basename(file_path).lower()
         files_to_entries = {}
         for chapter_key, chapter_info in prog.get("chapters", {}).items():

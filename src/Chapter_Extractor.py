@@ -61,7 +61,7 @@ _DEFAULT_SPECIAL_KEYWORDS = [
     'notice', 'colophon', 'dedication', 'epigraph', 'foreword',
     'acknowledgment', 'author', 'appendix', 'bibliography'
 ]
-_DEFAULT_SPECIAL_EXACT = ['cover', 'index', 'glossary', 'glossary_extension']
+_DEFAULT_SPECIAL_EXACT = ['cover', 'index', 'glossary', 'glossary_extension', 'glossary_unified']
 
 _REMOTE_CACHE_IMAGE_EXTENSIONS = {
     '.jpg', '.jpeg', '.png', '.gif', '.svg', '.bmp', '.webp'

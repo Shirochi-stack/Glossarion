@@ -160,6 +160,11 @@ def set_all_env_vars(config):
         'new' if _get('compress_glossary_precise_matching', False)
         else ('shadow' if _get('compress_glossary_shadow_log', False) else 'legacy')
     )
+    # Unified glossary (cross-novel glossary_unified.csv)
+    os.environ['ENABLE_UNIFIED_GLOSSARY'] = '1' if _get('enable_unified_glossary', False) else '0'
+    os.environ['GENERATE_UNIFIED_GLOSSARY'] = '1' if _get('generate_unified_glossary', False) else '0'
+    os.environ['UNIFIED_GLOSSARY_SOURCE_LANGUAGE'] = str(_get('unified_glossary_source_language', 'auto') or 'auto')
+    os.environ['UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES'] = '1' if _get('unified_glossary_combine_all_languages', False) else '0'
     os.environ['GLOSSARY_INCLUDE_ALL_CHARACTERS'] = '1' if _get('glossary_include_all_characters', True) else '0'
 
     # Glossary append prompt

@@ -4342,7 +4342,7 @@ class EPUBCompiler:
         )
         exact_text = os.environ.get(
             "SPECIAL_FILE_EXACT",
-            "index, glossary, glossary_extension",
+            "index, glossary, glossary_extension, glossary_unified",
         )
         keywords = [
             token.strip().casefold()

@@ -354,6 +354,7 @@ def _special_file_sets():
         "index",
         "glossary",
         "glossary_extension",
+        "glossary_unified",
     ]
     return keywords, exact
 

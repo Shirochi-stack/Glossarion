@@ -11119,13 +11119,15 @@ def _create_processing_options_section(self, parent):
     
     # --- Collapsible keywords panel ---
     _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, copyright, preface, nav, message, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
-    _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension'
-    
+    _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension, glossary_unified'
+
     # Initialize vars from config
     if not hasattr(self, 'special_file_keywords_var'):
         self.special_file_keywords_var = self.config.get('special_file_keywords', _DEFAULT_SPECIAL_KEYWORDS)
     if not hasattr(self, 'special_file_exact_var'):
-        self.special_file_exact_var = self.config.get('special_file_exact', _DEFAULT_SPECIAL_EXACT)
+        _saved_exact = self.config.get('special_file_exact', _DEFAULT_SPECIAL_EXACT)
+        _upgrade_exact = getattr(self, '_upgrade_special_file_exact', None)
+        self.special_file_exact_var = _upgrade_exact(_saved_exact) if callable(_upgrade_exact) else _saved_exact
     
     keywords_panel = QWidget()
     keywords_panel.setVisible(False)
@@ -11181,7 +11183,7 @@ def _create_processing_options_section(self, parent):
     keywords_panel_v.addWidget(kw_exact_label)
     
     kw_exact_edit = QTextEdit()
-    kw_exact_edit.setPlaceholderText("e.g. index, glossary, glossary_extension")
+    kw_exact_edit.setPlaceholderText("e.g. index, glossary, glossary_extension, glossary_unified")
     kw_exact_edit.setText(self.special_file_exact_var)
     kw_exact_edit.setFixedHeight(40)
     kw_exact_edit.setStyleSheet("""

@@ -14025,6 +14025,10 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             self.config['fuzzy_auto_mapping'] = False
 
         self.add_additional_glossary_var = self.config.get('add_additional_glossary', False)
+        self.enable_unified_glossary_var = self.config.get('enable_unified_glossary', False)
+        self.generate_unified_glossary_var = self.config.get('generate_unified_glossary', False)
+        self.unified_glossary_source_language_var = str(self.config.get('unified_glossary_source_language', 'auto') or 'auto')
+        self.unified_glossary_combine_all_languages_var = self.config.get('unified_glossary_combine_all_languages', False)
         self.glossary_use_smart_filter_var = self.config.get('glossary_use_smart_filter', True)
         self.glossary_min_frequency_var = str(self.config.get('glossary_min_frequency', 2))
         self.glossary_max_names_var = str(self.config.get('glossary_max_names', 50))
@@ -16386,9 +16390,11 @@ Recent translations to summarize:
         self.use_title_var = not self.skip_title_tag_translation_var
         # Custom special file keywords (comma-separated)
         _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, copyright, preface, nav, message, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
-        _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension'
+        _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension, glossary_unified'
         self.special_file_keywords_var = self.config.get('special_file_keywords', _DEFAULT_SPECIAL_KEYWORDS)
-        self.special_file_exact_var = self.config.get('special_file_exact', _DEFAULT_SPECIAL_EXACT)
+        self.special_file_exact_var = self._upgrade_special_file_exact(
+            self.config.get('special_file_exact', _DEFAULT_SPECIAL_EXACT)
+        )
         # Numbered HTML override (must be available before Progress Manager opens)
         self.translate_all_numbered_html_var = self.config.get('translate_all_numbered_html', True)
         self.never_consider_in_between_files_as_special_var = self.config.get(
@@ -26788,6 +26794,58 @@ Recent translations to summarize:
         )
         return '1' if enabled else '0'
 
+    def _unified_glossary_env_dict(self):
+        """The four unified-glossary variables, for every env export site.
+
+        One helper rather than four literals per site, so the three export
+        sites (two dicts and the tuple list) cannot drift apart.
+        """
+        enabled = self._live_bool_setting(
+            'enable_unified_glossary_checkbox',
+            'enable_unified_glossary_var',
+            'enable_unified_glossary',
+            False,
+        )
+        generate = self._live_bool_setting(
+            'generate_unified_glossary_checkbox',
+            'generate_unified_glossary_var',
+            'generate_unified_glossary',
+            False,
+        )
+        combine_all = self._live_bool_setting(
+            'unified_combine_all_languages_checkbox',
+            'unified_glossary_combine_all_languages_var',
+            'unified_glossary_combine_all_languages',
+            False,
+        )
+        source_language = str(
+            getattr(self, 'unified_glossary_source_language_var', None)
+            or self.config.get('unified_glossary_source_language', 'auto')
+            or 'auto'
+        ).strip().lower() or 'auto'
+        return {
+            'ENABLE_UNIFIED_GLOSSARY': '1' if enabled else '0',
+            'GENERATE_UNIFIED_GLOSSARY': '1' if generate else '0',
+            'UNIFIED_GLOSSARY_SOURCE_LANGUAGE': source_language,
+            'UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES': '1' if combine_all else '0',
+        }
+
+    _LEGACY_SPECIAL_FILE_EXACT_TOKENS = frozenset({'index', 'glossary', 'glossary_extension'})
+
+    def _upgrade_special_file_exact(self, value):
+        """Upgrade a saved exact-match list that is still the old default.
+
+        The default gained 'glossary_unified' with the unified glossary.
+        Anyone who opened Other Settings has the old default persisted in
+        config.json and exported to SPECIAL_FILE_EXACT, which would shadow
+        the new default for good. Customised lists are left untouched.
+        """
+        text = str(value or '')
+        tokens = {token.strip().lower() for token in text.split(',') if token.strip()}
+        if tokens == self._LEGACY_SPECIAL_FILE_EXACT_TOKENS:
+            return 'index, glossary, glossary_extension, glossary_unified'
+        return text
+
     def _on_context_mode_changed(self, index=None):
         """Map the Context Mode combo onto the existing runtime config flags."""
         mode = 'off'
@@ -35698,6 +35756,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
             'ADD_ADDITIONAL_GLOSSARY': "1" if self.config.get('add_additional_glossary', False) else "0",
             'ADDITIONAL_GLOSSARY_PATH': self.config.get('additional_glossary_path', ''),
+            **self._unified_glossary_env_dict(),
             'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var else "0",
 
             'BREAK_SPLIT_COUNT': str(self.break_split_count_var) if hasattr(self, 'break_split_count_var') and self.break_split_count_var else '',
@@ -37616,6 +37675,7 @@ Important rules:
                     'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
                     'GLOSSARY_SKIP_TITLE_HEADER_ONLY': self._glossary_skip_title_header_only_env_value(),
                     'GLOSSARY_ADD_MINIMAL_PASS': self._glossary_add_minimal_pass_env_value(),
+                    **self._unified_glossary_env_dict(),
                     'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL': '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', True)) else '0',
                     # Optional assistant prefill prompt
                     'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',
@@ -47002,6 +47062,10 @@ Important rules:
                 ('append_glossary_auto_load', ['append_glossary_auto_load_checkbox', 'append_glossary_auto_load_var'], False, bool),
                 ('add_additional_glossary', ['add_additional_glossary_checkbox', 'add_additional_glossary_var'], False, bool),
                 ('additional_glossary_path', [('config', 'additional_glossary_path')], '', str),
+                ('enable_unified_glossary', ['enable_unified_glossary_checkbox', 'enable_unified_glossary_var'], False, bool),
+                ('generate_unified_glossary', ['generate_unified_glossary_checkbox', 'generate_unified_glossary_var'], False, bool),
+                ('unified_glossary_source_language', ['unified_glossary_source_language_var'], 'auto', str),
+                ('unified_glossary_combine_all_languages', ['unified_combine_all_languages_checkbox', 'unified_glossary_combine_all_languages_var'], False, bool),
                 ('compress_glossary_prompt', ['compress_glossary_checkbox', 'compress_glossary_prompt_var'], True, bool),
                 ('compress_glossary_strict_gender_matching', ['strict_gender_compression_checkbox', 'compress_glossary_strict_gender_matching_var'], False, bool),
                 ('compress_glossary_consider_translated_column', ['consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column_var'], False, bool),
@@ -48293,6 +48357,7 @@ Important rules:
                 ('GLOSSARY_ENABLE_CHAPTER_SPLIT', env_glossary_chapter_split),
                 ('GLOSSARY_SKIP_TITLE_HEADER_ONLY', self._glossary_skip_title_header_only_env_value()),
                 ('GLOSSARY_ADD_MINIMAL_PASS', self._glossary_add_minimal_pass_env_value()),
+                *self._unified_glossary_env_dict().items(),
                 ('GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', True)) else '0'),
 
                 # Safety/merge toggles

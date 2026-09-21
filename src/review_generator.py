@@ -69,7 +69,7 @@ _DEFAULT_SPECIAL_PATTERNS = [
     'foreword', 'acknowledgment', 'author', 'appendix',
     'bibliography', 'titlepage', 'halftitle', 'frontmatter', 'backmatter',
 ]
-_DEFAULT_SPECIAL_EXACT = ['index', 'glossary', 'glossary_extension']
+_DEFAULT_SPECIAL_EXACT = ['index', 'glossary', 'glossary_extension', 'glossary_unified']
 
 
 def _get_special_keywords():
