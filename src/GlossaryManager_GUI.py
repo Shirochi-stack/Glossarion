@@ -1900,6 +1900,19 @@ class GlossaryManagerMixin:
         except Exception:
             pass
 
+    def _on_glossary_manager_multipass_exclude_matching_toggle(self, state=None):
+        """Sync the multipass already-applied glossary exclusion to config and environment."""
+        try:
+            enabled = bool(self.multipass_exclude_matching_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['compress_glossary_multipass_exclude_matching'] = enabled
+            self.compress_glossary_multipass_exclude_matching_var = enabled
+            os.environ['COMPRESS_GLOSSARY_MULTIPASS_EXCLUDE_MATCHING'] = '1' if enabled else '0'
+        except Exception:
+            pass
+
     def _on_glossary_manager_consider_translated_compression_toggle(self, state=None):
         """Sync translated-column glossary compression matching to config and environment."""
         try:
@@ -1927,6 +1940,7 @@ class GlossaryManagerMixin:
                     ('fuzzy_auto_mapping_checkbox', 'fuzzy_auto_mapping', False),
                     ('consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column', False),
                     ('precise_matching_checkbox', 'compress_glossary_precise_matching', True),
+                    ('multipass_exclude_matching_checkbox', 'compress_glossary_multipass_exclude_matching', True),
                     ('shadow_log_matching_checkbox', 'compress_glossary_shadow_log', False),
                     ('glossary_add_minimal_pass_checkbox', 'glossary_add_minimal_pass', False),
                     ('enable_unified_glossary_checkbox', 'enable_unified_glossary', False),
@@ -2433,6 +2447,7 @@ class GlossaryManagerMixin:
                     ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
                     ('consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column_var'),
                     ('precise_matching_checkbox', 'compress_glossary_precise_matching_var'),
+                    ('multipass_exclude_matching_checkbox', 'compress_glossary_multipass_exclude_matching_var'),
                     ('shadow_log_matching_checkbox', 'compress_glossary_shadow_log_var'),
                     ('glossary_add_minimal_pass_checkbox', 'glossary_add_minimal_pass_var'),
                     ('enable_unified_glossary_checkbox', 'enable_unified_glossary_var'),
@@ -2488,6 +2503,9 @@ class GlossaryManagerMixin:
                             # Both checkboxes feed one env var; resolve them together.
                             self._apply_glossary_match_engine_env()
                             self._apply_strict_matching_scope()
+                        elif checkbox_name == 'multipass_exclude_matching_checkbox':
+                            self.config['compress_glossary_multipass_exclude_matching'] = bool(checked)
+                            os.environ['COMPRESS_GLOSSARY_MULTIPASS_EXCLUDE_MATCHING'] = '1' if checked else '0'
                         elif checkbox_name == 'shadow_log_matching_checkbox':
                             self.config['compress_glossary_shadow_log'] = bool(checked)
                             self._apply_glossary_match_engine_env()
@@ -5075,6 +5093,30 @@ Do not stop after the glossary."""
         precise_matching_hint = QLabel("(Recommended: narrower, more accurate compression; default ON, turn OFF for the old loose matching)")
         precise_matching_layout.addWidget(precise_matching_hint)
         precise_matching_layout.addStretch()
+
+        multipass_exclude_widget = QWidget()
+        multipass_exclude_layout = QHBoxLayout(multipass_exclude_widget)
+        multipass_exclude_layout.setContentsMargins(20, 0, 0, 15)
+        auto_layout.addWidget(multipass_exclude_widget)
+
+        if not hasattr(self, 'multipass_exclude_matching_checkbox'):
+            self.multipass_exclude_matching_checkbox = self._create_styled_checkbox("Multipass: Exclude Already-Applied Entries")
+            self.multipass_exclude_matching_checkbox.setChecked(self.config.get('compress_glossary_multipass_exclude_matching', True))
+        if not getattr(self.multipass_exclude_matching_checkbox, '_glossary_manager_sync_connected', False):
+            self.multipass_exclude_matching_checkbox.stateChanged.connect(self._on_glossary_manager_multipass_exclude_matching_toggle)
+            self.multipass_exclude_matching_checkbox._glossary_manager_sync_connected = True
+        self.multipass_exclude_matching_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Multipass refinement (Full, Full + raw, Failed, Partial, Partial.b, Partial.b2) always compresses the "
+            "glossary against the RAW chapter, so Consider Translated Column is not needed for it.\n"
+            "When ON, entries whose translated name already appears in the translated output are left out too, "
+            "so each request only carries the entries the translation still needs.\n"
+            "Default ON."
+        ))
+        multipass_exclude_layout.addWidget(self.multipass_exclude_matching_checkbox)
+
+        multipass_exclude_hint = QLabel("(Multipass only sends glossary entries whose translation is missing from the output; default ON)")
+        multipass_exclude_layout.addWidget(multipass_exclude_hint)
+        multipass_exclude_layout.addStretch()
 
         shadow_log_widget = QWidget()
         shadow_log_layout = QHBoxLayout(shadow_log_widget)

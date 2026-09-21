@@ -156,6 +156,7 @@ def set_all_env_vars(config):
     os.environ['COMPRESS_GLOSSARY_STRICT_MATCHING_MODE'] = str(_get('compress_glossary_strict_matching_mode', 'all') or 'all')
     os.environ['COMPRESS_GLOSSARY_STRICT_MATCHING_CUSTOM_TYPES'] = json.dumps(_get('compress_glossary_strict_matching_custom_types', []) or [], ensure_ascii=False)
     os.environ['COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN'] = '1' if _get('compress_glossary_consider_translated_column', False) else '0'
+    os.environ['COMPRESS_GLOSSARY_MULTIPASS_EXCLUDE_MATCHING'] = '1' if _get('compress_glossary_multipass_exclude_matching', True) else '0'
     # Two checkboxes resolve into one engine value; 'new' wins over 'shadow'.
     os.environ['GLOSSARY_MATCH_ENGINE'] = (
         'new' if _get('compress_glossary_precise_matching', True)

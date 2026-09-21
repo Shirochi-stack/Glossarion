@@ -77,6 +77,7 @@ DEFAULT_CONFIG = {
     'compress_glossary_strict_matching_mode': 'all',
     'compress_glossary_strict_matching_custom_types': [],
     'compress_glossary_consider_translated_column': False,
+    'compress_glossary_multipass_exclude_matching': True,
     'compress_glossary_precise_matching': True,
     'compress_glossary_shadow_log': False,
     'enable_unified_glossary': False,

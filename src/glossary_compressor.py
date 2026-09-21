@@ -47,6 +47,10 @@ from glossary_matching import (
     parse_strict_scope,
     prepare_source_text,
 )
+from glossary_usage import (
+    _output_contains_term_prepared,
+    prepare_translated_output_text,
+)
 
 # Serialize glossary compression across translation worker threads.
 # Compression is pure-Python (terms x chapter-text substring scans); when
@@ -263,10 +267,10 @@ class _MatchContext:
     __slots__ = ("engine", "cfg", "prepared", "recorder", "source_text",
                  "glossary_path", "chapter_ref", "always_keep", "always_drop",
                  "whole_term_only", "min_term_length", "matcher", "index",
-                 "exclude", "keep_all")
+                 "exclude", "keep_all", "prepared_translated", "excluded_applied")
 
     def __init__(self, source_text, glossary_path=None, chapter_ref=None,
-                 exclude_raw_names=None, keep_all=False):
+                 exclude_raw_names=None, keep_all=False, translated_text=None):
         self.engine = _match_engine()
         self.source_text = source_text or ""
         self.glossary_path = glossary_path
@@ -276,6 +280,13 @@ class _MatchContext:
         self.recorder = None
         self.always_keep = frozenset()
         self.always_drop = frozenset()
+        # Translated output of the same chapter (multipass): an entry whose
+        # translation is already in it is applied and is not sent again.
+        self.prepared_translated = (
+            prepare_translated_output_text(translated_text)
+            if translated_text and str(translated_text).strip() else None
+        )
+        self.excluded_applied = 0
         self.whole_term_only = (
             _is_unified_glossary_path(glossary_path) and _unified_whole_term_enabled()
         )
@@ -324,6 +335,12 @@ class _MatchContext:
         """First-pass hook: every raw name in the glossary, before any verdict."""
         if self.index is not None and raw_name:
             self.index.add(raw_name)
+
+    def translation_applied(self, translated_name):
+        """Whether the entry's translation already appears in the translated output."""
+        if self.prepared_translated is None or not translated_name:
+            return False
+        return _output_contains_term_prepared(self.prepared_translated, translated_name)
 
     def decide(self, term, is_character=False, *, translated_name="", entry_type=""):
         """Return whether this term counts as present in the chapter."""
@@ -398,16 +415,31 @@ def _run_with_zero_match_relaxation(ctx, run, count_matches, label):
     Only the tiered engine can hit the new cliff, so the legacy and shadow
     paths run exactly once and are bit-for-bit unchanged.
     """
-    result = run()
+    # Entries dropped because their translation is already applied did match
+    # the chapter, so they count against the zero-match cliff: a chapter whose
+    # every term is applied is not a chapter with no glossary matches.
+    def _attempt():
+        ctx.excluded_applied = 0
+        value = run()
+        return value, ctx.excluded_applied
+
+    def _matched(attempt):
+        return count_matches(attempt[0]) + attempt[1]
+
+    def _finish(attempt):
+        ctx.excluded_applied = attempt[1]
+        return attempt[0]
+
+    result = _attempt()
     if ctx.engine != "new" or ctx.cfg is None or not _relax_on_zero_enabled():
-        return result
+        return _finish(result)
     if getattr(ctx, "whole_term_only", False):
         # For the unified glossary "nothing from other novels is in this
         # chapter" is a normal result, not a cliff, and relaxing would switch
         # the part-of-a-name rule straight back on.
-        return result
-    if count_matches(result) > 0:
-        return result
+        return _finish(result)
+    if _matched(result) > 0:
+        return _finish(result)
 
     original_floor = ctx.cfg.min_tier
     original_scope = ctx.matcher.scope
@@ -416,26 +448,26 @@ def _run_with_zero_match_relaxation(ctx, run, count_matches, label):
             # First rung: a part of a multi-word entry counts again. Better a
             # loosely matched glossary than a chapter sent with none at all.
             ctx.matcher.scope = NO_STRICT_SCOPE
-            relaxed = run()
-            if count_matches(relaxed) > 0:
+            relaxed = _attempt()
+            if _matched(relaxed) > 0:
                 print(
                     f"ℹ️ Glossary compression: 0 {label} matches as whole terms, "
                     "relaxed to parts of multi-word entries"
                 )
-                return relaxed
+                return _finish(relaxed)
         while ctx.cfg.min_tier > TIER_WEAK:
             ctx.cfg.min_tier -= 1
-            relaxed = run()
-            if count_matches(relaxed) > 0:
+            relaxed = _attempt()
+            if _matched(relaxed) > 0:
                 print(
                     f"ℹ️ Glossary compression: 0 {label} matches at tier "
                     f"{ctx.cfg.min_tier + 1}, relaxed to tier {ctx.cfg.min_tier}"
                 )
-                return relaxed
+                return _finish(relaxed)
     finally:
         ctx.cfg.min_tier = original_floor
         ctx.matcher.scope = original_scope
-    return result
+    return _finish(result)
 
 
 def _active_match_context(source_text):
@@ -699,6 +731,8 @@ def compress_glossary(
     settings=None,
     exclude_raw_names=None,
     keep_all=False,
+    translated_text=None,
+    stats=None,
 ):
     """Run compression with an optional thread-safe request settings snapshot.
 
@@ -707,16 +741,22 @@ def compress_glossary(
     leaves out what the book's own glossary already sends. ``keep_all``
     keeps every other entry, for callers that want that filter without
     compression.
+
+    ``translated_text`` is the translated output of the same chapter. When
+    given, an entry that matches the source but whose translated name is
+    already in that output is dropped too: it is applied, so a refinement
+    pass has nothing to do for it. ``stats`` (a dict) receives
+    ``excluded_applied``, the number of entries dropped that way.
     """
     token = _ACTIVE_GLOSSARY_SETTINGS.set(settings)
     # Built after the settings token so the engine choice and the matcher
     # knobs come from this request's snapshot, not the ambient environment.
-    match_token = _ACTIVE_MATCH_CONTEXT.set(
-        _MatchContext(
-            source_text, glossary_path=glossary_path, chapter_ref=chapter_ref,
-            exclude_raw_names=exclude_raw_names, keep_all=keep_all,
-        )
+    ctx = _MatchContext(
+        source_text, glossary_path=glossary_path, chapter_ref=chapter_ref,
+        exclude_raw_names=exclude_raw_names, keep_all=keep_all,
+        translated_text=translated_text,
     )
+    match_token = _ACTIVE_MATCH_CONTEXT.set(ctx)
     try:
         return _compress_glossary_impl(
             glossary_content,
@@ -731,6 +771,8 @@ def compress_glossary(
         # handles by appending nothing -- never the uncompressed glossary.
         return ""
     finally:
+        if isinstance(stats, dict):
+            stats["excluded_applied"] = ctx.excluded_applied
         _ACTIVE_MATCH_CONTEXT.reset(match_token)
         _ACTIVE_GLOSSARY_SETTINGS.reset(token)
 
@@ -850,7 +892,14 @@ def _compress_csv_glossary(csv_content, source_text, glossary_path=None, chapter
         # which is what caused multipass/refinement to ship the full ~72k-char
         # glossary. An empty result makes build_system_prompt skip the glossary
         # append entirely.
-        print("ℹ️ Glossary compression: CSV produced 0 matching entries for this chapter — sending no glossary entries")
+        excluded_applied = _active_match_context(source_text).excluded_applied
+        if excluded_applied:
+            print(
+                f"ℹ️ Glossary compression: all {excluded_applied} matching entries are already "
+                "applied in the translated output — sending no glossary entries"
+            )
+        else:
+            print("ℹ️ Glossary compression: CSV produced 0 matching entries for this chapter — sending no glossary entries")
         return ""  # Return empty so the caller doesn't append a header-only/full glossary
 
     return result
@@ -920,13 +969,13 @@ def _entry_matches_source(source_text, raw_name, translated_name="", is_characte
     if ctx.exclude and unicodedata.normalize("NFC", raw_name).casefold() in ctx.exclude:
         # Already sent by the book's own glossary in this same request.
         return False
-    if raw_name and ctx.decide(
+    matched = bool(raw_name) and ctx.decide(
         raw_name, is_character,
         translated_name=translated_name, entry_type=entry_type,
-    ):
-        return True
+    )
     if (
-        translated_name
+        not matched
+        and translated_name
         and translated_name != raw_name
         and _consider_translated_column_enabled()
         and ctx.decide(
@@ -934,8 +983,13 @@ def _entry_matches_source(source_text, raw_name, translated_name="", is_characte
             translated_name=translated_name, entry_type=entry_type,
         )
     ):
-        return True
-    return False
+        matched = True
+    if not matched:
+        return False
+    if translated_name and translated_name != raw_name and ctx.translation_applied(translated_name):
+        ctx.excluded_applied += 1
+        return False
+    return True
 
 
 def _compress_token_efficient_format(lines, source_text, glossary_path=None, chapter_ref=None):

@@ -60,6 +60,7 @@ _GLOSSARY_CONFIG_OPTIONS = {
     'compress_glossary_strict_matching_mode': 'COMPRESS_GLOSSARY_STRICT_MATCHING_MODE',
     'compress_glossary_strict_matching_custom_types': 'COMPRESS_GLOSSARY_STRICT_MATCHING_CUSTOM_TYPES',
     'compress_glossary_consider_translated_column': 'COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN',
+    'compress_glossary_multipass_exclude_matching': 'COMPRESS_GLOSSARY_MULTIPASS_EXCLUDE_MATCHING',
     'output_language': 'OUTPUT_LANGUAGE',
     'model': 'MODEL',
 }

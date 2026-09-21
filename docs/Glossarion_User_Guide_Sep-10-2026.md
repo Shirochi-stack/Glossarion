@@ -497,6 +497,7 @@ Open it with **Glossary Manager** / **Extract Glossary**.
 - **Compress Glossary Prompt** ✅ — "Only send glossary entries that appear in the current text. Saves tokens and cost; recommended ON."
 - **Consider Translated Column** — also keeps an entry when the *translated* name appears in the source text, not just the original. Default OFF.
 - **Precise Term Matching** ✅ — the smarter matcher described just below, with a **Whole term for** dropdown beside it (**All** by default). Default ON; turn it OFF to go back to the old plain-substring check. *The old **Strict Gender Entry Matching** checkbox is gone — it was folded into this dropdown.*
+- **Multipass: Exclude Already-Applied Entries** ✅ — for the refinement pass (every mode: Full, Full + raw, Failed, Partial, Partial.b, Partial.b2). Multipass always compresses the glossary against the **raw** chapter, so Consider Translated Column is not needed for it; with this ON, entries whose translated name is already in the translated output are dropped as well, so each request only carries the entries the translation still needs. Default ON. *This changed the default refinement prompts — click **Reset to Default** on them once to pick up the new wording.*
 - **Log Match Differences** — with Precise Term Matching OFF, preview what it *would* change, without changing anything. Default OFF.
 - **Add Additional Glossary** — always include an extra external glossary file (CSV/JSON/TXT/PDF/MD).
 - **Enable Unified Glossary** — keep one deduplicated `glossary_unified.csv` shared by *all* your novels (per source and target language) and send it alongside the book's own glossary. Described below. Default OFF.
@@ -807,6 +808,8 @@ Turn on a second pass that re-reads and improves your finished translation:
 - **Partial / Partial.b / Partial.b2** — increasingly targeted/batched passes that fix only the specific problem spots (e.g. chapters with leftover foreign characters), bundling them efficiently to save requests.
 
 > **✅ DO try `Partial.b` refinement** as a cheap cleanup: it only uses requests on chapters with leftover raw characters.
+
+**The glossary during refinement.** Every mode compresses the glossary against the *raw* chapter (not the translated HTML), then — with **Multipass: Exclude Already-Applied Entries** on (Section 8, default ON) — leaves out every entry whose translation is already in the output. What the model receives is the short list of terms the translation still gets wrong or missing; the log line shows how many were excluded as already applied. The default refinement prompts tell the model to treat that list exactly that way; if you customized yours, click **Reset to Default** to pick up the new wording.
 
 ### Review generator
 

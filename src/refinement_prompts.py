@@ -1,12 +1,23 @@
 # -*- coding: utf-8 -*-
 """Default prompt text for refinement and multipass refinement modes."""
 
+# Every multipass mode compresses the glossary against the raw chapter and,
+# by default, leaves out the entries whose translation the output already
+# carries, so what reaches the model is the list of entries still to apply.
+MULTIPASS_GLOSSARY_NOTE = (
+    "If a glossary is appended below, it lists only the entries this text still needs: terms that "
+    "appear in the raw source but whose glossary translation is missing from the current translated "
+    "text. Apply each listed translation wherever its term occurs, and keep every other name and term "
+    "exactly as it is already translated."
+)
+
 DEFAULT_REFINEMENT_SYSTEM_PROMPT = (
     "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
     "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
     "Retain the original meaning of the translation, while retaining the original translation style. "
     "Convert any foreign onomatopoeia to romaji. "
     "Return only the refined HTML.\n\n"
+    f"{MULTIPASS_GLOSSARY_NOTE}\n\n"
     "{QA_Issues}"
 )
 DEFAULT_REFINEMENT_USER_PROMPT = ""
@@ -20,6 +31,7 @@ DEFAULT_REFINEMENT_FULL_WITH_RAW_SYSTEM_PROMPT = (
     "terminology while improving clarity, flow, consistency, and readability. Preserve the translated "
     "HTML structure, tags, images, links, ids, and intended formatting. Convert any foreign onomatopoeia "
     "to romaji. Return only the refined translated HTML; do not return, quote, or reproduce the raw source HTML.\n\n"
+    f"{MULTIPASS_GLOSSARY_NOTE}\n\n"
     "{QA_Issues}"
 )
 DEFAULT_REFINEMENT_FULL_WITH_RAW_USER_PROMPT = ""
@@ -41,6 +53,7 @@ DEFAULT_REFINEMENT_PARTIAL_SYSTEM_PROMPT = (
     "The QA issue(s) below identify leftover source-language text in this HTML fragment. "
     "Translate that leftover text into {target_lang} while preserving the surrounding HTML. "
     "If placeholder HTML tags are present, retain every placeholder opening/closing tag and its attributes exactly.\n"
+    f"{MULTIPASS_GLOSSARY_NOTE}\n"
     "{QA_Issues}"
 )
 DEFAULT_REFINEMENT_PARTIAL_USER_PROMPT = ""
@@ -58,6 +71,7 @@ DEFAULT_REFINEMENT_PARTIAL_B_SYSTEM_PROMPT = (
     "Only refine or translate the content inside each <glossarion> tag. "
     "Example placeholder to preserve exactly, including the id value: "
     "<glossarion id=\"spine-00012-0001\">...HTML fragment...</glossarion>\n"
+    f"{MULTIPASS_GLOSSARY_NOTE}\n"
     "{QA_Issues}"
 )
 DEFAULT_REFINEMENT_PARTIAL_B_USER_PROMPT = ""
@@ -81,6 +95,7 @@ DEFAULT_REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT = (
     "qa_issue_prompt lists source-language text. Only refine or translate the content inside each <glossarion> tag. "
     "Example html value to preserve exactly around the refined content, with the same value as the request id: "
     "<glossarion id=\"spine-00012-0001\">...HTML fragment...</glossarion>\n"
+    f"{MULTIPASS_GLOSSARY_NOTE}\n"
     "{QA_Issues}"
 )
 DEFAULT_REFINEMENT_PARTIAL_B2_USER_PROMPT = ""

@@ -13641,6 +13641,13 @@ def _request_glossary_setting(settings, name, default=None):
     return os.getenv(name, default)
 
 
+def _multipass_exclude_applied_glossary_entries():
+    """Multipass sends only glossary entries not yet applied in the translated output."""
+    return str(os.getenv("COMPRESS_GLOSSARY_MULTIPASS_EXCLUDE_MATCHING", "1")).strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
 def find_glossary_file(
     output_dir,
     *,
@@ -20662,7 +20669,35 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             user_prompt = getattr(config, "REFINEMENT_USER_PROMPT", "").strip()
         return system_prompt, user_prompt
 
-    def _build_refinement_messages(html_content, *, partial=False, partial_kind="tags", enhanced=False, qa_entry=None, partial_mode="partial", raw_content=None):
+    _refinement_compression_raw_cache = {}
+
+    def _refinement_compression_raw(chapters):
+        """Raw source markup of the chapter(s) behind one refinement request.
+
+        Every multipass mode compresses the glossary against the raw chapter:
+        the translated HTML rarely carries raw names, so matching it alone
+        kept almost nothing unless Consider Translated Column was on.
+        Cached per chapter so per-fragment modes resolve it once.
+        """
+        parts = []
+        seen = set()
+        for chapter in chapters or ():
+            if not isinstance(chapter, dict) or id(chapter) in seen:
+                continue
+            seen.add(id(chapter))
+            raw = _refinement_compression_raw_cache.get(id(chapter))
+            if raw is None:
+                try:
+                    raw = str(_original_markup_for_copy(chapter, out) or "")
+                except Exception as exc:
+                    print(f"⚠️ Raw source unavailable for glossary compression: {exc}")
+                    raw = ""
+                _refinement_compression_raw_cache[id(chapter)] = raw
+            if raw.strip():
+                parts.append(raw)
+        return "\n\n".join(parts)
+
+    def _build_refinement_messages(html_content, *, partial=False, partial_kind="tags", enhanced=False, qa_entry=None, partial_mode="partial", raw_content=None, chapters=None):
         prompt_mode = partial_mode if partial else (
             "failed" if multipass_failed_mode else (
                 "full_with_raw" if multipass_full_with_raw_mode else "full"
@@ -20696,13 +20731,23 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             and os.path.exists(glossary_path)
             and os.getenv('DISABLE_GLOSSARY_TRANSLATION') != '1'
         ):
+            raw_for_compression = (
+                str(raw_content)
+                if raw_content and str(raw_content).strip()
+                else _refinement_compression_raw(chapters)
+            )
             refine_system = build_system_prompt(
                 refine_system,
                 glossary_path,
                 source_text=(
-                    f"{raw_content}\n\n{html_content}"
-                    if raw_content and str(raw_content).strip()
+                    f"{raw_for_compression}\n\n{html_content}"
+                    if raw_for_compression.strip()
                     else html_content
+                ),
+                # Only entries the translated output does not carry yet are
+                # worth a refinement request.
+                glossary_translated_text=(
+                    html_content if _multipass_exclude_applied_glossary_entries() else None
                 ),
             )
 
@@ -21113,6 +21158,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                             partial=True,
                             partial_kind=target_kind,
                             qa_entry=fragment_qa_entry,
+                            chapters=[chapter],
                         )
                         partial_requests.append((target_index, target, messages))
 
@@ -21155,6 +21201,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                             partial_kind="batch",
                             qa_entry=pre_existing_qa_source_entry or pre_existing_entry,
                             partial_mode=partial_refinement_mode,
+                            chapters=[chapter],
                         )
                         refined_batch, finish_reason, _raw_obj = send_with_interrupt(
                             messages,
@@ -21367,6 +21414,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         enhanced=enhanced_chapter_info is not None,
                         qa_entry=pre_existing_qa_source_entry or pre_existing_entry,
                         raw_content=raw_refinement_input,
+                        chapters=[chapter],
                     )
                     refined, finish_reason, _raw_obj = send_with_interrupt(
                         messages,
@@ -21782,6 +21830,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 item_requests.append({
                     "request_id": request_id,
                     "chapter": actual_num,
+                    "chapter_obj": chapter,
                     "output_file": output_file,
                     "target": target,
                     "fragment_html": fragment_html,
@@ -21933,6 +21982,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     partial_kind="json",
                     qa_entry=None,
                     partial_mode="partial.b2",
+                    chapters=[request.get("chapter_obj") for request in batch_requests],
                 )
                 refined_batch, finish_reason, _raw_obj = send_with_interrupt(
                     messages,
@@ -23099,8 +23149,14 @@ def build_system_prompt(
     source_text=None,
     chapter_ref=None,
     settings=None,
+    glossary_translated_text=None,
 ):
-    """Build the system prompt with glossary - TRUE BRUTE FORCE VERSION"""
+    """Build the system prompt with glossary - TRUE BRUTE FORCE VERSION
+
+    ``glossary_translated_text`` is the already-translated output of the same
+    chapter (multipass refinement): entries whose translation is already in
+    it are left out of the compressed glossary.
+    """
     append_glossary = str(_request_glossary_setting(
         settings, "APPEND_GLOSSARY", "1"
     )) == "1"
@@ -23154,6 +23210,7 @@ def build_system_prompt(
                     from glossary_compressor import compress_glossary
                     original_glossary_text = glossary_text  # Store original for token counting
                     original_length = len(glossary_text)
+                    compression_stats = {}
                     glossary_text = compress_glossary(
                         glossary_text,
                         compression_source_text,
@@ -23161,7 +23218,12 @@ def build_system_prompt(
                         glossary_path=actual_glossary_path,
                         chapter_ref=chapter_ref,
                         settings=settings,
+                        translated_text=glossary_translated_text,
+                        stats=compression_stats,
                     )
+                    applied_note = ""
+                    if glossary_translated_text:
+                        applied_note = f", {compression_stats.get('excluded_applied', 0):,} already applied excluded"
                     compressed_length = len(glossary_text)
                     reduction_pct = ((original_length - compressed_length) / original_length * 100) if original_length > 0 else 0
                     
@@ -23180,10 +23242,10 @@ def build_system_prompt(
                             strict_gender_note = f" (precise, whole term: {strict_scope_name})"
                         translated_column_note = " (translated column ON)" if str(_request_glossary_setting(settings, "COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN", "0")).strip().lower() in ("1", "true", "yes", "on") else ""
 
-                        glossary_log_parts.append(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%), {original_tokens:,}→{compressed_tokens:,} tokens ({token_reduction_pct:.1f}%){strict_gender_note}{translated_column_note}")
+                        glossary_log_parts.append(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%), {original_tokens:,}→{compressed_tokens:,} tokens ({token_reduction_pct:.1f}%){applied_note}{strict_gender_note}{translated_column_note}")
                     else:
                         # If tiktoken is not available, just show character reduction
-                        glossary_log_parts.append(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%)")
+                        glossary_log_parts.append(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%){applied_note}")
                     glossary_compression_logged = True
                 except Exception as e:
                     print(f"⚠️ Glossary compression failed: {e}")
@@ -23251,6 +23313,7 @@ def build_system_prompt(
                                 chapter_ref=chapter_ref,
                                 settings=settings,
                                 exclude_raw_names=exclude_raw_names,
+                                translated_text=glossary_translated_text,
                             )
                             was_compressed = True
                         except Exception as e:

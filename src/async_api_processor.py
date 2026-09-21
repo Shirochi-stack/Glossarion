@@ -3389,6 +3389,13 @@ class AsyncProcessingDialog:
         else:
             consider_translated_column = self.gui.config.get('compress_glossary_consider_translated_column', False)
         env_vars['COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN'] = "1" if consider_translated_column else "0"
+        if hasattr(self.gui, 'compress_glossary_multipass_exclude_matching_var'):
+            multipass_exclude_matching = _val(self.gui.compress_glossary_multipass_exclude_matching_var, True)
+        elif hasattr(self.gui, 'multipass_exclude_matching_checkbox'):
+            multipass_exclude_matching = _val(self.gui.multipass_exclude_matching_checkbox, True)
+        else:
+            multipass_exclude_matching = self.gui.config.get('compress_glossary_multipass_exclude_matching', True)
+        env_vars['COMPRESS_GLOSSARY_MULTIPASS_EXCLUDE_MATCHING'] = "1" if multipass_exclude_matching else "0"
         # Unified glossary (cross-novel glossary_unified.csv); the GUI helper
         # reads the live checkboxes with config as the fallback.
         if hasattr(self.gui, '_strict_matching_env_dict'):
