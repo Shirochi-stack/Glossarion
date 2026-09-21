@@ -3994,7 +3994,7 @@ class AsyncProcessingDialog:
                             whole_term_scope = env_vars.get('COMPRESS_GLOSSARY_STRICT_MATCHING_MODE', 'all')
                             translated_state = "ON" if env_vars.get('COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN') == '1' else "OFF"
                             
-                            logger.info(f"🗜️ Glossary: {original_length}→{compressed_length} chars ({reduction_pct:.1f}%), {original_tokens}→{compressed_tokens} tokens ({token_reduction_pct:.1f}%) (whole term: {whole_term_scope}, translated column {translated_state})")
+                            logger.info(f"🗜️ Glossary: {original_tokens}→{compressed_tokens} tokens ({token_reduction_pct:.1f}%) (whole term: {whole_term_scope}, translated column {translated_state})")
                         except ImportError:
                             logger.info(f"🗜️ Glossary compressed: {original_length} → {compressed_length} chars ({reduction_pct:.1f}% reduction)")
                     except Exception as e:

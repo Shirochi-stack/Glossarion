@@ -479,11 +479,32 @@ Before continuing, the confirmation dialog reports three separate values: mapped
 - **Auto-Fill / Map Glossaries to EPUBs** = the button you click to do that matching manually if you didn't let it happen automatically.
 - **Fuzzy** = allow *close* name matches, not just exact ones.
 
-### 8.5 The Glossary Manager (three tabs)
+### 8.5 The Glossary Manager
 
 Open it with **Glossary Manager** / **Extract Glossary**.
 
-**Tab 1 — Manual Extraction (build a master glossary before translating):**
+**Tab 1 — General Settings (the glossary mode, and everything that applies to every mode):**
+
+*These switches used to open the Automatic Generation tab. None of them is specific to one generation mode, so they now have the first tab to themselves, in the same order as before.*
+
+- **Automatic Glossary Generation** (dropdown) — the glossary mode from 8.1: Off, Off (Fuzzy Mapping), Manual Glossary Only, No Glossary, Minimal, Balanced, Full or Single Pass. It is the same setting as the glossary mode dropdown on the main window.
+- **Append Glossary to System Prompt** — sends the terms to the AI every request (the consistency switch).
+- **Auto-Mapping (Auto-Fill)** and **Fuzzy Auto-Mapping** (with its **Similarity** slider) — pick the book's glossary file by filename (see 8.4). The **Automatic Glossary Generation** mode above decides these three: a 🔒 and purple text mean the current mode has locked the switch on or off.
+- **Add Additional Glossary** — always include an extra external glossary file (CSV/JSON/TXT/PDF/MD).
+- **Enable Unified Glossary** — keep one deduplicated `glossary_unified.csv` shared by *all* your novels (per source and target language) and send it alongside the book's own glossary. Described below. Default OFF.
+- **Generate Unified Glossary** — rebuild that shared glossary from every book folder at the start of the next glossary run. Skipped automatically when nothing changed. Default OFF.
+- **Unified Glossary Settings** (button) — pick the source language (Auto reuses the one detected during extraction) or tick **Combine all languages** if detection fails for a book.
+- **Compress Glossary Prompt** ✅ — "Only send glossary entries that appear in the current text. Saves tokens and cost; recommended ON."
+- **Consider Translated Column** — also keeps an entry when the *translated* name appears in the source text, not just the original. Default OFF.
+- **Precise Term Matching** ✅ — the smarter matcher described just below, with a **Whole term for** dropdown beside it (**All** by default). Default ON; turn it OFF to go back to the old plain-substring check. *The old **Strict Gender Entry Matching** checkbox is gone — it was folded into this dropdown.*
+- **Multipass: Exclude Already-Applied Entries** ✅ — for the refinement pass (every mode: Full, Full + raw, Failed, Partial, Partial.b, Partial.b2). Multipass always compresses the glossary against the **raw** chapter, so Consider Translated Column is not needed for it; with this ON, entries whose translated name is already in the translated output are dropped as well, so each request only carries the entries the translation still needs. Default ON. *This changed the default refinement prompts — click **Reset to Default** on them once to pick up the new wording.*
+- **Log Match Differences** — with Precise Term Matching OFF, preview what it *would* change, without changing anything. Default OFF.
+- **Save Glossary Backup in Output** — also saves duplicate glossary files in an output-side `Glossary_Backup` folder. The glossary Glossarion actually uses stays where it is. Default OFF.
+- **Skip Gender Tracking**, **Ignore rare gender flips** and **Bias** — the gender tracker controls, described under *The gender tracker* below.
+- **Glossary Append Format** (text box) — the line written in front of the glossary when it is appended to the system prompt. It must not be empty; **Reset to Default** restores the original wording.
+- **Single Pass Header Prompt** (text box) — the wrapper used by **Single Pass** mode, where one request both extracts the glossary and translates. Keep the `{glossary_prompt}` and `{translation_prompt}` placeholders.
+
+**Tab 2 — Manual Extraction (build a master glossary before translating):**
 - **Entry Type Configuration** — what to look for: Characters, Terms, and your own **Custom Types** (e.g. "Skill," "Location").
 - **Custom Fields** — extra columns (e.g. "Description," "Age").
 - **Duplicate Detection** — merges names that are really the same person:
@@ -492,21 +513,13 @@ Open it with **Glossary Manager** / **Extract Glossary**.
   - **Disable honorifics filtering** — if checked, "Kim-nim" and "Kim" are treated as *different* people.
 - **Temperature / Context Limit / Merge Count** — keep temperature low for accurate name-pulling.
 
-**Tab 2 — Automatic Generation (the glossary built *during* translation):**
-- **Append Glossary to System Prompt** — sends the terms to the AI every request (the consistency switch).
-- **Compress Glossary Prompt** ✅ — "Only send glossary entries that appear in the current text. Saves tokens and cost; recommended ON."
-- **Consider Translated Column** — also keeps an entry when the *translated* name appears in the source text, not just the original. Default OFF.
-- **Precise Term Matching** ✅ — the smarter matcher described just below, with a **Whole term for** dropdown beside it (**All** by default). Default ON; turn it OFF to go back to the old plain-substring check. *The old **Strict Gender Entry Matching** checkbox is gone — it was folded into this dropdown.*
-- **Multipass: Exclude Already-Applied Entries** ✅ — for the refinement pass (every mode: Full, Full + raw, Failed, Partial, Partial.b, Partial.b2). Multipass always compresses the glossary against the **raw** chapter, so Consider Translated Column is not needed for it; with this ON, entries whose translated name is already in the translated output are dropped as well, so each request only carries the entries the translation still needs. Default ON. *This changed the default refinement prompts — click **Reset to Default** on them once to pick up the new wording.*
-- **Log Match Differences** — with Precise Term Matching OFF, preview what it *would* change, without changing anything. Default OFF.
-- **Add Additional Glossary** — always include an extra external glossary file (CSV/JSON/TXT/PDF/MD).
-- **Enable Unified Glossary** — keep one deduplicated `glossary_unified.csv` shared by *all* your novels (per source and target language) and send it alongside the book's own glossary. Described below. Default OFF.
-- **Generate Unified Glossary** — rebuild that shared glossary from every book folder at the start of the next glossary run. Skipped automatically when nothing changed. Default OFF.
-- **Unified Glossary Settings** (button) — pick the source language (Auto reuses the one detected during extraction) or tick **Combine all languages** if detection fails for a book.
+**Tab 3 — Automatic Generation (the glossary built *during* translation):**
 - **Include Gender Context** — expands snippets with surrounding sentences so the AI can infer each character's gender (costs more; it's the master switch that unlocks the gender-nuance and description options).
 - **Enable Gender Nuance Analysis** — an extra pronoun/honorific-aware scoring pass that prioritizes sentences which reveal gender (slightly higher CPU/time).
 - **Include Description Column** — adds a description/context field to every entry (only available while Gender Context is on).
 - **Disable Smart Filtering** — "Bypass all filtering and send the entire novel to the extractor. Extremely expensive; debugging only." **⚠️ Leave OFF.**
+
+**Tab 4 — Glossary Refinement:** an optional cleanup pass that runs after automatic glossary generation.
 
 #### Precise Term Matching (a narrower, more accurate glossary)
 
@@ -608,7 +621,7 @@ When gender features are on, Glossarion keeps a small sidecar file next to your 
 
 > **✅ Leave the gender tracker ON for character-heavy novels** — it's the thing that keeps a character's gender (and pronouns) consistent from chapter 1 to the end.
 
-**Tab 3 — Glossary Editor (view & clean a file):**
+**Tab 5 — Glossary Editor (view & clean a file):**
 - **Load / Browse** a `.csv` or `.json`.
 - **Clean Empty Fields** — drop empty columns.
 - **Remove Duplicates** — run the merge algorithm on the loaded file.

@@ -803,12 +803,33 @@ def test_kimi_k3_uses_documented_effort_with_note(monkeypatch, selected, expecte
     monkeypatch.setenv('GPT_EFFORT', selected)
     monkeypatch.delenv('AUTHND_ENABLE_THINKING', raising=False)
     monkeypatch.delenv('AUTHND_REASONING_EFFORT', raising=False)
+    monkeypatch.setattr(authnd, '_effort_fallback_notes_logged', set())
     logs = []
     payload = {}
     authnd._apply_reasoning_payload(payload, 'moonshotai/kimi-k3', log_fn=logs.append)
     assert payload == {'reasoning_effort': expected}
     assert authnd.reasoning_status_label('moonshotai/kimi-k3') == f' (reasoning_effort: {expected})'
     assert logs == ([f'📝 Kimi K3 does not support {selected}, using {expected} instead'] if selected != expected else [])
+
+
+def test_kimi_k3_effort_note_is_logged_once_per_session(monkeypatch):
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+    monkeypatch.setenv('GPT_EFFORT', 'medium')
+    monkeypatch.delenv('AUTHND_ENABLE_THINKING', raising=False)
+    monkeypatch.delenv('AUTHND_REASONING_EFFORT', raising=False)
+    monkeypatch.setattr(authnd, '_effort_fallback_notes_logged', set())
+    logs = []
+    for _request in range(5):
+        payload = {}
+        authnd._apply_reasoning_payload(payload, 'moonshotai/kimi-k3', log_fn=logs.append)
+        assert payload == {'reasoning_effort': 'low'}, 'the substitution itself happens on every request'
+    assert logs == ['📝 Kimi K3 does not support medium, using low instead']
+    # A different setting is a different substitution: announced once as well.
+    monkeypatch.setenv('GPT_EFFORT', 'xhigh')
+    for _request in range(3):
+        authnd._apply_reasoning_payload({}, 'moonshotai/kimi-k3', log_fn=logs.append)
+    assert logs == ['📝 Kimi K3 does not support medium, using low instead',
+                    '📝 Kimi K3 does not support xhigh, using high instead']
 
 
 def test_authnd_status_honors_provider_override(monkeypatch):

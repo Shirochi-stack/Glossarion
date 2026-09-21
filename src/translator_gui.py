@@ -44795,7 +44795,7 @@ Important rules:
             tips_lay.addWidget(tips_title)
             for tip in [
                 "• Enable <b>Auto-Mapping</b> in Glossary Settings to auto-load previously generated glossaries.",
-                "• You can change the glossary mode anytime in <b>Glossary Settings → Automatic Glossary Generation</b>.",
+                "• You can change the glossary mode anytime in <b>Glossary Settings → General Settings → Automatic Glossary Generation</b>.",
                 "• <b>Balanced</b> mode forces request merging (99) and chapter splitting for optimal quality.",
             ]:
                 tl = QLabel(tip)

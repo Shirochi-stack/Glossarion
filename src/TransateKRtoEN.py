@@ -23243,7 +23243,7 @@ def build_system_prompt(
                             strict_gender_note = f" (precise, whole term: {strict_scope_name})"
                         translated_column_note = " (translated column ON)" if str(_request_glossary_setting(settings, "COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN", "0")).strip().lower() in ("1", "true", "yes", "on") else ""
 
-                        glossary_log_parts.append(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%), {original_tokens:,}→{compressed_tokens:,} tokens ({token_reduction_pct:.1f}%){applied_note}{strict_gender_note}{translated_column_note}")
+                        glossary_log_parts.append(f"🗜️ Glossary: {original_tokens:,}→{compressed_tokens:,} tokens ({token_reduction_pct:.1f}%){applied_note}{strict_gender_note}{translated_column_note}")
                     else:
                         # If tiktoken is not available, just show character reduction
                         glossary_log_parts.append(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%){applied_note}")
@@ -23262,7 +23262,7 @@ def build_system_prompt(
                 raise ValueError(
                     "APPEND_GLOSSARY_PROMPT environment variable is not set!\n"
                     "Please configure your glossary append format in:\n"
-                    "Glossary Manager → Automatic Glossary → Glossary Append Format"
+                    "Glossary Manager → General Settings → Glossary Append Format"
                 )
             
             # Skip appending if compression returned empty (0 matching entries)
@@ -23349,6 +23349,8 @@ def build_system_prompt(
 
                     compressed_add_length = len(secondary_text or "")
                     add_reduction_pct = ((original_add_length - compressed_add_length) / original_add_length * 100) if original_add_length > 0 else 0
+                    # Tokens are what the request pays for; characters are only the fallback
+                    # when no tokenizer is available.
                     segment = f"{label}: {original_add_length:,}→{compressed_add_length:,} chars ({add_reduction_pct:.1f}%)"
                     if glossary_token_encoder is None:
                         glossary_token_encoder = _glossary_token_encoder(settings)
@@ -23356,7 +23358,7 @@ def build_system_prompt(
                     if original_add_tokens is not None:
                         compressed_add_tokens = len(glossary_token_encoder.encode(secondary_text or ""))
                         add_token_pct = ((original_add_tokens - compressed_add_tokens) / original_add_tokens * 100) if original_add_tokens > 0 else 0
-                        segment += f", {original_add_tokens:,}→{compressed_add_tokens:,} tokens ({add_token_pct:.1f}%)"
+                        segment = f"{label}: {original_add_tokens:,}→{compressed_add_tokens:,} tokens ({add_token_pct:.1f}%)"
                     glossary_log_parts.append(segment)
 
                     # Skip appending if compression returned empty (0 matching entries)

@@ -2377,17 +2377,20 @@ class GlossaryManagerMixin:
         tabs = [
             ("Balanced/Full Generation", self._setup_manual_glossary_tab, False),   # scrollable
             ("Minimal Glossary Generation", self._setup_auto_glossary_tab, False),  # scrollable
+            ("General Settings", self._setup_glossary_general_tab, False),          # scrollable; shown first, see below
             ("Glossary Refinement", self._setup_glossary_refinement_tab, False),     # scrollable
             ("Glossary Editor", self._setup_glossary_editor_tab, True),              # non-scrollable
         ]
 
         self._glossary_settings_tabs_built = True
 
+        tab_pages = {}
         for tab_idx, (tab_name, setup_method, is_editor) in enumerate(tabs):
             if is_editor:
                 tab_widget = QWidget()
                 notebook.addTab(tab_widget, tab_name)
                 setup_method(tab_widget)
+                tab_pages[setup_method] = tab_widget
             else:
                 tab_scroll = QScrollArea()
                 tab_scroll.setWidgetResizable(True)
@@ -2396,9 +2399,16 @@ class GlossaryManagerMixin:
                 tab_scroll.setWidget(tab_inner)
                 notebook.addTab(tab_scroll, tab_name)
                 setup_method(tab_inner)
+                tab_pages[setup_method] = tab_scroll
 
-        _refinement_tab_idx = 2
-        _editor_tab_idx = 3  # "Glossary Editor" follows the refinement tab
+        # General Settings holds the mode selector, so it is shown first. It is still built
+        # after the Minimal tab, because it finishes by running that tab's mode-state pass.
+        notebook.tabBar().moveTab(notebook.indexOf(tab_pages[self._setup_glossary_general_tab]), 0)
+        notebook.setCurrentIndex(0)
+
+        # Looked up by page so adding or reordering tabs cannot point these at the wrong tab.
+        _refinement_tab_idx = notebook.indexOf(tab_pages[self._setup_glossary_refinement_tab])
+        _editor_tab_idx = notebook.indexOf(tab_pages[self._setup_glossary_editor_tab])
 
         def _on_tab_switched(idx):
             if idx == _refinement_tab_idx and hasattr(self, '_refresh_glossary_refinement_type_list'):
@@ -4524,646 +4534,6 @@ Do not stop after the glossary."""
         auto_layout = QVBoxLayout(parent)
         auto_layout.setContentsMargins(10, 10, 10, 10)
         
-        # Master mode selector (replaces old checkbox toggle)
-        master_toggle_widget = QWidget()
-        master_toggle_layout = QHBoxLayout(master_toggle_widget)
-        master_toggle_layout.setContentsMargins(0, 0, 0, 15)
-        auto_layout.addWidget(master_toggle_widget)
-        
-        mode_label = QLabel("Automatic Glossary Generation:")
-        mode_label.setStyleSheet("font-weight: bold; font-size: 10pt;")
-        master_toggle_layout.addWidget(mode_label)
-        
-        if not hasattr(self, 'auto_glossary_mode_combo'):
-            from PySide6.QtWidgets import QComboBox
-            self.auto_glossary_mode_combo = QComboBox()
-            self.auto_glossary_mode_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full", "Single Pass"])
-            # Add Halgakos icon to each item
-            try:
-                _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
-                if os.path.exists(_ico_path):
-                    _combo_icon = QIcon(_ico_path)
-                    for i in range(self.auto_glossary_mode_combo.count()):
-                        self.auto_glossary_mode_combo.setItemIcon(i, _combo_icon)
-            except Exception:
-                pass
-            # Read saved mode with backward compat
-            saved_mode = self.config.get('auto_glossary_mode', None)
-            if saved_mode is None:
-                # Migrate from old boolean
-                old_enabled = self.config.get('enable_auto_glossary', False)
-                saved_mode = 'minimal' if old_enabled else 'off'
-            mode_index = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass': 7}.get(saved_mode.lower(), 5)
-            self.auto_glossary_mode_combo.setCurrentIndex(mode_index)
-        self.auto_glossary_mode_combo.setToolTip(_wrapped_tooltip_html(
-            "Off: No automatic glossary extraction + enables Auto-Mapping\n"
-            "Off (Fuzzy Mapping): Off + enables Auto-Mapping + Fuzzy Auto-Mapping\n"
-            "Manual Glossary Only: Off + disables Auto-Mapping (use the editor's Load Glossary button)\n"
-            "No Glossary: Runs without glossary (doesn't change toggle)\n"
-            "Minimal: Lightweight extraction during translation (in-process)\n"
-            "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
-            "Full: Chapter-by-chapter extraction for maximum context (most expensive)\n"
-            "Single Pass: Extract glossary inline during each translation request"
-        ))
-        from PySide6.QtCore import QSize
-        self.auto_glossary_mode_combo.setFixedWidth(220)
-        self.auto_glossary_mode_combo.setIconSize(QSize(18, 18))
-        self.auto_glossary_mode_combo.setStyleSheet("""
-            QComboBox {
-                background-color: #1a2a44;
-                color: #e8f0ff;
-                padding: 5px 10px;
-                border: 2px solid #4a8fd4;
-                border-radius: 4px;
-                font-size: 10pt;
-                font-weight: bold;
-            }
-            QComboBox:hover { border-color: #70b8ff; background-color: #223a58; }
-            QComboBox::drop-down {
-                border: none;
-                padding-right: 6px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #162848;
-                color: #e8f0ff;
-                selection-background-color: #4080d0;
-                selection-color: #ffffff;
-                border: 1px solid #4a8fd4;
-                outline: none;
-            }
-            QComboBox QAbstractItemView::item {
-                padding: 4px 8px;
-            }
-            QComboBox QAbstractItemView::item:hover {
-                background-color: #2a4a70;
-            }
-        """)
-        self.auto_glossary_mode_combo.wheelEvent = lambda event: None
-        master_toggle_layout.addWidget(self.auto_glossary_mode_combo)
-        
-        # Keep old attribute for backward compatibility
-        # Other code checks enable_auto_glossary_checkbox — provide a shim
-        self.enable_auto_glossary_checkbox = type('_Shim', (), {
-            'isChecked': lambda s: self.auto_glossary_mode_combo.currentText().lower() != 'off',
-            'setChecked': lambda s, v: None,
-            'stateChanged': type('_Sig', (), {'connect': lambda s, f: None, 'disconnect': lambda s, f: None})()
-        })()
-        
-        desc_label = QLabel("(Automatic extraction and translation of character names/Terms)")
-        master_toggle_layout.addWidget(desc_label)
-        master_toggle_layout.addStretch()
-        
-        # Append glossary toggle
-        append_widget = QWidget()
-        append_layout = QHBoxLayout(append_widget)
-        append_layout.setContentsMargins(0, 0, 0, 6)
-        auto_layout.addWidget(append_widget)
-        
-        if not hasattr(self, 'append_glossary_checkbox'):
-            self.append_glossary_checkbox = self._create_styled_checkbox("Append Glossary to System Prompt")
-            self.append_glossary_checkbox.setChecked(self.config.get('append_glossary', False))
-        self.append_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
-            "Send the current glossary to the model with every request.\n"
-            "Improves consistency across chapters."
-        ))
-        append_layout.addWidget(self.append_glossary_checkbox)
-        
-        self._append_glossary_desc_label = QLabel("(Applies to ALL glossaries - manual and automatic)")
-        self._append_glossary_desc_label.setCursor(Qt.PointingHandCursor)
-        self._append_glossary_desc_label.mousePressEvent = lambda _: self.append_glossary_checkbox.toggle() if not getattr(self.append_glossary_checkbox, '_mode_locked', False) else None
-        append_layout.addWidget(self._append_glossary_desc_label)
-        append_layout.addStretch()
-
-        # Auto-load glossaries toggle (under Append Glossary)
-        auto_load_widget = QWidget()
-        auto_load_layout = QHBoxLayout(auto_load_widget)
-        auto_load_layout.setContentsMargins(20, 0, 0, 15)
-        auto_layout.addWidget(auto_load_widget)
-
-        if not hasattr(self, 'append_glossary_auto_load_checkbox'):
-            self.append_glossary_auto_load_checkbox = self._create_styled_checkbox("Auto-Mapping (Auto-Fill)")
-        try:
-            self.append_glossary_auto_load_checkbox.setChecked(self.config.get('append_glossary_auto_load', False))
-        except Exception:
-            pass
-        self.append_glossary_auto_load_checkbox.setToolTip(_wrapped_tooltip_html(
-            "When Append Glossary is enabled, automatically Auto-Fill glossary mapping\n"
-            "based on filename matching. If disabled, use Load Glossary / Auto-Fill manually."
-        ))
-        auto_load_layout.addWidget(self.append_glossary_auto_load_checkbox)
-        auto_load_desc = QLabel("(Maps Glossary subfolder content → Output folder automatically)")
-        auto_load_desc.setCursor(Qt.PointingHandCursor)
-        auto_load_desc.mousePressEvent = lambda _: self.append_glossary_auto_load_checkbox.toggle()
-        auto_load_layout.addWidget(auto_load_desc)
-        auto_load_layout.addStretch()
-
-        # Fuzzy Auto-Mapping toggle (under Auto-Mapping)
-        fuzzy_map_widget = QWidget()
-        fuzzy_map_layout = QHBoxLayout(fuzzy_map_widget)
-        fuzzy_map_layout.setContentsMargins(40, 0, 0, 5)
-        auto_layout.addWidget(fuzzy_map_widget)
-
-        if not hasattr(self, 'fuzzy_auto_mapping_checkbox'):
-            self.fuzzy_auto_mapping_checkbox = self._create_styled_checkbox("Fuzzy Auto-Mapping")
-        try:
-            self.fuzzy_auto_mapping_checkbox.setChecked(self.config.get('fuzzy_auto_mapping', False))
-        except Exception:
-            pass
-        self.fuzzy_auto_mapping_checkbox.setToolTip(_wrapped_tooltip_html(
-            "When enabled, auto-mapping will match files with similar names\n"
-            "(e.g. 'MyNovel_v2.epub' → 'MyNovel_glossary.csv').\n"
-            "Adjust the slider to control how similar names must be."
-        ))
-        fuzzy_map_layout.addWidget(self.fuzzy_auto_mapping_checkbox)
-        fuzzy_map_desc = QLabel("(Matches files with similar names)")
-        fuzzy_map_desc.setCursor(Qt.PointingHandCursor)
-        fuzzy_map_desc.mousePressEvent = lambda _: self.fuzzy_auto_mapping_checkbox.toggle() if not getattr(self.fuzzy_auto_mapping_checkbox, '_mode_locked', False) else None
-        fuzzy_map_layout.addWidget(fuzzy_map_desc)
-        fuzzy_map_layout.addStretch()
-
-        # Fuzzy threshold mini-slider
-        fuzzy_slider_widget = QWidget()
-        fuzzy_slider_layout = QHBoxLayout(fuzzy_slider_widget)
-        fuzzy_slider_layout.setContentsMargins(60, 0, 0, 10)
-        auto_layout.addWidget(fuzzy_slider_widget)
-
-        fuzzy_slider_label = QLabel("Similarity:")
-        fuzzy_slider_label.setStyleSheet("color: #aaa; font-size: 9pt;")
-        fuzzy_slider_layout.addWidget(fuzzy_slider_label)
-
-        if not hasattr(self, 'fuzzy_auto_mapping_threshold_var'):
-            self.fuzzy_auto_mapping_threshold_var = self.config.get('fuzzy_auto_mapping_threshold', 50)
-        self.fuzzy_mapping_slider = QSlider(Qt.Horizontal)
-        self.fuzzy_mapping_slider.setMinimum(10)
-        self.fuzzy_mapping_slider.setMaximum(100)
-        self.fuzzy_mapping_slider.setValue(int(self.fuzzy_auto_mapping_threshold_var))
-        self.fuzzy_mapping_slider.setMaximumWidth(180)
-        self._disable_slider_mousewheel(self.fuzzy_mapping_slider)
-        fuzzy_slider_layout.addWidget(self.fuzzy_mapping_slider)
-
-        self.fuzzy_mapping_value_label = QLabel(f"{self.fuzzy_auto_mapping_threshold_var}%")
-        self.fuzzy_mapping_value_label.setStyleSheet("color: #ddd; font-size: 9pt; min-width: 30px;")
-        fuzzy_slider_layout.addWidget(self.fuzzy_mapping_value_label)
-
-        def _on_fuzzy_slider_changed(value):
-            self.fuzzy_auto_mapping_threshold_var = value
-            self.fuzzy_mapping_value_label.setText(f"{value}%")
-        self.fuzzy_mapping_slider.valueChanged.connect(_on_fuzzy_slider_changed)
-        fuzzy_slider_layout.addStretch()
-
-        # Sync fuzzy toggle enabled state with auto-mapping
-        def _sync_fuzzy_enabled(*_args):
-            try:
-                auto_map_on = bool(self.append_glossary_auto_load_checkbox.isChecked())
-                locked = getattr(self.fuzzy_auto_mapping_checkbox, '_mode_locked', False)
-                if not locked:
-                    self.fuzzy_auto_mapping_checkbox.setEnabled(auto_map_on)
-                self.fuzzy_mapping_slider.setEnabled(auto_map_on and self.fuzzy_auto_mapping_checkbox.isChecked())
-            except Exception:
-                pass
-
-        _sync_fuzzy_enabled()
-        try:
-            # Replace only the slots owned by this setup path. Broad disconnects
-            # emit PySide warnings when no slots exist and can remove unrelated slots.
-            previous_slot = getattr(self, '_sync_fuzzy_enabled_slot', None)
-            if previous_slot is not None:
-                try:
-                    self.append_glossary_auto_load_checkbox.toggled.disconnect(previous_slot)
-                except (TypeError, RuntimeError):
-                    pass
-                try:
-                    self.fuzzy_auto_mapping_checkbox.toggled.disconnect(previous_slot)
-                except (TypeError, RuntimeError):
-                    pass
-            self.append_glossary_auto_load_checkbox.toggled.connect(_sync_fuzzy_enabled)
-            self.fuzzy_auto_mapping_checkbox.toggled.connect(_sync_fuzzy_enabled)
-            self._sync_fuzzy_enabled_slot = _sync_fuzzy_enabled
-        except Exception:
-            pass
-
-        # Auto-Mapping only makes sense when Append Glossary is enabled.
-        def _sync_auto_mapping_enabled_state(*_args):
-            try:
-                enabled = bool(self.append_glossary_checkbox.isChecked())
-            except Exception:
-                enabled = False
-            try:
-                self.append_glossary_auto_load_checkbox.setEnabled(enabled)
-            except Exception:
-                pass
-
-        # Set initial enabled/disabled state
-        _sync_auto_mapping_enabled_state()
-
-        # Keep it in sync when Append Glossary changes (avoid duplicate connections)
-        try:
-            previous_slot = getattr(self, '_sync_auto_mapping_enabled_state_slot', None)
-            if previous_slot is not None:
-                try:
-                    self.append_glossary_checkbox.toggled.disconnect(previous_slot)
-                except (TypeError, RuntimeError):
-                    pass
-            self.append_glossary_checkbox.toggled.connect(_sync_auto_mapping_enabled_state)
-            self._sync_auto_mapping_enabled_state_slot = _sync_auto_mapping_enabled_state
-        except Exception:
-            pass
-
-        # Real-time path switching when auto-mapping is toggled
-        def _on_auto_mapping_toggled(checked):
-            """Switch glossary path between Glossary subfolder and output folder in real time."""
-            try:
-                # Only act if Append Glossary is also enabled
-                if not (hasattr(self, 'append_glossary_checkbox') and self.append_glossary_checkbox.isChecked()):
-                    return
-
-                # Subtitle members resolve to their one archive-level source.
-                source_path = None
-                try:
-                    sources = self._glossary_editor_input_sources()
-                    if len(sources) == 1:
-                        source_path = sources[0]
-                except Exception:
-                    pass
-                if not source_path:
-                    return
-
-                if checked:
-                    # Auto-mapping ON → switch to Glossary subfolder file
-                    # BUT if Minimal mode is active, use output folder instead
-                    _use_subfolder = True
-                    try:
-                        _cur_mode = getattr(self, 'auto_glossary_mode_var', self.config.get('auto_glossary_mode', 'off'))
-                        if str(_cur_mode).lower() == 'minimal':
-                            _use_subfolder = False
-                    except Exception:
-                        pass
-
-                    # Clear the current state so the correct loader can take over
-                    try:
-                        _prev = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
-                        if _prev and not getattr(self, 'manual_glossary_manually_loaded', False):
-                            self.append_log(f"📑 Cleared auto-mapped glossary: {os.path.basename(_prev)}")
-                        self.manual_glossary_path = None
-                        self.auto_loaded_glossary_path = None
-                        self.auto_loaded_glossary_for_file = None
-                        self.manual_glossary_manually_loaded = False
-                    except Exception:
-                        pass
-
-                    if _use_subfolder:
-                        try:
-                            if hasattr(self, '_autofill_glossary_for_current_selection'):
-                                self._autofill_glossary_for_current_selection()
-                        except Exception:
-                            pass
-                    else:
-                        try:
-                            self.auto_load_glossary_for_file(source_path)
-                        except Exception:
-                            pass
-                else:
-                    # Auto-mapping OFF → fall back to output folder glossary
-                    try:
-                        _prev = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
-                        if _prev and not getattr(self, 'manual_glossary_manually_loaded', False):
-                            self.append_log(f"📑 Cleared auto-mapped glossary: {os.path.basename(_prev)}")
-                        self.manual_glossary_path = None
-                        self.auto_loaded_glossary_path = None
-                        self.auto_loaded_glossary_for_file = None
-                        self.manual_glossary_manually_loaded = False
-                    except Exception:
-                        pass
-                    try:
-                        self.auto_load_glossary_for_file(source_path)
-                    except Exception:
-                        pass
-
-                # Refresh the glossary editor if it has been set up
-                try:
-                    if hasattr(self, 'editor_file_entry'):
-                        new_path = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
-                        if new_path and os.path.exists(new_path):
-                            self.editor_file_entry.setText(new_path)
-                            _log_msg = f"📑 Glossary editor switched to: {os.path.basename(new_path)}"
-                            if getattr(self, '_last_editor_switch_log', '') != _log_msg:
-                                self.append_log(_log_msg)
-                                self._last_editor_switch_log = _log_msg
-                except Exception:
-                    pass
-                try:
-                    refresh = getattr(self, '_refresh_glossary_editor', None)
-                    if callable(refresh):
-                        refresh()
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-        # Replace this handler without disturbing the fuzzy enabled-state sync.
-        try:
-            previous_slot = getattr(self, '_on_auto_mapping_toggled_slot', None)
-            if previous_slot is not None:
-                try:
-                    self.append_glossary_auto_load_checkbox.toggled.disconnect(previous_slot)
-                except (TypeError, RuntimeError):
-                    pass
-            self.append_glossary_auto_load_checkbox.toggled.connect(_on_auto_mapping_toggled)
-            self._on_auto_mapping_toggled_slot = _on_auto_mapping_toggled
-        except Exception:
-            pass
-        
-        # Add additional glossary toggle (below append glossary)
-        additional_glossary_widget = QWidget()
-        additional_glossary_layout = QHBoxLayout(additional_glossary_widget)
-        additional_glossary_layout.setContentsMargins(0, 0, 0, 15)
-        auto_layout.addWidget(additional_glossary_widget)
-        
-        if not hasattr(self, 'add_additional_glossary_checkbox'):
-            self.add_additional_glossary_checkbox = self._create_styled_checkbox("Add Additional Glossary")
-            self.add_additional_glossary_checkbox.setChecked(self.config.get('add_additional_glossary', False))
-        self.add_additional_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
-            "Always include an external glossary file (CSV/JSON/TXT/PDF/MD)\n"
-            "alongside the generated glossary when calling the API."
-        ))
-        additional_glossary_layout.addWidget(self.add_additional_glossary_checkbox)
-        
-        # Load additional glossary button
-        load_additional_btn = QPushButton("Load Additional Glossary")
-        load_additional_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #5a9fd4;
-                color: white;
-                padding: 5px 15px;
-                border-radius: 3px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #7ab8e8; }
-            QPushButton:pressed { background-color: #4a8fc4; }
-            QPushButton:disabled { background-color: #cccccc; color: #666666; }
-        """)
-        load_additional_btn.clicked.connect(self._load_additional_glossary)
-        additional_glossary_layout.addWidget(load_additional_btn)
-        self._load_additional_glossary_btn = load_additional_btn  # Store reference for animation
-        
-        # Show current additional glossary path if exists
-        additional_glossary_path = self.config.get('additional_glossary_path', '')
-        if additional_glossary_path:
-            label_additional = QLabel(f"(Current: {os.path.basename(additional_glossary_path)})")
-        else:
-            label_additional = QLabel("(Sends additional glossary file alongside main glossary to API)")
-        additional_glossary_layout.addWidget(label_additional)
-        self.additional_glossary_label = label_additional  # Store reference to update later
-        additional_glossary_layout.addStretch()
-
-        # Unified glossary: one deduplicated glossary across every novel,
-        # sent like the extension (below Add Additional Glossary).
-        unified_glossary_widget = QWidget()
-        unified_glossary_layout = QHBoxLayout(unified_glossary_widget)
-        unified_glossary_layout.setContentsMargins(0, 0, 0, 6)
-        auto_layout.addWidget(unified_glossary_widget)
-
-        if not hasattr(self, 'enable_unified_glossary_checkbox'):
-            self.enable_unified_glossary_checkbox = self._create_styled_checkbox("Enable Unified Glossary")
-            self.enable_unified_glossary_checkbox.setChecked(self.config.get('enable_unified_glossary', False))
-        if not getattr(self.enable_unified_glossary_checkbox, '_glossary_manager_sync_connected', False):
-            self.enable_unified_glossary_checkbox.stateChanged.connect(self._on_glossary_manager_enable_unified_glossary_toggle)
-            self.enable_unified_glossary_checkbox._glossary_manager_sync_connected = True
-        self.enable_unified_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
-            "Merge every book's glossary into one deduplicated glossary_unified.csv per language\n"
-            "(Glossary/Unified Glossary/<source>-<target>/) and send it alongside the main glossary\n"
-            "with the same compression settings.\n"
-            "Updated at the start and end of each glossary run; the copy sent to the API leaves out\n"
-            "entries the book's own glossary already has."
-        ))
-        unified_glossary_layout.addWidget(self.enable_unified_glossary_checkbox)
-
-        unified_settings_btn = QPushButton("Unified Glossary Settings")
-        unified_settings_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #5a9fd4;
-                color: white;
-                padding: 5px 15px;
-                border-radius: 3px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #7ab8e8; }
-            QPushButton:pressed { background-color: #4a8fc4; }
-            QPushButton:disabled { background-color: #cccccc; color: #666666; }
-        """)
-        unified_settings_btn.setToolTip(_wrapped_tooltip_html(
-            "Source language and language-combining options for the unified glossary."
-        ))
-        unified_settings_btn.clicked.connect(lambda: self._open_unified_glossary_settings_dialog(parent))
-        unified_glossary_layout.addWidget(unified_settings_btn)
-        self._unified_glossary_settings_btn = unified_settings_btn
-
-        self.unified_glossary_label = QLabel(self._unified_glossary_hint_text())
-        unified_glossary_layout.addWidget(self.unified_glossary_label)
-        unified_glossary_layout.addStretch()
-
-        generate_unified_widget = QWidget()
-        generate_unified_layout = QHBoxLayout(generate_unified_widget)
-        generate_unified_layout.setContentsMargins(20, 0, 0, 15)
-        auto_layout.addWidget(generate_unified_widget)
-
-        if not hasattr(self, 'generate_unified_glossary_checkbox'):
-            self.generate_unified_glossary_checkbox = self._create_styled_checkbox("Generate Unified Glossary")
-            self.generate_unified_glossary_checkbox.setChecked(self.config.get('generate_unified_glossary', False))
-        if not getattr(self.generate_unified_glossary_checkbox, '_glossary_manager_sync_connected', False):
-            self.generate_unified_glossary_checkbox.stateChanged.connect(self._on_glossary_manager_generate_unified_glossary_toggle)
-            self.generate_unified_glossary_checkbox._glossary_manager_sync_connected = True
-        self.generate_unified_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
-            "Rebuild the unified glossary from every book folder under Glossary/ at the start of the\n"
-            "next glossary run, reading the files in parallel (Parallel Extraction worker count).\n"
-            "Fingerprinted: the rebuild is skipped when no book glossary changed since the last one."
-        ))
-        generate_unified_layout.addWidget(self.generate_unified_glossary_checkbox)
-
-        generate_unified_hint = QLabel("(Rebuilds from every book glossary at the start of the next run; skipped when nothing changed)")
-        generate_unified_layout.addWidget(generate_unified_hint)
-        generate_unified_layout.addStretch()
-        self._unified_generate_row_widgets = (self.generate_unified_glossary_checkbox, generate_unified_hint)
-        self._set_unified_glossary_row_enabled(self.enable_unified_glossary_checkbox.isChecked())
-
-        # Compress glossary toggle
-        compress_widget = QWidget()
-        compress_layout = QHBoxLayout(compress_widget)
-        compress_layout.setContentsMargins(0, 0, 0, 15)
-        auto_layout.addWidget(compress_widget)
-        
-        if not hasattr(self, 'compress_glossary_checkbox'):
-            self.compress_glossary_checkbox = self._create_styled_checkbox("Compress Glossary Prompt")
-            self.compress_glossary_checkbox.setChecked(self.config.get('compress_glossary_prompt', True))
-        if not getattr(self.compress_glossary_checkbox, '_glossary_manager_sync_connected', False):
-            self.compress_glossary_checkbox.stateChanged.connect(self._on_glossary_manager_compress_glossary_toggle)
-            self.compress_glossary_checkbox._glossary_manager_sync_connected = True
-        self.compress_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
-            "Only send glossary entries that appear in the current source text.\n"
-            "Saves tokens and cost; recommended ON."
-        ))
-        compress_layout.addWidget(self.compress_glossary_checkbox)
-        
-        label3 = QLabel("(Excludes glossary entries that don't appear in source text before sending to API)")
-        # label3.setStyleSheet("color: white; font-size: 10pt; font-style: italic;")
-        compress_layout.addWidget(label3)
-        compress_layout.addStretch()
-
-        consider_translated_widget = QWidget()
-        consider_translated_layout = QHBoxLayout(consider_translated_widget)
-        consider_translated_layout.setContentsMargins(20, 0, 0, 15)
-        auto_layout.addWidget(consider_translated_widget)
-
-        if not hasattr(self, 'consider_translated_compression_checkbox'):
-            self.consider_translated_compression_checkbox = self._create_styled_checkbox("Consider Translated Column")
-            self.consider_translated_compression_checkbox.setChecked(self.config.get('compress_glossary_consider_translated_column', False))
-        if not getattr(self.consider_translated_compression_checkbox, '_glossary_manager_sync_connected', False):
-            self.consider_translated_compression_checkbox.stateChanged.connect(self._on_glossary_manager_consider_translated_compression_toggle)
-            self.consider_translated_compression_checkbox._glossary_manager_sync_connected = True
-        self.consider_translated_compression_checkbox.setToolTip(_wrapped_tooltip_html(
-            "When ON, glossary compression keeps an entry if either raw_name or translated_name appears in the source text.\n"
-            "Default OFF preserves raw-name-only matching."
-        ))
-        consider_translated_layout.addWidget(self.consider_translated_compression_checkbox)
-
-        consider_translated_hint = QLabel("(Optional: also match translated_name during compression; default OFF)")
-        consider_translated_layout.addWidget(consider_translated_hint)
-        consider_translated_layout.addStretch()
-
-        precise_matching_widget = QWidget()
-        precise_matching_layout = QHBoxLayout(precise_matching_widget)
-        precise_matching_layout.setContentsMargins(20, 0, 0, 15)
-        auto_layout.addWidget(precise_matching_widget)
-
-        if not hasattr(self, 'precise_matching_checkbox'):
-            self.precise_matching_checkbox = self._create_styled_checkbox("Precise Term Matching")
-            self.precise_matching_checkbox.setChecked(self.config.get('compress_glossary_precise_matching', True))
-        if not getattr(self.precise_matching_checkbox, '_glossary_manager_sync_connected', False):
-            self.precise_matching_checkbox.stateChanged.connect(self._on_glossary_manager_precise_matching_toggle)
-            self.precise_matching_checkbox._glossary_manager_sync_connected = True
-        self.precise_matching_checkbox.setToolTip(_wrapped_tooltip_html(
-            "When ON, glossary compression uses script-aware matching: word boundaries for Latin terms, "
-            "sub-word boundary checks for short CJK terms, and normalized/spacing/honorific variants.\n"
-            "When OFF, matching is a plain substring search and may keep an entry on a single CJK character.\n"
-            "Default ON."
-        ))
-        precise_matching_layout.addWidget(self.precise_matching_checkbox)
-
-        # "Whole term for": same All / Custom + Configure… pattern as Emergency
-        # Glossary Compliance, and the same entry-type dialog behind it. This
-        # replaces the old Strict Gender Entry Matching checkbox.
-        if not hasattr(self, 'strict_matching_mode_label'):
-            self.strict_matching_mode_label = QLabel("Whole term for:")
-        precise_matching_layout.addWidget(self.strict_matching_mode_label)
-        if not hasattr(self, 'strict_matching_mode_combo'):
-            self.strict_matching_mode_combo = QComboBox()
-            self.strict_matching_mode_combo.addItems(list(self._STRICT_MATCHING_LABELS))
-            self.strict_matching_mode_combo.setFixedWidth(150)
-            try:
-                self.strict_matching_mode_combo.setStyleSheet(self.auto_glossary_mode_combo.styleSheet())
-            except Exception:
-                pass
-            self._disable_combobox_mousewheel(self.strict_matching_mode_combo)
-            self.strict_matching_mode_combo.setCurrentIndex(
-                self._STRICT_MATCHING_MODES.index(self._strict_matching_mode())
-            )
-            self.strict_matching_mode_combo.currentIndexChanged.connect(
-                self._on_glossary_manager_strict_matching_mode_change
-            )
-        self.strict_matching_mode_combo.setToolTip(_wrapped_tooltip_html(
-            "Which entries must appear as the WHOLE term, not just one word of it. Particles, honorifics, "
-            "spacing and full/half-width differences still count as the whole term.\n"
-            "All (default) — every entry. 넥서스 alone no longer keeps 모노크롬 넥서스, 넥서스 신권 …\n"
-            "Gender Entries — only entries whose type has gender enabled (custom entry types included).\n"
-            "Custom — the entry types picked under Configure…\n"
-            "None — one word of a multi-word entry is enough for every entry.\n\n"
-            "Gender-enabled entries are people, so one part of a NAME still counts: 미샤 keeps 미샤 랄토스 "
-            "because the glossary transliterates it (Misha). A title word does not: 마법사 does not keep "
-            "3서클 마법사, because it is translated (Mage), not transliterated."
-        ))
-        precise_matching_layout.addWidget(self.strict_matching_mode_combo)
-
-        if not hasattr(self, 'strict_matching_configure_btn'):
-            self.strict_matching_configure_btn = QPushButton("Configure…")
-            self.strict_matching_configure_btn.setFixedWidth(100)
-            self.strict_matching_configure_btn.setStyleSheet(
-                "background-color: #3a5f8a; color: white; padding: 4px 8px; border-radius: 3px;"
-            )
-            self.strict_matching_configure_btn.clicked.connect(
-                lambda: self._open_strict_matching_types_dialog(self.strict_matching_configure_btn.window())
-            )
-        precise_matching_layout.addWidget(self.strict_matching_configure_btn)
-        self._refresh_strict_matching_row()
-
-        precise_matching_hint = QLabel("(Recommended: narrower, more accurate compression; default ON, turn OFF for the old loose matching)")
-        precise_matching_layout.addWidget(precise_matching_hint)
-        precise_matching_layout.addStretch()
-
-        multipass_exclude_widget = QWidget()
-        multipass_exclude_layout = QHBoxLayout(multipass_exclude_widget)
-        multipass_exclude_layout.setContentsMargins(20, 0, 0, 15)
-        auto_layout.addWidget(multipass_exclude_widget)
-
-        if not hasattr(self, 'multipass_exclude_matching_checkbox'):
-            self.multipass_exclude_matching_checkbox = self._create_styled_checkbox("Multipass: Exclude Already-Applied Entries")
-            self.multipass_exclude_matching_checkbox.setChecked(self.config.get('compress_glossary_multipass_exclude_matching', True))
-        if not getattr(self.multipass_exclude_matching_checkbox, '_glossary_manager_sync_connected', False):
-            self.multipass_exclude_matching_checkbox.stateChanged.connect(self._on_glossary_manager_multipass_exclude_matching_toggle)
-            self.multipass_exclude_matching_checkbox._glossary_manager_sync_connected = True
-        self.multipass_exclude_matching_checkbox.setToolTip(_wrapped_tooltip_html(
-            "Multipass refinement (Full, Full + raw, Failed, Partial, Partial.b, Partial.b2) always compresses the "
-            "glossary against the RAW chapter, so Consider Translated Column is not needed for it.\n"
-            "When ON, entries whose translated name already appears in the translated output are left out too, "
-            "so each request only carries the entries the translation still needs.\n"
-            "Default ON."
-        ))
-        multipass_exclude_layout.addWidget(self.multipass_exclude_matching_checkbox)
-
-        multipass_exclude_hint = QLabel("(Multipass only sends glossary entries whose translation is missing from the output; default ON)")
-        multipass_exclude_layout.addWidget(multipass_exclude_hint)
-        multipass_exclude_layout.addStretch()
-
-        shadow_log_widget = QWidget()
-        shadow_log_layout = QHBoxLayout(shadow_log_widget)
-        shadow_log_layout.setContentsMargins(20, 0, 0, 15)
-        auto_layout.addWidget(shadow_log_widget)
-
-        if not hasattr(self, 'shadow_log_matching_checkbox'):
-            self.shadow_log_matching_checkbox = self._create_styled_checkbox("Log Match Differences")
-            self.shadow_log_matching_checkbox.setChecked(self.config.get('compress_glossary_shadow_log', False))
-        if not getattr(self.shadow_log_matching_checkbox, '_glossary_manager_sync_connected', False):
-            self.shadow_log_matching_checkbox.stateChanged.connect(self._on_glossary_manager_shadow_log_matching_toggle)
-            self.shadow_log_matching_checkbox._glossary_manager_sync_connected = True
-        self.shadow_log_matching_checkbox.setToolTip(_wrapped_tooltip_html(
-            "When ON, both the old and the new matcher run and their disagreements are written to "
-            "logs/glossary_match_shadow/. Translation output is unchanged.\n"
-            "Use with Precise Term Matching OFF to preview what it would change before switching."
-        ))
-        shadow_log_layout.addWidget(self.shadow_log_matching_checkbox)
-
-        shadow_log_hint = QLabel("(Optional: preview-only; writes a diff report without changing output)")
-        shadow_log_layout.addWidget(shadow_log_hint)
-        shadow_log_layout.addStretch()
-
-        # Save location toggle
-        output_save_widget = QWidget()
-        output_save_layout = QHBoxLayout(output_save_widget)
-        output_save_layout.setContentsMargins(0, 0, 0, 15)
-        auto_layout.addWidget(output_save_widget)
-
-        if not hasattr(self, 'save_glossary_in_output_checkbox'):
-            self.save_glossary_in_output_checkbox = self._create_styled_checkbox("Save Glossary Backup in Output")
-            self.save_glossary_in_output_checkbox.setChecked(self.config.get('save_glossary_in_output', False))
-        self.save_glossary_in_output_checkbox.setToolTip(_wrapped_tooltip_html(
-            "Also save duplicate glossary files in the current output/source folder. Primary glossary mapping stays unchanged."
-        ))
-        output_save_layout.addWidget(self.save_glossary_in_output_checkbox)
-
-        output_save_hint = QLabel("(Creates output-side Glossary_Backup copies; manga always also writes MangaGlossary_Backup)")
-        output_save_layout.addWidget(output_save_hint)
-        output_save_layout.addStretch()
-        
-        
         # Include all characters toggle (Dynamic Max Limit)
         # MOVED to row 3 next to max sentences entry for better context
         # include_chars_widget = QWidget()
@@ -5218,74 +4588,6 @@ Do not stop after the glossary."""
         gender_nuance_layout.addWidget(gender_nuance_label)
         gender_nuance_layout.addStretch()
 
-        # Optional tracker file toggle
-        skip_gender_tracking_widget = QWidget()
-        skip_gender_tracking_layout = QHBoxLayout(skip_gender_tracking_widget)
-        skip_gender_tracking_layout.setContentsMargins(0, 0, 0, 15)
-        auto_layout.addWidget(skip_gender_tracking_widget)
-
-        if not hasattr(self, 'skip_gender_tracking_checkbox'):
-            self.skip_gender_tracking_checkbox = self._create_styled_checkbox("Skip Gender Tracking")
-            self.skip_gender_tracking_checkbox.setChecked(self.config.get('glossary_skip_gender_tracking', False))
-        self.skip_gender_tracking_checkbox.setToolTip(_wrapped_tooltip_html(
-            "Do not create or use the *_gender_tracker.json sidecar file.\n"
-            "Also disables the Male/Female dedupe protection, so same-name entries dedupe normally."
-        ))
-        skip_gender_tracking_layout.addWidget(self.skip_gender_tracking_checkbox)
-
-        skip_gender_tracking_label = QLabel("(Disables gender tracker and gender-variant dedupe protection)")
-        skip_gender_tracking_layout.addWidget(skip_gender_tracking_label)
-        skip_gender_tracking_layout.addStretch()
-
-        # Gender tracker false-positive controls
-        gender_noise_widget = QWidget()
-        gender_noise_layout = QHBoxLayout(gender_noise_widget)
-        gender_noise_layout.setContentsMargins(20, 0, 0, 15)
-        auto_layout.addWidget(gender_noise_widget)
-
-        gender_noise_label = QLabel("Ignore rare gender flips:")
-        gender_noise_layout.addWidget(gender_noise_label)
-
-        if not hasattr(self, 'gender_noise_threshold_slider'):
-            self.gender_noise_threshold_slider = QSlider(Qt.Horizontal)
-            self.gender_noise_threshold_slider.setMinimum(0)
-            self.gender_noise_threshold_slider.setMaximum(100)
-            self.gender_noise_threshold_slider.setValue(int(self.config.get('glossary_gender_noise_threshold', 10)))
-            self.gender_noise_threshold_slider.setMaximumWidth(180)
-            self._disable_slider_mousewheel(self.gender_noise_threshold_slider)
-        gender_noise_layout.addWidget(self.gender_noise_threshold_slider)
-
-        self.gender_noise_threshold_value_label = QLabel(f"{self.gender_noise_threshold_slider.value()}%")
-        self.gender_noise_threshold_value_label.setMinimumWidth(42)
-        gender_noise_layout.addWidget(self.gender_noise_threshold_value_label)
-
-        def _update_gender_noise_label(value):
-            self.gender_noise_threshold_value_label.setText(f"{value}%")
-        self.gender_noise_threshold_slider.valueChanged.connect(_update_gender_noise_label)
-
-        gender_noise_bias_label = QLabel("Bias:")
-        gender_noise_layout.addWidget(gender_noise_bias_label)
-
-        if not hasattr(self, 'gender_tracking_bias_combo'):
-            self.gender_tracking_bias_combo = QComboBox()
-            self.gender_tracking_bias_combo.addItems(["No Bias", "Prefer Female", "Prefer Male"])
-            bias_index = {'none': 0, 'female': 1, 'male': 2}.get(
-                str(self.config.get('glossary_gender_tracking_bias', 'none')).lower(),
-                0
-            )
-            self.gender_tracking_bias_combo.setCurrentIndex(bias_index)
-            self._disable_combobox_mousewheel(self.gender_tracking_bias_combo)
-        self.gender_tracking_bias_combo.setToolTip(_wrapped_tooltip_html(
-            "No Bias: suppress a gender variant when it appears at or below the rare-flip percentage.\n"
-            "Prefer Female: never suppress rare female readings, but still suppress rare male readings.\n"
-            "Prefer Male: never suppress rare male readings, but still suppress rare female readings."
-        ))
-        gender_noise_layout.addWidget(self.gender_tracking_bias_combo)
-
-        gender_noise_hint = QLabel("(Default 10%: one-off AI misgenders are ignored during glossary compression)")
-        gender_noise_layout.addWidget(gender_noise_hint)
-        gender_noise_layout.addStretch()
-        
         # Include description column toggle (below gender context)
         description_widget = QWidget()
         description_layout = QHBoxLayout(description_widget)
@@ -5337,118 +4639,6 @@ Do not stop after the glossary."""
         label6 = QLabel("(Disables all text filtering and sends the entire novel to the API - very expensive!)")
         disable_filtering_layout.addWidget(label6)
         disable_filtering_layout.addStretch()
-        
-        # Custom append prompt section
-        append_prompt_frame = QGroupBox("Glossary Append Format")
-        append_prompt_layout = QVBoxLayout(append_prompt_frame)
-        append_prompt_layout.setContentsMargins(10, 10, 10, 10)  # Tighter margins
-        append_prompt_layout.setSpacing(5)  # Reduced spacing
-        auto_layout.addWidget(append_prompt_frame)
-        
-        self.append_prompt_text = QTextEdit()
-        self.append_prompt_text.setFixedHeight(60)
-        self.append_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
-        append_prompt_layout.addWidget(self.append_prompt_text)
-        
-        # Always reload append prompt from config to ensure fresh state
-        # Treat empty string as missing to ensure users get the default
-        default_append_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
-        append_prompt_from_config = self.config.get('append_glossary_prompt', default_append_prompt)
-        if not append_prompt_from_config or not append_prompt_from_config.strip():
-            self.append_glossary_prompt = default_append_prompt
-        else:
-            self.append_glossary_prompt = append_prompt_from_config
-        
-        self.append_prompt_text.setPlainText(self._sep_for_display(self.append_glossary_prompt))
-        
-        append_prompt_controls_widget = QWidget()
-        append_prompt_controls_layout = QHBoxLayout(append_prompt_controls_widget)
-        append_prompt_controls_layout.setContentsMargins(0, 5, 0, 0)
-        append_prompt_layout.addWidget(append_prompt_controls_widget)
-        
-        def reset_append_prompt():
-            reply = QMessageBox.question(parent, "Reset Prompt", "Reset to default glossary append format?",
-                                         QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                self.append_prompt_text.setPlainText("- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
-        
-        reset_append_btn = QPushButton("Reset to Default")
-        reset_append_btn.clicked.connect(reset_append_prompt)
-        reset_append_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #b8860b;
-                color: black;
-                padding: 5px;
-                border: 1px solid #8a6a08;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #9a6d07; }
-            QPushButton:pressed { background-color: #8a6106; }
-        """)
-        append_prompt_controls_layout.addWidget(reset_append_btn)
-        append_prompt_controls_layout.addStretch()
-
-        single_pass_header_frame = QGroupBox("Single Pass Header Prompt")
-        single_pass_header_layout = QVBoxLayout(single_pass_header_frame)
-        single_pass_header_layout.setContentsMargins(10, 10, 10, 10)
-        single_pass_header_layout.setSpacing(5)
-        auto_layout.addWidget(single_pass_header_frame)
-
-        self.single_pass_header_prompt_text = QTextEdit()
-        self.single_pass_header_prompt_text.setFixedHeight(130)
-        self.single_pass_header_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
-        single_pass_header_layout.addWidget(self.single_pass_header_prompt_text)
-
-        default_single_pass_header = self._default_single_pass_header_prompt()
-        single_pass_header_from_config = self.config.get(
-            'single_pass_glossary_header_prompt',
-            default_single_pass_header,
-        )
-        if not single_pass_header_from_config or not str(single_pass_header_from_config).strip():
-            self.single_pass_glossary_header_prompt = default_single_pass_header
-        elif (
-            "Balanced/Full glossary logic" in str(single_pass_header_from_config)
-            or "standard Balanced/Full extraction" in str(single_pass_header_from_config)
-        ):
-            self.single_pass_glossary_header_prompt = default_single_pass_header
-            self.config['single_pass_glossary_header_prompt'] = default_single_pass_header
-        else:
-            self.single_pass_glossary_header_prompt = single_pass_header_from_config
-        self.single_pass_header_prompt_text.setPlainText(
-            self._sep_for_display(self.single_pass_glossary_header_prompt)
-        )
-
-        single_pass_header_controls_widget = QWidget()
-        single_pass_header_controls_layout = QHBoxLayout(single_pass_header_controls_widget)
-        single_pass_header_controls_layout.setContentsMargins(0, 5, 0, 0)
-        single_pass_header_layout.addWidget(single_pass_header_controls_widget)
-
-        def reset_single_pass_header_prompt():
-            reply = QMessageBox.question(parent, "Reset Prompt", "Reset to default single pass header prompt?",
-                                         QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                self.single_pass_header_prompt_text.setPlainText(default_single_pass_header)
-
-        reset_single_pass_header_btn = QPushButton("Reset to Default")
-        reset_single_pass_header_btn.clicked.connect(reset_single_pass_header_prompt)
-        reset_single_pass_header_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #b8860b;
-                color: black;
-                padding: 5px;
-                border: 1px solid #8a6a08;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #9a6d07; }
-            QPushButton:pressed { background-color: #8a6106; }
-        """)
-        single_pass_header_controls_layout.addWidget(reset_single_pass_header_btn)
-        single_pass_header_hint = QLabel("Use {glossary_prompt} and {translation_prompt} placeholders.")
-        single_pass_header_hint.setStyleSheet("color: gray; font-size: 9pt;")
-        single_pass_header_controls_layout.addWidget(single_pass_header_hint)
-        single_pass_header_controls_layout.addStretch()
         
         # Create notebook for tabs
         notebook = QTabWidget()
@@ -6116,16 +5306,8 @@ Do not stop after the glossary."""
                     label.setStyleSheet("color: #ddd;")
                     label._mode_locked = False
 
-            # Get the auto_load description label (sibling in auto_load_layout)
-            _auto_load_desc_label = None
-            try:
-                for i in range(auto_load_layout.count()):
-                    w = auto_load_layout.itemAt(i).widget()
-                    if isinstance(w, QLabel) and 'Maps' in (w.text() or ''):
-                        _auto_load_desc_label = w
-                        break
-            except Exception:
-                pass
+            # Get the auto_load description label (it lives in the General Settings tab)
+            _auto_load_desc_label = getattr(self, '_auto_load_desc_label', None)
 
             # Get the append glossary description label
             _append_desc_label = getattr(self, '_append_glossary_desc_label', None)
@@ -6290,14 +5472,6 @@ Do not stop after the glossary."""
             enabled = self.append_glossary_checkbox.isChecked()
             self.append_prompt_text.setEnabled(enabled)
         
-        # Initialize states
-        update_auto_glossary_state()
-        update_append_prompt_state()
-        
-        # Connect signals
-        self.auto_glossary_mode_combo.currentIndexChanged.connect(update_auto_glossary_state)
-        self.append_glossary_checkbox.stateChanged.connect(update_append_prompt_state)
-        
         # Sync main combo → shortcut dropdown on the main UI
         def _sync_shortcut_from_combo(*_args):
             if hasattr(self, 'auto_glossary_shortcut_combo'):
@@ -6305,7 +5479,21 @@ Do not stop after the glossary."""
                 self.auto_glossary_shortcut_combo.blockSignals(True)
                 self.auto_glossary_shortcut_combo.setCurrentIndex(idx)
                 self.auto_glossary_shortcut_combo.blockSignals(False)
-        self.auto_glossary_mode_combo.currentIndexChanged.connect(_sync_shortcut_from_combo)
+
+        # The mode combo and the Append Glossary / Auto-Mapping / Fuzzy Auto-Mapping rows it
+        # locks live in the General Settings tab, which is built after this one. The first
+        # state pass and the signal hookup run from _setup_glossary_general_tab.
+        def _init_auto_glossary_mode_state():
+            # Initialize states
+            update_auto_glossary_state()
+            update_append_prompt_state()
+
+            # Connect signals
+            self.auto_glossary_mode_combo.currentIndexChanged.connect(update_auto_glossary_state)
+            self.append_glossary_checkbox.stateChanged.connect(update_append_prompt_state)
+            self.auto_glossary_mode_combo.currentIndexChanged.connect(_sync_shortcut_from_combo)
+
+        self._init_auto_glossary_mode_state = _init_auto_glossary_mode_state
 
     def _open_glossary_anti_duplicate_dialog(self, parent):
         """Open glossary-specific anti-duplicate parameters dialog."""
@@ -7247,6 +6435,843 @@ Do not stop after the glossary."""
         
         if hasattr(self, 'append_log'):
             self.append_log("🔄 Glossary anti-duplicate parameters reset to defaults")
+
+    def _setup_glossary_general_tab(self, parent):
+        """Setup the General Settings tab: the glossary mode and everything that applies to every mode.
+
+        These rows used to open the Minimal tab, but none of them is specific to Minimal
+        generation. The tab is shown first and built after the Minimal tab: it finishes by
+        running that tab's mode-state pass, which needs both the mode selector and the
+        Append Glossary / Auto-Mapping rows built here.
+        """
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # Master mode selector (replaces old checkbox toggle)
+        master_toggle_widget = QWidget()
+        master_toggle_layout = QHBoxLayout(master_toggle_widget)
+        master_toggle_layout.setContentsMargins(0, 0, 0, 15)
+        layout.addWidget(master_toggle_widget)
+        
+        mode_label = QLabel("Automatic Glossary Generation:")
+        mode_label.setStyleSheet("font-weight: bold; font-size: 10pt;")
+        master_toggle_layout.addWidget(mode_label)
+        
+        if not hasattr(self, 'auto_glossary_mode_combo'):
+            self.auto_glossary_mode_combo = QComboBox()
+            self.auto_glossary_mode_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full", "Single Pass"])
+            # Add Halgakos icon to each item
+            try:
+                _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+                if os.path.exists(_ico_path):
+                    _combo_icon = QIcon(_ico_path)
+                    for i in range(self.auto_glossary_mode_combo.count()):
+                        self.auto_glossary_mode_combo.setItemIcon(i, _combo_icon)
+            except Exception:
+                pass
+            # Read saved mode with backward compat
+            saved_mode = self.config.get('auto_glossary_mode', None)
+            if saved_mode is None:
+                # Migrate from old boolean
+                old_enabled = self.config.get('enable_auto_glossary', False)
+                saved_mode = 'minimal' if old_enabled else 'off'
+            mode_index = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass': 7}.get(saved_mode.lower(), 5)
+            self.auto_glossary_mode_combo.setCurrentIndex(mode_index)
+        self.auto_glossary_mode_combo.setToolTip(_wrapped_tooltip_html(
+            "Off: No automatic glossary extraction + enables Auto-Mapping\n"
+            "Off (Fuzzy Mapping): Off + enables Auto-Mapping + Fuzzy Auto-Mapping\n"
+            "Manual Glossary Only: Off + disables Auto-Mapping (use the editor's Load Glossary button)\n"
+            "No Glossary: Runs without glossary (doesn't change toggle)\n"
+            "Minimal: Lightweight extraction during translation (in-process)\n"
+            "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
+            "Full: Chapter-by-chapter extraction for maximum context (most expensive)\n"
+            "Single Pass: Extract glossary inline during each translation request"
+        ))
+        from PySide6.QtCore import QSize
+        self.auto_glossary_mode_combo.setFixedWidth(220)
+        self.auto_glossary_mode_combo.setIconSize(QSize(18, 18))
+        self.auto_glossary_mode_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #1a2a44;
+                color: #e8f0ff;
+                padding: 5px 10px;
+                border: 2px solid #4a8fd4;
+                border-radius: 4px;
+                font-size: 10pt;
+                font-weight: bold;
+            }
+            QComboBox:hover { border-color: #70b8ff; background-color: #223a58; }
+            QComboBox::drop-down {
+                border: none;
+                padding-right: 6px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #162848;
+                color: #e8f0ff;
+                selection-background-color: #4080d0;
+                selection-color: #ffffff;
+                border: 1px solid #4a8fd4;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 4px 8px;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background-color: #2a4a70;
+            }
+        """)
+        self.auto_glossary_mode_combo.wheelEvent = lambda event: None
+        master_toggle_layout.addWidget(self.auto_glossary_mode_combo)
+        
+        # Keep old attribute for backward compatibility
+        # Other code checks enable_auto_glossary_checkbox — provide a shim
+        self.enable_auto_glossary_checkbox = type('_Shim', (), {
+            'isChecked': lambda s: self.auto_glossary_mode_combo.currentText().lower() != 'off',
+            'setChecked': lambda s, v: None,
+            'stateChanged': type('_Sig', (), {'connect': lambda s, f: None, 'disconnect': lambda s, f: None})()
+        })()
+        
+        desc_label = QLabel("(Automatic extraction and translation of character names/Terms)")
+        master_toggle_layout.addWidget(desc_label)
+        master_toggle_layout.addStretch()
+
+        # Append glossary toggle
+        append_widget = QWidget()
+        append_layout = QHBoxLayout(append_widget)
+        append_layout.setContentsMargins(0, 0, 0, 6)
+        layout.addWidget(append_widget)
+        
+        if not hasattr(self, 'append_glossary_checkbox'):
+            self.append_glossary_checkbox = self._create_styled_checkbox("Append Glossary to System Prompt")
+            self.append_glossary_checkbox.setChecked(self.config.get('append_glossary', False))
+        self.append_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Send the current glossary to the model with every request.\n"
+            "Improves consistency across chapters."
+        ))
+        append_layout.addWidget(self.append_glossary_checkbox)
+        
+        self._append_glossary_desc_label = QLabel("(Applies to ALL glossaries - manual and automatic)")
+        self._append_glossary_desc_label.setCursor(Qt.PointingHandCursor)
+        self._append_glossary_desc_label.mousePressEvent = lambda _: self.append_glossary_checkbox.toggle() if not getattr(self.append_glossary_checkbox, '_mode_locked', False) else None
+        append_layout.addWidget(self._append_glossary_desc_label)
+        append_layout.addStretch()
+
+        # Auto-load glossaries toggle (under Append Glossary)
+        auto_load_widget = QWidget()
+        auto_load_layout = QHBoxLayout(auto_load_widget)
+        auto_load_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(auto_load_widget)
+
+        if not hasattr(self, 'append_glossary_auto_load_checkbox'):
+            self.append_glossary_auto_load_checkbox = self._create_styled_checkbox("Auto-Mapping (Auto-Fill)")
+        try:
+            self.append_glossary_auto_load_checkbox.setChecked(self.config.get('append_glossary_auto_load', False))
+        except Exception:
+            pass
+        self.append_glossary_auto_load_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When Append Glossary is enabled, automatically Auto-Fill glossary mapping\n"
+            "based on filename matching. If disabled, use Load Glossary / Auto-Fill manually."
+        ))
+        auto_load_layout.addWidget(self.append_glossary_auto_load_checkbox)
+        auto_load_desc = QLabel("(Maps Glossary subfolder content → Output folder automatically)")
+        auto_load_desc.setCursor(Qt.PointingHandCursor)
+        auto_load_desc.mousePressEvent = lambda _: self.append_glossary_auto_load_checkbox.toggle()
+        auto_load_layout.addWidget(auto_load_desc)
+        self._auto_load_desc_label = auto_load_desc  # the mode combo locks it
+        auto_load_layout.addStretch()
+
+        # Fuzzy Auto-Mapping toggle (under Auto-Mapping)
+        fuzzy_map_widget = QWidget()
+        fuzzy_map_layout = QHBoxLayout(fuzzy_map_widget)
+        fuzzy_map_layout.setContentsMargins(40, 0, 0, 5)
+        layout.addWidget(fuzzy_map_widget)
+
+        if not hasattr(self, 'fuzzy_auto_mapping_checkbox'):
+            self.fuzzy_auto_mapping_checkbox = self._create_styled_checkbox("Fuzzy Auto-Mapping")
+        try:
+            self.fuzzy_auto_mapping_checkbox.setChecked(self.config.get('fuzzy_auto_mapping', False))
+        except Exception:
+            pass
+        self.fuzzy_auto_mapping_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When enabled, auto-mapping will match files with similar names\n"
+            "(e.g. 'MyNovel_v2.epub' → 'MyNovel_glossary.csv').\n"
+            "Adjust the slider to control how similar names must be."
+        ))
+        fuzzy_map_layout.addWidget(self.fuzzy_auto_mapping_checkbox)
+        fuzzy_map_desc = QLabel("(Matches files with similar names)")
+        fuzzy_map_desc.setCursor(Qt.PointingHandCursor)
+        fuzzy_map_desc.mousePressEvent = lambda _: self.fuzzy_auto_mapping_checkbox.toggle() if not getattr(self.fuzzy_auto_mapping_checkbox, '_mode_locked', False) else None
+        fuzzy_map_layout.addWidget(fuzzy_map_desc)
+        fuzzy_map_layout.addStretch()
+
+        # Fuzzy threshold mini-slider
+        fuzzy_slider_widget = QWidget()
+        fuzzy_slider_layout = QHBoxLayout(fuzzy_slider_widget)
+        fuzzy_slider_layout.setContentsMargins(60, 0, 0, 10)
+        layout.addWidget(fuzzy_slider_widget)
+
+        fuzzy_slider_label = QLabel("Similarity:")
+        fuzzy_slider_label.setStyleSheet("color: #aaa; font-size: 9pt;")
+        fuzzy_slider_layout.addWidget(fuzzy_slider_label)
+
+        if not hasattr(self, 'fuzzy_auto_mapping_threshold_var'):
+            self.fuzzy_auto_mapping_threshold_var = self.config.get('fuzzy_auto_mapping_threshold', 50)
+        self.fuzzy_mapping_slider = QSlider(Qt.Horizontal)
+        self.fuzzy_mapping_slider.setMinimum(10)
+        self.fuzzy_mapping_slider.setMaximum(100)
+        self.fuzzy_mapping_slider.setValue(int(self.fuzzy_auto_mapping_threshold_var))
+        self.fuzzy_mapping_slider.setMaximumWidth(180)
+        self._disable_slider_mousewheel(self.fuzzy_mapping_slider)
+        fuzzy_slider_layout.addWidget(self.fuzzy_mapping_slider)
+
+        self.fuzzy_mapping_value_label = QLabel(f"{self.fuzzy_auto_mapping_threshold_var}%")
+        self.fuzzy_mapping_value_label.setStyleSheet("color: #ddd; font-size: 9pt; min-width: 30px;")
+        fuzzy_slider_layout.addWidget(self.fuzzy_mapping_value_label)
+
+        def _on_fuzzy_slider_changed(value):
+            self.fuzzy_auto_mapping_threshold_var = value
+            self.fuzzy_mapping_value_label.setText(f"{value}%")
+        self.fuzzy_mapping_slider.valueChanged.connect(_on_fuzzy_slider_changed)
+        fuzzy_slider_layout.addStretch()
+
+        # Sync fuzzy toggle enabled state with auto-mapping
+        def _sync_fuzzy_enabled(*_args):
+            try:
+                auto_map_on = bool(self.append_glossary_auto_load_checkbox.isChecked())
+                locked = getattr(self.fuzzy_auto_mapping_checkbox, '_mode_locked', False)
+                if not locked:
+                    self.fuzzy_auto_mapping_checkbox.setEnabled(auto_map_on)
+                self.fuzzy_mapping_slider.setEnabled(auto_map_on and self.fuzzy_auto_mapping_checkbox.isChecked())
+            except Exception:
+                pass
+
+        _sync_fuzzy_enabled()
+        try:
+            # Replace only the slots owned by this setup path. Broad disconnects
+            # emit PySide warnings when no slots exist and can remove unrelated slots.
+            previous_slot = getattr(self, '_sync_fuzzy_enabled_slot', None)
+            if previous_slot is not None:
+                try:
+                    self.append_glossary_auto_load_checkbox.toggled.disconnect(previous_slot)
+                except (TypeError, RuntimeError):
+                    pass
+                try:
+                    self.fuzzy_auto_mapping_checkbox.toggled.disconnect(previous_slot)
+                except (TypeError, RuntimeError):
+                    pass
+            self.append_glossary_auto_load_checkbox.toggled.connect(_sync_fuzzy_enabled)
+            self.fuzzy_auto_mapping_checkbox.toggled.connect(_sync_fuzzy_enabled)
+            self._sync_fuzzy_enabled_slot = _sync_fuzzy_enabled
+        except Exception:
+            pass
+
+        # Auto-Mapping only makes sense when Append Glossary is enabled.
+        def _sync_auto_mapping_enabled_state(*_args):
+            try:
+                enabled = bool(self.append_glossary_checkbox.isChecked())
+            except Exception:
+                enabled = False
+            try:
+                self.append_glossary_auto_load_checkbox.setEnabled(enabled)
+            except Exception:
+                pass
+
+        # Set initial enabled/disabled state
+        _sync_auto_mapping_enabled_state()
+
+        # Keep it in sync when Append Glossary changes (avoid duplicate connections)
+        try:
+            previous_slot = getattr(self, '_sync_auto_mapping_enabled_state_slot', None)
+            if previous_slot is not None:
+                try:
+                    self.append_glossary_checkbox.toggled.disconnect(previous_slot)
+                except (TypeError, RuntimeError):
+                    pass
+            self.append_glossary_checkbox.toggled.connect(_sync_auto_mapping_enabled_state)
+            self._sync_auto_mapping_enabled_state_slot = _sync_auto_mapping_enabled_state
+        except Exception:
+            pass
+
+        # Real-time path switching when auto-mapping is toggled
+        def _on_auto_mapping_toggled(checked):
+            """Switch glossary path between Glossary subfolder and output folder in real time."""
+            try:
+                # Only act if Append Glossary is also enabled
+                if not (hasattr(self, 'append_glossary_checkbox') and self.append_glossary_checkbox.isChecked()):
+                    return
+
+                # Subtitle members resolve to their one archive-level source.
+                source_path = None
+                try:
+                    sources = self._glossary_editor_input_sources()
+                    if len(sources) == 1:
+                        source_path = sources[0]
+                except Exception:
+                    pass
+                if not source_path:
+                    return
+
+                if checked:
+                    # Auto-mapping ON → switch to Glossary subfolder file
+                    # BUT if Minimal mode is active, use output folder instead
+                    _use_subfolder = True
+                    try:
+                        _cur_mode = getattr(self, 'auto_glossary_mode_var', self.config.get('auto_glossary_mode', 'off'))
+                        if str(_cur_mode).lower() == 'minimal':
+                            _use_subfolder = False
+                    except Exception:
+                        pass
+
+                    # Clear the current state so the correct loader can take over
+                    try:
+                        _prev = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
+                        if _prev and not getattr(self, 'manual_glossary_manually_loaded', False):
+                            self.append_log(f"📑 Cleared auto-mapped glossary: {os.path.basename(_prev)}")
+                        self.manual_glossary_path = None
+                        self.auto_loaded_glossary_path = None
+                        self.auto_loaded_glossary_for_file = None
+                        self.manual_glossary_manually_loaded = False
+                    except Exception:
+                        pass
+
+                    if _use_subfolder:
+                        try:
+                            if hasattr(self, '_autofill_glossary_for_current_selection'):
+                                self._autofill_glossary_for_current_selection()
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            self.auto_load_glossary_for_file(source_path)
+                        except Exception:
+                            pass
+                else:
+                    # Auto-mapping OFF → fall back to output folder glossary
+                    try:
+                        _prev = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
+                        if _prev and not getattr(self, 'manual_glossary_manually_loaded', False):
+                            self.append_log(f"📑 Cleared auto-mapped glossary: {os.path.basename(_prev)}")
+                        self.manual_glossary_path = None
+                        self.auto_loaded_glossary_path = None
+                        self.auto_loaded_glossary_for_file = None
+                        self.manual_glossary_manually_loaded = False
+                    except Exception:
+                        pass
+                    try:
+                        self.auto_load_glossary_for_file(source_path)
+                    except Exception:
+                        pass
+
+                # Refresh the glossary editor if it has been set up
+                try:
+                    if hasattr(self, 'editor_file_entry'):
+                        new_path = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
+                        if new_path and os.path.exists(new_path):
+                            self.editor_file_entry.setText(new_path)
+                            _log_msg = f"📑 Glossary editor switched to: {os.path.basename(new_path)}"
+                            if getattr(self, '_last_editor_switch_log', '') != _log_msg:
+                                self.append_log(_log_msg)
+                                self._last_editor_switch_log = _log_msg
+                except Exception:
+                    pass
+                try:
+                    refresh = getattr(self, '_refresh_glossary_editor', None)
+                    if callable(refresh):
+                        refresh()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        # Replace this handler without disturbing the fuzzy enabled-state sync.
+        try:
+            previous_slot = getattr(self, '_on_auto_mapping_toggled_slot', None)
+            if previous_slot is not None:
+                try:
+                    self.append_glossary_auto_load_checkbox.toggled.disconnect(previous_slot)
+                except (TypeError, RuntimeError):
+                    pass
+            self.append_glossary_auto_load_checkbox.toggled.connect(_on_auto_mapping_toggled)
+            self._on_auto_mapping_toggled_slot = _on_auto_mapping_toggled
+        except Exception:
+            pass
+
+        # Add additional glossary toggle
+        additional_glossary_widget = QWidget()
+        additional_glossary_layout = QHBoxLayout(additional_glossary_widget)
+        additional_glossary_layout.setContentsMargins(0, 0, 0, 15)
+        layout.addWidget(additional_glossary_widget)
+        
+        if not hasattr(self, 'add_additional_glossary_checkbox'):
+            self.add_additional_glossary_checkbox = self._create_styled_checkbox("Add Additional Glossary")
+            self.add_additional_glossary_checkbox.setChecked(self.config.get('add_additional_glossary', False))
+        self.add_additional_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Always include an external glossary file (CSV/JSON/TXT/PDF/MD)\n"
+            "alongside the generated glossary when calling the API."
+        ))
+        additional_glossary_layout.addWidget(self.add_additional_glossary_checkbox)
+        
+        # Load additional glossary button
+        load_additional_btn = QPushButton("Load Additional Glossary")
+        load_additional_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5a9fd4;
+                color: white;
+                padding: 5px 15px;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #7ab8e8; }
+            QPushButton:pressed { background-color: #4a8fc4; }
+            QPushButton:disabled { background-color: #cccccc; color: #666666; }
+        """)
+        load_additional_btn.clicked.connect(self._load_additional_glossary)
+        additional_glossary_layout.addWidget(load_additional_btn)
+        self._load_additional_glossary_btn = load_additional_btn  # Store reference for animation
+        
+        # Show current additional glossary path if exists
+        additional_glossary_path = self.config.get('additional_glossary_path', '')
+        if additional_glossary_path:
+            label_additional = QLabel(f"(Current: {os.path.basename(additional_glossary_path)})")
+        else:
+            label_additional = QLabel("(Sends additional glossary file alongside main glossary to API)")
+        additional_glossary_layout.addWidget(label_additional)
+        self.additional_glossary_label = label_additional  # Store reference to update later
+        additional_glossary_layout.addStretch()
+
+        # Unified glossary: one deduplicated glossary across every novel,
+        # sent like the extension (below Add Additional Glossary).
+        unified_glossary_widget = QWidget()
+        unified_glossary_layout = QHBoxLayout(unified_glossary_widget)
+        unified_glossary_layout.setContentsMargins(0, 0, 0, 6)
+        layout.addWidget(unified_glossary_widget)
+
+        if not hasattr(self, 'enable_unified_glossary_checkbox'):
+            self.enable_unified_glossary_checkbox = self._create_styled_checkbox("Enable Unified Glossary")
+            self.enable_unified_glossary_checkbox.setChecked(self.config.get('enable_unified_glossary', False))
+        if not getattr(self.enable_unified_glossary_checkbox, '_glossary_manager_sync_connected', False):
+            self.enable_unified_glossary_checkbox.stateChanged.connect(self._on_glossary_manager_enable_unified_glossary_toggle)
+            self.enable_unified_glossary_checkbox._glossary_manager_sync_connected = True
+        self.enable_unified_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Merge every book's glossary into one deduplicated glossary_unified.csv per language\n"
+            "(Glossary/Unified Glossary/<source>-<target>/) and send it alongside the main glossary\n"
+            "with the same compression settings.\n"
+            "Updated at the start and end of each glossary run; the copy sent to the API leaves out\n"
+            "entries the book's own glossary already has."
+        ))
+        unified_glossary_layout.addWidget(self.enable_unified_glossary_checkbox)
+
+        unified_settings_btn = QPushButton("Unified Glossary Settings")
+        unified_settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5a9fd4;
+                color: white;
+                padding: 5px 15px;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #7ab8e8; }
+            QPushButton:pressed { background-color: #4a8fc4; }
+            QPushButton:disabled { background-color: #cccccc; color: #666666; }
+        """)
+        unified_settings_btn.setToolTip(_wrapped_tooltip_html(
+            "Source language and language-combining options for the unified glossary."
+        ))
+        unified_settings_btn.clicked.connect(lambda: self._open_unified_glossary_settings_dialog(parent))
+        unified_glossary_layout.addWidget(unified_settings_btn)
+        self._unified_glossary_settings_btn = unified_settings_btn
+
+        self.unified_glossary_label = QLabel(self._unified_glossary_hint_text())
+        unified_glossary_layout.addWidget(self.unified_glossary_label)
+        unified_glossary_layout.addStretch()
+
+        generate_unified_widget = QWidget()
+        generate_unified_layout = QHBoxLayout(generate_unified_widget)
+        generate_unified_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(generate_unified_widget)
+
+        if not hasattr(self, 'generate_unified_glossary_checkbox'):
+            self.generate_unified_glossary_checkbox = self._create_styled_checkbox("Generate Unified Glossary")
+            self.generate_unified_glossary_checkbox.setChecked(self.config.get('generate_unified_glossary', False))
+        if not getattr(self.generate_unified_glossary_checkbox, '_glossary_manager_sync_connected', False):
+            self.generate_unified_glossary_checkbox.stateChanged.connect(self._on_glossary_manager_generate_unified_glossary_toggle)
+            self.generate_unified_glossary_checkbox._glossary_manager_sync_connected = True
+        self.generate_unified_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Rebuild the unified glossary from every book folder under Glossary/ at the start of the\n"
+            "next glossary run, reading the files in parallel (Parallel Extraction worker count).\n"
+            "Fingerprinted: the rebuild is skipped when no book glossary changed since the last one."
+        ))
+        generate_unified_layout.addWidget(self.generate_unified_glossary_checkbox)
+
+        generate_unified_hint = QLabel("(Rebuilds from every book glossary at the start of the next run; skipped when nothing changed)")
+        generate_unified_layout.addWidget(generate_unified_hint)
+        generate_unified_layout.addStretch()
+        self._unified_generate_row_widgets = (self.generate_unified_glossary_checkbox, generate_unified_hint)
+        self._set_unified_glossary_row_enabled(self.enable_unified_glossary_checkbox.isChecked())
+
+        # Compress glossary toggle
+        compress_widget = QWidget()
+        compress_layout = QHBoxLayout(compress_widget)
+        compress_layout.setContentsMargins(0, 0, 0, 15)
+        layout.addWidget(compress_widget)
+        
+        if not hasattr(self, 'compress_glossary_checkbox'):
+            self.compress_glossary_checkbox = self._create_styled_checkbox("Compress Glossary Prompt")
+            self.compress_glossary_checkbox.setChecked(self.config.get('compress_glossary_prompt', True))
+        if not getattr(self.compress_glossary_checkbox, '_glossary_manager_sync_connected', False):
+            self.compress_glossary_checkbox.stateChanged.connect(self._on_glossary_manager_compress_glossary_toggle)
+            self.compress_glossary_checkbox._glossary_manager_sync_connected = True
+        self.compress_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Only send glossary entries that appear in the current source text.\n"
+            "Saves tokens and cost; recommended ON."
+        ))
+        compress_layout.addWidget(self.compress_glossary_checkbox)
+        
+        label3 = QLabel("(Excludes glossary entries that don't appear in source text before sending to API)")
+        # label3.setStyleSheet("color: white; font-size: 10pt; font-style: italic;")
+        compress_layout.addWidget(label3)
+        compress_layout.addStretch()
+
+        consider_translated_widget = QWidget()
+        consider_translated_layout = QHBoxLayout(consider_translated_widget)
+        consider_translated_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(consider_translated_widget)
+
+        if not hasattr(self, 'consider_translated_compression_checkbox'):
+            self.consider_translated_compression_checkbox = self._create_styled_checkbox("Consider Translated Column")
+            self.consider_translated_compression_checkbox.setChecked(self.config.get('compress_glossary_consider_translated_column', False))
+        if not getattr(self.consider_translated_compression_checkbox, '_glossary_manager_sync_connected', False):
+            self.consider_translated_compression_checkbox.stateChanged.connect(self._on_glossary_manager_consider_translated_compression_toggle)
+            self.consider_translated_compression_checkbox._glossary_manager_sync_connected = True
+        self.consider_translated_compression_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When ON, glossary compression keeps an entry if either raw_name or translated_name appears in the source text.\n"
+            "Default OFF preserves raw-name-only matching."
+        ))
+        consider_translated_layout.addWidget(self.consider_translated_compression_checkbox)
+
+        consider_translated_hint = QLabel("(Optional: also match translated_name during compression; default OFF)")
+        consider_translated_layout.addWidget(consider_translated_hint)
+        consider_translated_layout.addStretch()
+
+        precise_matching_widget = QWidget()
+        precise_matching_layout = QHBoxLayout(precise_matching_widget)
+        precise_matching_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(precise_matching_widget)
+
+        if not hasattr(self, 'precise_matching_checkbox'):
+            self.precise_matching_checkbox = self._create_styled_checkbox("Precise Term Matching")
+            self.precise_matching_checkbox.setChecked(self.config.get('compress_glossary_precise_matching', True))
+        if not getattr(self.precise_matching_checkbox, '_glossary_manager_sync_connected', False):
+            self.precise_matching_checkbox.stateChanged.connect(self._on_glossary_manager_precise_matching_toggle)
+            self.precise_matching_checkbox._glossary_manager_sync_connected = True
+        self.precise_matching_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When ON, glossary compression uses script-aware matching: word boundaries for Latin terms, "
+            "sub-word boundary checks for short CJK terms, and normalized/spacing/honorific variants.\n"
+            "When OFF, matching is a plain substring search and may keep an entry on a single CJK character.\n"
+            "Default ON."
+        ))
+        precise_matching_layout.addWidget(self.precise_matching_checkbox)
+
+        # "Whole term for": same All / Custom + Configure… pattern as Emergency
+        # Glossary Compliance, and the same entry-type dialog behind it. This
+        # replaces the old Strict Gender Entry Matching checkbox.
+        if not hasattr(self, 'strict_matching_mode_label'):
+            self.strict_matching_mode_label = QLabel("Whole term for:")
+        precise_matching_layout.addWidget(self.strict_matching_mode_label)
+        if not hasattr(self, 'strict_matching_mode_combo'):
+            self.strict_matching_mode_combo = QComboBox()
+            self.strict_matching_mode_combo.addItems(list(self._STRICT_MATCHING_LABELS))
+            self.strict_matching_mode_combo.setFixedWidth(150)
+            try:
+                self.strict_matching_mode_combo.setStyleSheet(self.auto_glossary_mode_combo.styleSheet())
+            except Exception:
+                pass
+            self._disable_combobox_mousewheel(self.strict_matching_mode_combo)
+            self.strict_matching_mode_combo.setCurrentIndex(
+                self._STRICT_MATCHING_MODES.index(self._strict_matching_mode())
+            )
+            self.strict_matching_mode_combo.currentIndexChanged.connect(
+                self._on_glossary_manager_strict_matching_mode_change
+            )
+        self.strict_matching_mode_combo.setToolTip(_wrapped_tooltip_html(
+            "Which entries must appear as the WHOLE term, not just one word of it. Particles, honorifics, "
+            "spacing and full/half-width differences still count as the whole term.\n"
+            "All (default) — every entry. 넥서스 alone no longer keeps 모노크롬 넥서스, 넥서스 신권 …\n"
+            "Gender Entries — only entries whose type has gender enabled (custom entry types included).\n"
+            "Custom — the entry types picked under Configure…\n"
+            "None — one word of a multi-word entry is enough for every entry.\n\n"
+            "Gender-enabled entries are people, so one part of a NAME still counts: 미샤 keeps 미샤 랄토스 "
+            "because the glossary transliterates it (Misha). A title word does not: 마법사 does not keep "
+            "3서클 마법사, because it is translated (Mage), not transliterated."
+        ))
+        precise_matching_layout.addWidget(self.strict_matching_mode_combo)
+
+        if not hasattr(self, 'strict_matching_configure_btn'):
+            self.strict_matching_configure_btn = QPushButton("Configure…")
+            self.strict_matching_configure_btn.setFixedWidth(100)
+            self.strict_matching_configure_btn.setStyleSheet(
+                "background-color: #3a5f8a; color: white; padding: 4px 8px; border-radius: 3px;"
+            )
+            self.strict_matching_configure_btn.clicked.connect(
+                lambda: self._open_strict_matching_types_dialog(self.strict_matching_configure_btn.window())
+            )
+        precise_matching_layout.addWidget(self.strict_matching_configure_btn)
+        self._refresh_strict_matching_row()
+
+        precise_matching_hint = QLabel("(Recommended: narrower, more accurate compression; default ON, turn OFF for the old loose matching)")
+        precise_matching_layout.addWidget(precise_matching_hint)
+        precise_matching_layout.addStretch()
+
+        multipass_exclude_widget = QWidget()
+        multipass_exclude_layout = QHBoxLayout(multipass_exclude_widget)
+        multipass_exclude_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(multipass_exclude_widget)
+
+        if not hasattr(self, 'multipass_exclude_matching_checkbox'):
+            self.multipass_exclude_matching_checkbox = self._create_styled_checkbox("Multipass: Exclude Already-Applied Entries")
+            self.multipass_exclude_matching_checkbox.setChecked(self.config.get('compress_glossary_multipass_exclude_matching', True))
+        if not getattr(self.multipass_exclude_matching_checkbox, '_glossary_manager_sync_connected', False):
+            self.multipass_exclude_matching_checkbox.stateChanged.connect(self._on_glossary_manager_multipass_exclude_matching_toggle)
+            self.multipass_exclude_matching_checkbox._glossary_manager_sync_connected = True
+        self.multipass_exclude_matching_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Multipass refinement (Full, Full + raw, Failed, Partial, Partial.b, Partial.b2) always compresses the "
+            "glossary against the RAW chapter, so Consider Translated Column is not needed for it.\n"
+            "When ON, entries whose translated name already appears in the translated output are left out too, "
+            "so each request only carries the entries the translation still needs.\n"
+            "Default ON."
+        ))
+        multipass_exclude_layout.addWidget(self.multipass_exclude_matching_checkbox)
+
+        multipass_exclude_hint = QLabel("(Multipass only sends glossary entries whose translation is missing from the output; default ON)")
+        multipass_exclude_layout.addWidget(multipass_exclude_hint)
+        multipass_exclude_layout.addStretch()
+
+        shadow_log_widget = QWidget()
+        shadow_log_layout = QHBoxLayout(shadow_log_widget)
+        shadow_log_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(shadow_log_widget)
+
+        if not hasattr(self, 'shadow_log_matching_checkbox'):
+            self.shadow_log_matching_checkbox = self._create_styled_checkbox("Log Match Differences")
+            self.shadow_log_matching_checkbox.setChecked(self.config.get('compress_glossary_shadow_log', False))
+        if not getattr(self.shadow_log_matching_checkbox, '_glossary_manager_sync_connected', False):
+            self.shadow_log_matching_checkbox.stateChanged.connect(self._on_glossary_manager_shadow_log_matching_toggle)
+            self.shadow_log_matching_checkbox._glossary_manager_sync_connected = True
+        self.shadow_log_matching_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When ON, both the old and the new matcher run and their disagreements are written to "
+            "logs/glossary_match_shadow/. Translation output is unchanged.\n"
+            "Use with Precise Term Matching OFF to preview what it would change before switching."
+        ))
+        shadow_log_layout.addWidget(self.shadow_log_matching_checkbox)
+
+        shadow_log_hint = QLabel("(Optional: preview-only; writes a diff report without changing output)")
+        shadow_log_layout.addWidget(shadow_log_hint)
+        shadow_log_layout.addStretch()
+
+        # Save location toggle
+        output_save_widget = QWidget()
+        output_save_layout = QHBoxLayout(output_save_widget)
+        output_save_layout.setContentsMargins(0, 0, 0, 15)
+        layout.addWidget(output_save_widget)
+
+        if not hasattr(self, 'save_glossary_in_output_checkbox'):
+            self.save_glossary_in_output_checkbox = self._create_styled_checkbox("Save Glossary Backup in Output")
+            self.save_glossary_in_output_checkbox.setChecked(self.config.get('save_glossary_in_output', False))
+        self.save_glossary_in_output_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Also save duplicate glossary files in the current output/source folder. Primary glossary mapping stays unchanged."
+        ))
+        output_save_layout.addWidget(self.save_glossary_in_output_checkbox)
+
+        output_save_hint = QLabel("(Creates output-side Glossary_Backup copies; manga always also writes MangaGlossary_Backup)")
+        output_save_layout.addWidget(output_save_hint)
+        output_save_layout.addStretch()
+
+        # Optional tracker file toggle
+        skip_gender_tracking_widget = QWidget()
+        skip_gender_tracking_layout = QHBoxLayout(skip_gender_tracking_widget)
+        skip_gender_tracking_layout.setContentsMargins(0, 0, 0, 15)
+        layout.addWidget(skip_gender_tracking_widget)
+
+        if not hasattr(self, 'skip_gender_tracking_checkbox'):
+            self.skip_gender_tracking_checkbox = self._create_styled_checkbox("Skip Gender Tracking")
+            self.skip_gender_tracking_checkbox.setChecked(self.config.get('glossary_skip_gender_tracking', False))
+        self.skip_gender_tracking_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Do not create or use the *_gender_tracker.json sidecar file.\n"
+            "Also disables the Male/Female dedupe protection, so same-name entries dedupe normally."
+        ))
+        skip_gender_tracking_layout.addWidget(self.skip_gender_tracking_checkbox)
+
+        skip_gender_tracking_label = QLabel("(Disables gender tracker and gender-variant dedupe protection)")
+        skip_gender_tracking_layout.addWidget(skip_gender_tracking_label)
+        skip_gender_tracking_layout.addStretch()
+
+        # Gender tracker false-positive controls
+        gender_noise_widget = QWidget()
+        gender_noise_layout = QHBoxLayout(gender_noise_widget)
+        gender_noise_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(gender_noise_widget)
+
+        gender_noise_label = QLabel("Ignore rare gender flips:")
+        gender_noise_layout.addWidget(gender_noise_label)
+
+        if not hasattr(self, 'gender_noise_threshold_slider'):
+            self.gender_noise_threshold_slider = QSlider(Qt.Horizontal)
+            self.gender_noise_threshold_slider.setMinimum(0)
+            self.gender_noise_threshold_slider.setMaximum(100)
+            self.gender_noise_threshold_slider.setValue(int(self.config.get('glossary_gender_noise_threshold', 10)))
+            self.gender_noise_threshold_slider.setMaximumWidth(180)
+            self._disable_slider_mousewheel(self.gender_noise_threshold_slider)
+        gender_noise_layout.addWidget(self.gender_noise_threshold_slider)
+
+        self.gender_noise_threshold_value_label = QLabel(f"{self.gender_noise_threshold_slider.value()}%")
+        self.gender_noise_threshold_value_label.setMinimumWidth(42)
+        gender_noise_layout.addWidget(self.gender_noise_threshold_value_label)
+
+        def _update_gender_noise_label(value):
+            self.gender_noise_threshold_value_label.setText(f"{value}%")
+        self.gender_noise_threshold_slider.valueChanged.connect(_update_gender_noise_label)
+
+        gender_noise_bias_label = QLabel("Bias:")
+        gender_noise_layout.addWidget(gender_noise_bias_label)
+
+        if not hasattr(self, 'gender_tracking_bias_combo'):
+            self.gender_tracking_bias_combo = QComboBox()
+            self.gender_tracking_bias_combo.addItems(["No Bias", "Prefer Female", "Prefer Male"])
+            bias_index = {'none': 0, 'female': 1, 'male': 2}.get(
+                str(self.config.get('glossary_gender_tracking_bias', 'none')).lower(),
+                0
+            )
+            self.gender_tracking_bias_combo.setCurrentIndex(bias_index)
+            self._disable_combobox_mousewheel(self.gender_tracking_bias_combo)
+        self.gender_tracking_bias_combo.setToolTip(_wrapped_tooltip_html(
+            "No Bias: suppress a gender variant when it appears at or below the rare-flip percentage.\n"
+            "Prefer Female: never suppress rare female readings, but still suppress rare male readings.\n"
+            "Prefer Male: never suppress rare male readings, but still suppress rare female readings."
+        ))
+        gender_noise_layout.addWidget(self.gender_tracking_bias_combo)
+
+        gender_noise_hint = QLabel("(Default 10%: one-off AI misgenders are ignored during glossary compression)")
+        gender_noise_layout.addWidget(gender_noise_hint)
+        gender_noise_layout.addStretch()
+
+        # Custom append prompt section
+        append_prompt_frame = QGroupBox("Glossary Append Format")
+        append_prompt_layout = QVBoxLayout(append_prompt_frame)
+        append_prompt_layout.setContentsMargins(10, 10, 10, 10)  # Tighter margins
+        append_prompt_layout.setSpacing(5)  # Reduced spacing
+        layout.addWidget(append_prompt_frame)
+        
+        self.append_prompt_text = QTextEdit()
+        self.append_prompt_text.setFixedHeight(60)
+        self.append_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        append_prompt_layout.addWidget(self.append_prompt_text)
+        
+        # Always reload append prompt from config to ensure fresh state
+        # Treat empty string as missing to ensure users get the default
+        default_append_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
+        append_prompt_from_config = self.config.get('append_glossary_prompt', default_append_prompt)
+        if not append_prompt_from_config or not append_prompt_from_config.strip():
+            self.append_glossary_prompt = default_append_prompt
+        else:
+            self.append_glossary_prompt = append_prompt_from_config
+        
+        self.append_prompt_text.setPlainText(self._sep_for_display(self.append_glossary_prompt))
+        
+        append_prompt_controls_widget = QWidget()
+        append_prompt_controls_layout = QHBoxLayout(append_prompt_controls_widget)
+        append_prompt_controls_layout.setContentsMargins(0, 5, 0, 0)
+        append_prompt_layout.addWidget(append_prompt_controls_widget)
+        
+        def reset_append_prompt():
+            reply = QMessageBox.question(parent, "Reset Prompt", "Reset to default glossary append format?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.append_prompt_text.setPlainText("- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
+        
+        reset_append_btn = QPushButton("Reset to Default")
+        reset_append_btn.clicked.connect(reset_append_prompt)
+        reset_append_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;
+                color: black;
+                padding: 5px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
+        append_prompt_controls_layout.addWidget(reset_append_btn)
+        append_prompt_controls_layout.addStretch()
+
+        single_pass_header_frame = QGroupBox("Single Pass Header Prompt")
+        single_pass_header_layout = QVBoxLayout(single_pass_header_frame)
+        single_pass_header_layout.setContentsMargins(10, 10, 10, 10)
+        single_pass_header_layout.setSpacing(5)
+        layout.addWidget(single_pass_header_frame)
+
+        self.single_pass_header_prompt_text = QTextEdit()
+        self.single_pass_header_prompt_text.setFixedHeight(130)
+        self.single_pass_header_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        single_pass_header_layout.addWidget(self.single_pass_header_prompt_text)
+
+        default_single_pass_header = self._default_single_pass_header_prompt()
+        single_pass_header_from_config = self.config.get(
+            'single_pass_glossary_header_prompt',
+            default_single_pass_header,
+        )
+        if not single_pass_header_from_config or not str(single_pass_header_from_config).strip():
+            self.single_pass_glossary_header_prompt = default_single_pass_header
+        elif (
+            "Balanced/Full glossary logic" in str(single_pass_header_from_config)
+            or "standard Balanced/Full extraction" in str(single_pass_header_from_config)
+        ):
+            self.single_pass_glossary_header_prompt = default_single_pass_header
+            self.config['single_pass_glossary_header_prompt'] = default_single_pass_header
+        else:
+            self.single_pass_glossary_header_prompt = single_pass_header_from_config
+        self.single_pass_header_prompt_text.setPlainText(
+            self._sep_for_display(self.single_pass_glossary_header_prompt)
+        )
+
+        single_pass_header_controls_widget = QWidget()
+        single_pass_header_controls_layout = QHBoxLayout(single_pass_header_controls_widget)
+        single_pass_header_controls_layout.setContentsMargins(0, 5, 0, 0)
+        single_pass_header_layout.addWidget(single_pass_header_controls_widget)
+
+        def reset_single_pass_header_prompt():
+            reply = QMessageBox.question(parent, "Reset Prompt", "Reset to default single pass header prompt?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.single_pass_header_prompt_text.setPlainText(default_single_pass_header)
+
+        reset_single_pass_header_btn = QPushButton("Reset to Default")
+        reset_single_pass_header_btn.clicked.connect(reset_single_pass_header_prompt)
+        reset_single_pass_header_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;
+                color: black;
+                padding: 5px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
+        single_pass_header_controls_layout.addWidget(reset_single_pass_header_btn)
+        single_pass_header_hint = QLabel("Use {glossary_prompt} and {translation_prompt} placeholders.")
+        single_pass_header_hint.setStyleSheet("color: gray; font-size: 9pt;")
+        single_pass_header_controls_layout.addWidget(single_pass_header_hint)
+        single_pass_header_controls_layout.addStretch()
+
+        layout.addStretch()
+
+        # The mode combo and the rows it locks now exist: run the Minimal tab's mode-state pass.
+        init_mode_state = getattr(self, '_init_auto_glossary_mode_state', None)
+        if callable(init_mode_state):
+            init_mode_state()
 
     def _setup_glossary_refinement_tab(self, parent):
         """Setup optional post-generation glossary refinement controls."""

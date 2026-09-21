@@ -65,6 +65,8 @@ _metadata_lock = threading.Lock()
 _endpoint_output_limits: Dict[str, int] = {}
 _chat_template_unsupported_models: set = set()
 _chat_template_unsupported_lock = threading.Lock()
+_effort_fallback_notes_logged: set = set()
+_effort_fallback_notes_lock = threading.Lock()
 _configured_gate_lock = threading.Lock()
 _configured_gates: Dict[str, Tuple[threading.BoundedSemaphore, int]] = {}
 _active_helper_processes: set = set()
@@ -1138,7 +1140,13 @@ def _apply_reasoning_payload(
         selected = {'none': 'low', 'medium': 'low', 'xhigh': 'high', 'heavy': 'max'}.get(effort, effort)
         payload['reasoning_effort'] = selected
         if selected != effort:
-            _log(log_fn, f'📝 Kimi K3 does not support {effort}, using {selected} instead')
+            # Every request makes the same substitution: say it once per session.
+            # Keyed on the mapping, so a changed effort setting is announced again.
+            with _effort_fallback_notes_lock:
+                first_time = ('kimi-k3', effort, selected) not in _effort_fallback_notes_logged
+                _effort_fallback_notes_logged.add(('kimi-k3', effort, selected))
+            if first_time:
+                _log(log_fn, f'📝 Kimi K3 does not support {effort}, using {selected} instead')
         return
     reasoning_disabled = not _reasoning_toggle_enabled() or (
         effort == "none" and "deepseek-v4" not in model_lower
