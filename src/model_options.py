@@ -395,6 +395,9 @@ def _get_static_model_options() -> List[str]:
         # Google Search / Gemini browser-backed route (no API key needed)
         "search/gemini",
 
+        # Opera "Ask AI" (Aria) backend route (no API key; refresh_token from your Opera session)
+        "search/opera",
+
         # NVIDIA Build browser-backed route (no API key needed) - chat-tagged catalog models
         "authnd/nvidia/nemotron-3-ultra-550b-a55b",
         "authnd/mistralai/mistral-medium-3.5-128b",

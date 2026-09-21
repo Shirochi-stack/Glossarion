@@ -1533,6 +1533,18 @@ except ImportError:
     _search_gemini_reset_cancel = None
     SEARCH_GEMINI_AVAILABLE = False
 
+# Opera Aria - Opera "Ask AI" backend route (optional, no API key; search/opera)
+try:
+    from opera_aria import send_chat_completion as _search_opera_send
+    from opera_aria import cancel_stream as _search_opera_cancel_stream
+    from opera_aria import reset_cancel as _search_opera_reset_cancel
+    SEARCH_OPERA_AVAILABLE = True
+except ImportError:
+    _search_opera_send = None
+    _search_opera_cancel_stream = None
+    _search_opera_reset_cancel = None
+    SEARCH_OPERA_AVAILABLE = False
+
 # AuthCD - Claude subscription via OAuth (optional)
 try:
     from authcd_auth import get_default_store as _authcd_get_store
@@ -28122,6 +28134,12 @@ class UnifiedClient:
             actual_model = actual_model[len('search'):].lstrip('/')
         actual_model = actual_model or 'gemini'
 
+        # search/opera -> Opera "Ask AI" (Aria) backend, not the Google route.
+        if actual_model.lower().startswith('opera'):
+            return self._send_search_opera(
+                messages, temperature, max_tokens, response_name, actual_model
+            )
+
         max_retries = self._get_max_retries()
         last_error = None
         if self._should_abort_retry():
@@ -28247,6 +28265,99 @@ class UnifiedClient:
 
         raise UnifiedClientError(
             f"Gemini Free request failed after {max_retries} attempts: {last_error}",
+            error_type="api_error"
+        )
+
+    def _send_search_opera(self, messages, temperature, max_tokens, response_name,
+                           actual_model='opera') -> UnifiedResponse:
+        """Send request through Opera's "Ask AI" (Aria) backend route.
+
+        Reached via model 'search/opera'. Unlike search/gemini this does not use
+        Qt WebEngine; opera_aria.py calls composer.opera-api.com directly over
+        SSE. Auth is secret-free and runs off a refresh_token captured from a
+        real Opera session (OPERA_ARIA_REFRESH_TOKEN or opera_aria_token.json).
+        """
+        if not SEARCH_OPERA_AVAILABLE or _search_opera_send is None:
+            raise UnifiedClientError(
+                "Opera Aria is not available. Ensure 'opera_aria.py' exists under src/.",
+                error_type="config_error"
+            )
+
+        max_retries = self._get_max_retries()
+        last_error = None
+        if self._should_abort_retry():
+            raise UnifiedClientError(
+                "Opera Aria: Translation stopped by user",
+                error_type="cancelled"
+            )
+        print(f"🎭 Opera Aria: Sending request via Opera Ask AI route (model={actual_model})")
+
+        _read_timeout = self.request_timeout
+        if os.getenv("ENABLE_HTTP_TUNING", "0") == "1":
+            try:
+                _read_timeout = int(float(os.getenv("READ_TIMEOUT", str(self.request_timeout))))
+            except (ValueError, TypeError):
+                pass
+
+        for attempt in range(max_retries):
+            if self._is_stop_requested():
+                raise UnifiedClientError(
+                    "Opera Aria: Translation stopped by user",
+                    error_type="cancelled"
+                )
+            try:
+                if _search_opera_reset_cancel is not None:
+                    _search_opera_reset_cancel()
+                if self._should_abort_retry():
+                    raise UnifiedClientError(
+                        "Opera Aria: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+
+                result = _search_opera_send(
+                    messages=messages,
+                    model=actual_model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=_read_timeout,
+                    log_fn=print,
+                )
+                return UnifiedResponse(
+                    content=result.get("content", ""),
+                    finish_reason=result.get("finish_reason") or "stop",
+                    usage=result.get("usage"),
+                    raw_response=result,
+                )
+
+            except Exception as exc:
+                error_type = getattr(exc, 'error_type', '') or ''
+                error_str = str(exc)
+                if error_type == 'cancelled' or 'stopped by user' in error_str.lower() \
+                        or 'stream cancelled' in error_str.lower():
+                    raise UnifiedClientError(
+                        "Opera Aria: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+                if error_type in ('config_error', 'auth_error'):
+                    # Not worth retrying a missing/dead credential.
+                    raise UnifiedClientError(error_str, error_type=error_type)
+                if self._should_abort_retry():
+                    raise UnifiedClientError(
+                        "Opera Aria: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+                last_error = exc
+                if attempt < max_retries - 1:
+                    print(f"Opera Aria error (attempt {attempt+1}/{max_retries}): {error_str}")
+                    if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
+                        raise UnifiedClientError(
+                            "Opera Aria: Translation stopped by user",
+                            error_type="cancelled"
+                        )
+                    continue
+
+        raise UnifiedClientError(
+            f"Opera Aria request failed after {max_retries} attempts: {last_error}",
             error_type="api_error"
         )
 
