@@ -1,6 +1,7 @@
 # extract_glossary_from_epub.py
 import os
 import json
+import contextlib
 import hashlib
 import re
 import argparse
@@ -7418,6 +7419,32 @@ def _record_minimal_pass_progress(status, context=None, **fields):
         print(f"⚠️ Could not record Minimal pass progress: {e}")
 
 
+def _minimal_pass_already_ran(context=None):
+    """Whether the Minimal pass has already completed for this book.
+
+    Idempotence is tracked by the progress file's `minimal_pass` marker, not
+    by whether the glossary has entries: a book extracted before the toggle
+    existed has a full glossary and has never run the pass.
+    """
+    progress_file = _resolved_glossary_progress_file(context)
+    if not progress_file or not os.path.exists(progress_file):
+        return False
+    try:
+        with open(progress_file, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    info = data.get(MINIMAL_PASS_PROGRESS_KEY) if isinstance(data, dict) else None
+    if not isinstance(info, dict):
+        return False
+    # Only a pass that actually produced entries counts as done. Anything
+    # else -- failed, stopped, or "skipped" -- gets retried, because those
+    # states have meant "the extractor never really ran" at least as often as
+    # they have meant "there was nothing to find". Re-running costs one cheap
+    # pattern-based pass; not re-running silently disables the feature.
+    return str(info.get("status", "")).strip().lower() == "completed"
+
+
 def _add_minimal_pass_enabled():
     """Whether to seed the Balanced/Full run with a Minimal extraction pass."""
     return str(os.getenv("GLOSSARY_ADD_MINIMAL_PASS", "0")).strip().lower() in (
@@ -7425,7 +7452,46 @@ def _add_minimal_pass_enabled():
     )
 
 
-def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None):
+@contextlib.contextmanager
+def _minimal_pass_environment():
+    """Give GlossaryManager.save_glossary the environment it requires.
+
+    save_glossary is the Minimal auto-glossary generator, and it returns {}
+    immediately in two cases that are *always* true during a Balanced/Full or
+    Single Pass run:
+
+      * ENABLE_AUTO_GLOSSARY != "1" -- the GUI sets this to "0" for every mode
+        except Minimal, since it is what switches the Minimal generator on.
+      * MANUAL_GLOSSARY points at an existing file -- it then copies that file
+        and returns without extracting anything. Balanced/Full runs normally
+        have this pointing at the book's own glossary.
+
+    Neither is a real reason to skip: the user asked for this pass explicitly.
+    Both are overridden for the duration and restored afterwards so the
+    surrounding run's configuration is untouched.
+    """
+    overrides = {
+        "ENABLE_AUTO_GLOSSARY": "1",
+        # Removed, not blanked: save_glossary checks os.path.exists on it.
+        "MANUAL_GLOSSARY": None,
+    }
+    previous = {key: os.environ.get(key) for key in overrides}
+    try:
+        for key, value in overrides.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None, context=None):
     """Run the Minimal extractor first and return its entries.
 
     Minimal (GlossaryManager.save_glossary) is pattern/frequency based, so it
@@ -7447,12 +7513,12 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None):
         return []
 
     print("📑 Minimal glossary pass: running before Balanced/Full extraction…")
-    _record_minimal_pass_progress("in_progress", started_at=time.time())
+    _record_minimal_pass_progress("in_progress", context=context, started_at=time.time())
     try:
         import GlossaryManager
     except Exception as e:
         print(f"⚠️ Minimal glossary pass skipped (GlossaryManager unavailable): {e}")
-        _record_minimal_pass_progress("failed", error=str(e)[:200])
+        _record_minimal_pass_progress("failed", context=context, error=str(e)[:200])
         return []
 
     # save_glossary() consumes chapter dicts and reads chapter["body"]; this
@@ -7466,20 +7532,23 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None):
     try:
         if callable(check_stop) and check_stop():
             print("⏹️ Minimal glossary pass cancelled before it started")
-            _record_minimal_pass_progress("skipped", reason="stopped")
+            _record_minimal_pass_progress("skipped", context=context, reason="stopped")
             return []
-        GlossaryManager.save_glossary(pass_dir, minimal_chapters, "")
+        with _minimal_pass_environment():
+            GlossaryManager.save_glossary(pass_dir, minimal_chapters, "")
     except Exception as e:
         print(f"⚠️ Minimal glossary pass failed, continuing without it: {e}")
-        _record_minimal_pass_progress("failed", error=str(e)[:200])
+        _record_minimal_pass_progress("failed", context=context, error=str(e)[:200])
         return []
 
     # save_glossary writes glossary.csv into the directory it is given.
     entries = []
+    produced_a_file = False
     for name in ("glossary.csv", "glossary.json"):
         candidate = os.path.join(pass_dir, name)
         if not os.path.exists(candidate):
             continue
+        produced_a_file = True
         try:
             entries = _load_glossary_file(candidate)
         except Exception as e:
@@ -7488,22 +7557,40 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None):
         if entries:
             break
 
+    if not produced_a_file:
+        # The extractor returned without writing anything. That is a setup
+        # problem rather than "this book has no names", so say so instead of
+        # reporting an empty result.
+        print(
+            "⚠️ Minimal glossary pass wrote no glossary file to "
+            f"{pass_dir}. The Minimal extractor exited early — check the "
+            "lines it logged above for the reason."
+        )
+        _record_minimal_pass_progress(
+            "failed", context=context, error="extractor produced no output file",
+            completed_at=time.time(),
+        )
+        return []
+
     entries = [e for e in entries if isinstance(e, dict)]
     if entries:
         print(f"✅ Minimal glossary pass: {len(entries)} entries to merge")
         _record_minimal_pass_progress(
-            "completed", entry_count=len(entries), completed_at=time.time()
+            "completed", context=context, entry_count=len(entries),
+            completed_at=time.time()
         )
     else:
         print("ℹ️ Minimal glossary pass produced no entries")
         _record_minimal_pass_progress(
-            "skipped", reason="no_entries", entry_count=0, completed_at=time.time()
+            "skipped", context=context, reason="no_entries", entry_count=0,
+            completed_at=time.time()
         )
     return entries
 
 
 def seed_glossary_with_minimal_pass(
-    chapters, glossary_dir, output_file, existing=None, check_stop=None
+    chapters, glossary_dir, output_file, existing=None, check_stop=None,
+    context=None,
 ):
     """Run the Minimal pass and merge its entries into an existing glossary.
 
@@ -7512,24 +7599,31 @@ def seed_glossary_with_minimal_pass(
     Single Pass extracts during translation and calls this directly.
 
     Returns the merged entry list, or None when nothing was seeded (toggle
-    off, already-populated glossary, or the pass produced nothing).
+    off, the pass already ran for this book, or it produced no entries).
     """
     if not _add_minimal_pass_enabled():
+        return None
+
+    if _minimal_pass_already_ran(context):
+        # Idempotent per book, tracked by the progress file's marker rather
+        # than by glossary contents -- a book extracted before this toggle
+        # existed has a full glossary and still needs the pass.
+        print("📑 Minimal glossary pass skipped: already ran for this book")
         return None
 
     if existing is None:
         existing = _load_glossary_file(output_file) if output_file and os.path.exists(output_file) else []
     existing = [e for e in (existing or []) if isinstance(e, dict)]
-    if existing:
-        # Resuming a run that already has entries: seeding again would repeat
-        # the cost for entries that are already present.
-        print("📑 Minimal glossary pass skipped: glossary already has entries")
-        return None
 
-    entries = _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=check_stop)
+    entries = _run_minimal_glossary_pass(
+        chapters, glossary_dir, check_stop=check_stop, context=context
+    )
     if not entries:
         return None
 
+    # Merged into whatever is already there; deduplication resolves the
+    # overlap, so running against a populated glossary only adds what the AI
+    # pass missed.
     merged = skip_duplicate_entries(existing + entries, glossary_path=output_file)
     print(f"📑 Glossary seeded with {len(merged)} entries from the Minimal pass")
     if output_file:
@@ -8240,6 +8334,7 @@ def main(log_callback=None, stop_callback=None):
         args.output,
         existing=glossary,
         check_stop=check_stop,
+        context=progress_context,
     )
     if _seeded is not None:
         glossary[:] = _seeded

@@ -14136,12 +14136,16 @@ def _seed_single_pass_glossary_with_minimal(chapters, output_dir, check_stop=Non
     if not glossary_extractor._add_minimal_pass_enabled():
         return
     try:
-        glossary_dir, json_path, _csv_path, _progress_path = _single_pass_glossary_paths(output_dir)
+        glossary_dir, json_path, _csv_path, progress_path = _single_pass_glossary_paths(output_dir)
+        # Single Pass keeps its own progress file, so hand the pass that
+        # context or its status row would be written to the wrong book.
+        context = _single_pass_glossary_context(glossary_extractor, json_path, progress_path)
         glossary_extractor.seed_glossary_with_minimal_pass(
             chapters,
             glossary_dir,
             json_path,
             check_stop=check_stop,
+            context=context,
         )
     except Exception as e:
         print(f"⚠️ Minimal glossary pass failed for Single Pass, continuing: {e}")
