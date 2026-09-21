@@ -7365,6 +7365,80 @@ def _extract_sdlxliff_chapters_for_glossary(sdlxliff_path, check_stop=None):
 
 
 # Update main function to support batch processing:
+def _add_minimal_pass_enabled():
+    """Whether to seed the Balanced/Full run with a Minimal extraction pass."""
+    return str(os.getenv("GLOSSARY_ADD_MINIMAL_PASS", "0")).strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None):
+    """Run the Minimal extractor first and return its entries.
+
+    Minimal (GlossaryManager.save_glossary) is pattern/frequency based, so it
+    finds names the AI pass can overlook, and it is cheap relative to a full
+    per-chapter extraction. Its results are merged into the Balanced/Full
+    glossary rather than kept in a separate file, which is why the pass is run
+    inside a subfolder of the same book glossary directory.
+
+    Returns a list of entry dicts, or [] when the pass produced nothing. Never
+    raises: a failed extra pass must not take down the main extraction.
+    """
+    if not chapters:
+        return []
+    pass_dir = os.path.join(glossary_dir, "minimal_pass")
+    try:
+        os.makedirs(pass_dir, exist_ok=True)
+    except OSError as e:
+        print(f"⚠️ Minimal glossary pass: could not create {pass_dir}: {e}")
+        return []
+
+    print("📑 Minimal glossary pass: running before Balanced/Full extraction…")
+    try:
+        import GlossaryManager
+    except Exception as e:
+        print(f"⚠️ Minimal glossary pass skipped (GlossaryManager unavailable): {e}")
+        return []
+
+    # save_glossary() consumes chapter dicts and reads chapter["body"]; this
+    # module carries chapters as plain extracted text, so wrap them. `body` is
+    # the only field it touches, and clean_html() leaves tag-free text alone.
+    minimal_chapters = [
+        {"body": text} if not isinstance(text, dict) else text
+        for text in chapters
+    ]
+
+    try:
+        if callable(check_stop) and check_stop():
+            print("⏹️ Minimal glossary pass cancelled before it started")
+            return []
+        GlossaryManager.save_glossary(pass_dir, minimal_chapters, "")
+    except Exception as e:
+        print(f"⚠️ Minimal glossary pass failed, continuing without it: {e}")
+        return []
+
+    # save_glossary writes glossary.csv into the directory it is given.
+    entries = []
+    for name in ("glossary.csv", "glossary.json"):
+        candidate = os.path.join(pass_dir, name)
+        if not os.path.exists(candidate):
+            continue
+        try:
+            entries = _load_glossary_file(candidate)
+        except Exception as e:
+            print(f"⚠️ Minimal glossary pass: could not read {name}: {e}")
+            entries = []
+        if entries:
+            break
+
+    entries = [e for e in entries if isinstance(e, dict)]
+    if entries:
+        print(f"✅ Minimal glossary pass: {len(entries)} entries to merge")
+    else:
+        print("ℹ️ Minimal glossary pass produced no entries")
+    return entries
+
+
 def main(log_callback=None, stop_callback=None):
     # Declare global variables at the very start of the function
     global _skipped_chapters
@@ -8053,6 +8127,27 @@ def main(log_callback=None, stop_callback=None):
             glossary = _load_glossary_file(csv_path)
         else:
             glossary = []
+
+    # Optional Minimal pass, merged in before the AI extraction starts so that
+    # every later step -- dedupe, gender resolution, refinement, saving --
+    # treats its entries exactly like AI-extracted ones. Seeding here (rather
+    # than merging at the end) also means a resumed run does not repeat it.
+    if _add_minimal_pass_enabled() and not glossary:
+        _minimal_entries = _run_minimal_glossary_pass(
+            chapters, glossary_dir, check_stop=check_stop
+        )
+        if _minimal_entries:
+            glossary.extend(_minimal_entries)
+            glossary[:] = skip_duplicate_entries(glossary, glossary_path=args.output)
+            print(f"📑 Glossary seeded with {len(glossary)} entries from the Minimal pass")
+            try:
+                save_glossary_json(glossary, args.output)
+                save_glossary_csv(glossary, args.output)
+            except Exception as _e:
+                print(f"⚠️ Could not persist the Minimal pass seed: {_e}")
+    elif _add_minimal_pass_enabled():
+        print("📑 Minimal glossary pass skipped: resuming a run that already has entries")
+
     merged_indices = prog.get('merged_indices', [])
 
     # Structural EPUB skips never make an API request and retain a distinct

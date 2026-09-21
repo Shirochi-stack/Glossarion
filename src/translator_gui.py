@@ -16305,6 +16305,7 @@ Recent translations to summarize:
             ('glossary_history_rolling_var', 'glossary_history_rolling', True),
             ('disable_glossary_history_var', 'disable_glossary_history', True),
             ('glossary_skip_title_header_only_var', 'glossary_skip_title_header_only', True),
+            ('glossary_add_minimal_pass_var', 'glossary_add_minimal_pass', False),
             ('translate_book_title_var', 'translate_book_title', True),
             ('skip_txt_title_translation_var', 'skip_txt_title_translation', True),
             ('skip_pdf_title_translation_var', 'skip_pdf_title_translation', False),
@@ -26778,6 +26779,15 @@ Recent translations to summarize:
         )
         return '1' if enabled else '0'
 
+    def _glossary_add_minimal_pass_env_value(self):
+        enabled = self._live_bool_setting(
+            'glossary_add_minimal_pass_checkbox',
+            'glossary_add_minimal_pass_var',
+            'glossary_add_minimal_pass',
+            False,
+        )
+        return '1' if enabled else '0'
+
     def _on_context_mode_changed(self, index=None):
         """Map the Context Mode combo onto the existing runtime config flags."""
         mode = 'off'
@@ -35722,6 +35732,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_REQUEST_MERGE_COUNT': glossary_request_merge_count,
             'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
             'GLOSSARY_SKIP_TITLE_HEADER_ONLY': self._glossary_skip_title_header_only_env_value(),
+            'GLOSSARY_ADD_MINIMAL_PASS': self._glossary_add_minimal_pass_env_value(),
             'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL': '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', True)) else '0',
             'ENABLE_AUTO_GLOSSARY': "1" if auto_glossary_mode == 'minimal' else "0",
             'AUTO_GLOSSARY_MODE': auto_glossary_mode,
@@ -37604,6 +37615,7 @@ Important rules:
                     'GLOSSARY_OUTPUT_LEGACY_JSON': '1' if getattr(self, 'glossary_output_legacy_json_var', False) else '0',
                     'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
                     'GLOSSARY_SKIP_TITLE_HEADER_ONLY': self._glossary_skip_title_header_only_env_value(),
+                    'GLOSSARY_ADD_MINIMAL_PASS': self._glossary_add_minimal_pass_env_value(),
                     'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL': '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', True)) else '0',
                     # Optional assistant prefill prompt
                     'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',

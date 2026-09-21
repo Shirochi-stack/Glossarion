@@ -1653,6 +1653,19 @@ class GlossaryManagerMixin:
             pass
         return engine
 
+    def _on_glossary_manager_add_minimal_pass_toggle(self, state=None):
+        """Sync the extra minimal extraction pass to config and environment."""
+        try:
+            enabled = bool(self.glossary_add_minimal_pass_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['glossary_add_minimal_pass'] = enabled
+            self.glossary_add_minimal_pass_var = enabled
+            os.environ['GLOSSARY_ADD_MINIMAL_PASS'] = '1' if enabled else '0'
+        except Exception:
+            pass
+
     def _on_glossary_manager_precise_matching_toggle(self, state=None):
         """Sync script-aware glossary matching to config and environment."""
         try:
@@ -1708,6 +1721,7 @@ class GlossaryManagerMixin:
                     ('consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column', False),
                     ('precise_matching_checkbox', 'compress_glossary_precise_matching', False),
                     ('shadow_log_matching_checkbox', 'compress_glossary_shadow_log', False),
+                    ('glossary_add_minimal_pass_checkbox', 'glossary_add_minimal_pass', False),
                     ('save_glossary_in_output_checkbox', 'save_glossary_in_output', False),
                     ('glossary_skip_title_header_only_checkbox', 'glossary_skip_title_header_only', True),
                 ]
@@ -2205,6 +2219,7 @@ class GlossaryManagerMixin:
                     ('consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column_var'),
                     ('precise_matching_checkbox', 'compress_glossary_precise_matching_var'),
                     ('shadow_log_matching_checkbox', 'compress_glossary_shadow_log_var'),
+                    ('glossary_add_minimal_pass_checkbox', 'glossary_add_minimal_pass_var'),
                     ('save_glossary_in_output_checkbox', 'save_glossary_in_output_var'),
                     ('enable_gender_nuance_checkbox', 'enable_gender_nuance_var'),
                     ('include_gender_context_checkbox', 'include_gender_context_var'),
@@ -2261,6 +2276,9 @@ class GlossaryManagerMixin:
                         elif checkbox_name == 'shadow_log_matching_checkbox':
                             self.config['compress_glossary_shadow_log'] = bool(checked)
                             self._apply_glossary_match_engine_env()
+                        elif checkbox_name == 'glossary_add_minimal_pass_checkbox':
+                            self.config['glossary_add_minimal_pass'] = bool(checked)
+                            os.environ['GLOSSARY_ADD_MINIMAL_PASS'] = '1' if checked else '0'
                         elif checkbox_name == 'save_glossary_in_output_checkbox':
                             self.config['save_glossary_in_output'] = bool(checked)
                         elif checkbox_name == 'enable_gender_nuance_checkbox':
@@ -3545,6 +3563,8 @@ class GlossaryManagerMixin:
         settings_grid.setColumnStretch(0, 0)
         settings_grid.setColumnStretch(1, 0)
         settings_grid.setColumnStretch(2, 0)
+        settings_grid.setColumnStretch(3, 0)
+        settings_grid.setColumnStretch(4, 0)
         
         # Compact label+field pair helper for manual Extraction Settings
         def _m_pair(label_text, field_widget, label_width=120, tooltip=None):
@@ -3570,7 +3590,33 @@ class GlossaryManagerMixin:
             tooltip="AI creativity for manual extraction.\nLower = more deterministic (recommended 0.1–0.3)."
         ), 0, 0)
 
-        # Large accent icon lives outside the grid so row spacing does not affect it.
+        # Column 3: run the minimal extractor first and merge its results in.
+        if not hasattr(self, 'glossary_add_minimal_pass_checkbox'):
+            self.glossary_add_minimal_pass_checkbox = self._create_styled_checkbox(
+                "Add minimal glossary pass"
+            )
+        self.glossary_add_minimal_pass_checkbox.setChecked(
+            self.config.get('glossary_add_minimal_pass', False)
+        )
+        self.glossary_add_minimal_pass_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Run the Minimal extractor first, then merge its entries into the "
+            "Balanced/Full glossary in the same folder.\n"
+            "Minimal is fast and pattern-based, so it catches names the AI pass "
+            "can miss; costs one extra pass up front.\n"
+            "Default OFF."
+        ))
+        if not getattr(self.glossary_add_minimal_pass_checkbox,
+                       '_glossary_manager_sync_connected', False):
+            self.glossary_add_minimal_pass_checkbox.stateChanged.connect(
+                self._on_glossary_manager_add_minimal_pass_toggle
+            )
+            self.glossary_add_minimal_pass_checkbox._glossary_manager_sync_connected = True
+        settings_grid.addWidget(
+            self.glossary_add_minimal_pass_checkbox, 0, 3, Qt.AlignLeft
+        )
+
+        # Column 4: large accent icon, spanning the three setting rows so row
+        # spacing does not squash it.
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
         if os.path.exists(icon_path):
             from PySide6.QtGui import QIcon
@@ -3579,7 +3625,7 @@ class GlossaryManagerMixin:
             icon_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             icon_label.setAlignment(Qt.AlignCenter)
             icon_label.setPixmap(QIcon(icon_path).pixmap(120, 120))
-            settings_content.addWidget(icon_label, 0, Qt.AlignTop)
+            settings_grid.addWidget(icon_label, 0, 4, 3, 1, Qt.AlignTop)
         settings_content.addStretch()
         
         # Row 1: Compression Factor and Rolling window checkbox
