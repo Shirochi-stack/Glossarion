@@ -23039,6 +23039,60 @@ def _glossary_compression_source_text(
     return source_text
 
 
+_GLOSSARY_FILE_TOKEN_CACHE = {}
+_GLOSSARY_FILE_TOKEN_CACHE_LOCK = threading.Lock()
+
+
+def _glossary_token_encoder(settings=None):
+    """tiktoken encoder for the request's model, or None when unavailable."""
+    try:
+        import tiktoken
+        try:
+            return tiktoken.encoding_for_model(str(
+                _request_glossary_setting(settings, "MODEL", "gpt-4") or "gpt-4"
+            ))
+        except Exception:
+            return tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        return None
+
+
+def _glossary_file_token_count(path, text, encoder):
+    """Token count of a glossary file's full text, computed once per file version.
+
+    The "before" side of the compression log. Re-encoding it on every request
+    is wasted work for a book glossary and seconds of CPU for a multi-megabyte
+    unified glossary, so it is cached on (path, size, mtime, encoder).
+    """
+    if encoder is None:
+        return None
+    try:
+        stat = os.stat(path)
+        key = (os.path.normcase(os.path.abspath(path)), stat.st_size, stat.st_mtime_ns,
+               getattr(encoder, "name", ""))
+    except Exception:
+        key = None
+    if key is not None:
+        cached = _GLOSSARY_FILE_TOKEN_CACHE.get(key)
+        if cached is not None:
+            return cached
+    # One thread encodes; the rest of a batch waits and reads the cache.
+    with _GLOSSARY_FILE_TOKEN_CACHE_LOCK:
+        if key is not None:
+            cached = _GLOSSARY_FILE_TOKEN_CACHE.get(key)
+            if cached is not None:
+                return cached
+        try:
+            count = len(encoder.encode(text))
+        except Exception:
+            return None
+        if key is not None:
+            if len(_GLOSSARY_FILE_TOKEN_CACHE) > 32:
+                _GLOSSARY_FILE_TOKEN_CACHE.clear()
+            _GLOSSARY_FILE_TOKEN_CACHE[key] = count
+        return count
+
+
 def build_system_prompt(
     user_prompt,
     glossary_path=None,
@@ -23090,6 +23144,11 @@ def build_system_prompt(
                 source_text, chapter_ref, settings
             )
             glossary_compression_logged = False
+            # The main glossary, the extension and the unified glossary each
+            # contribute one segment; they are emitted as a single log line at
+            # the end instead of a handful of separate ones per request.
+            glossary_log_parts = []
+            glossary_token_encoder = None
             if compress_glossary_enabled and compression_source_text:
                 try:
                     from glossary_compressor import compress_glossary
@@ -23107,30 +23166,22 @@ def build_system_prompt(
                     reduction_pct = ((original_length - compressed_length) / original_length * 100) if original_length > 0 else 0
                     
                     # Also calculate token savings if tiktoken is available
-                    try:
-                        import tiktoken
-                        try:
-                            enc = tiktoken.encoding_for_model(str(
-                                _request_glossary_setting(settings, "MODEL", "gpt-4")
-                                or "gpt-4"
-                            ))
-                        except:
-                            enc = tiktoken.get_encoding("cl100k_base")
-                        
-                        # Count tokens for original and compressed glossary
-                        original_tokens = len(enc.encode(original_glossary_text))
-                        compressed_tokens = len(enc.encode(glossary_text))
+                    glossary_token_encoder = _glossary_token_encoder(settings)
+                    original_tokens = _glossary_file_token_count(
+                        actual_glossary_path, original_glossary_text, glossary_token_encoder
+                    )
+                    if original_tokens is not None:
+                        compressed_tokens = len(glossary_token_encoder.encode(glossary_text))
                         token_reduction = original_tokens - compressed_tokens
                         token_reduction_pct = (token_reduction / original_tokens * 100) if original_tokens > 0 else 0
                         strict_gender_note = " (strict gender ON)" if str(_request_glossary_setting(settings, "COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0")).strip().lower() in ("1", "true", "yes", "on") else ""
                         translated_column_note = " (translated column ON)" if str(_request_glossary_setting(settings, "COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN", "0")).strip().lower() in ("1", "true", "yes", "on") else ""
-                        
-                        defer_batch_log(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%), {original_tokens:,}→{compressed_tokens:,} tokens ({token_reduction_pct:.1f}%){strict_gender_note}{translated_column_note}")
-                        glossary_compression_logged = True
-                    except ImportError:
+
+                        glossary_log_parts.append(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%), {original_tokens:,}→{compressed_tokens:,} tokens ({token_reduction_pct:.1f}%){strict_gender_note}{translated_column_note}")
+                    else:
                         # If tiktoken is not available, just show character reduction
-                        defer_batch_log(f"🗜️ Glossary compressed: {original_length:,} → {compressed_length:,} chars ({reduction_pct:.1f}% reduction)")
-                        glossary_compression_logged = True
+                        glossary_log_parts.append(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%)")
+                    glossary_compression_logged = True
                 except Exception as e:
                     print(f"⚠️ Glossary compression failed: {e}")
                     # Continue with uncompressed glossary
@@ -23152,11 +23203,11 @@ def build_system_prompt(
             if glossary_text and glossary_text.strip():
                 system += f"{custom_prompt}\n{glossary_text}"
                 if not glossary_compression_logged:
-                    defer_batch_log(f"✅ Glossary appended ({len(glossary_text):,} characters)")
+                    glossary_log_parts.append(f"✅ Glossary appended ({len(glossary_text):,} characters)")
             else:
-                defer_batch_log("ℹ️ Glossary skipped for this chapter (no matching entries after compression)")
-            
-            def _append_secondary_glossary(system_text, path, label, icon):
+                glossary_log_parts.append("ℹ️ Glossary skipped for this chapter (no matching entries after compression)")
+
+            def _append_secondary_glossary(system_text, path, label, max_uncompressed_chars=None):
                 """Read, optionally compress, and append a companion glossary.
 
                 Shared by the glossary extension and the unified glossary so
@@ -23165,18 +23216,27 @@ def build_system_prompt(
                 sub-toggle (strict gender, translated column, precise
                 matching, shadow log, the allowlist beside the file) applies
                 to both exactly as it does to the main glossary.
+
+                Adds one segment to ``glossary_log_parts`` instead of logging
+                its own load / compress / append lines. ``label`` is the name
+                used in that segment. ``max_uncompressed_chars`` refuses to
+                append a huge glossary that did not get compressed.
                 """
-                title = label[0].upper() + label[1:]
+                nonlocal glossary_token_encoder
+                # The request is being aborted; do not start seconds of work.
+                if os.environ.get("TRANSLATION_CANCELLED") == "1":
+                    return system_text
                 try:
-                    defer_batch_log(f"✅ Loading {label} from: {os.path.basename(path)}")
                     with open(path, "r", encoding="utf-8") as af:
                         secondary_text = af.read()
+                    original_add_text = secondary_text
+                    original_add_length = len(secondary_text)
 
                     # Apply same compression logic if enabled
+                    was_compressed = False
                     if compress_glossary_enabled and compression_source_text:
                         try:
                             from glossary_compressor import compress_glossary
-                            original_add_length = len(secondary_text)
                             secondary_text = compress_glossary(
                                 secondary_text,
                                 compression_source_text,
@@ -23185,18 +23245,39 @@ def build_system_prompt(
                                 chapter_ref=chapter_ref,
                                 settings=settings,
                             )
-                            compressed_add_length = len(secondary_text)
-                            add_reduction_pct = ((original_add_length - compressed_add_length) / original_add_length * 100) if original_add_length > 0 else 0
-                            defer_batch_log(f"{icon} {title} compressed: {original_add_length:,} → {compressed_add_length:,} chars ({add_reduction_pct:.1f}% reduction)")
+                            was_compressed = True
                         except Exception as e:
-                            print(f"⚠️ {title} compression failed: {e}")
+                            print(f"⚠️ {label} compression failed: {e}")
+                            secondary_text = original_add_text
+
+                    if not was_compressed:
+                        if max_uncompressed_chars and original_add_length > max_uncompressed_chars:
+                            # Never put a multi-megabyte glossary in a prompt.
+                            glossary_log_parts.append(
+                                f"{label}: skipped ({original_add_length:,} chars uncompressed — "
+                                "turn on Compress Glossary Prompt)"
+                            )
+                            return system_text
+                        if secondary_text and secondary_text.strip():
+                            system_text += f"\n\n{secondary_text}"
+                            glossary_log_parts.append(f"{label}: {original_add_length:,} chars appended")
+                        return system_text
+
+                    compressed_add_length = len(secondary_text or "")
+                    add_reduction_pct = ((original_add_length - compressed_add_length) / original_add_length * 100) if original_add_length > 0 else 0
+                    segment = f"{label}: {original_add_length:,}→{compressed_add_length:,} chars ({add_reduction_pct:.1f}%)"
+                    if glossary_token_encoder is None:
+                        glossary_token_encoder = _glossary_token_encoder(settings)
+                    original_add_tokens = _glossary_file_token_count(path, original_add_text, glossary_token_encoder)
+                    if original_add_tokens is not None:
+                        compressed_add_tokens = len(glossary_token_encoder.encode(secondary_text or ""))
+                        add_token_pct = ((original_add_tokens - compressed_add_tokens) / original_add_tokens * 100) if original_add_tokens > 0 else 0
+                        segment += f", {original_add_tokens:,}→{compressed_add_tokens:,} tokens ({add_token_pct:.1f}%)"
+                    glossary_log_parts.append(segment)
 
                     # Skip appending if compression returned empty (0 matching entries)
-                    if not secondary_text or not secondary_text.strip():
-                        defer_batch_log(f"ℹ️ {title} skipped for this chapter (no matching entries after compression)")
-                        return system_text
-                    system_text += f"\n\n{secondary_text}"
-                    defer_batch_log(f"✅ {title} appended ({len(secondary_text):,} characters)")
+                    if secondary_text and secondary_text.strip():
+                        system_text += f"\n\n{secondary_text}"
                 except Exception as e:
                     print(f"⚠️ Failed to load {label}: {e}")
                 return system_text
@@ -23217,7 +23298,7 @@ def build_system_prompt(
 
                 if additional_glossary_path:
                     system = _append_secondary_glossary(
-                        system, additional_glossary_path, "glossary extension", "🗃️"
+                        system, additional_glossary_path, "Glossary Extension"
                     )
 
             # Cross-novel unified glossary (Enable Unified Glossary). The copy
@@ -23236,8 +23317,14 @@ def build_system_prompt(
                     print(f"⚠️ Unified glossary lookup failed: {e}")
                 if unified_glossary_path:
                     system = _append_secondary_glossary(
-                        system, unified_glossary_path, "unified glossary", "📚"
+                        system, unified_glossary_path, "Unified Glossary",
+                        max_uncompressed_chars=200_000,
                     )
+
+            # One line for everything glossary-related in this request, e.g.
+            # 🗜️ Glossary: … chars, … tokens | Unified Glossary: … chars, … tokens
+            if glossary_log_parts:
+                defer_batch_log(" | ".join(glossary_log_parts))
 
         except Exception as e:
             print(f"[ERROR] Could not load glossary: {e}")

@@ -1073,6 +1073,80 @@ class GlossaryManagerMixin:
             current = parent
         return '/'.join(reversed(parts)) if parts else os.path.basename(path)
 
+    def _unified_glossary_editor_files(self):
+        """Existing unified glossary files, this run's language pair first."""
+        try:
+            import unified_glossary
+        except Exception:
+            return []
+        roots = []
+        override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        if override_dir and str(override_dir).strip():
+            roots.append(os.path.join(os.path.abspath(str(override_dir)), 'Glossary'))
+        shared_env = str(os.environ.get('GLOSSARY_SHARED_DIR', '') or '').strip()
+        if shared_env:
+            roots.append(os.path.abspath(shared_env))
+        for shared_root in (
+            os.path.join(str(getattr(self, 'base_dir', '') or ''), 'Glossary'),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Glossary'),
+            os.path.join(os.getcwd(), 'Glossary'),
+        ):
+            roots.append(shared_root)
+
+        preferred = str(
+            os.environ.get('UNIFIED_GLOSSARY_RESOLVED_KEY', '') or self._unified_glossary_folder_key()
+        ).casefold()
+        found, seen = [], set()
+        for root in roots:
+            try:
+                unified_root = unified_glossary.unified_root(root)
+                if not os.path.isdir(unified_root):
+                    continue
+                keys = sorted(
+                    os.listdir(unified_root),
+                    key=lambda name: (name.casefold() != preferred, name.casefold()),
+                )
+            except Exception:
+                continue
+            for key in keys:
+                csv_path = unified_glossary.unified_paths(root, key)[2]
+                norm = os.path.normcase(os.path.abspath(csv_path))
+                if norm in seen or not os.path.isfile(csv_path):
+                    continue
+                seen.add(norm)
+                found.append(csv_path)
+        return found
+
+    def _append_unified_glossaries_to_editor_combo(self):
+        """List the unified glossaries after the book glossaries in the editor.
+
+        They are appended, never first, so the editor still opens on the
+        book's own glossary; the user switches to a unified one by hand.
+        """
+        combo = getattr(self, 'editor_file_combo', None)
+        if combo is None:
+            return
+        present = set()
+        for i in range(combo.count()):
+            data = combo.itemData(i)
+            if data:
+                present.add(os.path.normcase(os.path.abspath(str(data))))
+        was_blocked = combo.blockSignals(True)
+        try:
+            for path in self._unified_glossary_editor_files():
+                if os.path.normcase(os.path.abspath(path)) in present:
+                    continue
+                combo.addItem("📚 " + self._display_glossary_path(path), path)
+                combo.setItemData(
+                    combo.count() - 1,
+                    "Unified glossary shared by every novel in this language pair.\n"
+                    "Edits are kept by later merges, but a full Generate rebuild "
+                    "recreates the file from the book glossaries.",
+                    Qt.ToolTipRole,
+                )
+        finally:
+            combo.blockSignals(was_blocked)
+
     def _glossary_type_count_summary(self, entries, max_custom_types=7):
         """Return built-in and prioritized custom entry-type counts for editor status."""
         counts = {}
@@ -6321,6 +6395,41 @@ Do not stop after the glossary."""
         location_label.setContentsMargins(0, 6, 0, 0)
         section_v.addWidget(location_label)
 
+        # Rebuild Now: a forced full rebuild from every book glossary, off the
+        # GUI thread, without waiting for the next glossary run.
+        rebuild_row = QWidget()
+        rebuild_layout = QHBoxLayout(rebuild_row)
+        rebuild_layout.setContentsMargins(0, 10, 0, 0)
+        rebuild_btn = QPushButton("🔄 Rebuild Now")
+        rebuild_btn.setMinimumWidth(160)
+        rebuild_btn.setCursor(Qt.PointingHandCursor)
+        rebuild_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5a9fd4;
+                color: white;
+                padding: 6px 18px;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #7ab8e8; }
+            QPushButton:pressed { background-color: #4a8fc4; }
+            QPushButton:disabled { background-color: #3a4a5a; color: #9aa7b4; }
+        """)
+        rebuild_btn.setToolTip(_wrapped_tooltip_html(
+            "Rebuild every unified glossary from all book folders under Glossary/ right now.\n"
+            "Ignores the change fingerprints, runs in the background (large lists in a separate "
+            "process), and reports progress in the main log. Hand edits made to a "
+            "glossary_unified.csv are replaced by what the book glossaries contain."
+        ))
+        rebuild_layout.addWidget(rebuild_btn)
+        rebuild_status = QLabel("(Rebuilds from every book glossary now; progress appears in the main log)")
+        rebuild_layout.addWidget(rebuild_status)
+        rebuild_layout.addStretch()
+        section_v.addWidget(rebuild_row)
+        self._unified_rebuild_btn = rebuild_btn
+        self._unified_rebuild_status = rebuild_status
+        rebuild_btn.clicked.connect(lambda: self._rebuild_unified_glossary_now(dialog))
+
         def _apply_from_widgets(*_args):
             try:
                 self._apply_unified_glossary_settings_from_widgets()
@@ -6380,6 +6489,113 @@ Do not stop after the glossary."""
         dialog.show()
         _fit_description()
         QTimer.singleShot(0, _fit_description)
+
+    def _unified_glossary_shared_dir(self):
+        """The shared Glossary/ folder, resolved the way a run resolves it."""
+        override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        if override_dir and str(override_dir).strip():
+            return os.path.join(os.path.abspath(str(override_dir)), 'Glossary')
+        try:
+            from translator_gui import _get_app_dir
+            return os.path.join(_get_app_dir(), 'Glossary')
+        except Exception:
+            return os.path.join(os.getcwd(), 'Glossary')
+
+    def _unified_glossary_run_is_active(self):
+        """A translation or glossary run is in progress (its hooks write the same files)."""
+        for thread_attr in ('translation_thread', 'glossary_thread'):
+            thread = getattr(self, thread_attr, None)
+            try:
+                if thread is not None and thread.is_alive():
+                    return True
+            except Exception:
+                pass
+        for future_attr in ('translation_future', 'glossary_future'):
+            future = getattr(self, future_attr, None)
+            try:
+                if future is not None and not future.done():
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _rebuild_unified_glossary_now(self, dialog=None):
+        """Rebuild Now: forced full rebuild on a worker thread.
+
+        The worker never touches Qt. A timer on the GUI thread watches it and
+        restores the button, so there is no cross-thread widget access.
+        """
+        import threading
+
+        button = getattr(self, '_unified_rebuild_btn', None)
+        status = getattr(self, '_unified_rebuild_status', None)
+        running = getattr(self, '_unified_rebuild_thread', None)
+        if running is not None and running.is_alive():
+            return
+        if self._unified_glossary_run_is_active():
+            self.append_log("⚠️ Unified glossary: wait for the current translation/glossary run to finish before rebuilding.")
+            if status is not None:
+                status.setText("(A run is in progress — try again when it finishes)")
+            return
+
+        # Rebuild with what the dialog shows, not what was last saved.
+        try:
+            self._apply_unified_glossary_settings_from_widgets()
+        except Exception:
+            pass
+        shared_dir = self._unified_glossary_shared_dir()
+        settings = {
+            'OUTPUT_LANGUAGE': self.config.get('output_language') or os.environ.get('OUTPUT_LANGUAGE') or 'English',
+            'UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES': '1' if self.config.get('unified_glossary_combine_all_languages', False) else '0',
+            'GLOSSARY_SHARED_DIR': shared_dir,
+        }
+
+        def _worker():
+            try:
+                import unified_glossary
+                unified_glossary.rebuild_now(shared_dir=shared_dir, settings=settings, log=self.append_log)
+            except Exception as exc:
+                try:
+                    self.append_log(f"⚠️ Unified glossary rebuild failed: {exc}")
+                except Exception:
+                    pass
+
+        self.append_log(f"📚 Unified glossary: Rebuild Now started ({shared_dir})")
+        if button is not None:
+            button.setEnabled(False)
+            button.setText("⏳ Rebuilding…")
+        if status is not None:
+            status.setText("(Running in the background — progress appears in the main log)")
+
+        thread = threading.Thread(target=_worker, name="UnifiedGlossaryRebuild", daemon=True)
+        self._unified_rebuild_thread = thread
+        thread.start()
+
+        watcher = QTimer(dialog if dialog is not None else self)
+        watcher.setInterval(400)
+
+        def _check():
+            if thread.is_alive():
+                return
+            watcher.stop()
+            try:
+                if button is not None:
+                    button.setEnabled(True)
+                    button.setText("🔄 Rebuild Now")
+                if status is not None:
+                    status.setText("(Done — see the main log for the result)")
+                self._refresh_unified_glossary_hint()
+                # New files may exist now: make them selectable in the editor.
+                if hasattr(self, 'editor_file_combo'):
+                    self._append_unified_glossaries_to_editor_combo()
+                    if hasattr(self, '_update_editor_nav_buttons'):
+                        self._update_editor_nav_buttons()
+            except RuntimeError:
+                pass  # dialog widgets were destroyed while it ran
+
+        watcher.timeout.connect(_check)
+        watcher.start()
+        self._unified_rebuild_watcher = watcher
 
     def _apply_unified_glossary_settings_from_widgets(self):
         """Mirror the sub-dialog widgets into config, instance vars and env."""
@@ -7246,6 +7462,11 @@ Do not stop after the glossary."""
                     display = shim._owner._display_glossary_path(path)
                     shim._combo.addItem(display, path)
                 shim._combo.blockSignals(False)
+                # Keep the unified glossaries reachable after a manual load.
+                try:
+                    shim._owner._append_unified_glossaries_to_editor_combo()
+                except Exception:
+                    pass
                 shim._owner._update_editor_nav_buttons()
         self.editor_file_entry = _ComboShim(self.editor_file_combo, self)
 
@@ -10425,11 +10646,17 @@ Do not stop after the glossary."""
                 self.editor_file_combo.clear()
                 for display, fpath in found_glossaries:
                     self.editor_file_combo.addItem(display, fpath)
+                # Unified glossaries go last so the editor still opens on the
+                # book's own file; the user switches to them from the list.
+                try:
+                    self._append_unified_glossaries_to_editor_combo()
+                except Exception:
+                    pass
                 self.editor_file_combo.blockSignals(False)
                 self._update_editor_nav_buttons()
 
                 # Load the first one
-                if found_glossaries:
+                if self.editor_file_combo.count() > 0:
                     self._glossary_editor_manual_source = False
                     self.editor_file_combo.setCurrentIndex(0)
                     load_glossary_for_editing()

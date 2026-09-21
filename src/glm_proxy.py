@@ -1335,19 +1335,73 @@ def shutdown_proxy(account_id: Optional[int] = None) -> None:
             pass
 
 
+def _response_socket(response: Any) -> Any:
+    """Best-effort: the raw socket under an httpx or requests streaming response."""
+    getters = (
+        # httpx -> httpcore: network stream exposes the socket as an extra.
+        lambda: response.extensions["network_stream"].get_extra_info("socket"),
+        # requests -> urllib3 (v2 / v1 attribute names).
+        lambda: response.raw._connection.sock,
+        lambda: response.raw.connection.sock,
+        lambda: response.raw._fp.fp.raw._sock,
+    )
+    for getter in getters:
+        try:
+            sock = getter()
+        except Exception:
+            sock = None
+        if sock is not None:
+            return sock
+    return None
+
+
+def _abort_responses(responses: List[Any]) -> None:
+    """Wake threads blocked reading ``responses``, then close them.
+
+    ``shutdown`` makes a blocked ``recv`` return at once and takes no library
+    lock. ``close`` can wait on the reader (buffered-reader / pool locks), so
+    it only runs here, on a throwaway thread, never on the caller's.
+    """
+    import socket as _socket
+
+    for response in responses:
+        sock = _response_socket(response)
+        if sock is not None:
+            try:
+                sock.shutdown(_socket.SHUT_RDWR)
+            except Exception:
+                pass
+    for response in responses:
+        try:
+            response.close()
+        except Exception:
+            pass
+
+
 def cancel_stream() -> None:
-    """Signal active streams without allowing a later reset to revive them."""
+    """Signal active streams without allowing a later reset to revive them.
+
+    Must never block: Stop handlers call this, some of them on the GUI thread.
+    Only the flags are set inline; tearing the live connections down happens
+    on a daemon thread.
+    """
     global _cancel_generation
     with _cancel_state_lock:
         _cancel_generation += 1
         _cancel_event.set()
     with _active_response_lock:
         responses = list(_active_responses.values())
-    for response in responses:
-        try:
-            response.close()
-        except Exception:
-            pass
+    if not responses:
+        return
+    try:
+        threading.Thread(
+            target=_abort_responses,
+            args=(responses,),
+            name="GLMProxyCancel",
+            daemon=True,
+        ).start()
+    except Exception:
+        pass
 
 
 def reset_cancel() -> None:

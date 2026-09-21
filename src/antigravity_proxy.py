@@ -1658,14 +1658,49 @@ def cancel_stream() -> None:
         _cancel_generation += 1
         _cancel_event.set()
     # Closing the live response wakes a thread blocked in SSE iteration instead
-    # of waiting for the proxy/model to yield another line.
+    # of waiting for the proxy/model to yield another line. It must not happen
+    # on the caller's thread: Stop handlers call this (some on the GUI thread)
+    # and close() can wait on the reader. shutdown() wakes the blocked recv at
+    # once and takes no library lock; close() then runs on a daemon thread.
     with _active_response_lock:
         responses = list(_active_responses.values())
-    for response in responses:
-        try:
-            response.close()
-        except Exception:
-            pass
+    if not responses:
+        return
+
+    def _abort(active):
+        import socket as _socket
+        for response in active:
+            sock = None
+            for getter in (
+                lambda: response.extensions["network_stream"].get_extra_info("socket"),
+                lambda: response.raw._connection.sock,
+                lambda: response.raw.connection.sock,
+                lambda: response.raw._fp.fp.raw._sock,
+            ):
+                try:
+                    sock = getter()
+                except Exception:
+                    sock = None
+                if sock is not None:
+                    break
+            if sock is not None:
+                try:
+                    sock.shutdown(_socket.SHUT_RDWR)
+                except Exception:
+                    pass
+        for response in active:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    try:
+        import threading as _threading
+        _threading.Thread(
+            target=_abort, args=(responses,), name="AntigravityCancel", daemon=True,
+        ).start()
+    except Exception:
+        pass
 
 
 def reset_cancel() -> None:

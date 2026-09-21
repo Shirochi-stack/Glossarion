@@ -28723,7 +28723,7 @@ class UnifiedClient:
 
         if _show_lifecycle:
             self._debug_log(
-                f"✅ [{_thread_name}] {_request_label} ({_request_context}) "
+                f"🔗 [{_thread_name}] {_request_label} ({_request_context}) "
                 f"Connected to AuthZA GLM proxy "
                 f"(local={local_endpoint}, upstream={upstream_endpoint})"
             )

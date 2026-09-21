@@ -39696,9 +39696,16 @@ Important rules:
                     unified_api_client.set_stop_flag(True)
                 if hasattr(unified_api_client, 'UnifiedClient'):
                     unified_api_client.UnifiedClient._global_cancelled = True
-                # Hard cancel: close active HTTP sessions to abort in-flight requests
+                # Hard cancel: close active HTTP sessions to abort in-flight requests.
+                # Off the GUI thread, like stop_translation does: closing a live
+                # streaming connection can wait on the thread that is reading it.
                 if hasattr(unified_api_client, 'hard_cancel_all'):
-                    unified_api_client.hard_cancel_all()
+                    import threading as _stop_threading
+                    _stop_threading.Thread(
+                        target=unified_api_client.hard_cancel_all,
+                        daemon=True,
+                        name="stop-hard-cancel",
+                    ).start()
             except Exception:
                 pass
 

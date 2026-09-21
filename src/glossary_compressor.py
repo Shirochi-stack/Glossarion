@@ -64,9 +64,31 @@ class _NullLock:
 _NULL_LOCK = _NullLock()
 
 
+class GlossaryCompressionCancelled(Exception):
+    """An immediate Stop arrived while a glossary was being compressed."""
+
+
+def _hard_stop_requested():
+    """An immediate (non-graceful) Stop is in effect.
+
+    TRANSLATION_CANCELLED is only set for an immediate stop. A graceful stop
+    lets in-flight requests finish, and those still need their glossary.
+    """
+    return os.environ.get("TRANSLATION_CANCELLED") == "1"
+
+
 def _gil_yield(counter, every=64):
-    """Briefly release the GIL every `every` iterations of a hot loop."""
+    """Briefly release the GIL every `every` iterations of a hot loop.
+
+    Also the cancellation point. A cross-novel unified glossary is tens of
+    thousands of entries, so one compression runs for seconds; without a way
+    out, every queued worker still runs its full compression after Stop, one
+    after another under _COMPRESS_GIL_LOCK, and the GUI thread is starved for
+    the whole tail.
+    """
     if counter % every == 0:
+        if _hard_stop_requested():
+            raise GlossaryCompressionCancelled()
         time.sleep(0)
 
 try:
@@ -583,6 +605,11 @@ def compress_glossary(
             glossary_path=glossary_path,
             chapter_ref=chapter_ref,
         )
+    except GlossaryCompressionCancelled:
+        # The request this was for is being aborted. "" is what compression
+        # returns for "no matching entries", which every caller already
+        # handles by appending nothing -- never the uncompressed glossary.
+        return ""
     finally:
         _ACTIVE_MATCH_CONTEXT.reset(match_token)
         _ACTIVE_GLOSSARY_SETTINGS.reset(token)
@@ -633,7 +660,13 @@ def _compress_glossary_impl(glossary_content, source_text, glossary_format='auto
     # freeze it prevents is verified, so it should only be lifted against a
     # benchmark (tools/glossary_match_bench.py measures the GUI-stall proxy
     # directly), not on the assumption that the prepared index made it cheap.
+    if _hard_stop_requested():
+        raise GlossaryCompressionCancelled()
     with _COMPRESS_GIL_LOCK if _serialize_compression_enabled() else _NULL_LOCK:
+        # Re-check after the wait: workers queue here, and the ones still
+        # waiting when Stop is pressed must not each run a full compression.
+        if _hard_stop_requested():
+            raise GlossaryCompressionCancelled()
         if glossary_format == 'csv':
             return _compress_csv_glossary(glossary_content, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
         elif glossary_format == 'json':
