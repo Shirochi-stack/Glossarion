@@ -3843,6 +3843,51 @@ def _create_response_handling_section(self, parent):
     # Initialize enabled state for Anthropic controls
     self.toggle_anthropic_thinking_controls()
 
+    # Opera Aria (Ask AI) thinking mode
+    opera_title = QLabel("Opera Aria (Ask AI)")
+    opera_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(opera_title)
+
+    opera_desc = QLabel("Controls Opera's built-in Ask AI route (search/opera).")
+    opera_desc.setWordWrap(True)
+    opera_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    opera_desc.setContentsMargins(12, 0, 0, 4)
+    section_v.addWidget(opera_desc)
+
+    if not hasattr(self, 'opera_aria_think_harder_var'):
+        self.opera_aria_think_harder_var = bool(
+            self.config.get(
+                'opera_aria_think_harder',
+                str(os.environ.get('OPERA_ARIA_THINK_HARDER', '0')) == '1'
+            )
+        )
+    try:
+        self.config['opera_aria_think_harder'] = bool(self.opera_aria_think_harder_var)
+    except Exception:
+        pass
+    self.opera_aria_think_harder_checkbox = self._create_styled_checkbox(
+        "Enable Opera thinking mode (think harder)"
+    )
+    self.opera_aria_think_harder_checkbox.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Ask Opera Aria to reason more deeply before answering (sends think_harder). "
+        "Slower but higher quality on hard passages. Applies to the search/opera route.</p></qt>"
+    )
+    try:
+        self.opera_aria_think_harder_checkbox.setChecked(bool(self.opera_aria_think_harder_var))
+    except Exception:
+        pass
+    def _on_opera_aria_think_harder_toggle(checked):
+        try:
+            self.opera_aria_think_harder_var = bool(checked)
+            self.config['opera_aria_think_harder'] = self.opera_aria_think_harder_var
+            os.environ['OPERA_ARIA_THINK_HARDER'] = '1' if checked else '0'
+        except Exception:
+            pass
+    self.opera_aria_think_harder_checkbox.toggled.connect(_on_opera_aria_think_harder_toggle)
+    section_v.addWidget(self.opera_aria_think_harder_checkbox)
+    section_v.addSpacing(8)
+
     # NIM/AuthND runtime settings
     nim_title = QLabel("NIM / AuthND Token Helpers")
     nim_title.setStyleSheet("font-weight: bold; font-size: 11pt;")

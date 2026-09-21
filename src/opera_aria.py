@@ -117,6 +117,25 @@ def _env(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None or val.strip() == "":
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _think_harder_enabled() -> bool:
+    return _env_bool("OPERA_ARIA_THINK_HARDER", False)
+
+
+def _stream_logging_enabled() -> bool:
+    """Real-time log streaming, mirroring the other browser-backed routes."""
+    val = os.getenv("OPERA_ARIA_STREAM")
+    if val is None or val.strip() == "":
+        val = os.getenv("LOG_STREAM_CHUNKS", "1")
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+
 class OperaAriaError(RuntimeError):
     def __init__(self, message: str, *, error_type: str = "api_error"):
         super().__init__(message)
@@ -585,12 +604,14 @@ def _post_chat(token: str, query: str, timeout: int, stream: bool = True):
         "X-Opera-UI-Language": "en_US",
     }
     payload = {"query": query, "stream": stream, "request_source": "side_panel"}
+    if _think_harder_enabled():
+        payload["think_harder"] = True
     return requests.post(CHAT_ENDPOINT_V2, headers=headers, json=payload,
                          stream=stream, timeout=timeout)
 
 
 def _run_chat(messages: Iterable[Dict[str, Any]], *, model: str, timeout: int,
-              log_fn=None) -> Dict[str, Any]:
+              log_fn=None, log_stream: Optional[bool] = None) -> Dict[str, Any]:
     query = _messages_to_query(messages)
     if not query.strip():
         raise OperaAriaError("Opera Aria: empty query", error_type="config_error")
@@ -611,6 +632,29 @@ def _run_chat(messages: Iterable[Dict[str, Any]], *, model: str, timeout: int,
 
     acc = ""
     conversation_id = None
+    stream_log = _stream_logging_enabled() if log_stream is None else bool(log_stream)
+    first_token = False
+    thinking_announced = False
+    emit_buf: List[str] = []
+
+    def _emit_live(fragment: str) -> None:
+        # Buffer streamed text and flush whole lines to the log in real time.
+        if not fragment:
+            return
+        emit_buf.append(fragment)
+        combined = "".join(emit_buf)
+        for tag in ("</p>", "</h1>", "</h2>", "</h3>", "</li>"):
+            combined = combined.replace(tag, tag + "\n")
+        if "\n" in combined:
+            lines = combined.split("\n")
+            for ln in lines[:-1]:
+                if ln.strip():
+                    _log(log_fn, ln)
+            emit_buf[:] = [lines[-1]]
+        elif len(combined) >= 160:
+            _log(log_fn, combined)
+            emit_buf.clear()
+
     for raw in resp.iter_lines(decode_unicode=True):
         if _is_cancelled():
             try:
@@ -630,12 +674,29 @@ def _run_chat(messages: Iterable[Dict[str, Any]], *, model: str, timeout: int,
             data = json.loads(body)
         except json.JSONDecodeError:
             continue
+        # Surface Opera's thinking phase (think_harder) as a reasoning log line.
+        resp_obj = data.get("response") if isinstance(data, dict) else None
+        if stream_log and not thinking_announced and (
+            data.get("thinking_status")
+            or (isinstance(resp_obj, dict) and resp_obj.get("content_type") == "thinking")
+        ):
+            thinking_announced = True
+            _log(log_fn, "🧠 [opera] Thinking...")
         text = _extract_message(data)
         if text:
+            prev_len = len(acc)
             acc = _accumulate(acc, text)
+            if stream_log:
+                if not first_token:
+                    first_token = True
+                    _log(log_fn, "📡 Opera Aria: streaming response...")
+                _emit_live(acc[prev_len:])
         meta = data.get("metadata")
         if isinstance(meta, dict) and meta.get("conversation_id"):
             conversation_id = meta["conversation_id"]
+
+    if stream_log and emit_buf and "".join(emit_buf).strip():
+        _log(log_fn, "".join(emit_buf))
 
     if not acc.strip():
         raise OperaAriaError("Opera Aria: empty response from server", error_type="api_error")
@@ -661,12 +722,13 @@ def send_chat_completion(
     max_tokens: Optional[int] = None,
     timeout: Optional[int] = None,
     log_fn: Optional[Callable[[str], None]] = None,
+    log_stream: Optional[bool] = None,
     **_: Any,
 ) -> Dict[str, Any]:
     del temperature, max_tokens
     timeout_value = int(timeout or int(os.getenv("OPERA_ARIA_TIMEOUT", str(DEFAULT_TIMEOUT))))
     return _run_chat(list(messages), model=model or DEFAULT_MODEL,
-                     timeout=timeout_value, log_fn=log_fn)
+                     timeout=timeout_value, log_fn=log_fn, log_stream=log_stream)
 
 
 if __name__ == "__main__":

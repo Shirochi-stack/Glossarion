@@ -28314,6 +28314,16 @@ class UnifiedClient:
                         error_type="cancelled"
                     )
 
+                # Opera Aria always streams internally (SSE). Gate the live log the
+                # same way as the other forced-stream providers: on during interactive
+                # runs, and during batch only when the forced-stream batch log is on.
+                _opera_batch = os.getenv("BATCH_TRANSLATION", "0") == "1"
+                _opera_allow_batch = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").strip().lower() \
+                    not in ("", "0", "false", "no", "off")
+                _opera_log_stream = (
+                    os.getenv("LOG_STREAM_CHUNKS", "1").strip().lower() not in ("0", "false", "no", "off")
+                    and (not _opera_batch or _opera_allow_batch)
+                )
                 result = _search_opera_send(
                     messages=messages,
                     model=actual_model,
@@ -28321,6 +28331,7 @@ class UnifiedClient:
                     max_tokens=max_tokens,
                     timeout=_read_timeout,
                     log_fn=print,
+                    log_stream=_opera_log_stream,
                 )
                 return UnifiedResponse(
                     content=result.get("content", ""),
