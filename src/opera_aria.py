@@ -545,6 +545,20 @@ def mint_opera_token(log_fn=None) -> str:
         error_type="auth_error")
 
 
+def _kill_splash_loop(stop_evt: threading.Event) -> None:
+    """Opera spawns a separate `opera_gx_splash.exe` logo window on startup that
+    no flag disables (even headless). Kill it on sight for the brief mint window."""
+    if not sys.platform.startswith("win"):
+        return
+    while not stop_evt.is_set():
+        try:
+            run_no_window(["taskkill", "/F", "/IM", "opera_gx_splash.exe"],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+        except Exception:
+            pass
+        stop_evt.wait(0.12)
+
+
 def _launch_and_harvest(opera: str, headless: bool, log_fn=None) -> Optional[str]:
     """Launch Opera (hidden), evaluate getAccessToken over CDP, kill Opera. None if no worker."""
     port = _free_port()
@@ -578,6 +592,12 @@ def _launch_and_harvest(opera: str, headless: bool, log_fn=None) -> Optional[str
                  f"(CDP:{port}{', headless' if headless else ''})")
     proc = popen_no_window(args, env=env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Suppress Opera's startup splash logo (opera_gx_splash.exe) during the mint.
+    stop_splash = threading.Event()
+    splash_thread = None
+    if sys.platform.startswith("win") and _env("OPERA_ARIA_KILL_SPLASH", "1") != "0":
+        splash_thread = threading.Thread(target=_kill_splash_loop, args=(stop_splash,), daemon=True)
+        splash_thread.start()
     try:
         deadline = time.time() + float(_env("OPERA_ARIA_CDP_WAIT") or CDP_TARGET_WAIT)
         worker = _cdp_find_aria_worker(port, deadline, log_fn)
@@ -587,7 +607,15 @@ def _launch_and_harvest(opera: str, headless: bool, log_fn=None) -> Optional[str
         _save_cached_token(token)
         return token
     finally:
+        stop_splash.set()
         terminate_subprocess_tree(proc, kill=True)
+        # One final sweep in case a splash spawned during teardown.
+        if splash_thread is not None:
+            try:
+                run_no_window(["taskkill", "/F", "/IM", "opera_gx_splash.exe"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+            except Exception:
+                pass
 
 
 def get_token(force_refresh: bool = False, log_fn=None) -> str:
@@ -617,12 +645,39 @@ def _debug_sse() -> bool:
     return _env_bool("OPERA_ARIA_DEBUG_SSE", False)
 
 
+_THINK_TEXT_KEYS = ("message", "text", "content", "thinking", "reasoning",
+                    "thought", "thoughts", "summary", "detail", "status_text", "body")
+_THINK_STATUS_WORDS = {"start", "started", "begin", "done", "end", "finished",
+                       "in_progress", "in-progress", "thinking", "generating", "running"}
+
+
+def _dig_text(obj: Any, depth: int = 3) -> Optional[str]:
+    """Pull the first meaningful reasoning string out of a nested payload,
+    skipping bare status words like 'start'/'done'."""
+    if isinstance(obj, str):
+        s = obj.strip()
+        return s if s and s.lower() not in _THINK_STATUS_WORDS else None
+    if isinstance(obj, dict) and depth > 0:
+        for k in _THINK_TEXT_KEYS:
+            if k in obj:
+                t = _dig_text(obj[k], depth - 1)
+                if t:
+                    return t
+    if isinstance(obj, list) and depth > 0:
+        for it in obj:
+            t = _dig_text(it, depth - 1)
+            if t:
+                return t
+    return None
+
+
 def _classify(data: Dict[str, Any], event: Optional[str]) -> tuple:
     """Return (kind, text): kind is 'text', 'thinking', or None.
 
     Opera's think_harder reasoning may arrive as an SSE `event: thinking_status`
-    frame, a response with content_type 'thinking'/'reasoning', or a top-level
-    thinking/reasoning field. We separate it so it never pollutes the answer.
+    frame, a response with content_type 'thinking'/'reasoning', a top-level
+    thinking/reasoning field, or a nested `thinking_status` payload. We separate
+    it so it never pollutes the answer, digging for any reasoning text present.
     """
     ev = (event or "").lower()
     thinking_ev = any(k in ev for k in ("thinking", "reason", "thought"))
@@ -632,18 +687,21 @@ def _classify(data: Dict[str, Any], event: Optional[str]) -> tuple:
         if ct == "image":
             return (None, None)
         msg = resp.get("message") if isinstance(resp.get("message"), str) else None
-        think = resp.get("thinking") or resp.get("reasoning") or resp.get("thought")
         if ct in ("thinking", "reasoning", "thought") or thinking_ev:
-            return ("thinking", msg or (think if isinstance(think, str) else None))
-        if isinstance(think, str) and think:
+            return ("thinking", msg or _dig_text(resp) or _dig_text(data.get("thinking_status")))
+        think = _dig_text(resp.get("thinking")) or _dig_text(resp.get("reasoning"))
+        if think:
             return ("thinking", think)
         if msg is not None:
             return ("text", msg)
-    top_think = data.get("thinking") or data.get("reasoning") if isinstance(data, dict) else None
-    if isinstance(top_think, str) and top_think:
+    top_think = None
+    if isinstance(data, dict):
+        top_think = (_dig_text(data.get("thinking")) or _dig_text(data.get("reasoning"))
+                     or _dig_text(data.get("thinking_status")))
+    if top_think:
         return ("thinking", top_think)
-    if thinking_ev:
-        return ("thinking", None)  # status frame with no visible text
+    if thinking_ev or (isinstance(data, dict) and "thinking_status" in data):
+        return ("thinking", None)  # status frame with no visible reasoning text
     return (None, None)
 
 
@@ -730,15 +788,16 @@ def _run_chat(messages: Iterable[Dict[str, Any]], *, model: str, timeout: int,
         _flush_lines(emit_buf)
 
     def _emit_thinking(fragment: Optional[str]) -> None:
+        # Only announce/stream when Opera actually sends reasoning TEXT. A bare
+        # thinking_status frame (no content) must not print a "Thinking..." header.
         nonlocal thinking_started
-        if not (stream_log and stream_thinking):
+        if not (stream_log and stream_thinking) or not fragment or not fragment.strip():
             return
         if not thinking_started:
             thinking_started = True
             _log(log_fn, "🧠 [opera] Thinking...")
-        if fragment:
-            think_buf.append(fragment)
-            _flush_lines(think_buf, prefix="    ")
+        think_buf.append(fragment)
+        _flush_lines(think_buf, prefix="    ")
 
     for raw in resp.iter_lines(decode_unicode=True):
         if _is_cancelled():
