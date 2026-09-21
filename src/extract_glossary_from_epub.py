@@ -5,6 +5,8 @@ import contextlib
 import hashlib
 import re
 import argparse
+from glossary_matching import section_name_for_type, type_for_section
+from gender_tracking import display_gender as _display_gender, normalize_entries_gender as _normalize_entries_gender
 import zipfile
 import time
 import sys
@@ -2668,7 +2670,12 @@ def _raw_tracker_key(raw_name) -> str:
 def _strip_private_glossary_keys(entry: Dict) -> Dict:
     if not isinstance(entry, dict):
         return entry
-    return {k: v for k, v in entry.items() if not str(k).startswith("_gender_tracker_")}
+    cleaned = {k: v for k, v in entry.items() if not str(k).startswith("_gender_tracker_")}
+    if cleaned.get("gender"):
+        # One spelling per column: the tracker resolves to `male`, the AI
+        # returns `Male`; both are written as `Male`.
+        cleaned["gender"] = _display_gender(cleaned["gender"])
+    return cleaned
 
 def _gender_tracker_path_for_output(output_path: str) -> str:
     return _shared_gender_tracker_path(output_path)
@@ -3288,7 +3295,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                     for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
                         entries = grouped_entries[entry_type]
                         type_config = custom_types.get(entry_type, {})
-                        section_name = entry_type.upper() + 'S' if not entry_type.upper().endswith('S') else entry_type.upper()
+                        section_name = section_name_for_type(entry_type, custom_types)
                         temp_f.write(f"=== {section_name} ===\n")
                         for entry in entries:
                             raw_name = entry.get('raw_name', '')
@@ -3420,7 +3427,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                         for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
                             entries = grouped_entries[entry_type]
                             type_config = custom_types.get(entry_type, {})
-                            section_name = entry_type.upper() + 'S' if not entry_type.upper().endswith('S') else entry_type.upper()
+                            section_name = section_name_for_type(entry_type, custom_types)
                             f.write(f"=== {section_name} ===\n")
                             for entry in entries:
                                 raw_name = entry.get('raw_name', '')
@@ -5909,7 +5916,9 @@ def _parse_token_efficient_glossary(text: str) -> List[Dict]:
         translated, raw_name, gender, desc, custom_values = parsed_line
 
         entry = {
-            "type": type_map.get((current_section or "").lower(), type_map.get("terms", "terms")),
+            # An unknown section keeps its own type, like a legacy CSV row
+            # does; `terms` is only for entries that precede every header.
+            "type": type_for_section(current_section, type_map, default=type_map.get("terms", "terms")),
             "raw_name": raw_name,
             "translated_name": translated,
         }
@@ -5945,17 +5954,17 @@ def _load_glossary_file(path: str, quiet: bool = False) -> List[Dict]:
                 data = json.loads(text)
                 if isinstance(data, list):
                     log(f"📂 Loaded JSON glossary: {len(data)} entries")
-                    return [entry for entry in data if isinstance(entry, dict)]
+                    return _normalize_entries_gender([entry for entry in data if isinstance(entry, dict)])
                 if isinstance(data, dict) and isinstance(data.get("glossary"), list):
                     entries = [entry for entry in data.get("glossary", []) if isinstance(entry, dict)]
                     log(f"📂 Loaded JSON glossary: {len(entries)} entries")
-                    return entries
+                    return _normalize_entries_gender(entries)
             except Exception:
                 pass
         token_entries = _parse_token_efficient_glossary(text)
         if token_entries:
             log(f"📂 Loaded token-efficient glossary: {len(token_entries)} entries")
-            return token_entries
+            return _normalize_entries_gender(token_entries)
         # Legacy CSV
         import csv
         rows = []
@@ -5963,7 +5972,7 @@ def _load_glossary_file(path: str, quiet: bool = False) -> List[Dict]:
         for row in reader:
             rows.append(row)
         log(f"📂 Loaded legacy CSV glossary: {len(rows)} entries")
-        return rows
+        return _normalize_entries_gender(rows)
     except Exception as e:
         print(f"⚠️ Could not load glossary file {path}: {e}")
         return []

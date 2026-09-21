@@ -267,22 +267,22 @@ def test_compression_materializes_chapter_gender_from_one_stored_row(
             content, "루나", glossary_format="csv", glossary_path=str(glossary_path),
             chapter_ref={"chapter_num": 3},
         )
-        assert "[female]" in result
-        assert "[male]" not in result
+        assert "[Female]" in result
+        assert "[Male]" not in result and "[male]" not in result
     elif glossary_format == "legacy":
         content = "type,raw_name,translated_name,gender\ncharacter,루나,Luna,male"
         result = compress_glossary(
             content, "루나", glossary_format="csv", glossary_path=str(glossary_path),
             chapter_ref={"chapter_num": 3},
         )
-        assert result.splitlines()[-1].endswith(",female")
+        assert result.splitlines()[-1].endswith(",Female")
     else:
         content = [{"type": "character", "raw_name": "루나", "translated_name": "Luna", "gender": "male"}]
         result = compress_glossary(
             content, "루나", glossary_format="json", glossary_path=str(glossary_path),
             chapter_ref={"chapter_num": 3},
         )
-        assert result[0]["gender"] == "female"
+        assert result[0]["gender"] == "Female"
 
 
 @pytest.mark.parametrize("glossary_format", ["token", "legacy", "json"])
@@ -304,22 +304,22 @@ def test_manual_compression_decision_overrides_chapter_history(
             content, "루나", glossary_format="csv", glossary_path=str(glossary_path),
             chapter_ref={"chapter_num": 3},
         )
-        assert "[male]" in result
-        assert "[female]" not in result
+        assert "[Male]" in result
+        assert "[Female]" not in result and "[female]" not in result
     elif glossary_format == "legacy":
         content = "type,raw_name,translated_name,gender\ncharacter,루나,Luna,female"
         result = compress_glossary(
             content, "루나", glossary_format="csv", glossary_path=str(glossary_path),
             chapter_ref={"chapter_num": 3},
         )
-        assert result.splitlines()[-1].endswith(",male")
+        assert result.splitlines()[-1].endswith(",Male")
     else:
         content = [{"type": "character", "raw_name": "루나", "translated_name": "Luna", "gender": "female"}]
         result = compress_glossary(
             content, "루나", glossary_format="json", glossary_path=str(glossary_path),
             chapter_ref={"chapter_num": 3},
         )
-        assert result[0]["gender"] == "male"
+        assert result[0]["gender"] == "Male"
 
 
 def test_compression_keeps_single_carrier_row_when_stored_gender_is_rare(tmp_path, monkeypatch):
@@ -334,7 +334,7 @@ def test_compression_keeps_single_carrier_row_when_stored_gender_is_rare(tmp_pat
         chapter_ref={"chapter_num": 11},
     )
 
-    assert result.splitlines()[-1].endswith(",male")
+    assert result.splitlines()[-1].endswith(",Male")
 
 
 @pytest.mark.skipif(_prepare_editor_gender_tracking is None, reason="PySide6 is not installed")

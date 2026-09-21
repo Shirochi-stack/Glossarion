@@ -34,6 +34,40 @@ def normalize_gender(value: Any) -> str:
     return aliases.get(gender, gender)
 
 
+def display_gender(value: Any) -> str:
+    """The form a gender is stored and shown in: first letter capital.
+
+    Comparisons everywhere use normalize_gender() (lower case), so the
+    tracker's consolidated `male` / `female` used to be written back next
+    to the `Male` / `Female` the AI returns, and one glossary column ended
+    up with both spellings. Aliases are resolved too (`m` -> `Male`).
+    Anything else keeps its own spelling with the first letter raised
+    (`unknown` -> `Unknown`, `non-binary` -> `Non-binary`, `N/A` stays).
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized = normalize_gender(text)
+    if normalized in BINARY_GENDERS:
+        return normalized.capitalize()   # male, MALE, m, boy -> Male
+    return text[:1].upper() + text[1:]
+
+
+def normalize_entries_gender(entries: Any) -> Any:
+    """Apply display_gender() in place to a list of entry dicts, or to the
+    values of a name -> entry mapping. Returns what it was given."""
+    if isinstance(entries, Mapping):
+        rows = entries.values()
+    elif isinstance(entries, (list, tuple)):
+        rows = entries
+    else:
+        return entries
+    for row in rows:
+        if isinstance(row, dict) and row.get("gender"):
+            row["gender"] = display_gender(row["gender"])
+    return entries
+
+
 def tracker_key(raw_name: Any) -> str:
     return str(raw_name or "").strip().casefold()
 

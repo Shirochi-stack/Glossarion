@@ -32,8 +32,10 @@ from language_options import TARGET_LANGUAGES
 from gender_tracking import (
     BINARY_GENDERS,
     collapse_tracked_gender_variants,
+    display_gender,
     editor_gender_status,
     normalize_bias,
+    normalize_entries_gender,
     normalize_gender,
     normalize_threshold,
     occurrence_bounds,
@@ -1534,6 +1536,9 @@ class GlossaryManagerMixin:
                 if isinstance(entry, dict):
                     all_fields.update(entry.keys())
 
+        # One spelling per Gender column, whatever the file holds: `male`
+        # and `Male` also have to match the same Gender filter.
+        normalize_entries_gender(current_data if isinstance(current_data, list) else entries)
         if current_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
             column_fields = []
             if any('_section' in e for e in entries):
@@ -8894,6 +8899,7 @@ Do not stop after the glossary."""
                            all_fields.update(item.keys())
                            entries.append(item)
                
+               normalize_entries_gender(entries)
                # Set up columns based on new format
                if self.current_glossary_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
                    # New simple format
@@ -11286,10 +11292,10 @@ Do not stop after the glossary."""
                     self._push_undo_snapshot()
                 tracker_entry['decision'] = selected
                 self._pending_gender_decisions[raw_name] = selected
-                data_entry['gender'] = resolved_storage_gender(
+                data_entry['gender'] = display_gender(resolved_storage_gender(
                     tracker_entry,
                     data_entry.get('gender', ''),
-                )
+                ))
                 _decorate_gender_item(item, data_entry, self.glossary_column_fields)
                 mark_row_updated(item, True)
                 if hasattr(self, '_apply_glossary_column_filters'):
@@ -12661,6 +12667,8 @@ Do not stop after the glossary."""
        
        def save_edit():
            new_value = entry.toPlainText()
+           if str(col_key).strip().lower() == 'gender':
+               new_value = display_gender(new_value)
            item.setText(column_idx, new_value)
            # Snapshot before mutation for undo
            if hasattr(self, '_push_undo_snapshot'):

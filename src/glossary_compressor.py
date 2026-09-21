@@ -22,6 +22,7 @@ from io import StringIO
 from gender_tracking import (
     BINARY_GENDERS,
     automatic_chapter_gender as _shared_automatic_chapter_gender,
+    display_gender,
     effective_gender as _shared_effective_gender,
     normalize_bias as _shared_normalize_bias,
     normalize_gender as _shared_normalize_gender,
@@ -718,7 +719,7 @@ def _replace_token_gender(line, gender):
         return line
     bracket = re.search(r"\s*\[[^\]]*\](?=\s*(?::|$))", line)
     if bracket:
-        return f"{line[:bracket.start()]} [{gender}]{line[bracket.end():]}"
+        return f"{line[:bracket.start()]} [{display_gender(gender)}]{line[bracket.end():]}"
 
     # Insert immediately before the first top-level description colon.
     paren_depth = 0
@@ -733,8 +734,8 @@ def _replace_token_gender(line, gender):
         elif char == "]" and paren_depth == 0 and bracket_depth:
             bracket_depth -= 1
         elif char == ":" and paren_depth == 0 and bracket_depth == 0:
-            return f"{line[:index].rstrip()} [{gender}]{line[index:]}"
-    return f"{line.rstrip()} [{gender}]"
+            return f"{line[:index].rstrip()} [{display_gender(gender)}]{line[index:]}"
+    return f"{line.rstrip()} [{display_gender(gender)}]"
 
 
 def compress_glossary(
@@ -1163,7 +1164,7 @@ def _compress_legacy_csv_format(lines, source_text, glossary_path=None, chapter_
                         available_genders,
                     )
                     if is_char and emitted_gender in BINARY_GENDERS and gender_idx < len(parts):
-                        parts[gender_idx] = emitted_gender
+                        parts[gender_idx] = display_gender(emitted_gender)
                         filtered_lines.append(sep.join(parts))
                     else:
                         filtered_lines.append(line)
@@ -1253,7 +1254,7 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
         if emitted not in BINARY_GENDERS or _normal_gender(value.get("gender", "")) == emitted:
             return value
         resolved = value.copy()
-        resolved["gender"] = emitted
+        resolved["gender"] = display_gender(emitted)
         return resolved
     
     if isinstance(json_data, dict):

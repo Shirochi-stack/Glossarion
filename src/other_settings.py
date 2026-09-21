@@ -9,6 +9,7 @@ import os
 import json
 import re
 import sys
+from glossary_matching import is_entry_type_token
 import platform
 import tempfile
 import multiprocessing
@@ -733,8 +734,9 @@ def discover_glossary_entry_types(self):
                 # Parse types from all formats
                 import re as _re
                 # Token-efficient: === TYPE === (keep as-is, e.g. "characters", "terms")
-                for m in _re.finditer(r'^=== (\w+) ===$', content, _re.MULTILINE):
-                    discovered_types.add(m.group(1).lower())
+                # (.+?) rather than (\w+): a type may be two words or hyphenated.
+                for m in _re.finditer(r'^===\s*(.+?)\s*===\s*$', content, _re.MULTILINE):
+                    discovered_types.add(m.group(1).strip().lower())
                 # CSV: type{sep}raw_name,...
                 _GSEP = '\x1F'
                 for line in content.split('\n'):
@@ -748,7 +750,7 @@ def discover_glossary_entry_types(self):
                         parts = line.split(',')
                     else:
                         continue
-                    if len(parts) >= 3 and not parts[0].strip().lower().startswith('type') and _re.match(r'^[a-z_]+$', parts[0].strip()):
+                    if len(parts) >= 3 and parts[0].strip().lower() != 'type' and is_entry_type_token(parts[0]):
                         discovered_types.add(parts[0].strip().lower())
     except Exception:
         pass

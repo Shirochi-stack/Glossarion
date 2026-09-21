@@ -258,6 +258,7 @@ from difflib import SequenceMatcher
 import unicodedata
 import re
 import time
+from glossary_matching import is_entry_type_token
 from history_manager import HistoryManager
 from chapter_splitter import ChapterSplitter
 from chapter_chunk_progress import (
@@ -14570,7 +14571,7 @@ def apply_emergency_glossary_compliance(
                 entry_type = row[0].strip().lower()
                 raw_name = row[1].strip()
                 translated = row[2].strip()
-                if raw_name and translated and re.match(r'^[a-z_]+$', entry_type):
+                if raw_name and translated and is_entry_type_token(entry_type):
                     entries.append((entry_type, raw_name, translated))
         else:
             # Legacy comma-separated format
@@ -14587,7 +14588,7 @@ def apply_emergency_glossary_compliance(
                 entry_type = row[0].strip().lower()
                 raw_name = row[1].strip()
                 translated = row[2].strip()
-                if raw_name and translated and re.match(r'^[a-z_]+$', entry_type):
+                if raw_name and translated and is_entry_type_token(entry_type):
                     entries.append((entry_type, raw_name, translated))
     
     if not entries:
@@ -27397,7 +27398,7 @@ def main(log_callback=None, stop_callback=None):
                                 continue
                             raw_name = row[1].strip()
                             translated = row[2].strip()
-                            if raw_name and translated and re.match(r'^[a-z_]+$', entry_type):
+                            if raw_name and translated and is_entry_type_token(entry_type):
                                 preview_entries.append((raw_name, translated, ""))
                     entry_count = len(preview_entries)
                     if glossary_file.lower().endswith('.txt'):

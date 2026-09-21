@@ -1002,7 +1002,7 @@ def rebuild_now(shared_dir=None, settings=None, log=print):
             log(f"📚 Unified glossary: no Glossary folder at {root} — nothing to rebuild")
             return True
         rebuild(root, None, log=log, force=True, settings=settings)
-        log("📚 Unified glossary: rebuild finished")
+        log("📔 Unified glossary: rebuild finished")
         return True
     except Exception as exc:
         log(f"⚠️ Unified glossary rebuild failed: {exc}")

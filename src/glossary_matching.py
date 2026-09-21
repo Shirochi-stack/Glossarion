@@ -94,6 +94,84 @@ def is_gender_entry_type(entry_type, gender="", gender_types=None):
     return False
 
 
+# ─── Entry-type tokens and section headers ───────────────────────────────────
+#
+# Shared by both extractors, the prompt-side parsers and the settings dialogs,
+# so none of them can disagree about which types exist in a file.
+
+_ENTRY_TYPE_WORD_RE = re.compile(r"^[\w\-'/&+]+$")
+_ENTRY_TYPE_CONNECTORS = frozenset({"&", "/", "+", "and", "or", "of"})
+ENTRY_TYPE_MAX_LENGTH = 30
+
+
+def is_entry_type_token(value):
+    """Is this first CSV field a plausible entry type, or junk?
+
+    The check exists to reject a stray sentence from the AI that happens to
+    contain commas. It used to be ``^[a-z_]+$``, which also rejected real
+    types: `Special Ability`, `special-ability`, `ability2`, `무공`,
+    `Items & Materials`. A type is one or two words -- letters in any script,
+    digits, hyphens, underscores -- optionally joined by a connector (&, /,
+    +, and, or, of), with at least one letter, up to ENTRY_TYPE_MAX_LENGTH
+    characters. "note that luna" is three words and still fails.
+    """
+    value = str(value or "").strip()
+    if not value or len(value) > ENTRY_TYPE_MAX_LENGTH:
+        return False
+    if not any(ch.isalpha() for ch in value):
+        return False
+    tokens = value.split(" ")
+    if any(not _ENTRY_TYPE_WORD_RE.match(token) for token in tokens):
+        return False  # empty token (double space) or sentence punctuation
+    words = [token for token in tokens if token.lower() not in _ENTRY_TYPE_CONNECTORS]
+    return 1 <= len(words) <= 2
+
+
+def _known_type_names(known_types):
+    names = {"book"}
+    for name in known_types or ():
+        name = str(name or "").strip().lower()
+        if name:
+            names.add(name)
+    return names
+
+
+def section_name_for_type(entry_type, known_types=()):
+    """The ``=== SECTION ===`` name a writer uses for an entry type.
+
+    Configured types keep the long-standing plural header (CHARACTERS,
+    TERMS). A type the configuration does not know is written verbatim, so
+    the reader gets back exactly what was stored: `ability` must not come
+    back as `abilitys`, nor `class` as `clas`.
+    """
+    name = str(entry_type or "").strip()
+    upper = name.upper()
+    if name.lower() in _known_type_names(known_types) and not upper.endswith("S"):
+        return upper + "S"
+    return upper
+
+
+_NAIVE_PLURAL_RE = re.compile(r"[^aeiou\W\d_]ys$")
+
+
+def type_for_section(section, type_map=None, default="terms"):
+    """The entry type a ``=== SECTION ===`` header stands for.
+
+    ``type_map`` maps the spellings of configured types. A section outside
+    it keeps its own name as the type -- it is never folded into `terms`.
+    ``default`` is only for entries that come before any header. Older
+    files pluralized every type naively, so ABILITYS is read as `ability`.
+    """
+    key = str(section or "").strip().strip("=").strip().lower()
+    if not key:
+        return default
+    if type_map and key in type_map:
+        return type_map[key]
+    if _NAIVE_PLURAL_RE.search(key):
+        return key[:-1]
+    return key
+
+
 # ─── Legacy matcher ──────────────────────────────────────────────────────────
 
 def legacy_text_contains_term(text, term, is_character=False):

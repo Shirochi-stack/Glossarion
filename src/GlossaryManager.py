@@ -4,6 +4,8 @@
 import os
 import re
 import os
+from glossary_matching import is_entry_type_token, section_name_for_type
+from gender_tracking import display_gender
 import sys
 import threading
 import tempfile
@@ -1572,8 +1574,9 @@ def _convert_to_token_efficient_format(csv_lines):
         parts_full = _gsplit(line, sep)
         if len(parts_full) < 3:
             continue
-        entry_type = parts_full[0].lower()
-        if not _re.match(r'^[a-z_]+$', entry_type):
+        entry_type = parts_full[0].strip().lower()
+        # One or two words in any script; a stray sentence still fails.
+        if not is_entry_type_token(entry_type):
             continue
         if entry_type not in grouped:
             grouped[entry_type] = []
@@ -1602,6 +1605,10 @@ def _convert_to_token_efficient_format(csv_lines):
     
     # Process in order: character first, then term, then others
     type_order = ['book', 'character', 'term'] + [t for t in grouped.keys() if t not in ['book', 'character', 'term']]
+    try:
+        _known_entry_types = set(_custom_entry_types_for_refinement().keys()) | {'character', 'term'}
+    except Exception:
+        _known_entry_types = {'character', 'term'}
     
     # Precompute column indices for richer rendering
     lower_header = [h.lower() for h in header_parts]
@@ -1619,7 +1626,9 @@ def _convert_to_token_efficient_format(csv_lines):
         entries = grouped[entry_type]
         
         # Add section header
-        section_name = entry_type.upper() + 'S' if not entry_type.upper().endswith('S') else entry_type.upper()
+        # Same rule as the Balanced/Full writer: a type the configuration
+        # does not know is written verbatim so it reads back unchanged.
+        section_name = section_name_for_type(entry_type, _known_entry_types)
         result.append(f"=== {section_name} ===")
         
         # Add entries in new format
@@ -1646,7 +1655,7 @@ def _convert_to_token_efficient_format(csv_lines):
 
             # Gender support — only for character entries (mirrors extract script's has_gender check)
             if entry_type_val == 'character' and gender_idx != -1 and len(parts) > gender_idx:
-                gender_val = parts[gender_idx].strip()
+                gender_val = display_gender(parts[gender_idx])
                 if gender_val and gender_val != 'Unknown':
                     entry_line += f" [{gender_val}]"
 
@@ -5615,9 +5624,8 @@ def _merge_csv_entries(new_csv_lines, existing_glossary, strip_honorifics, langu
                 continue
             
             entry_type = parts[0].strip().lower()
-            # Only accept reasonable type tokens (letters/underscores only)
-            import re as _re
-            if not _re.match(r'^[a-z_]+$', entry_type):
+            # Only accept plausible type tokens (one or two words, any script)
+            if not is_entry_type_token(entry_type):
                 continue
             
             raw_name = parts[1]
