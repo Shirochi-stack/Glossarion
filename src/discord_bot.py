@@ -1463,8 +1463,7 @@ async def translate(
         os.environ['GLOSSARY_COMPRESSION_FACTOR'] = str(config.get('glossary_compression_factor', 1.2))
         # Enable glossary prompt compression (filtering unused entries) by default
         os.environ['COMPRESS_GLOSSARY_PROMPT'] = '1' if config.get('compress_glossary_prompt', True) else '0'
-        os.environ['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = '1' if config.get('compress_glossary_strict_gender_matching', False) else '0'
-        os.environ['COMPRESS_GLOSSARY_STRICT_MATCHING_MODE'] = str(config.get('compress_glossary_strict_matching_mode', 'characters') or 'characters')
+        os.environ['COMPRESS_GLOSSARY_STRICT_MATCHING_MODE'] = str(config.get('compress_glossary_strict_matching_mode', 'all') or 'all')
         os.environ['COMPRESS_GLOSSARY_STRICT_MATCHING_CUSTOM_TYPES'] = json.dumps(config.get('compress_glossary_strict_matching_custom_types', []) or [], ensure_ascii=False)
         os.environ['COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN'] = '1' if config.get('compress_glossary_consider_translated_column', False) else '0'
         # Two checkboxes resolve into one engine value; 'new' wins over 'shadow'.

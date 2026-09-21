@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Shared term-matching primitives for glossary compression and usage.
 
-This module is deliberately a *leaf*: it imports nothing from the rest of the
-project.  Both ``glossary_compressor`` and ``glossary_usage`` need the same
+This module is deliberately a *leaf*: apart from ``glossary_translit`` (itself
+pure functions with no imports of its own) it imports nothing from the rest of
+the project.  Both ``glossary_compressor`` and ``glossary_usage`` need the same
 matching logic, but ``glossary_compressor`` pulls in ``gender_tracking``,
 ``extract_glossary_from_epub`` and ``GlossaryManager``.  That import weight is
 why ``glossary_usage`` used to carry a hand-copied duplicate of the matcher as
@@ -22,12 +23,18 @@ import unicodedata
 from collections import Counter, OrderedDict
 from functools import lru_cache
 
+from glossary_translit import is_transliterated
+
 
 # ─── Text primitives ─────────────────────────────────────────────────────────
 # Moved here verbatim from glossary_usage so the translated-output matchers and
 # the source-text matchers cannot disagree about what a token or a fold is.
 
 _WHITESPACE_RE = re.compile(r"\s+")
+# "Despacing" also drops the middle dot that CJK text puts between the parts
+# of a transliterated name: 哈利·波特 and 哈利波特, アリス・リデル and アリスリデル
+# are the same name. Applied to the term and to the chapter alike.
+_DESPACE_RE = re.compile(r"[\s\u30fb\u00b7\u2022\u2027]+")
 # Maximal runs of ASCII "word" characters, matching the boundary class used by
 # the matching regexes: (?<![A-Za-z0-9_]) ... (?![A-Za-z0-9_])
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -89,7 +96,7 @@ def is_gender_entry_type(entry_type, gender="", gender_types=None):
 
 # ─── Legacy matcher ──────────────────────────────────────────────────────────
 
-def legacy_text_contains_term(text, term, is_character=False, strict_gender=False):
+def legacy_text_contains_term(text, term, is_character=False):
     """The pre-tiered matcher, preserved exactly.
 
     Substring matching in every script, plus a whitespace-token fallback whose
@@ -97,9 +104,6 @@ def legacy_text_contains_term(text, term, is_character=False, strict_gender=Fals
     is the main over-matching source, but it is load-bearing for recall: it is
     what rescues a glossary term spelled with a space ("미샤 랄토스") when the
     source text runs it together ("미샤랄토스").
-
-    ``strict_gender`` is passed in rather than read from the environment so
-    this function stays pure and testable.
     """
     if not term or not text:
         return False
@@ -107,9 +111,6 @@ def legacy_text_contains_term(text, term, is_character=False, strict_gender=Fals
     # Full term match first (fast path)
     if term in text:
         return True
-
-    if is_character and strict_gender:
-        return False
 
     # Multi-word: check individual tokens
     # Character entries: accept any token length (>=1 char)
@@ -314,7 +315,22 @@ CHINESE_SUBJECT_FOLLOWERS = frozenset(
 )
 
 # Japanese plural / collective markers written in kanji after a kanji name.
-_HAN_NAME_SUFFIXES = ("達", "等")
+# What may stand directly left of a ONE-character Han entry: a function word
+# (是白, 和白, 对白兄), or a word that introduces a name (姓白, 老白, 小白, 阿白).
+_HAN_SINGLE_LEFT_OPENERS = frozenset(
+    "的地得了着过是有在和与及或而但则也就还又却都把被给对向从到为由跟比用"
+    "呢吗吧啊嘛呀这那说道问叫喊请让姓老小阿"
+)
+
+# What follows a short kanji / hanzi NAME without making it a different word:
+# plural markers, and the kinship / rank words used as forms of address
+# (萧炎哥哥, 小明师兄, 太郎先輩, 王女殿下). Longest first so 哥哥 wins over 哥.
+_HAN_NAME_SUFFIXES = (
+    "お嬢様", "哥哥", "姐姐", "弟弟", "妹妹", "大哥", "大姐", "师兄", "师姐", "师弟", "师妹", "师叔",
+    "师伯", "師兄", "師姐", "師弟", "師妹", "前辈", "前輩", "少爷", "少爺", "殿下", "陛下", "閣下",
+    "阁下", "先輩", "師匠", "隊長", "団長", "将軍", "王子", "王女",
+    "達", "等", "们", "們", "哥", "姐", "兄", "弟", "妹", "叔", "伯", "爷", "爺", "嬢", "卿", "姫",
+)
 
 
 # ─── Honorifics that attach to a name ────────────────────────────────────────
@@ -391,14 +407,13 @@ class MatchConfig:
     __slots__ = (
         "min_tier", "allow_weak_token", "weak_token_max_hits", "cjk_boundary",
         "short_cjk_len", "nfkc", "despaced", "despaced_latin", "honorific",
-        "honorific_min_residual", "strict_gender", "derived_forms", "cache_key",
+        "honorific_min_residual", "derived_forms", "cache_key",
     )
 
     def __init__(self, min_tier=TIER_TOKEN, allow_weak_token=True,
                  weak_token_max_hits=3, cjk_boundary=True, short_cjk_len=2,
                  nfkc=True, despaced=True, despaced_latin=False,
-                 honorific=True, honorific_min_residual=2, strict_gender=False,
-                 derived_forms=True):
+                 honorific=True, honorific_min_residual=2, derived_forms=True):
         self.min_tier = int(min_tier)
         self.allow_weak_token = bool(allow_weak_token)
         self.weak_token_max_hits = int(weak_token_max_hits)
@@ -409,7 +424,6 @@ class MatchConfig:
         self.despaced_latin = bool(despaced_latin)
         self.honorific = bool(honorific)
         self.honorific_min_residual = int(honorific_min_residual)
-        self.strict_gender = bool(strict_gender)
         # Verb/adjective endings (오염된, 록온하고) and one-syllable noun affixes
         # (중장갑, 장갑판) built on a term. Right for a book's own glossary; a
         # cross-novel glossary turns them into homonym hits (고려하면 is not
@@ -446,7 +460,6 @@ class MatchConfig:
             despaced_latin=flag("GLOSSARY_MATCH_DESPACED_LATIN", "0"),
             honorific=flag("GLOSSARY_MATCH_HONORIFIC", "1"),
             honorific_min_residual=num("GLOSSARY_MATCH_HONORIFIC_MIN_RESIDUAL", 2),
-            strict_gender=flag("COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0"),
             derived_forms=flag("GLOSSARY_MATCH_DERIVED_FORMS", "1"),
         )
 
@@ -489,7 +502,7 @@ def _korean_tail_is_boundary(tail, derived, relaxed=True):
     return derived and tail.startswith(KOREAN_VERBALIZER_PREFIXES)
 
 
-def _left_is_clean(text, start, script, derived=False, term_len=2):
+def _left_is_clean(text, start, script, derived=False, term_len=2, is_name=False):
     """True when nothing to the left glues the match into a longer word."""
     if start == 0:
         return True
@@ -522,6 +535,13 @@ def _left_is_clean(text, start, script, derived=False, term_len=2):
         # it cost four true positives and prevented no false ones — the right
         # edge and the surname rule already do the work. So: accept, unless
         # this is a Japanese-style kanji term (handled by KANA/script change).
+        if term_len == 1 and is_name:
+            # A one-hanzi NAME is a different matter: glued to a hanzi on
+            # its left it is nearly always the second half of a two-character
+            # word (明白, 空白, 表白 are not the surname 白). Only a function
+            # word or a name-introducer to the left leaves it standing alone.
+            # Not for things: 擦剑 "wipe the sword" really is the item 剑.
+            return prev in _HAN_SINGLE_LEFT_OPENERS
         single, compound = _chinese_surnames()
         if prev in single:
             return True
@@ -618,7 +638,7 @@ def _cjk_occurrence_is_clean(text, term, cfg, is_character=False, whole=True):
         if idx < 0:
             return False
         end = idx + len(term)
-        left = _left_is_clean(text, idx, script, derived, len(term))
+        left = _left_is_clean(text, idx, script, derived, len(term), is_character)
         right = _right_is_clean(text, end, script, derived, len(term), relaxed)
         if left and right:
             return True
@@ -630,6 +650,10 @@ def _cjk_occurrence_is_clean(text, term, cfg, is_character=False, whole=True):
             # Korean. A surname immediately to the left is independent
             # evidence that this is a name, so it stands in for the right edge.
             prev = text[idx - 1] if idx else ""
+            # ...for a name of two characters. With one, the "surname" is as
+            # likely the first half of an ordinary word: 明 in 明白.
+            if len(term) == 1 and is_character:
+                prev = ""
             if prev and (prev in single or (idx >= 2 and text[idx - 2:idx] in compound)):
                 return True
         start = idx + 1
@@ -717,22 +741,34 @@ def _variants_cached(term, cache_key):
         add(folded, TIER_NORM)
         base = folded
 
-    if despaced and _WHITESPACE_RE.search(base):
+    if despaced and _DESPACE_RE.search(base):
         # Only for CJK unless explicitly allowed: despacing "Al Gore" into
         # "algore" would cross a real word boundary.
         if despaced_latin or term_script(base) in _CJK_SCRIPTS:
-            add(_WHITESPACE_RE.sub("", base), TIER_DESPACED)
+            add(_DESPACE_RE.sub("", base), TIER_DESPACED)
 
     if honorific:
         stripped = strip_name_honorific(base, cfg)
         if stripped:
             add(stripped, TIER_HONORIFIC)
 
-    if " " in base:
-        for token in base.split():
+    parts = name_parts(base)
+    if len(parts) > 1:
+        for token in parts:
             add(token, TIER_TOKEN if len(token) >= 2 else TIER_WEAK)
 
     return tuple(out)
+
+
+# What separates the parts of a name. Whitespace, plus the marks CJK text
+# uses for transliterated names: アリス・リデル, ジャン＝ジャック (NFKC makes
+# ＝ into =), 哈利·波特. A hyphen is not one: Al-Gore is a single surname.
+_NAME_PART_SPLIT_RE = re.compile(r"[\s\u30fb\u00b7\u2022\u2027=]+")
+
+
+def name_parts(term):
+    """The separately usable parts of a (normalized) multi-part name."""
+    return [part for part in _NAME_PART_SPLIT_RE.split(str(term or "")) if part]
 
 
 def term_variants(term, cfg=None):
@@ -767,7 +803,7 @@ def prepare_source_text(text, cfg=None):
     return {
         "text": text,
         "norm": norm,
-        "despaced": _WHITESPACE_RE.sub("", norm),
+        "despaced": _DESPACE_RE.sub("", norm),
         "tokens": frozenset(_TOKEN_RE.findall(norm)),
         "cjk_chars": cjk_chars,
         "cjk_bigrams": frozenset(bigrams),
@@ -842,8 +878,13 @@ def _weak_token_allowed(prepared, variant, is_character, cfg):
     return True, ""
 
 
-def match_term(prepared, term, is_character=False, cfg=None):
-    """Find the strongest tier at which `term` is present in the chapter."""
+def match_term(prepared, term, is_character=False, cfg=None, token_filter=None):
+    """Find the strongest tier at which `term` is present in the chapter.
+
+    ``token_filter(token) -> bool`` can veto a match on one part of a
+    multi-part term (see GlossaryNameIndex.is_name_part); whole-term tiers
+    never consult it.
+    """
     cfg = cfg or DEFAULT_CONFIG
     term = str(term or "").strip()
     if not term or not prepared:
@@ -854,13 +895,6 @@ def match_term(prepared, term, is_character=False, cfg=None):
         return NO_MATCH
 
     floor = cfg.min_tier
-    if is_character and cfg.strict_gender:
-        # Strict Gender Entry Precise Matching: a gendered entry must match
-        # as a whole name, never on a part of one. "Whole name" includes
-        # the forms that are still that name -- width and case, spacing
-        # (미샤 랄토스 / 미샤랄토스) and an attached honorific (루나님 / 루나)
-        # -- so strictness does not cost recall; only tokens are excluded.
-        floor = max(floor, TIER_HONORIFIC)
 
     best_reject = "no_occurrence"
     for variant, tier in variants:
@@ -879,6 +913,11 @@ def match_term(prepared, term, is_character=False, cfg=None):
             elif variant.isascii():
                 best_reject = "word_boundary"
             continue
+        if tier <= TIER_TOKEN and token_filter is not None and not token_filter(variant):
+            # Asked only about parts that do occur here, so the filter can
+            # afford real work (see GlossaryNameIndex.is_name_part).
+            best_reject = "generic_name_part"
+            continue
         if tier == TIER_WEAK:
             allowed, reason = _weak_token_allowed(prepared, variant, is_character, cfg)
             if not allowed:
@@ -894,7 +933,15 @@ def text_contains_term(text, term, is_character=False, cfg=None):
     return bool(match_term(prepare_source_text(text, cfg), term, is_character, cfg))
 
 
-# ─── Strict gender entry precise matching ────────────────────────────────────
+# ─── Whole-term scope (part of Precise Term Matching) ────────────────────────
+#
+# Measured on a 704-entry glossary, two thirds of what the precise matcher
+# still kept per chapter was kept because ONE word of a multi-word entry
+# appeared: 넥서스 alone kept 모노크롬 넥서스, 넥서스 신권 and four more in
+# nearly every chapter. So entries in scope must appear whole. The one place
+# a part is real evidence is a person's name (미샤 for 미샤 랄토스), which is
+# what gender-enabled entries are for; there a part still counts when it is
+# a name rather than a title, see GlossaryNameIndex.
 
 _PREPARED_CACHE = OrderedDict()
 _PREPARED_CACHE_LOCK = threading.Lock()
@@ -920,50 +967,59 @@ def prepare_source_text_cached(text, cfg=None):
     return prepared
 
 
-def strict_name_config(base=None):
-    """A copy of `base` that accepts whole-name forms only (see match_term)."""
+def _copy_config(base, **changes):
     base = base or DEFAULT_CONFIG
-    return MatchConfig(
-        min_tier=max(base.min_tier, TIER_HONORIFIC),
-        allow_weak_token=False,
-        weak_token_max_hits=base.weak_token_max_hits,
-        cjk_boundary=base.cjk_boundary,
-        short_cjk_len=base.short_cjk_len,
-        nfkc=base.nfkc,
-        despaced=base.despaced,
-        despaced_latin=base.despaced_latin,
-        honorific=base.honorific,
-        honorific_min_residual=base.honorific_min_residual,
-        strict_gender=True,
-        derived_forms=base.derived_forms,
-    )
+    values = {name: getattr(base, name) for name in MatchConfig.__slots__ if name != "cache_key"}
+    values.update(changes)
+    return MatchConfig(**values)
 
 
-STRICT_SCOPE_MODES = ("characters", "all", "custom")
+def whole_term_config(base=None):
+    """`base`, but only whole-term forms count: exact, width/case, spacing
+    (미샤 랄토스 / 미샤랄토스) and an attached honorific (루나님 / 루나)."""
+    base = base or DEFAULT_CONFIG
+    return _copy_config(base, min_tier=max(base.min_tier, TIER_HONORIFIC), allow_weak_token=False)
+
+
+def name_part_config(base=None):
+    """`base`, accepting a part of a name of two or more characters. A
+    one-character part (김, 白) is never distinctive enough on its own."""
+    base = base or DEFAULT_CONFIG
+    # Never below the caller's own floor: GLOSSARY_MATCH_MIN_TIER above the
+    # token tier switches name parts off along with every other token match.
+    return _copy_config(base, min_tier=max(base.min_tier, TIER_TOKEN), allow_weak_token=False)
+
+
+WHOLE_TERM_SCOPE_MODES = ("all", "gender", "custom", "none")
+_SCOPE_MODE_ALIASES = {
+    "characters": "gender", "character": "gender", "gendered": "gender",
+    "gender_entries": "gender", "all_fields": "all", "everything": "all",
+    "off": "none", "": "all",
+}
 
 
 def parse_strict_scope(mode, custom_types=None):
-    """Normalize the Strict Precise Matching scope to ``(mode, types)``.
+    """Normalize the whole-term scope to ``(mode, types)``.
 
-    Same three modes as Emergency Glossary Compliance: ``characters``
-    (gender-enabled entries), ``all``, or ``custom`` with a list of entry
-    types. The list may arrive as a list or as the JSON / comma string an
-    environment variable carries. Both singular and plural spellings are
-    accepted, because section headers say CHARACTERS and rows say
-    character. An empty custom list falls back to ``characters`` rather
-    than silently switching the toggle off.
+    ``all`` (default) — every entry must appear whole. ``gender`` — only
+    gender-enabled entries. ``custom`` — the listed entry types. ``none`` —
+    no whole-term requirement: one word of a multi-word entry is enough.
+
+    The type list may arrive as a list or as the JSON / comma string an
+    environment variable carries; singular and plural spellings are both
+    accepted, because section headers say CHARACTERS and rows say character.
+    ``custom`` with nothing listed falls back to ``all``.
     """
-    mode = str(mode or "characters").strip().lower()
-    if mode in ("all_fields", "everything"):
+    mode = str(mode or "all").strip().lower().replace(" ", "_")
+    mode = _SCOPE_MODE_ALIASES.get(mode, mode)
+    if mode not in WHOLE_TERM_SCOPE_MODES:
         mode = "all"
-    if mode not in STRICT_SCOPE_MODES:
-        mode = "characters"
     if isinstance(custom_types, str):
-        text = custom_types.strip()
+        raw = custom_types.strip()
         try:
-            custom_types = json.loads(text) if text.startswith("[") else text.split(",")
+            custom_types = json.loads(raw) if raw.startswith("[") else raw.split(",")
         except ValueError:
-            custom_types = text.split(",")
+            custom_types = raw.split(",")
     allowed = set()
     for item in custom_types or ():
         name = str(item or "").strip().lower()
@@ -972,47 +1028,125 @@ def parse_strict_scope(mode, custom_types=None):
         allowed.add(name)
         allowed.add(name[:-1] if name.endswith("s") else name + "s")
     if mode == "custom" and not allowed:
-        mode = "characters"
+        mode = "all"
     return mode, frozenset(allowed)
 
 
-DEFAULT_STRICT_SCOPE = parse_strict_scope("characters")
+DEFAULT_STRICT_SCOPE = parse_strict_scope("all")
+NO_STRICT_SCOPE = parse_strict_scope("none")
 
 
-def in_strict_scope(scope, entry_type="", is_character=False):
-    """Does the strict whole-term rule apply to this entry?"""
+def in_strict_scope(scope, entry_type="", is_gender_entry=False):
+    """Must this entry appear as a whole term?
+
+    ``is_gender_entry`` is "this entry's type has gender enabled (or the row
+    carries a gender)" -- custom entry types included, not just `character`.
+    """
     mode, allowed = scope or DEFAULT_STRICT_SCOPE
     if mode == "all":
         return True
+    if mode == "none":
+        return False
     if mode == "custom":
-        if str(entry_type or "").strip().lower() in allowed:
-            return True
-        # Ticking Characters covers every gender-enabled entry, including
-        # formats that carry no type column.
-        return bool(is_character) and "character" in allowed
-    return bool(is_character)
+        return str(entry_type or "").strip().lower() in allowed
+    return bool(is_gender_entry)
 
 
-def strict_name_in_text(text, term, cfg=None, prepared=None, is_character=True):
-    """Strict Precise Matching for one entry inside the configured scope.
+_ADDRESS_TERMS = frozenset(
+    unicodedata.normalize("NFKC", suffix).casefold().lstrip("-") for suffix in HONORIFIC_SUFFIXES
+)
 
-    The old strict rule was a bare ``term in text``: it demanded the whole
-    name but found it anywhere, so 유 matched inside 자유 and 유리 inside
-    유리한, while 미샤 랄토스 missed 미샤랄토스. This keeps the whole-name
-    requirement, adds the script-aware word boundaries, and accepts the
-    spacing / width / honorific forms of the same name -- whichever match
-    engine is selected.
 
-    `cfg` must come from strict_name_config(); `prepared` is optional and
-    is looked up in a small cache when omitted.
+class GlossaryNameIndex:
+    """May one part of a gender-enabled entry's name stand for the entry?
+
+    Gender-enabled entries are people, but half of them are stored as
+    epithets (3서클 마법사, 유카 엄마, 마왕의 제자), and their head nouns are
+    ordinary words that turn up in most chapters. Three tests, in order:
+
+    1. The part is a glossary entry in its own right (피엘 for 피엘 메스,
+       넥서스 for 넥서스 파일럿): no. That row already carries the word, so
+       nothing is lost.
+    2. The part is transliterated in this entry's translation (카인 -> Kain,
+       리즈 -> Liz) rather than translated (마법사 -> Mage): it is a name, yes.
+    3. When that cannot be judged (Han characters, a non-Latin translation):
+       yes unless ``shared_limit`` or more entries share the part.
     """
-    if cfg is None:
-        cfg = strict_name_config()
-    if prepared is None:
-        prepared = prepare_source_text_cached(text, cfg)
-    # The whole-term floor lives in `cfg`; `is_character` only decides
-    # whether verb endings / noun affixes may attach (never to a name).
-    return bool(match_term(prepared, term, is_character, cfg))
+
+    __slots__ = ("own", "share", "shared_limit")
+
+    def __init__(self, raw_names=(), shared_limit=3):
+        self.own = set()
+        self.share = Counter()
+        self.shared_limit = int(shared_limit)
+        for raw in raw_names:
+            self.add(raw)
+
+    @staticmethod
+    def _fold(value):
+        return unicodedata.normalize("NFKC", str(value or "")).casefold().strip()
+
+    def add(self, raw_name):
+        folded = self._fold(raw_name)
+        if not folded:
+            return
+        self.own.add(folded)
+        parts = set(name_parts(folded))
+        if len(parts) > 1:
+            for part in parts:
+                self.share[part] += 1
+
+    def is_name_part(self, part, translated_name="", raw_name=""):
+        part = self._fold(part)
+        if not part or part in self.own:
+            return False
+        if any(ch.isdigit() for ch in part):
+            return False  # 1호, 3서클, 9번대: a rank or a number, never a name
+        if part in _ADDRESS_TERMS:
+            return False  # 루나 선배, 유카 언니: the form of address is not the name
+        siblings = tuple(name_parts(self._fold(raw_name))) if raw_name else ()
+        verdict = is_transliterated(part, str(translated_name or ""), siblings)
+        if verdict is None:
+            return self.share.get(part, 0) < self.shared_limit
+        return verdict
+
+
+class ScopedMatcher:
+    """Precise matching with the whole-term scope applied.
+
+    One object per chapter. Shared by the compressor and the glossary
+    editor's usage view so the two cannot disagree about what is sent.
+    """
+
+    __slots__ = ("prepared", "cfg", "scope", "index", "_whole", "_part")
+
+    def __init__(self, prepared, cfg=None, scope=None, index=None):
+        self.prepared = prepared
+        self.cfg = cfg or DEFAULT_CONFIG
+        self.scope = scope or DEFAULT_STRICT_SCOPE
+        self.index = index
+        self._whole = None
+        self._part = None
+
+    def match(self, term, is_gender_entry=False, entry_type="", translated_name=None):
+        """``translated_name`` is what lets a name part be recognised; leave
+        it None to require the whole term (e.g. when `term` IS the
+        translated name)."""
+        if not in_strict_scope(self.scope, entry_type, is_gender_entry):
+            return match_term(self.prepared, term, is_gender_entry, self.cfg)
+        if self._whole is None:
+            self._whole = whole_term_config(self.cfg)
+            self._part = name_part_config(self.cfg)
+        result = match_term(self.prepared, term, is_gender_entry, self._whole)
+        if result or not is_gender_entry or self.index is None or translated_name is None:
+            return result
+        # A person is usually referred to by one part of their name.
+        index = self.index
+        part = match_term(self.prepared, term, True, self._part,
+                          token_filter=lambda piece: index.is_name_part(piece, translated_name, term))
+        # Report "generic_name_part" rather than the whole-term miss, so the
+        # match-differences report says why 넥서스 did not keep 넥서스 파일럿.
+        return part if (part or part.reject_reason == "generic_name_part") else result
 
 
 # ─── Review overrides ────────────────────────────────────────────────────────

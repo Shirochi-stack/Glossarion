@@ -57,7 +57,6 @@ _GLOSSARY_CONFIG_OPTIONS = {
     'glossary_skip_gender_tracking': 'GLOSSARY_SKIP_GENDER_TRACKING',
     'glossary_gender_noise_threshold': 'GLOSSARY_GENDER_NOISE_THRESHOLD',
     'glossary_gender_tracking_bias': 'GLOSSARY_GENDER_TRACKING_BIAS',
-    'compress_glossary_strict_gender_matching': 'COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING',
     'compress_glossary_strict_matching_mode': 'COMPRESS_GLOSSARY_STRICT_MATCHING_MODE',
     'compress_glossary_strict_matching_custom_types': 'COMPRESS_GLOSSARY_STRICT_MATCHING_CUSTOM_TYPES',
     'compress_glossary_consider_translated_column': 'COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN',

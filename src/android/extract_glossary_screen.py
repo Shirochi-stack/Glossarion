@@ -210,7 +210,7 @@ class ExtractGlossaryScreen(MDScreen):
         "glossary_duplicate_algorithm": ["auto", "rapidfuzz", "difflib", "simple"],
         "glossary_duplicate_key_mode": ["auto", "raw_name", "translated_name", "skip"],
         "emergency_glossary_compliance_mode": ["characters", "all_fields", "custom"],
-        "compress_glossary_strict_matching_mode": ["characters", "all", "custom"],
+        "compress_glossary_strict_matching_mode": ["all", "gender", "custom", "none"],
     }
 
     _FORCED_KEYS = {
@@ -240,7 +240,6 @@ class ExtractGlossaryScreen(MDScreen):
         "glossary_compression_factor",
         "glossary_max_output_tokens",
         "compress_glossary_prompt",
-        "compress_glossary_strict_gender_matching",
         "compress_glossary_consider_translated_column",
         "strip_honorifics",
         "glossary_disable_honorifics_filter",
@@ -279,7 +278,6 @@ class ExtractGlossaryScreen(MDScreen):
         "add_additional_glossary",
         "glossary_enable_chapter_split",
         "compress_glossary_prompt",
-        "compress_glossary_strict_gender_matching",
         "compress_glossary_consider_translated_column",
         "strip_honorifics",
         "glossary_disable_honorifics_filter",

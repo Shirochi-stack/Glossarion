@@ -153,8 +153,7 @@ def set_all_env_vars(config):
     os.environ['MANUAL_GLOSSARY_FUZZY_THRESHOLD'] = str(_get('manual_glossary_fuzzy_threshold', 0.90))
     os.environ['GLOSSARY_USE_LEGACY_CSV'] = '1' if _get('glossary_use_legacy_csv', False) else '0'
     os.environ['COMPRESS_GLOSSARY_PROMPT'] = '1' if _get('compress_glossary_prompt', True) else '0'
-    os.environ['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = '1' if _get('compress_glossary_strict_gender_matching', False) else '0'
-    os.environ['COMPRESS_GLOSSARY_STRICT_MATCHING_MODE'] = str(_get('compress_glossary_strict_matching_mode', 'characters') or 'characters')
+    os.environ['COMPRESS_GLOSSARY_STRICT_MATCHING_MODE'] = str(_get('compress_glossary_strict_matching_mode', 'all') or 'all')
     os.environ['COMPRESS_GLOSSARY_STRICT_MATCHING_CUSTOM_TYPES'] = json.dumps(_get('compress_glossary_strict_matching_custom_types', []) or [], ensure_ascii=False)
     os.environ['COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN'] = '1' if _get('compress_glossary_consider_translated_column', False) else '0'
     # Two checkboxes resolve into one engine value; 'new' wins over 'shadow'.

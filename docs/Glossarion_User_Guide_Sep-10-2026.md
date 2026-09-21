@@ -496,8 +496,7 @@ Open it with **Glossary Manager** / **Extract Glossary**.
 - **Append Glossary to System Prompt** — sends the terms to the AI every request (the consistency switch).
 - **Compress Glossary Prompt** ✅ — "Only send glossary entries that appear in the current text. Saves tokens and cost; recommended ON."
 - **Consider Translated Column** — also keeps an entry when the *translated* name appears in the source text, not just the original. Default OFF.
-- **Strict Precise Entry Matching** — the entry types you choose are sent only when the **whole** term appears *as its own word*. It runs the precise matcher at its strictest setting whether or not **Precise Term Matching** is ON: particles, honorifics, spacing and full/half-width differences still count (`루나님`, `미샤랄토스` for `미샤 랄토스`), but one word of a multi-word entry does not, and neither does a term buried inside another word (`유` in `자유`, `유리` in `유리한`). Next to the checkbox, a dropdown picks which entries it covers — the same control as **Emergency Glossary Compliance**: **Characters** (gender-enabled entries, the default), **All** (every entry type), or **Custom**, where **Configure…** opens the same entry-type checklist (Characters, Terms, Locations, Titles, … read from the glossary of the selected book). Custom with nothing ticked behaves like Characters. Default OFF, which lets a surname or given name alone keep a character entry.
-- **Precise Term Matching** ✅ — the smarter matcher described just below. Default ON; turn it OFF to go back to the old plain-substring check.
+- **Precise Term Matching** ✅ — the smarter matcher described just below, with a **Whole term for** dropdown beside it (**All** by default). Default ON; turn it OFF to go back to the old plain-substring check. *The old **Strict Gender Entry Matching** checkbox is gone — it was folded into this dropdown.*
 - **Log Match Differences** — with Precise Term Matching OFF, preview what it *would* change, without changing anything. Default OFF.
 - **Add Additional Glossary** — always include an extra external glossary file (CSV/JSON/TXT/PDF/MD).
 - **Enable Unified Glossary** — keep one deduplicated `glossary_unified.csv` shared by *all* your novels (per source and target language) and send it alongside the book's own glossary. Described below. Default OFF.
@@ -525,12 +524,29 @@ It is looser still for names stored with a space. `신 라이언` is kept whenev
 
 - **English and other Latin text** — whole words only, so `Al` stops matching inside `Already`.
 - **Korean** — knows what can be glued onto a word without making it a different word: particles (`루나는`, `루나가`, `루나에게`), the copula (`아논입니다`, `아논인가?`, `소녀였다`), and bound nouns (`로켓같은`, `펄스때문에`, `수장끼리`). For non-character terms it also accepts verb forms built on the term (`오염된`, `록온하고`) and a short, measured list of one-syllable affixes (`중장갑`, `장갑판`). It still rejects a term buried in an unrelated word (`유` in `자유`, `노트` in `노트북`), and never lets a verb ending attach to a *name* — `유리한` ("favourable") is not the character `유리`.
-- **Japanese** — uses the kana/kanji change as a word edge, and the hiragana/katakana change too, so `太郎は`, `リンは` and `太郎達` count while `リン` inside `リング` and `大地` inside `大地震` do not.
-- **Chinese** — uses grammatical particles (`宋家的人` counts), surnames (`小明` inside `王小明` counts) and the words that normally follow a subject (`小明说道`, `小明忽然`, `小明脸色一变` count), while `天下` inside `天下第一楼` does not.
+- **Japanese** — uses the kana/kanji change as a word edge, and the hiragana/katakana change too, so `太郎は`, `リンは` and `太郎達` count while `リン` inside `リング` and `大地` inside `大地震` do not. A kanji name followed by a kanji form of address counts (`大地先輩`, `王女殿下`), and the `・` / `＝` in a transliterated name is a separator: `アリス・リデル` is found as `アリスリデル`, as `ｱﾘｽ･ﾘﾃﾞﾙ`, and by `アリス` alone.
+- **Chinese** — uses grammatical particles (`宋家的人` counts), surnames (`小明` inside `王小明` counts) and the words that normally follow a subject (`小明说道`, `小明忽然`, `小明脸色一变` count), while `天下` inside `天下第一楼` does not. Kinship and rank words after a name count (`萧炎哥哥`, `萧炎师兄`), `哈利·波特` is found as `哈利波特` or by `哈利` alone, and a one-character *name* needs a real left edge, so the surname `白` is not found in `明白` or `白天`.
 
 It also **finds terms the old check missed**: half-width `ｱﾘｽ` when your glossary says `アリス`, full-width or differently-capitalised Latin, a glossary name written `미샤 랄토스` when the chapter runs it together as `미샤랄토스`, and `루나님` when the chapter just says `루나`.
 
-On a real 2,971-entry glossary this cut a chapter's glossary from 250 entries to 142 — about **40% fewer** — without dropping anything genuinely in the scene.
+**Whole term for** — *which entries must appear as the whole term, not just one word of it.* This is the biggest saving of all. A glossary is full of multi-word entries (`모노크롬 넥서스`, `넥서스 신권`, `넥서스 파일럿 양성 프로그램` …), and if one word is enough, the common word `넥서스` keeps every one of them in nearly every chapter. The dropdown uses the same control as **Emergency Glossary Compliance**:
+
+- **All** (default) — every entry must appear whole. Spacing, full/half-width, particles and honorifics still count as the whole term (`미샤랄토스` for `미샤 랄토스`, `루나님` for `루나`).
+- **Gender Entries** — only entries whose type has gender enabled. That means *any* such type, including custom entry types you created, and any row that carries a gender — not just `character`.
+- **Custom** — the entry types you tick under **Configure…** (the same checklist Emergency Glossary Compliance uses, read from the selected book's glossary). Nothing ticked behaves like All.
+- **None** — one word of a multi-word entry is enough, for every entry.
+
+*People are the exception.* A gender-enabled entry is a person, and people are called by part of their name: the chapter says `미샤`, the glossary says `미샤 랄토스`. So for those entries one part still counts — **if it is a name and not a title.** Glossarion tells them apart with your own translation column: a name is *transliterated* (`카인` → **Kain**, `리즈` → **Liz**, `アリス` → **Alice**), a title is *translated* (`마법사` → Mage, `엄마` → Mother, `선배` → Senior). So `카인` keeps `카인 에렌하이츠`, while `마법사` does not keep `3서클 마법사`. A part that already has a glossary row of its own (`피엘` next to `피엘 메스`) is left to that row. Chinese characters cannot be read off the page, so there the rule falls back to: a part counts unless three or more entries share it.
+
+Measured end to end on three Korean novels (entries sent per chapter):
+
+| Glossary | Old matcher | Precise, Whole term: None | Precise, Whole term: All (default) |
+|---|---|---|---|
+| 704 entries | 93 | 81 | **26** |
+| 373 entries | 50 | 43 | **19** |
+| 2,971 entries | 377 | 276 | **39** |
+
+No chapter ended up with an empty glossary, and checked against eight novels every name the rule let go of was either covered by its own row or was a title word (`선배`, `여인`, `마법사`, `제국`). If a chapter would otherwise get *no* glossary at all, the whole-term requirement is relaxed for that chapter first.
 
 **It isn't perfect, and here's where it slips.** Korean can build a new word by sticking another noun on a noun (`루키` → `슈퍼루키`, `순애` → `순애충`). Beyond the short affix list above, Glossarion can't tell that apart from a coincidental match, so if a term *only ever* appears inside such a compound in a chapter, it gets dropped. Measured across a 237-chapter Korean novel, that is roughly one wrongly dropped entry every ten chapters, against about twelve wrongly *kept* entries per chapter with the old check. If the word also appears on its own anywhere in that chapter, it's kept. This is the trade for correctly rejecting `유리` inside `유리병` — and the reason for the preview toggle below.
 
@@ -566,7 +582,7 @@ so terms you already settled in one novel (a recurring sect name, a system messa
 
 **How it stays current.** Deduplication is the slow part, so it only runs twice per glossary run: once at the start (fold this book in, or rebuild) and once at the end (fold in what the run found). It is never run per chapter. The file is written with your Anti-Duplicate settings, so the same fuzzy threshold and algorithm apply.
 
-**What gets sent to the AI.** The unified glossary is never copied into a book's folder or its output folder — the file above is the only one. When a request is built, Glossarion reads it and skips every entry whose name the book's own glossary already has, so nothing is sent twice. (Older builds wrote a `glossary_unified.csv` next to each book glossary; those leftovers are deleted automatically the next time that book's glossary phase runs.) What remains goes through **Compress Glossary Prompt** and all of its sub-toggles (Strict Precise Entry Matching, Consider Translated Column, Precise Term Matching, Log Match Differences) exactly like the main glossary and the Additional Glossary do. In the log it shares the glossary line: `🗜️ Glossary: … chars, … tokens | Unified Glossary: … chars, … tokens`.
+**What gets sent to the AI.** The unified glossary is never copied into a book's folder or its output folder — the file above is the only one. When a request is built, Glossarion reads it and skips every entry whose name the book's own glossary already has, so nothing is sent twice. (Older builds wrote a `glossary_unified.csv` next to each book glossary; those leftovers are deleted automatically the next time that book's glossary phase runs.) What remains goes through **Compress Glossary Prompt** and all of its sub-toggles (Consider Translated Column, Precise Term Matching, Log Match Differences) exactly like the main glossary and the Additional Glossary do. In the log it shares the glossary line: `🗜️ Glossary: … chars, … tokens | Unified Glossary: … chars, … tokens`.
 
 **Generate Unified Glossary** rebuilds the shared file from *every* folder under `Glossary/` instead of just the current book — useful the first time you turn the feature on, or after editing several old glossaries by hand. The files are read in parallel using the **Parallel Extraction** worker count from Other Settings, and the rebuild is fingerprinted: it only happens when a book glossary actually changed since the last one, so you can leave the toggle on.
 

@@ -19,66 +19,80 @@ from glossary_matching import (
     _ASCII_FOLD_TABLE as _gm_ascii_fold_table,
     _TOKEN_RE as _gm_token_re,
     _WHITESPACE_RE as _gm_whitespace_re,
+    GlossaryNameIndex,
     MatchConfig,
+    ScopedMatcher,
     boundary_match,
     fold_match_text,
-    in_strict_scope,
     is_gender_entry_type,
     legacy_text_contains_term,
     norm_text,
     parse_strict_scope,
-    strict_name_config,
-    strict_name_in_text,
+    prepare_source_text_cached,
 )
 
 
-def _text_contains_term(text, term, is_character=False, entry_type=""):
-    """Source-text matching, shared with glossary_compressor.
+def _text_contains_term(text, term, is_character=False):
+    """The legacy source-text rule, shared with glossary_compressor.
 
     This used to import the private helper out of glossary_compressor with a
     hand-copied duplicate as an ImportError fallback; the two could drift.
     Both sides now call the same implementation in glossary_matching.
-
-    The strict-gender setting is read from the environment here rather than
-    through the compressor's ContextVar-aware _setting(): that ContextVar is
-    only populated for the duration of a compress_glossary() call, and usage
-    runs outside one, so os.environ was already the effective source.
     """
-    strict_gender = str(
-        os.getenv("COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0")
-    ).strip().lower() in ("1", "true", "yes", "on")
-    if strict_gender:
-        # Same rule and same scope the compressor applies: the strict toggle
-        # is a precise whole-term matcher for the selected entry types, so
-        # the usage view agrees with what is sent.
-        cfg, scope = _strict_usage_config()
-        if in_strict_scope(scope, entry_type, is_character):
-            return strict_name_in_text(text, term, cfg, is_character=is_character)
-    return legacy_text_contains_term(
-        text, term, is_character=is_character, strict_gender=False
-    )
+    return legacy_text_contains_term(text, term, is_character=is_character)
 
 
-_STRICT_USAGE_CONFIG = [0.0, None]
+_USAGE_MATCH_SETTINGS = [0.0, None]
+_USAGE_NAME_INDEX = [None, None]
 
 
-def _strict_usage_config():
-    """Strict config and scope from the environment, refreshed every few seconds.
+def _usage_match_settings():
+    """``(engine, cfg, scope)`` from the environment, refreshed every few seconds.
 
-    Usage matching asks once per entry per chapter; rebuilding the config
-    from a dozen environment reads each time would dominate the scan.
+    Read from os.environ rather than the compressor's ContextVar-aware
+    _setting(): that ContextVar only exists during a compress_glossary()
+    call, and usage runs outside one. Cached because usage asks once per
+    entry per chapter.
     """
     now = time.monotonic()
-    if _STRICT_USAGE_CONFIG[1] is None or now - _STRICT_USAGE_CONFIG[0] > 3.0:
-        _STRICT_USAGE_CONFIG[1] = (
-            strict_name_config(MatchConfig.from_getter(os.getenv)),
+    if _USAGE_MATCH_SETTINGS[1] is None or now - _USAGE_MATCH_SETTINGS[0] > 3.0:
+        engine = str(os.getenv("GLOSSARY_MATCH_ENGINE", "new") or "new").strip().lower()
+        _USAGE_MATCH_SETTINGS[1] = (
+            engine if engine in ("legacy", "shadow", "new") else "new",
+            MatchConfig.from_getter(os.getenv),
             parse_strict_scope(
-                os.getenv("COMPRESS_GLOSSARY_STRICT_MATCHING_MODE", "characters"),
+                os.getenv("COMPRESS_GLOSSARY_STRICT_MATCHING_MODE", "all"),
                 os.getenv("COMPRESS_GLOSSARY_STRICT_MATCHING_CUSTOM_TYPES", "[]"),
             ),
         )
-        _STRICT_USAGE_CONFIG[0] = now
-    return _STRICT_USAGE_CONFIG[1]
+        _USAGE_MATCH_SETTINGS[0] = now
+    return _USAGE_MATCH_SETTINGS[1]
+
+
+def _usage_name_index(entries):
+    """GlossaryNameIndex for this entry list, reused across chapters."""
+    key = (id(entries), len(entries))
+    if _USAGE_NAME_INDEX[0] != key:
+        _USAGE_NAME_INDEX[0] = key
+        _USAGE_NAME_INDEX[1] = GlossaryNameIndex(
+            entry.get("raw_name") for entry in entries if isinstance(entry, dict)
+        )
+    return _USAGE_NAME_INDEX[1]
+
+
+def usage_matcher(source_text, entries=None):
+    """The matcher the compressor would use for this chapter, or None when
+    Precise Term Matching is off and the legacy rule decides.
+
+    With it the editor's usage view shows what is actually sent: the same
+    engine, the same whole-term scope, and -- given the full entry list --
+    the same distinctive-name-part rule for gender-enabled entries.
+    """
+    engine, cfg, scope = _usage_match_settings()
+    if engine != "new":
+        return None
+    index = _usage_name_index(entries) if entries is not None and scope[0] != "none" else None
+    return ScopedMatcher(prepare_source_text_cached(source_text, cfg), cfg, scope, index)
 
 
 CHECK_PREFIX = "\u2705"
@@ -456,19 +470,26 @@ def read_epub_spine_chapters(epub_path, translate_special=False, include_text=Tr
     return chapters
 
 
-def entry_matches_text(entry, source_text):
+def entry_matches_text(entry, source_text, matcher=None):
     raw_name = _norm_text(entry.get("raw_name"))
     if not raw_name:
         return False
-    is_character = is_gender_entry_type(entry.get("type"), entry.get("gender"))
-    return _text_contains_term(
-        source_text, raw_name, is_character=is_character,
-        entry_type=entry.get("type") or "",
-    )
+    # "Gender entry" = a type with gender enabled or a row carrying a gender,
+    # custom entry types included.
+    is_gender_entry = is_gender_entry_type(entry.get("type"), entry.get("gender"))
+    if matcher is None:
+        matcher = usage_matcher(source_text)
+    if matcher is None:
+        return _text_contains_term(source_text, raw_name, is_character=is_gender_entry)
+    return bool(matcher.match(
+        raw_name, is_gender_entry, entry.get("type") or "",
+        translated_name=_norm_text(entry.get("translated_name")),
+    ))
 
 
 def match_entries_for_text(entries, source_text):
-    return [entry for entry in entries if entry_matches_text(entry, source_text)]
+    matcher = usage_matcher(source_text, entries)
+    return [entry for entry in entries if entry_matches_text(entry, source_text, matcher)]
 
 
 def build_usage_index(entries, chapters):

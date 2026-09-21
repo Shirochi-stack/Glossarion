@@ -3366,13 +3366,6 @@ class AsyncProcessingDialog:
             env_vars['COMPRESS_GLOSSARY_PROMPT'] = "1" if _val(self.gui.compress_glossary_prompt_var, False) else "0"
         else:
             env_vars['COMPRESS_GLOSSARY_PROMPT'] = "1" if self.gui.config.get('compress_glossary_prompt', False) else "0"
-        if hasattr(self.gui, 'compress_glossary_strict_gender_matching_var'):
-            strict_gender_matching = _val(self.gui.compress_glossary_strict_gender_matching_var, False)
-        elif hasattr(self.gui, 'strict_gender_compression_checkbox'):
-            strict_gender_matching = _val(self.gui.strict_gender_compression_checkbox, False)
-        else:
-            strict_gender_matching = self.gui.config.get('compress_glossary_strict_gender_matching', False)
-        env_vars['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = "1" if strict_gender_matching else "0"
         # Two checkboxes resolve into one engine value; 'new' wins over 'shadow'.
         if hasattr(self.gui, 'compress_glossary_precise_matching_var'):
             precise_matching = _val(self.gui.compress_glossary_precise_matching_var, True)
@@ -3990,10 +3983,10 @@ class AsyncProcessingDialog:
                             original_tokens = len(enc.encode(original_glossary_text))
                             compressed_tokens = len(enc.encode(glossary_text))
                             token_reduction_pct = ((original_tokens - compressed_tokens) / original_tokens * 100) if original_tokens > 0 else 0
-                            strict_gender_state = "ON" if env_vars.get('COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING') == '1' else "OFF"
+                            whole_term_scope = env_vars.get('COMPRESS_GLOSSARY_STRICT_MATCHING_MODE', 'all')
                             translated_state = "ON" if env_vars.get('COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN') == '1' else "OFF"
                             
-                            logger.info(f"🗜️ Glossary: {original_length}→{compressed_length} chars ({reduction_pct:.1f}%), {original_tokens}→{compressed_tokens} tokens ({token_reduction_pct:.1f}%) (strict gender {strict_gender_state}, translated column {translated_state})")
+                            logger.info(f"🗜️ Glossary: {original_length}→{compressed_length} chars ({reduction_pct:.1f}%), {original_tokens}→{compressed_tokens} tokens ({token_reduction_pct:.1f}%) (whole term: {whole_term_scope}, translated column {translated_state})")
                         except ImportError:
                             logger.info(f"🗜️ Glossary compressed: {original_length} → {compressed_length} chars ({reduction_pct:.1f}% reduction)")
                     except Exception as e:

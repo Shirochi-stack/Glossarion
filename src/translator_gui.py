@@ -16392,6 +16392,7 @@ Recent translations to summarize:
         _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, copyright, preface, nav, message, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
         _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension, glossary_unified'
         self.special_file_keywords_var = self.config.get('special_file_keywords', _DEFAULT_SPECIAL_KEYWORDS)
+        self._migrate_strict_matching_config()
         self.special_file_exact_var = self._upgrade_special_file_exact(
             self.config.get('special_file_exact', _DEFAULT_SPECIAL_EXACT)
         )
@@ -26816,20 +26817,46 @@ Recent translations to summarize:
         )
         return 'new' if precise else ('shadow' if shadow else 'legacy')
 
+    def _migrate_strict_matching_config(self):
+        """One-time upgrade from the retired Strict Gender Entry Matching toggle.
+
+        The toggle is gone; its scope dropdown moved onto Precise Term
+        Matching with All as the default. A config that still carries the
+        old on/off key is upgraded once: ON keeps the scope it had (the old
+        'characters' is spelled 'gender' now), OFF means the saved scope was
+        never in effect, so the new default applies. The key is removed so
+        a later deliberate choice is never overridden again.
+        """
+        if 'compress_glossary_strict_gender_matching' not in self.config:
+            return
+        was_on = bool(self.config.pop('compress_glossary_strict_gender_matching'))
+        mode = str(self.config.get('compress_glossary_strict_matching_mode', '') or '').strip().lower()
+        if not was_on or not mode:
+            mode = 'all'
+        elif mode in ('characters', 'character'):
+            mode = 'gender'
+        self.config['compress_glossary_strict_matching_mode'] = mode
+        self.compress_glossary_strict_matching_mode_var = mode
+        if hasattr(self, 'compress_glossary_strict_gender_matching_var'):
+            del self.compress_glossary_strict_gender_matching_var
+
     def _strict_matching_env_dict(self):
-        """Scope of Strict Precise Entry Matching (characters / all / custom).
+        """Precise Term Matching's whole-term scope (all / gender / custom / none).
 
         Exported beside GLOSSARY_MATCH_ENGINE at every site for the same
         reason: a setting only the Glossary Settings dialog writes is lost
         on restart until that dialog is opened again.
         """
+        self._migrate_strict_matching_config()
         mode = str(
             getattr(self, 'compress_glossary_strict_matching_mode_var', None)
-            or self.config.get('compress_glossary_strict_matching_mode', 'characters')
-            or 'characters'
+            or self.config.get('compress_glossary_strict_matching_mode', 'all')
+            or 'all'
         ).strip().lower()
-        if mode not in ('characters', 'all', 'custom'):
-            mode = 'characters'
+        if mode in ('characters', 'character'):
+            mode = 'gender'
+        if mode not in ('all', 'gender', 'custom', 'none'):
+            mode = 'all'
         custom_types = getattr(self, 'compress_glossary_strict_matching_custom_types_var', None)
         if custom_types is None:
             custom_types = self.config.get('compress_glossary_strict_matching_custom_types', [])
@@ -35866,7 +35893,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY': '1' if getattr(self, 'glossary_partial_ratio_gender_only_var', False) else '0',
             'GLOSSARY_ALIAS_AWARE_NAME_MATCHING': '1' if getattr(self, 'glossary_alias_aware_name_matching_var', False) else '0',
             'GLOSSARY_ALIAS_AWARE_GENDER_ONLY': '1' if getattr(self, 'glossary_alias_aware_gender_only_var', True) else '0',
-            'COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING': '1' if getattr(self, 'compress_glossary_strict_gender_matching_var', self.config.get('compress_glossary_strict_gender_matching', False)) else '0',
             'COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN': '1' if getattr(self, 'compress_glossary_consider_translated_column_var', self.config.get('compress_glossary_consider_translated_column', False)) else '0',
             'GLOSSARY_CUSTOM_ENTRY_TYPES': json.dumps(getattr(self, 'custom_entry_types', self.config.get('custom_entry_types', {}))),
             'GLOSSARY_CUSTOM_FIELDS': json.dumps(getattr(self, 'custom_glossary_fields', self.config.get('custom_glossary_fields', []))),
@@ -47124,8 +47150,7 @@ Important rules:
                 ('unified_glossary_source_language', ['unified_glossary_source_language_var'], 'auto', str),
                 ('unified_glossary_combine_all_languages', ['unified_combine_all_languages_checkbox', 'unified_glossary_combine_all_languages_var'], False, bool),
                 ('compress_glossary_prompt', ['compress_glossary_checkbox', 'compress_glossary_prompt_var'], True, bool),
-                ('compress_glossary_strict_gender_matching', ['strict_gender_compression_checkbox', 'compress_glossary_strict_gender_matching_var'], False, bool),
-                ('compress_glossary_strict_matching_mode', ['compress_glossary_strict_matching_mode_var'], 'characters', str),
+                ('compress_glossary_strict_matching_mode', ['compress_glossary_strict_matching_mode_var'], 'all', str),
                 ('compress_glossary_strict_matching_custom_types', ['compress_glossary_strict_matching_custom_types_var'], [], list),
                 ('compress_glossary_consider_translated_column', ['consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column_var'], False, bool),
                 ('save_glossary_in_output', ['save_glossary_in_output_checkbox', 'save_glossary_in_output_var'], False, bool),
@@ -47645,7 +47670,6 @@ Important rules:
                     ('GLOSSARY_USE_SMART_FILTER', '1' if self.config.get('glossary_use_smart_filter', True) else '0'),
                     ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 200))),
                     ('COMPRESS_GLOSSARY_PROMPT', '1' if self.config.get('compress_glossary_prompt') else '0'),
-                    ('COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING', '1' if getattr(self, 'compress_glossary_strict_gender_matching_var', self.config.get('compress_glossary_strict_gender_matching', False)) else '0'),
                     ('COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN', '1' if getattr(self, 'compress_glossary_consider_translated_column_var', self.config.get('compress_glossary_consider_translated_column', False)) else '0'),
                     ('GLOSSARY_INCLUDE_GENDER_CONTEXT', '1' if self.config.get('include_gender_context') else '0'),
                     ('GLOSSARY_ENABLE_GENDER_NUANCE', '1' if self.config.get('enable_gender_nuance', True) else '0'),
