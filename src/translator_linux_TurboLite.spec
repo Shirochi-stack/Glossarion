@@ -344,7 +344,6 @@ app_modules = [
     'authnd_auth',
     'config_backup',
     'enhanced_text_extractor',
-    'epub_library',
     'epub_metadata_utils',
     'glossary_compressor',
     'glossary_match_shadow',
