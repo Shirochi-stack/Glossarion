@@ -608,14 +608,43 @@ def get_token(force_refresh: bool = False, log_fn=None) -> str:
 # ---------------------------------------------------------------------------
 # SSE parsing
 # ---------------------------------------------------------------------------
-def _extract_message(data: Dict[str, Any]) -> Optional[str]:
-    resp = data.get("response")
-    if not isinstance(resp, dict):
-        return None
-    if resp.get("content_type") == "image":
-        return None
-    msg = resp.get("message")
-    return msg if isinstance(msg, str) else None
+def _stream_thinking_enabled() -> bool:
+    return str(os.getenv("STREAM_THINKING_LOGS", "0")).strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _debug_sse() -> bool:
+    return _env_bool("OPERA_ARIA_DEBUG_SSE", False)
+
+
+def _classify(data: Dict[str, Any], event: Optional[str]) -> tuple:
+    """Return (kind, text): kind is 'text', 'thinking', or None.
+
+    Opera's think_harder reasoning may arrive as an SSE `event: thinking_status`
+    frame, a response with content_type 'thinking'/'reasoning', or a top-level
+    thinking/reasoning field. We separate it so it never pollutes the answer.
+    """
+    ev = (event or "").lower()
+    thinking_ev = any(k in ev for k in ("thinking", "reason", "thought"))
+    resp = data.get("response") if isinstance(data, dict) else None
+    if isinstance(resp, dict):
+        ct = str(resp.get("content_type") or "").lower()
+        if ct == "image":
+            return (None, None)
+        msg = resp.get("message") if isinstance(resp.get("message"), str) else None
+        think = resp.get("thinking") or resp.get("reasoning") or resp.get("thought")
+        if ct in ("thinking", "reasoning", "thought") or thinking_ev:
+            return ("thinking", msg or (think if isinstance(think, str) else None))
+        if isinstance(think, str) and think:
+            return ("thinking", think)
+        if msg is not None:
+            return ("text", msg)
+    top_think = data.get("thinking") or data.get("reasoning") if isinstance(data, dict) else None
+    if isinstance(top_think, str) and top_think:
+        return ("thinking", top_think)
+    if thinking_ev:
+        return ("thinking", None)  # status frame with no visible text
+    return (None, None)
 
 
 def _accumulate(acc: str, piece: str) -> str:
@@ -652,7 +681,11 @@ def _run_chat(messages: Iterable[Dict[str, Any]], *, model: str, timeout: int,
         raise OperaAriaError("Opera Aria: empty query", error_type="config_error")
 
     token = get_token(log_fn=log_fn)
-    _log(log_fn, f"🎭 Opera Aria: sending request ({len(query):,} chars, model={model})")
+    think_on = _think_harder_enabled()
+    _log(log_fn, f"🎭 Opera Aria: sending request ({len(query):,} chars, model={model}"
+                 f"{', think harder' if think_on else ''})")
+    if think_on:
+        _log(log_fn, "🧠 Opera Aria: thinking mode enabled (think harder)")
     resp = _post_chat(token, query, timeout)
 
     if resp.status_code in (401, 403):
@@ -668,27 +701,44 @@ def _run_chat(messages: Iterable[Dict[str, Any]], *, model: str, timeout: int,
     acc = ""
     conversation_id = None
     stream_log = _stream_logging_enabled() if log_stream is None else bool(log_stream)
+    stream_thinking = _stream_thinking_enabled()
+    debug_sse = _debug_sse()
     first_token = False
-    thinking_announced = False
+    thinking_started = False
     emit_buf: List[str] = []
+    think_buf: List[str] = []
+    current_event: Optional[str] = None
 
-    def _emit_live(fragment: str) -> None:
-        # Buffer streamed text and flush whole lines to the log in real time.
-        if not fragment:
-            return
-        emit_buf.append(fragment)
-        combined = "".join(emit_buf)
+    def _flush_lines(buf: List[str], prefix: str = "") -> None:
+        combined = "".join(buf)
         for tag in ("</p>", "</h1>", "</h2>", "</h3>", "</li>"):
             combined = combined.replace(tag, tag + "\n")
         if "\n" in combined:
             lines = combined.split("\n")
             for ln in lines[:-1]:
                 if ln.strip():
-                    _log(log_fn, ln)
-            emit_buf[:] = [lines[-1]]
+                    _log(log_fn, f"{prefix}{ln}")
+            buf[:] = [lines[-1]]
         elif len(combined) >= 160:
-            _log(log_fn, combined)
-            emit_buf.clear()
+            _log(log_fn, f"{prefix}{combined}")
+            buf.clear()
+
+    def _emit_live(fragment: str) -> None:
+        if not fragment:
+            return
+        emit_buf.append(fragment)
+        _flush_lines(emit_buf)
+
+    def _emit_thinking(fragment: Optional[str]) -> None:
+        nonlocal thinking_started
+        if not (stream_log and stream_thinking):
+            return
+        if not thinking_started:
+            thinking_started = True
+            _log(log_fn, "🧠 [opera] Thinking...")
+        if fragment:
+            think_buf.append(fragment)
+            _flush_lines(think_buf, prefix="    ")
 
     for raw in resp.iter_lines(decode_unicode=True):
         if _is_cancelled():
@@ -700,28 +750,33 @@ def _run_chat(messages: Iterable[Dict[str, Any]], *, model: str, timeout: int,
         if not raw:
             continue
         line = raw.strip()
+        if line.startswith("event:"):
+            current_event = line[6:].strip()
+            continue
         if not line.startswith("data:"):
             continue
         body = line[5:].strip()
         if body in ("[DONE]", "null", ""):
+            current_event = None
             continue
+        if debug_sse:
+            _log(log_fn, f"[opera-sse]{(' ' + current_event) if current_event else ''} {body[:400]}")
         try:
             data = json.loads(body)
         except json.JSONDecodeError:
+            current_event = None
             continue
-        # Surface Opera's thinking phase (think_harder) as a reasoning log line.
-        resp_obj = data.get("response") if isinstance(data, dict) else None
-        if stream_log and not thinking_announced and (
-            data.get("thinking_status")
-            or (isinstance(resp_obj, dict) and resp_obj.get("content_type") == "thinking")
-        ):
-            thinking_announced = True
-            _log(log_fn, "🧠 [opera] Thinking...")
-        text = _extract_message(data)
-        if text:
+        kind, text = _classify(data, current_event)
+        current_event = None
+        if kind == "thinking":
+            _emit_thinking(text)
+        elif kind == "text" and text:
             prev_len = len(acc)
             acc = _accumulate(acc, text)
             if stream_log:
+                if thinking_started and think_buf:
+                    _log(log_fn, f"    {''.join(think_buf)}")
+                    think_buf.clear()
                 if not first_token:
                     first_token = True
                     _log(log_fn, "📡 Opera Aria: streaming response...")
@@ -730,6 +785,8 @@ def _run_chat(messages: Iterable[Dict[str, Any]], *, model: str, timeout: int,
         if isinstance(meta, dict) and meta.get("conversation_id"):
             conversation_id = meta["conversation_id"]
 
+    if stream_log and stream_thinking and think_buf and "".join(think_buf).strip():
+        _log(log_fn, f"    {''.join(think_buf)}")
     if stream_log and emit_buf and "".join(emit_buf).strip():
         _log(log_fn, "".join(emit_buf))
 

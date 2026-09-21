@@ -43459,6 +43459,36 @@ Important rules:
             self._force_stream_all = False
             return False
 
+    def _defer_config_save(self):
+        """Schedule a full config save on the next event-loop tick.
+
+        save_config() re-reads hundreds of widgets and rewrites a ~178KB
+        config.json (plus a backup copy), which briefly freezes the GUI. For
+        low-stakes state (e.g. remembering the last loaded input) we don't need
+        that to happen inside the click handler \u2014 deferring it keeps the click
+        instant while the state still persists a moment later. Repeated calls
+        collapse into a single pending save.
+        """
+        try:
+            if getattr(self, '_pending_config_save', False):
+                return
+            self._pending_config_save = True
+            from PySide6.QtCore import QTimer
+
+            def _run():
+                self._pending_config_save = False
+                try:
+                    self.save_config(show_message=False)
+                except Exception:
+                    pass
+            QTimer.singleShot(0, _run)
+        except Exception:
+            # If Qt isn't available for any reason, fall back to a direct save.
+            try:
+                self.save_config(show_message=False)
+            except Exception:
+                pass
+
     def _handle_library_import_epub(self, path: str):
         """Library \u2192 Import EPUB: set the picked file as the current input.
 
@@ -43486,7 +43516,9 @@ Important rules:
             try:
                 self.config['last_input_files'] = [path]
                 self.config['last_epub_path'] = path if path.lower().endswith('.epub') else None
-                self.save_config(show_message=False)
+                # Defer the (heavy, ~178KB) full config save to the next event-loop
+                # tick so the click returns immediately — no lag when loading a card.
+                self._defer_config_save()
             except Exception:
                 pass
             self._update_entry_epub_tooltip()
@@ -43543,7 +43575,7 @@ Important rules:
                 self.config['last_input_files'] = valid
                 first_epub = next((p for p in valid if str(p).lower().endswith('.epub')), None)
                 self.config['last_epub_path'] = first_epub
-                self.save_config(show_message=False)
+                self._defer_config_save()
             except Exception:
                 pass
             try:
