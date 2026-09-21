@@ -23174,7 +23174,7 @@ def build_system_prompt(
                         compressed_tokens = len(glossary_token_encoder.encode(glossary_text))
                         token_reduction = original_tokens - compressed_tokens
                         token_reduction_pct = (token_reduction / original_tokens * 100) if original_tokens > 0 else 0
-                        strict_gender_note = " (strict gender ON)" if str(_request_glossary_setting(settings, "COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0")).strip().lower() in ("1", "true", "yes", "on") else ""
+                        strict_gender_note = " (strict gender precise matching ON)" if str(_request_glossary_setting(settings, "COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0")).strip().lower() in ("1", "true", "yes", "on") else ""
                         translated_column_note = " (translated column ON)" if str(_request_glossary_setting(settings, "COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN", "0")).strip().lower() in ("1", "true", "yes", "on") else ""
 
                         glossary_log_parts.append(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%), {original_tokens:,}→{compressed_tokens:,} tokens ({token_reduction_pct:.1f}%){strict_gender_note}{translated_column_note}")

@@ -4935,18 +4935,22 @@ Do not stop after the glossary."""
         auto_layout.addWidget(strict_gender_widget)
 
         if not hasattr(self, 'strict_gender_compression_checkbox'):
-            self.strict_gender_compression_checkbox = self._create_styled_checkbox("Strict Gender Entry Matching")
+            self.strict_gender_compression_checkbox = self._create_styled_checkbox("Strict Gender Entry Precise Matching")
             self.strict_gender_compression_checkbox.setChecked(self.config.get('compress_glossary_strict_gender_matching', False))
         if not getattr(self.strict_gender_compression_checkbox, '_glossary_manager_sync_connected', False):
             self.strict_gender_compression_checkbox.stateChanged.connect(self._on_glossary_manager_strict_gender_compression_toggle)
             self.strict_gender_compression_checkbox._glossary_manager_sync_connected = True
         self.strict_gender_compression_checkbox.setToolTip(_wrapped_tooltip_html(
-            "When ON, gender-enabled entries such as characters are only sent if the full raw_name appears in the source text.\n"
+            "When ON, gender-enabled entries such as characters use the precise matcher and are only sent when the "
+            "whole name appears as its own word: particles, honorifics, spacing and full/half-width differences still "
+            "count (루나님, 미샤랄토스), but a surname/given-name token alone does not, and neither does the name buried "
+            "inside another word (유 in 자유).\n"
+            "Works on its own; Precise Term Matching does not need to be ON.\n"
             "When OFF, character names stay loose and may match surname/given-name tokens, including one-character CJK names."
         ))
         strict_gender_layout.addWidget(self.strict_gender_compression_checkbox)
 
-        strict_gender_hint = QLabel("(Optional: stricter compression for smart models; default OFF keeps loose character matching)")
+        strict_gender_hint = QLabel("(Optional: whole-name precise matching for character entries; default OFF keeps loose character matching)")
         strict_gender_layout.addWidget(strict_gender_hint)
         strict_gender_layout.addStretch()
 

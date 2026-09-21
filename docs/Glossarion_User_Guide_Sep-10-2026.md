@@ -496,7 +496,7 @@ Open it with **Glossary Manager** / **Extract Glossary**.
 - **Append Glossary to System Prompt** — sends the terms to the AI every request (the consistency switch).
 - **Compress Glossary Prompt** ✅ — "Only send glossary entries that appear in the current text. Saves tokens and cost; recommended ON."
 - **Consider Translated Column** — also keeps an entry when the *translated* name appears in the source text, not just the original. Default OFF.
-- **Strict Gender Entry Matching** — character entries are sent only when the **whole** name appears. Default OFF, which lets one part of a name (even a single CJK character) keep the entry.
+- **Strict Gender Entry Precise Matching** — character entries are sent only when the **whole** name appears *as its own word*. It runs the precise matcher on gendered entries whether or not **Precise Term Matching** is ON: particles, honorifics, spacing and full/half-width differences still count (`루나님`, `미샤랄토스` for `미샤 랄토스`), but a surname or given name alone does not, and neither does the name buried inside another word (`유` in `자유`, `유리` in `유리한`). Default OFF, which lets one part of a name (even a single CJK character) keep the entry.
 - **Precise Term Matching** — the smarter matcher described just below. Default OFF.
 - **Log Match Differences** — preview what Precise Term Matching *would* change, without changing anything. Default OFF.
 - **Add Additional Glossary** — always include an extra external glossary file (CSV/JSON/TXT/PDF/MD).
@@ -524,15 +524,15 @@ It is looser still for names stored with a space. `신 라이언` is kept whenev
 **What the toggle changes.** Precise Term Matching understands where words end:
 
 - **English and other Latin text** — whole words only, so `Al` stops matching inside `Already`.
-- **Korean** — knows the particles that follow a name (`루나는`, `루나가`, `루나에게` all still count) but rejects a term buried in an unrelated word.
-- **Japanese** — uses the kana/kanji change as a word edge, so `太郎は` counts and `大地` inside `大地震` does not.
-- **Chinese** — uses grammatical particles (`宋家的人` counts) and surnames (`小明` inside `王小明` counts), while `天下` inside `天下第一楼` does not.
+- **Korean** — knows what can be glued onto a word without making it a different word: particles (`루나는`, `루나가`, `루나에게`), the copula (`아논입니다`, `아논인가?`, `소녀였다`), and bound nouns (`로켓같은`, `펄스때문에`, `수장끼리`). For non-character terms it also accepts verb forms built on the term (`오염된`, `록온하고`) and a short, measured list of one-syllable affixes (`중장갑`, `장갑판`). It still rejects a term buried in an unrelated word (`유` in `자유`, `노트` in `노트북`), and never lets a verb ending attach to a *name* — `유리한` ("favourable") is not the character `유리`.
+- **Japanese** — uses the kana/kanji change as a word edge, and the hiragana/katakana change too, so `太郎は`, `リンは` and `太郎達` count while `リン` inside `リング` and `大地` inside `大地震` do not.
+- **Chinese** — uses grammatical particles (`宋家的人` counts), surnames (`小明` inside `王小明` counts) and the words that normally follow a subject (`小明说道`, `小明忽然`, `小明脸色一变` count), while `天下` inside `天下第一楼` does not.
 
 It also **finds terms the old check missed**: half-width `ｱﾘｽ` when your glossary says `アリス`, full-width or differently-capitalised Latin, a glossary name written `미샤 랄토스` when the chapter runs it together as `미샤랄토스`, and `루나님` when the chapter just says `루나`.
 
 On a real 2,971-entry glossary this cut a chapter's glossary from 250 entries to 142 — about **40% fewer** — without dropping anything genuinely in the scene.
 
-**It isn't perfect, and here's where it slips.** Korean can build a new word by sticking a suffix on a noun (`순애` → `순애충`). Glossarion can't tell that apart from a coincidental match, so if a term *only ever* appears inside such a compound in a chapter, it gets dropped. If the word also appears on its own anywhere in that chapter, it's kept. This is the trade for correctly rejecting `유리` inside `유리병` — and the reason for the preview toggle below.
+**It isn't perfect, and here's where it slips.** Korean can build a new word by sticking another noun on a noun (`루키` → `슈퍼루키`, `순애` → `순애충`). Beyond the short affix list above, Glossarion can't tell that apart from a coincidental match, so if a term *only ever* appears inside such a compound in a chapter, it gets dropped. Measured across a 237-chapter Korean novel, that is roughly one wrongly dropped entry every ten chapters, against about twelve wrongly *kept* entries per chapter with the old check. If the word also appears on its own anywhere in that chapter, it's kept. This is the trade for correctly rejecting `유리` inside `유리병` — and the reason for the preview toggle below.
 
 #### Log Match Differences (try it before you trust it)
 
@@ -566,7 +566,7 @@ so terms you already settled in one novel (a recurring sect name, a system messa
 
 **How it stays current.** Deduplication is the slow part, so it only runs twice per glossary run: once at the start (fold this book in, or rebuild) and once at the end (fold in what the run found). It is never run per chapter. The file is written with your Anti-Duplicate settings, so the same fuzzy threshold and algorithm apply.
 
-**What gets sent to the AI.** Beside the book's own glossary Glossarion writes a copy, `glossary_unified.csv`, that leaves out every entry the book's glossary already has — so nothing is sent twice. That copy goes through **Compress Glossary Prompt** and all of its sub-toggles (Strict Gender, Consider Translated Column, Precise Term Matching, Log Match Differences) exactly like the main glossary and the Additional Glossary do. In the log it shares the glossary line: `🗜️ Glossary: … chars, … tokens | Unified Glossary: … chars, … tokens`.
+**What gets sent to the AI.** Beside the book's own glossary Glossarion writes a copy, `glossary_unified.csv`, that leaves out every entry the book's glossary already has — so nothing is sent twice. That copy goes through **Compress Glossary Prompt** and all of its sub-toggles (Strict Gender Entry Precise Matching, Consider Translated Column, Precise Term Matching, Log Match Differences) exactly like the main glossary and the Additional Glossary do. In the log it shares the glossary line: `🗜️ Glossary: … chars, … tokens | Unified Glossary: … chars, … tokens`.
 
 **Generate Unified Glossary** rebuilds the shared file from *every* folder under `Glossary/` instead of just the current book — useful the first time you turn the feature on, or after editing several old glossaries by hand. The files are read in parallel using the **Parallel Extraction** worker count from Other Settings, and the rebuild is fingerprinted: it only happens when a book glossary actually changed since the last one, so you can leave the toggle on.
 

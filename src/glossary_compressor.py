@@ -41,6 +41,8 @@ from glossary_matching import (
     match_term,
     normalize_override_terms,
     prepare_source_text,
+    strict_name_config,
+    strict_name_in_text,
 )
 
 # Serialize glossary compression across translation worker threads.
@@ -251,7 +253,8 @@ class _MatchContext:
 
     __slots__ = ("engine", "cfg", "prepared", "recorder", "source_text",
                  "glossary_path", "chapter_ref", "always_keep", "always_drop",
-                 "whole_term_only", "min_term_length")
+                 "whole_term_only", "min_term_length",
+                 "strict_gender", "_strict_cfg", "_strict_prepared")
 
     def __init__(self, source_text, glossary_path=None, chapter_ref=None):
         self.engine = _match_engine()
@@ -267,6 +270,9 @@ class _MatchContext:
             _is_unified_glossary_path(glossary_path) and _unified_whole_term_enabled()
         )
         self.min_term_length = _unified_min_term_length() if self.whole_term_only else 1
+        self.strict_gender = _strict_gender_name_matching_enabled()
+        self._strict_cfg = None
+        self._strict_prepared = None
         if self.engine != "legacy":
             self.cfg = MatchConfig.from_getter(_setting)
             if self.whole_term_only:
@@ -274,6 +280,9 @@ class _MatchContext:
                 # the whole term still count; a part of it never does.
                 self.cfg.min_tier = max(self.cfg.min_tier, TIER_HONORIFIC)
                 self.cfg.allow_weak_token = False
+                # 고려하면 is not Goryeo: verb endings and noun affixes are
+                # homonym traps once the terms come from other novels.
+                self.cfg.derived_forms = False
             self.prepared = prepare_source_text(self.source_text, self.cfg)
             # Overrides apply to the tiered verdict only: the legacy engine is
             # the untouched path and must stay bit-identical.
@@ -288,6 +297,23 @@ class _MatchContext:
                 print(f"⚠️ Glossary shadow log unavailable: {exc}")
                 self.engine = "legacy"
 
+    def _strict_name_match(self, term):
+        """Strict Gender Entry Precise Matching, whichever engine is on.
+
+        Built lazily: the toggle is usually off, and under the legacy
+        engine nothing else needs a prepared index.
+        """
+        if self._strict_cfg is None:
+            base = self.cfg if self.cfg is not None else MatchConfig.from_getter(_setting)
+            self._strict_cfg = strict_name_config(base)
+            self._strict_prepared = (
+                self.prepared if self.prepared is not None
+                else prepare_source_text(self.source_text, self._strict_cfg)
+            )
+        return strict_name_in_text(
+            self.source_text, term, self._strict_cfg, self._strict_prepared
+        )
+
     def decide(self, term, is_character=False, *, translated_name="", entry_type=""):
         """Return whether this term counts as present in the chapter."""
         if self.whole_term_only:
@@ -297,10 +323,16 @@ class _MatchContext:
             if len(whole) < self.min_term_length:
                 return False
             legacy = whole in self.source_text
+        elif is_character and self.strict_gender:
+            # The strict toggle is a precise matcher in its own right: the
+            # whole name at a real word boundary. It replaces the loose
+            # rule under every engine, so legacy / shadow / new agree on
+            # gendered entries by construction.
+            legacy = self._strict_name_match(term)
         else:
             legacy = legacy_text_contains_term(
                 self.source_text, term, is_character=is_character,
-                strict_gender=_strict_gender_name_matching_enabled(),
+                strict_gender=False,
             )
         if self.engine == "legacy":
             return legacy
@@ -1431,11 +1463,12 @@ def _text_contains_term(text, term, is_character=False):
             require ≥2 chars to reduce false positives on
             non-character entries like terms and places.
     """
+    if is_character and _strict_gender_name_matching_enabled():
+        return strict_name_in_text(
+            text, term, strict_name_config(MatchConfig.from_getter(_setting))
+        )
     return legacy_text_contains_term(
-        text,
-        term,
-        is_character=is_character,
-        strict_gender=_strict_gender_name_matching_enabled(),
+        text, term, is_character=is_character, strict_gender=False
     )
 
 

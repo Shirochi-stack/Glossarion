@@ -16,8 +16,9 @@ For the same reason this module never reads settings itself.  Callers build a
 
 import os
 import re
+import threading
 import unicodedata
-from collections import Counter
+from collections import Counter, OrderedDict
 from functools import lru_cache
 
 
@@ -199,6 +200,83 @@ KOREAN_PARTICLE_PREFIXES = (
     "로", "랑", "나", "야", "아", "님", "씨", "들", "군", "양", "여", "고",
 )
 
+# Bound nouns and delimiters that attach straight to a noun. Measured on a real
+# book these were the misses: 로켓같은, 펄스때문에, 수장끼리, 기업측, 록온따윈,
+# 소녀답게.
+#
+# This table, the copula and everything below it are only consulted when the
+# WHOLE term (two syllables or more) is being matched. A part of a multi-word
+# entry, or a one-syllable term, keeps the conservative particle table above:
+# measured on the same book, relaxing those readmitted exactly the noise the
+# precise matcher exists to remove (침묵 지대 via 침묵하던, 노스 스타 사 via
+# 스타일, 유 via 유일하게) and recovered nothing.
+KOREAN_BOUND_NOUN_PREFIXES = (
+    "하고", "마다", "만큼", "대로", "때문", "끼리", "따위", "따윈", "다운",
+    "같", "답", "뿐", "쯤", "째", "측", "쪽", "네", "께",
+)
+
+# The copula 이다 fuses onto the noun with no space, and it attaches to names
+# as readily as to anything else: 아논입니다 ("it's Anon"), 드론일 것이다,
+# 수장인 페데리코, 소녀였다, 친구다, 악마라 했었지, 변수겠지. None of these
+# start with a josa, so a particle-only table drops every one of them.
+KOREAN_COPULA_PREFIXES = (
+    "입니", "이에요", "예요", "이었", "였", "이다", "이라", "이란", "이고",
+    "이면", "이니", "이지", "이죠", "이네", "이냐", "이잖", "이겠", "이던",
+    "이군", "이구", "구나", "군요", "니까", "지만", "지요",
+    "라", "란", "인", "일", "임", "죠", "냐", "잖", "겠",
+)
+# Measured against 3,741 two-syllable terms over a whole novel. Left out because
+# what they caught was a verb stem that happens to spell a name, not a noun
+# taking the copula: bare 지 (사라지는, 지나지, 나가지), 던 (달리던, 지나던),
+# 든 (나가든), 니 (해주니). 다 is kept but only as a word-final ending, so
+# 라베다 / 악마다 / 친구다고 count and 구름다리 does not.
+_KOREAN_DA_FOLLOWERS = frozenset("고는면니만며가")
+
+# 하다 / 되다 and friends turn a noun into a verb or adjective: 오염된 땅,
+# 록온하고, 총괄하는, 공격적인. They never attach to a person's name, and one
+# of them would readmit a real false positive if they did (유리한 "favourable"
+# is not the character 유리), so they only count for non-character entries.
+KOREAN_VERBALIZER_PREFIXES = (
+    "시키", "시킨", "시켜", "시켰", "당하", "당한", "당해", "당했",
+    "스러", "스럽", "스런",
+    "하", "한", "할", "함", "합", "해", "했", "된", "되", "될", "됐", "돼", "됨", "됩",
+    "받", "적",
+)
+
+# Sino-Korean prefixes that build a compound on the LEFT of a term: 중장갑,
+# 반기업, 핵펄스, 초진동. Only honoured for non-character entries and only when
+# the prefix itself starts the word, so 자유 / 이유 / 크롬 / 스카라베 stay
+# rejected.
+#
+# The set is small on purpose. It was measured against 2,216 two-syllable
+# terms over a whole novel, and most productive-looking prefixes turned out to
+# admit a different word far more often than a compound of the term:
+# 주 (주기적 -> 기적, 주변이 -> 변이), 무 (무의식 -> 의식), 대 (대상의 -> 상의),
+# 소 (소리치 -> 리치), 본 (본인도 -> 인도), 비, 신, 구, 총, 타. These four were
+# right in 204 of 210 hits.
+KOREAN_NOUN_PREFIXES = frozenset("반핵초중")
+
+# One-syllable noun suffixes on the RIGHT: 장갑판, 완충재, 링거줄, 강화형,
+# 선택권. Non-character entries only, and the suffix has to end the word.
+# Measured the same way as the prefixes; dropped for admitting other words:
+# 화 (무력화), 기 (나가기, 생기기), 탄 (철갑탄), 체 (투사체), 물 (부산물), 망, 진,
+# 포, and never included: 장 / 북 / 전 / 회 (수라장, 노트북, 지구전).
+KOREAN_NOUN_SUFFIXES = frozenset("판재줄류형용권성식")
+
+
+# ─── Japanese particles ──────────────────────────────────────────────────────
+# Hiragana and katakana share one "kana" script bucket, and a name is followed
+# by a hiragana particle with no space: アリスは, リンが. Treating that as "glued
+# to more kana" rejected every short katakana name. A switch between katakana
+# and hiragana is itself a word edge; this table covers the hiragana-to-hiragana
+# case (さくらは) that a script switch cannot.
+JAPANESE_PARTICLE_PREFIXES = (
+    "から", "まで", "より", "です", "でし", "だっ", "だけ", "など", "って",
+    "たち", "さえ", "しか", "こそ", "にも", "には", "とは", "では",
+    "は", "が", "を", "に", "へ", "と", "で", "も", "の", "や", "か", "ね", "よ", "な", "だ", "ら",
+)
+_JAPANESE_LEFT_PARTICLES = frozenset("はがをにへとでものやか")
+
 
 # ─── Chinese function words ──────────────────────────────────────────────────
 # Chinese is the hardest case for a boundary rule: there are no spaces at all,
@@ -221,6 +299,21 @@ CHINESE_FUNCTION_WORDS = (
     # sentence-final particles
     "呢", "吗", "吧", "啊", "嘛", "呀", "么",
 )
+
+# What follows a subject. Chinese has no spaces, so a name is almost always
+# followed directly by another Han character, and for a name that character is
+# overwhelmingly a verb of speech / motion / perception, an adverb, or a body
+# part: 小明说, 小明走了, 小明忽然, 小明脸色一变. Function words alone miss all of
+# these. Numerals, 第, and size adjectives are left out on purpose because they
+# build proper nouns (天下第一楼) and compounds (大地震) rather than follow a
+# subject.
+CHINESE_SUBJECT_FOLLOWERS = frozenset(
+    "说道笑看走想问答叫喊听见来去站坐点摇皱叹忽突连忙立已正这那便将会能要可"
+    "很最更太竟才刚曾只倒仍依似如像等带拿抬伸转回望盯瞪低沉怒微轻冷淡心脸眼身手"
+)
+
+# Japanese plural / collective markers written in kanji after a kanji name.
+_HAN_NAME_SUFFIXES = ("達", "等")
 
 
 # ─── Honorifics that attach to a name ────────────────────────────────────────
@@ -297,13 +390,14 @@ class MatchConfig:
     __slots__ = (
         "min_tier", "allow_weak_token", "weak_token_max_hits", "cjk_boundary",
         "short_cjk_len", "nfkc", "despaced", "despaced_latin", "honorific",
-        "honorific_min_residual", "strict_gender", "cache_key",
+        "honorific_min_residual", "strict_gender", "derived_forms", "cache_key",
     )
 
     def __init__(self, min_tier=TIER_TOKEN, allow_weak_token=True,
                  weak_token_max_hits=3, cjk_boundary=True, short_cjk_len=2,
                  nfkc=True, despaced=True, despaced_latin=False,
-                 honorific=True, honorific_min_residual=2, strict_gender=False):
+                 honorific=True, honorific_min_residual=2, strict_gender=False,
+                 derived_forms=True):
         self.min_tier = int(min_tier)
         self.allow_weak_token = bool(allow_weak_token)
         self.weak_token_max_hits = int(weak_token_max_hits)
@@ -315,6 +409,12 @@ class MatchConfig:
         self.honorific = bool(honorific)
         self.honorific_min_residual = int(honorific_min_residual)
         self.strict_gender = bool(strict_gender)
+        # Verb/adjective endings (오염된, 록온하고) and one-syllable noun affixes
+        # (중장갑, 장갑판) built on a term. Right for a book's own glossary; a
+        # cross-novel glossary turns them into homonym hits (고려하면 is not
+        # Goryeo, 결정한 is not Crystal), so the compressor switches them off
+        # for the unified glossary.
+        self.derived_forms = bool(derived_forms)
         # Only the variant-generation knobs belong in the cache key; the
         # acceptance knobs (min_tier, weak-token gates, boundary) are applied
         # after the variants are built, so they must not fragment the cache.
@@ -346,6 +446,7 @@ class MatchConfig:
             honorific=flag("GLOSSARY_MATCH_HONORIFIC", "1"),
             honorific_min_residual=num("GLOSSARY_MATCH_HONORIFIC_MIN_RESIDUAL", 2),
             strict_gender=flag("COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0"),
+            derived_forms=flag("GLOSSARY_MATCH_DERIVED_FORMS", "1"),
         )
 
 
@@ -354,7 +455,40 @@ DEFAULT_CONFIG = MatchConfig()
 
 # ─── Sub-word boundary heuristic ─────────────────────────────────────────────
 
-def _left_is_clean(text, start, script):
+def _kana_kind(ch):
+    """'hira' / 'kata' for a kana character, '' otherwise."""
+    cp = ord(ch) if ch else 0
+    if 0x3040 <= cp <= 0x309F:
+        return "hira"
+    if 0x30A0 <= cp <= 0x30FF or 0x31F0 <= cp <= 0x31FF or 0xFF66 <= cp <= 0xFF9D:
+        return "kata"
+    return ""
+
+
+def _korean_tail_is_boundary(tail, derived, relaxed=True):
+    """Does this text, right after a Korean noun, mark the end of that noun?
+
+    ``relaxed`` adds bound nouns and the copula (whole terms of 2+ syllables
+    only). ``derived`` further adds 하다/되다 verb endings; see
+    MatchConfig.derived_forms.
+    """
+    if not tail or script_of(tail[0]) != HANGUL:
+        return True
+    if tail.startswith(KOREAN_PARTICLE_PREFIXES) or tail.startswith(HONORIFIC_SUFFIXES):
+        return True
+    if not relaxed:
+        return False
+    if tail.startswith(KOREAN_BOUND_NOUN_PREFIXES) or tail.startswith(KOREAN_COPULA_PREFIXES):
+        return True
+    if tail[0] == "다":
+        # Word-final copula only: 라베다. / 친구다고, never 구름다리.
+        after = tail[1:2]
+        if not after or script_of(after) != HANGUL or after in _KOREAN_DA_FOLLOWERS:
+            return True
+    return derived and tail.startswith(KOREAN_VERBALIZER_PREFIXES)
+
+
+def _left_is_clean(text, start, script, derived=False, term_len=2):
     """True when nothing to the left glues the match into a longer word."""
     if start == 0:
         return True
@@ -367,7 +501,18 @@ def _left_is_clean(text, start, script):
         # neighbour is genuinely ambiguous. Rejecting is the conservative call;
         # the cost is a name glued to the preceding word with no other
         # occurrence in the chapter.
-        return prev_script != HANGUL
+        if prev_script != HANGUL:
+            return True
+        # A Sino-Korean prefix that itself begins the word (중장갑, 반기업) is a
+        # compound built on the term, not a different word containing it.
+        if (
+            derived
+            and term_len >= 2
+            and prev in KOREAN_NOUN_PREFIXES
+            and (start < 2 or script_of(text[start - 2]) != HANGUL)
+        ):
+            return True
+        return False
     if script == HAN:
         # The left edge carries almost no signal in Chinese. Verb-object and
         # modifier-noun sequences are written solid (擦剑 "wipe [the] sword",
@@ -383,11 +528,17 @@ def _left_is_clean(text, start, script):
             return True
         return True
     if script == KANA:
-        return prev_script != KANA
+        if prev_script != KANA:
+            return True
+        # Katakana after hiragana (or the reverse) is a word edge: …とアリス.
+        first_kind = _kana_kind(text[start]) if start < len(text) else ""
+        if _kana_kind(prev) != first_kind:
+            return True
+        return first_kind == "hira" and prev in _JAPANESE_LEFT_PARTICLES
     return True
 
 
-def _right_is_clean(text, end, script):
+def _right_is_clean(text, end, script, derived=False, term_len=2, relaxed=True):
     """True when nothing to the right glues the match into a longer word."""
     if end >= len(text):
         return True
@@ -396,34 +547,51 @@ def _right_is_clean(text, end, script):
     if nxt_script not in _CJK_SCRIPTS:
         return True
     if script == HANGUL:
-        # A josa or a name honorific immediately after the term is the normal
-        # way Korean uses a name, so it counts as a boundary rather than a
-        # collision. Without this the heuristic would reject almost every
-        # true positive in Korean.
+        # A josa, the copula, or a name honorific immediately after the term
+        # is the normal way Korean uses a noun, so it counts as a boundary
+        # rather than a collision. Without this the heuristic would reject
+        # almost every true positive in Korean.
+        if nxt_script != HANGUL:
+            return True
         tail = text[end:end + 6]
-        if tail.startswith(KOREAN_PARTICLE_PREFIXES):
+        if _korean_tail_is_boundary(tail, derived, relaxed):
             return True
-        if tail.startswith(HONORIFIC_SUFFIXES):
+        # 장갑판을, 완충재다: term + one noun suffix that itself ends the word.
+        if (
+            derived
+            and term_len >= 2
+            and nxt in KOREAN_NOUN_SUFFIXES
+            and _korean_tail_is_boundary(text[end + 1:end + 7], derived, relaxed)
+        ):
             return True
-        return nxt_script != HANGUL
+        return False
     if script == HAN:
         tail = text[end:end + 4]
-        if tail.startswith(HONORIFIC_SUFFIXES):
+        if tail.startswith(HONORIFIC_SUFFIXES) or tail.startswith(_HAN_NAME_SUFFIXES):
             return True
         # A grammatical particle cannot be half of a compound noun, so it marks
         # a real word edge: 宋家的人 references 宋家, while 天下第一楼 does not
         # reference 天下.
         if tail.startswith(CHINESE_FUNCTION_WORDS):
             return True
+        # 小明说 / 小明走了 / 小明忽然: what follows a subject, not a compound.
+        if nxt in CHINESE_SUBJECT_FOLLOWERS:
+            return True
         return nxt_script != HAN
     if script == KANA:
         if text[end:end + 4].startswith(HONORIFIC_SUFFIXES):
             return True
-        return nxt_script != KANA
+        if nxt_script != KANA:
+            return True
+        # アリスは: katakana name, hiragana particle. The switch is the edge.
+        last_kind = _kana_kind(text[end - 1]) if end else ""
+        if _kana_kind(nxt) != last_kind:
+            return True
+        return last_kind == "hira" and text[end:end + 3].startswith(JAPANESE_PARTICLE_PREFIXES)
     return True
 
 
-def _cjk_occurrence_is_clean(text, term, cfg):
+def _cjk_occurrence_is_clean(text, term, cfg, is_character=False, whole=True):
     """True when `term` occurs in `text` at least once without being glued
     inside a longer word.
 
@@ -438,14 +606,19 @@ def _cjk_occurrence_is_clean(text, term, cfg):
     if not cfg.cjk_boundary or len(term) > cfg.short_cjk_len:
         return term in text
     single, compound = _chinese_surnames() if script == HAN else (frozenset(), frozenset())
+    # Verb endings and noun affixes never attach to a person's name, and one of
+    # them would readmit a real false positive (유리한 "favourable" is not the
+    # character 유리), so they are for non-character entries only.
+    relaxed = bool(whole) and len(term) >= 2
+    derived = relaxed and bool(getattr(cfg, "derived_forms", True)) and not is_character
     start = 0
     while True:
         idx = text.find(term, start)
         if idx < 0:
             return False
         end = idx + len(term)
-        left = _left_is_clean(text, idx, script)
-        right = _right_is_clean(text, end, script)
+        left = _left_is_clean(text, idx, script, derived, len(term))
+        right = _right_is_clean(text, end, script, derived, len(term), relaxed)
         if left and right:
             return True
         if script == HAN:
@@ -475,7 +648,7 @@ def build_term_pattern(term):
     return re.compile(left + re.escape(term) + right)
 
 
-def text_contains_variant(text, variant, cfg):
+def text_contains_variant(text, variant, cfg, is_character=False, whole=True):
     """Does `variant` appear in `text` under the script-appropriate rule?"""
     if not variant or not text:
         return False
@@ -483,7 +656,7 @@ def text_contains_variant(text, variant, cfg):
         return False
     script = term_script(variant)
     if script in _CJK_SCRIPTS:
-        return _cjk_occurrence_is_clean(text, variant, cfg)
+        return _cjk_occurrence_is_clean(text, variant, cfg, is_character, whole)
     # Latin (and anything else): require word boundaries so "Al" stops
     # matching inside "Already".
     return build_term_pattern(variant).search(text) is not None
@@ -681,9 +854,12 @@ def match_term(prepared, term, is_character=False, cfg=None):
 
     floor = cfg.min_tier
     if is_character and cfg.strict_gender:
-        # Preserve the existing knob's meaning: gendered entries must match a
-        # whole name, not a part of one.
-        floor = max(floor, TIER_NORM)
+        # Strict Gender Entry Precise Matching: a gendered entry must match
+        # as a whole name, never on a part of one. "Whole name" includes
+        # the forms that are still that name -- width and case, spacing
+        # (미샤 랄토스 / 미샤랄토스) and an attached honorific (루나님 / 루나)
+        # -- so strictness does not cost recall; only tokens are excluded.
+        floor = max(floor, TIER_HONORIFIC)
 
     best_reject = "no_occurrence"
     for variant, tier in variants:
@@ -693,7 +869,7 @@ def match_term(prepared, term, is_character=False, cfg=None):
         if _cheap_reject(prepared, variant):
             continue
         found = any(
-            text_contains_variant(hay, variant, cfg)
+            text_contains_variant(hay, variant, cfg, is_character, whole=tier > TIER_TOKEN)
             for hay in _haystacks(prepared, tier)
         )
         if not found:
@@ -715,6 +891,71 @@ def match_term(prepared, term, is_character=False, cfg=None):
 def text_contains_term(text, term, is_character=False, cfg=None):
     """Convenience wrapper for callers that have no prepared index."""
     return bool(match_term(prepare_source_text(text, cfg), term, is_character, cfg))
+
+
+# ─── Strict gender entry precise matching ────────────────────────────────────
+
+_PREPARED_CACHE = OrderedDict()
+_PREPARED_CACHE_LOCK = threading.Lock()
+_PREPARED_CACHE_SIZE = 8
+
+
+def prepare_source_text_cached(text, cfg=None):
+    """prepare_source_text with a small LRU, for callers that match one
+    chapter against many terms through a per-term API."""
+    cfg = cfg or DEFAULT_CONFIG
+    text = str(text or "")
+    key = (len(text), hash(text), cfg.nfkc)
+    with _PREPARED_CACHE_LOCK:
+        prepared = _PREPARED_CACHE.get(key)
+        if prepared is not None and prepared["text"] == text:
+            _PREPARED_CACHE.move_to_end(key)
+            return prepared
+    prepared = prepare_source_text(text, cfg)
+    with _PREPARED_CACHE_LOCK:
+        _PREPARED_CACHE[key] = prepared
+        while len(_PREPARED_CACHE) > _PREPARED_CACHE_SIZE:
+            _PREPARED_CACHE.popitem(last=False)
+    return prepared
+
+
+def strict_name_config(base=None):
+    """A copy of `base` that accepts whole-name forms only (see match_term)."""
+    base = base or DEFAULT_CONFIG
+    return MatchConfig(
+        min_tier=max(base.min_tier, TIER_HONORIFIC),
+        allow_weak_token=False,
+        weak_token_max_hits=base.weak_token_max_hits,
+        cjk_boundary=base.cjk_boundary,
+        short_cjk_len=base.short_cjk_len,
+        nfkc=base.nfkc,
+        despaced=base.despaced,
+        despaced_latin=base.despaced_latin,
+        honorific=base.honorific,
+        honorific_min_residual=base.honorific_min_residual,
+        strict_gender=True,
+        derived_forms=base.derived_forms,
+    )
+
+
+def strict_name_in_text(text, term, cfg=None, prepared=None):
+    """Strict Gender Entry Precise Matching for one gendered entry.
+
+    The old strict rule was a bare ``term in text``: it demanded the whole
+    name but found it anywhere, so 유 matched inside 자유 and 유리 inside
+    유리한, while 미샤 랄토스 missed 미샤랄토스. This keeps the whole-name
+    requirement, adds the script-aware word boundaries, and accepts the
+    spacing / width / honorific forms of the same name -- whichever match
+    engine is selected.
+
+    `cfg` must come from strict_name_config(); `prepared` is optional and
+    is looked up in a small cache when omitted.
+    """
+    if cfg is None:
+        cfg = strict_name_config()
+    if prepared is None:
+        prepared = prepare_source_text_cached(text, cfg)
+    return bool(match_term(prepared, term, True, cfg))
 
 
 # ─── Review overrides ────────────────────────────────────────────────────────

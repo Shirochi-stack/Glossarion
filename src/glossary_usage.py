@@ -19,11 +19,14 @@ from glossary_matching import (
     _ASCII_FOLD_TABLE as _gm_ascii_fold_table,
     _TOKEN_RE as _gm_token_re,
     _WHITESPACE_RE as _gm_whitespace_re,
+    MatchConfig,
     boundary_match,
     fold_match_text,
     is_gender_entry_type,
     legacy_text_contains_term,
     norm_text,
+    strict_name_config,
+    strict_name_in_text,
 )
 
 
@@ -42,9 +45,29 @@ def _text_contains_term(text, term, is_character=False):
     strict_gender = str(
         os.getenv("COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0")
     ).strip().lower() in ("1", "true", "yes", "on")
+    if strict_gender and is_character:
+        # Same rule the compressor applies: the strict toggle is a precise
+        # whole-name matcher, so the usage view agrees with what is sent.
+        return strict_name_in_text(text, term, _strict_usage_config())
     return legacy_text_contains_term(
-        text, term, is_character=is_character, strict_gender=strict_gender
+        text, term, is_character=is_character, strict_gender=False
     )
+
+
+_STRICT_USAGE_CONFIG = [0.0, None]
+
+
+def _strict_usage_config():
+    """Strict-name config from the environment, refreshed every few seconds.
+
+    Usage matching asks once per entry per chapter; rebuilding the config
+    from a dozen environment reads each time would dominate the scan.
+    """
+    now = time.monotonic()
+    if _STRICT_USAGE_CONFIG[1] is None or now - _STRICT_USAGE_CONFIG[0] > 3.0:
+        _STRICT_USAGE_CONFIG[1] = strict_name_config(MatchConfig.from_getter(os.getenv))
+        _STRICT_USAGE_CONFIG[0] = now
+    return _STRICT_USAGE_CONFIG[1]
 
 
 CHECK_PREFIX = "\u2705"
