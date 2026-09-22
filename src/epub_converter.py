@@ -7296,6 +7296,9 @@ img {
         )
         failed_numbers = [num for num in source if num not in translated]
         if not failed_numbers:
+            # A cache that is already complete can still carry the Failed /
+            # Pending row an interrupted run left behind.
+            self._mark_complete_toc_progress_if_stale(source, translated)
             return source, translated, output_files
 
         from translate_headers_standalone import (
@@ -7463,7 +7466,52 @@ img {
             f"✅ Recovered {len(recovered)}/{len(failed_numbers)} failed source "
             f"TOC translation(s); {unresolved_count} remain failed"
         )
+        if not unresolved_count:
+            # Recycled + API-retried entries together can complete the file
+            # even though neither step alone saw the whole TOC finished.
+            self._mark_complete_toc_progress_if_stale(source, translated)
         return source, translated, output_files
+
+    def _mark_complete_toc_progress_if_stale(self, source, translated):
+        """Promote a leftover Failed/Pending TOC row once TOC.txt is complete.
+
+        The row's model label is kept (RECYCLED stays RECYCLED); only the
+        status is corrected. A row that is Completed or In Progress is left
+        alone.
+        """
+        if not source or any(
+            not str(translated.get(num) or '').strip() for num in source
+        ):
+            return False
+        try:
+            from translation_artifacts import (
+                load_translation_artifact_progress,
+                translation_artifact_progress_entry,
+                update_translation_artifact_progress,
+            )
+            progress = load_translation_artifact_progress(self.output_dir)
+            _key, entry = translation_artifact_progress_entry(progress, 'toc')
+            if not isinstance(entry, dict):
+                return False
+            status = str(entry.get('status') or '').strip().lower()
+            if status not in {'failed', 'error', 'pending'}:
+                return False
+            model_name = None
+            if not str(entry.get('model_name') or entry.get('model') or '').strip():
+                recycled = getattr(self, '_toc_recycled_header_keys_current', None)
+                if recycled:
+                    model_name = 'RECYCLED'
+            if update_translation_artifact_progress(
+                self.output_dir, 'toc', 'completed', model_name=model_name,
+            ):
+                self.log(
+                    f"✅ TOC.txt is complete ({len(source)} entries); "
+                    f"marked Table of Contents completed (was {status})"
+                )
+                return True
+        except Exception as exc:
+            self.log(f"⚠️ Could not update Table of Contents progress: {exc}")
+        return False
 
     def _cross_reference_from_other_file(self, entries_to_translate: Dict[int, str],
                                           other_file_path: str,
