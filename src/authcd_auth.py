@@ -69,6 +69,8 @@ TOKEN_REFRESH_MARGIN_SECONDS = 300  # refresh when <5 min remaining
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
+# Claude Code reads the signed-in account (email, organization) from here.
+ANTHROPIC_OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 
 # Claude Code identity headers – required for OAuth token acceptance
 _CLAUDE_CODE_USER_AGENT = "claude-code/2.1.119"
@@ -802,6 +804,7 @@ class AuthCDTokenStore:
         self._tokens: Optional[Dict] = None
         self._cleared = False  # prevents fallback reload after explicit logout
         self._on_change_callbacks: List = []
+        self._email_lookup_failed_token: Optional[str] = None
         self._load_from_disk()
 
     def on_token_change(self, callback):
@@ -988,13 +991,78 @@ class AuthCDTokenStore:
         tokens = self.load_tokens()
         return bool(tokens and tokens.get("access_token"))
 
+    def account_email(self, fetch: bool = True) -> str:
+        """Email of the signed-in Claude account, or "" when unknown.
+
+        The token response of a browser sign-in names the account. Tokens
+        imported from Claude Code do not, so with ``fetch`` the OAuth profile
+        is asked once and the answer is saved with the tokens.
+        """
+        with self._lock:
+            tokens = self.load_tokens()
+            if not tokens:
+                return ""
+            email = account_email_from_tokens(tokens)
+            access_token = tokens.get("access_token")
+            if email or not fetch or not access_token:
+                return email
+            if self._email_lookup_failed_token == access_token:
+                return ""
+            try:
+                profile = fetch_account_profile(access_token)
+            except Exception as exc:
+                logger.debug("AuthCD: account profile lookup failed: %s", exc)
+                profile = {}
+            account = profile.get("account") if isinstance(profile.get("account"), dict) else {}
+            email = str(account.get("email") or account.get("email_address") or "").strip()
+            if not email:
+                self._email_lookup_failed_token = access_token
+                return ""
+            updated = dict(tokens)
+            updated["_account_email"] = email
+            organization = profile.get("organization")
+            if isinstance(organization, dict) and organization.get("name"):
+                updated["_organization_name"] = str(organization["name"])
+            self.save_tokens(updated)
+            return email
+
     @property
     def account_info(self) -> Dict:
         tokens = self.load_tokens()
         if not tokens:
             return {}
         source = tokens.get("_source", "glossarion")
-        return {"source": source}
+        info = {"source": source}
+        email = account_email_from_tokens(tokens)
+        if email:
+            info["email"] = email
+        return info
+
+
+def account_email_from_tokens(tokens: Optional[Dict]) -> str:
+    """The account email saved with the tokens (token response or profile)."""
+    if not isinstance(tokens, dict):
+        return ""
+    account = tokens.get("account") if isinstance(tokens.get("account"), dict) else {}
+    return str(
+        account.get("email_address") or account.get("email") or tokens.get("_account_email") or ""
+    ).strip()
+
+
+def fetch_account_profile(access_token: str, timeout: int = 10) -> Dict:
+    """The OAuth profile of the signed-in account ({"account": {"email", ...}, "organization": {...}})."""
+    resp = requests.get(
+        ANTHROPIC_OAUTH_PROFILE_URL,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache",
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data if isinstance(data, dict) else {}
 
 
 # Module-level singleton
@@ -1295,6 +1363,30 @@ def _new_stream_state() -> Dict:
 # Public API – send chat completion
 # ===========================================================================
 
+# Models that answered HTTP 400 "`temperature` is deprecated for this model"
+# during this session. They are sent without temperature from then on, as if
+# "Disable temperature" were ticked for that model only.
+_TEMPERATURE_REJECTED_MODELS: set = set()
+_TEMPERATURE_REJECTED_LOCK = threading.Lock()
+
+
+class _TemperatureRejected(RuntimeError):
+    """The model refused the temperature parameter (HTTP 400)."""
+
+
+def _is_temperature_rejection(status: int, detail: str) -> bool:
+    text = str(detail or "").lower()
+    return status == 400 and "temperature" in text and any(
+        marker in text for marker in ("deprecated", "not supported", "unsupported", "not allowed")
+    )
+
+
+def model_rejects_temperature(model: str) -> bool:
+    """Whether this session already learned that ``model`` refuses temperature."""
+    with _TEMPERATURE_REJECTED_LOCK:
+        return str(model or "") in _TEMPERATURE_REJECTED_MODELS
+
+
 def send_chat_completion(
     access_token: str,
     messages: List[Dict],
@@ -1308,8 +1400,41 @@ def send_chat_completion(
 ) -> Dict:
     """Send a chat completion request via the Anthropic Messages API.
 
-    Uses Authorization: Bearer with the OAuth token (not x-api-key).
+    Uses Authorization: Bearer with the OAuth token (not x-api-key). When the
+    model refuses ``temperature``, the request is sent again without it and
+    the model is remembered for the rest of the session.
     """
+    kwargs = dict(
+        access_token=access_token, messages=messages, model=model,
+        temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+        base_url=base_url, log_fn=log_fn, connect_timeout=connect_timeout,
+    )
+    include_temperature = not model_rejects_temperature(model)
+    try:
+        return _send_chat_completion_once(include_temperature=include_temperature, **kwargs)
+    except _TemperatureRejected:
+        with _TEMPERATURE_REJECTED_LOCK:
+            _TEMPERATURE_REJECTED_MODELS.add(str(model or ""))
+        (log_fn or print)(
+            f"🌡️ AuthCD: {model} does not accept temperature; retrying without it "
+            "(kept off for this model for the rest of the session)"
+        )
+        return _send_chat_completion_once(include_temperature=False, **kwargs)
+
+
+def _send_chat_completion_once(
+    access_token: str,
+    messages: List[Dict],
+    model: str = "claude-sonnet-4-6",
+    temperature: Optional[float] = 0.7,
+    max_tokens: Optional[int] = None,
+    timeout: int = 600,
+    base_url: Optional[str] = None,
+    log_fn: Optional[Any] = None,
+    connect_timeout: Optional[float] = None,
+    include_temperature: bool = True,
+) -> Dict:
+    """One Messages API request (see :func:`send_chat_completion`)."""
     effective_base = base_url or os.getenv("AUTHCD_BASE_URL", ANTHROPIC_API_URL)
     url = effective_base.rstrip("/")
     if not url.endswith("/messages"):
@@ -1327,7 +1452,11 @@ def send_chat_completion(
         body["system"] = system_prompt
     # Some models have deprecated the temperature parameter.
     _no_temp_models = ("claude-opus-4-7", "claude-opus-4-8", "claude-fable-5")
-    if temperature is not None and not any(m in model for m in _no_temp_models):
+    if (
+        include_temperature
+        and temperature is not None
+        and not any(m in model for m in _no_temp_models)
+    ):
         body["temperature"] = temperature
 
     headers = {
@@ -1364,6 +1493,8 @@ def send_chat_completion(
                     detail = json.loads(error_body).get("error", {}).get("message", error_body)
                 except Exception:
                     pass
+                if "temperature" in body and _is_temperature_rejection(resp.status_code, detail):
+                    raise _TemperatureRejected(f"AuthCD: {resp.status_code} – {detail}")
                 _log(f"❌ AuthCD HTTP {resp.status_code}. {detail}")
                 raise RuntimeError(f"AuthCD: {resp.status_code} – {detail} [reason={reason}]")
             for line in resp.iter_lines():
@@ -1386,6 +1517,8 @@ def send_chat_completion(
             detail = resp.json().get("error", {}).get("message", error_body)
         except Exception:
             pass
+        if "temperature" in body and _is_temperature_rejection(resp.status_code, detail):
+            raise _TemperatureRejected(f"AuthCD: {resp.status_code} – {detail}")
         _log(f"❌ AuthCD HTTP {resp.status_code}. {detail}")
         raise RuntimeError(f"AuthCD: {resp.status_code} – {detail}")
 

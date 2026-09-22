@@ -27219,7 +27219,12 @@ class UnifiedClient:
         max_retries = self._get_max_retries()
         last_error = None
         label = f"AuthCD{acct_label}" if 'acct_label' in dir() and acct_label else "AuthCD"
-        print(f"\U0001f510 {label}: Sending request via Anthropic Messages API (model={actual_model})")
+        try:
+            _acct_email = store.account_email()
+        except Exception:
+            _acct_email = ""
+        _email_part = f", account={_acct_email}" if _acct_email else ""
+        print(f"\U0001f510 {label}: Sending request via Anthropic Messages API (model={actual_model}{_email_part})")
 
         # Apply cached max output token limit if known for this model
         if not hasattr(UnifiedClient, '_authcd_model_max_tokens'):

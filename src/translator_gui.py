@@ -19223,6 +19223,7 @@ Recent translations to summarize:
             if creds:
                 self._refresh_auth_account_arrows()
                 self.append_log(f"\u2705 Claude{acct_suffix}: Loaded credentials from Claude Code")
+                self._log_authcd_account_email(store, acct_suffix)
                 return
 
         # --- Strategy 2: automatic browser sign-in (no code to paste) ---
@@ -19273,6 +19274,22 @@ Recent translations to summarize:
         acct_id = self._get_authcd_account_id()
         acct_suffix = f" #{acct_id}" if acct_id else ""
         self.append_log(f"\u2705 Claude{acct_suffix}: Logged in")
+        try:
+            from authcd_auth import get_store as _authcd_get_store_for_log
+            self._log_authcd_account_email(_authcd_get_store_for_log(acct_id or None), acct_suffix)
+        except Exception:
+            pass
+
+    def _log_authcd_account_email(self, store, acct_suffix=""):
+        """Log which Claude account authcd/ is signed in to (looked up off the GUI thread)."""
+        def _lookup():
+            try:
+                email = store.account_email()
+            except Exception:
+                email = ""
+            if email:
+                self.append_log(f"\U0001f464 Claude{acct_suffix}: Connected account {email}")
+        threading.Thread(target=_lookup, daemon=True).start()
 
     @Slot()
     def _authcd_login_failed(self):
