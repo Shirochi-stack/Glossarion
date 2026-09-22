@@ -125,6 +125,52 @@ def extract_marked_chunks(html_text, chapter_key=None):
     return chunks
 
 
+def extract_marked_chunks_for_entry(html_text, chapter_key, entry=None):
+    """Return marker blocks for one chapter, tolerating a drifted marker key.
+
+    The progress content hash can change independently of an already-written
+    marker key (for example after PDF source normalization). Because one
+    response HTML file represents exactly one chapter/section, an unambiguous
+    single marker plan in that file is a safe secondary identity. Pass
+    ``chapter_key=None`` to skip the keyed lookup and accept only such a plan.
+    """
+    text = str(html_text or "")
+    if chapter_key is not None:
+        marked = extract_marked_chunks(text, chapter_key)
+        if marked:
+            return marked
+    blocks = []
+    for match in _CHUNK_BLOCK_RE.finditer(text):
+        index = _positive_int(match.group("idx"))
+        if not index:
+            continue
+        blocks.append({
+            "index": index,
+            "total": _positive_int(match.group("total")),
+            "marker_key": match.group("key"),
+            "content": match.group("content").strip("\r\n"),
+            "start": match.start(),
+            "end": match.end(),
+            "full": match.group(0),
+        })
+    if not blocks:
+        return {}
+    marker_keys = {str(block["marker_key"] or "").casefold() for block in blocks}
+    marker_totals = {block["total"] for block in blocks}
+    marker_totals.discard(0)
+    entry_total = _positive_int(
+        entry.get("total") if isinstance(entry, dict) else 0
+    )
+    plan_is_unambiguous = (
+        len(marker_keys) == 1
+        and len(marker_totals) == 1
+        and (not entry_total or marker_totals == {entry_total})
+    )
+    if not plan_is_unambiguous:
+        return {}
+    return {block["index"]: block for block in blocks}
+
+
 def _chunk_record(entry, chunk_index, create=False):
     if not isinstance(entry, dict):
         return None
@@ -570,53 +616,17 @@ def remove_chunk_segments(html_text, chapter_key, chunk_indices, entry=None):
 
     remaining = wanted.difference(removed)
     if remaining:
-        all_marked = []
-        for match in _CHUNK_BLOCK_RE.finditer(text):
-            all_marked.append({
-                "index": _positive_int(match.group("idx")),
-                "total": _positive_int(match.group("total")),
-                "marker_key": match.group("key"),
-                "start": match.start(),
-                "end": match.end(),
-            })
-        marker_keys = {
-            str(block.get("marker_key") or "").casefold()
-            for block in all_marked
-            if isinstance(block, dict) and block.get("marker_key")
-        }
-        entry_total = _positive_int(
-            entry.get("total") if isinstance(entry, dict) else 0
-        )
-        marker_totals = {
-            _positive_int(block.get("total"))
-            for block in all_marked
-            if isinstance(block, dict)
-        }
-        marker_totals.discard(0)
-        plan_is_unambiguous = bool(
-            len(marker_keys) == 1
-            and len(marker_totals) == 1
-            and (
-                not entry_total
-                or marker_totals == {entry_total}
-            )
-        )
-        if plan_is_unambiguous:
-            blocks_by_index = {
-                block["index"]: block
-                for block in all_marked
-                if block.get("index")
-            }
-            fallback_spans = []
-            for index in sorted(remaining):
-                block = blocks_by_index.get(index)
-                if block:
-                    fallback_spans.append(
-                        (block["start"], block["end"], index)
-                    )
-            for start, end, index in sorted(fallback_spans, reverse=True):
-                text = text[:start] + text[end:]
-                removed.append(index)
+        blocks_by_index = extract_marked_chunks_for_entry(text, None, entry)
+        fallback_spans = []
+        for index in sorted(remaining):
+            block = blocks_by_index.get(index)
+            if block:
+                fallback_spans.append(
+                    (block["start"], block["end"], index)
+                )
+        for start, end, index in sorted(fallback_spans, reverse=True):
+            text = text[:start] + text[end:]
+            removed.append(index)
 
     remaining = wanted.difference(removed)
     if remaining and isinstance(entry, dict):

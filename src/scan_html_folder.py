@@ -60,7 +60,7 @@ from qa_scan_runtime import is_html_like_path
 from chapter_chunk_progress import (
     chunk_failure_summary,
     ensure_chunk_entry_schema,
-    extract_marked_chunks,
+    extract_marked_chunks_for_entry,
     is_multi_chunk_entry,
     set_chunk_qa,
 )
@@ -5007,24 +5007,71 @@ def _count_unwrapped_text_chars(html_content):
     return total
 
 
-def _chunk_issue_matches(issue, chunk_html, chunk_text, source_text, qa_settings):
+_FOREIGN_TEXT_ISSUE_RE = re.compile(
+    r"^(?P<script>[A-Za-z]+)_text_found_\d+_chars_", re.IGNORECASE
+)
+
+
+def _chunk_foreign_text_issues(chunk_html, chunk_text, qa_settings, chunk_cache=None):
+    """Per-script foreign text findings for one chunk, computed once per chunk.
+
+    The whole document already passed the configured threshold, so a chunk
+    is charged with a script as soon as it contains any character of that
+    script. Returns ``{script: chunk_issue_text}``; a ``"__mismatch__"`` key
+    means the chunk itself reads as the wrong language.
+    """
+    if isinstance(chunk_cache, dict) and "foreign_issues" in chunk_cache:
+        return chunk_cache["foreign_issues"]
+    chunk_settings = dict(qa_settings or {})
+    chunk_settings["foreign_char_threshold"] = 0
+    by_script = {}
+    try:
+        _flagged, chunk_issues = detect_non_english_content(
+            str(_foreign_character_qa_text(chunk_text, chunk_html, qa_settings) or ""),
+            chunk_settings,
+        )
+    except Exception:
+        chunk_issues = []
+    for chunk_issue in chunk_issues:
+        match = _FOREIGN_TEXT_ISSUE_RE.match(str(chunk_issue))
+        if match:
+            by_script[match.group("script").casefold()] = str(chunk_issue)
+        elif str(chunk_issue).startswith("Language_mismatch"):
+            by_script["__mismatch__"] = str(chunk_issue)
+    if isinstance(chunk_cache, dict):
+        chunk_cache["foreign_issues"] = by_script
+    return by_script
+
+
+def _chunk_local_issue_text(issue, chunk_cache):
+    """Record a foreign-script finding with the chunk's own count and sample."""
+    match = _FOREIGN_TEXT_ISSUE_RE.match(str(issue or ""))
+    if match and isinstance(chunk_cache, dict):
+        by_script = chunk_cache.get("foreign_issues") or {}
+        return by_script.get(match.group("script").casefold(), str(issue))
+    return str(issue)
+
+
+def _chunk_issue_matches(issue, chunk_html, chunk_text, source_text, qa_settings, chunk_cache=None):
     """Best-effort deterministic localization of one file QA issue."""
     issue_text = str(issue or "")
     issue_lower = issue_text.lower()
-    is_foreign_text_issue = "_text_found_" in issue_lower
-    if is_foreign_text_issue:
-        foreign_chunk_text = _foreign_character_qa_text(
-            chunk_text,
-            chunk_html,
-            qa_settings,
+    foreign_match = _FOREIGN_TEXT_ISSUE_RE.match(issue_text)
+    if foreign_match:
+        # The sample in the issue text is a handful of characters gathered
+        # across the whole file, not a contiguous string, and an
+        # any-foreign-script fallback charged a chunk with Korean when it
+        # only contained Japanese. Test the chunk for that script itself.
+        by_script = _chunk_foreign_text_issues(
+            chunk_html, chunk_text, qa_settings, chunk_cache
         )
-        haystacks = (str(foreign_chunk_text or "").casefold(),)
-    else:
-        foreign_chunk_text = chunk_text
-        haystacks = (
-            str(chunk_html or "").casefold(),
-            str(chunk_text or "").casefold(),
+        return "__mismatch__" in by_script or (
+            foreign_match.group("script").casefold() in by_script
         )
+    haystacks = (
+        str(chunk_html or "").casefold(),
+        str(chunk_text or "").casefold(),
+    )
 
     # Most artifact/foreign-text issues carry the actual offending sample.
     samples = []
@@ -5039,16 +5086,6 @@ def _chunk_issue_matches(issue, chunk_html, chunk_text, source_text, qa_settings
         if len(normalized) >= 2 and any(normalized in haystack for haystack in haystacks):
             return True
 
-    if is_foreign_text_issue:
-        try:
-            return bool(
-                detect_non_english_content(
-                    foreign_chunk_text,
-                    qa_settings,
-                )[0]
-            )
-        except Exception:
-            return False
     if issue_lower == "no_spacing_or_linebreaks":
         try:
             return has_no_spacing_or_linebreaks(
@@ -5181,16 +5218,43 @@ def _attach_chunk_results_to_scan(
         chunk_key, chunk_entry = matched
         try:
             with open(result.get("filepath") or os.path.join(folder_path, filename), "r", encoding="utf-8", errors="replace") as output_file:
-                marked = extract_marked_chunks(output_file.read(), chunk_key)
+                marked = extract_marked_chunks_for_entry(
+                    output_file.read(), chunk_key, chunk_entry
+                )
         except OSError:
             marked = {}
-        if not marked:
-            continue
 
         all_issues = list(result.get("issues") or [])
         previews = result.get("qa_issue_previews")
         previews = previews if isinstance(previews, dict) else {}
         chunk_results = []
+
+        if not marked:
+            # The output carries no chunk boundaries any more (refined,
+            # rewritten or hand-edited as one document), so nothing can be
+            # localized. Skipping the file here used to leave every chunk
+            # record frozen in whatever QA state the last localized scan
+            # wrote, no matter what the file contains now. Apply the
+            # whole-file verdict to every chunk that has one instead.
+            for index, record in _concrete_chunk_records(chunk_entry):
+                chunk_results.append({
+                    "chunk_index": index,
+                    "total_chunks": chunk_entry.get("total"),
+                    "issues": list(all_issues),
+                    "qa_issue_previews": {
+                        str(issue): previews[str(issue)]
+                        for issue in all_issues
+                        if previews.get(str(issue)) is not None
+                    },
+                })
+            if not chunk_results:
+                continue
+            result["chunk_progress_key"] = chunk_key
+            result["chunk_results"] = chunk_results
+            result["chunk_results_unlocalized"] = True
+            attached += 1
+            continue
+
         unmatched = set(range(len(all_issues)))
         for index, block in sorted(marked.items()):
             chunk_html = block.get("content", "")
@@ -5199,26 +5263,29 @@ def _attach_chunk_results_to_scan(
             )
             record = chunk_entry.get("entries", {}).get(str(index), {})
             source_text = record.get("source") if isinstance(record, dict) else None
+            chunk_cache = {}
             localized = []
+            local_previews = {}
             for issue_index, issue in enumerate(all_issues):
-                if _chunk_issue_matches(
+                if not _chunk_issue_matches(
                     issue,
                     chunk_html,
                     chunk_text,
                     source_text,
                     qa_settings,
+                    chunk_cache,
                 ):
-                    localized.append(issue)
-                    unmatched.discard(issue_index)
+                    continue
+                unmatched.discard(issue_index)
+                local_issue = _chunk_local_issue_text(issue, chunk_cache)
+                localized.append(local_issue)
+                if previews.get(str(issue)) is not None:
+                    local_previews[local_issue] = previews[str(issue)]
             chunk_results.append({
                 "chunk_index": index,
                 "total_chunks": block.get("total") or chunk_entry.get("total"),
                 "issues": localized,
-                "qa_issue_previews": {
-                    str(issue): previews.get(str(issue))
-                    for issue in localized
-                    if previews.get(str(issue)) is not None
-                },
+                "qa_issue_previews": local_previews,
             })
 
         # If only some marker blocks remain, distinguish an intentional
@@ -5274,6 +5341,23 @@ def _attach_chunk_results_to_scan(
     if attached:
         log(f"🧩 Localized QA state for {attached} marker-aware chapter file(s)")
     return attached
+
+
+def _concrete_chunk_records(chunk_entry):
+    """Yield ``(index, record)`` for chunks that already hold a verdict."""
+    for raw_index, record in sorted(
+        chunk_entry.get("entries", {}).items(),
+        key=lambda item: int(item[0]) if str(item[0]).isdigit() else 10**9,
+    ):
+        if not isinstance(record, dict):
+            continue
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            continue
+        status = str(record.get("status") or "pending").lower()
+        if status in {"completed", "qa_failed", "failed"}:
+            yield index, record
 
 
 def _apply_chunk_scan_to_progress(
@@ -5332,20 +5416,37 @@ def _apply_chunk_scan_to_progress(
         (issue.get("type") if isinstance(issue, dict) else str(issue)) in protected
         for issue in existing_issues
     )
+    unlocalized = bool(scan_row.get("chunk_results_unlocalized"))
     if not has_protected:
         previous_status = str(chapter_info.get("status") or "").lower()
-        if summary["pending"]:
-            chapter_info["status"] = (
-                previous_status
-                if previous_status in {"pending", "in_progress"}
-                else "pending"
-            )
-        else:
-            chapter_info["status"] = "completed"
-        chapter_info["qa_issues"] = False
-        chapter_info["qa_issues_found"] = []
-        chapter_info["qa_issue_previews"] = {}
         chapter_info["qa_timestamp"] = time.time()
+        if unlocalized and summary["failed"] and not summary["pending"]:
+            # Without chunk boundaries the failure belongs to the whole
+            # document: only a full chapter retranslation can act on it, so
+            # the chapter carries the verdict. Every cached chunk was marked
+            # failed above so the translator cannot rebuild the same output
+            # from its cache, and a GUI chunk-row reset (which needs the
+            # missing boundary) is not the only way out.
+            chapter_info["status"] = "qa_failed"
+            chapter_info["qa_issues"] = True
+            chapter_info["qa_issues_found"] = list(scan_row.get("issues") or [])
+            incoming_previews = scan_row.get("qa_issue_previews")
+            chapter_info["qa_issue_previews"] = (
+                dict(incoming_previews) if isinstance(incoming_previews, dict) else {}
+            )
+            chapter_info["duplicate_confidence"] = scan_row.get("duplicate_confidence", 0)
+        else:
+            if summary["pending"]:
+                chapter_info["status"] = (
+                    previous_status
+                    if previous_status in {"pending", "in_progress"}
+                    else "pending"
+                )
+            else:
+                chapter_info["status"] = "completed"
+            chapter_info["qa_issues"] = False
+            chapter_info["qa_issues_found"] = []
+            chapter_info["qa_issue_previews"] = {}
     # Keep refinement history even when a later QA scan fails. The chapter's
     # qa_failed/chunk state already makes it eligible for multipass again, and
     # deleting refinement/model-era metadata before a new request succeeds
@@ -5353,6 +5454,11 @@ def _apply_chunk_scan_to_progress(
     log(
         f"   └─ Updated chunks for chapter {chapter_info.get('actual_num')}: "
         f"{summary['failed']} QA failed, {summary['completed']} completed"
+        + (
+            " (no chunk markers in output; whole-chapter verdict applied)"
+            if unlocalized
+            else ""
+        )
     )
     return True
 

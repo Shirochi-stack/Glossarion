@@ -112,6 +112,7 @@ from chapter_chunk_progress import (
     effective_parent_status,
     ensure_chunk_entry_schema,
     extract_marked_chunks,
+    extract_marked_chunks_for_entry,
     is_multi_chunk_entry,
     remove_chunk_segments_from_file,
     reset_chunks_for_retranslation,
@@ -196,12 +197,104 @@ def _pending_mark_output_path(info, output_dir):
     return path if os.path.isfile(path) else None
 
 
+_QA_MARK_FIELDS = (
+    "qa_issues", "qa_timestamp", "qa_issues_found", "qa_issue_previews",
+    "duplicate_confidence", "failure_reason", "error_message",
+)
+_CHUNK_QA_MIRROR_FIELDS = (
+    "has_chunk_qa_failures", "chunk_qa_summary", "chunk_qa_issues_found",
+)
+
+
+def _chunk_ledger_for_progress_entry(prog, progress_key, entry):
+    """Return ``(chunk_key, ledger)`` for a chapter's multi-chunk plan, else ``(chunk_key, None)``."""
+    chunk_key = str((entry or {}).get("content_hash") or progress_key or "")
+    chunk_entry = prog.get("chapter_chunks", {}).get(chunk_key) if chunk_key else None
+    return chunk_key, (chunk_entry if is_multi_chunk_entry(chunk_entry) else None)
+
+
+def progress_entry_has_qa_mark(prog, progress_key, entry):
+    """Whether a chapter row, or any chunk under it, still carries a failed mark."""
+    if not isinstance(entry, dict):
+        return False
+    if str(entry.get("status") or "").lower() in ("qa_failed", "failed"):
+        return True
+    if entry.get("has_chunk_qa_failures"):
+        return True
+    _chunk_key, chunk_entry = _chunk_ledger_for_progress_entry(
+        prog, progress_key, entry
+    )
+    return bool(chunk_entry and chunk_failure_summary(chunk_entry)["failed"])
+
+
+def clear_progress_entry_qa_mark(prog, progress_key, entry, output_dir=None):
+    """Remove the failed mark from one chapter row and from every chunk under it.
+
+    Clearing only the chapter used to leave its chunk records qa_failed (and
+    clearing only the chunks left the chapter qa_failed), so the rows came
+    back red on the next refresh. Returns True when anything changed.
+    """
+    if not isinstance(entry, dict):
+        return False
+    changed = False
+    if str(entry.get("status") or "").lower() in ("qa_failed", "failed"):
+        entry["status"] = "completed"
+        changed = True
+    for field in _QA_MARK_FIELDS + _CHUNK_QA_MIRROR_FIELDS:
+        if field in entry:
+            entry.pop(field, None)
+            changed = True
+    chunk_key, chunk_entry = _chunk_ledger_for_progress_entry(
+        prog, progress_key, entry
+    )
+    if chunk_entry is not None:
+        ensure_chunk_entry_schema(chunk_entry)
+        for index, record in sorted_chunk_items(chunk_entry.get("entries", {})):
+            if not isinstance(record, dict):
+                continue
+            marked = (
+                str(record.get("status") or "").lower() in ("qa_failed", "failed")
+                or record.get("qa_issues_found")
+            )
+            if marked and set_chunk_qa(chunk_entry, index, []):
+                changed = True
+        _sync_parent_chunk_qa_summary(prog, progress_key, chunk_key, output_dir)
+    if changed:
+        entry["last_updated"] = time.time()
+    return changed
+
+
+def clear_chunk_row_qa_mark(prog, info, output_dir=None):
+    """Remove the failed mark from one chunk row.
+
+    Once no chunk of the chapter is failed any more, a chapter-level
+    qa_failed status has nothing left to point at and is cleared as well.
+    """
+    chunk_key = str(info.get("chunk_progress_key") or "")
+    chunk_entry = prog.get("chapter_chunks", {}).get(chunk_key)
+    if not isinstance(chunk_entry, dict):
+        return False
+    if not set_chunk_qa(chunk_entry, info.get("chunk_index"), []):
+        return False
+    parent_key = info.get("parent_progress_key")
+    summary = _sync_parent_chunk_qa_summary(prog, parent_key, chunk_key, output_dir)
+    parent = prog.get("chapters", {}).get(parent_key)
+    if (
+        isinstance(parent, dict)
+        and summary is not None
+        and not summary["failed"]
+        and str(parent.get("status") or "").lower() in ("qa_failed", "failed")
+    ):
+        clear_progress_entry_qa_mark(prog, parent_key, parent, output_dir)
+    return True
+
+
 def _pending_mark_chunk_blocks(path, chunk_key, entry):
     if not path:
         return {}
     try:
         with open(path, "r", encoding="utf-8") as source:
-            blocks = extract_marked_chunks(source.read(), chunk_key)
+            blocks = extract_marked_chunks_for_entry(source.read(), chunk_key, entry)
         total = int(entry.get("total") or 0)
         return {
             index: block for index, block in blocks.items()
@@ -27893,10 +27986,32 @@ class RetranslationMixin:
             selected_chapters = [
                 data['chapter_display_info'][i] for i in selected_indices
             ]
-            failed_chapters = [ch for ch in selected_chapters if ch['status'] in ['qa_failed', 'failed']]
-            
+
+            def _progress_entry_for_row(info):
+                progress_key = info.get('progress_key')
+                chapters = data['prog'].get("chapters", {})
+                if progress_key and isinstance(chapters.get(progress_key), dict):
+                    return progress_key, chapters[progress_key]
+                match = _find_progress_entry(info, data['prog'])
+                if isinstance(match, tuple) and len(match) == 2:
+                    return match
+                return None, None
+
+            failed_chapters = []
+            for ch in selected_chapters:
+                if ch['status'] in ['qa_failed', 'failed']:
+                    failed_chapters.append(ch)
+                    continue
+                if ch.get("is_chunk_progress"):
+                    continue
+                # A completed parent whose chunk rows are QA failed carries
+                # the mark too; selecting it must clear those chunks.
+                row_key, row_entry = _progress_entry_for_row(ch)
+                if progress_entry_has_qa_mark(data['prog'], row_key, row_entry):
+                    failed_chapters.append(ch)
+
             if not failed_chapters:
-                self._styled_msgbox(QMessageBox.Warning, data.get('dialog', self), "No Failed Chapters", 
+                self._styled_msgbox(QMessageBox.Warning, data.get('dialog', self), "No Failed Chapters",
                                      "None of the selected chapters have 'qa_failed' or 'failed' status.")
                 return
             
@@ -27912,21 +28027,12 @@ class RetranslationMixin:
             progress_updated = False
             for info in failed_chapters:
                 if info.get("is_chunk_progress"):
-                    chunk_key = str(info.get("chunk_progress_key") or "")
-                    chunk_entry = data['prog'].get("chapter_chunks", {}).get(
-                        chunk_key
-                    )
-                    if isinstance(chunk_entry, dict) and set_chunk_qa(
-                        chunk_entry,
-                        info.get("chunk_index"),
-                        [],
+                    # Clears the chunk record and, once no chunk of the
+                    # chapter is failed any more, the chapter's own
+                    # qa_failed status as well.
+                    if clear_chunk_row_qa_mark(
+                        data['prog'], info, data['output_dir']
                     ):
-                        _sync_parent_chunk_qa_summary(
-                            data['prog'],
-                            info.get("parent_progress_key"),
-                            chunk_key,
-                            data['output_dir'],
-                        )
                         cleared_count += 1
                         progress_updated = True
                     continue
@@ -27941,17 +28047,21 @@ class RetranslationMixin:
                 target_out = info.get('output_file')
                 target_norm = _normalize_filename(target_out)
                 if match:
-                    # Clear failed/qa_failed on ALL entries sharing this output file (normalized)
-                    fields_to_remove = ["qa_issues", "qa_timestamp", "qa_issues_found", "duplicate_confidence", "failure_reason", "error_message"]
+                    # Clear failed/qa_failed on ALL entries sharing this
+                    # output file (normalized), including the chunk ledger
+                    # under each of them.
                     for key, entry in data['prog'].get("chapters", {}).items():
+                        if not isinstance(entry, dict):
+                            continue
                         entry_out = entry.get('output_file')
                         if not entry_out:
                             continue
                         if _normalize_filename(entry_out) == target_norm:
-                            if entry.get('status') in ['qa_failed', 'failed']:
-                                entry["status"] = "completed"
-                                for field in fields_to_remove:
-                                    entry.pop(field, None)
+                            if progress_entry_has_qa_mark(
+                                data['prog'], key, entry
+                            ) and clear_progress_entry_qa_mark(
+                                data['prog'], key, entry, data['output_dir']
+                            ):
                                 cleared_count += 1
                                 progress_updated = True
                 else:

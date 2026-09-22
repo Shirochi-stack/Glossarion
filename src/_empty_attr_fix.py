@@ -110,6 +110,29 @@ def _should_rewrite(tag: str, names: list[str]) -> bool:
     return tag.lower() not in _STANDARD_HTML_TAGS
 
 
+_EMPTY_ATTR_BLOCK_RE = re.compile(r'^(?:\s+' + _EMPTY_ATTR_TOKEN + r')+\s*$')
+
+
+def empty_attr_names(attrs_block: str) -> list[str] | None:
+    """Return the attribute names when *every* attribute in the block is empty.
+
+    ``attrs_block`` is the text after the tag name, e.g. ``' troupe=""'``
+    for ``<theater troupe="">``. Returns ``None`` for an empty block, for
+    any non-empty value, or for anything that is not attribute syntax, so a
+    caller can keep real markup and rewrite only the tokenizer / parser
+    artifact where every attribute is blank.
+    """
+    block = str(attrs_block or "").rstrip()
+    if block.endswith('/'):
+        block = block[:-1].rstrip()
+    if not block.strip():
+        return None
+    block = ' ' + block.lstrip()
+    if not _EMPTY_ATTR_BLOCK_RE.match(block):
+        return None
+    return _attr_names(block) or None
+
+
 
 # ---------------------------------------------------------------------------
 # Mangled closing-tag pattern

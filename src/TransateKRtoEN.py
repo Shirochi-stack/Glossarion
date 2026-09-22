@@ -12108,10 +12108,16 @@ class BatchTranslationProcessor:
             if remove_duplicate_h1_p and cleaned:
                 # First: HTML-based duplicate removal
                 from bs4 import BeautifulSoup
+                # Escape prose angle brackets before parsing: html.parser
+                # turns <Theater Troupe> into a <theater troupe=""> element
+                # and appends </theater>, which the escape pass further down
+                # would then have to treat as markup.
+                if not chapter.get('enhanced_extraction', False):
+                    cleaned = _escape_invalid_html_tags(cleaned)
                 output_soup = BeautifulSoup(cleaned, 'html.parser')
                 remove_duplicate_heading_paragraph_pairs(output_soup)
                 cleaned = str(output_soup)
-                
+
                 # Second: Markdown-based duplicate removal (for enhanced extraction mode)
                 # Pattern: "Title Text\n\n# Title Text" - remove the plain text line before markdown header
                 def remove_markdown_duplicate_headers_batch(text):
@@ -24183,23 +24189,20 @@ def _escape_invalid_html_tags(html_text: str) -> str:
         return html_text or ""
 
     import re as _re
+    from _empty_attr_fix import empty_attr_names as _empty_attr_names
 
-    def _repl(m):
-        inner = m.group(1)
+    def _escape_decision(inner):
+        """Return the escaped text for prose in angle brackets, else None."""
         stripped = inner.strip()
 
         # Keep closing tags, declarations, processing instructions
         if stripped.startswith(('/', '!', '?')):
-            return m.group(0)
-
-        # Keep tags that have real HTML attributes (contain '=')
-        if '=' in inner:
-            return m.group(0)
+            return None
 
         # Extract the tag name (first token)
         tokens = stripped.split()
         if not tokens:
-            return m.group(0)
+            return None
 
         first = tokens[0].lower()
         # Handle self-closing like <br/>
@@ -24208,33 +24211,48 @@ def _escape_invalid_html_tags(html_text: str) -> str:
 
         # Recognised HTML/SVG/EPUB tag → keep
         if first in _KNOWN_HTML_TAGS:
-            return m.group(0)
+            return None
+
+        if '=' in inner:
+            # Unknown tags with real attribute values (namespaced or custom
+            # elements) are kept. Prose such as <Theater Troupe> that an
+            # earlier BeautifulSoup pass re-serialized as
+            # <theater troupe=""> only ever carries empty attributes; that
+            # is the "LLM token issue" the QA scanner reports, so render it
+            # as visible text instead of an invisible element.
+            names = _empty_attr_names(stripped[len(tokens[0]):])
+            if names is None:
+                return None
+            return '&lt;' + ' '.join([tokens[0].rstrip('/')] + names) + '&gt;'
 
         # Everything else is a non-standard / story tag → escape
         return '&lt;' + inner + '&gt;'
+
+    def _repl(m):
+        escaped = _escape_decision(m.group(1))
+        return m.group(0) if escaped is None else escaped
 
     # Pass 1: normal angle brackets  <...>
     html_text = _re.sub(r'<([^<>]+)>', _repl, html_text)
 
     # Pass 2: hybrid case where closing bracket is already an entity  <...&gt;
-    def _repl_gt(m):
-        inner = m.group(1)
-        stripped = inner.strip()
-        if stripped.startswith(('/', '!', '?')):
-            return m.group(0)
-        if '=' in inner:
-            return m.group(0)
-        tokens = stripped.split()
-        if not tokens:
-            return m.group(0)
-        first = tokens[0].lower()
-        if first.endswith('/'):
-            first = first[:-1]
-        if first in _KNOWN_HTML_TAGS:
-            return m.group(0)
-        return '&lt;' + inner + '&gt;'
+    html_text = _re.sub(r'<([^<>]+)&gt;', _repl, html_text)
 
-    html_text = _re.sub(r'<([^<>]+)&gt;', _repl_gt, html_text)
+    # Pass 3: a closing tag for an unknown name whose opening no longer
+    # exists is what html.parser appends after prose it mistook for an
+    # element (<Theater Troupe> … </theater>). With the opening escaped
+    # above, the closer is an orphan that would only survive as junk.
+    def _repl_close(m):
+        name = m.group(1)
+        if name.lower() in _KNOWN_HTML_TAGS:
+            return m.group(0)
+        if _re.search(
+            r'<' + _re.escape(name) + r'(?=[\s/>])', html_text, _re.IGNORECASE
+        ):
+            return m.group(0)
+        return ''
+
+    html_text = _re.sub(r'</([A-Za-z][A-Za-z0-9:_.\-]*)\s*>', _repl_close, html_text)
 
     return html_text
 
@@ -32414,10 +32432,16 @@ def main(log_callback=None, stop_callback=None):
             if remove_duplicate_h1_p and cleaned:
                 # First: HTML-based duplicate removal
                 from bs4 import BeautifulSoup
+                # Escape prose angle brackets before parsing: html.parser
+                # turns <Theater Troupe> into a <theater troupe=""> element
+                # and appends </theater>, which the escape pass further down
+                # would then have to treat as markup.
+                if not c.get('enhanced_extraction', False):
+                    cleaned = _escape_invalid_html_tags(cleaned)
                 output_soup = BeautifulSoup(cleaned, 'html.parser')
                 remove_duplicate_heading_paragraph_pairs(output_soup)
                 cleaned = str(output_soup)
-                
+
                 # Second: Markdown-based duplicate removal (for enhanced extraction mode)
                 # Pattern: "Title Text\n\n# Title Text" - remove the plain text line before markdown header
                 def remove_markdown_duplicate_headers(text):
