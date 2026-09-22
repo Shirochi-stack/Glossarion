@@ -5494,6 +5494,45 @@ def _apply_chunk_scan_to_progress(
     return True
 
 
+def _spine_display_numbers(folder_path):
+    """Map spine filename stems to the Progress Manager's display numbers."""
+    try:
+        from chapter_display_numbering import nonreset_chapter_display_numbers
+        opf_paths = [
+            os.path.join(folder_path, name) for name in os.listdir(folder_path)
+            if name.lower().endswith(".opf")
+        ]
+        if not opf_paths:
+            return {}
+        root = ET.parse(opf_paths[0]).getroot()
+        ns = {"opf": root.tag.split("}")[0].strip("{")} if root.tag.startswith("{") else {}
+        prefix = "opf:" if ns else ""
+        manifest = {
+            item.get("id"): os.path.basename(item.get("href") or "")
+            for item in root.iter(("{%s}item" % ns["opf"]) if ns else "item")
+        }
+        spine = root.find(f".//{prefix}spine", ns)
+        if spine is None:
+            return {}
+        names = [
+            manifest.get(ref.get("idref"), "")
+            for ref in spine.findall(f"{prefix}itemref", ns)
+        ]
+        names = [name for name in names if name]
+        raw = []
+        for name in names:
+            found = re.findall(r"\d+", os.path.splitext(name)[0])
+            raw.append(int(found[-1]) if found else 0)
+        return {
+            os.path.splitext(name)[0].casefold(): (position, number)
+            for position, (name, number) in enumerate(
+                zip(names, nonreset_chapter_display_numbers(raw)), start=1
+            )
+        }
+    except Exception:
+        return {}
+
+
 def update_progress_file(folder_path, results, log, progress_path=None):
     """Update translation progress file"""
     prog_path = progress_path or os.path.join(folder_path, "translation_progress.json")
@@ -5580,6 +5619,34 @@ def update_progress_file(folder_path, results, log, progress_path=None):
         if isinstance(fallback_num, (int, float)) and fallback_num != 0:
             return fallback_num
         return None
+
+    # Label rows the way the Progress Manager does: spine display numbers
+    # (Ch.014) and, for chunked chapters, which chunks actually failed.
+    display_map = _spine_display_numbers(folder_path)
+    if display_map:
+        def _row_label(row, failed_only):
+            fname = os.path.basename(str(row.get("filename") or ""))
+            stem = os.path.splitext(fname[9:] if fname.startswith("response_") else fname)[0].casefold()
+            spine_entry = display_map.get(stem)
+            if spine_entry is None:
+                return None
+            position, num = spine_entry
+            label = f"[{position:03d}] Ch.{num:03d}"
+            chunks = row.get("chunk_results")
+            if isinstance(chunks, list) and chunks and not row.get("chunk_results_unlocalized"):
+                total = chunks[0].get("total_chunks") or len(chunks)
+                picked = sorted(
+                    int(c.get("chunk_index") or 0) for c in chunks
+                    if bool(c.get("issues")) == failed_only
+                )
+                if failed_only and picked:
+                    label += f" (chunk{'s' if len(picked) > 1 else ''} {', '.join(str(i) for i in picked)} of {total})"
+            return (position, label)
+
+        faulty_labels = sorted({l for l in (_row_label(r, True) for r in faulty_chapters) if l})
+        if faulty_labels:
+            log(f"📝 Chapters marked for re-translation: {', '.join(l for _n, l in faulty_labels)}")
+            updated_nums_for_log = []
 
     affected_chapters_for_log = []
     if updated_nums_for_log is not None:
