@@ -2496,6 +2496,16 @@ def _read_progress_summary(progress_file: str, exclude_special: bool = False,
             continue
         if _is_progress_sidecar_entry(key, ch):
             continue
+        # Metadata / TOC / chapter-header translation rows are workspace
+        # phases, not book chapters. Counting them inflated the total past
+        # the raw spine and let two extra completed rows hide a missing
+        # chapter, so a book could land on Completed with work left.
+        if (
+            is_metadata_progress_entry(key, ch)
+            or bool(ch.get("metadata_progress_key"))
+            or is_translation_artifact_progress_entry(key, ch)
+        ):
+            continue
         name = (ch.get("original_basename")
                 or ch.get("output_file")
                 or str(key)
@@ -5797,7 +5807,8 @@ class _BookCard(QFrame):
                 pass
             else:
                 has_progress_row = True
-                pct = int(round((done / total) * 100)) if total else 0
+                # Floor, not round: 216/217 must not read as 100%.
+                pct = int((done * 100) // total) if total else 0
                 progress_row = QHBoxLayout()
                 progress_row.setContentsMargins(0, 0, 0, 0)
                 progress_row.setSpacing(4)
@@ -16745,7 +16756,7 @@ class BookDetailsDialog(QDialog):
             self._progress_strip.hide()
             return
         if total:
-            pct = int(round((done / total) * 100))
+            pct = int((done * 100) // total)
             self._progress_strip.setText(
                 f"\u23f3  Translation in progress \u2014 {done}/{total} chapters ({pct}%)"
             )

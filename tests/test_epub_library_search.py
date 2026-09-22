@@ -110,3 +110,25 @@ def test_library_query_matches_raw_titles_regardless_of_toggle():
     assert _book_matches_library_query(book, "犯罪RPG")
     assert _book_matches_library_query(book, "シャーロック＋")
     assert not _book_matches_library_query(book, "unrelated")
+
+
+def test_progress_summary_ignores_metadata_and_artifact_rows(tmp_path):
+    import json
+
+    from epub_library import _read_progress_summary
+
+    chapters = {
+        "__metadata__": {"status": "completed", "output_file": "metadata.json", "special_type": "metadata"},
+        "__translation_artifact__:toc": {"status": "completed", "output_file": "TOC.txt", "special_type": "toc"},
+        "__translation_artifact__:headers": {
+            "status": "completed", "output_file": "translated_headers.txt", "special_type": "headers",
+        },
+        "1": {"status": "completed", "output_file": "response_chapter1.html"},
+    }
+    for name in ("metadata.json", "TOC.txt", "translated_headers.txt", "response_chapter1.html"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    progress = tmp_path / "translation_progress.json"
+    progress.write_text(json.dumps({"chapters": chapters}), encoding="utf-8")
+
+    summary = _read_progress_summary(str(progress), exclude_special=False, config={})
+    assert (summary["total"], summary["completed"]) == (1, 1)
