@@ -29948,12 +29948,15 @@ def main(log_callback=None, stop_callback=None):
         progress_manager.begin_parallel_worker_progress()
 
         def _save_parallel_worker_progress(*, in_progress=False):
-            # During a stop, every worker updates the same in-memory progress
-            # mapping.  Let the coordinator serialize it once after executor
-            # shutdown instead of making cancelled workers rewrite it in turn.
+            # During a force stop, cancelled workers all restore entries in
+            # the same in-memory mapping; the coordinator serializes it once
+            # after executor shutdown instead of each worker rewriting it.
+            # A graceful stop is different: in-flight chapters keep running
+            # and really complete, so their status must keep reaching disk
+            # (and the Progress Manager) through the normal throttled save.
             return progress_manager.save_parallel_worker_progress(
-                stop_requested=bool(
-                    _translation_prequeue_stop_mode(stop_callback)
+                stop_requested=(
+                    _translation_prequeue_stop_mode(stop_callback) == "force"
                 ),
                 in_progress=in_progress,
             )
