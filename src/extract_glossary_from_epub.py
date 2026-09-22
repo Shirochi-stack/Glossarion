@@ -7405,6 +7405,11 @@ def _record_minimal_pass_progress(status, context=None, **fields):
     try:
         model_name = _current_glossary_model_name({}, prefer_thread=True)
     except Exception:
+        model_name = ""
+    if not model_name and str(status or "") == "in_progress":
+        # Before the first request no thread model exists yet. The Minimal
+        # extractor builds its client from MODEL, so name that until the
+        # dispatch hook records the model a key pool actually chose.
         model_name = os.getenv("MODEL", "")
     if model_name:
         payload["model_name"] = str(model_name)
@@ -7567,8 +7572,20 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None, context=
             print("⏹️ Minimal glossary pass cancelled before it started")
             _record_minimal_pass_progress("skipped", context=context, reason="stopped")
             return []
-        with _minimal_pass_environment():
-            GlossaryManager.save_glossary(pass_dir, minimal_chapters, "")
+        def _stamp_minimal_pass_request_model():
+            # Runs on the request thread after key selection, where the
+            # actual model is known -- the same boundary chapter rows use.
+            _record_minimal_pass_progress("in_progress", context=context)
+
+        set_hook = getattr(GlossaryManager, "set_before_send_hook", None)
+        if callable(set_hook):
+            set_hook(_stamp_minimal_pass_request_model)
+        try:
+            with _minimal_pass_environment():
+                GlossaryManager.save_glossary(pass_dir, minimal_chapters, "")
+        finally:
+            if callable(set_hook):
+                set_hook(None)
     except Exception as e:
         print(f"⚠️ Minimal glossary pass failed, continuing without it: {e}")
         _record_minimal_pass_progress("failed", context=context, error=str(e)[:200])

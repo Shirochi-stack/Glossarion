@@ -600,9 +600,24 @@ def _ensure_multi_key_config_loaded():
     except Exception as e:
         print(f"[DEBUG] Failed to initialize multi-key config from file: {e}")
 
+# Optional pre-send hook installed by a caller that runs save_glossary as a
+# sub-step (the Balanced/Full "Minimal pass") and needs to know, at the moment
+# a request is dispatched, which model/key it went out on.
+_BEFORE_SEND_HOOK = None
+
+
+def set_before_send_hook(hook):
+    """Install (or clear with None) the pre-send hook used by send_with_interrupt."""
+    global _BEFORE_SEND_HOOK
+    _BEFORE_SEND_HOOK = hook if callable(hook) else None
+
+
 def send_with_interrupt(*args, **kwargs):
     """Lazy wrapper to avoid circular import"""
     from TransateKRtoEN import send_with_interrupt as _send_with_interrupt
+    hook = _BEFORE_SEND_HOOK
+    if hook is not None and kwargs.get('before_send_callback') is None:
+        kwargs['before_send_callback'] = hook
     return _send_with_interrupt(*args, **kwargs)
 
 

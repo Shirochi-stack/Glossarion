@@ -258,7 +258,7 @@ def test_gpt6_does_not_send_unsupported_thinking_toggle(monkeypatch):
     assert not client._get_openai_compatible_thinking_disabled("openai", "gpt-6-astra")
 
 
-@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6-pro"])
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6-pro"])
 def test_http_path_sends_native_gpt6_effort(monkeypatch, tmp_path, model):
     monkeypatch.setattr(api.openai, "OpenAI", lambda **kwargs: SimpleNamespace(close=lambda: None))
     monkeypatch.setenv("USE_CUSTOM_OPENAI_ENDPOINT", "0")
@@ -295,7 +295,7 @@ def test_http_path_sends_native_gpt6_effort(monkeypatch, tmp_path, model):
     assert bodies[0]["max_output_tokens"] == 128000
     assert "reasoning_effort" not in bodies[0]
     assert "max_completion_tokens" not in bodies[0]
-    if model == "gpt-6-astra":
+    if model != "gpt-6-pro":
         assert bodies[0]["reasoning"] == {"effort": "max", "summary": "auto"}
     else:
         assert bodies[0]["reasoning"] == {"effort": "max"}

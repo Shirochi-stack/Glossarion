@@ -19954,10 +19954,16 @@ class UnifiedClient:
 
     @staticmethod
     def _uses_astra_responses_api(provider: str, model: str, base_url: str) -> bool:
-        """Astra accepts max effort on public Responses, but rejects it on Chat Completions."""
+        """Route GPT-6 models (Astra, Sol, Luna, ...) on the public API to Responses.
+
+        Reasoning summaries (``reasoning.summary``) exist only on Responses, so
+        Chat Completions streams no thinking text for them, and GPT-6 rejects
+        ``max`` effort on Chat Completions while accepting it on Responses.
+        """
         return (provider == 'openai'
                 and str(base_url or '').rstrip('/') == 'https://api.openai.com/v1'
-                and bool(re.fullmatch(r'gpt-6-astra(?:-.*)?', str(model or '').split('/')[-1].lower())))
+                # -pro models keep their own Responses route (no summary request).
+                and bool(re.fullmatch(r'gpt-6(?:-(?!pro(?:$|[-_])).*)?', str(model or '').split('/')[-1].lower())))
 
     @classmethod
     def _apply_gpt6_openai_constraints(cls, params: dict, use_responses_api: bool = False):
