@@ -336,6 +336,50 @@ def _replace_organized_library_epub(out_path: str, output_dir: str,
         raise
 
 
+# Builds currently inside compile_epub(). App shutdown uses this to kill the
+# PDF and image-compression subprocesses a running build owns; the GUI has no
+# other reference to the EPUBCompiler instance.
+import threading as _threading
+import weakref as _weakref
+
+_ACTIVE_COMPILERS = _weakref.WeakSet()
+_ACTIVE_COMPILERS_LOCK = _threading.Lock()
+
+
+def active_compilers() -> list:
+    """Return the EPUBCompiler instances whose build is still running."""
+    with _ACTIVE_COMPILERS_LOCK:
+        return list(_ACTIVE_COMPILERS)
+
+
+def stop_active_compiler_subprocesses() -> int:
+    """Kill PDF and image-compression subprocesses owned by running builds.
+
+    Returns how many processes were told to stop.
+    """
+    stopped = 0
+    for compiler in active_compilers():
+        pdf_mgr = getattr(compiler, '_active_pdf_mgr', None)
+        if pdf_mgr is not None:
+            try:
+                if getattr(pdf_mgr, 'is_running', False):
+                    pdf_mgr.stop()
+                    stopped += 1
+                process = getattr(pdf_mgr, 'process', None)
+                if process is not None and process.poll() is None:
+                    process.kill()
+            except Exception:
+                pass
+        for process in list(getattr(compiler, '_active_compress_workers', None) or []):
+            try:
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    stopped += 1
+            except Exception:
+                pass
+    return stopped
+
+
 def set_stop_flag(value: bool):
     """Set the stop flag for EPUB converter"""
     global _stop_flag
@@ -9644,7 +9688,13 @@ def compile_epub(
     reset_stop_state_for_new_compilation(api_client)
     
     compiler = EPUBCompiler(base_dir, log_callback, api_client=api_client)
-    return compiler.compile()
+    with _ACTIVE_COMPILERS_LOCK:
+        _ACTIVE_COMPILERS.add(compiler)
+    try:
+        return compiler.compile()
+    finally:
+        with _ACTIVE_COMPILERS_LOCK:
+            _ACTIVE_COMPILERS.discard(compiler)
 
 
 # Legacy alias

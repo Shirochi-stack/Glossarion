@@ -15212,35 +15212,22 @@ Text to analyze:
                 except:
                     pass
             
-            # Stop PDF worker subprocess if running
-            if hasattr(self, 'epub_converter') and hasattr(self.epub_converter, '_active_pdf_mgr'):
-                def _stop_pdf_worker():
+            # Stop PDF / image-compression subprocesses owned by a running
+            # EPUB build. ``self.epub_converter`` is the GUI's launcher method,
+            # not the builder, so ask the converter module for its live builds.
+            # Only if it was ever imported: shutdown must not load it.
+            _epub_converter_module = sys.modules.get('epub_converter')
+            if _epub_converter_module is not None and hasattr(
+                _epub_converter_module, 'stop_active_compiler_subprocesses'
+            ):
+                def _stop_epub_build_workers(module=_epub_converter_module):
                     try:
-                        pdf_mgr = self.epub_converter._active_pdf_mgr
-                        if pdf_mgr and pdf_mgr.is_running:
-                            print("[CLEANUP] Stopping PDF worker subprocess...")
-                            pdf_mgr.stop()
-                            # Force kill the process if still alive
-                            if pdf_mgr.process and pdf_mgr.process.poll() is None:
-                                pdf_mgr.process.kill()
+                        stopped = module.stop_active_compiler_subprocesses()
+                        if stopped:
+                            print(f"[CLEANUP] Stopped {stopped} EPUB build subprocess(es)")
                     except Exception:
                         pass
-                _submit_shutdown_task("PDF worker", _stop_pdf_worker)
-
-            # Stop compression worker subprocesses if running
-            if hasattr(self, 'epub_converter') and hasattr(self.epub_converter, '_active_compress_workers'):
-                def _stop_compression_workers():
-                    try:
-                        for p in (self.epub_converter._active_compress_workers or []):
-                            if p and p.poll() is None:
-                                try:
-                                    p.kill()
-                                except Exception:
-                                    pass
-                        print("[CLEANUP] Compression workers killed")
-                    except Exception:
-                        pass
-                _submit_shutdown_task("compression workers", _stop_compression_workers)
+                _submit_shutdown_task("EPUB build workers", _stop_epub_build_workers)
             
             # Set any stop flags that might exist
             if hasattr(self, 'stop_flag'):
