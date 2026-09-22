@@ -19217,14 +19217,15 @@ Recent translations to summarize:
             return
 
         # --- Strategy 1: Try loading existing Claude Code credentials ---
+        # An explicit Login click ends the post-logout block on re-importing.
         from authcd_auth import import_claude_code_login
-        if not getattr(store, '_cleared', False):
-            creds = import_claude_code_login(store)
-            if creds:
-                self._refresh_auth_account_arrows()
-                self.append_log(f"\u2705 Claude{acct_suffix}: Loaded credentials from Claude Code")
-                self._log_authcd_account_email(store, acct_suffix)
-                return
+        store.clear_logout_flag()
+        creds = import_claude_code_login(store)
+        if creds:
+            self._refresh_auth_account_arrows()
+            self.append_log(f"\u2705 Claude{acct_suffix}: Loaded credentials from Claude Code")
+            self._log_authcd_account_email(store, acct_suffix)
+            return
 
         # --- Strategy 2: automatic browser sign-in (no code to paste) ---
         # Glossarion runs the same localhost OAuth flow as `claude auth login`

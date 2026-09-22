@@ -982,6 +982,11 @@ class AuthCDTokenStore:
                 logger.warning("Failed to remove token file: %s", exc)
         self._fire_change_callbacks()
 
+    def clear_logout_flag(self):
+        """Allow the Claude Code fallback again after an explicit logout (user asked to log in)."""
+        with self._lock:
+            self._cleared = False
+
     def _is_token_expired(self, tokens: Dict) -> bool:
         expires_at = tokens.get("expires_at", 0)
         return time.time() >= (expires_at - TOKEN_REFRESH_MARGIN_SECONDS)
