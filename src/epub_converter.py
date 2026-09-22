@@ -2018,17 +2018,18 @@ class EPUBCompiler:
             print(message)
     
     def is_stopped(self) -> bool:
-        """Check if stop has been requested"""
-        # Check both the global flag and the callback
+        """Check every stop signal that can cancel an EPUB build.
+
+        The converter's own flag is set only by the EPUB Converter button.
+        When the build runs as the last phase of a translation, the user stops
+        it with the translation Stop button, which raises GRACEFUL_STOP (or
+        TRANSLATION_CANCELLED and the translator's flag on a force stop).
+        compile_epub() clears all of these before each build, so a stale flag
+        from an earlier run cannot abort a new one.
+        """
         if is_stop_requested():
             return True
         if self.stop_callback and self.stop_callback():
-            return True
-        return False
-
-    def _translation_stop_requested(self) -> bool:
-        """Check every stop signal that can cancel metadata translation."""
-        if self.is_stopped():
             return True
         if any(
             os.environ.get(name) == '1'
@@ -2052,6 +2053,10 @@ class EPUBCompiler:
         except Exception:
             pass
         return False
+
+    def _translation_stop_requested(self) -> bool:
+        """Check every stop signal that can cancel metadata translation."""
+        return self.is_stopped()
             
     def compile(self):
         """Main compilation method"""
