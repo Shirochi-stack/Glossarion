@@ -15,6 +15,7 @@ Flow:
   6. Store tokens locally (~/.glossarion/authcd_tokens.json)
 """
 import os
+import sys
 import json
 import time
 import hashlib
@@ -79,6 +80,15 @@ _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authcd_tokens.json")
 # Claude Code credential paths (for parasitic fallback)
 _CLAUDE_CODE_CREDS = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json")
 
+# Glossarion runs `claude auth login` against its own Claude Code config
+# directory. The user's ~/.claude/settings.json can carry an "env" block
+# (e.g. ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL for a proxy) that Claude
+# Code applies to every run; its post-login validation then rejects the new
+# OAuth login and exits without keeping it. A fresh config dir has no such
+# settings, and there the CLI writes a plain .credentials.json we can read.
+GLOSSARION_CLAUDE_CONFIG_DIR = os.path.join(_DEFAULT_TOKEN_DIR, "claude-code")
+_GLOSSARION_CLAUDE_CODE_CREDS = os.path.join(GLOSSARION_CLAUDE_CONFIG_DIR, ".credentials.json")
+
 
 # ===========================================================================
 # PKCE helpers
@@ -111,22 +121,59 @@ def build_auth_url(code_challenge: str, state: str) -> str:
 # Token exchange / refresh
 # ===========================================================================
 
-def exchange_code_for_tokens(auth_code: str, code_verifier: str) -> Dict:
+# Claude Code posts to the OAuth token endpoint through axios with only a JSON
+# content type, so the request carries axios's default User-Agent and Accept.
+# The Messages-API identity headers (claude-code UA, anthropic-beta, x-app)
+# are for inference calls only; on the token endpoint they drew HTTP 429
+# "Rate limited" while a plain request was answered normally.
+_TOKEN_ENDPOINT_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/plain, */*",
+    "User-Agent": "axios/1.15.2",
+}
+_TOKEN_RATE_LIMIT_WAITS = (5, 15, 30, 60)
+
+
+def _post_token_endpoint(payload: Dict) -> "requests.Response":
+    """POST to the token endpoint, waiting out HTTP 429 (a 429 does not use up the code)."""
+    resp = None
+    for attempt, default_wait in enumerate((0,) + _TOKEN_RATE_LIMIT_WAITS):
+        if attempt:
+            wait = default_wait
+            try:
+                retry_after = float(resp.headers.get("Retry-After", ""))
+                if 0 < retry_after <= 120:
+                    wait = retry_after
+            except (TypeError, ValueError):
+                pass
+            logger.warning("AuthCD token endpoint rate limited; retrying in %.0fs", wait)
+            print(f"⏳ AuthCD: Anthropic rate-limited the sign-in; retrying in {wait:.0f}s…")
+            deadline = time.time() + wait
+            while time.time() < deadline:
+                if is_cancelled():
+                    raise RuntimeError("AuthCD: Login cancelled.")
+                time.sleep(0.2)
+        resp = requests.post(CLAUDE_TOKEN_URL, json=payload, headers=_TOKEN_ENDPOINT_HEADERS, timeout=30)
+        if resp.status_code != 429:
+            break
+    return resp
+
+
+def exchange_code_for_tokens(auth_code: str, code_verifier: str,
+                             redirect_uri: Optional[str] = None,
+                             state: Optional[str] = None) -> Dict:
     """Exchange authorization code for access + refresh tokens."""
     payload = {
         "grant_type": "authorization_code",
-        "client_id": CLAUDE_CLIENT_ID,
         "code": auth_code,
-        "redirect_uri": CLAUDE_REDIRECT_URI,
+        "redirect_uri": redirect_uri or CLAUDE_REDIRECT_URI,
+        "client_id": CLAUDE_CLIENT_ID,
         "code_verifier": code_verifier,
     }
+    if state:
+        payload["state"] = state
     logger.info("AuthCD token exchange")
-    _headers = {
-        "User-Agent": _CLAUDE_CODE_USER_AGENT,
-        "anthropic-beta": _CLAUDE_CODE_BETA_FLAGS,
-        "x-app": "cli",
-    }
-    resp = requests.post(CLAUDE_TOKEN_URL, json=payload, headers=_headers, timeout=30)
+    resp = _post_token_endpoint(payload)
     if resp.status_code >= 400:
         try:
             err_body = resp.json()
@@ -145,19 +192,160 @@ def refresh_access_token(refresh_token: str) -> Dict:
     """Use a refresh token to obtain a new access token."""
     payload = {
         "grant_type": "refresh_token",
-        "client_id": CLAUDE_CLIENT_ID,
         "refresh_token": refresh_token,
+        "client_id": CLAUDE_CLIENT_ID,
+        # Claude Code sends the scope list it signed in with.
+        "scope": " ".join(s for s in CLAUDE_CODE_LOGIN_SCOPES.split() if s != "org:create_api_key"),
     }
-    _headers = {
-        "User-Agent": _CLAUDE_CODE_USER_AGENT,
-        "anthropic-beta": _CLAUDE_CODE_BETA_FLAGS,
-        "x-app": "cli",
-    }
-    resp = requests.post(CLAUDE_TOKEN_URL, json=payload, headers=_headers, timeout=30)
+    resp = _post_token_endpoint(payload)
+    if resp.status_code == 400 and "invalid_scope" in (resp.text or ""):
+        # A token from an older sign-in may carry fewer scopes; Claude Code
+        # retries such a refresh without the scope list too.
+        payload.pop("scope", None)
+        resp = _post_token_endpoint(payload)
     resp.raise_for_status()
     data = resp.json()
     data["expires_at"] = time.time() + data.get("expires_in", 3600)
     return data
+
+
+# ===========================================================================
+# Automatic browser login (what `claude auth login` does, done in-process)
+# ===========================================================================
+# Claude Code's automatic login opens the browser with a localhost redirect,
+# catches the code on 127.0.0.1 and exchanges it. Running that here means the
+# token request goes through Python/certifi. The native Claude Code CLI on
+# Windows cannot verify platform.claude.com's current Let's Encrypt chain
+# (YE1 -> Root YE -> ISRG Root X2) and fails with UNABLE_TO_GET_ISSUER_CERT,
+# whatever NODE_EXTRA_CA_CERTS says.
+CLAUDE_AI_AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize"
+CLAUDE_AI_SUCCESS_URL = "https://platform.claude.com/oauth/code/success?app=claude-code"
+# Opened before the authorize page so the browser drops its current claude.ai
+# session and the sign-in lets the user pick the account (claude.com/logout
+# redirects here).
+CLAUDE_AI_LOGOUT_URL = "https://claude.ai/logout"
+CLAUDE_AI_SIGN_OUT_WAIT_SECONDS = 4.0
+CLAUDE_CODE_LOGIN_SCOPES = (
+    "org:create_api_key user:profile user:inference user:sessions:claude_code "
+    "user:mcp_servers user:file_upload user:plugins"
+)
+
+
+def _bind_oauth_callback_server(handler_cls):
+    """Bind 127.0.0.1 on a free port in Claude Code's callback port range."""
+    low, high = (39152, 49151) if os.name == "nt" else (49152, 65535)
+    for _ in range(50):
+        port = secrets.randbelow(high - low + 1) + low
+        try:
+            return HTTPServer(("127.0.0.1", port), handler_cls)
+        except OSError:
+            continue
+    return HTTPServer(("127.0.0.1", 0), handler_cls)
+
+
+def run_automatic_oauth_login(timeout: int = 180, open_browser=None,
+                              sign_out_first: bool = True,
+                              sign_out_wait: float = CLAUDE_AI_SIGN_OUT_WAIT_SECONDS) -> Dict:
+    """Sign in through the browser and return tokens, with no pasting.
+
+    ``open_browser(url)`` defaults to ``webbrowser.open``. With
+    ``sign_out_first`` the browser is first signed out of claude.ai, so the
+    authorize page asks for an account instead of reusing the one already
+    signed in. The browser then redirects to http://localhost:<port>/callback,
+    which this function answers, and is sent on to Anthropic's success page.
+    """
+    code_verifier, code_challenge = generate_pkce()
+    state = secrets.token_urlsafe(32)
+    result: Dict[str, Optional[str]] = {"code": None, "error": None}
+    received = threading.Event()
+
+    class _CallbackHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            if parsed.path != "/callback":
+                self.send_response(404)
+                self.end_headers()
+                return
+            query = parse_qs(parsed.query)
+            if query.get("state", [None])[0] != state:
+                result["error"] = "state mismatch in the sign-in callback"
+            elif query.get("error"):
+                result["error"] = query.get("error_description", query["error"])[0]
+            elif query.get("code"):
+                result["code"] = query["code"][0]
+            else:
+                result["error"] = "no authorization code in the sign-in callback"
+            if result["code"]:
+                self.send_response(302)
+                self.send_header("Location", CLAUDE_AI_SUCCESS_URL)
+                self.end_headers()
+            else:
+                body = f"Claude sign-in failed: {result['error']}".encode("utf-8")
+                self.send_response(400)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            received.set()
+
+    server = _bind_oauth_callback_server(_CallbackHandler)
+    server.timeout = 0.5
+    port = server.server_address[1]
+    redirect_uri = f"http://localhost:{port}/callback"
+    params = {
+        "code": "true",
+        "client_id": CLAUDE_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "scope": CLAUDE_CODE_LOGIN_SCOPES,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+    }
+    auth_url = f"{CLAUDE_AI_AUTHORIZE_URL}?{urlencode(params)}"
+    open_url = open_browser or webbrowser.open
+    try:
+        if sign_out_first:
+            open_url(CLAUDE_AI_LOGOUT_URL)
+            wait_until = time.time() + max(0.0, float(sign_out_wait))
+            while time.time() < wait_until:
+                if is_cancelled():
+                    raise RuntimeError("AuthCD: Login cancelled.")
+                time.sleep(0.1)
+        open_url(auth_url)
+        deadline = time.time() + timeout
+        while not received.is_set():
+            if is_cancelled():
+                raise RuntimeError("AuthCD: Login cancelled.")
+            if time.time() > deadline:
+                raise TimeoutError("AuthCD: Login timed out waiting for the browser sign-in.")
+            server.handle_request()
+    finally:
+        server.server_close()
+    if not result["code"]:
+        raise RuntimeError(f"AuthCD: {result['error']}")
+    tokens = exchange_code_for_tokens(
+        result["code"], code_verifier, redirect_uri=redirect_uri, state=state,
+    )
+    tokens["_source"] = "glossarion_oauth"
+    return tokens
+
+
+def login_automatically(store, claude_bin: Optional[str] = None, timeout: int = 180,
+                        sign_out_first: bool = True) -> Dict:
+    """Browser sign-in for the authcd store; the Claude Code CLI is only a fallback.
+
+    The browser is signed out of claude.ai first so the account can be chosen.
+    """
+    # No Claude Code CLI fallback: it starts a second browser sign-in, and
+    # on Windows its own TLS check fails against platform.claude.com.
+    del claude_bin
+    tokens = run_automatic_oauth_login(timeout=timeout, sign_out_first=sign_out_first)
+    store.save_tokens(tokens)
+    return tokens
 
 
 # ===========================================================================
@@ -177,7 +365,6 @@ def start_oauth_flow() -> Dict:
 
     print(f"🔐 Opening browser for Claude login…")
     print(f"   If the browser doesn't open, visit:\n   {auth_url}")
-    print(f"   [DEBUG] code_verifier={code_verifier}")  # TEMP – remove after debugging
     webbrowser.open(auth_url)
 
     return {
@@ -224,13 +411,321 @@ def run_oauth_flow(timeout: int = 300) -> Dict:
 # Claude Code credentials parasitic loader
 # ===========================================================================
 
-def _load_claude_code_credentials() -> Optional[Dict]:
-    """Try to load existing credentials from Claude Code's local store."""
+# Claude Code on Windows (Bun-based builds, 2.1.x) keeps the login in Windows
+# Credential Manager instead of ~/.claude/.credentials.json. Service
+# "Claude Code-credentials" (plus "-<hash>" when CLAUDE_CONFIG_DIR is set),
+# account "claude-code-user"; values over 2400 bytes are split into base64
+# chunks "claude-code-user#0..n" with a {"n","l"} record at "#m".
+_CLAUDE_CODE_CREDMAN_SERVICE = "Claude Code-credentials"
+_CLAUDE_CODE_CREDMAN_ACCOUNT = "claude-code-user"
+
+
+def _credman_decode(blob: bytes) -> Optional[str]:
+    if not blob:
+        return None
+    if len(blob) >= 2 and blob[1:2] == b"\x00":
+        try:
+            return blob.decode("utf-16-le")
+        except UnicodeDecodeError:
+            pass
     try:
-        if not os.path.isfile(_CLAUDE_CODE_CREDS):
+        return blob.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _read_windows_credman_entries(service_substring: str) -> Dict[str, str]:
+    """Return {entry name: value} for generic credentials of one service.
+
+    The entry name is the account part ("claude-code-user", "claude-code-user#m",
+    ...). Works for either target layout ("service/account" or a bare service
+    target with the account in UserName). ``service_substring`` must match the
+    whole service name for callers that need one exact store; see
+    :func:`_claude_code_credman_service`.
+    """
+    if os.name != "nt":
+        return {}
+    import ctypes
+    from ctypes import wintypes
+
+    class CREDENTIALW(ctypes.Structure):
+        _fields_ = [
+            ("Flags", wintypes.DWORD), ("Type", wintypes.DWORD),
+            ("TargetName", wintypes.LPWSTR), ("Comment", wintypes.LPWSTR),
+            ("LastWritten", wintypes.FILETIME),
+            ("CredentialBlobSize", wintypes.DWORD),
+            ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+            ("Persist", wintypes.DWORD), ("AttributeCount", wintypes.DWORD),
+            ("Attributes", ctypes.c_void_p), ("TargetAlias", wintypes.LPWSTR),
+            ("UserName", wintypes.LPWSTR),
+        ]
+
+    entries: Dict[str, str] = {}
+    try:
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        count = wintypes.DWORD()
+        creds = ctypes.POINTER(ctypes.POINTER(CREDENTIALW))()
+        # CredEnumerateW filters only by "prefix*", and the service name can
+        # carry a config-dir hash suffix, so enumerate and match here.
+        if not advapi.CredEnumerateW(None, 0, ctypes.byref(count), ctypes.byref(creds)):
+            return {}
+        try:
+            for i in range(count.value):
+                cred = creds[i].contents
+                target = cred.TargetName or ""
+                if service_substring not in target:
+                    continue
+                user = cred.UserName or ""
+                if user.startswith(_CLAUDE_CODE_CREDMAN_ACCOUNT):
+                    name = user
+                else:
+                    name = target.rsplit("/", 1)[-1] if "/" in target else user
+                if not name.startswith(_CLAUDE_CODE_CREDMAN_ACCOUNT):
+                    continue
+                size = int(cred.CredentialBlobSize or 0)
+                blob = bytes(cred.CredentialBlob[:size]) if size else b""
+                value = _credman_decode(blob)
+                if value is not None:
+                    entries[name] = value
+        finally:
+            advapi.CredFree(creds)
+    except Exception as exc:
+        logger.debug("Credential Manager read failed: %s", exc)
+    return entries
+
+
+def _claude_code_credman_service(config_dir: Optional[str] = None) -> str:
+    """Service name Claude Code uses for one config dir (hash only for a custom dir)."""
+    if not config_dir:
+        return _CLAUDE_CODE_CREDMAN_SERVICE
+    import unicodedata
+    digest = hashlib.sha256(
+        unicodedata.normalize("NFC", config_dir).encode("utf-8")
+    ).hexdigest()[:8]
+    return f"{_CLAUDE_CODE_CREDMAN_SERVICE}-{digest}"
+
+
+def _decode_keychain_value(value: str) -> Optional[str]:
+    """`security -w` prints binary items as hex; JSON items as-is."""
+    value = (value or "").strip()
+    if value and len(value) % 2 == 0 and all(c in "0123456789abcdefABCDEF" for c in value):
+        try:
+            decoded = bytes.fromhex(value).decode("utf-8")
+            if decoded.lstrip().startswith("{"):
+                return decoded
+        except (ValueError, UnicodeDecodeError):
+            pass
+    return value or None
+
+
+def _load_claude_code_keychain_json(config_dir: Optional[str] = None) -> Optional[Dict]:
+    """Claude Code's stored credential JSON from the macOS Keychain."""
+    if sys.platform != "darwin":
+        return None
+    import getpass
+    import subprocess
+    service = _claude_code_credman_service(config_dir)
+    accounts = [_CLAUDE_CODE_CREDMAN_ACCOUNT]
+    try:
+        accounts.append(getpass.getuser())  # older Claude Code builds
+    except Exception:
+        pass
+    for account in accounts:
+        try:
+            result = subprocess.run(
+                ["security", "find-generic-password", "-a", account, "-w", "-s", service],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception:
+            continue
+        if result.returncode != 0:
+            continue
+        text = _decode_keychain_value(result.stdout)
+        if not text:
+            continue
+        try:
+            data = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def _load_claude_code_credman_json(config_dir: Optional[str] = None) -> Optional[Dict]:
+    """Claude Code's stored credential JSON from Windows Credential Manager."""
+    service = _claude_code_credman_service(config_dir)
+    entries = _read_windows_credman_entries(service + "/") or (
+        _read_windows_credman_entries(service) if config_dir else {}
+    )
+    if not entries and not config_dir:
+        entries = _read_windows_credman_entries(service)
+    if not entries:
+        return None
+    account = _CLAUDE_CODE_CREDMAN_ACCOUNT
+    text = None
+    meta_raw = entries.get(f"{account}#m")
+    if meta_raw:
+        try:
+            meta = json.loads(meta_raw)
+            parts = [entries.get(f"{account}#{i}") for i in range(int(meta["n"]))]
+            joined = "".join(parts) if all(p is not None for p in parts) else ""
+            if joined and len(joined) == int(meta["l"]):
+                text = base64.b64decode(joined).decode("utf-8")
+        except Exception as exc:
+            logger.debug("Chunked Credential Manager entry unreadable: %s", exc)
+    if text is None:
+        text = entries.get(account)
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def claude_cli_environment() -> Dict[str, str]:
+    """Environment for running the Claude Code CLI from Glossarion.
+
+    Glossarion sets ANTHROPIC_BASE_URL (often to an empty string or a
+    third-party gateway) and ANTHROPIC_API_KEY for its own API routes. The
+    CLI would inherit them and use them during `claude auth login`, which
+    breaks the OAuth login even though the browser step succeeds.
+    """
+    env = dict(os.environ)
+    for name in list(env):
+        if name.upper().startswith("ANTHROPIC_"):
+            env.pop(name, None)
+    env.pop("CLAUDE_SECURESTORAGE_CONFIG_DIR", None)
+    env.pop("CLAUDE_CODE_FORCE_WINDOWS_CREDMAN", None)
+    # platform.claude.com (the OAuth token endpoint) is served from Let's
+    # Encrypt's newer hierarchy. A Windows root store that has not fetched
+    # that root yet fails the CLI's token exchange with
+    # UNABLE_TO_GET_ISSUER_CERT after the browser step. certifi's bundle is
+    # added (NODE_EXTRA_CA_CERTS extends, never replaces, the trusted roots).
+    if not env.get("NODE_EXTRA_CA_CERTS"):
+        try:
+            import certifi
+            bundle = certifi.where()
+            if bundle and os.path.isfile(bundle):
+                env["NODE_EXTRA_CA_CERTS"] = bundle
+        except Exception:
+            pass
+    try:
+        os.makedirs(GLOSSARION_CLAUDE_CONFIG_DIR, exist_ok=True)
+    except OSError:
+        pass
+    env["CLAUDE_CONFIG_DIR"] = GLOSSARION_CLAUDE_CONFIG_DIR
+    return env
+
+
+def run_claude_cli_login(claude_bin: str, timeout: int = 180) -> Tuple[Optional[int], str]:
+    """Run `claude auth login` automatically; return (exit code, output tail).
+
+    No console window: the CLI opens the browser and receives the OAuth
+    callback on its own. Its output goes to a log file so a failure can be
+    reported with the CLI's own message instead of a vanished window.
+    """
+    import subprocess
+    log_path = os.path.join(GLOSSARION_CLAUDE_CONFIG_DIR, "last_login.log")
+    env = claude_cli_environment()
+    returncode = None
+    with open(log_path, "w", encoding="utf-8", errors="replace") as log_file:
+        proc = subprocess.Popen(
+            [claude_bin, "auth", "login"],
+            stdin=subprocess.PIPE, stdout=log_file, stderr=subprocess.STDOUT,
+            env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        try:
+            returncode = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+            raise
+        finally:
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except Exception:
+                pass
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as log_file:
+            lines = [line.rstrip() for line in log_file if line.strip()]
+    except OSError:
+        lines = []
+    # The authorize URL is long and carries the PKCE challenge; keep it out.
+    lines = [line for line in lines if "oauth/authorize" not in line]
+    return returncode, "\n".join(lines[-8:])
+
+
+def claude_cli_auth_status(claude_bin: str) -> Optional[Dict]:
+    """`claude auth status` as a dict, or None when it cannot be read."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            [claude_bin, "auth", "status"], capture_output=True, text=True,
+            timeout=30, env=claude_cli_environment(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        data = json.loads((result.stdout or "").strip() or "null")
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def claude_login_failure_message(claude_bin: Optional[str], cli_output: str = "") -> str:
+    """Explain a login that finished without usable credentials."""
+    status = claude_cli_auth_status(claude_bin) if claude_bin else None
+    detail = f"\n\nClaude Code said:\n{cli_output}" if cli_output else ""
+    if status is not None and not status.get("loggedIn"):
+        return (
+            "Claude Code did not keep the login after the browser step."
+            + detail
+        )
+    if status is not None and status.get("loggedIn"):
+        return (
+            "Claude Code reports it is logged in "
+            f"(method: {status.get('authMethod')}), but its stored credentials "
+            "could not be read." + detail
+        )
+    return "Claude login completed but no credentials found." + detail
+
+
+def _load_claude_code_credentials() -> Optional[Dict]:
+    """Try to load existing credentials from Claude Code's local store.
+
+    Checks ~/.claude/.credentials.json first, then Windows Credential
+    Manager, where current Claude Code builds keep them on Windows.
+    """
+    try:
+        def _has_token(value):
+            return isinstance(value, dict) and bool(
+                value.get("claudeAiOauth") or value.get("accessToken") or value.get("access_token")
+            )
+
+        data = None
+        # Glossarion's own login (isolated config dir) first, then the
+        # user's regular Claude Code login.
+        for path, config_dir in (
+            (_GLOSSARION_CLAUDE_CODE_CREDS, GLOSSARION_CLAUDE_CONFIG_DIR),
+            (_CLAUDE_CODE_CREDS, None),
+        ):
+            source_path = None
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                source_path = path
+            if not _has_token(data):
+                source_path = None
+                data = (
+                    _load_claude_code_credman_json(config_dir)
+                    or _load_claude_code_keychain_json(config_dir)
+                )
+            if _has_token(data):
+                break
+        if not _has_token(data):
             return None
-        with open(_CLAUDE_CODE_CREDS, "r", encoding="utf-8") as f:
-            data = json.load(f)
         # Claude Code stores as { claudeAiOauth: { accessToken, refreshToken, expiresAt } }
         oauth = data.get("claudeAiOauth") or data
         access = oauth.get("accessToken") or oauth.get("access_token")
@@ -241,6 +736,9 @@ def _load_claude_code_credentials() -> Optional[Dict]:
         expires_at = 0
         if isinstance(expires_at_str, (int, float)):
             expires_at = float(expires_at_str)
+            if expires_at > 1e12:
+                # Claude Code records expiresAt in epoch milliseconds.
+                expires_at /= 1000.0
         elif isinstance(expires_at_str, str):
             try:
                 from datetime import datetime
@@ -248,15 +746,42 @@ def _load_claude_code_credentials() -> Optional[Dict]:
                 expires_at = dt.timestamp()
             except Exception:
                 expires_at = time.time() + 3600
-        return {
+        creds = {
             "access_token": access,
             "refresh_token": refresh,
             "expires_at": expires_at,
             "_source": "claude_code",
         }
+        if source_path == _GLOSSARION_CLAUDE_CODE_CREDS:
+            # Plaintext handoff file from Glossarion's own login; see
+            # import_claude_code_login(), which removes it once stored.
+            creds["_plaintext_handoff"] = source_path
+        return creds
     except Exception as exc:
         logger.debug("Failed to load Claude Code credentials: %s", exc)
         return None
+
+
+def import_claude_code_login(store) -> Optional[Dict]:
+    """Copy Claude Code's login into the encrypted authcd store.
+
+    The token then lives in Glossarion's token_encryption store (DPAPI on
+    Windows, Keychain-held key on macOS, 0600 key file on Linux). The
+    plaintext .credentials.json that the CLI wrote into Glossarion's own
+    config dir is removed once the encrypted copy is saved; the user's
+    personal ~/.claude credentials are never touched.
+    """
+    creds = _load_claude_code_credentials()
+    if not creds or not creds.get("access_token"):
+        return None
+    handoff = creds.pop("_plaintext_handoff", None)
+    store.save_tokens(creds)
+    if handoff and os.path.isfile(store._token_file) and os.path.abspath(handoff) == os.path.abspath(_GLOSSARION_CLAUDE_CODE_CREDS):
+        try:
+            os.remove(handoff)
+        except OSError as exc:
+            logger.warning("AuthCD: could not remove plaintext login handoff file: %s", exc)
+    return creds
 
 
 # ===========================================================================
@@ -446,49 +971,17 @@ class AuthCDTokenStore:
                     "You can obtain these by running the OAuth flow locally first."
                 )
 
-            # Use Claude Code CLI for login (opens browser automatically)
             import shutil, subprocess
+            # In-app browser sign-in; the Claude Code CLI, when installed, is
+            # only a fallback.
             claude_bin = shutil.which("claude")
-            if not claude_bin:
-                raise RuntimeError(
-                    "AuthCD: Claude Code CLI is required for login.\n"
-                    "Install it with: npm install -g @anthropic-ai/claude-code\n"
-                    "Then click the Claude Login button or restart translation."
-                )
 
             print("\U0001f504 AuthCD: No valid token found \u2013 opening browser for login\u2026")
             try:
-                if os.name == 'nt':
-                    proc = subprocess.Popen(
-                        [claude_bin, "auth", "login"],
-                        creationflags=subprocess.CREATE_NEW_CONSOLE,
-                    )
-                else:
-                    proc = subprocess.Popen([claude_bin, "auth", "login"])
-                proc.wait(timeout=180)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+                tokens = login_automatically(self, claude_bin=claude_bin)
+            except (TimeoutError, subprocess.TimeoutExpired):
                 raise RuntimeError("AuthCD: Login timed out (3 min).")
-            except Exception as exc:
-                raise RuntimeError(f"AuthCD: Failed to run 'claude auth login': {exc}")
-
-            # Load the newly created credentials
-            import time as _time
-            cred_path = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json")
-            for _ in range(10):
-                _time.sleep(1)
-                if os.path.isfile(cred_path):
-                    break
-
-            cc_creds = _load_claude_code_credentials()
-            if cc_creds and cc_creds.get("access_token"):
-                self.save_tokens(cc_creds)
-                return cc_creds["access_token"]
-
-            raise RuntimeError(
-                "AuthCD: Login completed but no credentials found.\n"
-                "Try running 'claude auth login' manually in a terminal."
-            )
+            return tokens["access_token"]
 
     @property
     def has_tokens(self) -> bool:

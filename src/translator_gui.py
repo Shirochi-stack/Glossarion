@@ -19193,16 +19193,20 @@ Recent translations to summarize:
                 _claude = _shutil.which("claude")
                 if _claude:
                     try:
+                        from authcd_auth import claude_cli_environment
                         _sp.run(
                             [_claude, "auth", "logout"],
                             timeout=10, capture_output=True,
                             creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
+                            env=claude_cli_environment(),
                         )
                     except Exception:
                         pass
-                # Fallback: also remove credentials file directly
+                # Fallback: also remove Glossarion's own Claude Code login file
+                # (never the user's personal ~/.claude credentials).
                 import os as _os
-                _cc_creds = _os.path.join(_os.path.expanduser("~"), ".claude", ".credentials.json")
+                from authcd_auth import GLOSSARION_CLAUDE_CONFIG_DIR as _gl_cc_dir
+                _cc_creds = _os.path.join(_gl_cc_dir, ".credentials.json")
                 if _os.path.isfile(_cc_creds):
                     try:
                         _os.remove(_cc_creds)
@@ -19213,88 +19217,34 @@ Recent translations to summarize:
             return
 
         # --- Strategy 1: Try loading existing Claude Code credentials ---
-        from authcd_auth import _load_claude_code_credentials
+        from authcd_auth import import_claude_code_login
         if not getattr(store, '_cleared', False):
-            creds = _load_claude_code_credentials()
+            creds = import_claude_code_login(store)
             if creds:
-                store.save_tokens(creds)
                 self._refresh_auth_account_arrows()
                 self.append_log(f"\u2705 Claude{acct_suffix}: Loaded credentials from Claude Code")
                 return
 
-        # --- Strategy 2: Run 'claude auth login' via CLI in a visible terminal ---
+        # --- Strategy 2: automatic browser sign-in (no code to paste) ---
+        # Glossarion runs the same localhost OAuth flow as `claude auth login`
+        # itself; the Claude Code CLI is only a fallback when installed.
         import shutil
         claude_bin = shutil.which("claude")
-        if not claude_bin:
-            dlg = QDialog(self)
-            dlg.setWindowTitle("Claude Code Required")
-            dlg.setMinimumWidth(430)
-            lay = QVBoxLayout(dlg)
-            lay.addWidget(QLabel("Claude Code CLI is required for login.\nInstall it with:"))
-            cmd_edit = QLineEdit("npm install -g @anthropic-ai/claude-code")
-            cmd_edit.setReadOnly(True)
-            cmd_edit.selectAll()
-            lay.addWidget(cmd_edit)
-            lay.addWidget(QLabel("After installing, click this button again."))
-            btn_row = QHBoxLayout()
-            copy_btn = QPushButton("Copy Command")
-            copy_btn.clicked.connect(lambda: (
-                QApplication.clipboard().setText(cmd_edit.text()),
-                copy_btn.setText("\u2705 Copied!"),
-            ))
-            ok_btn = QPushButton("OK")
-            ok_btn.clicked.connect(dlg.accept)
-            btn_row.addWidget(copy_btn)
-            btn_row.addWidget(ok_btn)
-            lay.addLayout(btn_row)
-            dlg.exec()
-            return
 
-        self.authcd_login_btn.setText("\u23f3 Logging in\u2026")
+        self.authcd_login_btn.setText("⏳ Logging in…")
         self.authcd_login_btn.setEnabled(False)
-        self.append_log(f"🔐 Claude{acct_suffix}: Opening browser for Claude login\u2026")
+        self.append_log(f"🔐 Claude{acct_suffix}: Opening browser for Claude login…")
 
         def _do_claude_login():
-            import subprocess, time as _time, os
             try:
-                # Run 'claude auth login' in a VISIBLE console window
-                if os.name == 'nt':
-                    proc = subprocess.Popen(
-                        [claude_bin, "auth", "login"],
-                        creationflags=subprocess.CREATE_NEW_CONSOLE,
-                    )
-                else:
-                    proc = subprocess.Popen(
-                        [claude_bin, "auth", "login"],
-                    )
-                proc.wait(timeout=180)
-
-                # Poll for credentials file
-                cred_path = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json")
-                for _ in range(10):
-                    _time.sleep(1)
-                    if os.path.isfile(cred_path):
-                        break
-
-                creds = _load_claude_code_credentials()
-                if creds:
-                    store.save_tokens(creds)
-                    QMetaObject.invokeMethod(
-                        self, "_authcd_login_finished",
-                        Qt.QueuedConnection
-                    )
-                else:
-                    self._authcd_login_error = (
-                        "Claude login completed but no credentials found.\n"
-                        "Try running 'claude auth login' manually in a terminal."
-                    )
-                    QMetaObject.invokeMethod(
-                        self, "_authcd_login_failed",
-                        Qt.QueuedConnection
-                    )
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                self._authcd_login_error = "Login timed out (3 min). Try 'claude auth login' in a terminal."
+                from authcd_auth import login_automatically
+                login_automatically(store, claude_bin=claude_bin)
+                QMetaObject.invokeMethod(
+                    self, "_authcd_login_finished",
+                    Qt.QueuedConnection
+                )
+            except TimeoutError:
+                self._authcd_login_error = "Login timed out (3 min) waiting for the browser sign-in."
                 QMetaObject.invokeMethod(
                     self, "_authcd_login_failed",
                     Qt.QueuedConnection
