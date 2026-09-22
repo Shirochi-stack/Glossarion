@@ -484,8 +484,11 @@ def _progress_entry_has_raw_foreign_text_qa(entry):
     while isinstance(current, dict) and id(current) not in seen:
         seen.add(id(current))
         values = []
+        # chunk_qa_issues_found mirrors chunk-level failures on a completed
+        # parent as {chunk index: [issues]}; the dict branch below flattens it.
         for key in (
-            'qa_issues_found', 'qa_issues', 'failure_reason', 'error_message'
+            'qa_issues_found', 'qa_issues', 'failure_reason', 'error_message',
+            'chunk_qa_issues_found',
         ):
             value = current.get(key)
             if isinstance(value, dict):
@@ -18918,7 +18921,12 @@ class RetranslationMixin:
         data = data if isinstance(data, dict) else {}
         display_info = display_info if isinstance(display_info, dict) else {}
         chapters = data.get('prog', {}).get('chapters', {})
-        progress_key = display_info.get('progress_key')
+        # A chunk row resolves through its parent chapter: the parent carries
+        # the output file and the chunk-level QA mirror Partial.b targets.
+        progress_key = (
+            display_info.get('progress_key')
+            or display_info.get('parent_progress_key')
+        )
         progress_entry = (
             chapters.get(progress_key)
             if progress_key and isinstance(chapters, dict)

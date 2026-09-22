@@ -171,6 +171,75 @@ def extract_marked_chunks_for_entry(html_text, chapter_key, entry=None):
     return {block["index"]: block for block in blocks}
 
 
+def _marker_pair_for_block(block):
+    marker_key = str(block.get("marker_key") or "")
+    index = _positive_int(block.get("index"))
+    total = _positive_int(block.get("total"))
+    return (
+        f"<!-- GLOSSARION_CHUNK_START key={marker_key} idx={index} total={total} -->",
+        f"<!-- GLOSSARION_CHUNK_END key={marker_key} idx={index} -->",
+    )
+
+
+def replace_marked_chunks(html_text, blocks, replacements):
+    """Return ``html_text`` with selected marker blocks' contents replaced.
+
+    ``blocks`` is an ``extract_marked_chunks``-style mapping taken from this
+    exact text and ``replacements`` maps chunk index to new inner content.
+    The markers are rebuilt from each block's own key, so a plan whose key
+    drifted from the progress hash keeps one consistent key.
+    """
+    text = str(html_text or "")
+    if not isinstance(blocks, dict) or not replacements:
+        return text
+    for index in sorted(replacements, key=_positive_int, reverse=True):
+        block = blocks.get(index)
+        if not block:
+            continue
+        start_marker, end_marker = _marker_pair_for_block(block)
+        content = str(replacements[index] or "").strip("\r\n")
+        text = (
+            text[:block["start"]]
+            + f"{start_marker}\n{content}\n{end_marker}"
+            + text[block["end"]:]
+        )
+    return text
+
+
+def find_chunk_entry_for_output(chapter_chunks, preferred_key, html_text):
+    """Locate the multi-chunk ledger behind one marked output document.
+
+    Returns ``(ledger_key, entry, blocks)``; ``entry`` is None when no
+    multi-chunk ledger applies. The preferred key (the chapter's progress
+    content hash) wins. When it no longer keys a ledger, the document's own
+    marker key identifies one, which is how a ledger survives a progress row
+    whose hash was rewritten after the chunks were saved.
+    """
+    chapter_chunks = chapter_chunks if isinstance(chapter_chunks, dict) else {}
+    text = str(html_text or "")
+    preferred_key = str(preferred_key or "")
+    entry = chapter_chunks.get(preferred_key) if preferred_key else None
+    if is_multi_chunk_entry(entry):
+        return preferred_key, entry, extract_marked_chunks_for_entry(text, preferred_key, entry)
+    if "GLOSSARION_CHUNK_START" not in text:
+        return preferred_key, None, {}
+    blocks = extract_marked_chunks_for_entry(text, None, None)
+    if not blocks:
+        return preferred_key, None, {}
+    first_block = next(iter(blocks.values()))
+    marker_key = str(first_block.get("marker_key") or "").lower()
+    marker_total = _positive_int(first_block.get("total"))
+    for key, candidate in chapter_chunks.items():
+        if not is_multi_chunk_entry(candidate):
+            continue
+        if chunk_marker_key(key).lower() != marker_key:
+            continue
+        if marker_total and _positive_int(candidate.get("total")) not in (0, marker_total):
+            continue
+        return str(key), candidate, blocks
+    return preferred_key, None, {}
+
+
 def _chunk_record(entry, chunk_index, create=False):
     if not isinstance(entry, dict):
         return None

@@ -27408,6 +27408,21 @@ Recent translations to summarize:
                 self._is_foreign_character_translation_qa_issue(issue) for issue in issues
             ):
                 return True
+            # A completed parent whose chunk ledger holds QA-failed chunks
+            # mirrors those findings as {chunk index: [issues]}.
+            chunk_issues = current.get("chunk_qa_issues_found")
+            if isinstance(chunk_issues, dict):
+                for chunk_value in chunk_issues.values():
+                    chunk_list = (
+                        chunk_value
+                        if isinstance(chunk_value, (list, tuple, set))
+                        else [chunk_value]
+                    )
+                    if any(
+                        self._is_foreign_character_translation_qa_issue(issue)
+                        for issue in chunk_list
+                    ):
+                        return True
             current = current.get("previous_progress_entry")
         return False
 
@@ -27443,16 +27458,38 @@ Recent translations to summarize:
                 if foreign_character_only and not self._entry_has_foreign_character_qa_failure(chapter_info):
                     continue
                 issues = chapter_info.get("qa_issues_found") or []
+                if isinstance(issues, str):
+                    issues = [issues]
+                elif isinstance(issues, (tuple, set)):
+                    issues = list(issues)
+                elif not isinstance(issues, list):
+                    issues = []
+                else:
+                    issues = list(issues)
+                # Chunk-level QA failures live on a completed parent as a
+                # mirror of the chunk ledger. They are refinement targets
+                # too, not chapters for the main phase to retranslate.
+                chunk_issue_map = chapter_info.get("chunk_qa_issues_found")
+                has_chunk_failures = bool(chapter_info.get("has_chunk_qa_failures")) or (
+                    isinstance(chunk_issue_map, dict) and any(chunk_issue_map.values())
+                )
+                if isinstance(chunk_issue_map, dict):
+                    for chunk_index, chunk_issues in sorted(
+                        chunk_issue_map.items(), key=lambda item: str(item[0])
+                    ):
+                        if isinstance(chunk_issues, str):
+                            chunk_issues = [chunk_issues]
+                        for chunk_issue in chunk_issues or []:
+                            label = f"chunk {chunk_index}: {chunk_issue}"
+                            if label not in issues:
+                                issues.append(label)
                 if (
                     not foreign_character_only
                     and status not in {"qa_failed", "failed"}
                     and not chapter_info.get("qa_issues")
+                    and not has_chunk_failures
                 ):
                     continue
-                if isinstance(issues, str):
-                    issues = [issues]
-                elif not isinstance(issues, list):
-                    issues = []
 
                 chapter_num = (
                     chapter_info.get("pdf_section_num")
@@ -47534,6 +47571,7 @@ Important rules:
             default_qa_settings = {'foreign_char_threshold': 0, 'excluded_characters': '', 'target_language': 'english', 'check_encoding_issues': False, 'check_repetition': True, 'check_translation_artifacts': True, 'check_glossary_leakage': True, 'min_file_length': 0, 'report_format': 'detailed', 'auto_save_report': True, 'check_word_count_ratio': True, 'check_multiple_headers': True, 'warn_name_mismatch': True, 'check_missing_html_tag': True, 'check_missing_beautifulsoup_tags': False, 'sdlxliff_tag_retention_threshold': 0.9, 'sdlxliff_tag_surplus_tolerance': 0.05, 'sdlxliff_min_source_paragraph_tags': 20, 'check_invalid_nesting': False, 'cache_enabled': True, 'cache_auto_size': False, 'cache_show_stats': False}
             default_qa_settings.update({
                 'whitelist_emoticon_patterns': False,
+                'exclude_ruby_tags': False,
                 'emoticon_patterns': list(DEFAULT_EMOTICON_PATTERNS),
                 'emoticon_patterns_are_regex': False,
             })
@@ -48258,6 +48296,7 @@ Important rules:
                 ('QA_FOREIGN_CHAR_THRESHOLD', str(qa_settings.get('foreign_char_threshold', 0))),
                 ('QA_TARGET_LANGUAGE', qa_settings.get('target_language', 'english')),
                 ('QA_WHITELIST_EMOTICON_PATTERNS', '1' if qa_settings.get('whitelist_emoticon_patterns', False) else '0'),
+                ('QA_EXCLUDE_RUBY_TAGS', '1' if qa_settings.get('exclude_ruby_tags', False) else '0'),
                 ('QA_EMOTICON_PATTERNS_JSON', json.dumps(qa_settings.get('emoticon_patterns', DEFAULT_EMOTICON_PATTERNS), ensure_ascii=False)),
                 ('QA_EMOTICON_PATTERNS_ARE_REGEX', '1' if qa_settings.get('emoticon_patterns_are_regex', False) else '0'),
                 ('QA_CHECK_ENCODING', '1' if qa_settings.get('check_encoding_issues', False) else '0'),

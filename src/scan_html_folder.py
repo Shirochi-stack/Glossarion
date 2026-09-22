@@ -61,6 +61,7 @@ from chapter_chunk_progress import (
     chunk_failure_summary,
     ensure_chunk_entry_schema,
     extract_marked_chunks_for_entry,
+    find_chunk_entry_for_output,
     is_multi_chunk_entry,
     set_chunk_qa,
 )
@@ -979,6 +980,18 @@ def _scan_should_translate_title_tags(qa_settings=None):
     return should_translate_title_tags()
 
 
+RUBY_ANNOTATION_TAGS = ("ruby", "rb", "rt", "rp", "rtc")
+
+
+def _scan_should_exclude_ruby_tags(qa_settings=None):
+    """Whether ruby annotation tags are ignored by foreign-character QA."""
+    settings = qa_settings if isinstance(qa_settings, dict) else {}
+    value = settings.get("exclude_ruby_tags", False)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def _foreign_character_qa_text(
     fallback_text,
     html_content,
@@ -986,17 +999,24 @@ def _foreign_character_qa_text(
     *,
     headers_only=False,
 ):
-    """Return text eligible for foreign-character QA under the title policy."""
+    """Return text eligible for foreign-character QA under the title/ruby policy."""
     translate_titles = _scan_should_translate_title_tags(qa_settings)
+    exclude_ruby = _scan_should_exclude_ruby_tags(qa_settings)
     # BeautifulSoup's default get_text() omits RubyTextString (<rt>) and
     # RubyParenthesisString (<rp>), even when their content is untranslated.
-    if translate_titles and not re.search(r'<(?:ruby|rb|rt|rp|rtc)\b', str(html_content or ''), re.I):
+    has_ruby = bool(re.search(r'<(?:ruby|rb|rt|rp|rtc)\b', str(html_content or ''), re.I))
+    if translate_titles and not has_ruby:
         return str(fallback_text or "")
     if not isinstance(html_content, str) or not html_content.strip():
         return str(fallback_text or "")
 
     try:
         soup = BeautifulSoup(html_content, "html.parser")
+        if exclude_ruby and has_ruby:
+            # Ruby annotations legitimately keep source-script readings next
+            # to the translated base text; the user opted to ignore them.
+            for ruby_tag in soup.find_all(list(RUBY_ANNOTATION_TAGS)):
+                ruby_tag.decompose()
         text_types = (NavigableString, CData, RubyTextString, RubyParenthesisString)
         if headers_only:
             return "\n".join(
@@ -5198,31 +5218,42 @@ def _attach_chunk_results_to_scan(
     if not isinstance(chapter_chunks, dict) or not chapter_chunks:
         return 0
 
+    if not any(is_multi_chunk_entry(entry) for entry in chapter_chunks.values()):
+        return 0
+
     by_output = {}
     for chapter_key, chapter_info in progress.get("chapters", {}).items():
         if not isinstance(chapter_info, dict):
             continue
         output_file = os.path.basename(str(chapter_info.get("output_file") or ""))
+        if not output_file:
+            continue
         chunk_key = str(chapter_info.get("content_hash") or chapter_key)
-        chunk_entry = chapter_chunks.get(chunk_key)
-        if output_file and is_multi_chunk_entry(chunk_entry):
-            ensure_chunk_entry_schema(chunk_entry)
-            by_output[output_file.casefold()] = (chunk_key, chunk_entry)
+        if is_multi_chunk_entry(chapter_chunks.get(chunk_key)):
+            by_output[output_file.casefold()] = chunk_key
+        else:
+            by_output.setdefault(output_file.casefold(), chunk_key)
 
     attached = 0
     for result in results or []:
         filename = os.path.basename(str(result.get("filename") or ""))
-        matched = by_output.get(filename.casefold())
-        if not matched:
+        preferred_key = by_output.get(filename.casefold())
+        if preferred_key is None:
             continue
-        chunk_key, chunk_entry = matched
         try:
             with open(result.get("filepath") or os.path.join(folder_path, filename), "r", encoding="utf-8", errors="replace") as output_file:
-                marked = extract_marked_chunks_for_entry(
-                    output_file.read(), chunk_key, chunk_entry
-                )
+                html_text = output_file.read()
         except OSError:
-            marked = {}
+            html_text = ""
+        # The chapter's content hash normally keys its ledger. A marked
+        # document whose progress hash was rewritten (older refinement runs
+        # stored the output hash) is matched by its own marker key instead.
+        chunk_key, chunk_entry, marked = find_chunk_entry_for_output(
+            chapter_chunks, preferred_key, html_text
+        )
+        if not is_multi_chunk_entry(chunk_entry):
+            continue
+        ensure_chunk_entry_schema(chunk_entry)
 
         all_issues = list(result.get("issues") or [])
         previews = result.get("qa_issue_previews")
@@ -10216,6 +10247,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'ai_artifact_patterns_are_regex': False,
             'check_glossary_leakage': True,
             'check_missing_images': True,
+            'exclude_ruby_tags': False,
             'min_file_length': 0,
             'min_duplicate_word_count': 500,
             'report_format': 'detailed',
@@ -10852,6 +10884,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         pass
 
     log(f"   ✓ Foreign char threshold: {qa_settings.get('foreign_char_threshold', 0)}")
+    log(
+        "   ✓ Ruby annotation tags excluded: "
+        + ("ENABLED" if _scan_should_exclude_ruby_tags(qa_settings) else "DISABLED")
+    )
     log(
         "   ✓ Emoticon pattern whitelist: "
         + ("ENABLED" if qa_settings.get('whitelist_emoticon_patterns', False) else "DISABLED")

@@ -268,9 +268,12 @@ from chapter_chunk_progress import (
     chunk_failure_summary,
     ensure_chunk_entry_schema,
     extract_marked_chunks,
+    extract_marked_chunks_for_entry,
+    find_chunk_entry_for_output,
     is_multi_chunk_entry,
     prune_single_chunk_entries,
     record_chunk_result,
+    replace_marked_chunks,
     reset_in_progress_chunks,
     reset_chunks_for_retranslation,
     reusable_chunk_results,
@@ -1595,6 +1598,7 @@ def _load_qa_scanner_settings_from_env():
             "whitelist_emoticon_patterns": _env_bool(
                 "QA_WHITELIST_EMOTICON_PATTERNS", False
             ),
+            "exclude_ruby_tags": _env_bool("QA_EXCLUDE_RUBY_TAGS", False),
             "emoticon_patterns_are_regex": _env_bool(
                 "QA_EMOTICON_PATTERNS_ARE_REGEX", False
             ),
@@ -19650,10 +19654,29 @@ def _entry_has_foreign_character_qa_issue(entry) -> bool:
                 issues.extend(value)
             elif value is not None:
                 issues.append(value)
+        # A completed parent mirrors chunk-level QA failures from its chunk
+        # ledger as {chunk index: [issues]}.
+        chunk_issues = current.get("chunk_qa_issues_found")
+        if isinstance(chunk_issues, dict):
+            for chunk_value in chunk_issues.values():
+                if isinstance(chunk_value, (list, tuple, set)):
+                    issues.extend(chunk_value)
+                elif chunk_value is not None:
+                    issues.append(chunk_value)
         if any(_is_foreign_character_qa_issue(issue) for issue in issues):
             return True
         current = current.get("previous_progress_entry")
     return False
+
+
+def _entry_has_chunk_qa_failures(entry) -> bool:
+    """Completed parent rows mirror chunk-level QA failures from the chunk ledger."""
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("has_chunk_qa_failures"):
+        return True
+    chunk_issues = entry.get("chunk_qa_issues_found")
+    return isinstance(chunk_issues, dict) and any(chunk_issues.values())
 
 
 def _qa_failed_source_entry(entry):
@@ -19717,13 +19740,51 @@ def _partial_refinement_detection_settings(qa_settings):
     return settings
 
 
+_RUBY_TAG_NAMES = frozenset({"ruby", "rb", "rt", "rp", "rtc"})
+_RUBY_ANNOTATION_RE = re.compile(
+    r"<(ruby|rb|rt|rp|rtc)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL
+)
+
+
+def _partial_refinement_exclude_ruby(qa_settings) -> bool:
+    """Same QA scanner setting the file-level scan honours."""
+    try:
+        from scan_html_folder import _scan_should_exclude_ruby_tags
+    except Exception:
+        return False
+    return _scan_should_exclude_ruby_tags(qa_settings)
+
+
+def _partial_refinement_detection_text(text, qa_settings):
+    """Text handed to foreign-character detection, minus ruby annotations when excluded."""
+    text = str(text or "")
+    if text and "<" in text and _partial_refinement_exclude_ruby(qa_settings):
+        # A nested <ruby><rb>..</rb><rt>..</rt></ruby> collapses in one pass;
+        # loop for the rare stacked annotation.
+        for _ in range(3):
+            stripped = _RUBY_ANNOTATION_RE.sub("", text)
+            if stripped == text:
+                break
+            text = stripped
+    return text
+
+
+def _text_node_inside_ruby(text_node) -> bool:
+    parent = getattr(text_node, "parent", None)
+    while parent is not None and getattr(parent, "name", None):
+        if _partial_refinement_tag_name(parent) in _RUBY_TAG_NAMES:
+            return True
+        parent = getattr(parent, "parent", None)
+    return False
+
+
 def _text_has_foreign_characters_for_partial_refinement(text, qa_settings) -> bool:
     if not text or not str(text).strip():
         return False
     try:
         from scan_html_folder import detect_non_english_content
         has_issue, issues = detect_non_english_content(
-            str(text),
+            _partial_refinement_detection_text(text, qa_settings),
             _partial_refinement_detection_settings(qa_settings),
         )
         return bool(has_issue and any(_is_foreign_character_qa_issue(issue) for issue in issues))
@@ -19737,7 +19798,7 @@ def _foreign_character_qa_issues_for_partial_refinement_text(text, qa_settings):
     try:
         from scan_html_folder import detect_non_english_content
         has_issue, issues = detect_non_english_content(
-            str(text),
+            _partial_refinement_detection_text(text, qa_settings),
             _partial_refinement_detection_settings(qa_settings),
         )
     except Exception:
@@ -19849,6 +19910,7 @@ def _collect_partial_refinement_tag_groups(html_content, qa_settings):
     soup = BeautifulSoup(html_content or "", "html.parser")
     selected_tags = []
     selected_ids = set()
+    exclude_ruby = _partial_refinement_exclude_ruby(qa_settings)
 
     for text_node in soup.find_all(string=True):
         parent = getattr(text_node, "parent", None)
@@ -19856,6 +19918,8 @@ def _collect_partial_refinement_tag_groups(html_content, qa_settings):
             continue
         parent_name = str(getattr(parent, "name", "") or "").lower()
         if parent_name in _PARTIAL_REFINEMENT_SKIP_TAGS:
+            continue
+        if exclude_ruby and _text_node_inside_ruby(text_node):
             continue
         if not _text_has_foreign_characters_for_partial_refinement(str(text_node), qa_settings):
             continue
@@ -20524,6 +20588,150 @@ def _partial_b_target_request_matches(
     )
 
 
+def _chunk_record_has_qa_failure(record) -> bool:
+    if not isinstance(record, dict):
+        return False
+    return (
+        str(record.get("status") or "").strip().lower() in ("qa_failed", "failed")
+        or bool(record.get("qa_issues_found"))
+    )
+
+
+def _refinement_chunk_plan(progress, entry, html_content, *, failed_only=False):
+    """Describe a chunk-translated output so refinement can work chunk by chunk.
+
+    Returns None unless the output is a marked multi-chunk document with a
+    ledger. ``selected`` lists the chunks to refine: every chunk, or only the
+    QA-failed ones in failed mode (all of them when none is marked).
+    """
+    if not isinstance(progress, dict) or not isinstance(html_content, str):
+        return None
+    ledger_key, ledger, blocks = find_chunk_entry_for_output(
+        progress.get("chapter_chunks", {}),
+        entry.get("content_hash") if isinstance(entry, dict) else None,
+        html_content,
+    )
+    if not is_multi_chunk_entry(ledger) or not blocks:
+        return None
+    ensure_chunk_entry_schema(ledger)
+    records = {
+        str(key): value
+        for key, value in ledger.get("entries", {}).items()
+        if isinstance(value, dict)
+    }
+    all_indices = sorted(blocks)
+    failed_indices = [
+        index for index in all_indices
+        if _chunk_record_has_qa_failure(records.get(str(index)))
+    ]
+    try:
+        total = int(ledger.get("total") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    return {
+        "ledger_key": ledger_key,
+        "ledger": ledger,
+        "blocks": blocks,
+        "records": records,
+        "selected": failed_indices if (failed_only and failed_indices) else all_indices,
+        "failed_indices": failed_indices,
+        "total": total or len(blocks),
+        "text": html_content,
+    }
+
+
+def _chunk_plan_index_for_offset(plan, offset):
+    for index, block in plan["blocks"].items():
+        if block["start"] <= offset < block["end"]:
+            return index
+    return None
+
+
+def _partial_target_chunk_indices(target, document, plan):
+    """Chunk indices whose marker block contains a partial refinement target."""
+    if not plan or not isinstance(target, dict):
+        return []
+    kind = str(target.get("kind") or "")
+    offsets = []
+    if kind == "tags":
+        line_starts = plan.get("_line_starts")
+        if line_starts is None:
+            line_starts = [0] + [match.end() for match in re.finditer(r"\n", plan["text"])]
+            plan["_line_starts"] = line_starts
+        for tag in target.get("tags", []):
+            line = getattr(tag, "sourceline", None)
+            column = getattr(tag, "sourcepos", None)
+            if not line or column is None or line - 1 >= len(line_starts):
+                continue
+            offsets.append(line_starts[line - 1] + int(column))
+    elif kind == "lines" and isinstance(document, dict):
+        line_offsets = document.get("_chunk_line_offsets")
+        if line_offsets is None:
+            line_offsets = []
+            position = 0
+            for line in document.get("lines", []):
+                line_offsets.append(position)
+                position += len(line)
+            document["_chunk_line_offsets"] = line_offsets
+        try:
+            first, last = int(target.get("start", 0)), int(target.get("end", -1))
+        except (TypeError, ValueError):
+            first, last = 0, -1
+        for line_index in range(first, last + 1):
+            if 0 <= line_index < len(line_offsets):
+                offsets.append(line_offsets[line_index])
+    indices = []
+    for offset in offsets:
+        index = _chunk_plan_index_for_offset(plan, offset)
+        if index is not None and index not in indices:
+            indices.append(index)
+    return indices
+
+
+def _chunk_plan_compression_raw(plan, indices):
+    """Raw source of the given chunks, joined for glossary compression.
+
+    None when any chunk has no stored source, so the caller falls back to the
+    whole chapter rather than compressing against a partial picture.
+    """
+    if not plan or not indices:
+        return None
+    parts = []
+    for index in indices:
+        source = (plan["records"].get(str(index)) or {}).get("source")
+        if not isinstance(source, str) or not source.strip():
+            return None
+        if source not in parts:
+            parts.append(source)
+    return "\n\n".join(parts)
+
+
+def _chunk_refinement_qa_entry(record, fallback_entry):
+    """QA entry for one chunk's refinement prompt: the chunk's own findings first."""
+    if isinstance(record, dict) and record.get("qa_issues_found"):
+        chunk_entry = dict(fallback_entry or {})
+        chunk_entry.pop("previous_progress_entry", None)
+        chunk_entry["status"] = "qa_failed"
+        chunk_entry["qa_issues_found"] = list(record["qa_issues_found"])
+        return chunk_entry
+    return fallback_entry
+
+
+def _record_refined_chunks(plan, refined_document, indices, *, model_name=None):
+    """Store refined chunk contents in the ledger so its cache matches the file."""
+    if not plan or not indices:
+        return []
+    blocks = extract_marked_chunks_for_entry(refined_document, plan["ledger_key"], plan["ledger"])
+    recorded = []
+    for index in indices:
+        block = blocks.get(index)
+        if not block:
+            continue
+        if record_chunk_result(plan["ledger"], index, block.get("content", ""), model_name=model_name):
+            recorded.append(index)
+    return recorded
+
+
 def _process_refinement_or_tts_mode(config, client, chapters, out, progress_manager, check_stop, *, multipass_failed_mode=False, multipass_partial_mode=False):
     mode = config.OUTPUT_MODE
     multipass_refinement_mode = str(
@@ -20633,7 +20841,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             _collect(entry.get(key))
 
         status = str(entry.get("status", "") or "").strip().lower()
-        if failed_mode and status == "completed":
+        if failed_mode and status == "completed" and not _entry_has_chunk_qa_failures(entry):
             return "completed"
         if status == "qa_failed":
             _collect(status)
@@ -20704,7 +20912,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 parts.append(raw)
         return "\n\n".join(parts)
 
-    def _build_refinement_messages(html_content, *, partial=False, partial_kind="tags", enhanced=False, qa_entry=None, partial_mode="partial", raw_content=None, chapters=None):
+    def _build_refinement_messages(html_content, *, partial=False, partial_kind="tags", enhanced=False, qa_entry=None, partial_mode="partial", raw_content=None, chapters=None, compression_raw=None):
         prompt_mode = partial_mode if partial else (
             "failed" if multipass_failed_mode else (
                 "full_with_raw" if multipass_full_with_raw_mode else "full"
@@ -20738,11 +20946,14 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             and os.path.exists(glossary_path)
             and os.getenv('DISABLE_GLOSSARY_TRANSLATION') != '1'
         ):
-            raw_for_compression = (
-                str(raw_content)
-                if raw_content and str(raw_content).strip()
-                else _refinement_compression_raw(chapters)
-            )
+            # A chunk-translated chapter compresses against the raw source of
+            # the chunk(s) actually being refined; otherwise the whole chapter.
+            if compression_raw and str(compression_raw).strip():
+                raw_for_compression = str(compression_raw)
+            elif raw_content and str(raw_content).strip():
+                raw_for_compression = str(raw_content)
+            else:
+                raw_for_compression = _refinement_compression_raw(chapters)
             refine_system = build_system_prompt(
                 refine_system,
                 glossary_path,
@@ -20791,6 +21002,105 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             messages.append({"role": "assistant", "content": refine_assistant})
         messages.append({"role": "user", "content": refine_user})
         return _apply_direct_text_prompt_overrides_to_messages(messages, config)
+
+    def _refine_chunked_output(
+        chapter,
+        actual_num,
+        html_content,
+        chunk_plan,
+        *,
+        qa_fallback_entry,
+        use_enhanced,
+        before_send,
+    ):
+        """Refine a chunk-translated chapter one marker block at a time.
+
+        Each request carries only that chunk's HTML, and the glossary is
+        compressed against that chunk's stored raw source, so a chapter that
+        needed splitting to translate is refined within the same budget.
+        Returns ``(document, refined_indices, stopped_before_start)``.
+        """
+        blocks = chunk_plan["blocks"]
+        records = chunk_plan["records"]
+        total_chunks = chunk_plan["total"]
+        selected = list(chunk_plan["selected"])
+        refined_chunks = {}
+        print(
+            f"🧩 Chapter {actual_num}: refining {len(selected)}/{total_chunks} chunk(s) "
+            "with chunk-scoped glossary compression"
+        )
+        for chunk_index in selected:
+            if _stop_new_work_requested():
+                if refined_chunks and _graceful_stop_requested() and not _hard_stop_requested():
+                    break
+                return None, [], True
+            block = blocks[chunk_index]
+            chunk_html = block.get("content", "")
+            record = records.get(str(chunk_index), {})
+            chunk_raw = record.get("source")
+            if not isinstance(chunk_raw, str) or not chunk_raw.strip():
+                chunk_raw = None
+            chunk_input = chunk_html
+            chunk_enhanced_info = None
+            if use_enhanced:
+                try:
+                    chunk_input, chunk_enhanced_info = _html_to_enhanced_refinement_text(chunk_html, chapter)
+                except Exception as enhanced_exc:
+                    print(
+                        f"⚠️ Chapter {actual_num} chunk {chunk_index}/{total_chunks}: Enhanced/html2text "
+                        f"refinement input failed; falling back to HTML ({enhanced_exc})"
+                    )
+                    chunk_input, chunk_enhanced_info = chunk_html, None
+            raw_chunk_input = None
+            if multipass_full_with_raw_mode:
+                raw_chunk_input = chunk_raw or _original_markup_for_copy(chapter, out)
+                if not str(raw_chunk_input or "").strip():
+                    raise RuntimeError(
+                        f"Full + raw could not resolve raw source HTML for Chapter {actual_num} "
+                        f"chunk {chunk_index}/{total_chunks}"
+                    )
+            messages = _build_refinement_messages(
+                chunk_input,
+                partial=False,
+                enhanced=chunk_enhanced_info is not None,
+                qa_entry=_chunk_refinement_qa_entry(record, qa_fallback_entry),
+                raw_content=raw_chunk_input,
+                chapters=[chapter],
+                compression_raw=chunk_raw,
+            )
+            refined_chunk, finish_reason, _raw_obj = send_with_interrupt(
+                messages,
+                client,
+                config.TEMP,
+                config.MAX_OUTPUT_TOKENS,
+                check_stop,
+                chunk_timeout=None,
+                context="refinement",
+                chapter_context={"chapter": actual_num, "chunk": chunk_index, "total_chunks": total_chunks},
+                before_send_callback=before_send,
+            )
+            if _hard_stop_requested():
+                raise RuntimeError(f"Refinement force-stopped before saving Chapter {actual_num}")
+            if (
+                not refined_chunk
+                or not str(refined_chunk).strip()
+                or str(finish_reason or "").strip().lower() not in ("stop", "complete", "end_turn", "finished")
+            ):
+                raise RuntimeError(
+                    f"Refinement returned no usable HTML for Chapter {actual_num} chunk "
+                    f"{chunk_index}/{total_chunks} (finish_reason={finish_reason})"
+                )
+            refined_chunk = _strip_refinement_code_fence(refined_chunk)
+            if chunk_enhanced_info is not None:
+                refined_chunk = convert_enhanced_text_to_html(refined_chunk, chunk_enhanced_info)
+                try:
+                    if getattr(config, "EMERGENCY_IMAGE_RESTORE", False):
+                        refined_chunk = ContentProcessor.emergency_restore_images(refined_chunk, chunk_html)
+                except Exception:
+                    pass
+            refined_chunks[chunk_index] = refined_chunk
+        document = replace_marked_chunks(html_content, blocks, refined_chunks)
+        return document, sorted(refined_chunks), False
 
     def _find_progress_entry_for_output(output_file, actual_num=None):
         if not output_file:
@@ -20958,6 +21268,20 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         with progress_lock:
             _pre_key, pre_existing_entry = _find_progress_entry_for_output(output_file, actual_num)
             pre_existing_entry = dict(pre_existing_entry) if pre_existing_entry else {}
+            chunk_plan = (
+                _refinement_chunk_plan(
+                    progress_manager.prog,
+                    pre_existing_entry,
+                    html_content,
+                    failed_only=multipass_failed_mode and not multipass_partial_mode,
+                )
+                if mode == "refinement" and not chapter.get("translation_artifact_file")
+                else None
+            )
+        if chunk_plan:
+            # A chunk-translated chapter keeps its ledger key as the progress
+            # hash; storing the output hash instead would orphan the ledger.
+            content_hash = chunk_plan["ledger_key"]
         pre_existing_qa_source_entry = _qa_failed_source_entry(pre_existing_entry)
         pre_existing_has_foreign_qa_issue = _entry_has_foreign_character_qa_issue(pre_existing_entry)
         multipass_refinement_active = (
@@ -21035,8 +21359,20 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     "chapter": actual_num,
                     "reason": skip_reason,
                 }
+            if (
+                multipass_failed_mode
+                and str(pre_existing_entry.get("status") or "").strip().lower() == "completed"
+                and not (chunk_plan and chunk_plan["failed_indices"])
+            ):
+                # The chunk mirror said "failed" but the ledger no longer does.
+                return "excluded", None, {
+                    "kind": "not_targeted",
+                    "chapter": actual_num,
+                    "reason": "completed",
+                }
             partial_document = None
             partial_targets = []
+            partial_target_chunks = []
             if multipass_partial_mode:
                 if not pre_existing_has_foreign_qa_issue:
                     return "excluded", None, {
@@ -21072,6 +21408,12 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         "chapter": actual_num,
                         "reason": "no foreign-character valid tag or line found",
                     }
+                # Which translated chunk each fragment lives in, so its
+                # glossary is compressed against that chunk's raw source.
+                partial_target_chunks = [
+                    _partial_target_chunk_indices(target, partial_document, chunk_plan)
+                    for target in partial_targets
+                ]
         else:
             partial_document = None
             partial_targets = []
@@ -21137,6 +21479,8 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         progress_manager.save()
 
                 partial_graceful_incomplete = False
+                graceful_incomplete_message = None
+                refined_chunk_indices = []
                 if multipass_partial_mode:
                     total_targets = _partial_refinement_target_count(partial_targets)
                     partial_requests = []
@@ -21166,6 +21510,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                             partial_kind=target_kind,
                             qa_entry=fragment_qa_entry,
                             chapters=[chapter],
+                            compression_raw=_chunk_plan_compression_raw(
+                                chunk_plan, partial_target_chunks[target_index - 1]
+                            ),
                         )
                         partial_requests.append((target_index, target, messages))
 
@@ -21202,6 +21549,11 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                             for request in batch_requests
                         )
 
+                        batch_chunk_indices = []
+                        for request in batch_requests:
+                            for chunk_index in partial_target_chunks[request["index"] - 1]:
+                                if chunk_index not in batch_chunk_indices:
+                                    batch_chunk_indices.append(chunk_index)
                         messages = _build_refinement_messages(
                             batch_payload,
                             partial=True,
@@ -21209,6 +21561,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                             qa_entry=pre_existing_qa_source_entry or pre_existing_entry,
                             partial_mode=partial_refinement_mode,
                             chapters=[chapter],
+                            compression_raw=_chunk_plan_compression_raw(
+                                chunk_plan, batch_chunk_indices
+                            ),
                         )
                         refined_batch, finish_reason, _raw_obj = send_with_interrupt(
                             messages,
@@ -21383,6 +21738,36 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         and len(partial_results) < len(partial_requests)
                     )
                     refined = _render_partial_refinement_document(partial_document)
+                    # Chunks whose fragments were all applied get their new
+                    # content recorded in the ledger below. A per-fragment
+                    # run that stopped early keeps the untouched chunks as
+                    # they were (partial.b applies its batch all at once).
+                    refined_chunk_indices = sorted({
+                        index
+                        for target_index, indices in enumerate(partial_target_chunks, start=1)
+                        if not partial_requests or target_index in partial_results
+                        for index in indices
+                    })
+                elif chunk_plan:
+                    chunk_document, refined_chunk_indices, stopped_before_start = _refine_chunked_output(
+                        chapter,
+                        actual_num,
+                        html_content,
+                        chunk_plan,
+                        qa_fallback_entry=pre_existing_qa_source_entry or pre_existing_entry,
+                        use_enhanced=use_enhanced_refinement_text,
+                        before_send=_mark_refinement_progress_on_send,
+                    )
+                    if stopped_before_start:
+                        return "skipped", f"⏹️ Refinement stopped before Chapter {actual_num} produced a response"
+                    refined = chunk_document
+                    if len(refined_chunk_indices) < len(chunk_plan["selected"]):
+                        partial_graceful_incomplete = True
+                        graceful_incomplete_message = (
+                            f"⏹️ Graceful stop saved {len(refined_chunk_indices)}/"
+                            f"{len(chunk_plan['selected'])} refined chunk(s) for Chapter "
+                            f"{actual_num}; remaining chunks stay retryable"
+                        )
                 else:
                     refinement_input = html_content
                     raw_refinement_input = None
@@ -21465,7 +21850,19 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         out, output_file, chapter, refined
                     )
                 new_hash = ContentProcessor.get_content_hash(refined)
+                if chunk_plan:
+                    # The ledger stays the authority for chunk state: keep its
+                    # key as the progress hash and store the refined chunks so
+                    # the cached results match the file on disk.
+                    new_hash = chunk_plan["ledger_key"]
                 with progress_lock:
+                    if chunk_plan and refined_chunk_indices:
+                        _record_refined_chunks(
+                            chunk_plan,
+                            refined,
+                            refined_chunk_indices,
+                            model_name=str(getattr(config, "MODEL", "") or os.getenv("MODEL", "") or "").strip() or None,
+                        )
                     if partial_graceful_incomplete:
                         preserved_qa_issues = (
                             pre_existing_qa_source_entry or pre_existing_entry
@@ -21509,7 +21906,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         )
                     progress_manager.save()
                 if partial_graceful_incomplete:
-                    return "skipped", (
+                    return "skipped", graceful_incomplete_message or (
                         f"⏹️ Graceful stop saved {len(partial_results)}/"
                         f"{len(partial_requests)} completed refinement fragment(s) "
                         f"for Chapter {actual_num}; remaining QA work stays retryable"
@@ -21727,6 +22124,13 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             with progress_lock:
                 _pre_key, pre_existing_entry = _find_progress_entry_for_output(output_file, actual_num)
                 pre_existing_entry = dict(pre_existing_entry) if pre_existing_entry else {}
+                chunk_plan = (
+                    _refinement_chunk_plan(progress_manager.prog, pre_existing_entry, html_content)
+                    if not chapter.get("translation_artifact_file")
+                    else None
+                )
+            if chunk_plan:
+                content_hash = chunk_plan["ledger_key"]
             pre_existing_qa_source_entry = _qa_failed_source_entry(pre_existing_entry)
             pre_existing_has_foreign_qa_issue = _entry_has_foreign_character_qa_issue(pre_existing_entry)
 
@@ -21834,6 +22238,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     idx,
                     target_index,
                 )
+                target_chunk_indices = _partial_target_chunk_indices(
+                    target, partial_document, chunk_plan
+                )
                 item_requests.append({
                     "request_id": request_id,
                     "chapter": actual_num,
@@ -21842,6 +22249,10 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     "target": target,
                     "fragment_html": fragment_html,
                     "qa_issue_prompt": _partial_refinement_qa_prompt_text(fragment_qa_entry),
+                    "chunk_indices": target_chunk_indices,
+                    "compression_raw": _chunk_plan_compression_raw(
+                        chunk_plan, target_chunk_indices
+                    ),
                 })
 
             return "collected", {
@@ -21854,6 +22265,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 "partial_document": partial_document,
                 "partial_targets": partial_targets,
                 "requests": item_requests,
+                "chunk_plan": chunk_plan,
                 "pre_existing_entry": pre_existing_entry,
                 "pre_existing_qa_source_entry": pre_existing_qa_source_entry,
             }
@@ -21983,6 +22395,15 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             def _send_partial_b2_batch(batch_index, batch_requests):
                 if _stop_new_work_requested():
                     raise RuntimeError("Partial.b2 refinement stopped before all JSON batches completed")
+                # Every request in the batch contributes the raw source of the
+                # chunk it lives in (or its whole chapter when not chunked).
+                compression_parts = []
+                for request in batch_requests:
+                    raw = request.get("compression_raw") or _refinement_compression_raw(
+                        [request.get("chapter_obj")]
+                    )
+                    if raw and raw not in compression_parts:
+                        compression_parts.append(raw)
                 messages = _build_refinement_messages(
                     _partial_b2_payload(batch_requests),
                     partial=True,
@@ -21990,6 +22411,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     qa_entry=None,
                     partial_mode="partial.b2",
                     chapters=[request.get("chapter_obj") for request in batch_requests],
+                    compression_raw="\n\n".join(compression_parts) or None,
                 )
                 refined_batch, finish_reason, _raw_obj = send_with_interrupt(
                     messages,
@@ -22079,7 +22501,21 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         refined,
                     )
                 new_hash = ContentProcessor.get_content_hash(refined)
+                item_chunk_plan = item.get("chunk_plan")
+                if item_chunk_plan:
+                    new_hash = item_chunk_plan["ledger_key"]
                 with progress_lock:
+                    if item_chunk_plan:
+                        _record_refined_chunks(
+                            item_chunk_plan,
+                            refined,
+                            sorted({
+                                index
+                                for request in item["requests"]
+                                for index in request.get("chunk_indices", [])
+                            }),
+                            model_name=str(getattr(config, "MODEL", "") or os.getenv("MODEL", "") or "").strip() or None,
+                        )
                     progress_manager.update(
                         item["idx"],
                         item["actual_num"],

@@ -548,6 +548,7 @@ class QAScannerMixin:
                     'foreign_char_threshold': 0,
                     'excluded_characters': '',
                     'whitelist_emoticon_patterns': False,
+                    'exclude_ruby_tags': False,
                     'emoticon_patterns': list(DEFAULT_EMOTICON_PATTERNS),
                     'emoticon_patterns_are_regex': False,
                     'target_language': 'english',
@@ -2939,6 +2940,25 @@ class QAScannerMixin:
             emoticon_whitelist_layout.addWidget(edit_emoticon_patterns_button)
             emoticon_whitelist_layout.addStretch()
             foreign_layout.addWidget(emoticon_whitelist_row)
+
+            # Ruby annotations keep source-script readings (rt) beside the
+            # translated base text; some books want them ignored entirely.
+            ruby_row = QWidget()
+            ruby_layout = QHBoxLayout(ruby_row)
+            ruby_layout.setContentsMargins(0, 0, 0, 10)
+            exclude_ruby_tags_checkbox = self._create_styled_checkbox(
+                "Exclude ruby annotation tags (ruby / rb / rt) from foreign character detection"
+            )
+            exclude_ruby_tags_checkbox.setChecked(
+                bool(qa_settings.get('exclude_ruby_tags', False))
+            )
+            exclude_ruby_tags_checkbox.setToolTip(
+                "Ignore text inside ruby, rb, rt, rp and rtc tags when counting foreign characters. "
+                "Applies to the QA scanner, chunk-level QA, and multipass partial refinement targets."
+            )
+            ruby_layout.addWidget(exclude_ruby_tags_checkbox)
+            ruby_layout.addStretch()
+            foreign_layout.addWidget(ruby_row)
 
             emoticon_patterns_holder = [list(
                 qa_settings.get('emoticon_patterns', DEFAULT_EMOTICON_PATTERNS)
@@ -5622,6 +5642,7 @@ class QAScannerMixin:
                         'foreign_char_threshold': (threshold_spinbox, lambda x: x.value()),
                         'excluded_characters': (excluded_text, lambda x: x.toPlainText().strip()),
                         'whitelist_emoticon_patterns': (whitelist_emoticon_patterns_checkbox, lambda x: x.isChecked()),
+                        'exclude_ruby_tags': (exclude_ruby_tags_checkbox, lambda x: x.isChecked()),
                         'emoticon_patterns': (emoticon_patterns_holder, lambda x: list(x[0])),
                         'emoticon_patterns_are_regex': (emoticon_patterns_regex_holder, lambda x: bool(x[0])),
                         'source_language': (source_lang_combo, lambda x: _normalize_source_language(x.currentText())),
@@ -5872,6 +5893,7 @@ class QAScannerMixin:
                             ('QA_FOREIGN_CHAR_THRESHOLD', str(qa_settings.get('foreign_char_threshold', 0))),
                             ('QA_TARGET_LANGUAGE', qa_settings.get('target_language', 'english')),
                             ('QA_WHITELIST_EMOTICON_PATTERNS', '1' if qa_settings.get('whitelist_emoticon_patterns', False) else '0'),
+                            ('QA_EXCLUDE_RUBY_TAGS', '1' if qa_settings.get('exclude_ruby_tags', False) else '0'),
                             ('QA_EMOTICON_PATTERNS_JSON', json.dumps(qa_settings.get('emoticon_patterns', DEFAULT_EMOTICON_PATTERNS), ensure_ascii=False)),
                             ('QA_EMOTICON_PATTERNS_ARE_REGEX', '1' if qa_settings.get('emoticon_patterns_are_regex', False) else '0'),
                             ('QA_CHECK_ENCODING', '1' if qa_settings.get('check_encoding_issues', False) else '0'),
@@ -6027,6 +6049,7 @@ class QAScannerMixin:
                     ('foreign_char_threshold', threshold_spinbox, 0),
                     ('excluded_characters', excluded_text, ''),
                     ('whitelist_emoticon_patterns', whitelist_emoticon_patterns_checkbox, False),
+                    ('exclude_ruby_tags', exclude_ruby_tags_checkbox, False),
                     ('target_language', target_language_combo, 'english'),
                     ('source_language', source_lang_combo, 'auto'),
                     ('check_encoding_issues', check_encoding_checkbox, False),
@@ -6217,6 +6240,7 @@ class QAScannerMixin:
                     source_lang_combo.setCurrentText('Auto')
                     target_language_combo.setCurrentText('English')
                     whitelist_emoticon_patterns_checkbox.setChecked(False)
+                    exclude_ruby_tags_checkbox.setChecked(False)
                     emoticon_patterns_holder[0] = list(DEFAULT_EMOTICON_PATTERNS)
                     emoticon_patterns_regex_holder[0] = False
 
