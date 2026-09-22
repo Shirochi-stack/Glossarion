@@ -25,7 +25,7 @@ import logging
 import threading
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlencode, urlparse, parse_qs
+from urllib.parse import urlencode, urlparse, parse_qs, quote
 from typing import Optional, Dict, List, Tuple, Any
 
 import requests
@@ -72,12 +72,94 @@ ANTHROPIC_API_VERSION = "2023-06-01"
 # Claude Code reads the signed-in account (email, organization) from here.
 ANTHROPIC_OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 
-# Claude Code identity headers – required for OAuth token acceptance
-_CLAUDE_CODE_USER_AGENT = "claude-code/2.1.119"
+# Claude Code identity headers – required for OAuth token acceptance.
+# Anthropic reads the Claude Code version from the User-Agent and refuses
+# newer models for old versions ("Claude Code 2.1.119 does not support this
+# model; version 2.1.280 or newer is required"). The version sent is the
+# newest of this default, the installed Claude Code CLI, and any version a
+# refusal asked for (remembered in _CLIENT_VERSION_FILE).
+_CLAUDE_CODE_DEFAULT_VERSION = "2.1.280"
 _CLAUDE_CODE_BETA_FLAGS = "claude-code-20250219,oauth-2025-04-20"
 
 _DEFAULT_TOKEN_DIR = os.path.join(os.path.expanduser("~"), ".glossarion")
 _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authcd_tokens.json")
+_CLIENT_VERSION_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authcd_client_version.json")
+_client_version_lock = threading.Lock()
+_client_version: Optional[str] = None
+
+
+def _version_tuple(version: str) -> Tuple[int, ...]:
+    try:
+        return tuple(int(part) for part in str(version).strip().split("."))
+    except (TypeError, ValueError):
+        return ()
+
+
+def _newest_version(*versions: Optional[str]) -> str:
+    valid = [v for v in versions if v and _version_tuple(v)]
+    return max(valid, key=_version_tuple) if valid else _CLAUDE_CODE_DEFAULT_VERSION
+
+
+def _installed_claude_code_version() -> Optional[str]:
+    """Version of the npm-installed Claude Code CLI, read from its package.json."""
+    import shutil
+    shim = shutil.which("claude")
+    if not shim:
+        return None
+    base = os.path.dirname(os.path.realpath(shim))
+    for candidate in (
+        os.path.join(base, "node_modules", "@anthropic-ai", "claude-code", "package.json"),
+        os.path.join(base, "..", "lib", "node_modules", "@anthropic-ai", "claude-code", "package.json"),
+        os.path.join(base, "..", "package.json"),
+    ):
+        try:
+            with open(candidate, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("name") == "@anthropic-ai/claude-code" and data.get("version"):
+                return str(data["version"])
+        except Exception:
+            continue
+    return None
+
+
+def _saved_client_version() -> Optional[str]:
+    try:
+        with open(_CLIENT_VERSION_FILE, "r", encoding="utf-8") as f:
+            return str(json.load(f).get("version") or "") or None
+    except Exception:
+        return None
+
+
+def claude_code_client_version() -> str:
+    """The Claude Code version AuthCD identifies as."""
+    global _client_version
+    with _client_version_lock:
+        if _client_version is None:
+            _client_version = _newest_version(
+                _CLAUDE_CODE_DEFAULT_VERSION, _installed_claude_code_version(), _saved_client_version(),
+            )
+        return _client_version
+
+
+def _claude_code_user_agent() -> str:
+    return f"claude-code/{claude_code_client_version()}"
+
+
+def _adopt_client_version(required: str) -> bool:
+    """Identify as ``required`` from now on (and after restarts). False if not newer."""
+    global _client_version
+    current = claude_code_client_version()
+    if not _version_tuple(required) or _version_tuple(required) <= _version_tuple(current):
+        return False
+    with _client_version_lock:
+        _client_version = required
+    try:
+        os.makedirs(_DEFAULT_TOKEN_DIR, exist_ok=True)
+        with open(_CLIENT_VERSION_FILE, "w", encoding="utf-8") as f:
+            json.dump({"version": required}, f)
+    except Exception as exc:
+        logger.debug("AuthCD: could not save client version: %s", exc)
+    return True
 
 # Claude Code credential paths (for parasitic fallback)
 _CLAUDE_CODE_CREDS = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json")
@@ -222,10 +304,12 @@ def refresh_access_token(refresh_token: str) -> Dict:
 # whatever NODE_EXTRA_CA_CERTS says.
 CLAUDE_AI_AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize"
 CLAUDE_AI_SUCCESS_URL = "https://platform.claude.com/oauth/code/success?app=claude-code"
-# Opened before the authorize page so the browser drops its current claude.ai
-# session and the sign-in lets the user pick the account (claude.com/logout
-# redirects here).
+# The sign-in opens this page first so the browser drops its current claude.ai
+# session and the user can pick the account. Its returnTo (a claude.ai path)
+# then continues to the authorize page in the same tab; claude.com's
+# authorize URL is a redirect to claude.ai/oauth/authorize.
 CLAUDE_AI_LOGOUT_URL = "https://claude.ai/logout"
+CLAUDE_AI_AUTHORIZE_PATH = "/oauth/authorize"
 CLAUDE_AI_SIGN_OUT_WAIT_SECONDS = 4.0
 CLAUDE_CODE_LOGIN_SCOPES = (
     "org:create_api_key user:profile user:inference user:sessions:claude_code "
@@ -307,16 +391,17 @@ def run_automatic_oauth_login(timeout: int = 180, open_browser=None,
         "code_challenge_method": "S256",
         "state": state,
     }
-    auth_url = f"{CLAUDE_AI_AUTHORIZE_URL}?{urlencode(params)}"
+    query = urlencode(params)
+    if sign_out_first:
+        # One tab: sign out, then claude.ai goes on to the authorize page,
+        # which asks for the account (login?selectAccount=true).
+        return_to = quote(f"{CLAUDE_AI_AUTHORIZE_PATH}?{query}", safe="")
+        auth_url = f"{CLAUDE_AI_LOGOUT_URL}?returnTo={return_to}"
+    else:
+        auth_url = f"{CLAUDE_AI_AUTHORIZE_URL}?{query}"
+    del sign_out_wait  # kept for callers; the redirect replaces the wait
     open_url = open_browser or webbrowser.open
     try:
-        if sign_out_first:
-            open_url(CLAUDE_AI_LOGOUT_URL)
-            wait_until = time.time() + max(0.0, float(sign_out_wait))
-            while time.time() < wait_until:
-                if is_cancelled():
-                    raise RuntimeError("AuthCD: Login cancelled.")
-                time.sleep(0.1)
         open_url(auth_url)
         deadline = time.time() + timeout
         while not received.is_set():
@@ -1103,7 +1188,7 @@ def fetch_available_models(access_token: str, timeout: int = 10) -> List[str]:
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json",
             "anthropic-version": ANTHROPIC_API_VERSION,
-            "User-Agent": _CLAUDE_CODE_USER_AGENT,
+            "User-Agent": _claude_code_user_agent(),
             "anthropic-beta": _CLAUDE_CODE_BETA_FLAGS,
             "x-app": "cli",
         },
@@ -1374,6 +1459,24 @@ class _TemperatureRejected(RuntimeError):
     """The model refused the temperature parameter (HTTP 400)."""
 
 
+class _ClientVersionRejected(RuntimeError):
+    """Anthropic wants a newer Claude Code version for this model (HTTP 400)."""
+
+    def __init__(self, message: str, required: str, detail: str):
+        super().__init__(message)
+        self.required = required
+        self.detail = detail
+
+
+def _required_client_version(status: int, detail: str) -> Optional[str]:
+    """The version named by "... version 2.1.280 or newer is required", else None."""
+    import re
+    if status != 400:
+        return None
+    match = re.search(r"version\s+v?(\d+(?:\.\d+)+)\s+or\s+newer\s+is\s+required", str(detail or ""), re.I)
+    return match.group(1) if match else None
+
+
 def _is_temperature_rejection(status: int, detail: str) -> bool:
     text = str(detail or "").lower()
     return status == 400 and "temperature" in text and any(
@@ -1409,17 +1512,32 @@ def send_chat_completion(
         temperature=temperature, max_tokens=max_tokens, timeout=timeout,
         base_url=base_url, log_fn=log_fn, connect_timeout=connect_timeout,
     )
+    _log = log_fn or print
     include_temperature = not model_rejects_temperature(model)
-    try:
-        return _send_chat_completion_once(include_temperature=include_temperature, **kwargs)
-    except _TemperatureRejected:
-        with _TEMPERATURE_REJECTED_LOCK:
-            _TEMPERATURE_REJECTED_MODELS.add(str(model or ""))
-        (log_fn or print)(
-            f"🌡️ AuthCD: {model} does not accept temperature; retrying without it "
-            "(kept off for this model for the rest of the session)"
-        )
-        return _send_chat_completion_once(include_temperature=False, **kwargs)
+    version_retried = False
+    while True:
+        try:
+            return _send_chat_completion_once(include_temperature=include_temperature, **kwargs)
+        except _TemperatureRejected:
+            if not include_temperature:
+                raise
+            with _TEMPERATURE_REJECTED_LOCK:
+                _TEMPERATURE_REJECTED_MODELS.add(str(model or ""))
+            _log(
+                f"🌡️ AuthCD: {model} does not accept temperature; retrying without it "
+                "(kept off for this model for the rest of the session)"
+            )
+            include_temperature = False
+        except _ClientVersionRejected as exc:
+            previous = claude_code_client_version()
+            if version_retried or not _adopt_client_version(exc.required):
+                _log(f"❌ AuthCD HTTP 400. {exc.detail}")
+                raise RuntimeError(str(exc)) from None
+            version_retried = True
+            _log(
+                f"⬆️ AuthCD: {model} needs Claude Code {exc.required} or newer; "
+                f"now identifying as {exc.required} (was {previous}) and retrying"
+            )
 
 
 def _send_chat_completion_once(
@@ -1465,7 +1583,7 @@ def _send_chat_completion_once(
         "Content-Type": "application/json",
         "Accept-Encoding": "identity",
         # Claude Code identity headers – required for OAuth token acceptance
-        "User-Agent": _CLAUDE_CODE_USER_AGENT,
+        "User-Agent": _claude_code_user_agent(),
         "anthropic-beta": _CLAUDE_CODE_BETA_FLAGS,
         "x-app": "cli",
     }
@@ -1495,6 +1613,10 @@ def _send_chat_completion_once(
                     pass
                 if "temperature" in body and _is_temperature_rejection(resp.status_code, detail):
                     raise _TemperatureRejected(f"AuthCD: {resp.status_code} – {detail}")
+                _required = _required_client_version(resp.status_code, detail)
+                if _required:
+                    raise _ClientVersionRejected(
+                        f"AuthCD: {resp.status_code} – {detail} [reason={reason}]", _required, detail)
                 _log(f"❌ AuthCD HTTP {resp.status_code}. {detail}")
                 raise RuntimeError(f"AuthCD: {resp.status_code} – {detail} [reason={reason}]")
             for line in resp.iter_lines():
@@ -1519,6 +1641,9 @@ def _send_chat_completion_once(
             pass
         if "temperature" in body and _is_temperature_rejection(resp.status_code, detail):
             raise _TemperatureRejected(f"AuthCD: {resp.status_code} – {detail}")
+        _required = _required_client_version(resp.status_code, detail)
+        if _required:
+            raise _ClientVersionRejected(f"AuthCD: {resp.status_code} – {detail}", _required, detail)
         _log(f"❌ AuthCD HTTP {resp.status_code}. {detail}")
         raise RuntimeError(f"AuthCD: {resp.status_code} – {detail}")
 
