@@ -2335,12 +2335,35 @@ def _book_library_tag_values(book: dict) -> tuple[str, ...]:
     ))
 
 
+def _book_library_title_values(book: dict) -> tuple[str, ...]:
+    """Every title a user may search a card by, translated and raw.
+
+    Raw (source-language) titles are always searchable, whether or not
+    the "Raw titles" toggle currently shows them on the card.
+    """
+    titles = [book.get("name"), _card_raw_title(book)]
+    for path_key in ("raw_source_path", "original_path"):
+        path = book.get(path_key) or ""
+        if path:
+            titles.append(os.path.splitext(os.path.basename(str(path)))[0])
+    titles.append(book.get("folder_name"))
+    metadata = book.get("metadata_json") or {}
+    if isinstance(metadata, dict):
+        for key in ("title", "translated_title", "original_title", "raw_title", "source_title"):
+            titles.append(metadata.get(key))
+    return tuple(dict.fromkeys(
+        value.casefold()
+        for title in titles
+        for value in _iter_library_search_values(title)
+    ))
+
+
 def _book_matches_library_query(book: dict, query: str) -> bool:
-    """Match a library query against the card title and its tags/subjects."""
+    """Match a library query against translated/raw titles and tags/subjects."""
     needle = str(query or "").strip().casefold()
     if not needle:
         return True
-    if needle in str(book.get("name", "") or "").casefold():
+    if any(needle in value for value in _book_library_title_values(book)):
         return True
     return any(needle in value for value in _book_library_tag_values(book))
 

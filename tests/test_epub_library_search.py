@@ -96,3 +96,17 @@ def test_extract_epub_subjects_preserves_all_opf_tags(tmp_path):
         "Apocalypse",
         "TS",
     )
+
+
+def test_library_query_matches_raw_titles_regardless_of_toggle():
+    from epub_library import _book_matches_library_query
+
+    book = {
+        "name": "Sherlock + Academy Logic.4 Crime RPG",
+        "raw_source_path": r"C:\books\シャーロック アカデミー Logic.4 犯罪RPG.epub",
+        "metadata_json": {"original_title": "シャーロック＋アカデミー"},
+    }
+    assert _book_matches_library_query(book, "sherlock")
+    assert _book_matches_library_query(book, "犯罪RPG")
+    assert _book_matches_library_query(book, "シャーロック＋")
+    assert not _book_matches_library_query(book, "unrelated")
