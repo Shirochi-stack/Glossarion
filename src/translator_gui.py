@@ -13886,6 +13886,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.use_rolling_summary_keys_var = self.config.get('use_rolling_summary_keys', False)
         self.use_truncation_retry_keys_var = self.config.get('use_truncation_retry_keys', False)
         self.use_inpainter_keys_var = self.config.get('use_inpainter_keys', False)
+        self.use_tts_keys_var = self.config.get('use_tts_keys', False)
         self.multipass_mode_var = self.config.get('multipass_mode', False)
         self.multipass_refinement_mode_var = str(self.config.get('multipass_refinement_mode', 'full') or 'full').strip().lower()
         if self.multipass_refinement_mode_var not in MULTIPASS_REFINEMENT_MODES:
@@ -18587,6 +18588,7 @@ Recent translations to summarize:
             'rolling_summary_keys': 'use_rolling_summary_keys',
             'truncation_retry_keys': 'use_truncation_retry_keys',
             'inpainter_keys': 'use_inpainter_keys',
+            'tts_keys': 'use_tts_keys',
         }
         for pool_key, toggle_key in pool_map.items():
             if not self.config.get(toggle_key, False):
@@ -33586,6 +33588,27 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         self.append_log("[ImageGenEdit] Enabled but no keys configured")
             except Exception:
                 pass
+
+            # Configure Audio / TTS key pool for audio output mode (context "tts").
+            try:
+                from unified_api_client import UnifiedClient
+                tts_keys_enabled = bool(self.config.get('use_tts_keys', False))
+                tts_keys = self.config.get('tts_keys', []) or []
+                os.environ['USE_TTS_KEYS'] = '1' if tts_keys_enabled else '0'
+                os.environ['TTS_API_KEYS'] = json.dumps(tts_keys)
+                if tts_keys_enabled and tts_keys:
+                    UnifiedClient.set_in_memory_tts_keys(
+                        tts_keys,
+                        force_rotation=self.config.get('force_key_rotation', True),
+                        rotation_frequency=self.config.get('rotation_frequency', 1),
+                    )
+                    self.append_log(f"[AudioTTS] Key pool ENABLED for audio output ({len(tts_keys)} keys)")
+                else:
+                    UnifiedClient.clear_in_memory_tts_keys()
+                    if tts_keys_enabled:
+                        self.append_log("[AudioTTS] Enabled but no keys configured")
+            except Exception:
+                pass
             
             # Initialize API client with output_dir to enable multi-key mode from environment
             try:
@@ -35634,6 +35657,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 )
             else:
                 UnifiedClient.clear_in_memory_inpainter_keys()
+
+            # Configure Audio / TTS key pool for audio output mode requests.
+            if self.config.get('use_tts_keys', False) and self.config.get('tts_keys', []):
+                UnifiedClient.set_in_memory_tts_keys(
+                    self.config.get('tts_keys', []),
+                    force_rotation=self.config.get('force_key_rotation', True),
+                    rotation_frequency=self.config.get('rotation_frequency', 1),
+                )
+            else:
+                UnifiedClient.clear_in_memory_tts_keys()
         except Exception:
             pass
 

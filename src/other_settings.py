@@ -2559,6 +2559,7 @@ def _create_danger_zone_section(self, parent):
                 'rolling_summary_keys',
                 'truncation_retry_keys',
                 'inpainter_keys',
+                'tts_keys',
             ):
                 if _pool_key in current_config:
                     keys_to_preserve[_pool_key] = current_config[_pool_key]
@@ -2609,6 +2610,7 @@ def _create_danger_zone_section(self, parent):
                 'use_rolling_summary_keys',
                 'use_truncation_retry_keys',
                 'use_inpainter_keys',
+                'use_tts_keys',
             ):
                 if _toggle_key in current_config:
                     keys_to_preserve[_toggle_key] = current_config[_toggle_key]

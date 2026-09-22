@@ -193,6 +193,7 @@ class APIKeyEncryption:
             'rolling_summary_keys',
             'truncation_retry_keys',
             'inpainter_keys',
+            'tts_keys',
         ]
     
     def encrypt_config(self, config):

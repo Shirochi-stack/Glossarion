@@ -3643,12 +3643,17 @@ class UnifiedClient:
             cls._inpainter_key_pool = None
 
     @classmethod
-    def setup_inpainter_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
-        """Setup the shared Image gen/edit API key pool (mirrors setup_glossary_key_pool)."""
-        with cls._inpainter_pool_lock:
-            if cls._inpainter_key_pool is None:
-                cls._inpainter_key_pool = APIKeyPool("Image gen/edit key pool")
-            cls._inpainter_pool_logged = False
+    def _setup_named_dedicated_key_pool(cls, keys_list, *, pool_attr, lock_attr, label,
+                                        status_attr, logged_attr):
+        """Validate/decrypt a key list and load it into one dedicated APIKeyPool.
+
+        Shared by dedicated pools whose keys use the standard key shape
+        (Image gen/edit, Audio / TTS).
+        """
+        with getattr(cls, lock_attr):
+            if getattr(cls, pool_attr, None) is None:
+                setattr(cls, pool_attr, APIKeyPool(label))
+            setattr(cls, logged_attr, False)
 
             if cls._rate_limit_cache is None:
                 cls._rate_limit_cache = RateLimitCache()
@@ -3689,22 +3694,104 @@ class UnifiedClient:
             if rejected_reasons:
                 reject_note = " (" + ", ".join(f"{count} {reason}" for reason, count in sorted(rejected_reasons.items())) + ")"
             if not validated_keys:
-                cls._last_inpainter_pool_setup_status = f"0 loaded{reject_note}"
-                print(f"🔑 Image gen/edit key pool: {configured_count} entries configured, 0 loaded{reject_note}")
+                setattr(cls, status_attr, f"0 loaded{reject_note}")
+                print(f"🔑 {label}: {configured_count} entries configured, 0 loaded{reject_note}")
                 return False
 
-            cls._inpainter_key_pool.load_from_list(validated_keys)
-            cls._last_inpainter_pool_setup_status = "OK"
+            pool = getattr(cls, pool_attr)
+            pool.load_from_list(validated_keys)
+            setattr(cls, status_attr, "OK")
 
-            existing_count = len(getattr(cls._inpainter_key_pool, 'keys', [])) if cls._inpainter_key_pool else 0
+            existing_count = len(getattr(pool, 'keys', [])) if pool else 0
             if existing_count != len(validated_keys):
                 load_note = f", {len(validated_keys)} loaded" if len(validated_keys) != configured_count else ""
                 if encrypted_keys_fixed > 0:
-                    print(f"🔑 Image gen/edit key pool: {configured_count} entries configured{load_note}{reject_note} ({encrypted_keys_fixed} required decryption fix)")
+                    print(f"🔑 {label}: {configured_count} entries configured{load_note}{reject_note} ({encrypted_keys_fixed} required decryption fix)")
                 else:
-                    print(f"🔑 Image gen/edit key pool: {configured_count} entries configured{load_note}{reject_note}")
+                    print(f"🔑 {label}: {configured_count} entries configured{load_note}{reject_note}")
 
             return True
+
+    @classmethod
+    def setup_inpainter_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Setup the shared Image gen/edit API key pool (mirrors setup_glossary_key_pool)."""
+        return cls._setup_named_dedicated_key_pool(
+            keys_list,
+            pool_attr='_inpainter_key_pool',
+            lock_attr='_inpainter_pool_lock',
+            label='Image gen/edit key pool',
+            status_attr='_last_inpainter_pool_setup_status',
+            logged_attr='_inpainter_pool_logged',
+        )
+
+    # Audio / TTS dedicated key pool (requests with context "tts").
+    _tts_key_pool: Optional[APIKeyPool] = None
+    _tts_pool_lock = threading.Lock()
+    _in_memory_tts_keys = None
+    _in_memory_tts_keys_lock = RLock()
+
+    @classmethod
+    def set_in_memory_tts_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Configure Audio / TTS key mode without storing the full key list in environment variables."""
+        try:
+            with cls._in_memory_tts_keys_lock:
+                cls._in_memory_tts_keys = keys_list
+        except Exception:
+            pass
+        try:
+            return bool(cls.setup_tts_key_pool(keys_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency))
+        except Exception as e:
+            cls._last_tts_pool_setup_status = f"error: {e}"
+            print(f"🔑 Audio / TTS key pool setup failed: {e}")
+            return False
+
+    @classmethod
+    def clear_in_memory_tts_keys(cls):
+        """Clear in-memory Audio / TTS key configuration."""
+        with cls._in_memory_tts_keys_lock:
+            cls._in_memory_tts_keys = None
+        with cls._tts_pool_lock:
+            cls._tts_key_pool = None
+
+    @classmethod
+    def setup_tts_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Setup the shared Audio / TTS API key pool."""
+        return cls._setup_named_dedicated_key_pool(
+            keys_list,
+            pool_attr='_tts_key_pool',
+            lock_attr='_tts_pool_lock',
+            label='Audio / TTS key pool',
+            status_attr='_last_tts_pool_setup_status',
+            logged_attr='_tts_pool_logged',
+        )
+
+    def _resolve_tts_key_pool(self):
+        """Return (pool, key_data_list) when the Audio / TTS pool applies, else (None, None)."""
+        if os.getenv('USE_TTS_KEYS', '0') != '1':
+            return None, None
+        cls = self.__class__
+        pool = cls._tts_key_pool
+        if not pool or not getattr(pool, 'keys', []):
+            keys_json = os.getenv('TTS_API_KEYS', '[]')
+            if keys_json and keys_json != '[]':
+                try:
+                    keys_list = json.loads(keys_json)
+                    if keys_list:
+                        cls.set_in_memory_tts_keys(keys_list)
+                        pool = cls._tts_key_pool
+                except Exception:
+                    pass
+        if not (pool and any(getattr(k, 'enabled', True) for k in getattr(pool, 'keys', []) or [])):
+            raise UnifiedClientError(
+                "Audio / TTS key pool is enabled for this context but has no enabled keys; refusing fallback to another pool",
+                error_type="no_keys",
+            )
+        with cls._in_memory_tts_keys_lock:
+            key_data_list = cls._in_memory_tts_keys or []
+        if not getattr(cls, '_tts_pool_logged', False):
+            print(f"[TTS KEYS] Using Audio / TTS key pool ({len(pool.keys)} keys)")
+            cls._tts_pool_logged = True
+        return pool, key_data_list
 
     # In-memory truncation-retry key configuration.
     _in_memory_truncation_retry_keys = None
@@ -6867,8 +6954,12 @@ class UnifiedClient:
         image_data=None,
         request_id=None,
         retry_reason=None,
+        send_fn=None,
     ):
         """Send one request through a dedicated pool without mutating this shared client.
+
+        ``send_fn(temp_client)`` replaces the chat send for non-chat calls
+        (Audio / TTS) that still need the pool's key selection and rotation.
 
         Vision/OCR workers often share a UnifiedClient instance. The older
         dedicated-pool override swapped self.api_key/self.model for the duration
@@ -7006,16 +7097,19 @@ class UnifiedClient:
                 except Exception:
                     pass
 
-                result = temp._send_internal(
-                    messages,
-                    temperature,
-                    max_tokens,
-                    max_completion_tokens,
-                    context,
-                    retry_reason=retry_reason,
-                    request_id=request_id,
-                    image_data=image_data,
-                )
+                if send_fn is not None:
+                    result = send_fn(temp)
+                else:
+                    result = temp._send_internal(
+                        messages,
+                        temperature,
+                        max_tokens,
+                        max_completion_tokens,
+                        context,
+                        retry_reason=retry_reason,
+                        request_id=request_id,
+                        image_data=image_data,
+                    )
                 try:
                     pool.mark_key_success(key_idx)
                 except Exception:
@@ -9267,51 +9361,30 @@ class UnifiedClient:
             # TTS must participate in multi-key/per-key-delay setup just like
             # translation calls. Without this, it can skip key rotation and the
             # individual key's API call delay.
-            if getattr(self, "_multi_key_mode", False):
+            if getattr(self, "_multi_key_mode", False) and os.getenv("USE_TTS_KEYS", "0") != "1":
                 self._ensure_thread_client()
                 _api_watchdog_update_model(getattr(self, "model", None), request_id)
 
-            provider = os.getenv("TTS_PROVIDER", "").lower().strip()
-            model_name = (os.getenv("TTS_MODEL", "") or self.model or "tts-1").strip() or "tts-1"
-            model_l = model_name.lower()
-            explicit_openai_endpoint = bool((os.getenv("OPENAI_TTS_ENDPOINT") or "").strip())
-            custom_base_url = (os.getenv("OPENAI_CUSTOM_BASE_URL") or "").strip()
-            use_custom_endpoint = os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") == "1"
-            google_key = (
-                os.getenv("GOOGLE_TTS_API_KEY")
-                or os.getenv("GOOGLE_API_KEY")
-                or os.getenv("GEMINI_API_KEY")
-                or (self.api_key if str(self.api_key or "").startswith("AIza") else "")
-            )
-
-            # Match normal HTTP lifecycle: obey SEND_INTERVAL_SECONDS/per-key
-            # delay and transition watchdog from queued -> in-flight only when
-            # the call is actually about to be sent.
-            self._apply_api_call_stagger()
-            if os.environ.get("GRACEFUL_STOP") == "1":
-                raise UnifiedClientError("Graceful stop active - not starting new TTS call", error_type="cancelled")
-            if self._should_abort_retry():
-                self._cancelled = True
-                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-            _api_watchdog_mark_in_flight(request_id, getattr(self, "model", None))
-
-            # If the user explicitly configured an OpenAI-compatible/custom endpoint,
-            # honor that first. AIza keys are Google AI Studio/Gemini keys, not
-            # Google Cloud Text-to-Speech OAuth credentials, so route them to Gemini.
-            google_cloud_requested = provider in ("google_cloud", "google-cloud", "cloud_tts", "google_cloud_tts") or model_l.startswith(("google-tts", "google/cloud-tts"))
-            gemini_requested = provider in ("google", "gemini", "google_ai", "google-ai", "google_tts", "gemini_tts") or model_l.startswith(("gemini-", "models/gemini-"))
-            if google_cloud_requested:
-                print(f"🔊 [{threading.current_thread().name}] UnifiedClient TTS route=google_cloud model={model_name} chars={len(text):,}")
-                result = self._text_to_speech_google_cloud(text, output_path, voice=voice, audio_format=audio_format)
-            elif (
-                gemini_requested
-                or (google_key and not explicit_openai_endpoint and not (use_custom_endpoint and custom_base_url))
-            ):
-                print(f"🔊 [{threading.current_thread().name}] UnifiedClient TTS route=gemini model={model_name} chars={len(text):,}")
-                result = self._text_to_speech_gemini(text, output_path, voice=voice, audio_format=audio_format)
+            tts_pool, tts_key_list = self._resolve_tts_key_pool()
+            if tts_pool is not None:
+                # Isolated one-shot client per call: batch TTS workers keep
+                # running in parallel instead of serializing on a shared
+                # key override.
+                result = self._send_with_isolated_dedicated_key(
+                    tts_pool,
+                    tts_key_list,
+                    'TTS',
+                    'TTSKey',
+                    None,
+                    context='tts',
+                    request_id=request_id,
+                    send_fn=lambda temp: temp._dispatch_tts_request(
+                        text, output_path, voice, audio_format, request_id,
+                        pool_key_active=True,
+                    ),
+                )
             else:
-                print(f"🔊 [{threading.current_thread().name}] UnifiedClient TTS route=openai-compatible model={model_name} chars={len(text):,}")
-                result = self._text_to_speech_openai_compatible(text, output_path, voice=voice, audio_format=audio_format)
+                result = self._dispatch_tts_request(text, output_path, voice, audio_format, request_id)
 
             self._track_stats("tts", True, None, time.time() - start_time)
             self._mark_key_success()
@@ -9326,10 +9399,82 @@ class UnifiedClient:
             if not batch_mode:
                 self._sequential_send_lock.release()
 
+    def _dispatch_tts_request(self, text, output_path, voice, audio_format, request_id,
+                              pool_key_active=False):
+        """Pick the TTS backend and synthesize with this client's current key."""
+        # With an Audio / TTS pool key active, that key and its model win over
+        # the global GOOGLE_*/TTS_MODEL environment defaults.
+        self._tts_pool_key_active = bool(pool_key_active)
+        try:
+            return self._dispatch_tts_request_inner(text, output_path, voice, audio_format, request_id)
+        finally:
+            self._tts_pool_key_active = False
+
+    def _dispatch_tts_request_inner(self, text, output_path, voice, audio_format, request_id):
+        provider = os.getenv("TTS_PROVIDER", "").lower().strip()
+        pool_key_active = bool(getattr(self, "_tts_pool_key_active", False))
+        model_name = (
+            ("" if pool_key_active else os.getenv("TTS_MODEL", "")) or self.model or "tts-1"
+        ).strip() or "tts-1"
+        model_l = model_name.lower()
+        explicit_openai_endpoint = bool((os.getenv("OPENAI_TTS_ENDPOINT") or "").strip())
+        custom_base_url = (os.getenv("OPENAI_CUSTOM_BASE_URL") or "").strip()
+        use_custom_endpoint = os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") == "1"
+        if pool_key_active:
+            # The pool key decides the route: an AIza key is Gemini, anything
+            # else goes to the configured OpenAI-compatible endpoint.
+            google_key = self.api_key if str(self.api_key or "").startswith("AIza") else ""
+        else:
+            google_key = (
+                os.getenv("GOOGLE_TTS_API_KEY")
+                or os.getenv("GOOGLE_API_KEY")
+                or os.getenv("GEMINI_API_KEY")
+                or (self.api_key if str(self.api_key or "").startswith("AIza") else "")
+            )
+
+        # Match normal HTTP lifecycle: obey SEND_INTERVAL_SECONDS/per-key
+        # delay and transition watchdog from queued -> in-flight only when
+        # the call is actually about to be sent.
+        self._apply_api_call_stagger()
+        if os.environ.get("GRACEFUL_STOP") == "1":
+            raise UnifiedClientError("Graceful stop active - not starting new TTS call", error_type="cancelled")
+        if self._should_abort_retry():
+            self._cancelled = True
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+        _api_watchdog_mark_in_flight(request_id, getattr(self, "model", None))
+
+        # If the user explicitly configured an OpenAI-compatible/custom endpoint,
+        # honor that first. AIza keys are Google AI Studio/Gemini keys, not
+        # Google Cloud Text-to-Speech OAuth credentials, so route them to Gemini.
+        google_cloud_requested = provider in ("google_cloud", "google-cloud", "cloud_tts", "google_cloud_tts") or model_l.startswith(("google-tts", "google/cloud-tts"))
+        gemini_requested = provider in ("google", "gemini", "google_ai", "google-ai", "google_tts", "gemini_tts") or model_l.startswith(("gemini-", "models/gemini-"))
+        if google_cloud_requested:
+            print(f"🔊 [{threading.current_thread().name}] UnifiedClient TTS route=google_cloud model={model_name} chars={len(text):,}")
+            result = self._text_to_speech_google_cloud(text, output_path, voice=voice, audio_format=audio_format)
+        elif (
+            gemini_requested
+            or (google_key and not explicit_openai_endpoint and not (use_custom_endpoint and custom_base_url))
+        ):
+            print(f"🔊 [{threading.current_thread().name}] UnifiedClient TTS route=gemini model={model_name} chars={len(text):,}")
+            result = self._text_to_speech_gemini(text, output_path, voice=voice, audio_format=audio_format)
+        else:
+            print(f"🔊 [{threading.current_thread().name}] UnifiedClient TTS route=openai-compatible model={model_name} chars={len(text):,}")
+            result = self._text_to_speech_openai_compatible(text, output_path, voice=voice, audio_format=audio_format)
+        return result
+
     def _text_to_speech_openai_compatible(self, text: str, output_path: str, voice: Optional[str] = None, audio_format: Optional[str] = None) -> str:
         endpoint = (os.getenv("OPENAI_TTS_ENDPOINT") or "").strip()
         custom_base_url = (os.getenv("OPENAI_CUSTOM_BASE_URL") or "").strip()
         use_custom_endpoint = os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") == "1"
+        if (
+            getattr(self, "_tts_pool_key_active", False)
+            and getattr(self, "current_key_use_individual_endpoint", False)
+            and getattr(self, "current_key_azure_endpoint", None)
+        ):
+            # A pool key with its own endpoint speaks to that server.
+            endpoint = ""
+            custom_base_url = str(self.current_key_azure_endpoint).strip()
+            use_custom_endpoint = True
         if not endpoint:
             if custom_base_url and custom_base_url.rstrip("/").endswith("/audio/speech"):
                 endpoint = custom_base_url.rstrip("/")
@@ -9341,7 +9486,7 @@ class UnifiedClient:
 
         endpoint_l = endpoint.lower()
         is_openai_host = "api.openai.com" in endpoint_l
-        configured_tts_model = os.getenv("TTS_MODEL", "").strip()
+        configured_tts_model = "" if getattr(self, "_tts_pool_key_active", False) else os.getenv("TTS_MODEL", "").strip()
         model = configured_tts_model or self.model or "tts-1"
         model_l = model.lower()
         if is_openai_host and not configured_tts_model and not any(token in model_l for token in ("tts", "speech", "playai")):
@@ -9579,7 +9724,8 @@ class UnifiedClient:
 
     def _text_to_speech_gemini(self, text: str, output_path: str, voice: Optional[str] = None, audio_format: Optional[str] = None) -> str:
         api_key = (
-            os.getenv("GOOGLE_TTS_API_KEY")
+            (self.api_key if getattr(self, "_tts_pool_key_active", False) else "")
+            or os.getenv("GOOGLE_TTS_API_KEY")
             or os.getenv("GOOGLE_API_KEY")
             or os.getenv("GEMINI_API_KEY")
             or (self.api_key if str(self.api_key or "").startswith("AIza") else "")
@@ -9587,7 +9733,11 @@ class UnifiedClient:
         if not api_key:
             raise UnifiedClientError("Gemini TTS requires a Google AI Studio/Gemini API key", error_type="validation")
 
-        model = (os.getenv("TTS_MODEL", "").strip() or self.model or "gemini-2.5-flash-preview-tts").strip()
+        model = (
+            ("" if getattr(self, "_tts_pool_key_active", False) else os.getenv("TTS_MODEL", "").strip())
+            or self.model
+            or "gemini-2.5-flash-preview-tts"
+        ).strip()
         model_l = model.lower()
         if not model_l.startswith(("gemini-", "models/gemini-")) or "tts" not in model_l:
             model = "gemini-2.5-flash-preview-tts"
@@ -9661,7 +9811,8 @@ class UnifiedClient:
         voice_name = voice or os.getenv("TTS_VOICE", "en-US-Neural2-J")
         audio_format = (audio_format or os.getenv("TTS_AUDIO_FORMAT", "mp3")).lower().strip()
         api_key = (
-            os.getenv("GOOGLE_TTS_API_KEY")
+            (self.api_key if getattr(self, "_tts_pool_key_active", False) else "")
+            or os.getenv("GOOGLE_TTS_API_KEY")
             or os.getenv("GOOGLE_API_KEY")
             or os.getenv("GEMINI_API_KEY")
             or (self.api_key if str(self.api_key or "").startswith("AIza") else "")

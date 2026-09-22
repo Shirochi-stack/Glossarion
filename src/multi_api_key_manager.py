@@ -3393,6 +3393,15 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui.config['use_inpainter_keys'] = use_inpainter
             self.translator_gui.use_inpainter_keys_var = use_inpainter
 
+            # Save Audio / TTS keys toggle
+            use_tts = (
+                self.use_tts_keys_checkbox.isChecked()
+                if hasattr(self, 'use_tts_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_tts_keys', False))
+            )
+            self.translator_gui.config['use_tts_keys'] = use_tts
+            self.translator_gui.use_tts_keys_var = use_tts
+
             # Save config
             self.translator_gui.save_config(show_message=False)
 
@@ -3627,6 +3636,7 @@ class MultiAPIKeyDialog(QDialog):
             self._create_rolling_summary_section,
             self._create_qa_scan_section,
             self._create_inpainter_section,
+            self._create_tts_section,
         )
 
     def _prepare_deferred_key_pool_sections(self, parent_layout):
@@ -10239,6 +10249,20 @@ class MultiAPIKeyDialog(QDialog):
                     "Normal rate-limit retries rotate within this pool; prohibited-content handling may still use configured fallback paths."
                 ),
             },
+            'tts': {
+                'title': 'Audio / TTS Keys',
+                'label': 'Audio/TTS',
+                'config_key': 'tts_keys',
+                'toggle_key': 'use_tts_keys',
+                'set_method': 'set_in_memory_tts_keys',
+                'clear_method': 'clear_in_memory_tts_keys',
+                'use_envs': ['USE_TTS_KEYS'],
+                'keys_envs': ['TTS_API_KEYS'],
+                'description': (
+                    "Configure dedicated keys for Audio output mode text-to-speech calls (request context 'tts').\n"
+                    "The key's model is the TTS model; an AIza key routes to Gemini TTS, others to the OpenAI-compatible speech endpoint or the key's individual endpoint."
+                ),
+            },
         }
 
     def _dedicated_pool_spec(self, pool_name: str):
@@ -11163,6 +11187,9 @@ class MultiAPIKeyDialog(QDialog):
 
     def _create_inpainter_section(self, parent_layout):
         self._create_dedicated_key_pool_section(parent_layout, 'inpainter')
+
+    def _create_tts_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'tts')
 
     def _save_and_close(self):
         """Save configuration"""
