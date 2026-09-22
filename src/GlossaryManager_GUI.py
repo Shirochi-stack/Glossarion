@@ -1817,6 +1817,16 @@ class GlossaryManagerMixin:
             os.environ['GLOSSARY_ADD_MINIMAL_PASS'] = '1' if enabled else '0'
         except Exception:
             pass
+        # Open Glossary Progress windows show a Minimal Pass row that depends
+        # on this toggle; refresh them now instead of on their next tick.
+        try:
+            from PySide6.QtWidgets import QApplication
+            for widget in QApplication.topLevelWidgets():
+                refresh_visible = getattr(widget, '_gp_refresh_visible', None)
+                if callable(refresh_visible) and widget.isVisible():
+                    refresh_visible()
+        except Exception:
+            pass
 
     def _unified_glossary_folder_key(self):
         """The Unified Glossary subfolder the current settings resolve to."""
@@ -2404,7 +2414,8 @@ class GlossaryManagerMixin:
         # General Settings holds the mode selector, so it is shown first. It is still built
         # after the Minimal tab, because it finishes by running that tab's mode-state pass.
         notebook.tabBar().moveTab(notebook.indexOf(tab_pages[self._setup_glossary_general_tab]), 0)
-        notebook.setCurrentIndex(0)
+        # Open on Balanced/Full Generation (the second tab), where most work happens.
+        notebook.setCurrentWidget(tab_pages[self._setup_manual_glossary_tab])
 
         # Looked up by page so adding or reordering tabs cannot point these at the wrong tab.
         _refinement_tab_idx = notebook.indexOf(tab_pages[self._setup_glossary_refinement_tab])

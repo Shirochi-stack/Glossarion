@@ -25982,6 +25982,13 @@ class RetranslationMixin:
                     refinement_key = it.data(Qt.UserRole + 3)
                     chapter_index = it.data(Qt.UserRole + 1)
                     target = None
+                    minimal_pass_key = it.data(Qt.UserRole + 4)
+                    if minimal_pass_key:
+                        # Removing the record resets the row to Not Translated
+                        # and lets the next run execute the pass again.
+                        if status in deletable_statuses:
+                            removable_targets.append((it, ('minimal_pass', minimal_pass_key)))
+                        continue
                     if refinement_key:
                         target = ('refinement', refinement_key)
                         refinement_targets.append((it, refinement_key, status))
@@ -26062,7 +26069,11 @@ class RetranslationMixin:
                     n = len(removable_targets)
                     if n == 1:
                         status = removable_targets[0][0].data(Qt.UserRole)
-                        chapter_label = _gp_context_target_label(*removable_targets[0])
+                        chapter_label = (
+                            "Minimal Pass"
+                            if removable_targets[0][1][0] == 'minimal_pass'
+                            else _gp_context_target_label(*removable_targets[0])
+                        )
                         remove_action = menu.addAction(f"🗑️ Remove {chapter_label} from progress ({status})")
                     else:
                         remove_action = menu.addAction(f"🗑️ Remove {n} chapters from progress")
@@ -26111,7 +26122,11 @@ class RetranslationMixin:
                     
                     indices_to_remove = set(value for _, (kind, value) in removable_targets if kind == 'chapter')
                     refinement_keys_to_remove = set(value for _, (kind, value) in removable_targets if kind == 'refinement')
+                    remove_minimal_pass = any(kind == 'minimal_pass' for _, (kind, _value) in removable_targets)
                     changed = False
+                    if remove_minimal_pass and 'minimal_pass' in _d:
+                        del _d['minimal_pass']
+                        changed = True
                     if indices_to_remove:
                         removed_indices = _d.get('manual_removed_indices', [])
                         if not isinstance(removed_indices, list):
@@ -26178,7 +26193,12 @@ class RetranslationMixin:
                         _invalidate_gp_refresh()
                         # Update all affected items
                         _cmap = panel_state['chapter_map']
+                        if remove_minimal_pass:
+                            panel_state['_minimal_pass_fingerprint'] = None
+                            _refresh_minimal_pass_row(_d)
                         for it, (kind, value) in removable_targets:
+                            if kind == 'minimal_pass':
+                                continue
                             if kind == 'refinement':
                                 row = next((r for r in _gp_refinement_rows(_d) if r[0] == value), None)
                                 if row:
@@ -26663,6 +26683,16 @@ class RetranslationMixin:
                     _cur_ts = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
                     if (_cur_signature == panel_state.get('_last_signature')
                             and _cur_ts == panel_state.get('translate_special')):
+                        # The file is unchanged, but the Minimal row also
+                        # depends on the live "Add minimal pass" toggle, which
+                        # never touches the file. Fingerprint-gated: no-op
+                        # unless the row's text actually changes.
+                        try:
+                            _cached_d = gp_data if isinstance(gp_data, dict) else {}
+                            if _refresh_minimal_pass_row(_cached_d):
+                                _refresh_stats_from_dict(_cached_d)
+                        except Exception:
+                            pass
                         _finish_gp_refresh_callbacks()
                         return  # Nothing changed — skip
                     panel_state['_gp_bg_running'] = True
