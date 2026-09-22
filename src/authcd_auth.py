@@ -23,6 +23,7 @@ import base64
 import secrets
 import logging
 import threading
+import uuid
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlencode, urlparse, parse_qs, quote
@@ -64,7 +65,9 @@ CLAUDE_AUTH_URL = "https://claude.ai/oauth/authorize"
 CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 # Anthropic's registered redirect_uri – localhost is NOT supported by this client
 CLAUDE_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
-SCOPES = "user:profile user:inference org:create_api_key"
+# Scope set the real Claude Code CLI signs in with (no org:create_api_key —
+# that is an API-key management scope the CLI does not request for inference).
+SCOPES = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 TOKEN_REFRESH_MARGIN_SECONDS = 300  # refresh when <5 min remaining
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
@@ -79,7 +82,13 @@ ANTHROPIC_OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 # newest of this default, the installed Claude Code CLI, and any version a
 # refusal asked for (remembered in _CLIENT_VERSION_FILE).
 _CLAUDE_CODE_DEFAULT_VERSION = "2.1.280"
-_CLAUDE_CODE_BETA_FLAGS = "claude-code-20250219,oauth-2025-04-20"
+# Beta flags the real CLI 2.1.x sends on Messages requests. The first two are
+# the OAuth/Claude-Code gate; the last two are the fine-grained tool streaming
+# and interleaved-thinking capabilities the real client advertises.
+_CLAUDE_CODE_BETA_FLAGS = (
+    "claude-code-20250219,oauth-2025-04-20,"
+    "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
+)
 
 _DEFAULT_TOKEN_DIR = os.path.join(os.path.expanduser("~"), ".glossarion")
 _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authcd_tokens.json")
@@ -142,7 +151,30 @@ def claude_code_client_version() -> str:
 
 
 def _claude_code_user_agent() -> str:
-    return f"claude-code/{claude_code_client_version()}"
+    # Match the shape the real CLI sends and Anthropic parses:
+    #   claude-cli/<version> (external, cli)
+    # (the old "claude-code/<version>" form is not in the shape the version
+    # gate parses, which can route models differently).
+    return f"claude-cli/{claude_code_client_version()} (external, cli)"
+
+
+def _claude_code_entrypoint() -> str:
+    """The entrypoint label the CLI stamps into its attribution header."""
+    return os.getenv("CLAUDE_CODE_ENTRYPOINT", "cli")
+
+
+def _attribution_system_block() -> Dict[str, Any]:
+    """The ``x-anthropic-billing-header:`` system block the real CLI prepends.
+
+    The CLI builds an attribution string and puts it in the FIRST system block;
+    the server matches a system block starting with ``x-anthropic-billing-header:``.
+    ``cc_entrypoint`` comes from CLAUDE_CODE_ENTRYPOINT.
+    """
+    header = (
+        f"x-anthropic-billing-header: cc_version={claude_code_client_version()}; "
+        f"cc_entrypoint={_claude_code_entrypoint()}; cch=00000;"
+    )
+    return {"type": "text", "text": header}
 
 
 def _adopt_client_version(required: str) -> bool:
@@ -311,9 +343,10 @@ CLAUDE_AI_SUCCESS_URL = "https://platform.claude.com/oauth/code/success?app=clau
 CLAUDE_AI_LOGOUT_URL = "https://claude.ai/logout"
 CLAUDE_AI_AUTHORIZE_PATH = "/oauth/authorize"
 CLAUDE_AI_SIGN_OUT_WAIT_SECONDS = 4.0
+# The scope set the real Claude Code CLI requests at sign-in.
 CLAUDE_CODE_LOGIN_SCOPES = (
-    "org:create_api_key user:profile user:inference user:sessions:claude_code "
-    "user:mcp_servers user:file_upload user:plugins"
+    "user:profile user:inference user:sessions:claude_code "
+    "user:mcp_servers user:file_upload"
 )
 
 
@@ -1460,6 +1493,146 @@ _TEMPERATURE_REJECTED_MODELS: set = set()
 _TEMPERATURE_REJECTED_LOCK = threading.Lock()
 
 
+# ---------------------------------------------------------------------------
+# metadata.user_id  – the real CLI stamps a per-account/per-session id on every
+# Messages request. Format: user_<sha256(accountUuid)>_account_<accountUuid>_session_<uuid>
+# ---------------------------------------------------------------------------
+_SESSION_ID: Optional[str] = None
+_metadata_user_id_cache: Dict[str, str] = {}
+_metadata_lock = threading.Lock()
+
+
+def _process_session_id() -> str:
+    """A stable session UUID for the life of this process."""
+    global _SESSION_ID
+    if _SESSION_ID is None:
+        with _metadata_lock:
+            if _SESSION_ID is None:
+                _SESSION_ID = str(uuid.uuid4())
+    return _SESSION_ID
+
+
+def _account_uuid_for_token(access_token: str):
+    """Find the saved account UUID for ``access_token`` and its store, if any."""
+    stores = [get_default_store()]
+    with _account_stores_lock:
+        stores.extend(_account_stores.values())
+    for store in stores:
+        try:
+            toks = store.load_tokens()
+        except Exception:
+            continue
+        if toks and toks.get("access_token") == access_token:
+            account = toks.get("account") if isinstance(toks.get("account"), dict) else {}
+            saved = str(toks.get("_account_uuid") or account.get("uuid") or account.get("id") or "").strip()
+            return saved, store, toks
+    return "", None, None
+
+
+def _metadata_user_id(access_token: str) -> Optional[str]:
+    """Build the CLI-style ``metadata.user_id`` for this access token.
+
+    The account UUID is resolved from the saved tokens (fetched once from the
+    OAuth profile and cached alongside the tokens, like the account email). When
+    it cannot be resolved, a stable id derived from the token is used so the
+    request still carries a well-formed user_id.
+    """
+    if not access_token:
+        return None
+    with _metadata_lock:
+        cached = _metadata_user_id_cache.get(access_token)
+    if cached:
+        return cached
+
+    account_uuid, store, toks = _account_uuid_for_token(access_token)
+    if not account_uuid and store is not None:
+        try:
+            profile = fetch_account_profile(access_token)
+            account = profile.get("account") if isinstance(profile.get("account"), dict) else {}
+            account_uuid = str(account.get("uuid") or account.get("id") or "").strip()
+            if account_uuid and toks is not None:
+                updated = dict(toks)
+                updated["_account_uuid"] = account_uuid
+                store.save_tokens(updated)
+        except Exception as exc:
+            logger.debug("AuthCD: account uuid lookup failed: %s", exc)
+            account_uuid = ""
+    if not account_uuid:
+        account_uuid = hashlib.sha256(access_token.encode("utf-8")).hexdigest()[:32]
+
+    user_hash = hashlib.sha256(account_uuid.encode("utf-8")).hexdigest()
+    user_id = f"user_{user_hash}_account_{account_uuid}_session_{_process_session_id()}"
+    with _metadata_lock:
+        _metadata_user_id_cache[access_token] = user_id
+    return user_id
+
+
+# ---------------------------------------------------------------------------
+# Response billing / rate-limit headers  – the server reports subscription vs
+# Extra Usage (pay-per-token overage) and the unified rate-limit windows here.
+# The old code streamed the body and never read them; parse and expose them.
+# ---------------------------------------------------------------------------
+_last_billing_status: Dict[str, Any] = {}
+_billing_status_lock = threading.Lock()
+
+
+def last_billing_status() -> Dict[str, Any]:
+    """The most recently parsed billing/rate-limit summary (see below)."""
+    with _billing_status_lock:
+        return dict(_last_billing_status)
+
+
+def _parse_billing_headers(headers) -> Dict[str, Any]:
+    """Summarize the billing/rate-limit response headers.
+
+    Returns a dict with:
+      - ``billing_mode``: "overage" (Extra Usage / pay-per-token) or "subscription"
+      - ``overage_active``: bool
+      - ``ratelimit``: every ``anthropic-ratelimit-*`` header, name->value
+    """
+    try:
+        items = {str(k).lower(): str(v) for k, v in headers.items()}
+    except Exception:
+        items = {}
+
+    ratelimit = {k: v for k, v in items.items() if k.startswith("anthropic-ratelimit")}
+
+    def _truthy(val: str) -> bool:
+        return str(val or "").strip().lower() in ("1", "true", "active", "in_use", "in-use", "yes", "on")
+
+    overage_status = items.get("anthropic-ratelimit-unified-overage-status", "")
+    overage_in_use = items.get("anthropic-ratelimit-unified-overage-in-use", "")
+    overage_active = (
+        (bool(overage_status) and overage_status.strip().lower() not in ("", "inactive", "none", "off", "false"))
+        or _truthy(overage_in_use)
+    )
+
+    return {
+        "billing_mode": "overage" if overage_active else "subscription",
+        "overage_active": overage_active,
+        "overage_status": overage_status,
+        "overage_in_use": overage_in_use,
+        "ratelimit": ratelimit,
+    }
+
+
+def _record_billing_headers(headers, model: str, _log) -> None:
+    """Parse, store and log the billing/rate-limit headers of a response."""
+    summary = _parse_billing_headers(headers)
+    summary["model"] = model
+    summary["at"] = time.time()
+    with _billing_status_lock:
+        _last_billing_status.clear()
+        _last_billing_status.update(summary)
+    try:
+        if summary["ratelimit"]:
+            windows = ", ".join(f"{k.split('anthropic-ratelimit-')[-1]}={v}"
+                                for k, v in sorted(summary["ratelimit"].items()))
+            logger.info("AuthCD rate-limit headers: %s", windows)
+    except Exception:
+        pass
+
+
 class _TemperatureRejected(RuntimeError):
     """The model refused the temperature parameter (HTTP 400)."""
 
@@ -1571,8 +1744,17 @@ def _send_chat_completion_once(
         "max_tokens": max_tokens or 8192,
         "stream": True,
     }
+    # The real CLI prepends an x-anthropic-billing-header attribution block as
+    # the first system block, and always sends a system array.
+    attribution = _attribution_system_block()
     if system_prompt:
-        body["system"] = system_prompt
+        body["system"] = [attribution, {"type": "text", "text": system_prompt}]
+    else:
+        body["system"] = [attribution]
+    # The real CLI stamps a per-account/per-session user_id on every request.
+    user_id = _metadata_user_id(access_token)
+    if user_id:
+        body["metadata"] = {"user_id": user_id}
     # Some models have deprecated the temperature parameter.
     _no_temp_models = ("claude-opus-4-7", "claude-opus-4-8", "claude-fable-5")
     if (
@@ -1624,6 +1806,8 @@ def _send_chat_completion_once(
                         f"AuthCD: {resp.status_code} – {detail} [reason={reason}]", _required, detail)
                 _log(f"❌ AuthCD HTTP {resp.status_code}. {detail}")
                 raise RuntimeError(f"AuthCD: {resp.status_code} – {detail} [reason={reason}]")
+            # Parse the billing / rate-limit headers before consuming the body.
+            _record_billing_headers(resp.headers, model, _log)
             for line in resp.iter_lines():
                 if is_cancelled():
                     resp.close()
@@ -1651,6 +1835,9 @@ def _send_chat_completion_once(
             raise _ClientVersionRejected(f"AuthCD: {resp.status_code} – {detail}", _required, detail)
         _log(f"❌ AuthCD HTTP {resp.status_code}. {detail}")
         raise RuntimeError(f"AuthCD: {resp.status_code} – {detail}")
+
+    # Parse the billing / rate-limit headers before consuming the body.
+    _record_billing_headers(resp.headers, model, _log)
 
     for raw_line in resp.iter_lines(chunk_size=1):
         if is_cancelled():
