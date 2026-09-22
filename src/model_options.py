@@ -278,7 +278,8 @@ def _get_static_model_options() -> List[str]:
         # AuthGPT – ChatGPT subscription via OAuth (Codex Responses endpoint)
         # Only models supported by /backend-api/codex/responses are listed.
         # GPT-5.1 retiring March 11 2026, removed. GPT-5.4 released March 5 2026.
-        "authgpt/gpt-5.6-luna","authgpt/gpt-5.6-sol","authgpt/gpt-5.6-terra","authgpt/gpt-5.5","authgpt/gpt-5.4", "authgpt/gpt-5.4-pro",
+        "authgpt/gpt-6-luna","authgpt/gpt-6-sol","authgpt/gpt-6-astra","authgpt/gpt-5.6-luna",
+        "authgpt/gpt-5.6-sol","authgpt/gpt-5.6-terra","authgpt/gpt-5.5","authgpt/gpt-5.4", "authgpt/gpt-5.4-pro",
         "authgpt/gpt-5.3-codex", "authgpt/gpt-5.3-codex-spark",
         "authgpt/gpt-5.2", "authgpt/gpt-5.2-codex",
 

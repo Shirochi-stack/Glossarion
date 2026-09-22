@@ -44103,8 +44103,9 @@ Important rules:
                 compact_height_ratio = 0.70
             else:
                 compact_height_ratio = 0.66
-            compact_page_size = QSize(int(sw * 0.40), int(sh * compact_height_ratio))
-            regular_page_size = QSize(int(sw * 0.40), int(sh * 0.77))
+            # 0.42 = the earlier 0.40 widened by 5%.
+            compact_page_size = QSize(int(sw * 0.42), int(sh * compact_height_ratio))
+            regular_page_size = QSize(int(sw * 0.42), int(sh * 0.77))
             dialog.resize(compact_page_size)
             dialog.setMinimumSize(int(sw * 0.34), int(sh * 0.52))
             
