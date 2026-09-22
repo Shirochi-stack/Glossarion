@@ -133,12 +133,24 @@ def _think_harder_for(model: str) -> bool:
     return _env_bool("OPERA_ARIA_THINK_HARDER", False)
 
 
-def _stream_logging_enabled() -> bool:
-    """Real-time log streaming, mirroring the other browser-backed routes."""
+def _realtime_streaming_enabled() -> bool:
+    """The GUI's "Enable streaming responses" toggle (ENABLE_STREAMING)."""
     val = os.getenv("OPERA_ARIA_STREAM")
     if val is None or val.strip() == "":
-        val = os.getenv("LOG_STREAM_CHUNKS", "1")
-    return str(val).strip().lower() in ("1", "true", "yes", "on")
+        val = os.getenv("ENABLE_STREAMING", "1")
+    return str(val).strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _stream_logging_enabled() -> bool:
+    """Live log output: needs real-time streaming on, chunk logging on, and
+    during batch mode the "Allow streaming logs during batch mode" toggle."""
+    if not _realtime_streaming_enabled():
+        return False
+    if not _env_bool("LOG_STREAM_CHUNKS", True):
+        return False
+    if os.getenv("BATCH_TRANSLATION", "0") == "1" and not _env_bool("ALLOW_BATCH_STREAM_LOGS", False):
+        return False
+    return True
 
 
 class OperaAriaError(RuntimeError):
@@ -739,7 +751,14 @@ def _post_chat(token: str, query: str, timeout: int, stream: bool = True,
 
 
 def _run_chat(messages: Iterable[Dict[str, Any]], *, model: str, timeout: int,
-              log_fn=None, log_stream: Optional[bool] = None) -> Dict[str, Any]:
+              log_fn=None, log_stream: Optional[bool] = None,
+              stream: Optional[bool] = None) -> Dict[str, Any]:
+    # The transport is always SSE (Opera's JSON reply shape is not relied on).
+    # ``stream`` is the real-time streaming toggle: off means the reply is
+    # collected silently and only the final result is returned.
+    realtime = _realtime_streaming_enabled() if stream is None else bool(stream)
+    if not realtime:
+        log_stream = False
     query = _messages_to_query(messages)
     if not query.strip():
         raise OperaAriaError("Opera Aria: empty query", error_type="config_error")
@@ -878,12 +897,14 @@ def send_chat_completion(
     timeout: Optional[int] = None,
     log_fn: Optional[Callable[[str], None]] = None,
     log_stream: Optional[bool] = None,
+    stream: Optional[bool] = None,
     **_: Any,
 ) -> Dict[str, Any]:
     del temperature, max_tokens
     timeout_value = int(timeout or int(os.getenv("OPERA_ARIA_TIMEOUT", str(DEFAULT_TIMEOUT))))
     return _run_chat(list(messages), model=model or DEFAULT_MODEL,
-                     timeout=timeout_value, log_fn=log_fn, log_stream=log_stream)
+                     timeout=timeout_value, log_fn=log_fn, log_stream=log_stream,
+                     stream=stream)
 
 
 if __name__ == "__main__":
