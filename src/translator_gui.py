@@ -1988,6 +1988,7 @@ class _InputOutputDialog(QDialog):
         'GPT_EFFORT',
         'PASS_THINKING_TO_OPENAI_COMPATIBLE',
         'GEMINI_THINKING_LEVEL',
+        'GEMINI_SERVICE_TIER',
         'THINKING_BUDGET',
         'STREAM_THINKING_LOGS',
         'AUTHND_STREAM_THINKING_LOGS',
@@ -13819,6 +13820,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.thinking_budget_var = str(self.config.get('thinking_budget', '-1'))
         self.thinking_level_var = self.config.get('thinking_level', 'high')
         self.enable_thoughts_var = self.config.get('enable_thoughts', True)
+        self.gemini_service_tier_var = str(self.config.get('gemini_service_tier', 'off') or 'off')
+        os.environ['GEMINI_SERVICE_TIER'] = self.gemini_service_tier_var
         # NEW: GPT/OpenRouter reasoning controls
         self.enable_gpt_thinking_var = self.config.get('enable_gpt_thinking', True)
         self.gpt_reasoning_tokens_var = str(self.config.get('gpt_reasoning_tokens', '2000'))
@@ -36274,6 +36277,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ENABLE_GEMINI_THINKING': "1" if self.enable_gemini_thinking_var else "0",
             'THINKING_BUDGET': self.thinking_budget_var if self.enable_gemini_thinking_var else '0',
             'GEMINI_THINKING_LEVEL': getattr(self, 'thinking_level_var', 'high'),
+            'GEMINI_SERVICE_TIER': getattr(self, 'gemini_service_tier_var', 'off'),
             # GPT/OpenRouter reasoning
             'ENABLE_GPT_THINKING': "1" if self.enable_gpt_thinking_var else "0",
             'GPT_REASONING_TOKENS': self.gpt_reasoning_tokens_var if self.enable_gpt_thinking_var else '',
@@ -36644,6 +36648,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['ENABLE_GEMINI_THINKING'] = "1" if self.enable_gemini_thinking_var else "0"
                 os.environ['THINKING_BUDGET'] = self.thinking_budget_var if self.enable_gemini_thinking_var else '0'
                 os.environ['GEMINI_THINKING_LEVEL'] = getattr(self, 'thinking_level_var', 'high')
+                os.environ['GEMINI_SERVICE_TIER'] = getattr(self, 'gemini_service_tier_var', 'off')
                 # GPT/OpenRouter reasoning
                 os.environ['ENABLE_GPT_THINKING'] = "1" if self.enable_gpt_thinking_var else "0"
                 os.environ['GPT_REASONING_TOKENS'] = self.gpt_reasoning_tokens_var if self.enable_gpt_thinking_var else ''
@@ -47174,6 +47179,7 @@ Important rules:
                 ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),
                 ('token_limit_disabled', ['token_limit_disabled'], False, bool),
                 ('enable_thoughts', ['enable_thoughts_var'], True, bool),
+                ('gemini_service_tier', ['gemini_service_tier_var'], 'off', str),
                 ('translation_history_rolling', ['translation_history_rolling_var'], True, bool),
                 ('disable_epub_gallery', ['disable_epub_gallery_var'], True, bool),
                 ('skip_non_spine_special_files', ['skip_non_spine_special_files_var'], False, bool),
@@ -48408,6 +48414,7 @@ Important rules:
                 ('ALLOW_BATCH_STREAM_LOGS', '1' if bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False))) else '0'),
                 ('ALLOW_AUTHGPT_BATCH_STREAM_LOGS', '1' if bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False))) else '0'),
                 ('ENABLE_THOUGHTS', '1' if self.config.get('enable_thoughts', True) else '0'),
+                ('GEMINI_SERVICE_TIER', str(self.config.get('gemini_service_tier', 'off') or 'off')),
                 ('STREAM_THINKING_LOGS', '1' if bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False))) else '0'),
                 ('AUTHZA_USE_GENERAL_API', '1' if _bool_config('authza_use_general_api', False) else '0'),
                 ('HTML2TEXT_ESCAPE_SNOB', '1' if self.config.get('html2text_escape_snob', False) else '0'),

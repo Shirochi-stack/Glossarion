@@ -3613,6 +3613,45 @@ def _create_response_handling_section(self, parent):
     thoughts_h.addStretch()
     section_v.addWidget(thoughts_row)
 
+    # Gemini service tier (independent of thinking, so not disabled with it)
+    if not hasattr(self, 'gemini_service_tier_var'):
+        self.gemini_service_tier_var = str(self.config.get('gemini_service_tier', 'off') or 'off').lower()
+    tier_row = QWidget()
+    tier_h = QHBoxLayout(tier_row)
+    tier_h.setContentsMargins(20, 2, 0, 0)
+    tier_label = QLabel("Service tier:")
+    tier_h.addWidget(tier_label)
+    self.gemini_service_tier_combo = QComboBox()
+    self.gemini_service_tier_combo.addItems(["off", "standard", "flex", "priority"])
+    self.gemini_service_tier_combo.setFixedWidth(90)
+    self.gemini_service_tier_combo.setStyleSheet(_THINKING_COMBO_STYLE)
+    self._add_combobox_arrow(self.gemini_service_tier_combo)
+    self._disable_combobox_mousewheel(self.gemini_service_tier_combo)
+    self.gemini_service_tier_combo.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Sets service_tier on native Gemini API requests.<br>"
+        "<b>off</b>: parameter not sent (API default).<br>"
+        "<b>standard</b>: normal pricing and latency.<br>"
+        "<b>flex</b>: 50% cheaper, best-effort; may queue for minutes and fail with 503/429 "
+        "when busy (no automatic fallback).<br>"
+        "<b>priority</b>: lowest latency, highest reliability, costs more than standard.<br>"
+        "Not applied to Vertex AI or the OpenAI-compatible endpoint."
+        "</p></qt>"
+    )
+    _tier_idx = self.gemini_service_tier_combo.findText(self.gemini_service_tier_var)
+    self.gemini_service_tier_combo.setCurrentIndex(_tier_idx if _tier_idx >= 0 else 0)
+    def _on_service_tier_changed(text):
+        try:
+            self.gemini_service_tier_var = text
+            self.config['gemini_service_tier'] = text
+            os.environ['GEMINI_SERVICE_TIER'] = text
+        except Exception:
+            pass
+    self.gemini_service_tier_combo.currentTextChanged.connect(_on_service_tier_changed)
+    tier_h.addWidget(self.gemini_service_tier_combo)
+    tier_h.addStretch()
+    section_v.addWidget(tier_row)
+
     # Apply initial lock state if stream thinking is already enabled
     if getattr(self, 'stream_thinking_logs_var', False):
         self._sync_thoughts_lock_state(True)

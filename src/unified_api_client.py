@@ -21194,10 +21194,17 @@ class UnifiedClient:
                 }
                 if temperature is not None:
                     generation_config_params["temperature"] = temperature
-                
+                # Service tier: "off" (default) omits the parameter entirely
+                gemini_tier = str(os.getenv("GEMINI_SERVICE_TIER", "off") or "off").strip().lower()
+                if gemini_tier not in ("standard", "flex", "priority"):
+                    gemini_tier = ""
+                if gemini_tier:
+                    generation_config_params["service_tier"] = gemini_tier
+
                 # Log the request - only if not stopping
                 if not self._is_stop_requested():
-                    print(f"   📊 Temperature: {temperature}, Max tokens: {max_tokens}")
+                    _tier = f", Tier: {gemini_tier}" if gemini_tier else ""
+                    print(f"   📊 Temperature: {temperature}, Max tokens: {max_tokens}{_tier}")
 
                 # ========== MAKE THE API CALL - DIFFERENT FOR EACH ENDPOINT ==========
                 if use_openai_endpoint and gemini_endpoint:
