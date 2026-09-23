@@ -37,6 +37,7 @@ def print_env_var_status():
         # OpenRouter settings
         'OPENROUTER_USE_HTTP_ONLY': 'OpenRouter HTTP-only transport',
         'OPENROUTER_ACCEPT_IDENTITY': 'OpenRouter identity encoding',
+        'OPENROUTER_GEMINI_FLEX': 'OpenRouter always-Flex for Gemini',
         'OPENROUTER_PREFERRED_PROVIDER': 'OpenRouter preferred provider',
         
         # General application settings

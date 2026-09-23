@@ -12465,7 +12465,9 @@ def _create_processing_options_section(self, parent):
         'Auto', 'AI21', 'AionLabs', 'Alibaba Cloud Int.', 'Amazon Bedrock', 'Anthropic',
         'AtlasCloud', 'Atoma', 'Avian.io', 'Azure', 'Baseten', 'Cerebras', 'Chutes',
         'Cloudflare', 'Cohere', 'CrofAI', 'Crusoe', 'DeepInfra', 'DeepSeek', 'Enfer',
-        'Featherless', 'Fireworks', 'Friendli', 'GMICloud', 'Google AI Studio', 'Google Vertex',
+        'Featherless', 'Fireworks', 'Friendli', 'GMICloud', 'Google AI Studio',
+        'google-ai-studio/flex', 'google-ai-studio/priority', 'Google Vertex',
+        'google-vertex/global/flex', 'google-vertex/global/priority',
         'Groq', 'Hyperbolic', 'Inception', 'inference.net', 'Infermatic', 'Inflection',
         'kluster.ai', 'Lambda', 'Lepton', 'Leschde', 'Liquid', 'Mancer (private)', 'Meta',
         'Minimax', 'Mistral', 'Moonshot AI', 'Morph', 'nCompass', 'Nebius AI Studio',
@@ -12515,10 +12517,33 @@ def _create_processing_options_section(self, parent):
     
     section_v.addWidget(provider_w)
     
-    provider_desc = QLabel("Specify which upstream provider OpenRouter should prefer for your requests.\n'Auto' lets OpenRouter choose. Specific providers may have different availability.")
+    provider_desc = QLabel("Specify which upstream provider OpenRouter should prefer for your requests.\n'Auto' lets OpenRouter choose. Specific providers may have different availability.\n.../flex and .../priority endpoints are pinned with no fallback — Flex is 50% cheaper but may be slow or 503.")
     provider_desc.setStyleSheet("color: gray; font-size: 8pt;")
     provider_desc.setContentsMargins(20, 0, 0, 8)
     section_v.addWidget(provider_desc)
+
+    # OpenRouter: always route Gemini models to Flex endpoints
+    if not hasattr(self, 'openrouter_gemini_flex_var'):
+        self.openrouter_gemini_flex_var = self.config.get('openrouter_gemini_flex', False)
+
+    gemini_flex_cb = self._create_styled_checkbox("Always use Flex for Gemini models")
+    try:
+        gemini_flex_cb.setChecked(bool(self.openrouter_gemini_flex_var))
+    except Exception:
+        pass
+    def _on_openrouter_gemini_flex_toggle(checked):
+        try:
+            self.openrouter_gemini_flex_var = bool(checked)
+        except Exception:
+            pass
+    gemini_flex_cb.toggled.connect(_on_openrouter_gemini_flex_toggle)
+    gemini_flex_cb.setContentsMargins(0, 4, 0, 0)
+    section_v.addWidget(gemini_flex_cb)
+
+    gemini_flex_desc = QLabel("Pins Gemini models to Google AI Studio / Vertex Flex endpoints (50% cheaper) with no fallback,\noverriding the preferred provider. Requests may queue or 503; models without a Flex endpoint will fail.")
+    gemini_flex_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    gemini_flex_desc.setContentsMargins(20, 0, 0, 8)
+    section_v.addWidget(gemini_flex_desc)
     
     # Place the section at row 1, column 1 to match the original grid
     try:

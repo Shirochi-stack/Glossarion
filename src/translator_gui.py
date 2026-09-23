@@ -13749,6 +13749,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             self.openrouter_accept_identity_var = self.config.get('openrouter_accept_identity', False)
         except Exception:
             self.openrouter_accept_identity_var = False
+        self.openrouter_gemini_flex_var = bool(self.config.get('openrouter_gemini_flex', False))
 
         # Initialize OpenRouter preferred provider early (avoid blank UI when config key is missing/empty)
         try:
@@ -47545,6 +47546,7 @@ Important rules:
                 # OpenRouter
                 ('openrouter_use_http_only', ['openrouter_http_only_var'], False, bool),
                 ('openrouter_accept_identity', ['openrouter_accept_identity_var'], False, bool),
+                ('openrouter_gemini_flex', ['openrouter_gemini_flex_var'], False, bool),
                 ('openrouter_preferred_provider', ['openrouter_preferred_provider_var', ('config', 'openrouter_preferred_provider')], 'Auto', lambda v: (str(v).strip() if v is not None else '') or 'Auto'),
 
                 # Environment-backed settings
@@ -47804,6 +47806,7 @@ Important rules:
             # Standard env vars
             env_vars_set.append(_update_env('OPENROUTER_USE_HTTP_ONLY', self.config.get('openrouter_use_http_only'), is_bool=True))
             env_vars_set.append(_update_env('OPENROUTER_ACCEPT_IDENTITY', self.config.get('openrouter_accept_identity'), is_bool=True))
+            env_vars_set.append(_update_env('OPENROUTER_GEMINI_FLEX', self.config.get('openrouter_gemini_flex'), is_bool=True))
             env_vars_set.append(_update_env('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')))
             env_vars_set.append(_update_env('RETAIN_SOURCE_EXTENSION', self.config.get('retain_source_extension'), is_bool=True))
             env_vars_set.append(_update_env('DOWNLOAD_REMOTE_IMAGE_URLS', self.config.get('download_remote_image_urls'), is_bool=True))
@@ -47981,6 +47984,7 @@ Important rules:
                     ('OPENROUTER_USE_HTTP_ONLY', '1' if self.config.get('openrouter_use_http_only') else '0'),
                     ('USE_NVIDIA_HTTP', '1' if self.config.get('openrouter_use_http_only') else '0'),
                     ('OPENROUTER_ACCEPT_IDENTITY', '1' if self.config.get('openrouter_accept_identity') else '0'),
+                    ('OPENROUTER_GEMINI_FLEX', '1' if self.config.get('openrouter_gemini_flex') else '0'),
                     ('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')),
                     ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers')) if self.config.get('enable_parallel_extraction') else '1'),
                     ('PDF_EXTRACTION_WORKERS', str(self.config.get('pdf_extraction_workers', 'auto') or 'auto')),
@@ -48061,6 +48065,7 @@ Important rules:
             'OPENROUTER_USE_HTTP_ONLY': 'OpenRouter/NVIDIA HTTP-only transport',
             'USE_NVIDIA_HTTP': 'NVIDIA HTTP-only transport',
             'OPENROUTER_ACCEPT_IDENTITY': 'OpenRouter identity encoding',
+            'OPENROUTER_GEMINI_FLEX': 'OpenRouter always-Flex for Gemini',
             'OPENROUTER_PREFERRED_PROVIDER': 'OpenRouter preferred provider',
             
             # General application settings
@@ -48405,6 +48410,7 @@ Important rules:
                 # OpenRouter settings
                 ('OPENROUTER_USE_HTTP_ONLY', '1' if self.config.get('openrouter_use_http_only', False) else '0'),
                 ('OPENROUTER_ACCEPT_IDENTITY', '1' if self.config.get('openrouter_accept_identity', False) else '0'),
+                ('OPENROUTER_GEMINI_FLEX', '1' if self.config.get('openrouter_gemini_flex', False) else '0'),
                 ('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')),
 
                 # Thinking toggles
@@ -48796,6 +48802,7 @@ Important rules:
                 # OpenRouter (duplicates are okay; ensures presence)
                 ('OPENROUTER_USE_HTTP_ONLY', '1' if getattr(self, 'openrouter_http_only_var', False) else '0'),
                 ('OPENROUTER_ACCEPT_IDENTITY', '1' if getattr(self, 'openrouter_accept_identity_var', False) else '0'),
+                ('OPENROUTER_GEMINI_FLEX', '1' if getattr(self, 'openrouter_gemini_flex_var', False) else '0'),
 
                 # Misc toggles
                 ('auto_update_check', str(getattr(self, 'auto_update_check_var', True))),

@@ -18388,6 +18388,29 @@ class UnifiedClient:
             usage = None
         return content, finish_reason, usage
 
+    # OpenRouter Flex endpoints for Gemini models (used by the "always Flex" toggle)
+    _OPENROUTER_GEMINI_FLEX_ENDPOINTS = ('google-ai-studio/flex', 'google-vertex/global/flex')
+
+    def _openrouter_provider_routing(self, model=None):
+        """Build OpenRouter's `provider` body, or None to let OpenRouter choose.
+
+        Tier endpoint slugs (``.../flex``, ``.../priority``) are pinned with fallbacks off,
+        otherwise OpenRouter silently reroutes shed Flex requests to a full-price endpoint.
+        """
+        preferred = (os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto') or '').strip()
+        if preferred == 'Auto':
+            preferred = ''
+        is_tier_slug = preferred.lower().endswith(('/flex', '/priority'))
+        if (os.getenv('OPENROUTER_GEMINI_FLEX', '0') == '1'
+                and 'gemini' in str(model or '').lower()
+                and not preferred.lower().endswith('/flex')):
+            return {"only": list(self._OPENROUTER_GEMINI_FLEX_ENDPOINTS), "allow_fallbacks": False}
+        if not preferred:
+            return None
+        if is_tier_slug:
+            return {"only": [preferred], "allow_fallbacks": False}
+        return {"order": [preferred]}
+
     def _get_idempotency_key(self) -> str:
         """Build an idempotency key from the current request context."""
         tls = self._get_thread_local_client()
@@ -23929,8 +23952,9 @@ class UnifiedClient:
                         preferred_provider = None
                         try:
                             preferred_provider = os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto').strip()
-                            if preferred_provider and preferred_provider != 'Auto':
-                                extra_body["provider"] = {"order": [preferred_provider]}
+                            _routing = self._openrouter_provider_routing(effective_model)
+                            if _routing:
+                                extra_body["provider"] = _routing
                         except Exception:
                             preferred_provider = None
 
@@ -25657,11 +25681,9 @@ class UnifiedClient:
                                 pass
                             # Add provider preference if specified (fallback path)
                             try:
-                                preferred_provider = os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto').strip()
-                                if preferred_provider and preferred_provider != 'Auto':
-                                    body["provider"] = {
-                                        "order": [preferred_provider]
-                                    }
+                                _routing = self._openrouter_provider_routing(effective_model)
+                                if _routing:
+                                    body["provider"] = _routing
                             except Exception:
                                 pass
                             # Make HTTP request
@@ -26037,10 +26059,9 @@ class UnifiedClient:
                     preferred_provider = None
                     try:
                         preferred_provider = os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto').strip()
-                        if preferred_provider and preferred_provider != 'Auto':
-                            data["provider"] = {
-                                "order": [preferred_provider]
-                            }
+                        _routing = self._openrouter_provider_routing(effective_model)
+                        if _routing:
+                            data["provider"] = _routing
                     except Exception:
                         preferred_provider = None
 
