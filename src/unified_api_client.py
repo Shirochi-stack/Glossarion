@@ -18411,6 +18411,19 @@ class UnifiedClient:
             return {"only": [preferred], "allow_fallbacks": False}
         return {"order": [preferred]}
 
+    @staticmethod
+    def _describe_openrouter_routing(routing):
+        """Short human-readable summary of an OpenRouter `provider` body for logs."""
+        if not routing:
+            return "Auto (OpenRouter picks the provider)"
+        if routing.get("only"):
+            slugs = [str(x) for x in routing["only"]]
+            tiers = sorted({t for x in slugs for t in ("flex", "priority") if x.lower().endswith("/" + t)})
+            label = f"{'/'.join(t.capitalize() for t in tiers)} tier" if tiers else "Pinned"
+            fb = ", no fallback" if routing.get("allow_fallbacks") is False else ""
+            return f"{label} ({', '.join(slugs)}{fb})"
+        return f"Prefer {', '.join(routing.get('order', []))}"
+
     def _get_idempotency_key(self) -> str:
         """Build an idempotency key from the current request context."""
         tls = self._get_thread_local_client()
@@ -21226,7 +21239,16 @@ class UnifiedClient:
 
                 # Log the request - only if not stopping
                 if not self._is_stop_requested():
-                    _tier = f", Tier: {gemini_tier}" if gemini_tier else ""
+                    # service_tier only reaches the native SDK request; the gRPC proto
+                    # and OpenAI-compatible calls have no field for it
+                    _tier = ""
+                    if gemini_tier:
+                        if use_grpc_transport:
+                            _tier = f", Tier: {gemini_tier} (not sent: gRPC has no service_tier field)"
+                        elif use_openai_endpoint and gemini_endpoint:
+                            _tier = f", Tier: {gemini_tier} (not sent: OpenAI-compatible endpoint)"
+                        else:
+                            _tier = f", Tier: {gemini_tier}"
                     print(f"   📊 Temperature: {temperature}, Max tokens: {max_tokens}{_tier}")
 
                 # ========== MAKE THE API CALL - DIFFERENT FOR EACH ENDPOINT ==========
@@ -23950,6 +23972,7 @@ class UnifiedClient:
 
                         # OpenRouter: Provider preference
                         preferred_provider = None
+                        _routing = None
                         try:
                             preferred_provider = os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto').strip()
                             _routing = self._openrouter_provider_routing(effective_model)
@@ -23970,17 +23993,12 @@ class UnifiedClient:
                                 raw_model_for_log = ''
                             raw_model_for_log = str(raw_model_for_log or '')
                             pp = (preferred_provider or 'Auto').strip() or 'Auto'
-                            state_key = (str(raw_model_for_log), str(effective_model or ''), str(pp))
+                            route_desc = self._describe_openrouter_routing(_routing)
+                            state_key = (str(raw_model_for_log), str(effective_model or ''), str(pp), route_desc)
                             if state_key not in tls.openrouter_route_logged:
                                 tls.openrouter_route_logged.add(state_key)
-                                try:
-                                    tname = threading.current_thread().name
-                                except Exception:
-                                    tname = "unknown-thread"
-                                sent = 'yes' if (pp and pp != 'Auto') else 'no'
                                 print(
-                                    f"🔀 OpenRouter route: preferred_provider={pp} (provider_order_sent={sent}) "
-                                    f"(thread={tname}, raw_model={raw_model_for_log}, model={effective_model})"
+                                    f"🔀 OpenRouter: {route_desc} · model={effective_model}"
                                 )
                         except Exception:
                             pass
@@ -26057,6 +26075,7 @@ class UnifiedClient:
                     
                     # Add provider preference if specified
                     preferred_provider = None
+                    _routing = None
                     try:
                         preferred_provider = os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto').strip()
                         _routing = self._openrouter_provider_routing(effective_model)
@@ -26076,17 +26095,12 @@ class UnifiedClient:
                             raw_model_for_log = ''
                         raw_model_for_log = str(raw_model_for_log or '')
                         pp = (preferred_provider or 'Auto').strip() or 'Auto'
-                        state_key = (str(raw_model_for_log), str(effective_model or ''), str(pp))
+                        route_desc = self._describe_openrouter_routing(_routing)
+                        state_key = (str(raw_model_for_log), str(effective_model or ''), str(pp), route_desc)
                         if state_key not in tls.openrouter_route_logged_http:
                             tls.openrouter_route_logged_http.add(state_key)
-                            try:
-                                tname = threading.current_thread().name
-                            except Exception:
-                                tname = "unknown-thread"
-                            sent = 'yes' if (pp and pp != 'Auto') else 'no'
                             print(
-                                f"🔀 OpenRouter route: preferred_provider={pp} (provider_order_sent={sent}) "
-                                f"(thread={tname}, raw_model={raw_model_for_log}, model={effective_model})"
+                                f"🔀 OpenRouter: {route_desc} · model={effective_model}"
                             )
                     except Exception:
                         pass
