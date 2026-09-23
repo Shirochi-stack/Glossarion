@@ -227,15 +227,20 @@ def _get_static_model_options() -> List[str]:
         "lr/pixtral-large-2411", "lr/pixtral-large-latest",
         "lr/qwen3-4b-fp8:free", "lr/trinity-large-thinking", "lr/trinity-mini:free",
 
-        # OpenCode Go (oc/ prefix) - OpenAI-compatible /chat/completions models
+        # OpenCode (oc/ prefix) - polls the Zen endpoint which has the full catalog
+        "oc/claude-fable-5-1", "oc/claude-fable-5",
+        "oc/claude-opus-5-5", "oc/claude-sonnet-5", "oc/claude-sonnet-4.5",
+        "oc/gpt-5.4", "oc/gpt-5.4-mini", "oc/gpt-5.4-nano",
+        "oc/gemini-2.5-pro", "oc/gemini-2.5-flash",
+        "oc/grok-4", "oc/grok-3-mini",
+        "oc/deepseek-v4-pro", "oc/deepseek-v4-flash",
         "oc/glm-5.1", "oc/glm-5",
         "oc/kimi-k2.6", "oc/kimi-k2.5",
-        "oc/deepseek-v4-pro", "oc/deepseek-v4-flash",
         "oc/mimo-v2.5-pro", "oc/mimo-v2.5",
+        "oc/qwen3.8-flash",
 
-        # OpenCode Zen free tier (ocz/ prefix) - routed to the Zen endpoint,
-        # which is where the *-free models are actually served (Go does not
-        # serve them). The live list is auto-polled; these are static fallbacks.
+        # OpenCode free tier (ocz/ prefix) - same Zen endpoint, filtered to
+        # *-free models only. These require the genuine OpenCode binary.
         "ocz/deepseek-v4-flash-free",
         "ocz/mimo-v2.6-flash-free", "ocz/mimo-v2.5-free",
         "ocz/nemotron-3-ultra-free", "ocz/nemotron-3.5-lightning-free",
@@ -608,7 +613,7 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
         base_url_env="LITEROUTER_API_URL",
     ),
     ProviderCatalogSpec(
-        "opencode", "oc/", "https://opencode.ai/zen/go/v1/models", ("OPENCODE_API_KEY",),
+        "opencode", "oc/", "https://opencode.ai/zen/v1/models", ("OPENCODE_API_KEY",),
         public=True, base_url_env="OPENCODE_API_URL",
     ),
     ProviderCatalogSpec(
@@ -1261,6 +1266,8 @@ def _fetch_provider_catalog(
         normalized = _normalize_catalog_model_id(spec, model_id)
         if normalized:
             models.append(normalized)
+    if spec.name == "opencode-zen":
+        models = [m for m in models if m.split("/", 1)[-1].endswith("-free")]
     return _deduplicate_models(models)
 
 

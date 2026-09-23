@@ -18095,10 +18095,9 @@ class UnifiedClient:
     def _opencode_base_url(self) -> str:
         """Return the OpenCode base URL for the current model.
 
-        The 'ocz/' prefix targets OpenCode Zen (https://opencode.ai/zen/v1),
-        which is the only endpoint that serves the free '*-free' models. Every
-        other opencode model uses the Go subscription endpoint. Both honor an
-        env override so a custom gateway can be pointed at either route.
+        Both oc/ and ocz/ use the Zen endpoint which serves the full catalog.
+        Each honors its own env override so a custom gateway (e.g. opencode
+        serve) can be pointed at either route independently.
         """
         try:
             model = str(getattr(self, 'model', '') or '').lower()
@@ -18106,7 +18105,7 @@ class UnifiedClient:
             model = ''
         if model.startswith('ocz/'):
             return os.getenv("OPENCODE_ZEN_API_URL", "https://opencode.ai/zen/v1")
-        return os.getenv("OPENCODE_API_URL", "https://opencode.ai/zen/go/v1")
+        return os.getenv("OPENCODE_API_URL", "https://opencode.ai/zen/v1")
 
     def _opencode_session_id(self) -> str:
         """Return a stable session ID that passes the OpenCode fingerprint gate.
