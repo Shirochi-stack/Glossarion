@@ -83,9 +83,35 @@ def update_translation_artifact_progress(
             chapters = progress.setdefault("chapters", {})
             if not isinstance(chapters, dict):
                 return False
-            previous = chapters.get(spec["progress_key"], {})
+
+            # Collapse duplicate rows for this artifact. Older runs keyed
+            # TOC/header rows by their (negative) actual_num (e.g. "-2"), while
+            # this writer keys them by their canonical progress_key. When both
+            # exist, the two rows disagree — one writer updates one key, the QA
+            # scanner (matching by output_file) updates the other — and the
+            # Progress Manager shows whichever stale row it reaches. Fold every
+            # other-keyed row for this artifact into the canonical key so the
+            # progress file can only hold one row per artifact.
+            spec_kind = spec["kind"].casefold()
+            spec_file = spec["filename"].casefold()
+            previous = chapters.get(spec["progress_key"])
             if not isinstance(previous, dict):
                 previous = {}
+            for dup_key in list(chapters.keys()):
+                if dup_key == spec["progress_key"]:
+                    continue
+                dup = chapters.get(dup_key)
+                if not isinstance(dup, dict):
+                    continue
+                dup_kind = str(dup.get("special_type") or "").strip().casefold()
+                dup_file = os.path.basename(str(dup.get("output_file") or "")).casefold()
+                dup_pkey = str(dup.get("translation_artifact_progress_key") or "")
+                if dup_kind == spec_kind or dup_file == spec_file or dup_pkey == spec["progress_key"]:
+                    # Seed from the legacy row when the canonical key is absent so
+                    # provenance (model_name, content_hash) isn't lost on migration.
+                    if not previous:
+                        previous = dict(dup)
+                    chapters.pop(dup_key, None)
 
             entry = dict(previous)
             entry.update({

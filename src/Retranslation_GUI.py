@@ -1307,6 +1307,36 @@ def _manual_editing_output_filename(entry, current_output, retain_source_extensi
     return f"response_{source_stem or source_name}.html"
 
 
+_ARTIFACT_ROW_STATUS_RANK = {
+    'completed': 5,
+    'in_progress': 4,
+    'qa_failed': 3,
+    'failed': 2,
+    'error': 2,
+    'pending': 1,
+    'skipped': 0,
+}
+
+
+def _artifact_row_sort_rank(key, entry, canonical_key):
+    """Rank a duplicate artifact progress row so the authoritative one wins.
+
+    Ordering (highest wins): status priority (a ``completed`` row beats a
+    ``failed`` one), then recency by ``last_updated`` (a newer row supersedes an
+    older one whose provenance changed, e.g. claude -> RECYCLED), then the
+    canonical progress key as a final tie-breaker.
+    """
+    entry = entry if isinstance(entry, dict) else {}
+    status = str(entry.get('status') or '').strip().lower()
+    status_rank = _ARTIFACT_ROW_STATUS_RANK.get(status, 1)
+    try:
+        last_updated = float(entry.get('last_updated') or 0)
+    except (TypeError, ValueError):
+        last_updated = 0.0
+    is_canonical = 1 if key == canonical_key else 0
+    return (status_rank, last_updated, is_canonical)
+
+
 def _progress_item_is_html(display_info) -> bool:
     """Return whether a Progress Manager row points to an HTML document."""
     display_info = display_info if isinstance(display_info, dict) else {}
@@ -19733,6 +19763,9 @@ class RetranslationMixin:
         if not file_path.lower().endswith(('.epub', '.pdf')):
             return
 
+        _prog = data.get('prog') if isinstance(data.get('prog'), dict) else {}
+        prog_chapters = _prog.get('chapters') if isinstance(_prog, dict) else None
+
         _metadata_entries, artifact_entries = (
             self._progress_managed_special_entries(data)
         )
@@ -19785,13 +19818,24 @@ class RetranslationMixin:
             if enabled:
                 if not entries:
                     continue
-                key, entry = next(
-                    (
-                        item for item in entries
-                        if item[0] == spec['progress_key']
-                    ),
-                    entries[0],
+                # An artifact can carry duplicate progress rows under two key
+                # schemes (the canonical ``__translation_artifact__:*`` key and
+                # a legacy ``actual_num`` key like ``-2``). One writer updates
+                # one row, the QA scanner the other, so the file can hold
+                # disagreeing rows — a stale ``failed`` twin outliving a real
+                # ``completed`` one, or an outdated ``completed`` row whose
+                # provenance has since changed (e.g. claude -> RECYCLED). Keep
+                # exactly one authoritative row and drop the rest: rank by
+                # status (completed wins), then recency, then the canonical key.
+                key, entry = max(
+                    entries, key=lambda item: _artifact_row_sort_rank(
+                        item[0], item[1], spec['progress_key']
+                    )
                 )
+                if isinstance(prog_chapters, dict):
+                    for dup_key, _dup_entry in entries:
+                        if dup_key != key:
+                            prog_chapters.pop(dup_key, None)
             else:
                 key = spec['progress_key']
                 entry = {
