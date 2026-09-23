@@ -21204,14 +21204,14 @@ Recent translations to summarize:
         <h4>OpenCode Paid (oc/)</h4>
         <p>Access the full OpenCode model catalog with a subscription API key</p>
         <ul>
-            <li><b>oc/claude-fable-5-1</b> - Claude Fable 5.1</li>
-            <li><b>oc/gpt-5.4</b> - GPT-5.4</li>
+            <li><b>oc/gpt-6-luna</b> - GPT-6 Luna</li>
+            <li><b>oc/kimi-k3</b> - Kimi K3</li>
             <li><b>oc/deepseek-v4-pro</b> - DeepSeek V4 Pro</li>
             <li><b>oc/qwen3.8-flash</b> - Qwen 3.8 Flash</li>
         </ul>
         <p style="color: #38bdf8; padding: 4px; font-size: 11px;">
             <b>ℹ️ Tip:</b> Set <b>OPENCODE_API_KEY</b> in the multi API key manager.
-            The catalog is auto-polled from OpenCode's Zen endpoint.
+            The catalog is auto-polled from OpenCode's Go endpoint.
         </p>
 
         <h4>OpenCode Free (ocz/)</h4>
