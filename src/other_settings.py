@@ -4765,7 +4765,7 @@ def _create_response_handling_section(self, parent):
             return
 
         raw_budget = int((output_tokens - safety_margin) / compression_factor)
-        chunk_budget = max(1000, raw_budget)
+        chunk_budget = max(500, raw_budget)
         minimum_note = " minimum" if raw_budget < 1000 else ""
         compression_budget_label.setText(
             f"Max input chunk budget = ({output_tokens:,} output - {safety_margin:,} safety) "

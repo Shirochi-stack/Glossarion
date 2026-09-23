@@ -443,7 +443,7 @@ def _split_chapter_for_translation(chapter_splitter, chapter, available_tokens, 
     return chapter_splitter.split_chapter(body, available_tokens, filename=filename)
 
 
-def _translation_chunk_budget_snapshot(config, safety_margin=500, minimum=1000):
+def _translation_chunk_budget_snapshot(config, safety_margin=500, minimum=500):
     """Return a normalized chunk-budget snapshot for real and test configs."""
     resolver = getattr(config, "get_chunk_budget_snapshot", None)
     if callable(resolver):
@@ -2258,7 +2258,7 @@ class TranslationConfig:
             return 0.000000000001
         return compression_factor
 
-    def get_chunk_budget_snapshot(self, safety_margin=500, minimum=1000):
+    def get_chunk_budget_snapshot(self, safety_margin=500, minimum=500):
         """Describe configured and cache-adjusted EPUB input chunk budgets."""
         compression_factor = self.get_effective_compression_factor()
         initial_output_limit = self.get_initial_output_limit()
@@ -26106,7 +26106,7 @@ def main(log_callback=None, stop_callback=None):
             try:
                 sdlxliff_max_output = config.get_effective_output_limit()
                 sdlxliff_compression = config.get_effective_compression_factor()
-                sdlxliff_available = max(1000, int((sdlxliff_max_output - 500) / sdlxliff_compression))
+                sdlxliff_available = max(500, int((sdlxliff_max_output - 500) / sdlxliff_compression))
                 os.environ["SDLXLIFF_AVAILABLE_TOKENS"] = str(sdlxliff_available)
             except Exception:
                 pass

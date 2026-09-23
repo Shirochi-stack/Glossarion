@@ -16578,7 +16578,7 @@ Recent translations to summarize:
             return None
         if factor <= 0:
             return None
-        return max(1000, int((output_tokens - self._CHUNK_BUDGET_SAFETY_MARGIN) / factor))
+        return max(500, int((output_tokens - self._CHUNK_BUDGET_SAFETY_MARGIN) / factor))
 
     def _sync_chunk_size_entry(self):
         """Show "Auto" or the max input chunk budget in the main-window Chunk Size field."""

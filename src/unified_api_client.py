@@ -4362,6 +4362,9 @@ class UnifiedClient:
         # Initialize client references
         self.api_key = api_key
         self.model = model
+        # One OpenCode session per client, created up front so parallel threads
+        # can't race to mint different IDs (retries/copies/fallbacks reuse it)
+        self._opencode_session = self._new_opencode_session_id()
         self.key_identifier = "Single Key"
         self.current_key_index = None
         self.openai_client = None
@@ -11721,6 +11724,7 @@ class UnifiedClient:
                         _skip_cancel_reset=True
                     )
                     temp_client._apply_key_runtime_overrides(key_data=fallback_data, apply_delay=False)
+                    temp_client._opencode_session = self._opencode_session_id()
 
                     # Mark this client as a retry client to prevent recursive fallbacks
                     temp_client._is_retry_client = True
@@ -12119,6 +12123,7 @@ class UnifiedClient:
                         _skip_cancel_reset=True
                     )
                     temp_client._apply_key_runtime_overrides(key_data=fb, apply_delay=False)
+                    temp_client._opencode_session = self._opencode_session_id()
                     
                     # CRITICAL: Mark this client as a retry client BEFORE setup to prevent recursive fallback
                     # This flag tells _send_internal to NOT attempt fallback keys if it hits prohibited content
@@ -12413,6 +12418,7 @@ class UnifiedClient:
                         _skip_cancel_reset=True
                     )
                     temp_client._apply_key_runtime_overrides(key_data=gk)
+                    temp_client._opencode_session = self._opencode_session_id()
                     
                     # CRITICAL: Mark this client as a retry client BEFORE setup to prevent recursive fallback
                     temp_client._is_retry_client = True
@@ -18095,7 +18101,8 @@ class UnifiedClient:
     def _opencode_base_url(self) -> str:
         """Return the OpenCode base URL for the current model.
 
-        Both oc/ and ocz/ use the Zen endpoint which serves the full catalog.
+        oc/ is OpenCode Go (subscription) at /zen/go/v1; ocz/ is Zen at /zen/v1,
+        which bills a prepaid balance and returns 402 to Go-only subscribers.
         Each honors its own env override so a custom gateway (e.g. opencode
         serve) can be pointed at either route independently.
         """
@@ -18105,22 +18112,26 @@ class UnifiedClient:
             model = ''
         if model.startswith('ocz/'):
             return os.getenv("OPENCODE_ZEN_API_URL", "https://opencode.ai/zen/v1")
-        return os.getenv("OPENCODE_API_URL", "https://opencode.ai/zen/v1")
+        return os.getenv("OPENCODE_API_URL", "https://opencode.ai/zen/go/v1")
+
+    @staticmethod
+    def _new_opencode_session_id() -> str:
+        """Mint an OpenCode session ID: ses_ + 12 hex (recent-ms timestamp) + 14 base62."""
+        import time as _time, secrets as _secrets, string as _string
+        ts_hex = f'{int(_time.time() * 1000):012x}'[-12:]
+        b62 = _string.digits + _string.ascii_lowercase + _string.ascii_uppercase
+        rand_part = ''.join(_secrets.choice(b62) for _ in range(14))
+        return f'ses_{ts_hex}{rand_part}'
 
     def _opencode_session_id(self) -> str:
-        """Return a stable session ID that passes the OpenCode fingerprint gate.
+        """Return this client's x-opencode-session ID (created in __init__).
 
-        Format: ses_ + 12 hex (recent-ms timestamp) + 14 base62.
-        Reuse one ID for the life of this client so retries and chunked
-        requests stay on the same session.
+        The same ID is sent on every OpenCode request from this client — SDK and
+        HTTP fallback paths, retries, parallel threads and fallback-key clients.
         """
         sid = getattr(self, '_opencode_session', None)
         if not sid:
-            import time as _time, random as _rand, string as _string
-            ts_hex = f'{int(_time.time() * 1000):012x}'[-12:]
-            b62 = _string.digits + _string.ascii_lowercase + _string.ascii_uppercase
-            rand_part = ''.join(_rand.choice(b62) for _ in range(14))
-            sid = f'ses_{ts_hex}{rand_part}'
+            sid = self._new_opencode_session_id()
             try:
                 self._opencode_session = sid
             except Exception:

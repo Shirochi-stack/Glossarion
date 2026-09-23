@@ -362,12 +362,12 @@ def _safe_float(value: Any, default: float) -> float:
 def _available_tokens_from_env() -> int:
     explicit = _safe_int(os.getenv("SDLXLIFF_AVAILABLE_TOKENS"), 0)
     if explicit > 0:
-        return max(1000, explicit)
+        return max(500, explicit)
     max_output_tokens = _safe_int(os.getenv("MAX_OUTPUT_TOKENS", "8192"), 8192)
     compression_factor = _safe_float(os.getenv("COMPRESSION_FACTOR", "2.0"), 2.0)
     if compression_factor <= 0:
         compression_factor = 0.000000000001
-    return max(1000, int((max_output_tokens - 500) / compression_factor))
+    return max(500, int((max_output_tokens - 500) / compression_factor))
 
 
 def _segment_source_hash(segments: List[Dict[str, Any]]) -> str:
