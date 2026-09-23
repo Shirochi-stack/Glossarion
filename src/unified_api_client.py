@@ -18063,6 +18063,8 @@ class UnifiedClient:
             h['Accept'] = 'application/json'
         if provider == 'opencode' and 'User-Agent' not in h:
             h['User-Agent'] = self._opencode_user_agent()
+        if provider == 'opencode' and 'x-opencode-session' not in h:
+            h['x-opencode-session'] = self._opencode_session_id()
         return h
 
     @staticmethod
@@ -18073,6 +18075,24 @@ class UnifiedClient:
             return f"Glossarion/{APP_VERSION}"
         except Exception:
             return "Glossarion"
+
+    def _opencode_session_id(self) -> str:
+        """Return a stable session ID for the OpenCode Go x-opencode-session header.
+
+        OpenCode Go requires a stable session ID per conversation for routing and
+        prompt caching; without it the endpoint returns 400 MissingSessionID.
+        Reuse one ID for the life of this client so retries and chunked requests
+        stay on the same session.
+        """
+        sid = getattr(self, '_opencode_session', None)
+        if not sid:
+            import uuid
+            sid = uuid.uuid4().hex
+            try:
+                self._opencode_session = sid
+            except Exception:
+                pass
+        return sid
 
     def _get_openai_compatible_reasoning_effort(self, provider: str, effective_model: str = "") -> Optional[str]:
         """Return the selected effort for native GPT-6 and compatible opt-in routes."""
@@ -23650,7 +23670,8 @@ class UnifiedClient:
                         client_kwargs["http_client"] = _http_client
                     if provider == 'opencode':
                         client_kwargs["default_headers"] = {
-                            "User-Agent": self._opencode_user_agent()
+                            "User-Agent": self._opencode_user_agent(),
+                            "x-opencode-session": self._opencode_session_id(),
                         }
 
                     client = openai.OpenAI(
@@ -24095,6 +24116,7 @@ class UnifiedClient:
                     extra_headers = {"Idempotency-Key": idem_key}
                     if provider == 'opencode':
                         extra_headers["User-Agent"] = self._opencode_user_agent()
+                        extra_headers["x-opencode-session"] = self._opencode_session_id()
                     if provider == 'chutes':
                         try:
                             # Log once per-thread per (model,state)
