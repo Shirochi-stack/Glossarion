@@ -1455,6 +1455,14 @@ except ImportError:
     _ocagy_is_cancelled = None
     OCAGY_AVAILABLE = False
 
+# OpenCode Zen free-tier via CLI (ocz/ prefix)
+try:
+    from ocagy_cli import send_opencode_zen_completion as _opencode_zen_send
+    OPENCODE_ZEN_AVAILABLE = True
+except ImportError:
+    _opencode_zen_send = None
+    OPENCODE_ZEN_AVAILABLE = False
+
 # Antigravity Cloud Code proxy (optional)
 try:
     from antigravity_proxy import send_message as _antigravity_send
@@ -2892,7 +2900,7 @@ class UnifiedClient:
         'openrouter': 'openrouter',
         'lr/': 'literouter',
         'lr': 'literouter',
-        'ocz/': 'opencode',  # OpenCode Zen (free-tier models); base URL switches on the prefix
+        'ocz/': 'opencode-zen',  # OpenCode Zen free-tier; routed through the OpenCode CLI binary
         'oc/': 'opencode',
         'opencode/': 'opencode',
         'opencode-go/': 'opencode',
@@ -2961,7 +2969,7 @@ class UnifiedClient:
         'authgpt/', 'authgpt',
         'authgrok/', 'authgrok',
         'authgem', 'authgem-vertex',
-        'vertex/', 'ocagy/', 'ocagy',
+        'vertex/', 'ocagy/', 'ocagy', 'ocz/',
         'antigravity/', 'antigravity',
         'authza/', 'authza', 'authnd/', 'authnd',
         'search/', 'search', 'authcd/', 'authcd',
@@ -8922,6 +8930,13 @@ class UnifiedClient:
                     "Antigravity proxy module not found. Make sure 'antigravity_proxy.py' exists in src/."
                 )
             logger.info("🛸 Antigravity will use local proxy (Shirochi-stack/antigravity-proxy)")
+
+        elif self.client_type == 'opencode-zen':
+            if not OPENCODE_ZEN_AVAILABLE:
+                raise ImportError(
+                    "OpenCode Zen adapter not found. Make sure 'ocagy_cli.py' exists under src/."
+                )
+            logger.info("🌐 OpenCode Zen will use the OpenCode CLI for free-tier models")
 
         elif self.client_type == 'ocagy':
             # OpenCode and opencode-antigravity-auth own OAuth and requests.
@@ -16617,7 +16632,7 @@ class UnifiedClient:
             return ""
 
         # --- OpenAI / GPT family ---
-        if model_lower.startswith(('oc/', 'opencode/', 'opencode-go/')):
+        if model_lower.startswith(('ocz/', 'oc/', 'opencode/', 'opencode-go/')):
             model_for_detect = model_lower.split('/', 1)[1] if '/' in model_lower else model_lower
             if self._opencode_thinking_disabled(model_for_detect):
                 return " (thinking disabled)"
@@ -18075,7 +18090,7 @@ class UnifiedClient:
     @staticmethod
     def _opencode_user_agent() -> str:
         """Return a User-Agent that passes the OpenCode free-tier fingerprint gate."""
-        return "opencode/1.18.31"
+        return "opencode/1.18.32"
 
     def _opencode_base_url(self) -> str:
         """Return the OpenCode base URL for the current model.
@@ -18716,6 +18731,7 @@ class UnifiedClient:
             'authgem': self._send_authgem,  # Gemini via Google OAuth + AI Studio
             'authgem_key': self._send_authgem_key,  # Gemini via AI Studio API key
             'authgem_vertex': self._send_authgem_vertex,  # Gemini via Google OAuth + Vertex AI
+            'opencode-zen': self._send_opencode_zen,  # OpenCode Zen free-tier via CLI
             'ocagy': self._send_ocagy,  # OpenCode + opencode-antigravity-auth
             'autharena': self._send_autharena,
             'antigravity': self._send_antigravity,  # Antigravity Cloud Code proxy
@@ -27815,6 +27831,74 @@ class UnifiedClient:
             )
 
         return self._authgem_retry_loop(_do_send, label, actual_model, messages, temperature, max_tokens, store=store)
+
+    def _send_opencode_zen(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send one request through the OpenCode CLI for free-tier Zen models (ocz/)."""
+        if not OPENCODE_ZEN_AVAILABLE or _opencode_zen_send is None:
+            raise UnifiedClientError(
+                "OpenCode Zen provider is unavailable. Ensure ocagy_cli.py exists under src/.",
+                error_type="config_error",
+            )
+        if self._should_abort_retry():
+            raise UnifiedClientError(
+                "OpenCode Zen: Translation stopped by user",
+                error_type="cancelled",
+            )
+
+        request_model = self._get_active_request_model()
+        actual_model = str(request_model or "").strip()
+
+        ocz_timeout = self.request_timeout
+        if os.getenv("ENABLE_HTTP_TUNING", "0") == "1":
+            try:
+                configured_read_timeout = float(os.getenv("READ_TIMEOUT", str(ocz_timeout)))
+                ocz_timeout = configured_read_timeout if configured_read_timeout > 0 else 36000
+            except (TypeError, ValueError):
+                pass
+
+        try:
+            result = _opencode_zen_send(
+                messages=messages,
+                model=actual_model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=ocz_timeout,
+                log_fn=lambda message: print(message, flush=True),
+            )
+            content = str(result.get("content", "") or "")
+            finish_reason = self._normalize_finish_reason(result.get("finish_reason"))
+            if not finish_reason:
+                if self._force_missing_finish_as_prohibited(None):
+                    finish_reason = None
+                else:
+                    raise UnifiedClientError(
+                        "OpenCode Zen: provider response did not include a finish_reason.",
+                        error_type="api_error",
+                    )
+            if finish_reason == "stop" and not content.strip():
+                raise UnifiedClientError(
+                    "OpenCode Zen returned an empty response.",
+                    error_type="provider_error",
+                )
+            return UnifiedResponse(
+                content=content,
+                finish_reason=finish_reason,
+                usage=result.get("usage"),
+                raw_response=result,
+            )
+        except UnifiedClientError:
+            raise
+        except RuntimeError as exc:
+            text = str(exc)
+            lower = text.lower()
+            if "cancel" in lower or self._should_abort_retry():
+                raise UnifiedClientError(
+                    "OpenCode Zen: Translation stopped by user",
+                    error_type="cancelled",
+                )
+            raise UnifiedClientError(text, error_type="provider_error")
+        except Exception as exc:
+            raise UnifiedClientError(str(exc), error_type="provider_error")
 
     def _send_ocagy(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send one request through OpenCode + opencode-antigravity-auth.

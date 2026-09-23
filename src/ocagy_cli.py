@@ -2597,3 +2597,181 @@ def send_chat_completion(
         "stderr": "",
         "raw_response": result.get("raw_response"),
     }
+
+
+# ---------------------------------------------------------------------------
+# OpenCode Zen free-tier — ocz/ prefix
+# ---------------------------------------------------------------------------
+
+def _zen_workspace_config(*, temperature: Optional[float] = None) -> Dict[str, Any]:
+    config: Dict[str, Any] = {
+        "$schema": "https://opencode.ai/config.json",
+        "share": "disabled",
+        "permission": {"*": "deny"},
+        "agent": {
+            "glossarion": {
+                "description": "Non-interactive text generation backend for Glossarion",
+                "mode": "primary",
+                "prompt": (
+                    "Act only as a text-generation backend for Glossarion. Never use tools, "
+                    "never inspect files or the workspace, never browse, and never explain your process. "
+                    "Follow the supplied instructions and return only the requested final text."
+                ),
+                "permission": {"*": "deny"},
+            }
+        },
+    }
+    if temperature is not None:
+        try:
+            config.setdefault("agent", {}).setdefault("glossarion", {})["temperature"] = round(float(temperature), 2)
+        except (TypeError, ValueError):
+            pass
+    return config
+
+
+def _write_zen_workspace_config(path: Path, *, temperature: Optional[float] = None) -> Path:
+    target = path / "opencode.json"
+    desired = _zen_workspace_config(temperature=temperature)
+    target.write_text(json.dumps(desired, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return target
+
+
+def send_opencode_zen_completion(
+    *,
+    messages: List[Dict[str, Any]],
+    model: str,
+    temperature: float = 0.3,
+    max_tokens: int = 65536,
+    timeout: float = 1800,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """Run one request through the OpenCode CLI for free-tier Zen models (ocz/).
+
+    Unlike the antigravity path, no plugin or OAuth is needed — the OpenCode
+    binary itself authenticates with the Zen endpoint via its built-in
+    fingerprint (User-Agent, session, binary signature).
+    """
+    if is_cancelled():
+        raise OcAgyError("OpenCode Zen request cancelled by user")
+
+    logger = log_fn or (lambda _message: None)
+    exe = ensure_opencode_installed(log_fn=logger)
+
+    effective_model = str(model or "").strip()
+    for prefix in ("ocz/", "oc/", "opencode/", "opencode-go/"):
+        if effective_model.startswith(prefix):
+            effective_model = effective_model[len(prefix):]
+            break
+    if not effective_model:
+        raise OcAgyError("No model specified for OpenCode Zen request.")
+
+    prompt = build_prompt(messages)
+    timeout_seconds = max(1.0, float(timeout or 1800))
+
+    base = _workspace_dir()
+    request_dir = Path(tempfile.mkdtemp(prefix="ocz-request-", dir=str(base)))
+    try:
+        env = _subprocess_env()
+        env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(max(1, int(max_tokens)))
+        _write_zen_workspace_config(request_dir, temperature=temperature)
+    except Exception:
+        shutil.rmtree(request_dir, ignore_errors=True)
+        raise
+
+    command = [
+        exe,
+        "run",
+        "--format", "json",
+        "--model", effective_model,
+        "--agent", "glossarion",
+        "--dir", str(request_dir),
+        "--title", "Glossarion translation",
+    ]
+
+    logger(f"🌐 OpenCode Zen: {Path(exe).name} run --model {effective_model}")
+
+    start = time.time()
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=str(request_dir),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_creation_flags(),
+            start_new_session=(os.name != "nt"),
+            env=env,
+        )
+    except Exception:
+        shutil.rmtree(request_dir, ignore_errors=True)
+        raise
+    with _ACTIVE_LOCK:
+        _ACTIVE_PROCESSES.add(proc)
+
+    stdout = ""
+    stderr = ""
+    try:
+        try:
+            stdout, stderr = proc.communicate(input=prompt, timeout=1.0)
+        except subprocess.TimeoutExpired:
+            while True:
+                if is_cancelled():
+                    _terminate_process_tree(proc)
+                    raise OcAgyError("OpenCode Zen request cancelled by user")
+                if time.time() - start >= timeout_seconds:
+                    _terminate_process_tree(proc)
+                    raise OcAgyError(
+                        f"OpenCode Zen timed out after {timeout_seconds}s. "
+                        "Increase the API timeout or use a shorter chunk."
+                    )
+                try:
+                    stdout, stderr = proc.communicate(timeout=0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+    finally:
+        with _ACTIVE_LOCK:
+            _ACTIVE_PROCESSES.discard(proc)
+        shutil.rmtree(request_dir, ignore_errors=True)
+
+    elapsed = time.time() - start
+    content, events, non_json = _parse_json_events(stdout)
+    event_error = _event_error(events)
+    if proc.returncode != 0 or event_error:
+        detail = "\n".join(part for part in (event_error, _clean_text(stderr), "\n".join(non_json)) if part)
+        raise _classify_error(detail, int(proc.returncode or 1))
+
+    if not content:
+        fallback = "\n".join(non_json).strip()
+        if fallback:
+            content = fallback
+    content = _clean_text(content)
+    if not content:
+        detail = _clean_text(stderr)
+        raise OcAgyError("OpenCode Zen returned an empty response." + (f" Details: {detail}" if detail else ""))
+
+    usage = _usage_from_value(events)
+    raw_finish_reason, finish_reason_source = _finish_reason_from_cli_events(events)
+    finish_reason = _normalize_opencode_finish_reason(raw_finish_reason)
+    finish_reason_fallback = not bool(finish_reason)
+    if finish_reason_fallback:
+        finish_reason = "stop"
+        finish_reason_source = "fallback_stop"
+
+    logger(f"✅ OpenCode Zen: completed in {elapsed:.1f}s")
+    return {
+        "content": content,
+        "finish_reason": finish_reason,
+        "raw_finish_reason": raw_finish_reason,
+        "finish_reason_source": finish_reason_source,
+        "finish_reason_fallback": finish_reason_fallback,
+        "usage": usage,
+        "model": effective_model,
+        "provider": "opencode-zen",
+        "elapsed_seconds": elapsed,
+        "stderr": _clean_text(stderr),
+        "raw_response": events,
+    }
