@@ -4702,6 +4702,8 @@ def _create_response_handling_section(self, parent):
     compression_budget_label.setWordWrap(True)
 
     def _update_compression_token_budget_label():
+        if hasattr(self, '_sync_chunk_size_entry'):
+            self._sync_chunk_size_entry()
         try:
             output_tokens = int(getattr(self, 'max_output_tokens', self.config.get('max_output_tokens', 65536)))
         except Exception:
@@ -4766,6 +4768,8 @@ def _create_response_handling_section(self, parent):
     def _on_compression_changed(text):
         try:
             self.compression_factor_var = text
+            if hasattr(self, '_remember_manual_chunk_size'):
+                self._remember_manual_chunk_size()
             _update_compression_token_budget_label()
         except Exception:
             pass
@@ -4783,6 +4787,8 @@ def _create_response_handling_section(self, parent):
             if checked:
                 _update_compression_factor()
             else:
+                if hasattr(self, '_remember_manual_chunk_size'):
+                    self._remember_manual_chunk_size()
                 _update_compression_token_budget_label()
         except Exception as e:
             print(f"Error toggling auto compression: {e}")
@@ -4805,7 +4811,25 @@ def _create_response_handling_section(self, parent):
     
     # Apply initial state
     _on_auto_compression_toggle(auto_compression_cb.isChecked())
-    
+
+    # Let the main window's Chunk Size field drive these controls while the dialog is open
+    self._auto_compression_cb = auto_compression_cb
+    self._compression_factor_edit = compression_edit
+
+    def _on_compression_widgets_destroyed(*_args):
+        # Fall back to the main window's methods once these closures' widgets are gone
+        # (identity checks so a newer dialog's hooks are left alone)
+        if self.__dict__.get('_update_auto_compression_factor') is _update_compression_factor:
+            del self._update_auto_compression_factor
+        if self.__dict__.get('_update_compression_token_budget_label') is _update_compression_token_budget_label:
+            del self._update_compression_token_budget_label
+        if getattr(self, '_compression_factor_edit', None) is compression_edit:
+            self._auto_compression_cb = None
+            self._compression_factor_edit = None
+            self.compression_token_budget_label = None
+
+    compression_edit.destroyed.connect(_on_compression_widgets_destroyed)
+
     compression_desc = QLabel("Expected output tokens per input token for chunk sizing")
     compression_desc.setStyleSheet("color: gray; font-size: 10pt;")
     compression_desc.setContentsMargins(20, 0, 0, 10)

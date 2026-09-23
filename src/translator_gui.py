@@ -16560,6 +16560,116 @@ Recent translations to summarize:
                     pass
         except Exception as e:
             print(f"Error updating auto compression factor: {e}")
+        finally:
+            self._sync_chunk_size_entry()
+
+    _CHUNK_BUDGET_SAFETY_MARGIN = 500
+
+    def _compression_chunk_budget(self):
+        """Max input chunk budget for the current compression factor (same formula as Other Settings)."""
+        try:
+            output_tokens = int(getattr(self, 'max_output_tokens', self.config.get('max_output_tokens', 65536)))
+            factor = float(getattr(self, 'compression_factor_var', self.config.get('compression_factor', 3.0)))
+        except (TypeError, ValueError):
+            return None
+        if factor <= 0:
+            return None
+        return max(1000, int((output_tokens - self._CHUNK_BUDGET_SAFETY_MARGIN) / factor))
+
+    def _sync_chunk_size_entry(self):
+        """Show "Auto" or the max input chunk budget in the main-window Chunk Size field."""
+        entry = getattr(self, 'chunk_size_entry', None)
+        if entry is None:
+            return
+        if self.config.get('auto_compression_factor', True):
+            text = "Auto"
+        else:
+            budget = self._compression_chunk_budget()
+            text = f"{budget:,}" if budget is not None else "Auto"
+        try:
+            if entry.text() != text:
+                entry.blockSignals(True)
+                entry.setText(text)
+                entry.blockSignals(False)
+        except RuntimeError:
+            pass
+
+    def _live_other_settings_widget(self, attr):
+        """Return an Other Settings widget stored on self, or None once its dialog is gone."""
+        widget = getattr(self, attr, None)
+        if widget is None:
+            return None
+        try:
+            widget.objectName()
+            return widget
+        except RuntimeError:
+            setattr(self, attr, None)
+            return None
+
+    def _on_chunk_size_edited(self):
+        """Chunk Size edited: "Auto"/blank enables auto compression, a number sets the factor to match."""
+        entry = self.chunk_size_entry
+        text = entry.text().strip().replace(',', '')
+        auto_cb = self._live_other_settings_widget('_auto_compression_cb')
+        factor_edit = self._live_other_settings_widget('_compression_factor_edit')
+
+        if not text or text.lower() == 'auto':
+            self.config['auto_compression_factor'] = True
+            type(self)._update_auto_compression_factor(self)
+            if auto_cb is not None and not auto_cb.isChecked():
+                auto_cb.setChecked(True)
+            self._sync_chunk_size_entry()
+            return
+
+        try:
+            chunk_size = int(float(text))
+        except (TypeError, ValueError):
+            chunk_size = 0
+        if not self._apply_chunk_size(chunk_size):
+            self._sync_chunk_size_entry()
+            return
+        self.config['auto_compression_factor'] = False
+        if auto_cb is not None and auto_cb.isChecked():
+            auto_cb.setChecked(False)
+        self.config['manual_chunk_size'] = chunk_size
+        self._sync_chunk_size_entry()
+
+    def _apply_chunk_size(self, chunk_size):
+        """Set the compression factor so the max input chunk budget equals chunk_size."""
+        try:
+            output_tokens = int(getattr(self, 'max_output_tokens', self.config.get('max_output_tokens', 65536)))
+            chunk_size = int(chunk_size)
+        except (TypeError, ValueError):
+            return False
+        available = output_tokens - self._CHUNK_BUDGET_SAFETY_MARGIN
+        if chunk_size <= 0 or available <= 0:
+            return False
+
+        # Round the factor down so int(available / factor) lands on the chunk size.
+        factor = max(0.000001, math.floor(available / chunk_size * 1_000_000) / 1_000_000)
+        self.compression_factor_var = str(factor)
+        self.config['compression_factor'] = factor
+        self.config['manual_chunk_size'] = chunk_size
+        factor_edit = self._live_other_settings_widget('_compression_factor_edit')
+        if factor_edit is not None:
+            factor_edit.setText(self.compression_factor_var)
+        return True
+
+    def _remember_manual_chunk_size(self):
+        """Record the current budget as the chunk size to hold when the output limit changes."""
+        if self.config.get('auto_compression_factor', True):
+            return
+        budget = self._compression_chunk_budget()
+        if budget is not None:
+            self.config['manual_chunk_size'] = budget
+
+    def _hold_manual_chunk_size(self):
+        """Output limit changed: keep the manual chunk size by recomputing the compression factor."""
+        if self.config.get('auto_compression_factor', True):
+            return
+        chunk_size = self.config.get('manual_chunk_size')
+        if chunk_size is not None:
+            self._apply_chunk_size(chunk_size)
 
     def _resolve_max_retry_tokens(self, current_max_tokens: int) -> int:
         """
@@ -25009,7 +25119,29 @@ Recent translations to summarize:
         self.thread_delay_entry = QLineEdit()
         self.thread_delay_entry.setText(str(self.thread_delay_var))
         self.thread_delay_entry.setMaximumWidth(80)
-        self.frame.addWidget(self.thread_delay_entry, 3, 1, Qt.AlignLeft)
+
+        # Chunk Size mirrors Other Settings' compression factor:
+        # "Auto" = Auto Compression Factor on, a number = max input chunk budget.
+        chunk_size_label = QLabel("Chunk Size:")
+        self.chunk_size_entry = QLineEdit()
+        self.chunk_size_entry.setMaximumWidth(70)
+        self.chunk_size_entry.setToolTip(
+            "Max input chunk budget in tokens.\n"
+            "\"Auto\" = Auto Compression Factor (Other Settings).\n"
+            "Entering a number turns auto off and sets the compression factor to match."
+        )
+        self.chunk_size_entry.editingFinished.connect(self._on_chunk_size_edited)
+
+        thread_delay_container = QWidget()
+        thread_delay_layout = QHBoxLayout(thread_delay_container)
+        thread_delay_layout.setContentsMargins(0, 0, 0, 0)
+        thread_delay_layout.setSpacing(8)
+        thread_delay_layout.addWidget(self.thread_delay_entry)
+        thread_delay_layout.addWidget(chunk_size_label)
+        thread_delay_layout.addWidget(self.chunk_size_entry)
+        thread_delay_layout.addStretch()
+        self.frame.addWidget(thread_delay_container, 3, 1, Qt.AlignLeft)
+        self._sync_chunk_size_entry()
 
         # API delay (left side)
         api_delay_label = QLabel("API call delay (s):")
@@ -43227,7 +43359,12 @@ Important rules:
            maxValue=2000000
        )
        if ok and val:
+           # Manual chunk size stays fixed across limit changes; capture it
+           # first for settings saved before Chunk Size existed.
+           if 'manual_chunk_size' not in self.config:
+               self._remember_manual_chunk_size()
            self.max_output_tokens = val
+           self._hold_manual_chunk_size()
            self.output_btn.setText(f"Output Token Limit: {val:,}")
            self.append_log(f"✅ Output token limit set to {val:,}")
            
@@ -43243,7 +43380,10 @@ Important rules:
                    self._update_compression_token_budget_label()
                except Exception as e:
                    print(f"Error updating compression token budget label: {e}")
-           
+
+           # Refresh the main-window Chunk Size (budget depends on the output limit)
+           self._sync_chunk_size_entry()
+
            # Clamp Anthropic thinking budget if it now exceeds the new limit
            try:
                cap = val - 1
