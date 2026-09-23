@@ -31815,7 +31815,8 @@ def main(log_callback=None, stop_callback=None):
                                 f"{terminology} {log_num}",
                                 overall_current=chapters_completed + 1,
                                 overall_total=chapters_to_process,
-                                extra_info=f"{display_len:,} chars"
+                                extra_info=f"{display_len:,} chars",
+                                progress_label=f"[{idx+1:03d}] {terminology} {log_num}"
                             )
                         else:
                             log_callback.__self__.append_chunk_progress(
@@ -31824,7 +31825,8 @@ def main(log_callback=None, stop_callback=None):
                                 "text",
                                 f"{terminology} {log_num}",
                                 overall_current=chapters_completed + 1,
-                                overall_total=chapters_to_process
+                                overall_total=chapters_to_process,
+                                progress_label=f"[{idx+1:03d}] {terminology} {log_num}"
                             )
                     else:
                         # Determine terminology based on source type
@@ -31833,9 +31835,9 @@ def main(log_callback=None, stop_callback=None):
                         terminology_lower = "section" if is_text_source else "chapter"
 
                         if total_chunks == 1:
-                            log_callback(f"📄 Processing {terminology} {log_num} ({chapters_completed + 1}/{chapters_to_process}) - {progress_percent:.1f}% complete")
+                            log_callback(f"📄 Processing [{idx+1:03d}] {terminology} {log_num} - {progress_percent:.1f}% complete")
                         else:
-                            log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for {terminology_lower} {log_num} - {progress_percent:.1f}% complete")
+                            log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for [{idx+1:03d}] {terminology_lower} {log_num} - {progress_percent:.1f}% complete")
                         
                 # Keep the extracted title markup byte-for-byte as the user
                 # payload; the dedicated title request does not use glossary

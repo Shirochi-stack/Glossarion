@@ -2886,12 +2886,14 @@ def _send_via_server_zen(
         thinking_buffer: List[str] = []
         thinking_started = False
         first_text = False
-        stream_thinking = _forced_stream_thinking_logging_enabled(log_stream)
+        stream_thinking = log_stream and os.getenv(
+            "STREAM_THINKING_LOGS", "0"
+        ).strip().lower() not in ("0", "false", "no", "off")
 
         def consume(event: Dict[str, Any]) -> None:
             nonlocal thinking_started, first_text
             for fragment_type, fragment in state.feed(event):
-                if fragment_type == "reasoning" and log_stream and stream_thinking:
+                if fragment_type == "reasoning" and stream_thinking:
                     if not thinking_started:
                         thinking_started = True
                         logger("🧠 [ocz] Thinking...")

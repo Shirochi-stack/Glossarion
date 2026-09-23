@@ -41164,8 +41164,9 @@ Important rules:
                except Exception:
                    pass
 
-    def append_chunk_progress(self, chunk_num, total_chunks, chunk_type="text", chapter_info="", 
-                           overall_current=None, overall_total=None, extra_info=None):
+    def append_chunk_progress(self, chunk_num, total_chunks, chunk_type="text", chapter_info="",
+                           overall_current=None, overall_total=None, extra_info=None,
+                           progress_label=None):
        """Append chunk progress with enhanced visual indicator"""
        progress_bar_width = 20
        
@@ -41184,8 +41185,9 @@ Important rules:
                msg_parts.append(f"[{extra_info}]")
            
            if overall_current is not None and overall_total is not None:
-               msg_parts.append(f"\n    Progress: [{overall_bar}] {overall_current}/{overall_total} ({overall_progress*100:.1f}%)")
-               
+               progress_counter = progress_label if progress_label else f"{overall_current}/{overall_total}"
+               msg_parts.append(f"\n    Progress: [{overall_bar}] {progress_counter} ({overall_progress*100:.1f}%)")
+
                if hasattr(self, '_chunk_start_times'):
                    if overall_current > 1:
                        elapsed = time.time() - self._translation_start_time
@@ -41219,7 +41221,8 @@ Important rules:
            msg_parts.append(f"\n    Chunk: [{chunk_bar}] {chunk_num}/{total_chunks} ({chunk_progress*100:.1f}%)")
            
            if overall_current is not None and overall_total is not None:
-               msg_parts.append(f"\n    Overall: [{overall_bar}] {overall_current}/{overall_total} ({overall_progress*100:.1f}%)")
+               overall_counter = progress_label if progress_label else f"{overall_current}/{overall_total}"
+               msg_parts.append(f"\n    Overall: [{overall_bar}] {overall_counter} ({overall_progress*100:.1f}%)")
            
            msg = "".join(msg_parts)
        
