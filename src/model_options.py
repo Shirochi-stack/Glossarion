@@ -232,7 +232,16 @@ def _get_static_model_options() -> List[str]:
         "oc/kimi-k2.6", "oc/kimi-k2.5",
         "oc/deepseek-v4-pro", "oc/deepseek-v4-flash",
         "oc/mimo-v2.5-pro", "oc/mimo-v2.5",
-        
+
+        # OpenCode Zen free tier (ocz/ prefix) - routed to the Zen endpoint,
+        # which is where the *-free models are actually served (Go does not
+        # serve them). The live list is auto-polled; these are static fallbacks.
+        "ocz/deepseek-v4-flash-free",
+        "ocz/mimo-v2.6-flash-free", "ocz/mimo-v2.5-free",
+        "ocz/nemotron-3-ultra-free", "ocz/nemotron-3.5-lightning-free",
+        "ocz/ling-3.0-flash-fin-free", "ocz/jev-1.13-free",
+        "ocz/muse-spark-1.3-contributor-free", "ocz/muse-spark-1.2-contributor-free",
+
         # For OR, prefix with 'or/'
         "or/openrouter/free",
         "or/anthropic/claude-sonnet-4.6","or/anthropic/claude-sonnet-4.5", "or/anthropic/claude-sonnet-4",
@@ -602,6 +611,12 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
         "opencode", "oc/", "https://opencode.ai/zen/go/v1/models", ("OPENCODE_API_KEY",),
         base_url_env="OPENCODE_API_URL",
     ),
+    # OpenCode Zen catalog: the *-free models are only served here, not on Go.
+    # Uses the same OpenCode API key; the /models listing is public regardless.
+    ProviderCatalogSpec(
+        "opencode-zen", "ocz/", "https://opencode.ai/zen/v1/models", ("OPENCODE_API_KEY",),
+        base_url_env="OPENCODE_ZEN_API_URL",
+    ),
     ProviderCatalogSpec(
         "electronhub", "eh/", "https://api.electronhub.ai/v1/models", ("ELECTRONHUB_API_KEY",),
         base_url_env="ELECTRONHUB_API_URL",
@@ -671,6 +686,7 @@ _PREFIX_PROVIDER_MAP: Tuple[Tuple[str, str], ...] = (
     ("or/", "openrouter"),
     ("openrouter/", "openrouter"),
     ("lr/", "literouter"),
+    ("ocz/", "opencode-zen"),
     ("oc/", "opencode"),
     ("opencode/", "opencode"),
     ("opencode-go/", "opencode"),

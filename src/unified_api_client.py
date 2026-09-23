@@ -45,6 +45,7 @@ Supported models and their prefixes (Updated July 2025):
 - Poe: poe/* (e.g., poe/claude-4-opus, poe/gpt-4.5, poe/Assistant)
 - OpenRouter: or/*, openrouter/* (e.g., or/anthropic/claude-4-opus, or/openai/gpt-4.5)
 - OpenCode Go: oc/* (e.g., oc/kimi-k2.6, oc/glm-5.1)
+- OpenCode Zen (free tier): ocz/* (e.g., ocz/deepseek-v4-flash-free)
 - Fireworks AI: fireworks/* (e.g., fireworks/llama-v3-70b)
 - Groq: groq/* (e.g., groq/llama-3.1-8b-instant)
 - AuthGPT: authgpt/* (e.g., authgpt/gpt-4o, authgpt/o3) – ChatGPT subscription via OAuth
@@ -96,6 +97,7 @@ Environment Variables:
 - OPENROUTER_REFERER: HTTP referer for OpenRouter (default: https://github.com/Shirochi-stack/Glossarion)
 - OPENROUTER_APP_NAME: App name for OpenRouter (default: Glossarion Translation)
 - OPENCODE_API_URL: Custom OpenCode Go endpoint (default: https://opencode.ai/zen/go/v1)
+- OPENCODE_ZEN_API_URL: Custom OpenCode Zen endpoint for ocz/* free models (default: https://opencode.ai/zen/v1)
 - POE_API_KEY: API key for Poe platform
 - AUTHGPT_BASE_URL: Override ChatGPT backend URL (default: https://chatgpt.com/backend-api)
 - AUTHGPT_TOKEN_FILE: Custom path for OAuth token storage (default: ~/.glossarion/authgpt_tokens.json)
@@ -2890,6 +2892,7 @@ class UnifiedClient:
         'openrouter': 'openrouter',
         'lr/': 'literouter',
         'lr': 'literouter',
+        'ocz/': 'opencode',  # OpenCode Zen (free-tier models); base URL switches on the prefix
         'oc/': 'opencode',
         'opencode/': 'opencode',
         'opencode-go/': 'opencode',
@@ -18076,6 +18079,22 @@ class UnifiedClient:
         except Exception:
             return "Glossarion"
 
+    def _opencode_base_url(self) -> str:
+        """Return the OpenCode base URL for the current model.
+
+        The 'ocz/' prefix targets OpenCode Zen (https://opencode.ai/zen/v1),
+        which is the only endpoint that serves the free '*-free' models. Every
+        other opencode model uses the Go subscription endpoint. Both honor an
+        env override so a custom gateway can be pointed at either route.
+        """
+        try:
+            model = str(getattr(self, 'model', '') or '').lower()
+        except Exception:
+            model = ''
+        if model.startswith('ocz/'):
+            return os.getenv("OPENCODE_ZEN_API_URL", "https://opencode.ai/zen/v1")
+        return os.getenv("OPENCODE_API_URL", "https://opencode.ai/zen/go/v1")
+
     def _opencode_session_id(self) -> str:
         """Return a stable session ID for the OpenCode Go x-opencode-session header.
 
@@ -23264,7 +23283,7 @@ class UnifiedClient:
                 effective_model = effective_model[3:]
             effective_model = effective_model.strip()
         elif provider == 'opencode':
-            for prefix in ('oc/', 'opencode/', 'opencode-go/'):
+            for prefix in ('ocz/', 'oc/', 'opencode/', 'opencode-go/'):
                 if effective_model.startswith(prefix):
                     effective_model = effective_model[len(prefix):]
                     break
@@ -30283,7 +30302,7 @@ class UnifiedClient:
             'together': lambda: os.getenv("TOGETHER_API_URL", "https://api.together.xyz/v1"),
             'openrouter': "https://openrouter.ai/api/v1",
             'literouter': "https://api.literouter.com/v1",
-            'opencode': lambda: os.getenv("OPENCODE_API_URL", "https://opencode.ai/zen/go/v1"),
+            'opencode': lambda: self._opencode_base_url(),
             'fireworks': lambda: os.getenv("FIREWORKS_API_URL", "https://api.fireworks.ai/inference/v1"),
             'xai': lambda: os.getenv("XAI_API_URL", "https://api.x.ai/v1"),
             'deepseek': lambda: os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1"),
