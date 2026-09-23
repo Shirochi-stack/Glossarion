@@ -18093,15 +18093,19 @@ class UnifiedClient:
 
     @staticmethod
     def _opencode_user_agent() -> str:
-        """Return a User-Agent that passes the OpenCode free-tier fingerprint gate."""
-        return "opencode/1.18.32"
+        """Return the app User-Agent required by OpenCode Zen/Go WAF routing."""
+        try:
+            from app_version import APP_VERSION
+            return f"Glossarion/{APP_VERSION}"
+        except Exception:
+            return "Glossarion"
 
     def _opencode_base_url(self) -> str:
         """Return the OpenCode base URL for the current model.
 
-        Both oc/ and ocz/ use the Zen endpoint which serves the full catalog.
-        Each honors its own env override so a custom gateway (e.g. opencode
-        serve) can be pointed at either route independently.
+        oc/ is OpenCode Go (/zen/go/v1), billed to the Go subscription; /zen/v1
+        bills the separate Zen balance and returns 402 when that is empty.
+        ocz/ free models live on Zen. Each honors its own env override.
         """
         try:
             model = str(getattr(self, 'model', '') or '').lower()
@@ -18109,7 +18113,7 @@ class UnifiedClient:
             model = ''
         if model.startswith('ocz/'):
             return os.getenv("OPENCODE_ZEN_API_URL", "https://opencode.ai/zen/v1")
-        return os.getenv("OPENCODE_API_URL", "https://opencode.ai/zen/v1")
+        return os.getenv("OPENCODE_API_URL", "https://opencode.ai/zen/go/v1")
 
     def _get_openai_compatible_reasoning_effort(self, provider: str, effective_model: str = "") -> Optional[str]:
         """Return the selected effort for native GPT-6 and compatible opt-in routes."""

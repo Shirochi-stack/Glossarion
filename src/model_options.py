@@ -613,7 +613,7 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
         base_url_env="LITEROUTER_API_URL",
     ),
     ProviderCatalogSpec(
-        "opencode", "oc/", "https://opencode.ai/zen/v1/models", ("OPENCODE_API_KEY",),
+        "opencode", "oc/", "https://opencode.ai/zen/go/v1/models", ("OPENCODE_API_KEY",),
         public=True, base_url_env="OPENCODE_API_URL",
     ),
     ProviderCatalogSpec(
