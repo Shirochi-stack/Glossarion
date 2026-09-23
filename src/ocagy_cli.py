@@ -2603,42 +2603,17 @@ def send_chat_completion(
 # OpenCode Zen free-tier — ocz/ prefix
 # ---------------------------------------------------------------------------
 
-def send_opencode_zen_completion(
+
+def _run_opencode_zen_buffered(
     *,
-    messages: List[Dict[str, Any]],
-    model: str,
-    temperature: float = 0.3,
-    max_tokens: int = 65536,
-    timeout: float = 1800,
-    log_fn: Optional[Callable[[str], None]] = None,
+    exe: str,
+    prompt: str,
+    effective_model: str,
+    timeout_seconds: float,
+    logger: Callable[[str], None],
+    subprocess_env: Dict[str, str],
 ) -> Dict[str, Any]:
-    """Run one request through the OpenCode CLI for free-tier Zen models (ocz/).
-
-    Unlike the antigravity path, no plugin or OAuth is needed — the OpenCode
-    binary itself authenticates with the Zen endpoint via its built-in
-    fingerprint (User-Agent, session, binary signature).
-    """
-    if is_cancelled():
-        raise OcAgyError("OpenCode Zen request cancelled by user")
-
-    logger = log_fn or (lambda _message: None)
-    exe = ensure_opencode_installed(log_fn=logger)
-
-    raw_model = str(model or "").strip()
-    for prefix in ("ocz/", "oc/", "opencode/", "opencode-go/"):
-        if raw_model.startswith(prefix):
-            raw_model = raw_model[len(prefix):]
-            break
-    if not raw_model:
-        raise OcAgyError("No model specified for OpenCode Zen request.")
-    effective_model = f"opencode/{raw_model}"
-
-    prompt = build_prompt(messages)
-    timeout_seconds = max(1.0, float(timeout or 1800))
-
-    env = _subprocess_env()
-    env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(max(1, int(max_tokens)))
-
+    """Buffered (non-streaming) path: ``opencode run --format json``."""
     command = [
         exe,
         "run",
@@ -2647,9 +2622,6 @@ def send_opencode_zen_completion(
         "--title", "Glossarion translation",
     ]
 
-    logger(f"🌐 OpenCode Zen: {Path(exe).name} run --model {effective_model}")
-
-    start = time.time()
     try:
         proc = subprocess.Popen(
             command,
@@ -2661,7 +2633,7 @@ def send_opencode_zen_completion(
             errors="replace",
             creationflags=_creation_flags(),
             start_new_session=(os.name != "nt"),
-            env=env,
+            env=subprocess_env,
         )
     except Exception:
         raise
@@ -2670,6 +2642,7 @@ def send_opencode_zen_completion(
 
     stdout = ""
     stderr = ""
+    start = time.time()
     try:
         try:
             stdout, stderr = proc.communicate(input=prompt, timeout=1.0)
@@ -2693,16 +2666,23 @@ def send_opencode_zen_completion(
         with _ACTIVE_LOCK:
             _ACTIVE_PROCESSES.discard(proc)
 
-    elapsed = time.time() - start
     content, events, non_json = _parse_json_events(stdout)
     event_error = _event_error(events)
     if proc.returncode != 0 or event_error:
-        detail = "\n".join(part for part in (event_error, _clean_text(stderr), "\n".join(non_json)) if part)
+        detail = "\n".join(
+            part for part in (event_error, _clean_text(stderr), "\n".join(non_json)) if part
+        )
         text = _clean_text(detail) or f"opencode exited with code {proc.returncode}"
         lower = text.lower()
-        if any(x in lower for x in ("rate limit", "rate-limited", "quota", "resource_exhausted", "too many requests", "429")):
+        if any(
+            x in lower
+            for x in ("rate limit", "rate-limited", "quota", "resource_exhausted", "too many requests", "429")
+        ):
             raise OcAgyError("OpenCode Zen quota/rate limit: " + text)
-        if any(x in lower for x in ("model not found", "unknown model", "model does not exist", "cannot be resolved")):
+        if any(
+            x in lower
+            for x in ("model not found", "unknown model", "model does not exist", "cannot be resolved")
+        ):
             raise OcAgyError("OpenCode Zen model error: " + text)
         raise OcAgyError(f"OpenCode Zen failed (exit {proc.returncode}): {text}")
 
@@ -2713,7 +2693,10 @@ def send_opencode_zen_completion(
     content = _clean_text(content)
     if not content:
         detail = _clean_text(stderr)
-        raise OcAgyError("OpenCode Zen returned an empty response." + (f" Details: {detail}" if detail else ""))
+        raise OcAgyError(
+            "OpenCode Zen returned an empty response."
+            + (f" Details: {detail}" if detail else "")
+        )
 
     usage = _usage_from_value(events)
     raw_finish_reason, finish_reason_source = _finish_reason_from_cli_events(events)
@@ -2723,7 +2706,6 @@ def send_opencode_zen_completion(
         finish_reason = "stop"
         finish_reason_source = "fallback_stop"
 
-    logger(f"✅ OpenCode Zen: completed in {elapsed:.1f}s")
     return {
         "content": content,
         "finish_reason": finish_reason,
@@ -2731,9 +2713,426 @@ def send_opencode_zen_completion(
         "finish_reason_source": finish_reason_source,
         "finish_reason_fallback": finish_reason_fallback,
         "usage": usage,
+        "raw_response": events,
+    }
+
+
+def _send_via_server_zen(
+    *,
+    exe: str,
+    prompt: str,
+    model_id: str,
+    timeout_seconds: float,
+    logger: Callable[[str], None],
+    log_stream: bool,
+    subprocess_env: Dict[str, str],
+) -> Dict[str, Any]:
+    """Run an OpenCode serve instance and stream the response via SSE.
+
+    Same event-based protocol as ``_send_via_server`` but without the
+    antigravity plugin/OAuth.  The server runs from the current working
+    directory so OpenCode derives a real projectID (required by the
+    free-tier gate).
+    """
+    port = _loopback_port()
+    base_url = f"http://127.0.0.1:{port}"
+    command = [exe, "serve", "--hostname", "127.0.0.1", "--port", str(port), "--pure"]
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_creation_flags(),
+        start_new_session=(os.name != "nt"),
+        env=subprocess_env,
+    )
+    with _ACTIVE_LOCK:
+        _ACTIVE_PROCESSES.add(proc)
+
+    server_stdout: List[str] = []
+    server_stderr: List[str] = []
+    for pipe, target in ((proc.stdout, server_stdout), (proc.stderr, server_stderr)):
+        if pipe is not None:
+            threading.Thread(
+                target=_drain_process_pipe,
+                args=(pipe, target),
+                daemon=True,
+            ).start()
+
+    event_response = None
+    event_stream_context = None
+    session_id = ""
+    started = time.time()
+
+    def remaining() -> float:
+        r = float(timeout_seconds) - (time.time() - started)
+        if r <= 0:
+            raise OcAgyError(
+                f"OpenCode Zen timed out after {timeout_seconds}s. "
+                "Increase the API timeout or use a shorter chunk."
+            )
+        return max(0.1, r)
+
+    try:
+        # Wait for server health
+        while time.time() - started < timeout_seconds:
+            if is_cancelled():
+                raise OcAgyError("OpenCode Zen request cancelled by user")
+            if proc.poll() is not None:
+                detail = _clean_text("".join(server_stderr + server_stdout))
+                raise OcAgyError(
+                    "OpenCode Zen server exited during startup."
+                    + (f" Details: {detail}" if detail else "")
+                )
+            try:
+                health = _http_json(
+                    base_url,
+                    "/global/health",
+                    timeout=min(0.75, remaining()),
+                )
+                if isinstance(health, dict) and health.get("healthy"):
+                    break
+            except Exception:
+                time.sleep(0.1)
+        else:
+            raise OcAgyError(
+                f"OpenCode Zen server did not become ready within {timeout_seconds}s."
+            )
+
+        # Create session
+        session = _http_json(
+            base_url,
+            "/session",
+            method="POST",
+            payload={"title": "Glossarion translation"},
+            timeout=remaining(),
+        )
+        if not isinstance(session, dict) or not session.get("id"):
+            raise OcAgyError("OpenCode Zen could not create a streaming session.")
+        session_id = str(session["id"])
+
+        # Connect SSE event stream
+        if httpx is None:
+            raise OcAgyError(
+                "OpenCode Zen real-time streaming requires httpx, but it is not installed."
+            )
+        event_queue: "queue.Queue[Tuple[str, Any]]" = queue.Queue()
+        stream_timeout = httpx.Timeout(remaining(), connect=remaining())
+        event_stream_context = httpx.stream(
+            "GET",
+            base_url + "/event",
+            headers={
+                "Accept": "text/event-stream",
+                "Accept-Encoding": "identity",
+                "Cache-Control": "no-cache",
+            },
+            timeout=stream_timeout,
+        )
+        event_response = event_stream_context.__enter__()
+        if event_response.status_code != 200:
+            try:
+                detail = event_response.read().decode("utf-8", errors="replace")
+            except Exception:
+                detail = f"HTTP {event_response.status_code}"
+            raise OcAgyError(f"OpenCode Zen event stream HTTP {event_response.status_code}: {detail}")
+        threading.Thread(
+            target=_read_sse_events,
+            args=(event_response, event_queue),
+            daemon=True,
+        ).start()
+
+        # Wait for server.connected
+        connected = False
+        pending_events: List[Dict[str, Any]] = []
+        while time.time() - started < timeout_seconds:
+            try:
+                kind, value = event_queue.get(timeout=0.5)
+            except queue.Empty:
+                if is_cancelled():
+                    raise OcAgyError("OpenCode Zen request cancelled by user")
+                continue
+            if kind == "event" and isinstance(value, dict):
+                if value.get("type") == "server.connected":
+                    connected = True
+                    break
+                pending_events.append(value)
+            elif kind == "error":
+                raise OcAgyError(f"OpenCode Zen event stream failed: {value}")
+            elif kind == "eof":
+                break
+        if not connected:
+            raise OcAgyError("OpenCode Zen event stream did not connect.")
+
+        # Send prompt
+        provider_id, model_name = model_id.split("/", 1)
+        payload: Dict[str, Any] = {
+            "model": {"providerID": provider_id, "modelID": model_name},
+            "parts": [{"type": "text", "text": prompt}],
+        }
+        _http_json(
+            base_url,
+            f"/session/{session_id}/prompt_async",
+            method="POST",
+            payload=payload,
+            timeout=remaining(),
+        )
+
+        # Consume streaming events
+        state = _OpenCodeStreamState(session_id)
+        text_buffer: List[str] = []
+        thinking_buffer: List[str] = []
+        thinking_started = False
+        first_text = False
+        stream_thinking = _forced_stream_thinking_logging_enabled(log_stream)
+
+        def consume(event: Dict[str, Any]) -> None:
+            nonlocal thinking_started, first_text
+            for fragment_type, fragment in state.feed(event):
+                if fragment_type == "reasoning" and log_stream and stream_thinking:
+                    if not thinking_started:
+                        thinking_started = True
+                        logger("🧠 [ocz] Thinking...")
+                    _stream_log_text(fragment, thinking_buffer, logger)
+                elif fragment_type == "text" and log_stream:
+                    if not first_text:
+                        first_text = True
+                        logger(f"OpenCode Zen: first token in {time.time() - started:.1f}s, streaming...")
+                    _stream_log_text(fragment, text_buffer, logger)
+
+        for event in pending_events:
+            consume(event)
+
+        stream_eof = False
+        while not state.complete:
+            if is_cancelled():
+                try:
+                    _http_json(
+                        base_url,
+                        f"/session/{session_id}/abort",
+                        method="POST",
+                        payload={},
+                        timeout=2,
+                    )
+                except Exception:
+                    pass
+                raise OcAgyError("OpenCode Zen request cancelled by user")
+            if time.time() - started >= timeout_seconds:
+                raise OcAgyError(
+                    f"OpenCode Zen timed out after {timeout_seconds}s. "
+                    "Increase the API timeout or use a shorter chunk."
+                )
+            if proc.poll() is not None:
+                detail = _clean_text("".join(server_stderr + server_stdout))
+                raise OcAgyError(
+                    "OpenCode Zen server exited before the response completed."
+                    + (f" Details: {detail}" if detail else "")
+                )
+            try:
+                kind, value = event_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if kind == "event" and isinstance(value, dict):
+                consume(value)
+            elif kind == "error":
+                raise OcAgyError(f"OpenCode Zen event stream failed: {value}")
+            elif kind == "eof":
+                stream_eof = True
+                break
+
+        if stream_eof and not state.complete:
+            raise OcAgyError("OpenCode Zen event stream closed before completion.")
+        if state.error:
+            lower = state.error.lower()
+            if any(x in lower for x in ("rate limit", "rate-limited", "quota", "resource_exhausted", "too many requests", "429")):
+                raise OcAgyError("OpenCode Zen quota/rate limit: " + state.error)
+            raise OcAgyError(f"OpenCode Zen error: {state.error}")
+
+        # Try server-side finish reason lookup
+        finish_reason_lookup_error = ""
+        if not state.finish_reason:
+            remaining_after = timeout_seconds - (time.time() - started)
+            if remaining_after > 0.1:
+                (
+                    persisted_reason,
+                    persisted_source,
+                    persisted_evidence,
+                    finish_reason_lookup_error,
+                ) = _retrieve_server_finish_reason(
+                    base_url,
+                    session_id,
+                    state.assistant_message_order,
+                    min(3.0, remaining_after),
+                )
+                if persisted_reason:
+                    state.record_finish_reason(
+                        persisted_reason, persisted_source, persisted_evidence,
+                    )
+
+        finish_reason_fallback = not bool(state.finish_reason)
+        if finish_reason_fallback:
+            state.finish_reason = "stop"
+            state.raw_finish_reason = None
+            state.finish_reason_source = "fallback_stop"
+            state.finish_reason_evidence = {}
+
+        if log_stream and thinking_buffer:
+            tail = "".join(thinking_buffer).strip()
+            if tail:
+                logger(f"    {tail}")
+        if log_stream and text_buffer:
+            tail = "".join(text_buffer).strip()
+            if tail:
+                logger(tail)
+
+        return {
+            "content": state.content(),
+            "finish_reason": state.finish_reason,
+            "raw_finish_reason": state.raw_finish_reason,
+            "finish_reason_source": state.finish_reason_source,
+            "finish_reason_fallback": finish_reason_fallback,
+            "finish_reason_evidence": state.finish_reason_evidence,
+            "finish_reason_lookup_error": finish_reason_lookup_error,
+            "usage": _usage_from_value(state.step_events),
+            "raw_response": state.step_events,
+        }
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = str(exc)
+        raise OcAgyError(f"OpenCode Zen HTTP error: {detail}")
+    except urllib.error.URLError as exc:
+        raise OcAgyError(f"OpenCode Zen local streaming connection failed: {exc}")
+    except TimeoutError as exc:
+        raise OcAgyError(
+            f"OpenCode Zen timed out after {timeout_seconds}s."
+        ) from exc
+    except OcAgyError:
+        raise
+    except Exception as exc:
+        if httpx is not None and isinstance(exc, httpx.TimeoutException):
+            raise OcAgyError(
+                f"OpenCode Zen real-time stream timed out after {timeout_seconds}s."
+            ) from exc
+        if httpx is not None and isinstance(exc, httpx.RequestError):
+            raise OcAgyError(
+                f"OpenCode Zen local real-time stream failed: {exc}"
+            ) from exc
+        raise
+    finally:
+        if event_response is not None:
+            try:
+                event_response.close()
+            except Exception:
+                pass
+        if event_stream_context is not None:
+            try:
+                event_stream_context.__exit__(None, None, None)
+            except Exception:
+                pass
+        _terminate_process_tree(proc)
+        with _ACTIVE_LOCK:
+            _ACTIVE_PROCESSES.discard(proc)
+
+
+def send_opencode_zen_completion(
+    *,
+    messages: List[Dict[str, Any]],
+    model: str,
+    temperature: float = 0.3,
+    max_tokens: int = 65536,
+    timeout: float = 1800,
+    log_fn: Optional[Callable[[str], None]] = None,
+    log_stream: bool = True,
+) -> Dict[str, Any]:
+    """Run one request through the OpenCode CLI for free-tier Zen models (ocz/).
+
+    Uses ``opencode serve`` + SSE for real-time thinking/text streaming,
+    matching the Antigravity provider's streaming behaviour.
+    """
+    if is_cancelled():
+        raise OcAgyError("OpenCode Zen request cancelled by user")
+
+    logger = log_fn or (lambda _message: None)
+    exe = ensure_opencode_installed(log_fn=logger)
+
+    raw_model = str(model or "").strip()
+    for prefix in ("ocz/", "oc/", "opencode/", "opencode-go/"):
+        if raw_model.startswith(prefix):
+            raw_model = raw_model[len(prefix):]
+            break
+    if not raw_model:
+        raise OcAgyError("No model specified for OpenCode Zen request.")
+    effective_model = f"opencode/{raw_model}"
+
+    prompt = build_prompt(messages)
+    timeout_seconds = max(1.0, float(timeout or 1800))
+
+    env = _subprocess_env()
+    env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(max(1, int(max_tokens)))
+
+    start = time.time()
+
+    if log_stream:
+        # Real-time streaming via opencode serve + SSE
+        logger(
+            f"🌐 OpenCode Zen: {Path(exe).name} serve --model {effective_model}"
+        )
+        result = _send_via_server_zen(
+            exe=exe,
+            prompt=prompt,
+            model_id=effective_model,
+            timeout_seconds=timeout_seconds,
+            logger=logger,
+            log_stream=True,
+            subprocess_env=env,
+        )
+        elapsed = time.time() - start
+        content = _clean_text(str(result.get("content", "") or ""))
+        if not content:
+            raise OcAgyError("OpenCode Zen returned an empty response.")
+        logger(f"✅ OpenCode Zen: stream finished in {elapsed:.1f}s")
+    else:
+        # Buffered mode via opencode run (streaming disabled)
+        logger(f"🌐 OpenCode Zen: {Path(exe).name} run --model {effective_model}")
+        result = _run_opencode_zen_buffered(
+            exe=exe,
+            prompt=prompt,
+            effective_model=effective_model,
+            timeout_seconds=timeout_seconds,
+            logger=logger,
+            subprocess_env=env,
+        )
+        elapsed = time.time() - start
+        content = _clean_text(str(result.get("content", "") or ""))
+        if not content:
+            raise OcAgyError("OpenCode Zen returned an empty response.")
+        logger(f"✅ OpenCode Zen: completed in {elapsed:.1f}s")
+    return {
+        "content": content,
+        "finish_reason": str(result.get("finish_reason", "") or "stop"),
+        "raw_finish_reason": result.get("raw_finish_reason"),
+        "finish_reason_source": str(
+            result.get("finish_reason_source", "")
+            or (
+                "send_chat_completion_fallback_stop"
+                if not result.get("finish_reason")
+                else ""
+            )
+        ),
+        "finish_reason_fallback": bool(
+            result.get("finish_reason_fallback", False)
+            or not result.get("finish_reason")
+        ),
+        "finish_reason_evidence": result.get("finish_reason_evidence") or {},
+        "finish_reason_lookup_error": result.get("finish_reason_lookup_error", ""),
+        "usage": result.get("usage"),
         "model": effective_model,
         "provider": "opencode-zen",
         "elapsed_seconds": elapsed,
-        "stderr": _clean_text(stderr),
-        "raw_response": events,
+        "stderr": "",
+        "raw_response": result.get("raw_response"),
     }

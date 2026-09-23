@@ -27857,6 +27857,22 @@ class UnifiedClient:
                 pass
 
         try:
+            # Unlike forced-stream providers (OcAgy/Antigravity), OCZ respects
+            # ENABLE_STREAMING — when off, use the buffered opencode-run path.
+            env_stream = os.getenv("ENABLE_STREAMING", "0")
+            streaming_enabled = env_stream.strip().lower() not in ("0", "false", "no", "off")
+            if streaming_enabled:
+                if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                    log_stream = os.getenv(
+                        "ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0"
+                    ).strip().lower() not in ("", "0", "false", "no", "off")
+                else:
+                    log_stream = os.getenv(
+                        "LOG_STREAM_CHUNKS", "1"
+                    ).strip().lower() not in ("0", "false", "no", "off")
+            else:
+                log_stream = False
+
             result = _opencode_zen_send(
                 messages=messages,
                 model=actual_model,
@@ -27864,6 +27880,7 @@ class UnifiedClient:
                 max_tokens=max_tokens,
                 timeout=ocz_timeout,
                 log_fn=lambda message: print(message, flush=True),
+                log_stream=log_stream,
             )
             content = str(result.get("content", "") or "")
             finish_reason = self._normalize_finish_reason(result.get("finish_reason"))
