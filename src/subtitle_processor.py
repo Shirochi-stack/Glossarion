@@ -612,7 +612,7 @@ def _available_tokens() -> int:
     except (TypeError, ValueError):
         explicit = 0
     if explicit > 0:
-        return max(500, explicit)
+        return max(1000, explicit)
     try:
         output_limit = int(os.getenv("MAX_OUTPUT_TOKENS", "8192") or "8192")
     except (TypeError, ValueError):
@@ -623,7 +623,7 @@ def _available_tokens() -> int:
         compression = 2.0
     if compression <= 0:
         compression = 1.0
-    return max(500, int((output_limit - 500) / compression))
+    return max(1000, int((output_limit - 500) / compression))
 
 
 def _batch_body(segments: List[Dict[str, Any]]) -> str:

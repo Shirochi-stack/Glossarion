@@ -4280,6 +4280,8 @@ class UnifiedClient:
         
         # Add unique session ID for this client instance
         self.session_id = str(uuid.uuid4())[:8]
+        # Stable for this client, including concurrent requests and retries.
+        self._opencode_session_id = str(uuid.uuid4())
         
         # INSTANCE-LEVEL multi-key configuration
         self._multi_key_mode = False  # INSTANCE variable, not class!
@@ -4362,9 +4364,6 @@ class UnifiedClient:
         # Initialize client references
         self.api_key = api_key
         self.model = model
-        # One OpenCode session per client, created up front so parallel threads
-        # can't race to mint different IDs (retries/copies/fallbacks reuse it)
-        self._opencode_session = self._new_opencode_session_id()
         self.key_identifier = "Single Key"
         self.current_key_index = None
         self.openai_client = None
@@ -11724,7 +11723,6 @@ class UnifiedClient:
                         _skip_cancel_reset=True
                     )
                     temp_client._apply_key_runtime_overrides(key_data=fallback_data, apply_delay=False)
-                    temp_client._opencode_session = self._opencode_session_id()
 
                     # Mark this client as a retry client to prevent recursive fallbacks
                     temp_client._is_retry_client = True
@@ -12123,7 +12121,6 @@ class UnifiedClient:
                         _skip_cancel_reset=True
                     )
                     temp_client._apply_key_runtime_overrides(key_data=fb, apply_delay=False)
-                    temp_client._opencode_session = self._opencode_session_id()
                     
                     # CRITICAL: Mark this client as a retry client BEFORE setup to prevent recursive fallback
                     # This flag tells _send_internal to NOT attempt fallback keys if it hits prohibited content
@@ -12418,7 +12415,6 @@ class UnifiedClient:
                         _skip_cancel_reset=True
                     )
                     temp_client._apply_key_runtime_overrides(key_data=gk)
-                    temp_client._opencode_session = self._opencode_session_id()
                     
                     # CRITICAL: Mark this client as a retry client BEFORE setup to prevent recursive fallback
                     temp_client._is_retry_client = True
@@ -18089,8 +18085,10 @@ class UnifiedClient:
             h['Accept'] = 'application/json'
         if provider == 'opencode' and 'User-Agent' not in h:
             h['User-Agent'] = self._opencode_user_agent()
-        if provider == 'opencode' and 'x-opencode-session' not in h:
-            h['x-opencode-session'] = self._opencode_session_id()
+        if provider == 'opencode':
+            session_header = next((key for key in h if key.lower() == 'x-opencode-session'), None)
+            if session_header is None or not h[session_header]:
+                h[session_header or 'x-opencode-session'] = self._opencode_session_id
         return h
 
     @staticmethod
@@ -18101,8 +18099,7 @@ class UnifiedClient:
     def _opencode_base_url(self) -> str:
         """Return the OpenCode base URL for the current model.
 
-        oc/ is OpenCode Go (subscription) at /zen/go/v1; ocz/ is Zen at /zen/v1,
-        which bills a prepaid balance and returns 402 to Go-only subscribers.
+        Both oc/ and ocz/ use the Zen endpoint which serves the full catalog.
         Each honors its own env override so a custom gateway (e.g. opencode
         serve) can be pointed at either route independently.
         """
@@ -18112,31 +18109,7 @@ class UnifiedClient:
             model = ''
         if model.startswith('ocz/'):
             return os.getenv("OPENCODE_ZEN_API_URL", "https://opencode.ai/zen/v1")
-        return os.getenv("OPENCODE_API_URL", "https://opencode.ai/zen/go/v1")
-
-    @staticmethod
-    def _new_opencode_session_id() -> str:
-        """Mint an OpenCode session ID: ses_ + 12 hex (recent-ms timestamp) + 14 base62."""
-        import time as _time, secrets as _secrets, string as _string
-        ts_hex = f'{int(_time.time() * 1000):012x}'[-12:]
-        b62 = _string.digits + _string.ascii_lowercase + _string.ascii_uppercase
-        rand_part = ''.join(_secrets.choice(b62) for _ in range(14))
-        return f'ses_{ts_hex}{rand_part}'
-
-    def _opencode_session_id(self) -> str:
-        """Return this client's x-opencode-session ID (created in __init__).
-
-        The same ID is sent on every OpenCode request from this client — SDK and
-        HTTP fallback paths, retries, parallel threads and fallback-key clients.
-        """
-        sid = getattr(self, '_opencode_session', None)
-        if not sid:
-            sid = self._new_opencode_session_id()
-            try:
-                self._opencode_session = sid
-            except Exception:
-                pass
-        return sid
+        return os.getenv("OPENCODE_API_URL", "https://opencode.ai/zen/v1")
 
     def _get_openai_compatible_reasoning_effort(self, provider: str, effective_model: str = "") -> Optional[str]:
         """Return the selected effort for native GPT-6 and compatible opt-in routes."""
@@ -23772,7 +23745,7 @@ class UnifiedClient:
                     if provider == 'opencode':
                         client_kwargs["default_headers"] = {
                             "User-Agent": self._opencode_user_agent(),
-                            "x-opencode-session": self._opencode_session_id(),
+                            "x-opencode-session": self._opencode_session_id,
                         }
 
                     client = openai.OpenAI(
@@ -24214,7 +24187,7 @@ class UnifiedClient:
                     extra_headers = {"Idempotency-Key": idem_key}
                     if provider == 'opencode':
                         extra_headers["User-Agent"] = self._opencode_user_agent()
-                        extra_headers["x-opencode-session"] = self._opencode_session_id()
+                        extra_headers["x-opencode-session"] = self._opencode_session_id
                     if provider == 'chutes':
                         try:
                             # Log once per-thread per (model,state)

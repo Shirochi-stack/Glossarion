@@ -563,7 +563,7 @@ def _refinement_budget_label(available_tokens: int, mtoks: int) -> str:
     if compression_factor and compression_factor > 0:
         margin = None
         try:
-            if int(max(500, int((output_limit - 500) / compression_factor))) == int(budget):
+            if int(max(1000, int((output_limit - 500) / compression_factor))) == int(budget):
                 margin = 500
         except Exception:
             margin = None
