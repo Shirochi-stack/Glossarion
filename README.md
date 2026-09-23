@@ -7,7 +7,7 @@
 **Glossarion** is a comprehensive AI-powered translation suite for light novels, web novels, manga, subtitles, synchronized lyrics, and documents in virtually any language, with preconfigured profiles for Korean, Japanese, and Chinese via its profile system. Built to transform EPUB, TXT, PDF, SRT, ASS, and LRC files into high-quality, context-aware translations, it also includes a dedicated **manga translator** panel that combines multiple AI models to translate .cbz archives and direct image files, plus a **translation-editing tool** for .sdlxliff files. It works with **40+ AI providers** — including OpenAI, Google Gemini, Anthropic Claude, DeepSeek, xAI Grok, Mistral, and local LLMs via Ollama — and, beyond those, **any OpenAI-compatible model or endpoint**, all through a modern PySide6 GUI that gives you total control over every step of the translation process.
 
 <p align="center">
-  <a href="docs/Glossarion_User_Guide_Sep-10-2026.md"><strong>📖 Read the Complete User Guide →</strong></a><br/>
+  <a href="docs/Glossarion_User_Guide_Sep-23-2026.md"><strong>📖 Read the Complete User Guide →</strong></a><br/>
   <em>Every button and setting explained in plain language — including how to translate for free.</em>
 </p>
 
@@ -123,7 +123,8 @@
 | **ElectronHub** | `eh/*` | eh/gpt-5-chat-latest, eh/claude-sonnet-4-6, eh/gemini-3.1-pro-preview, eh/grok-4-fast |
 | **OpenRouter** | `or/*` | or/openai/gpt-5.4, or/google/gemini-3.1-pro-preview, or/deepseek/deepseek-v3.2 |
 | **LiteRouter** | `lr/*` | lr/deepseek-v3.2:free, lr/gpt-oss-120b:free, lr/openrouter:free:full-context |
-| **OpenCode Go** | `oc/*` | oc/kimi-k2.6, oc/glm-5.1, oc/deepseek-v4-pro, oc/mimo-v2.5-pro |
+| **OpenCode** | `oc/*` | oc/claude-fable-5-1, oc/gpt-5.4, oc/deepseek-v4-pro, oc/qwen3.8-flash |
+| **OpenCode Free** | `ocz/*` | ocz/deepseek-v4-flash-free, ocz/mimo-v2.6-flash-free, ocz/nemotron-3-ultra-free |
 | **Poe** | `poe/*` | poe/gpt-4.5, poe/claude-4-opus, poe/gemini-2.5-pro |
 | **VertexAI** | `vertex/*` | vertex/gemini-3.1-pro-preview, vertex/claude-4-opus |
 | **Groq** | `groq/*` | groq/llama-3.3-70b-versatile, groq/meta-llama/llama-4-maverick-17b |
@@ -278,7 +279,7 @@ cryptography
 
 ## 🚀 Usage
 
-> 📖 **For a full walkthrough of every feature and setting, see the [Complete User Guide](docs/Glossarion_User_Guide_Sep-10-2026.md).** The quick steps below get you started.
+> 📖 **For a full walkthrough of every feature and setting, see the [Complete User Guide](docs/Glossarion_User_Guide_Sep-23-2026.md).** The quick steps below get you started.
 
 ### Basic Translation
 1. Launch `translator_gui.py`

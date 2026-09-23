@@ -21197,6 +21197,31 @@ Recent translations to summarize:
               Glossarion will auto-update and launch it when Node/npm or Bun is available.
           </p>
 
+        <h4>OpenCode Paid (oc/)</h4>
+        <p>Access the full OpenCode model catalog with a subscription API key</p>
+        <ul>
+            <li><b>oc/claude-fable-5-1</b> - Claude Fable 5.1</li>
+            <li><b>oc/gpt-5.4</b> - GPT-5.4</li>
+            <li><b>oc/deepseek-v4-pro</b> - DeepSeek V4 Pro</li>
+            <li><b>oc/qwen3.8-flash</b> - Qwen 3.8 Flash</li>
+        </ul>
+        <p style="color: #38bdf8; padding: 4px; font-size: 11px;">
+            <b>ℹ️ Tip:</b> Set <b>OPENCODE_API_KEY</b> in the multi API key manager.
+            The catalog is auto-polled from OpenCode's Zen endpoint.
+        </p>
+
+        <h4>OpenCode Free (ocz/)</h4>
+        <p>Free-tier models — requires the genuine OpenCode desktop app</p>
+        <ul>
+            <li><b>ocz/deepseek-v4-flash-free</b> - DeepSeek V4 Flash (free)</li>
+            <li><b>ocz/mimo-v2.6-flash-free</b> - MiMo V2.6 Flash (free)</li>
+            <li><b>ocz/nemotron-3-ultra-free</b> - Nemotron 3 Ultra (free)</li>
+        </ul>
+        <p style="color: #f59e0b; padding: 4px; font-size: 11px;">
+            <b>⚠️ Note:</b> Free-tier models can only be used from the official OpenCode app.
+            For third-party access, use <code>oc/</code> with an API key instead.
+        </p>
+
         <h4>Zhipu AI International (za/)</h4>
         <p>Route to the GLM international endpoint (https://api.z.ai/api/paas/v4) instead of the Chinese endpoint</p>
         <ul>
@@ -44201,9 +44226,8 @@ Important rules:
                 compact_height_ratio = 0.70
             else:
                 compact_height_ratio = 0.66
-            # 0.42 = the earlier 0.40 widened by 5%.
-            compact_page_size = QSize(int(sw * 0.42), int(sh * compact_height_ratio))
-            regular_page_size = QSize(int(sw * 0.42), int(sh * 0.77))
+            compact_page_size = QSize(int(sw * 0.44), int(sh * compact_height_ratio))
+            regular_page_size = QSize(int(sw * 0.44), int(sh * 0.77))
             dialog.resize(compact_page_size)
             dialog.setMinimumSize(int(sw * 0.34), int(sh * 0.52))
             
@@ -44884,6 +44908,7 @@ Important rules:
                 ("🇨🇳", "za/", "Zhipu Intl.", "GLM international endpoint", "#1e2030", "#60c0e0"),
                 ("🌌", "nan/", "NanoGPT", "Generative & text models", "#1a1025", "#c084fc"),
                 ("⚙️", "sam/", "SambaNova", "SambaNova Cloud API", "#1a1e14", "#7cb343"),
+                ("🔓", "oc/ · ocz/", "OpenCode", "Paid (oc/) & free (ocz/) tiers", "#101828", "#38bdf8"),
             ]
             
             pfx_w = QWidget()

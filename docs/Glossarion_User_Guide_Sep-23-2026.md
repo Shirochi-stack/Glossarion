@@ -179,6 +179,8 @@ Glossarion doesn't translate by itself — it sends your text to an AI company a
 | `grok-` | xAI |
 | `eh/...` | ElectronHub (one key, many providers) |
 | `or/...` | OpenRouter |
+| `oc/...` | OpenCode (paid subscription — full model catalog) |
+| `ocz/...` | OpenCode free tier (only works from the official OpenCode app) |
 | `authnd/...` | AuthND (browser/token routing — needs the EPUB Library build) |
 | `ocagy0/...`, `ocagy/...`, `ocagy1/...`, ... | OpenCode plus `opencode-antigravity-auth` — no API key; supports pooled or pinned OAuth accounts |
 | `antigravity/...` | Local Antigravity proxy — needs a Google login; Glossarion installs Bun automatically if no runtime is available |
@@ -899,6 +901,7 @@ Yes — you can run Glossarion **without spending a cent.** There are several fr
 | **Google AI Studio key (Gemini)** | `gemini-...` (e.g. `gemini-3.1-flash-lite`) | A **[free Google AI Studio key](https://aistudio.google.com/apikey)** | A few free requests on most models — but **~500 free requests/day when used with Gemini 3.1 Flash Lite**. |
 | **Antigravity login** | `antigravity/...` (e.g. `antigravity/gemini-3.5-flash-low`) | A **Google login**; Glossarion installs Bun automatically when needed | Free Cloud Code routing through a local proxy on `localhost:3000` using `Shirochi-stack/antigravity-proxy`; see [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
 | **OcAgy login** | `ocagy0/...` or a pinned OcAgy prefix | A **Google login**; Glossarion installs OpenCode and the auth plugin automatically when needed | Uses `opencode-antigravity-auth`; supports pooled and deterministic numbered-account routing. See [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
+| **OpenCode free models** | `ocz/...` (e.g. `ocz/deepseek-v4-flash-free`) | The **official OpenCode app** | Free models can only be used from the genuine OpenCode binary. |
 | **OpenRouter free models** | `or/...:free` (e.g. `or/deepseek/deepseek-v4-flash:free`) | A **[free OpenRouter key](https://openrouter.ai/settings/keys)** | Limited to OpenRouter's **free-tier models** (the ones ending in `:free`). |
 | **Google Translate (free)** | `google-translate-free` | **Nothing** | It's plain **machine translation**, not an AI — fast and free, but lower quality / no context. |
 | **Your own local AI** | your model name (e.g. `llama3`) | **LM Studio or Ollama** on your PC | Free and private, but quality and speed depend on your computer. |
