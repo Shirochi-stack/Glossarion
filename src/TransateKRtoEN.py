@@ -31811,20 +31811,20 @@ def main(log_callback=None, stop_callback=None):
                             terminology = "Section" if is_text_source else "Chapter"
 
                             log_callback.__self__.append_chunk_progress(
-                                1, 1, "text", 
+                                1, 1, "text",
                                 f"{terminology} {log_num}",
-                                overall_current=current_chunk_number,
-                                overall_total=total_chunks_needed,
+                                overall_current=chapters_completed + 1,
+                                overall_total=chapters_to_process,
                                 extra_info=f"{display_len:,} chars"
                             )
                         else:
                             log_callback.__self__.append_chunk_progress(
-                                chunk_idx, 
-                                total_chunks, 
-                                "text", 
+                                chunk_idx,
+                                total_chunks,
+                                "text",
                                 f"{terminology} {log_num}",
-                                overall_current=current_chunk_number,
-                                overall_total=total_chunks_needed
+                                overall_current=chapters_completed + 1,
+                                overall_total=chapters_to_process
                             )
                     else:
                         # Determine terminology based on source type

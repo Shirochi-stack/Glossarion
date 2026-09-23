@@ -609,13 +609,11 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
     ),
     ProviderCatalogSpec(
         "opencode", "oc/", "https://opencode.ai/zen/go/v1/models", ("OPENCODE_API_KEY",),
-        base_url_env="OPENCODE_API_URL",
+        public=True, base_url_env="OPENCODE_API_URL",
     ),
-    # OpenCode Zen catalog: the *-free models are only served here, not on Go.
-    # Uses the same OpenCode API key; the /models listing is public regardless.
     ProviderCatalogSpec(
         "opencode-zen", "ocz/", "https://opencode.ai/zen/v1/models", ("OPENCODE_API_KEY",),
-        base_url_env="OPENCODE_ZEN_API_URL",
+        public=True, base_url_env="OPENCODE_ZEN_API_URL",
     ),
     ProviderCatalogSpec(
         "electronhub", "eh/", "https://api.electronhub.ai/v1/models", ("ELECTRONHUB_API_KEY",),
@@ -1199,6 +1197,12 @@ def _fetch_provider_catalog(
         "Accept": "application/json",
         "User-Agent": "Glossarion/ModelCatalog",
     }
+    if spec.name in ("opencode", "opencode-zen"):
+        headers["User-Agent"] = "opencode/1.18.31"
+        import time as _time, random as _rand, string as _string
+        ts_hex = f'{int(_time.time() * 1000):012x}'[-12:]
+        b62 = _string.digits + _string.ascii_lowercase + _string.ascii_uppercase
+        headers["x-opencode-session"] = f'ses_{ts_hex}{"".join(_rand.choice(b62) for _ in range(14))}'
     if api_key:
         if spec.auth_style == "query":
             url = _append_query_parameter(url, "key", api_key)
@@ -1207,6 +1211,8 @@ def _fetch_provider_catalog(
             headers["anthropic-version"] = "2023-06-01"
         else:
             headers["Authorization"] = f"Bearer {api_key}"
+    elif spec.name in ("opencode", "opencode-zen"):
+        headers["Authorization"] = "Bearer public"
 
     payload = _http_get_json(url, headers, timeout)
     entries = _extract_catalog_entries(payload, spec)

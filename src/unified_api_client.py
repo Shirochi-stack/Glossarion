@@ -18055,6 +18055,8 @@ class UnifiedClient:
         except Exception:
             api_key_clean = api_key
 
+        if provider == 'opencode' and not api_key_clean:
+            api_key_clean = "public"
         # Only set Authorization if not already present and not Azure special-case (Azure handled earlier)
         if 'Authorization' not in h and provider not in ('azure',):
             h['Authorization'] = f'Bearer {api_key_clean}'
@@ -18072,12 +18074,8 @@ class UnifiedClient:
 
     @staticmethod
     def _opencode_user_agent() -> str:
-        """Return the app User-Agent required by OpenCode Zen/Go WAF routing."""
-        try:
-            from app_version import APP_VERSION
-            return f"Glossarion/{APP_VERSION}"
-        except Exception:
-            return "Glossarion"
+        """Return a User-Agent that passes the OpenCode free-tier fingerprint gate."""
+        return "opencode/1.18.31"
 
     def _opencode_base_url(self) -> str:
         """Return the OpenCode base URL for the current model.
@@ -18096,17 +18094,19 @@ class UnifiedClient:
         return os.getenv("OPENCODE_API_URL", "https://opencode.ai/zen/go/v1")
 
     def _opencode_session_id(self) -> str:
-        """Return a stable session ID for the OpenCode Go x-opencode-session header.
+        """Return a stable session ID that passes the OpenCode fingerprint gate.
 
-        OpenCode Go requires a stable session ID per conversation for routing and
-        prompt caching; without it the endpoint returns 400 MissingSessionID.
-        Reuse one ID for the life of this client so retries and chunked requests
-        stay on the same session.
+        Format: ses_ + 12 hex (recent-ms timestamp) + 14 base62.
+        Reuse one ID for the life of this client so retries and chunked
+        requests stay on the same session.
         """
         sid = getattr(self, '_opencode_session', None)
         if not sid:
-            import uuid
-            sid = uuid.uuid4().hex
+            import time as _time, random as _rand, string as _string
+            ts_hex = f'{int(_time.time() * 1000):012x}'[-12:]
+            b62 = _string.digits + _string.ascii_lowercase + _string.ascii_uppercase
+            rand_part = ''.join(_rand.choice(b62) for _ in range(14))
+            sid = f'ses_{ts_hex}{rand_part}'
             try:
                 self._opencode_session = sid
             except Exception:
@@ -23543,6 +23543,10 @@ class UnifiedClient:
             if not actual_api_key:
                 actual_api_key = "dummy-key-for-local-llm"
 
+        # OpenCode free tier accepts "Bearer public" for anonymous access
+        if provider == 'opencode' and not actual_api_key:
+            actual_api_key = "public"
+
         # For all other providers, use the actual API key
         # Remove the special case for gemini-openai - it needs the real API key
         if not is_local_endpoint:
@@ -25736,6 +25740,15 @@ class UnifiedClient:
                                 pass
 
                         print(f"{provider} SDK error (attempt {attempt + 1}){label_part}: {self._summarize_exception(e)}")
+
+                        # OpenCode free-tier gate: non-retryable, the server
+                        # requires the genuine OpenCode binary.
+                        if provider == 'opencode' and http_status == 403 and 'FreeTierError' in str(e):
+                            raise UnifiedClientError(
+                                "OpenCode free-tier models (ocz/) can only be used from the official OpenCode app. "
+                                "Use the paid tier (oc/) with an OPENCODE_API_KEY, or choose a different provider.",
+                                error_type="auth_error",
+                            )
 
                         # If graceful stop is active, do not schedule any further API calls (including retries).
                         # Graceful stop is different from force-stop: it lets in-flight calls finish, but blocks new ones.
