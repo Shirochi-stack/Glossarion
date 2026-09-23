@@ -56,7 +56,7 @@ _ACTIVE_PROCESSES: set[subprocess.Popen] = set()
 _ACTIVE_LOCK = threading.RLock()
 _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _PLUGIN_PACKAGE = str(os.environ.get("OCAGY_PLUGIN_PACKAGE", "opencode-antigravity-auth@latest") or "opencode-antigravity-auth@latest").strip()
-OPENCODE_NPM_INSTALL_COMMAND = "npm install -g opencode-ai"
+OPENCODE_NPM_INSTALL_COMMAND = "npm install -g --allow-scripts=opencode-ai opencode-ai"
 NODEJS_WINGET_INSTALL_COMMAND = "winget install --id OpenJS.NodeJS.LTS --exact"
 OPENCODE_INSTALL_TIMEOUT_SECONDS = 600
 OCAGY_PLUGIN_INSTALL_TIMEOUT_SECONDS = 300
@@ -308,7 +308,7 @@ def _opencode_install_command() -> Optional[List[str]]:
 
     npm = _candidate_command("npm")
     if npm:
-        return [npm, "install", "-g", "opencode-ai"]
+        return [npm, "install", "-g", "--allow-scripts=opencode-ai", "opencode-ai"]
     return None
 
 
@@ -2603,39 +2603,6 @@ def send_chat_completion(
 # OpenCode Zen free-tier — ocz/ prefix
 # ---------------------------------------------------------------------------
 
-def _zen_workspace_config(*, temperature: Optional[float] = None) -> Dict[str, Any]:
-    config: Dict[str, Any] = {
-        "$schema": "https://opencode.ai/config.json",
-        "share": "disabled",
-        "permission": {"*": "deny"},
-        "agent": {
-            "glossarion": {
-                "description": "Non-interactive text generation backend for Glossarion",
-                "mode": "primary",
-                "prompt": (
-                    "Act only as a text-generation backend for Glossarion. Never use tools, "
-                    "never inspect files or the workspace, never browse, and never explain your process. "
-                    "Follow the supplied instructions and return only the requested final text."
-                ),
-                "permission": {"*": "deny"},
-            }
-        },
-    }
-    if temperature is not None:
-        try:
-            config.setdefault("agent", {}).setdefault("glossarion", {})["temperature"] = round(float(temperature), 2)
-        except (TypeError, ValueError):
-            pass
-    return config
-
-
-def _write_zen_workspace_config(path: Path, *, temperature: Optional[float] = None) -> Path:
-    target = path / "opencode.json"
-    desired = _zen_workspace_config(temperature=temperature)
-    target.write_text(json.dumps(desired, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return target
-
-
 def send_opencode_zen_completion(
     *,
     messages: List[Dict[str, Any]],
@@ -2657,34 +2624,26 @@ def send_opencode_zen_completion(
     logger = log_fn or (lambda _message: None)
     exe = ensure_opencode_installed(log_fn=logger)
 
-    effective_model = str(model or "").strip()
+    raw_model = str(model or "").strip()
     for prefix in ("ocz/", "oc/", "opencode/", "opencode-go/"):
-        if effective_model.startswith(prefix):
-            effective_model = effective_model[len(prefix):]
+        if raw_model.startswith(prefix):
+            raw_model = raw_model[len(prefix):]
             break
-    if not effective_model:
+    if not raw_model:
         raise OcAgyError("No model specified for OpenCode Zen request.")
+    effective_model = f"opencode/{raw_model}"
 
     prompt = build_prompt(messages)
     timeout_seconds = max(1.0, float(timeout or 1800))
 
-    base = _workspace_dir()
-    request_dir = Path(tempfile.mkdtemp(prefix="ocz-request-", dir=str(base)))
-    try:
-        env = _subprocess_env()
-        env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(max(1, int(max_tokens)))
-        _write_zen_workspace_config(request_dir, temperature=temperature)
-    except Exception:
-        shutil.rmtree(request_dir, ignore_errors=True)
-        raise
+    env = _subprocess_env()
+    env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(max(1, int(max_tokens)))
 
     command = [
         exe,
         "run",
         "--format", "json",
         "--model", effective_model,
-        "--agent", "glossarion",
-        "--dir", str(request_dir),
         "--title", "Glossarion translation",
     ]
 
@@ -2694,7 +2653,6 @@ def send_opencode_zen_completion(
     try:
         proc = subprocess.Popen(
             command,
-            cwd=str(request_dir),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -2706,7 +2664,6 @@ def send_opencode_zen_completion(
             env=env,
         )
     except Exception:
-        shutil.rmtree(request_dir, ignore_errors=True)
         raise
     with _ACTIVE_LOCK:
         _ACTIVE_PROCESSES.add(proc)
@@ -2735,14 +2692,19 @@ def send_opencode_zen_completion(
     finally:
         with _ACTIVE_LOCK:
             _ACTIVE_PROCESSES.discard(proc)
-        shutil.rmtree(request_dir, ignore_errors=True)
 
     elapsed = time.time() - start
     content, events, non_json = _parse_json_events(stdout)
     event_error = _event_error(events)
     if proc.returncode != 0 or event_error:
         detail = "\n".join(part for part in (event_error, _clean_text(stderr), "\n".join(non_json)) if part)
-        raise _classify_error(detail, int(proc.returncode or 1))
+        text = _clean_text(detail) or f"opencode exited with code {proc.returncode}"
+        lower = text.lower()
+        if any(x in lower for x in ("rate limit", "rate-limited", "quota", "resource_exhausted", "too many requests", "429")):
+            raise OcAgyError("OpenCode Zen quota/rate limit: " + text)
+        if any(x in lower for x in ("model not found", "unknown model", "model does not exist", "cannot be resolved")):
+            raise OcAgyError("OpenCode Zen model error: " + text)
+        raise OcAgyError(f"OpenCode Zen failed (exit {proc.returncode}): {text}")
 
     if not content:
         fallback = "\n".join(non_json).strip()
