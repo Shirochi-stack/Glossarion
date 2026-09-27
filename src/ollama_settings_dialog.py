@@ -11,6 +11,7 @@ import json
 import math
 import os
 import threading
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Qt, QTimer
 from PySide6.QtWidgets import (
@@ -61,7 +62,7 @@ OPTION_GROUPS = (
     ("Context and output", (
         ("num_ctx", "Context size", "int"),
         ("num_predict", "Maximum generated tokens", "int"),
-        ("draft_num_predict", "MTP draft tokens", "int"),
+        ("draft_num_predict", "Speculative decoding", "int"),
         ("num_keep", "Prompt tokens to retain", "int"),
         ("num_batch", "Prompt batch size", "int"),
     )),
@@ -115,6 +116,23 @@ SLIDER_OPTIONS = {
 }
 
 
+def _style_dropdown_arrow(combo: QComboBox) -> None:
+    """Use the bundled Halgakos icon for this dialog's combo arrows."""
+    icon_path = Path(__file__).resolve().with_name("Halgakos.ico")
+    if not icon_path.is_file():
+        return
+    icon_url = icon_path.as_posix()
+    combo.setStyleSheet(combo.styleSheet() + f"""
+        QComboBox {{ padding-right: 24px; }}
+        QComboBox::drop-down {{
+            subcontrol-origin: padding; subcontrol-position: top right;
+            width: 22px; border-left: 1px solid #485466;
+        }}
+        QComboBox::drop-down:disabled {{ border-left-color: #383d44; }}
+        QComboBox::down-arrow {{ image: url(\"{icon_url}\"); width: 16px; height: 16px; }}
+    """)
+
+
 class _OptionEditor(QWidget):
     """Ollama option with an explicit model-default state."""
 
@@ -125,18 +143,57 @@ class _OptionEditor(QWidget):
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
-        self.default = QCheckBox("Model default")
-        self.default.setChecked(saved is None)
-        self.default.setMinimumWidth(112)
-        row.addWidget(self.default)
+        self.default = None
+        if key == "draft_num_predict":
+            self.mode = QComboBox()
+            _style_dropdown_arrow(self.mode)
+            self.mode.addItems(("Model default", "Off", "On (MTP if supported)"))
+            self.mode.setCurrentIndex(0 if saved is None else 1 if int(saved) == 0 else 2)
+            self._mode_help = (
+                "Ollama chooses the draft method supported by the model. "
+                "An embedded MTP model uses MTP; a model with a separate draft uses that draft."
+            )
+            self.mode.setToolTip(self._mode_help)
+            self.control = QSpinBox()
+            self.control.setRange(1, 2147483647)
+            self.control.setValue(int(saved) if saved is not None and int(saved) > 0 else 4)
+            self.control.setSuffix(" draft tokens")
+            self.control.setMinimumWidth(155)
+            self.mode.currentIndexChanged.connect(
+                lambda index: self.control.setEnabled(index == 2)
+            )
+            self.control.setEnabled(self.mode.currentIndex() == 2)
+            row.addWidget(self.mode, 1)
+            row.addWidget(self.control)
+        else:
+            self.default = _styled_checkbox("Model default")
+            self.default.setChecked(saved is None)
+            self.default.setMinimumWidth(112)
+            row.addWidget(self.default)
 
-        if kind == "bool" or key == "mirostat":
+        if key == "draft_num_predict":
+            pass
+        elif kind == "bool" or key == "mirostat":
             self.control = QComboBox()
+            _style_dropdown_arrow(self.control)
             choices = ("False", "True") if kind == "bool" else ("Off", "Mirostat 1", "Mirostat 2")
             self.control.addItems(choices)
             if saved is not None:
                 self.control.setCurrentIndex(int(saved))
             row.addWidget(self.control, 1)
+        elif key == "num_ctx":
+            self.slider = QSlider(Qt.Horizontal)
+            self.slider.setRange(1, max(262144, int(saved or 0)))
+            self.slider.setSingleStep(256)
+            self.slider.setPageStep(1024)
+            self.slider.setToolTip("Context size in tokens; drag to adjust.")
+            self.slider.setValue(int(saved) if saved is not None else 8192)
+            self.control = QLabel(f"{self.slider.value():,}")
+            self.control.setMinimumWidth(92)
+            self.control.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.slider.valueChanged.connect(lambda value: self.control.setText(f"{value:,}"))
+            row.addWidget(self.slider, 1)
+            row.addWidget(self.control)
         elif key in SLIDER_OPTIONS:
             low, high, step, suggested = SLIDER_OPTIONS[key]
             self.slider = QSlider(Qt.Horizontal)
@@ -167,25 +224,50 @@ class _OptionEditor(QWidget):
                 self.control.setText(json.dumps(saved) if kind == "array" else str(saved))
             self.control.setPlaceholderText("Enter JSON array" if kind == "array" else "Enter value")
             row.addWidget(self.control, 1)
-        self.default.toggled.connect(lambda checked: self.control.setEnabled(not checked))
-        if hasattr(self, "slider"):
-            self.default.toggled.connect(lambda checked: self.slider.setEnabled(not checked))
-            self.slider.setEnabled(not self.default.isChecked())
-        self.control.setEnabled(not self.default.isChecked())
+        if self.default is not None:
+            self.default.toggled.connect(lambda checked: self.control.setEnabled(not checked))
+            if hasattr(self, "slider"):
+                self.default.toggled.connect(lambda checked: self.slider.setEnabled(not checked))
+                self.slider.setEnabled(not self.default.isChecked())
+            self.control.setEnabled(not self.default.isChecked())
+        self.setStyleSheet("""
+            QLabel:disabled { color: #818892; }
+            QSpinBox:disabled, QDoubleSpinBox:disabled,
+            QLineEdit:disabled, QComboBox:disabled {
+                color: #818892; background: #25272b; border-color: #383d44;
+            }
+            QSlider::groove:horizontal:disabled { background: #3a3f46; }
+            QSlider::handle:horizontal:disabled { background: #747d87; }
+        """)
 
     def text(self) -> str:
+        if self.key == "draft_num_predict":
+            return "" if self.mode.currentIndex() == 0 else "0" if self.mode.currentIndex() == 1 else str(self.control.value())
         if self.default.isChecked():
             return ""
         if self.kind == "bool":
             return "true" if self.control.currentIndex() else "false"
         if self.key == "mirostat":
             return str(self.control.currentIndex())
+        if self.key == "num_ctx":
+            return str(self.slider.value())
         if isinstance(self.control, QLineEdit):
             return self.control.text()
         return str(self.control.value())
 
     def setPlaceholderText(self, text: str) -> None:
+        if self.key == "draft_num_predict":
+            self.mode.setToolTip(text + "\n" + self._mode_help)
+            return
         self.default.setToolTip(text)
+        if self.key == "num_ctx" and self.default.isChecked() and text.startswith("Model default: "):
+            try:
+                value = int(text.removeprefix("Model default: ").strip())
+                if value > 0:
+                    self.slider.setMaximum(max(self.slider.maximum(), value))
+                    self.slider.setValue(value)
+            except ValueError:
+                pass
         if isinstance(self.control, QLineEdit):
             self.control.setPlaceholderText(text)
 
@@ -259,7 +341,7 @@ def _styled_checkbox(text: str) -> QCheckBox:
             border-color: #7bb3e0;
         }
         QCheckBox:disabled {
-            color: #666666;
+            color: #818892;
         }
         QCheckBox::indicator:disabled {
             background-color: #1a1a1a;
@@ -275,6 +357,7 @@ def _styled_checkbox(text: str) -> QCheckBox:
             font-weight: bold;
             font-size: 11px;
         }
+        QLabel:disabled { color: #818892; }
     """)
     checkmark.setAlignment(Qt.AlignCenter)
     checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -590,6 +673,10 @@ class OllamaSettingsDialog(QDialog):
             QTabWidget#ollama_settings_tabs QTabBar::tab:disabled {
                 background: #202124; color: #777d85; border-color: #363a40;
             }
+            QTabWidget#ollama_settings_tabs QLabel:disabled,
+            QTabWidget#ollama_settings_tabs QGroupBox:disabled {
+                color: #818892;
+            }
         """)
         layout.addWidget(self.tabs, 1)
         self.option_fields = {}
@@ -603,7 +690,11 @@ class OllamaSettingsDialog(QDialog):
                 field = _OptionEditor(key, kind, options.get(key))
                 field.setObjectName(f"ollama_option_{key}")
                 if key == "draft_num_predict":
-                    field.setToolTip("Multi-token prediction draft length. Availability depends on the installed Ollama version and model.")
+                    field.setToolTip(
+                        "On sets draft_num_predict to the chosen token count. "
+                        "Embedded MTP runs only when the model and Ollama support it. "
+                        "Off sends 0; Model default sends no override."
+                    )
                 form.addRow(label + ":", field)
                 self.option_fields[key] = (field, kind)
             scroll = QScrollArea()
@@ -618,6 +709,7 @@ class OllamaSettingsDialog(QDialog):
         self.auto_update_checkbox.setChecked(bool(self._settings.get("auto_update", True)))
         advanced_form.addRow(self.auto_update_checkbox)
         self.think_field = QComboBox()
+        _style_dropdown_arrow(self.think_field)
         self.think_field.setEditable(True)
         self.think_field.addItems(["Model default", "True", "False", "low", "medium", "high"])
         self.think_field.setToolTip("Choose a thinking mode, or enter a model-supported level.")
@@ -626,12 +718,14 @@ class OllamaSettingsDialog(QDialog):
             self.think_field.setCurrentText(str(think).lower() if isinstance(think, bool) else str(think))
         advanced_form.addRow("Thinking:", self.think_field)
         self.keep_alive_field = QComboBox()
+        _style_dropdown_arrow(self.keep_alive_field)
         self.keep_alive_field.setEditable(True)
         self.keep_alive_field.addItems(["Model default", "0", "5m", "30m", "1h", "-1"])
         if self._model_settings.get("keep_alive") is not None:
             self.keep_alive_field.setCurrentText(str(self._model_settings["keep_alive"]))
         advanced_form.addRow("Keep model loaded:", self.keep_alive_field)
         self.format_field = QComboBox()
+        _style_dropdown_arrow(self.format_field)
         self.format_field.setEditable(True)
         self.format_field.addItems(["Model default", "json"])
         saved_format = self._model_settings.get("format")
@@ -856,6 +950,8 @@ class OllamaSettingsDialog(QDialog):
                     raise ValueError(f"{key}: {exc}") from exc
         if "num_ctx" in options and options["num_ctx"] <= 0:
             raise ValueError("num_ctx must be greater than zero")
+        if "draft_num_predict" in options and options["draft_num_predict"] < 0:
+            raise ValueError("draft_num_predict must be zero or greater")
 
         request = _json_object(self.extra_request_edit.toPlainText(), "Additional request fields")
         reserved = RESERVED_REQUEST_KEYS.intersection(request)
