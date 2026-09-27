@@ -22956,7 +22956,7 @@ Recent translations to summarize:
         model_btn_layout.setContentsMargins(0, 0, 0, 0)
         model_btn_layout.setSpacing(4)
 
-        self.ollama_settings_btn = QPushButton("🦙 Download Ollama")
+        self.ollama_settings_btn = QPushButton("🦙 Load Ollama")
         self.ollama_settings_btn.setToolTip("Install Ollama or configure its local settings")
         from ollama_settings_dialog import OllamaRouteButtonController
         self._ollama_route_button = OllamaRouteButtonController(

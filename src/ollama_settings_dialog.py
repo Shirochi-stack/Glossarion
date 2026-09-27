@@ -606,7 +606,7 @@ class OllamaRouteButtonController(QObject):
             return
         if not self._busy:
             self.button.setText(
-                "🦙 Ollama Settings" if self._installed else "🦙 Download Ollama"
+                "🦙 Ollama Settings" if self._installed else "🦙 Load Ollama"
             )
         if self._installed is None and not self._passive_check_pending and not self._busy:
             self._passive_check_pending = True

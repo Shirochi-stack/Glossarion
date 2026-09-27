@@ -8603,7 +8603,7 @@ class MultiAPIKeyDialog(QDialog):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
         row.addWidget(combo, 1)
-        button = QPushButton("🦙 Download Ollama")
+        button = QPushButton("🦙 Load Ollama")
         button.setToolTip("Install Ollama or configure its local settings")
         row.addWidget(button)
         controller = OllamaRouteButtonController(

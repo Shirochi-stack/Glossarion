@@ -42,6 +42,7 @@ def test_ollamapull_shutdown_targets_only_verified_local_ollama(monkeypatch):
                         status=psutil.CONN_LISTEN, pid=99999),
     ]
     monkeypatch.setattr(psutil, "net_connections", lambda **_: connections)
+    monkeypatch.setattr(psutil, "process_iter", lambda: [])
     monkeypatch.setattr(psutil, "Process", lambda pid: Process())
     monkeypatch.setattr(psutil, "wait_procs", lambda processes, **_: (processes, []))
     monkeypatch.setattr(ollamapull, "_managed_server_process", None)
@@ -55,10 +56,41 @@ def test_ollamapull_shutdown_refuses_unidentified_server(monkeypatch):
     import psutil
 
     monkeypatch.setattr(psutil, "net_connections", lambda **_: [])
+    monkeypatch.setattr(psutil, "process_iter", lambda: [])
     monkeypatch.setattr(ollamapull, "_managed_server_process", None)
     monkeypatch.setattr(ollamapull, "_server_version", lambda: "1.0")
     with pytest.raises(ollamapull.OllamaPullError, match="could not be identified"):
         ollamapull.shutdown_ollama()
+
+
+def test_ollamapull_shutdown_stops_orphaned_model_runner(monkeypatch, tmp_path):
+    import ollamapull
+    import psutil
+
+    stopped = []
+    install_dir = tmp_path / "Ollama"
+    runner_path = install_dir / "lib" / "ollama" / "llama-server.exe"
+
+    class Runner:
+        pid = 23456
+
+        def name(self):
+            return "llama-server.exe"
+
+        def exe(self):
+            return str(runner_path)
+
+        def terminate(self):
+            stopped.append(self.pid)
+
+    monkeypatch.setattr(ollamapull, "_ollama_executable", lambda: str(install_dir / "ollama.exe"))
+    monkeypatch.setattr(ollamapull, "_managed_server_process", None)
+    monkeypatch.setattr(psutil, "process_iter", lambda: [Runner()])
+    monkeypatch.setattr(psutil, "net_connections", lambda **_: [])
+    monkeypatch.setattr(psutil, "wait_procs", lambda processes, **_: (processes, []))
+
+    assert ollamapull.shutdown_ollama() is True
+    assert stopped == [23456]
 
 def test_ollamapull_route_wins_over_custom_and_individual_endpoints(monkeypatch):
     monkeypatch.setenv('CUSTOM_OPENAI_PREFIX_ROUTES', json.dumps([

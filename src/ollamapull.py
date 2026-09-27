@@ -514,6 +514,20 @@ def shutdown_ollama() -> bool:
         targets = []
         try:
             import psutil
+            executable = _ollama_executable()
+            install_dir = Path(executable).resolve().parent if executable else None
+            if install_dir is not None:
+                for process in psutil.process_iter():
+                    try:
+                        if process.name().lower() not in ("llama-server", "llama-server.exe"):
+                            continue
+                        runner_path = Path(process.exe()).resolve()
+                        if runner_path.is_relative_to(install_dir):
+                            # Ollama's model runner can outlive its server and
+                            # retain the model's VRAM allocation.
+                            targets.append(process)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                        continue
             for connection in psutil.net_connections(kind="tcp"):
                 address = connection.laddr
                 if not address or address.port != 11434 or connection.status != psutil.CONN_LISTEN:
@@ -570,7 +584,9 @@ def shutdown_ollama() -> bool:
                     except psutil.NoSuchProcess:
                         pass
                 if alive:
-                    psutil.wait_procs(alive, timeout=2)
+                    _, alive = psutil.wait_procs(alive, timeout=2)
+                    if alive:
+                        raise OllamaPullError("Ollama processes did not exit after shutdown.")
         if not stopped and _server_version() is not None:
             raise OllamaPullError("Ollama is running, but its local server process could not be identified.")
         return stopped
