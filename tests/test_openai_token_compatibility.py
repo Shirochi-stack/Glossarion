@@ -452,6 +452,24 @@ def test_ollamapull_pull_progress_and_graceful_cancel(monkeypatch):
     assert 'closed' in events
 
 
+def test_ollamapull_version_check_hides_windows_console(monkeypatch):
+    import ollamapull
+    import subprocess
+
+    captured = {}
+    monkeypatch.setattr(ollamapull.sys, 'platform', 'win32')
+    monkeypatch.setattr(ollamapull, '_ollama_executable', lambda: r'C:\Ollama\ollama.exe')
+    def fake_run(*_args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(stdout='ollama version 0.34.4', stderr='')
+    monkeypatch.setattr(ollamapull.subprocess, 'run', fake_run)
+
+    assert ollamapull._binary_version() == '0.34.4'
+    assert captured['creationflags'] & subprocess.CREATE_NO_WINDOW
+    assert captured['startupinfo'].dwFlags & subprocess.STARTF_USESHOWWINDOW
+    assert captured['startupinfo'].wShowWindow == subprocess.SW_HIDE
+
+
 def test_ollamapull_pull_progress_shows_speed_and_eta(monkeypatch):
     import ollamapull
     import model_options

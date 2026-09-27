@@ -975,14 +975,18 @@ class OllamaSettingsDialog(QDialog):
             self.model_defaults_label.setText("No model selected.")
 
         footer = QHBoxLayout()
+        footer.setSpacing(16)
         footer.addStretch()
         close_button = QPushButton("Close")
+        close_button.setMinimumWidth(170)
         close_button.clicked.connect(self.reject)
         footer.addWidget(close_button)
         save_button = QPushButton("Save settings")
+        save_button.setMinimumWidth(170)
         save_button.setDefault(True)
         save_button.clicked.connect(self.save_settings)
         footer.addWidget(save_button)
+        footer.addStretch()
         layout.addLayout(footer)
 
     def _start_job(self, operation, function):

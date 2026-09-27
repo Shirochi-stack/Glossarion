@@ -165,12 +165,28 @@ def _ollama_executable() -> Optional[str]:
     return str(next((path for path in candidates if path.is_file()), "")) or None
 
 
+def _hidden_subprocess_kwargs() -> dict[str, Any]:
+    """Keep Ollama CLI subprocesses in Task Manager without console flashes."""
+    if sys.platform != "win32":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "startupinfo": startupinfo,
+    }
+
+
 def _binary_version() -> Optional[str]:
     executable = _ollama_executable()
     if not executable:
         return None
     try:
-        result = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(
+            [executable, "--version"], capture_output=True, text=True,
+            timeout=5, **_hidden_subprocess_kwargs(),
+        )
         match = re.search(r"\b(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.]+)?)\b", result.stdout + result.stderr)
         return match.group(1) if match else None
     except (OSError, subprocess.SubprocessError):
@@ -372,11 +388,11 @@ def _run_installer(progress: Optional[Callable[[str], None]], should_stop: Optio
         path.write_bytes(script)
         command = _installer_command(path)
         _progress(progress, "Installing Ollama; this may take several minutes...")
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
         try:
             process = subprocess.Popen(
                 command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, bufsize=1, creationflags=flags,
+                stderr=subprocess.STDOUT, text=True, bufsize=1,
+                **_hidden_subprocess_kwargs(),
             )
         except OSError as exc:
             raise OllamaPullError(f"Could not start the Ollama installer: {exc}") from exc
@@ -438,7 +454,7 @@ def _start_server(progress: Optional[Callable[[str], None]], should_stop: Option
     _progress(progress, "Starting the local Ollama server...")
     kwargs: dict[str, Any] = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if sys.platform == "win32":
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        kwargs.update(_hidden_subprocess_kwargs())
     else:
         kwargs["start_new_session"] = True
     try:
