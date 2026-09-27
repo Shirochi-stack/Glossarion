@@ -823,6 +823,12 @@ class OllamaSettingsDialog(QDialog):
             value.setTextInteractionFlags(Qt.TextSelectableByMouse)
             self.status_labels[key] = value
             status_layout.addWidget(value, row, 3)
+        self.hardware_refresh_button = QPushButton("🔄")
+        self.hardware_refresh_button.setToolTip("Refresh RAM and VRAM usage")
+        self.hardware_refresh_button.setAccessibleName("Refresh hardware memory usage")
+        self.hardware_refresh_button.setFixedSize(34, 30)
+        self.hardware_refresh_button.clicked.connect(self.refresh_hardware_status)
+        status_layout.addWidget(self.hardware_refresh_button, 0, 4, Qt.AlignTop)
         status_layout.setColumnStretch(1, 1)
         status_layout.setColumnStretch(3, 2)
         layout.addWidget(status_box)
@@ -839,6 +845,9 @@ class OllamaSettingsDialog(QDialog):
         self.update_button = QPushButton("Update Ollama")
         self.update_button.clicked.connect(self.update_ollama)
         action_row.addWidget(self.update_button)
+        self.shutdown_button = QPushButton("Shutdown Ollama")
+        self.shutdown_button.clicked.connect(self.shutdown_ollama)
+        action_row.addWidget(self.shutdown_button)
         self.cancel_button = QPushButton("Stop operation")
         self.cancel_button.clicked.connect(self._stop_event.set)
         self.cancel_button.hide()
@@ -1001,6 +1010,7 @@ class OllamaSettingsDialog(QDialog):
         self._busy_action = busy
         self.ensure_button.setEnabled(not busy)
         self.update_button.setEnabled(not busy)
+        self.shutdown_button.setEnabled(not busy)
         self.cancel_button.setVisible(busy)
 
     def refresh_status(self):
@@ -1021,6 +1031,14 @@ class OllamaSettingsDialog(QDialog):
             return {"status": status, "hardware": hardware, "details": details, "details_error": details_error}
 
         self._start_job("status", task)
+
+    def refresh_hardware_status(self):
+        self.hardware_refresh_button.setEnabled(False)
+
+        def task(_progress):
+            return _hardware_status()
+
+        self._start_job("hardware", task)
 
     def ensure_model_ready(self):
         if self._busy_action:
@@ -1059,12 +1077,41 @@ class OllamaSettingsDialog(QDialog):
 
         self._start_job("update", task)
 
+    def shutdown_ollama(self):
+        if self._busy_action:
+            return
+        answer = QMessageBox.question(
+            self, "Shutdown Ollama",
+            "Shut down the local Ollama server?\n\n"
+            "This will interrupt active Ollama requests, including requests from other apps.",
+            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self._set_action_busy(True)
+        self.progress_label.setText("Shutting down Ollama…")
+
+        def task(_progress):
+            import ollamapull
+            return ollamapull.shutdown_ollama()
+
+        self._start_job("shutdown", task)
+
     def _on_job_progress(self, message):
         self.progress_label.setText(str(message))
 
     def _on_job_finished(self, payload):
         job_id, operation, result, error = payload
         self._jobs.pop(job_id, None)
+        if operation == "hardware":
+            self.hardware_refresh_button.setEnabled(True)
+            if error:
+                QMessageBox.warning(self, "Hardware status", f"Could not refresh memory usage:\n{error}")
+            else:
+                for key in ("ram", "vram", "gpu", "cpu"):
+                    if key in result:
+                        self.status_labels[key].setText(str(result[key]))
+            return
         if operation == "status":
             self.refresh_button.setEnabled(True)
             if error:
@@ -1135,7 +1182,10 @@ class OllamaSettingsDialog(QDialog):
             self.progress_label.setText(f"Ollama {operation} failed: {error}")
             QMessageBox.warning(self, "Ollama", f"Ollama {operation} failed:\n{error}")
             return
-        self.progress_label.setText("Ollama is ready." if operation == "ensure" else "Ollama update completed.")
+        self.progress_label.setText(
+            "Ollama shut down." if operation == "shutdown" else
+            "Ollama is ready." if operation == "ensure" else "Ollama update completed."
+        )
         if operation == "ensure":
             try:
                 refresh = getattr(self.translator_gui, "_refresh_model_combo_catalog", None)

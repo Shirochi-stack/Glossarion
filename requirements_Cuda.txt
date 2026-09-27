@@ -9,6 +9,7 @@ lxml
 html5lib
 ebooklib
 requests
+psutil
 tqdm
 langdetect
 PySide6

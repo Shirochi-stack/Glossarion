@@ -16,6 +16,50 @@ from reasoning_compatibility import (
 # parameter names. Keep these transport and lifecycle checks alongside the
 # other provider parameter compatibility tests.
 
+
+def test_ollamapull_shutdown_targets_only_verified_local_ollama(monkeypatch):
+    import ollamapull
+    import psutil
+
+    stopped = []
+
+    class Process:
+        pid = 12345
+
+        def name(self):
+            return "ollama.exe"
+
+        def parent(self):
+            return None
+
+        def terminate(self):
+            stopped.append(self.pid)
+
+    connections = [
+        SimpleNamespace(laddr=SimpleNamespace(ip="127.0.0.1", port=11434),
+                        status=psutil.CONN_LISTEN, pid=12345),
+        SimpleNamespace(laddr=SimpleNamespace(ip="127.0.0.1", port=1234),
+                        status=psutil.CONN_LISTEN, pid=99999),
+    ]
+    monkeypatch.setattr(psutil, "net_connections", lambda **_: connections)
+    monkeypatch.setattr(psutil, "Process", lambda pid: Process())
+    monkeypatch.setattr(psutil, "wait_procs", lambda processes, **_: (processes, []))
+    monkeypatch.setattr(ollamapull, "_managed_server_process", None)
+
+    assert ollamapull.shutdown_ollama() is True
+    assert stopped == [12345]
+
+
+def test_ollamapull_shutdown_refuses_unidentified_server(monkeypatch):
+    import ollamapull
+    import psutil
+
+    monkeypatch.setattr(psutil, "net_connections", lambda **_: [])
+    monkeypatch.setattr(ollamapull, "_managed_server_process", None)
+    monkeypatch.setattr(ollamapull, "_server_version", lambda: "1.0")
+    with pytest.raises(ollamapull.OllamaPullError, match="could not be identified"):
+        ollamapull.shutdown_ollama()
+
 def test_ollamapull_route_wins_over_custom_and_individual_endpoints(monkeypatch):
     monkeypatch.setenv('CUSTOM_OPENAI_PREFIX_ROUTES', json.dumps([
         {'prefix': 'ollamapull/', 'routing': 'http://127.0.0.1:9999/v1'}]))

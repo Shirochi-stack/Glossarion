@@ -14940,6 +14940,11 @@ Text to analyze:
             # Stop any background operations first
             self.stop_all_operations(kill_child_processes=False, fast=True)
             self._restore_in_progress_rows_for_shutdown()
+            try:
+                import ollamapull
+                ollamapull.shutdown_ollama()
+            except Exception as exc:
+                print(f"[CLOSE] Could not shut down Ollama: {exc}")
 
             # Aggressively free PyInstaller temp dir to avoid warning message box
             try:

@@ -503,6 +503,79 @@ def _start_server(progress: Optional[Callable[[str], None]], should_stop: Option
     raise OllamaPullError("Ollama did not start within 30 seconds.")
 
 
+def shutdown_ollama() -> bool:
+    """Stop the local Ollama server, including one started by the Ollama app.
+
+    Only a process verified to own the loopback Ollama listener (or a process
+    started by this module) is eligible. Returns whether a process was stopped.
+    """
+    global _managed_server_process
+    with _lifecycle_lock:
+        targets = []
+        try:
+            import psutil
+            for connection in psutil.net_connections(kind="tcp"):
+                address = connection.laddr
+                if not address or address.port != 11434 or connection.status != psutil.CONN_LISTEN:
+                    continue
+                if address.ip not in ("127.0.0.1", "::1", "0.0.0.0", "::") or not connection.pid:
+                    continue
+                try:
+                    process = psutil.Process(connection.pid)
+                    if not process.name().lower().startswith("ollama"):
+                        continue
+                    targets.append(process)
+                    # The desktop app can relaunch its server after a direct
+                    # child shutdown. Stop Ollama parents as well.
+                    parent = process.parent()
+                    while parent is not None and parent.name().lower().startswith("ollama"):
+                        targets.append(parent)
+                        parent = parent.parent()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except ImportError:
+            psutil = None
+        except Exception as exc:
+            raise OllamaPullError(f"Could not identify the local Ollama server: {exc}") from exc
+
+        managed = _managed_server_process
+        if managed is not None and managed.poll() is None:
+            try:
+                managed.terminate()
+                managed.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                managed.kill()
+                managed.wait(timeout=2)
+            _managed_server_process = None
+            stopped = True
+        else:
+            _managed_server_process = None
+            stopped = False
+
+        if psutil is not None:
+            unique = {process.pid: process for process in targets}
+            for process in unique.values():
+                try:
+                    process.terminate()
+                    stopped = True
+                except psutil.NoSuchProcess:
+                    pass
+                except psutil.AccessDenied as exc:
+                    raise OllamaPullError(f"Access denied stopping Ollama (PID {process.pid}).") from exc
+            if unique:
+                _, alive = psutil.wait_procs(list(unique.values()), timeout=2)
+                for process in alive:
+                    try:
+                        process.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+                if alive:
+                    psutil.wait_procs(alive, timeout=2)
+        if not stopped and _server_version() is not None:
+            raise OllamaPullError("Ollama is running, but its local server process could not be identified.")
+        return stopped
+
+
 def _after_update(progress: Optional[Callable[[str], None]],
                   should_stop: Optional[Callable[[], bool]]) -> None:
     """Restart only a server this process launched; report external restarts."""
