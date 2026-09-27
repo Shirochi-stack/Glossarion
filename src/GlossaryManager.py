@@ -681,6 +681,7 @@ def _atomic_write_file(filepath, content, encoding='utf-8'):
 
 def save_glossary(output_dir, chapters, instructions, language="korean", log_callback=None):
     """Targeted glossary generator with true CSV format output and parallel processing"""
+    save_glossary.last_run_complete = False
 
     # If the user stops translation while glossary runs in a subprocess, we must ensure the
     # per-process watchdog file doesn't stick around and keep the GUI progress bar "busy".
@@ -1230,6 +1231,10 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             # print(f"📑 Term entries: {t_count}")
             print(f"📑 Total entries: {total}")
             
+            save_glossary.last_run_complete = bool(
+                getattr(_process_chunks_batch_api, 'last_run_complete', False)
+                and not is_stop_requested()
+            )
             return _parse_csv_to_dict(csv_content)
         else:
             # Strict sequential processing (one API call at a time)
@@ -1531,6 +1536,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             # print(f"📑 Term entries: {t_count}")
             print(f"📑 Total entries: {total}")
         
+        save_glossary.last_run_complete = bool(
+            _minimal_scheduled_requests_complete and not is_stop_requested()
+        )
         return _parse_csv_to_dict(csv_content)
     
     # Original single-text processing

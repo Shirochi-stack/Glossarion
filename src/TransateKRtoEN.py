@@ -27181,6 +27181,9 @@ def main(log_callback=None, stop_callback=None):
                 print("📑 Automatic glossary generation disabled")
                 print(f"   {model} does not support glossary extraction")
                 print("   Traditional translation APIs cannot identify character names/terms")
+                if os.getenv('GLOSSARY_REQUIRE_COMPLETE_BEFORE_TRANSLATION') == '1':
+                    print('⏸️ Translation blocked: Minimal glossary cannot be completed with this model.')
+                    return
             else:
                 print("📑 Starting automatic glossary generation...")
                 try:
@@ -27571,18 +27574,27 @@ def main(log_callback=None, stop_callback=None):
                             pass
 
                         # Get result
+                        minimal_glossary_success = False
                         if future.done():
                             try:
                                 result = future.result(timeout=0.1)
                                 if isinstance(result, dict):
                                     if result.get('success'):
-                                        print(f"📑 ✅ Glossary generation completed successfully")
+                                        minimal_glossary_success = bool(result.get('complete'))
+                                        if minimal_glossary_success:
+                                            print("📑 ✅ Glossary generation completed successfully")
+                                        else:
+                                            print("📑 ⚠️ Glossary generation returned partial results")
                                     else:
                                         print(f"📑 ❌ Glossary generation failed: {result.get('error')}")
                                         if result.get('traceback'):
                                             print(f"📑 Error details:\n{result.get('traceback')}")
                             except Exception as e:
                                 print(f"📑 ❌ Error retrieving glossary result: {e}")
+
+                        if os.getenv('GLOSSARY_REQUIRE_COMPLETE_BEFORE_TRANSLATION') == '1' and not minimal_glossary_success:
+                            print('⏸️ Translation blocked: Minimal glossary generation did not complete.')
+                            return
 
                         # Only mark completed when not stopping.
                         print("✅ Automatic glossary generation COMPLETED")
@@ -27602,6 +27614,37 @@ def main(log_callback=None, stop_callback=None):
                     # translation. Direct Text installs a GUI callback here so
                     # the user can edit, accept, or reject that generated file.
                     generated_glossary_path = find_glossary_file(out)
+                    if (
+                        os.getenv('GLOSSARY_REQUIRE_COMPLETE_BEFORE_TRANSLATION') == '1'
+                        and (not generated_glossary_path or not os.path.isfile(generated_glossary_path))
+                    ):
+                        print('⏸️ Translation blocked: Minimal glossary file was not saved.')
+                        return
+                    if (
+                        os.getenv('GLOSSARY_REQUIRE_COMPLETE_BEFORE_TRANSLATION') == '1'
+                        and os.getenv('GLOSSARY_REFINEMENT_ENABLED') == '1'
+                    ):
+                        from glossary_translation_gate import refinement_complete
+
+                        refinement_progress_path = os.path.join(out, 'glossary_progress.json')
+                        try:
+                            with open(refinement_progress_path, 'r', encoding='utf-8') as progress_stream:
+                                refinement_progress = json.load(progress_stream)
+                        except (OSError, ValueError):
+                            refinement_progress = {}
+                        refinement_config = {
+                            'glossary_refinement_enabled': True,
+                            'glossary_refinement_type_mode': os.getenv('GLOSSARY_REFINEMENT_TYPE_MODE', 'all'),
+                            'glossary_refinement_selected_types': os.getenv(
+                                'GLOSSARY_REFINEMENT_SELECTED_TYPES', ''
+                            ).split(','),
+                        }
+                        ready, reason = refinement_complete(
+                            refinement_progress, generated_glossary_path, refinement_config
+                        )
+                        if not ready:
+                            print(f'⏸️ Translation blocked: {reason}.')
+                            return
                     if not _approve_direct_text_generated_glossary(
                         generated_glossary_path
                     ):
@@ -28584,6 +28627,39 @@ def main(log_callback=None, stop_callback=None):
                 run_vision_glossary_prepass(chapters, image_translator, check_stop)
         except Exception as e:
             print(f"⚠️ Vision auto glossary prepass failed: {e}")
+
+        if (
+            os.getenv('GLOSSARY_REQUIRE_COMPLETE_BEFORE_TRANSLATION') == '1'
+            and (os.getenv('AUTO_GLOSSARY_MODE') or '').strip().lower() in ('balanced', 'full')
+            and os.getenv('OUTPUT_MODE', '').strip().lower() == 'vision'
+        ):
+            from glossary_translation_gate import glossary_complete
+
+            try:
+                _glossary_dir, json_path, csv_path, progress_path = image_translator._vision_ocr_glossary_paths()
+                glossary_path = next(
+                    (path for path in (json_path, csv_path) if path and os.path.isfile(path)),
+                    None,
+                )
+                refinement_config = {
+                    'glossary_refinement_enabled': os.getenv('GLOSSARY_REFINEMENT_ENABLED') == '1',
+                    'glossary_refinement_type_mode': os.getenv('GLOSSARY_REFINEMENT_TYPE_MODE', 'all'),
+                    'glossary_refinement_selected_types': os.getenv(
+                        'GLOSSARY_REFINEMENT_SELECTED_TYPES', ''
+                    ).split(','),
+                }
+                ready, reason = glossary_complete(
+                    progress_path,
+                    glossary_path,
+                    refinement_config,
+                    require_minimal_pass=os.getenv('GLOSSARY_ADD_MINIMAL_PASS') == '1',
+                    is_epub=str(input_path or '').lower().endswith('.epub'),
+                )
+            except Exception as exc:
+                ready, reason = False, str(exc)
+            if not ready:
+                print(f'⏸️ Vision translation blocked: glossary is below 100% ({reason}).')
+                return
     
     if (
         config.OUTPUT_MODE == "audio"

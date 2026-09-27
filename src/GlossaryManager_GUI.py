@@ -2602,6 +2602,11 @@ class GlossaryManagerMixin:
                     glossary_request_merging = self.glossary_request_merging_checkbox.isChecked()
                     self.config['glossary_request_merging_enabled'] = glossary_request_merging
                     setattr(self, 'glossary_request_merging_enabled_var', glossary_request_merging)
+
+                if hasattr(self, 'glossary_require_complete_checkbox'):
+                    require_complete = self.glossary_require_complete_checkbox.isChecked()
+                    self.config['glossary_require_complete_before_translation'] = bool(require_complete)
+                    self.glossary_require_complete_before_translation_var = bool(require_complete)
                 
                 # Chapter split toggle (manual glossary)
                 if hasattr(self, 'glossary_enable_chapter_split_checkbox'):
@@ -6545,6 +6550,24 @@ Do not stop after the glossary."""
         desc_label = QLabel("(Automatic extraction and translation of character names/Terms)")
         master_toggle_layout.addWidget(desc_label)
         master_toggle_layout.addStretch()
+
+        self.glossary_require_complete_checkbox = self._create_styled_checkbox(
+            "Require 100% glossary progress before translation"
+        )
+        self.glossary_require_complete_checkbox.setChecked(bool(
+            self.config.get('glossary_require_complete_before_translation', False)
+        ))
+        self.glossary_require_complete_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When automatic glossary generation is enabled, stop translation if "
+            "extraction, the optional Minimal pass, or enabled refinement is incomplete.\n"
+            "Default OFF."
+        ))
+        self.glossary_require_complete_checkbox.toggled.connect(
+            lambda checked: self.config.__setitem__(
+                'glossary_require_complete_before_translation', bool(checked)
+            )
+        )
+        layout.addWidget(self.glossary_require_complete_checkbox)
 
         # Append glossary toggle
         append_widget = QWidget()

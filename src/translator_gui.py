@@ -32513,6 +32513,53 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # never remains visible after the user starts a run.
                 self._sync_automapped_glossaries_to_output()
 
+                if (
+                    auto_glossary_mode in ('balanced', 'full')
+                    and current_output_mode != 'vision'
+                    and self._live_bool_setting(
+                        'glossary_require_complete_checkbox',
+                        'glossary_require_complete_before_translation_var',
+                        'glossary_require_complete_before_translation',
+                        False,
+                    )
+                ):
+                    from glossary_translation_gate import glossary_complete, progress_path_for_source
+
+                    glossary_root = os.path.abspath(
+                        os.environ.get('OUTPUT_DIRECTORY')
+                        or self.config.get('output_directory')
+                        or os.getcwd()
+                    )
+                    for source in self.selected_files:
+                        source_root = (
+                            os.path.dirname(os.path.abspath(source))
+                            if sys.platform == 'darwin'
+                            and not (os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory'))
+                            else glossary_root
+                        )
+                        progress_path = progress_path_for_source(source, source_root)
+                        base = os.path.splitext(os.path.basename(source))[0]
+                        glossary_path = next((
+                            os.path.join(os.path.dirname(progress_path), f'{base}_glossary{ext}')
+                            for ext in ('.json', '.csv', '.txt', '.md')
+                            if progress_path and os.path.isfile(
+                                os.path.join(os.path.dirname(progress_path), f'{base}_glossary{ext}')
+                            )
+                        ), None)
+                        ready, reason = glossary_complete(
+                            progress_path,
+                            glossary_path,
+                            self.config,
+                            require_minimal_pass=self._glossary_add_minimal_pass_env_value() == '1',
+                            is_epub=str(source).lower().endswith('.epub'),
+                        )
+                        if not ready:
+                            self.append_log(
+                                f"⏸️ Translation blocked for {os.path.basename(source)}: "
+                                f"glossary is below 100% ({reason})."
+                            )
+                            return
+
                 # Call the direct function
                 if getattr(self, '_translation_run_is_multipass_qa_refinement', False):
                     mode_label = str(getattr(self, '_translation_run_qa_refinement_mode', '') or 'multipass').title()
@@ -36061,6 +36108,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
             'GLOSSARY_SKIP_TITLE_HEADER_ONLY': self._glossary_skip_title_header_only_env_value(),
             'GLOSSARY_ADD_MINIMAL_PASS': self._glossary_add_minimal_pass_env_value(),
+            'GLOSSARY_REQUIRE_COMPLETE_BEFORE_TRANSLATION': '1' if self._live_bool_setting(
+                'glossary_require_complete_checkbox',
+                'glossary_require_complete_before_translation_var',
+                'glossary_require_complete_before_translation',
+                False,
+            ) else '0',
             'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL': '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', True)) else '0',
             'ENABLE_AUTO_GLOSSARY': "1" if auto_glossary_mode == 'minimal' else "0",
             'AUTO_GLOSSARY_MODE': auto_glossary_mode,

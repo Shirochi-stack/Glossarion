@@ -165,6 +165,7 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
         
         return {
             'success': True,
+            'complete': bool(getattr(GlossaryManager.save_glossary, 'last_run_complete', False)),
             'result': result,
             'pid': os.getpid(),
             'logs': captured_logs
