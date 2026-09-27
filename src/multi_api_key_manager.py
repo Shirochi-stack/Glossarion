@@ -355,6 +355,21 @@ if HAS_GUI:
                 painter.restore()
 
 
+def _model_poll_marker_tooltip(model):
+    route = str(model or "").strip().casefold()
+    if route.startswith(("ollamapull/", "ollama/")):
+        return (
+            "Reported by the local Ollama model catalog during a recent poll. "
+            "This does not confirm the model is loaded in memory or running now."
+        )
+    if route.startswith("lmstudio/"):
+        return (
+            "Reported by the local LM Studio model catalog during a recent poll. "
+            "This does not confirm the model is loaded in memory or running now."
+        )
+    return "Confirmed by a successful provider poll within the past 7 days"
+
+
 def _update_model_field_poll_marker(combo):
     """Render a compact transparent check inside an editable model field."""
     if not HAS_GUI or combo is None or not combo.isEditable():
@@ -380,6 +395,9 @@ def _update_model_field_poll_marker(combo):
                 margins.right(),
                 margins.bottom(),
             )
+        line_edit.setToolTip(
+            _model_poll_marker_tooltip(line_edit.text()) if has_check else ""
+        )
         if has_check:
             marker.raise_()
     except RuntimeError:
@@ -8640,10 +8658,7 @@ class MultiAPIKeyDialog(QDialog):
                         return is_polled
                     if role == Qt.DecorationRole:
                         return self._checked_icon if is_polled else QIcon()
-                    return (
-                        "✓ Confirmed by a successful provider poll within the past 7 days"
-                        if is_polled else ""
-                    )
+                    return "✓ " + _model_poll_marker_tooltip(value) if is_polled else ""
                 return super().data(index, role)
 
             @staticmethod

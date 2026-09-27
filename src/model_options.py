@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import re
+import socket
 import tempfile
 import threading
 import time
@@ -18,9 +19,33 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+
+# Curated, small-to-medium chat model tags from the Ollama library (2026-09-27):
+# https://ollama.com/library?sort=popular. These are
+# editable suggestions, not claims that the models are installed. LM Studio may
+# assign different IDs; its live /v1/models catalog adds those exact IDs.
+LOCAL_CHAT_MODEL_TAGS: Tuple[str, ...] = (
+    "qwen3.5:0.8b", "qwen3.5:2b", "qwen3.5:4b", "qwen3.5:9b",
+    "qwen3:0.6b", "qwen3:1.7b", "qwen3:4b", "qwen3:8b", "qwen3:14b",
+    "qwen2.5:0.5b", "qwen2.5:1.5b", "qwen2.5:3b", "qwen2.5:7b", "qwen2.5:14b",
+    "qwen2.5-coder:0.5b", "qwen2.5-coder:1.5b", "qwen2.5-coder:3b",
+    "qwen2.5-coder:7b", "qwen2.5-coder:14b",
+    "gemma4:e2b", "gemma4:e4b", "gemma4:12b",
+    "gemma3:1b", "gemma3:4b", "gemma3:12b",
+    "gemma3n:e2b", "gemma3n:e4b",
+    "llama3.2:1b", "llama3.2:3b", "llama3.1:8b",
+    "mistral:7b", "mistral-nemo:12b",
+    "phi4-mini:3.8b", "phi4:14b", "phi3:3.8b",
+    "deepseek-r1:1.5b", "deepseek-r1:7b", "deepseek-r1:8b", "deepseek-r1:14b",
+    "granite4.2:3b", "granite4.2:8b",
+    "ministral-3:3b", "ministral-3:8b", "ministral-3:14b",
+    "translategemma:4b", "translategemma:12b",
+    "cogito:3b", "cogito:8b", "olmo-3:7b", "dolphin3:8b",
+)
+
+
 def _get_static_model_options() -> List[str]:
     return [
-    
         # OpenAI Models (as of March 2026)
         # - GPT-4o/4o-mini/4-turbo/4.1/3.5-turbo retired from ChatGPT Feb 13 2026; 4o still on API but legacy
         # - GPT-5.1 retiring March 11 2026, removed
@@ -522,6 +547,14 @@ def _get_static_model_options() -> List[str]:
         "nd/moonshotai/kimi-k2-thinking",
         "nd/meta/llama-4-scout-17b-16e-instruct",
         "nd/meta/llama-3.3-70b-instruct",
+
+        # Local route suggestions. The live catalog adds actual installed IDs;
+        # selecting an ollamapull/ entry can download it when needed.
+        *(
+            f"{prefix}{tag}"
+            for prefix in ("ollamapull/", "ollama/", "lmstudio/")
+            for tag in LOCAL_CHAT_MODEL_TAGS
+        ),
         
         # Last Resort
         "deepl",  # Will use DeepL API
@@ -663,6 +696,14 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
         "ollamapull", "ollamapull/", "http://127.0.0.1:11434/api/tags",
         public=True, response_keys=("models",), id_fields=("name", "model"),
     ),
+    # These routes use the OpenAI-compatible model lists of already running
+    # local servers. Discovery never starts or installs either application.
+    ProviderCatalogSpec(
+        "ollama", "ollama/", "http://localhost:11434/v1/models", public=True,
+    ),
+    ProviderCatalogSpec(
+        "lmstudio", "lmstudio/", "http://localhost:1234/v1/models", public=True,
+    ),
     # The local proxy is queried only if it is already running. Catalog
     # discovery must never start the proxy or open an OAuth browser window.
     ProviderCatalogSpec("autharena", "autharena/", "http://127.0.0.1/v1/models", public=True),
@@ -683,6 +724,8 @@ STATIC_ONLY_PROVIDER_PREFIXES: Mapping[str, str] = {
 
 _PREFIX_PROVIDER_MAP: Tuple[Tuple[str, str], ...] = (
     ("ollamapull/", "ollamapull"),
+    ("ollama/", "ollama"),
+    ("lmstudio/", "lmstudio"),
     ("autharena/", "autharena"),
     ("authgem-vertex/", "static"),
     ("authgrok/", "authgrok"),
@@ -1072,6 +1115,18 @@ def _merge_dynamic_model_options(
         for provider, models in provider_models.items()
         if models
     }
+    # Local suggestions remain useful after polling: ollamapull can download a
+    # selected tag, while Ollama and LM Studio users can still edit a suggested
+    # ID. Append the server's exact installed IDs, which alone get poll markers.
+    for provider in ("ollamapull", "ollama", "lmstudio"):
+        if provider in replacements:
+            suggestions = [
+                model for model in static_models
+                if str(model).casefold().startswith(f"{provider}/")
+            ]
+            replacements[provider] = _deduplicate_models(
+                [*suggestions, *replacements[provider]]
+            )
     if not replacements:
         return _deduplicate_models(static_models)
 
@@ -1503,7 +1558,7 @@ def provider_model_catalog_refresh_due(
     ``successful_only`` is used when a previously unavailable local service has
     just become ready. In that case, an earlier failed attempt must not suppress
     the first usable poll, while a successful catalog from the last 24 hours
-    should still be reused. Failed local Ollama polls have a shorter retry window.
+    should still be reused. Failed local-server polls have a shorter retry window.
     """
     provider = str(provider or "").strip()
     if not provider:
@@ -1519,7 +1574,7 @@ def provider_model_catalog_refresh_due(
         try:
             if expected_variant is None or attempt_variants.get(provider) == expected_variant:
                 attempted_at = float(attempts.get(provider, 0) or 0)
-                if provider != "ollamapull" or (
+                if provider not in {"ollamapull", "ollama", "lmstudio"} or (
                     time.time() - attempted_at
                     < min(max(0, int(max_age)), _OLLAMAPULL_OFFLINE_RETRY_SECONDS)
                 ):
@@ -1552,6 +1607,24 @@ def ollamapull_installed() -> bool:
         return False
 
 
+def local_catalog_available(provider: str) -> bool:
+    """Check a local model server without making an HTTP request or starting it.
+
+    This is used on the GUI thread only for automatic catalog polling. Explicit
+    refreshes still reach the worker and report the server's actual response.
+    """
+    ports = {"ollama": 11434, "lmstudio": 1234}
+    provider_name = str(provider or "").strip().casefold()
+    port = ports.get(provider_name)
+    if port is None:
+        return False
+    try:
+        with socket.create_connection(("localhost", port), timeout=0.1):
+            return True
+    except OSError:
+        return False
+
+
 def due_provider_catalog_for_model(
     active_model: str,
     active_api_key: str = "",
@@ -1580,6 +1653,8 @@ def due_provider_catalog_for_model(
         # for releases, or install Ollama just to decide whether to auto-poll.
         if not ollamapull_installed():
             return None
+    elif provider in {"ollama", "lmstudio"} and not local_catalog_available(provider):
+        return None
 
     # AuthGrok uses its existing account session and checks it without opening
     # a login window. The actual session validation remains in the worker.

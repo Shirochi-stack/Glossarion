@@ -146,6 +146,62 @@ def _reported_parameter_defaults(details: dict) -> dict:
     return defaults
 
 
+def _styled_checkbox(text: str) -> QCheckBox:
+    """Match Glossarion's blue checkbox with its visible white checkmark."""
+    checkbox = QCheckBox(text)
+    checkbox.setStyleSheet("""
+        QCheckBox {
+            color: white;
+            spacing: 6px;
+        }
+        QCheckBox::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #5a9fd4;
+            border-radius: 2px;
+            background-color: #2d2d2d;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #5a9fd4;
+            border-color: #5a9fd4;
+        }
+        QCheckBox::indicator:hover {
+            border-color: #7bb3e0;
+        }
+        QCheckBox:disabled {
+            color: #666666;
+        }
+        QCheckBox::indicator:disabled {
+            background-color: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+    """)
+
+    checkmark = QLabel("✓", checkbox)
+    checkmark.setStyleSheet("""
+        QLabel {
+            color: white;
+            background: transparent;
+            font-weight: bold;
+            font-size: 11px;
+        }
+    """)
+    checkmark.setAlignment(Qt.AlignCenter)
+    checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+    checkmark.setGeometry(2, 1, 14, 14)
+
+    def update_checkmark():
+        checkmark.setVisible(checkbox.isChecked())
+        if checkbox.isChecked():
+            checkmark.raise_()
+
+    checkbox.stateChanged.connect(update_checkmark)
+    checkbox._checkmark_label = checkmark
+    checkbox._update_checkmark = update_checkmark
+    update_checkmark()
+    return checkbox
+
+
 class _JobSignals(QObject):
     progress = Signal(str)
     finished = Signal(object)
@@ -192,7 +248,7 @@ class OllamaRouteButtonController(QObject):
             return
         if not self._busy:
             self.button.setText(
-                "Ollama Settings" if self._installed else "🦙 Download Ollama"
+                "🦙 Ollama Settings" if self._installed else "🦙 Download Ollama"
             )
         if self._installed is None and not self._passive_check_pending and not self._busy:
             self._passive_check_pending = True
@@ -248,11 +304,35 @@ class OllamaRouteButtonController(QObject):
 
         def task(progress):
             import ollamapull
-            ollamapull.ensure_ready(
-                None, auto_update=auto_update,
-                progress=progress, should_stop=self._stop_event.is_set,
-            )
-            return ollamapull.get_status("")
+            try:
+                ollamapull.ensure_ready(
+                    None, auto_update=auto_update,
+                    progress=progress, should_stop=self._stop_event.is_set,
+                )
+                return ollamapull.get_status("")
+            except Exception as install_error:
+                # An installer may finish successfully while its own serve
+                # subprocess exits because the desktop Ollama server started.
+                # Only this startup race can be cleared by a healthy server.
+                # Cancellation and unrelated install/update errors still matter.
+                message = str(install_error).casefold()
+                startup_error = (
+                    message.startswith("ollama server exited")
+                    or message.startswith("ollama did not start within")
+                )
+                if (
+                    self._stop_event.is_set()
+                    or isinstance(install_error, ollamapull.OllamaPullCancelled)
+                    or not startup_error
+                ):
+                    raise
+                try:
+                    status = ollamapull.get_status("")
+                except Exception:
+                    raise install_error
+                if status.get("installed") and status.get("server_running"):
+                    return status
+                raise
 
         self._start_job("install", task)
 
@@ -365,11 +445,14 @@ class OllamaSettingsDialog(QDialog):
             ("server_version", "Running server version"),
             ("latest_version", "Latest version"), ("server_running", "Server"),
             ("restart_required", "Restart needed"),
-            ("model_installed", "Selected model"),
+            ("model_installed", "Selected model downloaded"),
+            ("model_loaded", "Selected model in memory"),
         )):
             status_layout.addWidget(QLabel(label + ":"), row, 0)
             value = QLabel("Checking…")
             value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            if key == "model_loaded":
+                value.setToolTip("Loaded in memory does not show whether a chat request is generating tokens.")
             self.status_labels[key] = value
             status_layout.addWidget(value, row, 1)
         layout.addWidget(status_box)
@@ -425,7 +508,7 @@ class OllamaSettingsDialog(QDialog):
         advanced = QWidget()
         advanced_layout = QVBoxLayout(advanced)
         advanced_form = QFormLayout()
-        self.auto_update_checkbox = QCheckBox("Auto-update Ollama before use")
+        self.auto_update_checkbox = _styled_checkbox("Auto-update Ollama before use")
         self.auto_update_checkbox.setChecked(bool(self._settings.get("auto_update", True)))
         advanced_form.addRow(self.auto_update_checkbox)
         self.think_field = QLineEdit()
@@ -590,7 +673,15 @@ class OllamaSettingsDialog(QDialog):
             )
             self.status_labels["model_installed"].setText(
                 "No model selected" if not self.model_name else
-                "Downloaded" if status.get("model_installed") else "Not downloaded"
+                "Server stopped" if not status.get("server_running") else
+                "Downloaded" if status.get("model_installed") is True else
+                "Not downloaded" if status.get("model_installed") is False else "Unknown"
+            )
+            self.status_labels["model_loaded"].setText(
+                "No model selected" if not self.model_name else
+                "Server stopped" if not status.get("server_running") else
+                "Loaded" if status.get("model_loaded") is True else
+                "Not loaded" if status.get("model_loaded") is False else "Unknown"
             )
             self.update_button.setText("Update Ollama" if status.get("update_available") else "Check / update Ollama")
             details = result.get("details")

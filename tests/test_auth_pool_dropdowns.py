@@ -266,6 +266,48 @@ def test_bare_ollamapull_route_opens_global_settings(ollama_qapp, monkeypatch):
     assert translator.config["ollama_settings"]["models"] == {}
 
 
+def test_ollama_auto_update_checkbox_shows_styled_checkmark(ollama_qapp, monkeypatch):
+    from PySide6.QtWidgets import QLabel
+    from ollama_settings_dialog import OllamaSettingsDialog
+
+    monkeypatch.setattr(OllamaSettingsDialog, "refresh_status", lambda self: None)
+    dialog = OllamaSettingsDialog(_ollama_test_translator(), "ollamapull/")
+    dialog.show()
+    ollama_qapp.processEvents()
+
+    checkbox = dialog.auto_update_checkbox
+    checkmark = next(label for label in checkbox.findChildren(QLabel) if label.text() == "✓")
+    assert checkbox.isChecked()
+    assert checkmark.isVisible()
+    assert "QCheckBox::indicator:checked" in checkbox.styleSheet()
+
+    checkbox.setChecked(False)
+    ollama_qapp.processEvents()
+    assert not checkmark.isVisible()
+    checkbox.setChecked(True)
+    ollama_qapp.processEvents()
+    assert checkmark.isVisible()
+    dialog.close()
+
+
+def test_ollama_status_separates_downloaded_and_loaded(ollama_qapp, monkeypatch):
+    from ollama_settings_dialog import OllamaSettingsDialog
+
+    monkeypatch.setattr(OllamaSettingsDialog, "refresh_status", lambda self: None)
+    dialog = OllamaSettingsDialog(_ollama_test_translator(), "ollamapull/qwen3")
+    status = {"installed": True, "server_running": True,
+              "model_installed": True, "model_loaded": False}
+    dialog._on_job_finished((1, "status", {"status": status}, None))
+    assert dialog.status_labels["model_installed"].text() == "Downloaded"
+    assert dialog.status_labels["model_loaded"].text() == "Not loaded"
+
+    status["model_loaded"] = True
+    dialog._on_job_finished((2, "status", {"status": status}, None))
+    assert dialog.status_labels["model_loaded"].text() == "Loaded"
+    assert "does not show whether" in dialog.status_labels["model_loaded"].toolTip()
+    dialog.close()
+
+
 def test_multi_key_ollamapull_button_follows_model_field(ollama_qapp, monkeypatch):
     from PySide6.QtWidgets import QComboBox, QDialog, QPushButton
     from multi_api_key_manager import MultiAPIKeyDialog
@@ -289,6 +331,10 @@ def test_multi_key_ollamapull_button_follows_model_field(ollama_qapp, monkeypatc
     assert not button.isHidden()
     combo.setCurrentText("ollamapull/qwen3")
     assert not button.isHidden()
+    combo.setCurrentText("ollama/llama3.2")
+    assert button.isHidden()
+    combo.setCurrentText("lmstudio/model-id")
+    assert button.isHidden()
     combo.setCurrentText("openai/gpt-4.1")
     assert button.isHidden()
 
@@ -307,8 +353,42 @@ def test_main_ollamapull_button_follows_model_field(ollama_qapp):
     assert not fake.ollama_settings_btn.isHidden()
     TranslatorGUI._update_ollama_settings_button(fake, "ollamapull/gemma3")
     assert not fake.ollama_settings_btn.isHidden()
+    TranslatorGUI._update_ollama_settings_button(fake, "ollama/llama3.2")
+    assert fake.ollama_settings_btn.isHidden()
+    TranslatorGUI._update_ollama_settings_button(fake, "lmstudio/model-id")
+    assert fake.ollama_settings_btn.isHidden()
     TranslatorGUI._update_ollama_settings_button(fake, "authgpt/gpt-6-luna")
     assert fake.ollama_settings_btn.isHidden()
+
+
+@pytest.mark.parametrize("model,provider", [
+    ("ollama/llama3.2", "ollama"),
+    ("lmstudio/model-id", "lmstudio"),
+])
+def test_local_route_auto_poll_skips_stopped_server_without_logging(
+    monkeypatch, model, provider,
+):
+    import translator_gui
+
+    checked = []
+    monkeypatch.setattr(
+        translator_gui, "local_catalog_available",
+        lambda value: checked.append(value) or False,
+    )
+    logs = []
+    gui = SimpleNamespace(
+        model_combo=SimpleNamespace(currentText=lambda: model),
+        api_key_entry=SimpleNamespace(text=lambda: ""),
+        config={},
+        _normalize_custom_prefix_routes=lambda routes: routes,
+        append_log=logs.append,
+    )
+
+    assert not translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(
+        gui, automatic=True,
+    )
+    assert checked == [provider]
+    assert logs == []
 
 
 def test_ollamapull_button_rechecks_then_installs_or_opens_settings(ollama_qapp, monkeypatch):
@@ -338,7 +418,7 @@ def test_ollamapull_button_rechecks_then_installs_or_opens_settings(ollama_qapp,
     controller._on_clicked()
     controller._on_job_finished((2, "click_status", {"installed": True}, None))
     assert opened and opened[0][1] == "ollamapull/qwen3"
-    assert button.text() == "Ollama Settings"
+    assert button.text() == "🦙 Ollama Settings"
 
 
 def test_ollamapull_button_status_runs_in_background(ollama_qapp, monkeypatch):
@@ -356,8 +436,128 @@ def test_ollamapull_button_status_runs_in_background(ollama_qapp, monkeypatch):
     controller.update_model()
     assert button.text() == "🦙 Download Ollama"
     deadline = time.monotonic() + 3
-    while button.text() != "Ollama Settings" and time.monotonic() < deadline:
+    while button.text() != "🦙 Ollama Settings" and time.monotonic() < deadline:
         ollama_qapp.processEvents()
         time.sleep(0.01)
-    assert button.text() == "Ollama Settings"
+    assert button.text() == "🦙 Ollama Settings"
     assert not controller._jobs
+
+
+def test_ollama_install_error_is_suppressed_when_server_is_ready(ollama_qapp, monkeypatch):
+    import ollama_settings_dialog as module
+    import ollamapull
+    from PySide6.QtWidgets import QPushButton
+
+    monkeypatch.setattr(module.OllamaRouteButtonController, "_check_installation_passively", lambda self: None)
+
+    def installer(*_args, **_kwargs):
+        raise RuntimeError("Ollama server exited (code 1).")
+
+    statuses = []
+
+    def status(_model=""):
+        statuses.append(True)
+        return {"installed": True, "server_running": True}
+
+    monkeypatch.setattr(ollamapull, "ensure_ready", installer)
+    monkeypatch.setattr(ollamapull, "get_status", status)
+    warnings = []
+    monkeypatch.setattr(module.QMessageBox, "warning", lambda *args: warnings.append(args))
+
+    translator = _ollama_test_translator()
+    button = QPushButton()
+    controller = module.OllamaRouteButtonController(
+        button, translator, lambda: "ollamapull/", translator,
+    )
+    jobs = []
+    monkeypatch.setattr(controller, "_start_job", lambda operation, task: jobs.append((operation, task)))
+    controller._busy = True
+    controller._begin_install()
+    assert jobs[0][0] == "install"
+    result = jobs[0][1](lambda _progress: None)
+    controller._on_job_finished((1, "install", result, None))
+
+    assert statuses
+    assert button.text() == "🦙 Ollama Settings"
+    assert warnings == []
+
+
+def test_ollama_install_error_is_reported_when_server_is_stopped(ollama_qapp, monkeypatch):
+    import ollama_settings_dialog as module
+    import ollamapull
+    from PySide6.QtWidgets import QPushButton
+
+    monkeypatch.setattr(module.OllamaRouteButtonController, "_check_installation_passively", lambda self: None)
+
+    def installer(*_args, **_kwargs):
+        raise RuntimeError("Ollama server exited (code 1).")
+
+    monkeypatch.setattr(ollamapull, "ensure_ready", installer)
+    monkeypatch.setattr(ollamapull, "get_status", lambda _model="": {"installed": True, "server_running": False})
+    warnings = []
+    monkeypatch.setattr(module.QMessageBox, "warning", lambda *args: warnings.append(args))
+
+    translator = _ollama_test_translator()
+    button = QPushButton()
+    controller = module.OllamaRouteButtonController(
+        button, translator, lambda: "ollamapull/", translator,
+    )
+    jobs = []
+    monkeypatch.setattr(controller, "_start_job", lambda operation, task: jobs.append((operation, task)))
+    controller._busy = True
+    controller._begin_install()
+    with pytest.raises(RuntimeError, match="server exited"):
+        jobs[0][1](lambda _progress: None)
+    controller._on_job_finished((1, "install", None, "Ollama server exited (code 1)."))
+
+    assert button.text() == "🦙 Download Ollama"
+    assert len(warnings) == 1
+
+
+@pytest.mark.parametrize("failure", ["cancelled", "unrelated", "stop_flag"])
+def test_ollama_install_error_is_not_cleared_by_old_running_server(
+    ollama_qapp, monkeypatch, failure,
+):
+    import ollama_settings_dialog as module
+    import ollamapull
+    from PySide6.QtWidgets import QPushButton
+
+    monkeypatch.setattr(module.OllamaRouteButtonController, "_check_installation_passively", lambda self: None)
+    error = (
+        ollamapull.OllamaPullCancelled("Ollama operation cancelled")
+        if failure == "cancelled" else
+        ollamapull.OllamaPullError("Ollama update failed")
+        if failure == "unrelated" else
+        ollamapull.OllamaPullError("Ollama server exited (code 1).")
+    )
+
+    def installer(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(ollamapull, "ensure_ready", installer)
+    status_calls = []
+    monkeypatch.setattr(
+        ollamapull, "get_status",
+        lambda _model="": status_calls.append(True) or {"installed": True, "server_running": True},
+    )
+    warnings = []
+    monkeypatch.setattr(module.QMessageBox, "warning", lambda *args: warnings.append(args))
+
+    translator = _ollama_test_translator()
+    controller = module.OllamaRouteButtonController(
+        QPushButton(), translator, lambda: "ollamapull/", translator,
+    )
+    jobs = []
+    monkeypatch.setattr(controller, "_start_job", lambda operation, task: jobs.append((operation, task)))
+    controller._busy = True
+    controller._begin_install()
+    if failure == "stop_flag":
+        controller._stop_event.set()
+
+    with pytest.raises(type(error)) as raised:
+        jobs[0][1](lambda _progress: None)
+    assert str(raised.value) == str(error)
+    controller._on_job_finished((1, "install", None, str(error)))
+
+    assert status_calls == []
+    assert len(warnings) == 1

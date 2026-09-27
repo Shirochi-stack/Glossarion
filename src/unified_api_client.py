@@ -2899,6 +2899,8 @@ class UnifiedClient:
         'or': 'openrouter',
         'openrouter': 'openrouter',
         'ollamapull/': 'ollamapull',
+        'ollama/': 'ollama',
+        'lmstudio/': 'lmstudio',
         'lr/': 'literouter',
         'lr': 'literouter',
         'ocz/': 'opencode-zen',  # OpenCode Zen free-tier; routed through the OpenCode CLI binary
@@ -2967,6 +2969,7 @@ class UnifiedClient:
     # Models/prefixes that authenticate without a traditional API key
     _NO_API_KEY_PREFIXES = (
         'ollamapull/',
+        'ollama/', 'lmstudio/',
         'autharena/', 'autharena',
         'authgpt/', 'authgpt',
         'authgrok/', 'authgrok',
@@ -2979,6 +2982,21 @@ class UnifiedClient:
     # NOTE: 'authgem' (without /) intentionally matches authgem/, authgem-key/, authgem-vertex/,
     # AND all numbered variants (authgem1/, authgem2/, authgem-vertex3/, etc.)
     _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
+
+    # These routes use an already-running local OpenAI-compatible server.
+    # Unlike ollamapull/, they do not install software or download models.
+    _LOCAL_OPENAI_ROUTES = {
+        'ollama/': ('ollama', 'http://localhost:11434/v1'),
+        'lmstudio/': ('lmstudio', 'http://localhost:1234/v1'),
+    }
+
+    @classmethod
+    def _local_openai_route(cls, model: str) -> Optional[Tuple[str, str, str]]:
+        model_lower = str(model or '').strip().lower()
+        for prefix, (provider, base_url) in cls._LOCAL_OPENAI_ROUTES.items():
+            if model_lower.startswith(prefix):
+                return prefix, provider, base_url
+        return None
 
     @staticmethod
     def _is_local_openai_base_url(url: str) -> bool:
@@ -3094,6 +3112,9 @@ class UnifiedClient:
                 return None
             if model_l.startswith('ollamapull/'):
                 return 'ollamapull'
+            local_route = cls._local_openai_route(model_l)
+            if local_route:
+                return local_route[1]
             if model_l.startswith('vertex/') or '@' in model_l:
                 return 'vertex_model_garden'
             if cls._get_custom_prefix_route_for_model(model_l):
@@ -3208,7 +3229,7 @@ class UnifiedClient:
     @classmethod
     def _model_needs_api_key(cls, model: str) -> bool:
         """Return False for models that authenticate without an API key."""
-        if (model or '').lower().startswith('ollamapull/'):
+        if (model or '').lower().startswith('ollamapull/') or cls._local_openai_route(model):
             return False
         # Local custom endpoint (Ollama/LM Studio/etc.) → no API key needed
         if cls._is_local_custom_endpoint():
@@ -4918,7 +4939,10 @@ class UnifiedClient:
                                 pass
                     self._individual_endpoint_applied = False
                     self._skip_global_custom_endpoint = False
-                    if getattr(self, 'current_key_use_individual_endpoint', False) and getattr(self, 'current_key_azure_endpoint', None):
+                    if (getattr(self, 'current_key_use_individual_endpoint', False)
+                            and getattr(self, 'current_key_azure_endpoint', None)
+                            and not self._local_openai_route(self.model)
+                            and not str(self.model or '').lower().startswith('ollamapull/')):
                         self.client_type = 'openai'
                         self._apply_individual_key_endpoint_if_needed()
                     else:
@@ -5498,7 +5522,8 @@ class UnifiedClient:
 
     def _apply_custom_endpoint_if_needed(self):
         """Apply custom endpoint configuration if needed"""
-        if str(getattr(self, 'model', '') or '').lower().startswith('ollamapull/'):
+        if (str(getattr(self, 'model', '') or '').lower().startswith('ollamapull/')
+                or self._local_openai_route(getattr(self, 'model', ''))):
             return
         if getattr(self, 'client_type', None) == 'custom_openai' or self._get_custom_prefix_route_for_model(getattr(self, 'model', '')):
             return
@@ -5542,7 +5567,8 @@ class UnifiedClient:
     
     def _apply_individual_key_endpoint_if_needed(self):
         """Apply individual key endpoint if configured (multi-key mode) - works independently of global toggle"""
-        if str(getattr(self, 'model', '') or '').lower().startswith('ollamapull/'):
+        if (str(getattr(self, 'model', '') or '').lower().startswith('ollamapull/')
+                or self._local_openai_route(getattr(self, 'model', ''))):
             return
         # Check if this key has an individual endpoint enabled AND configured
         has_individual_endpoint = (hasattr(self, 'current_key_azure_endpoint') and 
@@ -8375,6 +8401,10 @@ class UnifiedClient:
         # global OpenAI-compatible endpoint is configured elsewhere.
         if str(getattr(self, 'model', '') or '').lower().startswith('ollamapull/'):
             self.client_type = 'ollamapull'
+            return
+        local_route = self._local_openai_route(getattr(self, 'model', ''))
+        if local_route:
+            self.client_type = local_route[1]
             return
         # If this instance already applied an individual (per-key) endpoint, do NOT let
         # prefix-based detection override the client_type or base URL. This prevents
@@ -16869,13 +16899,16 @@ class UnifiedClient:
                 'nanogpt', 'sambanova', 'literouter', 'opencode', 'custom_openai',
             }
             _is_sdk_provider = False
+            _is_managed_ollama = False
             try:
                 _provider = self._get_actual_provider()
                 if _provider in _sdk_providers:
                     _is_sdk_provider = True
+                _is_managed_ollama = _provider == 'ollamapull'
             except Exception:
                 pass
-            _defer_progress_log = _is_authgem or _is_authnd or _is_authza or _is_vertex or _is_sdk_provider
+            _defer_progress_log = (_is_authgem or _is_authnd or _is_authza or
+                                   _is_vertex or _is_sdk_provider or _is_managed_ollama)
             if not _defer_progress_log and self._should_show_api_lifecycle_logs() and os.environ.get('GRACEFUL_STOP') != '1':
                 try:
                     tls = self._get_thread_local_client()
@@ -16922,10 +16955,12 @@ class UnifiedClient:
             'nanogpt', 'sambanova', 'literouter', 'opencode', 'custom_openai',
         }
         _is_sdk_provider = False
+        _is_managed_ollama = False
         try:
             _provider = self._get_actual_provider()
             if _provider in _sdk_providers:
                 _is_sdk_provider = True
+            _is_managed_ollama = _provider == 'ollamapull'
         except Exception:
             pass
         if (
@@ -16938,6 +16973,7 @@ class UnifiedClient:
             and not _is_antigravity
             and not _is_vertex
             and not _is_sdk_provider
+            and not _is_managed_ollama
             and self._should_show_api_lifecycle_logs()
             and os.environ.get('GRACEFUL_STOP') != '1'
         ):
@@ -18720,6 +18756,8 @@ class UnifiedClient:
         handlers = {
             'openai': self._send_openai,
             'ollamapull': self._send_ollamapull,
+            'ollama': self._send_openai_provider_router,
+            'lmstudio': self._send_openai_provider_router,
             'custom_openai': self._send_openai_provider_router,
             'gemini': self._send_gemini,
             'deepseek': self._send_openai_provider_router,  # Consolidated
@@ -18849,6 +18887,9 @@ class UnifiedClient:
         model_snapshot = self._get_active_request_model()
         if str(model_snapshot or '').lower().startswith('ollamapull/'):
             return 'ollamapull'
+        local_route = self._local_openai_route(model_snapshot)
+        if local_route:
+            return local_route[1]
 
         # Per-key and global OpenAI-compatible endpoints own the model namespace.
         # Check them before model-prefix routing, otherwise a model like
@@ -23346,6 +23387,13 @@ class UnifiedClient:
             if custom_prefix_route:
                 effective_model = self._strip_custom_route_prefix(effective_model, custom_prefix_route)
                 base_url = custom_prefix_route.get('routing', base_url).rstrip('/')
+        elif provider in ('ollama', 'lmstudio'):
+            local_route = self._local_openai_route(effective_model)
+            if local_route and local_route[1] == provider:
+                effective_model = effective_model[len(local_route[0]):].strip()
+            base_url = self._LOCAL_OPENAI_ROUTES[f'{provider}/'][1]
+            if not effective_model:
+                raise UnifiedClientError(f"Enter a model name after {provider}/", error_type='validation')
         # Provider-specific model normalization (transport-only)
         if provider == 'openrouter':
             for prefix in ('or/', 'openrouter/'):
@@ -23408,7 +23456,7 @@ class UnifiedClient:
         # Never override OpenRouter base_url with custom endpoint
         # CRITICAL: Also skip if individual endpoint was already applied
         skip_custom = getattr(self, '_skip_global_custom_endpoint', False)
-        if use_custom_endpoint and provider not in ("gemini-openai", "openrouter", "opencode", "custom_openai") and not skip_custom:
+        if use_custom_endpoint and provider not in ("gemini-openai", "openrouter", "opencode", "custom_openai", "ollama", "lmstudio") and not skip_custom:
             custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
             if custom_base_url:
                 if not actual_api_key:
@@ -23583,7 +23631,7 @@ class UnifiedClient:
         # Route image/video output mode through the dedicated image edit endpoint
         # without changing where normal text requests go.
         try:
-            image_edit_base_url = '' if self._should_suppress_custom_image_edit_endpoint() else (
+            image_edit_base_url = '' if provider in ('ollama', 'lmstudio') or self._should_suppress_custom_image_edit_endpoint() else (
                 os.getenv('CUSTOM_IMAGE_EDIT_BASE_URL', '')
                 or os.getenv('OPENAI_IMAGE_EDIT_BASE_URL', '')
             ).strip()
@@ -23617,6 +23665,10 @@ class UnifiedClient:
             is_local_endpoint = True
             if not actual_api_key:
                 actual_api_key = "dummy-key-for-local-llm"
+        if provider in ('ollama', 'lmstudio'):
+            # Never forward a configured cloud key to an unauthenticated local server.
+            is_local_endpoint = True
+            actual_api_key = "dummy-key-for-local-llm"
 
         # OpenCode free tier accepts "Bearer public" for anonymous access
         if provider == 'opencode' and not actual_api_key:
@@ -23640,7 +23692,7 @@ class UnifiedClient:
                     logger.debug(f"  System prompt preview: {msg.get('content', '')[:100]}...")
         
         # Use OpenAI SDK for providers known to work well with it
-        sdk_compatible = ['openai', 'deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq', 
+        sdk_compatible = ['openai', 'ollama', 'lmstudio', 'deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq',
                          'electronhub', 'openrouter', 'literouter', 'opencode', 'fireworks', 'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu', 'nanogpt', 'sambanova', 'custom_openai']
         
         # Allow forcing HTTP-only for OpenRouter via toggle (default: disabled)
@@ -25939,7 +25991,7 @@ class UnifiedClient:
                     use_responses_api = True
                 elif provider == 'openai' and model_leaf.startswith("gpt-") and _re.match(r"^gpt-\d+(?:\.\d+)*-pro(?:$|[-_])", model_leaf):
                     use_responses_api = True
-                elif model_leaf.endswith("-instruct") or "instruct" in model_leaf:
+                elif provider not in ('ollama', 'lmstudio') and (model_leaf.endswith("-instruct") or "instruct" in model_leaf):
                     use_text_completions = True
             except Exception:
                 use_responses_api = False
@@ -27903,6 +27955,17 @@ class UnifiedClient:
             # The GUI forwards this logger into its run log, so an automatic
             # first-use model pull has visible progress outside the settings
             # dialog as well.
+            try:
+                tls = self._get_thread_local_client()
+                request_label = getattr(tls, 'current_request_label', None) or 'request'
+                request_context = getattr(tls, 'current_request_context', None) or 'translation'
+            except Exception:
+                request_label, request_context = 'request', 'translation'
+            logger.info(
+                "📤 [%s] %s (%s) Preparing Ollama request; checking local server and model %s...",
+                threading.current_thread().name, request_label, request_context,
+                native_model_name(model),
+            )
             ensure_ready(
                 model,
                 progress=lambda message: logger.info("Ollama: %s", message),
@@ -27922,6 +27985,8 @@ class UnifiedClient:
                 model, messages, temperature=temperature, max_tokens=max_tokens,
                 stream=use_streaming,
                 log_stream=self._stream_logging_enabled(use_streaming),
+                log_thinking=self._stream_thinking_logging_enabled(),
+                progress=lambda message: logger.info("Ollama: %s", message),
                 should_stop=stopped,
                 on_response_open=register,
                 on_response_close=unregister,
@@ -30388,6 +30453,16 @@ class UnifiedClient:
         """Generic router for many OpenAI-compatible providers to reduce wrapper duplication."""
         if response_name is None:
             response_name = max_completion_tokens_or_response_name
+        local_route = self._local_openai_route(self._get_active_request_model())
+        if local_route:
+            return self._send_openai_compatible(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                base_url=local_route[2],
+                response_name=response_name,
+                provider=local_route[1],
+            )
         # Re-apply per-key individual endpoint (if any) before routing, so routing can't override it.
         try:
             self._apply_individual_key_endpoint_if_needed()

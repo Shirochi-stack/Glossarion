@@ -87,6 +87,29 @@ def _progress(callback: Optional[Callable[[str], None]], message: str) -> None:
             pass
 
 
+def _chat_status(callback: Optional[Callable[[str], None]], message: str) -> None:
+    """Report chat progress through the caller's log without a duplicate print."""
+    if callback is not None:
+        try:
+            callback(message)
+        except Exception:
+            pass
+
+
+def _stream_log_fragment(pending: str, fragment: str, *, prefix: str = "",
+                         force: bool = False) -> str:
+    """Emit readable live log lines while retaining a short incomplete line."""
+    pending += fragment
+    while "\n" in pending:
+        line, pending = pending.split("\n", 1)
+        if line.strip():
+            print(f"{prefix}{line}", flush=True)
+    if pending and (force or len(pending) >= 160):
+        print(f"{prefix}{pending}", flush=True)
+        pending = ""
+    return pending
+
+
 def _check_stop(should_stop: Optional[Callable[[], bool]]) -> None:
     if should_stop is not None and should_stop():
         raise OllamaPullCancelled("Ollama operation cancelled")
@@ -213,7 +236,7 @@ def get_status(model_name: str = "") -> dict[str, Any]:
     """Read-only installation, server, release, and selected-model status."""
     status: dict[str, Any] = {
         "installed": False, "version": None, "server_running": False,
-        "model_installed": None, "model_info": None,
+        "model_installed": None, "model_loaded": None, "model_info": None,
         "latest_version": None, "update_available": False,
         "installed_version": None, "server_version": None, "restart_required": False,
     }
@@ -230,6 +253,12 @@ def get_status(model_name: str = "") -> dict[str, Any]:
                 status["model_info"] = get_model_details(model_name)
         except (requests.RequestException, OllamaPullError, ValueError) as exc:
             status["error"] = str(exc)
+        try:
+            running_models = _api_get("/api/ps").get("models", [])
+            status["model_loaded"] = _model_is_installed(
+                model_name, running_models if isinstance(running_models, list) else [])
+        except (requests.RequestException, OllamaPullError, ValueError) as exc:
+            status["loaded_error"] = str(exc)
     status["latest_version"] = latest_version()
     installed_version = _version_tuple(status["installed_version"] or status["version"])
     available_version = _version_tuple(status["latest_version"])
@@ -417,15 +446,43 @@ def _start_server(progress: Optional[Callable[[str], None]], should_stop: Option
     except OSError as exc:
         raise OllamaPullError(f"Could not start Ollama: {exc}") from exc
     deadline = time.monotonic() + 30
+    exited_code: Optional[int] = None
     while time.monotonic() < deadline:
         _check_stop(should_stop)
         try:
             _api_get("/api/version", timeout=1)
-            return
         except (requests.RequestException, OllamaPullError, ValueError):
-            if process.poll() is not None:
-                raise OllamaPullError(f"Ollama server exited (code {process.returncode}).")
+            code = process.poll()
+            if code is not None and exited_code is None:
+                exited_code = code
+                if _managed_server_process is process:
+                    _managed_server_process = None
+                _progress(progress, "Ollama launch exited; checking whether its app server is starting...")
             time.sleep(0.25)
+        else:
+            _check_stop(should_stop)
+            if process.poll() is not None and _managed_server_process is process:
+                # The Ollama app/installer may have started its own server while
+                # this duplicate ``serve`` command was exiting on a port conflict.
+                _managed_server_process = None
+            return
+    _check_stop(should_stop)
+    # A server can become available during the final sleep or HTTP timeout.
+    try:
+        _api_get("/api/version", timeout=1)
+    except (requests.RequestException, OllamaPullError, ValueError):
+        pass
+    else:
+        _check_stop(should_stop)
+        if process.poll() is not None and _managed_server_process is process:
+            _managed_server_process = None
+        return
+    _check_stop(should_stop)
+    code = process.poll()
+    if code is not None:
+        if _managed_server_process is process:
+            _managed_server_process = None
+        raise OllamaPullError(f"Ollama server exited (code {code}); no local server became available within 30 seconds.")
     raise OllamaPullError("Ollama did not start within 30 seconds.")
 
 
@@ -600,7 +657,9 @@ def _native_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Optional[float] = None,
          max_tokens: Optional[int] = None, stream: bool = True,
-         log_stream: bool = False, should_stop: Optional[Callable[[], bool]] = None,
+         log_stream: bool = False, log_thinking: bool = False,
+         progress: Optional[Callable[[str], None]] = None,
+         should_stop: Optional[Callable[[], bool]] = None,
          on_response_open: Optional[Callable[[requests.Response], None]] = None,
          on_response_close: Optional[Callable[[requests.Response], None]] = None) -> dict[str, Any]:
     """Send one native chat request and return text, finish reason, and usage."""
@@ -641,6 +700,20 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
     global _active_chats
     with _lifecycle_lock:
         _active_chats += 1
+    first_event = threading.Event()
+    request_started = time.monotonic()
+    _chat_status(progress, f"Sending request for {name}; waiting for Ollama to respond.")
+    if progress is not None:
+        def report_wait() -> None:
+            while not first_event.wait(15):
+                try:
+                    if should_stop is not None and should_stop():
+                        return
+                except Exception:
+                    return
+                elapsed = int(time.monotonic() - request_started)
+                _chat_status(progress, f"Still waiting for an Ollama response ({elapsed}s); model loading or prompt processing may be underway.")
+        threading.Thread(target=report_wait, daemon=True).start()
     try:
         response = requests.post(f"{BASE_URL}/api/chat", json=payload, stream=stream, timeout=(5, 600))
         finished = _watch_stop(response, should_stop)
@@ -651,20 +724,51 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
         chunks: list[str] = []
         final: dict[str, Any] = {}
         if stream:
+            thinking_log_buffer = ""
+            content_log_buffer = ""
+            saw_thinking = False
+            saw_content = False
             for item in _iter_json_lines(response, should_stop):
-                content = item.get("message", {}).get("content") if isinstance(item.get("message"), dict) else None
+                message = item.get("message")
+                content = message.get("content") if isinstance(message, dict) else None
+                thinking = message.get("thinking") if isinstance(message, dict) else None
+                if thinking or content or item.get("done"):
+                    first_event.set()
+                if thinking:
+                    if not saw_thinking:
+                        saw_thinking = True
+                        _chat_status(progress, "Ollama has started generating reasoning; response text has not begun.")
+                        if log_stream and log_thinking:
+                            print("🧠 [Ollama] Thinking...", flush=True)
+                    if log_stream and log_thinking:
+                        thinking_log_buffer = _stream_log_fragment(
+                            thinking_log_buffer, str(thinking), prefix="    ")
                 if content:
+                    if not saw_content:
+                        saw_content = True
+                        if thinking_log_buffer:
+                            _stream_log_fragment(thinking_log_buffer, "", prefix="    ", force=True)
+                            thinking_log_buffer = ""
+                        if saw_thinking and log_stream and log_thinking:
+                            print("🧠 [Ollama] Thinking complete.", flush=True)
+                        _chat_status(progress, "First text token received; Ollama text streaming has begun.")
+                        if log_stream:
+                            print("📡 [Ollama] Text streaming...", flush=True)
                     chunks.append(str(content))
                     if log_stream:
-                        print(str(content), end="", flush=True)
+                        content_log_buffer = _stream_log_fragment(content_log_buffer, str(content))
                 if item.get("done"):
                     final = item
-            if log_stream and chunks:
-                print(flush=True)
+            if log_stream:
+                if thinking_log_buffer:
+                    _stream_log_fragment(thinking_log_buffer, "", prefix="    ", force=True)
+                if content_log_buffer:
+                    _stream_log_fragment(content_log_buffer, "", force=True)
             if not final:
                 raise OllamaPullError("Ollama chat stream ended without a completion event.")
         else:
             final = response.json()
+            first_event.set()
             if not isinstance(final, dict):
                 raise OllamaPullError("Unexpected Ollama chat response.")
             message = final.get("message") or {}
@@ -679,11 +783,17 @@ def chat(model_name: str, messages: list[dict[str, Any]], *, temperature: Option
             "completion_tokens": int(final.get("eval_count") or 0),
         }
         usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+        completion_label = "Ollama stream complete" if stream else "Ollama response complete"
+        if final.get("eval_count") is not None:
+            _chat_status(progress, f"{completion_label} ({usage['completion_tokens']} generated tokens).")
+        else:
+            _chat_status(progress, f"{completion_label}.")
         return {"content": "".join(chunks), "finish_reason": reason, "usage": usage, "raw_response": final}
     except requests.RequestException as exc:
         _check_stop(should_stop)
         raise OllamaPullError(f"Ollama chat failed: {exc}") from exc
     finally:
+        first_event.set()
         if finished is not None:
             finished.set()
         try:

@@ -18,7 +18,7 @@ This guide explains **every button, box, and toggle** in Glossarion in plain Eng
 6. [Main settings (the middle of the window)](#6-main-settings-the-middle-of-the-window)
 7. [Other Settings (the ⚙️ Other Setting button)](#7-other-settings-the-️-other-setting-button)
 8. [The Glossary system (read this — it matters a lot)](#8-the-glossary-system-read-this--it-matters-a-lot)
-9. [Local AI / custom endpoints — the 3 methods](#9-local-ai--custom-endpoints--the-3-methods)
+9. [Local AI and custom endpoints](#9-local-ai-and-custom-endpoints)
 10. [Manga & comic translation](#10-manga--comic-translation)
 11. [Retranslation (fixing single chapters)](#11-retranslation-fixing-single-chapters)
 12. [EPUB Converter (building your finished book)](#12-epub-converter-building-your-finished-book)
@@ -125,7 +125,7 @@ The top of the window is the control strip you'll use every time.
 
 - **Input File(s):** The book(s) or folder you want to translate. Click **🔍 Browse ▼** to pick a file or a whole folder. It shows **No file selected** until you choose something. The same menu also contains **📚 Glossary Parallel EPUB Pair**, a glossary-only tool for cross-checking an original EPUB against an existing translation (see Section 8.3).
 - **Model:** The AI brain. **The Model box is NOT a fixed dropdown — it's a free text field.** You can pick a suggestion *or just type any model name yourself*. Any model a routing prefix supports will work if you type it in (e.g. `or/deepseek/deepseek-v4-flash:free`, `nd/moonshotai/kimi-k2-thinking`, `authnd/z-ai/glm-5.1`). Next to it:
-  - **Manage Models** (gear/list button) — opens the **Model Manager**, where you add your own models, rearrange the list, create **custom prefixes**, and click **🌐 Poll Providers** to fetch current provider catalogs (see [Section 5](#keeping-the-model-list-current-provider-polling) and [Section 9](#9-local-ai--custom-endpoints--the-3-methods)).
+  - **Manage Models** (gear/list button) — opens the **Model Manager**, where you add your own models, rearrange the list, create **custom prefixes**, and click **🌐 Poll Providers** to fetch current provider catalogs (see [Section 5](#keeping-the-model-list-current-provider-polling) and [Section 9](#9-local-ai-and-custom-endpoints)).
   - **Right-click the Model box → 🌐 Refresh Online Models** — manually refresh every provider catalog Glossarion can safely access. Progress and detailed results appear in the bottom log; there is no popup.
   - **ℹ️** — "Show API provider information and shortcuts," a quick reference of which models belong to which provider.
 - **Login buttons (🔐):** If you'd rather use a subscription than an API key, you can log in with your browser:
@@ -637,11 +637,19 @@ When gender features are on, Glossarion keeps a small sidecar file next to your 
 
 ---
 
-## 9. Local AI / custom endpoints — the 3 methods
+## 9. Local AI and custom endpoints
 
-You can run Glossarion against a **local AI** on your own computer (free, private, no internet) using tools like **Ollama** or **LM Studio**, or against **any other OpenAI-compatible server**. There are **three different ways** to point Glossarion at such an endpoint. They exist for different situations and they have a clear pecking order. Here they are, simplest to most flexible.
+You can run Glossarion against a **local AI** on your own computer using **Ollama** or **LM Studio**, or against another OpenAI-compatible server. The built-in local routes below work without configuring a custom endpoint. Three custom endpoint methods remain available for other servers and special setups.
 
-**Managed Ollama route:** Type `ollamapull/model-name` in the main Model field or Multi API Key Manager to use Ollama on this computer without configuring an endpoint or API key. If Ollama is missing, click **🦙 Download Ollama** beside the model field to install and start it with visible progress. The button becomes **Ollama Settings** once Ollama is available. On first use, Glossarion downloads the named model if needed. Settings include context size, multi-token prediction, other Ollama request options, local status, and an automatic Ollama application update switch. Installed Ollama models also appear in the model search after a successful poll. Stop interrupts a model download in progress. This route is separate from the three endpoint methods below, which remain available for manually managed and remote servers.
+| Model field | Connects to | What Glossarion does |
+|-------------|-------------|----------------------|
+| `ollamapull/model-name` | Local Ollama native API | Installs and starts Ollama if needed, downloads a missing model, and provides **🦙 Ollama Settings**. |
+| `ollama/model-name` | `http://localhost:11434/v1` | Uses your running Ollama server and a model already installed there. |
+| `lmstudio/model-name` | `http://localhost:1234/v1` | Uses your running LM Studio server and a model already downloaded there. |
+
+Type any of these in the main Model field or Multi API Key Manager. The model list has 50 local model suggestions under each prefix. A poll also adds the exact models exposed by a running server. LM Studio often uses a different model ID than Ollama for the same model; select its polled entry or type the ID shown by LM Studio. The `ollama/` and `lmstudio/` routes do not install software or download models.
+
+With `ollamapull/`, if Ollama is missing, click **🦙 Download Ollama** beside the model field to install and start it with visible progress. The button becomes **🦙 Ollama Settings** once Ollama is available. Settings include context size, multi-token prediction, other native request options, local status, and an automatic Ollama application update switch. Stop interrupts a model download in progress.
 
 > **First, what's an "endpoint"?** It's just the web address where the AI lives. A cloud provider's endpoint is on the internet. A local AI's endpoint is on your own machine, usually:
 > - **Ollama:** `http://localhost:11434/v1`
@@ -693,6 +701,9 @@ You can run Glossarion against a **local AI** on your own computer (free, privat
 
 | You want… | Use | Notes |
 |-----------|-----|-------|
+| Use an existing Ollama server | `ollama/model-name` | Start Ollama and install the model first. |
+| Use an existing LM Studio server | `lmstudio/model-name` | Start its local server and use its served model ID. |
+| Let Glossarion install and manage Ollama | `ollamapull/model-name` | Includes downloads, updates, and settings. |
 | One local model for everything | **Method 1** (global) | Simplest. |
 | Different endpoints per key, rotating | **Method 2** (per-key) | Needs Multi-Key Mode. |
 | Switch endpoints by typing a prefix | **Method 3** (prefix) | Most flexible. |
@@ -701,7 +712,7 @@ You can run Glossarion against a **local AI** on your own computer (free, privat
 
 > **Individual per-key endpoint (Method 2)  ▶  beats  ▶  Global Custom OpenAI Endpoint (Method 1).**
 >
-> **Custom prefixes (Method 3)** are chosen by the *model name* you type (`prefix/model`), so they route independently — if your model name carries a known prefix, that prefix's endpoint is used.
+> **Built-in local routes and custom prefixes (Method 3)** are chosen by the *model name* you type (`prefix/model`), so they route independently. The built-in `ollama/`, `lmstudio/`, and `ollamapull/` prefixes take precedence over custom routes with the same names.
 
 > **⚠️ DON'T forget Method 2 needs Multi-Key Mode turned on.** A per-key endpoint does nothing if you're in single-key mode.
 
@@ -938,7 +949,7 @@ Make a **free OpenRouter key** and type an OpenRouter model with the `:free` suf
 Type exactly `google-translate-free` in the Model box. This is **classic machine translation** (like the Google Translate website), not an AI model — so it needs no key and costs nothing, but it won't follow your profile/glossary or keep long-range context. Good for a rough, instant draft.
 
 **10. Host your own local AI (totally free, fully private).**
-Install **LM Studio** or **Ollama**, download a model, and point Glossarion at it. Nothing leaves your computer and there's no usage cost — the only "price" is your own hardware doing the work. Full setup (all three ways to connect a local model) is in **[Section 9](#9-local-ai--custom-endpoints--the-3-methods)**.
+Install **LM Studio** or **Ollama**, download a model, and point Glossarion at it. Nothing leaves your computer and there's no usage cost — the only "price" is your own hardware doing the work. The built-in local routes and custom endpoint methods are in **[Section 9](#9-local-ai-and-custom-endpoints)**.
 
 > **✅ Best free starting point:** try **`authgrok/`** with a free xAI/Grok login, **`authnd/`** for zero setup, or a **free Google AI Studio key** used with **Gemini 3.1 Flash Lite** (~500/day). If you have a decent PC and care about privacy, set up a **local model** instead.
 
@@ -1094,7 +1105,7 @@ You do **not** need Glossarion's local proxy, port `3000`, or an API key when us
 | **`authnd/` model won't work** | Using a `Lite`/`TurboLite` build | Those builds drop the EPUB Library and `authnd/` routing — use the standard `L_Glossarion` build (Section 2). |
 | **`antigravity/...` model won't launch** | Node/npm or Bun is not installed, login is unfinished, or port `3000` is busy | Install **Node.js LTS** or **Bun**, finish **🔐 Antigravity Login**, and check [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
 | **OcAgy model won't launch** | Automatic OpenCode/plugin setup failed, the Google OAuth flow is unfinished, the numbered account slot is unavailable, or the plugin has not loaded | Retry **🔐 OCAGY Login** and inspect the installation log. Use the manual commands only if automatic setup fails, then click **📊**, verify the requested account slot, and check [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
-| **Local model isn't used** | Endpoint not enabled, or wrong precedence | Check the right method in Section 9; remember per-key endpoints need **Multi-Key Mode**. |
+| **Local model isn't used** | Server stopped, model ID differs, or endpoint setting conflicts | For `ollama/` and `lmstudio/`, start the local server and choose the exact model ID it reports. For custom endpoints, check the method in Section 9; per-key endpoints need **Multi-Key Mode**. |
 | **The window seems frozen during a big job** | It's just working hard | Watch the bottom log — if lines are still appearing, it's fine. **GUI Yield** (Other Settings) reduces freezing. |
 | **Settings reset after restart** | Didn't save | Click **Save Config** (Section 4). |
 
@@ -1121,6 +1132,9 @@ You do **not** need Glossarion's local proxy, port `3000`, or an API key when us
 **Glossary, the easy way:** Mode **Balanced** = hands-off. Mode **Off** + **Append Glossary** on = use a glossary you built and reviewed yourself (cheaper, cleaner — see 8.2).
 
 **Local AI, pick one:**
+- Existing Ollama server → type `ollama/model-name`
+- Existing LM Studio server → type `lmstudio/model-name`
+- Managed Ollama → type `ollamapull/model-name`
 - All requests → **Other Settings → Enable Custom OpenAI Endpoint** (global)
 - Just one key → **Multi Key Manager → Configure Individual Endpoint** (beats the global one)
 - Route by typing `prefix/model` → **Manage Models → Add Prefix**

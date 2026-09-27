@@ -1783,6 +1783,87 @@ def test_model_field_check_survives_focus_and_catalog_changes(monkeypatch):
     manager.deleteLater()
 
 
+def test_local_model_poll_check_explains_it_is_not_a_loaded_model(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    qt_gui = pytest.importorskip("PySide6.QtGui")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    combo._model_poll_marker_keys = {"ollamapull/qwen3.5-9b:latest"}
+    combo.setEditText("ollamapull/qwen3.5-9b:latest")
+    translator_gui._install_model_field_poll_marker(combo, qt_gui.QIcon())
+
+    assert "local Ollama model catalog" in combo.lineEdit().toolTip()
+    assert "does not confirm the model is loaded" in combo.lineEdit().toolTip()
+    combo.setEditText("ollamapull/other")
+    assert combo.lineEdit().toolTip() == ""
+    combo.close()
+
+
+def test_multi_key_local_model_poll_check_explains_it_is_not_loaded(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    qt_gui = pytest.importorskip("PySide6.QtGui")
+    import multi_api_key_manager
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    combo.addItem("ollamapull/qwen3.5-9b:latest")
+    combo.setItemData(0, True, multi_api_key_manager._MODEL_POLL_MARKER_ROLE)
+    multi_api_key_manager._install_model_field_poll_marker(combo, qt_gui.QIcon())
+
+    assert "local Ollama model catalog" in combo.lineEdit().toolTip()
+    assert "does not confirm the model is loaded" in combo.lineEdit().toolTip()
+    combo.close()
+
+
+def test_ollama_stream_logs_enter_and_finish_request_card():
+    import translator_gui
+
+    dialog_type = translator_gui._InputOutputDialog
+    segment = {"phase": "processing", "complete": False}
+
+    class Harness:
+        _DIRECT_RESPONSE_PAYLOAD_PREFIX = dialog_type._DIRECT_RESPONSE_PAYLOAD_PREFIX
+        _DIRECT_GLOSSARY_STREAM_START_PREFIX = dialog_type._DIRECT_GLOSSARY_STREAM_START_PREFIX
+        _HIDDEN_STREAM_START_LOG_PHRASES = dialog_type._HIDDEN_STREAM_START_LOG_PHRASES
+        _STREAM_END_LOG_PHRASES = dialog_type._STREAM_END_LOG_PHRASES
+        _PIPELINE_LOG_PHRASES = dialog_type._PIPELINE_LOG_PHRASES
+        _STATUS_FIRST_CHARS = dialog_type._STATUS_FIRST_CHARS
+        _stream_phase_by_thread = {}
+        _in_thinking = False
+        _streaming_text = False
+        starts = []
+
+        def _begin_request_segment(self, line, source_thread=None):
+            self.starts.append((line, source_thread))
+            return segment
+
+        def _request_segment_for_thread(self, source_thread=None, create=True):
+            return segment
+
+        def _looks_like_pipeline_status(self, line):
+            return dialog_type._looks_like_pipeline_status(line)
+
+    harness = Harness()
+    classify = dialog_type._classify_line
+    worker = "Thread-34 (api_call)"
+
+    assert classify(harness, "📤 [Thread-34 (api_call)] Chapter 25 (translation) Preparing Ollama request", worker) == "log"
+    assert harness.starts and "Chapter 25" in harness.starts[0][0]
+    assert classify(harness, "🧠 [Ollama] Thinking...", worker) == "log"
+    assert classify(harness, "    Checking wording", worker) == "thinking"
+    assert classify(harness, "🧠 [Ollama] Thinking complete.", worker) == "log"
+    assert classify(harness, "📡 [Ollama] Text streaming...", worker) == "log"
+    assert classify(harness, "Translated sentence", worker) == "content"
+    assert classify(harness, "Ollama: Ollama stream complete (3 generated tokens).", worker) == "log"
+    assert segment["complete"] is True
+
+
 def test_main_model_search_marks_polled_rows_and_hides_unpolled_without_changing_ids(
     monkeypatch,
 ):
@@ -2503,6 +2584,9 @@ def test_model_text_provider_refresh_is_debounced(monkeypatch):
 
         def _schedule_current_provider_catalog_refresh(self):
             self.catalog_poll_schedules += 1
+
+        def _update_ollama_settings_button(self, _text):
+            pass
 
         def _apply_model_combo_catalog_now(self, _models):
             raise AssertionError("no catalog should be queued in this test")
@@ -3262,3 +3346,111 @@ def test_invalid_tags_are_not_treated_as_an_empty_catalog(tmp_path, monkeypatch)
 
     assert result.provider_models == {}
     assert "invalid model list" in result.statuses["ollamapull"]
+
+
+@pytest.mark.parametrize(
+    ("provider", "port"),
+    [("ollama", 11434), ("lmstudio", 1234)],
+)
+def test_local_openai_catalog_routes_poll_running_server(
+    tmp_path, monkeypatch, provider, port,
+):
+    _isolated_cache(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, headers, timeout))
+        return {"data": [
+            {"id": "publisher/model:latest"},
+            {"id": "another-model"},
+            {"id": "bad model"},
+            {"id": "publisher/model:latest"},
+        ]}
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    monkeypatch.setattr(model_options, "local_catalog_available", lambda _name: True)
+    model = f"{provider}/publisher/model:latest"
+
+    assert model_options.catalog_provider_for_model(model) == provider
+    assert model_options.provider_model_catalog_supports_anonymous_poll(model)
+    assert model_options.due_provider_catalog_for_model(model) == provider
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model=model, only_provider=provider, timeout=0.25,
+    )
+
+    assert calls == [(
+        f"http://localhost:{port}/v1/models",
+        {"Accept": "application/json", "User-Agent": "Glossarion/ModelCatalog"},
+        0.25,
+    )]
+    assert result.provider_models[provider] == [
+        model, f"{provider}/another-model",
+    ]
+    assert result.statuses[provider] == "online (2 models)"
+    assert f"{provider}/qwen3:4b" in result.models
+    assert result.models.count(model) == 1
+    assert model_options.get_current_polled_provider_models()[provider] == [
+        model, f"{provider}/another-model",
+    ]
+    assert model_options.due_provider_catalog_for_model(model) is None
+    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+    assert model in model_options.get_model_options()
+
+
+def test_local_route_static_suggestions_share_50_model_tags():
+    assert len(model_options.LOCAL_CHAT_MODEL_TAGS) == 50
+    assert len(set(model_options.LOCAL_CHAT_MODEL_TAGS)) == 50
+    choices = model_options._get_static_model_options()
+    for prefix in ("ollamapull/", "ollama/", "lmstudio/"):
+        local_choices = [model for model in choices if model.startswith(prefix)]
+        assert local_choices == [
+            f"{prefix}{tag}" for tag in model_options.LOCAL_CHAT_MODEL_TAGS
+        ]
+
+
+@pytest.mark.parametrize("provider", ["ollama", "lmstudio"])
+def test_local_openai_catalog_auto_poll_skips_absent_server_without_ttl(
+    tmp_path, monkeypatch, provider,
+):
+    _isolated_cache(tmp_path, monkeypatch)
+    available = [False]
+    monkeypatch.setattr(
+        model_options, "local_catalog_available", lambda _name: available[0],
+    )
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda *_args: pytest.fail("auto-poll contacted an absent local server"),
+    )
+    model = f"{provider}/example"
+
+    assert model_options.due_provider_catalog_for_model(model) is None
+    assert provider not in model_options._load_model_catalog_cache()["attempts"]
+    available[0] = True
+    assert model_options.due_provider_catalog_for_model(model) == provider
+
+
+def test_local_catalog_readiness_checks_local_port_without_cli(monkeypatch):
+    checked = []
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        model_options, "ollamapull_installed",
+        lambda: pytest.fail("plain local routes must not require Ollama CLI"),
+    )
+    monkeypatch.setattr(
+        model_options.socket, "create_connection",
+        lambda address, timeout: checked.append((address, timeout)) or Connection(),
+    )
+
+    assert model_options.local_catalog_available("OLLAMA")
+    assert checked == [(('localhost', 11434), 0.1)]
+    assert model_options.local_catalog_available("lmstudio")
+    assert checked[-1] == (('localhost', 1234), 0.1)

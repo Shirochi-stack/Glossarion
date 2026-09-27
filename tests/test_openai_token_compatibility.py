@@ -35,6 +35,75 @@ def test_ollamapull_route_wins_over_custom_and_individual_endpoints(monkeypatch)
     assert client.client_type == 'ollamapull'
 
 
+@pytest.mark.parametrize('prefix,provider,base_url', [
+    ('ollama/', 'ollama', 'http://localhost:11434/v1'),
+    ('lmstudio/', 'lmstudio', 'http://localhost:1234/v1'),
+])
+def test_builtin_local_routes_ignore_custom_and_individual_endpoints(
+        monkeypatch, prefix, provider, base_url):
+    model = prefix + 'org/model:small'
+    monkeypatch.setenv('CUSTOM_OPENAI_PREFIX_ROUTES', json.dumps([
+        {'prefix': prefix, 'routing': 'https://other.example/v1'}]))
+    monkeypatch.setenv('USE_CUSTOM_OPENAI_ENDPOINT', '1')
+    monkeypatch.setenv('OPENAI_CUSTOM_BASE_URL', 'https://global.example/v1')
+    assert UnifiedClient._provider_from_model_name(model) == provider
+    assert not UnifiedClient._model_needs_api_key(model)
+
+    client = bare_client(model)
+    client._get_thread_local_client = lambda: SimpleNamespace(
+        use_individual_endpoint=True, azure_endpoint='https://individual.example/v1',
+        client_type='openai')
+    client.current_key_use_individual_endpoint = True
+    client.current_key_azure_endpoint = 'https://individual.example/v1'
+    assert client._get_actual_provider() == provider
+    client._setup_client()
+    assert client.client_type == provider
+    client._apply_custom_endpoint_if_needed()
+    client._apply_individual_key_endpoint_if_needed()
+    assert client.client_type == provider
+
+    captured = {}
+    client._send_openai_compatible = lambda **kwargs: captured.update(kwargs)
+    client._send_openai_provider_router(
+        [{'role': 'user', 'content': 'Hi'}], 0.2, 128, 'test')
+    assert captured['base_url'] == base_url
+    assert captured['provider'] == provider
+
+
+@pytest.mark.parametrize('model,provider,url,expected_model', [
+    ('ollama/gemma3:4b', 'ollama', 'http://localhost:11434/v1/chat/completions', 'gemma3:4b'),
+    ('ollama/qwen2.5-7b-instruct', 'ollama', 'http://localhost:11434/v1/chat/completions', 'qwen2.5-7b-instruct'),
+    ('lmstudio/org/model:small', 'lmstudio', 'http://localhost:1234/v1/chat/completions', 'org/model:small'),
+])
+def test_builtin_local_routes_strip_prefix_for_http_request(
+        monkeypatch, tmp_path, model, provider, url, expected_model):
+    monkeypatch.setattr(api, 'openai', None)
+    monkeypatch.setenv('USE_CUSTOM_OPENAI_ENDPOINT', '1')
+    monkeypatch.setenv('OPENAI_CUSTOM_BASE_URL', 'https://global.example/v1')
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '0')
+    client = UnifiedClient('cloud-secret', model, str(tmp_path))
+    monkeypatch.setattr(client, '_get_max_retries', lambda: 1)
+    monkeypatch.setattr(client, '_get_send_interval', lambda: 0)
+    monkeypatch.setattr(client, '_is_stop_requested', lambda: False)
+    monkeypatch.setattr(client, '_save_response', lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, '_should_show_api_lifecycle_logs', lambda: False)
+    captured = {}
+
+    def request(**kwargs):
+        captured.update(kwargs)
+        payload = {'choices': [{'message': {'content': 'OK'}, 'finish_reason': 'stop'}]}
+        return SimpleNamespace(headers={'content-type': 'application/json'}, json=lambda: payload)
+
+    monkeypatch.setattr(client, '_http_request_with_retries', request)
+    response = client._send_openai_provider_router(
+        [{'role': 'user', 'content': 'Hi'}], 0.2, 128, 'test')
+    assert response.content == 'OK'
+    assert captured['url'] == url
+    assert captured['json']['model'] == expected_model
+    assert captured['provider_name'] == provider
+    assert captured['headers']['Authorization'] == 'Bearer dummy-key-for-local-llm'
+
+
 def test_ollamapull_native_chat_strips_prefix_and_applies_model_settings(monkeypatch):
     import ollamapull
 
@@ -77,23 +146,128 @@ def test_ollamapull_native_chat_strips_prefix_and_applies_model_settings(monkeyp
     assert result['usage']['total_tokens'] == 7
 
 
+def test_ollamapull_native_stream_logs_reasoning_separately(monkeypatch, capsys):
+    import ollamapull
+
+    monkeypatch.delenv('OLLAMA_SETTINGS_JSON', raising=False)
+    progress = []
+
+    class Response:
+        ok = True
+        def iter_lines(self):
+            yield b'{"message":{"thinking":"I need to reason first.\\n"},"done":false}'
+            yield b'{"message":{"thinking":"The answer is ready."},"done":false}'
+            yield b'{"message":{"content":"Final answer"},"done":false}'
+            yield b'{"done":true,"eval_count":2,"prompt_eval_count":3}'
+        def close(self): pass
+
+    monkeypatch.setattr(ollamapull.requests, 'post', lambda *a, **k: Response())
+    result = ollamapull.chat('ollamapull/test', [{'role': 'user', 'content': 'Hi'}],
+                             log_stream=True, log_thinking=True,
+                             progress=progress.append)
+    output = capsys.readouterr().out
+    assert '🧠 [Ollama] Thinking...' in output
+    assert '    I need to reason first.' in output
+    assert '    The answer is ready.' in output
+    assert '📡 [Ollama] Text streaming...' in output
+    assert 'Final answer' in output
+    assert result['content'] == 'Final answer'
+    assert 'I need to reason' not in result['content']
+    assert progress[0].startswith('Sending request for test;')
+    assert any('generating reasoning' in message for message in progress)
+    assert any('First text token received' in message for message in progress)
+    assert progress[-1] == 'Ollama stream complete (2 generated tokens).'
+
+
+def test_ollamapull_native_stream_hides_reasoning_when_disabled(monkeypatch, capsys):
+    import ollamapull
+
+    monkeypatch.delenv('OLLAMA_SETTINGS_JSON', raising=False)
+
+    class Response:
+        ok = True
+        def iter_lines(self):
+            yield b'{"message":{"thinking":"private thought"},"done":false}'
+            yield b'{"message":{"content":"public result"},"done":false}'
+            yield b'{"done":true}'
+        def close(self): pass
+
+    monkeypatch.setattr(ollamapull.requests, 'post', lambda *a, **k: Response())
+    result = ollamapull.chat('ollamapull/test', [], log_stream=True,
+                             log_thinking=False)
+    output = capsys.readouterr().out
+    assert 'private thought' not in output
+    assert '🧠 [Ollama]' not in output
+    assert 'public result' in output
+    assert result['content'] == 'public result'
+
+
+def test_ollamapull_status_distinguishes_installed_from_loaded(monkeypatch):
+    import ollamapull
+
+    monkeypatch.setattr(ollamapull, '_ollama_executable', lambda: 'ollama')
+    monkeypatch.setattr(ollamapull, '_binary_version', lambda: '0.1.0')
+    monkeypatch.setattr(ollamapull, '_server_version', lambda: '0.1.0')
+    monkeypatch.setattr(ollamapull, 'latest_version', lambda: '0.1.0')
+    monkeypatch.setattr(ollamapull, 'get_model_details', lambda *_: {})
+    monkeypatch.setattr(ollamapull, '_models', lambda: [{'name': 'test:latest'}])
+    monkeypatch.setattr(ollamapull, '_api_get',
+                        lambda path, **_: {'models': []} if path == '/api/ps' else {})
+    installed_only = ollamapull.get_status('ollamapull/test')
+    assert installed_only['model_installed'] is True
+    assert installed_only['model_loaded'] is False
+
+    monkeypatch.setattr(ollamapull, '_api_get',
+                        lambda path, **_: {'models': [{'model': 'test:latest'}]})
+    loaded = ollamapull.get_status('ollamapull/test')
+    assert loaded['model_loaded'] is True
+
+
 def test_ollamapull_unified_handler_returns_normalized_response(monkeypatch):
     import ollamapull
 
     called = []
+    request_flags = {}
     monkeypatch.setattr(ollamapull, 'ensure_ready', lambda model, **kwargs: called.append(model))
-    monkeypatch.setattr(ollamapull, 'chat', lambda model, messages, **kwargs: {
-        'content': 'translated', 'finish_reason': 'stop',
-        'usage': {'prompt_tokens': 2, 'completion_tokens': 1, 'total_tokens': 3},
-        'raw_response': {'done': True},
-    })
+    def fake_chat(model, messages, **kwargs):
+        request_flags.update(kwargs)
+        return {
+            'content': 'translated', 'finish_reason': 'stop',
+            'usage': {'prompt_tokens': 2, 'completion_tokens': 1, 'total_tokens': 3},
+            'raw_response': {'done': True},
+        }
+    monkeypatch.setattr(ollamapull, 'chat', fake_chat)
+    monkeypatch.setenv('ENABLE_STREAMING', '1')
+    monkeypatch.setenv('STREAM_THINKING_LOGS', '1')
+    monkeypatch.setenv('LOG_STREAM_CHUNKS', '1')
+    monkeypatch.setenv('BATCH_TRANSLATION', '0')
     client = bare_client('ollamapull/gemma3')
     client.client_type = 'ollamapull'
     response = client._send_ollamapull([{'role': 'user', 'content': 'Translate'}], 0.2, 128, None)
     assert called == ['ollamapull/gemma3']
+    assert request_flags['stream'] is True
+    assert request_flags['log_stream'] is True
+    assert request_flags['log_thinking'] is True
+    assert callable(request_flags['progress'])
     assert response.content == 'translated'
     assert response.finish_reason == 'stop'
     assert response.usage['total_tokens'] == 3
+
+
+def test_ollamapull_stagger_log_does_not_claim_chat_started(monkeypatch):
+    monkeypatch.setenv('SEND_INTERVAL_SECONDS', '0.01')
+    monkeypatch.setattr(UnifiedClient, '_last_api_call_start_by_scope', {}, raising=False)
+    client = bare_client('ollamapull/qwen3')
+    client._get_thread_local_client = lambda: SimpleNamespace()
+    client._get_api_stagger_scope = lambda: 'ollamapull-test'
+    client._should_show_api_lifecycle_logs = lambda: True
+    messages = []
+    client._debug_log = messages.append
+
+    client._apply_api_call_stagger()
+
+    assert not any('API call in progress' in message for message in messages)
+    assert not any('Sending API call' in message for message in messages)
 
 
 def test_ollamapull_advanced_request_cannot_replace_routing(monkeypatch):
@@ -118,6 +292,81 @@ def test_ollamapull_missing_install_start_and_pull(monkeypatch):
     monkeypatch.setattr(ollamapull, 'pull_model', lambda *a, **k: calls.append('pull'))
     ollamapull.ensure_ready('ollamapull/gemma3')
     assert calls == ['install', 'start', 'pull']
+
+
+def test_ollamapull_accepts_installer_started_server_after_duplicate_serve_exits(monkeypatch):
+    import ollamapull
+    import requests
+
+    probes = []
+    messages = []
+    duplicate = SimpleNamespace(poll=lambda: 1, returncode=1)
+    monkeypatch.setattr(ollamapull, '_managed_server_process', None)
+    monkeypatch.setattr(ollamapull, '_ollama_executable', lambda: 'ollama')
+    monkeypatch.setattr(ollamapull.subprocess, 'Popen', lambda *a, **k: duplicate)
+    monkeypatch.setattr(ollamapull.time, 'sleep', lambda _seconds: None)
+
+    def probe(*_args, **_kwargs):
+        probes.append(True)
+        if len(probes) < 3:
+            raise requests.ConnectionError('server still starting')
+        return {'version': '0.34.4'}
+
+    monkeypatch.setattr(ollamapull, '_api_get', probe)
+    ollamapull._start_server(messages.append, None)
+
+    assert len(probes) == 3
+    assert ollamapull._managed_server_process is None
+    assert any('checking whether its app server is starting' in message for message in messages)
+
+
+def test_ollamapull_reports_exited_server_when_no_server_becomes_ready(monkeypatch):
+    import ollamapull
+    import requests
+
+    now = [0]
+    probes = []
+    messages = []
+    duplicate = SimpleNamespace(poll=lambda: 1, returncode=1)
+    monkeypatch.setattr(ollamapull, '_managed_server_process', None)
+    monkeypatch.setattr(ollamapull, '_ollama_executable', lambda: 'ollama')
+    monkeypatch.setattr(ollamapull.subprocess, 'Popen', lambda *a, **k: duplicate)
+    monkeypatch.setattr(ollamapull.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(ollamapull.time, 'sleep', lambda _seconds: now.__setitem__(0, now[0] + 5))
+
+    def unavailable(*_args, **_kwargs):
+        probes.append(True)
+        raise requests.ConnectionError('server unavailable')
+
+    monkeypatch.setattr(ollamapull, '_api_get', unavailable)
+    with pytest.raises(ollamapull.OllamaPullError,
+                       match=r'Ollama server exited \(code 1\); no local server became available'):
+        ollamapull._start_server(messages.append, None)
+
+    assert len(probes) > 2  # Keep checking for a server after the child exits.
+    assert ollamapull._managed_server_process is None
+    assert sum('checking whether its app server is starting' in message for message in messages) == 1
+
+
+def test_ollamapull_server_start_can_be_cancelled_while_waiting_for_app(monkeypatch):
+    import ollamapull
+    import requests
+
+    stopped = [False]
+    duplicate = SimpleNamespace(poll=lambda: 1, returncode=1)
+    monkeypatch.setattr(ollamapull, '_managed_server_process', None)
+    monkeypatch.setattr(ollamapull, '_ollama_executable', lambda: 'ollama')
+    monkeypatch.setattr(ollamapull.subprocess, 'Popen', lambda *a, **k: duplicate)
+    monkeypatch.setattr(ollamapull.time, 'sleep', lambda _seconds: None)
+    monkeypatch.setattr(ollamapull, '_api_get', lambda *_a, **_k: (_ for _ in ()).throw(
+        requests.ConnectionError('server still starting')))
+
+    def progress(message):
+        if 'checking whether its app server is starting' in message:
+            stopped[0] = True
+
+    with pytest.raises(ollamapull.OllamaPullCancelled):
+        ollamapull._start_server(progress, lambda: stopped[0])
 
 
 def test_ollamapull_auto_update_attempted_once_and_toggle(monkeypatch):

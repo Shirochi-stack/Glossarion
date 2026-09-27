@@ -898,6 +898,22 @@ class _ModelCatalogPollBorder(QWidget):
         painter.drawRoundedRect(rect, 5, 5)
 
 
+def _model_poll_marker_tooltip(model):
+    """Explain what the catalog check confirms for a selected model."""
+    route = str(model or "").strip().casefold()
+    if route.startswith(("ollamapull/", "ollama/")):
+        return (
+            "Reported by the local Ollama model catalog during a recent poll. "
+            "This does not confirm the model is loaded in memory or running now."
+        )
+    if route.startswith("lmstudio/"):
+        return (
+            "Reported by the local LM Studio model catalog during a recent poll. "
+            "This does not confirm the model is loaded in memory or running now."
+        )
+    return "Confirmed by a successful provider poll within the past 7 days"
+
+
 def _update_model_field_poll_marker(combo):
     """Render a compact transparent check inside an editable model field."""
     if combo is None or not combo.isEditable():
@@ -926,6 +942,9 @@ def _update_model_field_poll_marker(combo):
                 margins.right(),
                 margins.bottom(),
             )
+        line_edit.setToolTip(
+            _model_poll_marker_tooltip(line_edit.text()) if has_check else ""
+        )
         if has_check:
             marker.raise_()
     except RuntimeError:
@@ -978,6 +997,7 @@ from model_options import (
     due_provider_catalog_for_model,
     get_current_polled_provider_models,
     get_model_options,
+    local_catalog_available,
     merge_saved_model_options,
     model_has_polled_marker,
     ollamapull_installed,
@@ -10113,6 +10133,7 @@ class _InputOutputDialog(QDialog):
             elif (
                 "sending api call now" in low
                 or "api call in progress" in low
+                or "preparing ollama request" in low
             ):
                 phase = "processing"
             self._listener_stream_phase_by_thread[thread_key] = phase
@@ -10158,7 +10179,7 @@ class _InputOutputDialog(QDialog):
         if value in ("TRANSLATION_COMPLETE_SIGNAL", "GLOSSARY_COMPLETE_SIGNAL"):
             return True
         status_phrases = (
-            "api call in progress", "http request:", "sdk call finished",
+            "api call in progress", "preparing ollama request", "http request:", "sdk call finished",
             "thinking tokens used:", "received chapter ", "received section ",
             "received translation from api", "received merged response",
             "finish_reason:", "saved ", "temperature:", "max tokens:",
@@ -10206,7 +10227,7 @@ class _InputOutputDialog(QDialog):
             self._begin_request_segment(raw, source_thread)
             return "ignore"
 
-        if "sending api call now" in low:
+        if "sending api call now" in low or "preparing ollama request" in low:
             self._begin_request_segment(raw, source_thread)
             self._in_thinking = False
             self._streaming_text = False
@@ -21124,6 +21145,16 @@ Recent translations to summarize:
             <li><b>sam/Llama-4-Maverick-17B-128E-Instruct</b> - Llama 4 Maverick</li>
             <li><b>sam/gpt-oss-120b</b> - GPT OSS 120B via SambaNova</li>
         </ul>
+
+        <h4>Local models (ollamapull/, ollama/, lmstudio/)</h4>
+        <p>Use models running on your computer without an API key or custom endpoint toggle.</p>
+        <ul>
+            <li><b>ollamapull/llama3.2</b> - Install Ollama and download the model as needed</li>
+            <li><b>ollama/llama3.2</b> - Connect to Ollama at <code>http://localhost:11434/v1</code></li>
+            <li><b>lmstudio/model-id</b> - Connect to LM Studio at <code>http://localhost:1234/v1</code></li>
+        </ul>
+        <p>Start the local server and load the model first when using <code>ollama/</code> or <code>lmstudio/</code>.
+           The <b>🦙 Download Ollama</b> button is available for <code>ollamapull/</code>.</p>
         
         <h4>ChatGPT Subscription (authgpt/)</h4>
         <p>Use your ChatGPT Plus/Pro subscription directly — no API key needed</p>
@@ -21907,6 +21938,8 @@ Recent translations to summarize:
                 return False
             if current_provider == "ollamapull" and not ollamapull_installed():
                 return False
+            if current_provider in ("ollama", "lmstudio") and not local_catalog_available(current_provider):
+                return False
             only_provider = current_provider
 
         if show_feedback:
@@ -22655,7 +22688,7 @@ Recent translations to summarize:
                     if role == Qt.DecorationRole:
                         return self._checked_icon if is_polled else QIcon()
                     return (
-                        "✓ Confirmed by a successful provider poll within the past 7 days"
+                        "✓ " + _model_poll_marker_tooltip(value)
                         if is_polled else ""
                     )
                 return super().data(index, role)
@@ -45010,6 +45043,9 @@ Important rules:
                 ("🇨🇳", "za/", "Zhipu Intl.", "GLM international endpoint", "#1e2030", "#60c0e0"),
                 ("🌌", "nan/", "NanoGPT", "Generative & text models", "#1a1025", "#c084fc"),
                 ("⚙️", "sam/", "SambaNova", "SambaNova Cloud API", "#1a1e14", "#7cb343"),
+                ("🦙", "ollamapull/", "Ollama Pull", "Install and pull local models", "#1d2c22", "#86cda0"),
+                ("🦙", "ollama/", "Ollama", "Local server at port 11434", "#1d2c22", "#86cda0"),
+                ("🖥️", "lmstudio/", "LM Studio", "Local server at port 1234", "#1c2732", "#8fc6ef"),
                 ("🔓", "oc/ · ocz/", "OpenCode", "Paid (oc/) & free (ocz/) tiers", "#101828", "#38bdf8"),
             ]
             
