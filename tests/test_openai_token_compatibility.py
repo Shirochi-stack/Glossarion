@@ -12,6 +12,215 @@ from reasoning_compatibility import (
 )
 
 
+# The managed Ollama route uses native request options instead of OpenAI token
+# parameter names. Keep these transport and lifecycle checks alongside the
+# other provider parameter compatibility tests.
+
+def test_ollamapull_route_wins_over_custom_and_individual_endpoints(monkeypatch):
+    monkeypatch.setenv('CUSTOM_OPENAI_PREFIX_ROUTES', json.dumps([
+        {'prefix': 'ollamapull/', 'routing': 'http://127.0.0.1:9999/v1'}]))
+    assert UnifiedClient._provider_from_model_name('ollamapull/gemma3') == 'ollamapull'
+    assert not UnifiedClient._model_needs_api_key('ollamapull/gemma3')
+    client = bare_client('ollamapull/gemma3')
+    client._get_thread_local_client = lambda: SimpleNamespace(
+        use_individual_endpoint=True, azure_endpoint='https://other.example/v1',
+        client_type='openai')
+    assert client._get_actual_provider() == 'ollamapull'
+    client._setup_client()
+    assert client.client_type == 'ollamapull'
+    client._get_custom_prefix_route_for_model = lambda _model: (_ for _ in ()).throw(
+        AssertionError('custom endpoint should not be considered'))
+    client._apply_custom_endpoint_if_needed()
+    client._apply_individual_key_endpoint_if_needed()
+    assert client.client_type == 'ollamapull'
+
+
+def test_ollamapull_native_chat_strips_prefix_and_applies_model_settings(monkeypatch):
+    import ollamapull
+
+    monkeypatch.setenv('OLLAMA_SETTINGS_JSON', json.dumps({
+        'auto_update': False,
+        'models': {'qwen3:8b': {
+            'options': {'num_ctx': 8192, 'draft_num_predict': 4, 'num_predict': 300},
+            'think': 'high', 'keep_alive': '10m', 'format': 'json',
+            'request': {'logprobs': True},
+        }},
+    }))
+    captured = {}
+
+    class Response:
+        ok = True
+        def iter_lines(self):
+            yield b'{"message":{"content":"Hello "},"done":false}'
+            yield b'{"message":{"content":"world"},"done":false}'
+            yield b'{"done":true,"done_reason":"length","prompt_eval_count":5,"eval_count":2}'
+        def close(self): pass
+
+    def post(url, **kwargs):
+        captured.update(url=url, **kwargs)
+        return Response()
+
+    monkeypatch.setattr(ollamapull.requests, 'post', post)
+    result = ollamapull.chat('ollamapull/qwen3:8b', [{'role': 'user', 'content': 'Hi'}],
+                             temperature=0.3, max_tokens=200, stream=True)
+    payload = captured['json']
+    assert captured['url'] == 'http://127.0.0.1:11434/api/chat'
+    assert payload['model'] == 'qwen3:8b'
+    assert payload['options'] == {
+        'temperature': 0.3, 'num_predict': 300, 'num_ctx': 8192,
+        'draft_num_predict': 4,
+    }
+    assert (payload['think'], payload['keep_alive'], payload['format'], payload['logprobs']) == (
+        'high', '10m', 'json', True)
+    assert result['content'] == 'Hello world'
+    assert result['finish_reason'] == 'length'
+    assert result['usage']['total_tokens'] == 7
+
+
+def test_ollamapull_unified_handler_returns_normalized_response(monkeypatch):
+    import ollamapull
+
+    called = []
+    monkeypatch.setattr(ollamapull, 'ensure_ready', lambda model, **kwargs: called.append(model))
+    monkeypatch.setattr(ollamapull, 'chat', lambda model, messages, **kwargs: {
+        'content': 'translated', 'finish_reason': 'stop',
+        'usage': {'prompt_tokens': 2, 'completion_tokens': 1, 'total_tokens': 3},
+        'raw_response': {'done': True},
+    })
+    client = bare_client('ollamapull/gemma3')
+    client.client_type = 'ollamapull'
+    response = client._send_ollamapull([{'role': 'user', 'content': 'Translate'}], 0.2, 128, None)
+    assert called == ['ollamapull/gemma3']
+    assert response.content == 'translated'
+    assert response.finish_reason == 'stop'
+    assert response.usage['total_tokens'] == 3
+
+
+def test_ollamapull_advanced_request_cannot_replace_routing(monkeypatch):
+    import ollamapull
+
+    monkeypatch.setenv('OLLAMA_SETTINGS_JSON', json.dumps({
+        'models': {'test': {'request': {'model': 'other'}}}}))
+    with pytest.raises(ollamapull.OllamaPullError, match='cannot override'):
+        ollamapull.chat('ollamapull/test', [], stream=False)
+
+
+def test_ollamapull_missing_install_start_and_pull(monkeypatch):
+    import ollamapull
+    import requests
+
+    calls = []
+    monkeypatch.setattr(ollamapull, '_ollama_executable', lambda: None)
+    monkeypatch.setattr(ollamapull, '_api_get', lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError()))
+    monkeypatch.setattr(ollamapull, '_run_installer', lambda *a: calls.append('install'))
+    monkeypatch.setattr(ollamapull, '_start_server', lambda *a: calls.append('start'))
+    monkeypatch.setattr(ollamapull, '_models', lambda: [])
+    monkeypatch.setattr(ollamapull, 'pull_model', lambda *a, **k: calls.append('pull'))
+    ollamapull.ensure_ready('ollamapull/gemma3')
+    assert calls == ['install', 'start', 'pull']
+
+
+def test_ollamapull_auto_update_attempted_once_and_toggle(monkeypatch):
+    import ollamapull
+
+    calls = []
+    ollamapull._attempted_auto_updates.clear()
+    monkeypatch.setattr(ollamapull, '_ollama_executable', lambda: '/usr/bin/ollama')
+    monkeypatch.setattr(ollamapull, '_installed_version', lambda: '0.1.0')
+    monkeypatch.setattr(ollamapull, 'latest_version', lambda: '0.2.0')
+    monkeypatch.setattr(ollamapull, '_run_installer', lambda *a: calls.append('update'))
+    monkeypatch.setattr(ollamapull, '_start_server', lambda *a: None)
+    ollamapull.ensure_ready()
+    ollamapull.ensure_ready()
+    assert calls == ['update']
+    ollamapull._attempted_auto_updates.clear()
+    monkeypatch.setenv('OLLAMA_SETTINGS_JSON', '{"auto_update": false, "models": {}}')
+    ollamapull.ensure_ready()
+    assert calls == ['update']
+
+
+def test_ollamapull_pull_progress_and_graceful_cancel(monkeypatch):
+    import ollamapull
+
+    events = []
+    stopped = [False]
+
+    class Response:
+        ok = True
+        def __enter__(self): return self
+        def __exit__(self, *args): self.close()
+        def close(self): events.append('closed')
+        def iter_lines(self):
+            yield b'{"status":"downloading","total":100,"completed":50}'
+            yield b'{"status":"success"}'
+
+    monkeypatch.setattr(ollamapull.requests, 'post', lambda *a, **k: Response())
+    def progress(message):
+        events.append(message)
+        if '50%' in message:
+            stopped[0] = True
+    with pytest.raises(ollamapull.OllamaPullCancelled):
+        ollamapull.pull_model('ollamapull/test', progress=progress,
+                              should_stop=lambda: stopped[0])
+    assert any('50%' in event for event in events)
+    assert 'closed' in events
+
+
+def test_ollamapull_installer_platform_commands_and_graphical_elevation(monkeypatch):
+    import ollamapull
+    import subprocess
+    from pathlib import Path
+
+    script = Path('install.sh')
+    monkeypatch.setattr(ollamapull.sys, 'platform', 'win32')
+    assert ollamapull._installer_command(script)[-2:] == ['-File', str(script)]
+    monkeypatch.setattr(ollamapull.sys, 'platform', 'linux')
+    monkeypatch.setattr(ollamapull.os, 'geteuid', lambda: 1000, raising=False)
+    monkeypatch.setattr(ollamapull.subprocess, 'run', lambda *a, **k: (_ for _ in ()).throw(
+        subprocess.CalledProcessError(1, 'sudo')))
+    monkeypatch.setattr(ollamapull.shutil, 'which', lambda name: '/usr/bin/pkexec' if name == 'pkexec' else None)
+    monkeypatch.setenv('DISPLAY', ':0')
+    assert ollamapull._installer_command(script) == ['/usr/bin/pkexec', '/bin/sh', str(script)]
+    monkeypatch.delenv('DISPLAY')
+    monkeypatch.delenv('WAYLAND_DISPLAY', raising=False)
+    with pytest.raises(ollamapull.OllamaPullError, match='no graphical'):
+        ollamapull._installer_command(script)
+
+
+def test_ollamapull_macos_uses_user_app_installer(monkeypatch):
+    import ollamapull
+
+    calls = []
+    monkeypatch.setattr(ollamapull.sys, 'platform', 'darwin')
+    monkeypatch.setattr(ollamapull, '_install_macos_app', lambda *a: calls.append('mac-app'))
+    ollamapull._run_installer(None, None)
+    assert calls == ['mac-app']
+
+
+def test_ollamapull_status_reports_old_external_server_after_update(monkeypatch):
+    import ollamapull
+
+    monkeypatch.setattr(ollamapull, '_ollama_executable', lambda: '/usr/bin/ollama')
+    monkeypatch.setattr(ollamapull, '_binary_version', lambda: '0.2.0')
+    monkeypatch.setattr(ollamapull, '_server_version', lambda: '0.1.0')
+    monkeypatch.setattr(ollamapull, 'latest_version', lambda: '0.2.0')
+    status = ollamapull.get_status()
+    assert status['server_running'] is True
+    assert status['update_available'] is False
+    assert status['restart_required'] is True
+    assert status['model_installed'] is None
+
+
+def test_ollamapull_rejects_bad_official_installer_response(monkeypatch):
+    import ollamapull
+
+    monkeypatch.setattr(ollamapull.sys, 'platform', 'win32')
+    response = SimpleNamespace(content=b'<html>not an installer</html>', raise_for_status=lambda: None)
+    monkeypatch.setattr(ollamapull.requests, 'get', lambda *a, **k: response)
+    with pytest.raises(ollamapull.OllamaPullError, match='not a valid install script'):
+        ollamapull._run_installer(None, None)
+
+
 ERROR = {
     "error": {
         "message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",

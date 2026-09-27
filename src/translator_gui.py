@@ -980,6 +980,7 @@ from model_options import (
     get_model_options,
     merge_saved_model_options,
     model_has_polled_marker,
+    ollamapull_installed,
     PolledModelKeys,
     numbered_model_completion_values,
     provider_model_catalog_supports_anonymous_poll,
@@ -21296,10 +21297,30 @@ Recent translations to summarize:
         dialog.finished.connect(lambda: setattr(self, '_model_info_dialog', None))
         dialog.show()
     
+    def _update_ollama_settings_button(self, model=None):
+        """Show the shared settings entry point as soon as a local route is typed."""
+        controller = getattr(self, '_ollama_route_button', None)
+        if controller is not None:
+            controller.update_model(model)
+            return
+        button = getattr(self, 'ollama_settings_btn', None)
+        if button is None:
+            return
+        from ollama_settings_dialog import is_ollamapull_route
+        if model is None:
+            model = self.model_combo.currentText()
+        button.setVisible(is_ollamapull_route(model))
+
+    def _open_ollama_settings(self):
+        controller = getattr(self, '_ollama_route_button', None)
+        if controller is not None:
+            controller._on_clicked()
+
     # PySide6 helper method for model text changes
     def _on_model_text_changed(self, text):
         """Record edits immediately and debounce the expensive UI refresh."""
         self.model_var = text
+        self._update_ollama_settings_button(text)
 
         timer = getattr(self, '_model_text_change_timer', None)
         if timer is None:
@@ -21883,6 +21904,8 @@ Recent translations to summarize:
             # provider.
             current_provider = catalog_provider_for_model(active_model, custom_routes)
             if not current_provider:
+                return False
+            if current_provider == "ollamapull" and not ollamapull_installed():
                 return False
             only_provider = current_provider
 
@@ -22894,6 +22917,16 @@ Recent translations to summarize:
         model_btn_layout = QHBoxLayout(model_btn_container)
         model_btn_layout.setContentsMargins(0, 0, 0, 0)
         model_btn_layout.setSpacing(4)
+
+        self.ollama_settings_btn = QPushButton("🦙 Download Ollama")
+        self.ollama_settings_btn.setToolTip("Install Ollama or configure its local settings")
+        from ollama_settings_dialog import OllamaRouteButtonController
+        self._ollama_route_button = OllamaRouteButtonController(
+            self.ollama_settings_btn, self,
+            lambda: self.model_combo.currentText(), self,
+        )
+        self.ollama_settings_btn.hide()
+        model_btn_layout.addWidget(self.ollama_settings_btn)
         
         # Add info button next to model field with spacing
         model_info_btn = QPushButton("ℹ️")
@@ -23232,6 +23265,7 @@ Recent translations to summarize:
         # Connect signals
         self.model_combo.currentIndexChanged.connect(self._on_model_index_changed)
         self.model_combo.editTextChanged.connect(self._on_model_text_changed)
+        self._update_ollama_settings_button(default_model)
         
         # Setup autocomplete bindings
         self.setup_model_combobox_bindings()
@@ -25046,10 +25080,16 @@ Recent translations to summarize:
         except Exception:
             return "[]"
 
+    def _ollama_settings_env_json(self):
+        """Serialize the shared local Ollama settings for every translation path."""
+        from ollama_settings_dialog import ollama_settings_json
+        return ollama_settings_json(self.config)
+
     def _sync_custom_prefix_routes_env(self):
         """Expose custom prefix routes to UnifiedClient."""
         try:
             os.environ['CUSTOM_OPENAI_PREFIX_ROUTES'] = self._custom_prefix_routes_env_json()
+            os.environ['OLLAMA_SETTINGS_JSON'] = self._ollama_settings_env_json()
         except Exception:
             pass
 
@@ -36360,6 +36400,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'CUSTOM_IMAGE_EDIT_BASE_URL': getattr(self, 'custom_image_edit_endpoint_var', '') if getattr(self, 'use_custom_image_edit_endpoint_var', False) else '',
             'OPENAI_IMAGE_EDIT_BASE_URL': getattr(self, 'custom_image_edit_endpoint_var', '') if getattr(self, 'use_custom_image_edit_endpoint_var', False) else '',
             'CUSTOM_OPENAI_PREFIX_ROUTES': self._custom_prefix_routes_env_json(),
+            'OLLAMA_SETTINGS_JSON': self._ollama_settings_env_json(),
             'OPENAI_TTS_ENDPOINT': getattr(self, 'openai_tts_endpoint_var', '') or (self.openai_base_url_var if str(self.openai_base_url_var).rstrip('/').endswith('/audio/speech') else ''),
             'TTS_VOICE': getattr(self, 'tts_voice_var', '') or '',
             'GROQ_API_URL': self.groq_base_url_var if self.groq_base_url_var else '',
@@ -37030,6 +37071,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = (getattr(self, 'custom_image_edit_endpoint_var', '') or '') if _use_img_edit else ''
                 os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = (getattr(self, 'custom_image_edit_endpoint_var', '') or '') if _use_img_edit else ''
                 os.environ['CUSTOM_OPENAI_PREFIX_ROUTES'] = self._custom_prefix_routes_env_json()
+                os.environ['OLLAMA_SETTINGS_JSON'] = self._ollama_settings_env_json()
                 os.environ['OPENAI_TTS_ENDPOINT'] = getattr(self, 'openai_tts_endpoint_var', '') or (getattr(self, 'openai_base_url_var', '') if str(getattr(self, 'openai_base_url_var', '')).rstrip('/').endswith('/audio/speech') else '')
                 os.environ['GROQ_API_URL'] = getattr(self, 'groq_base_url_var', '') or ''
                 os.environ['FIREWORKS_API_URL'] = getattr(self, 'fireworks_base_url_var', '') or ''
@@ -38025,6 +38067,7 @@ Important rules:
                     'CUSTOM_IMAGE_EDIT_BASE_URL': (getattr(self, 'custom_image_edit_endpoint_var', '') or '') if getattr(self, 'use_custom_image_edit_endpoint_var', False) else '',
                     'OPENAI_IMAGE_EDIT_BASE_URL': (getattr(self, 'custom_image_edit_endpoint_var', '') or '') if getattr(self, 'use_custom_image_edit_endpoint_var', False) else '',
                     'CUSTOM_OPENAI_PREFIX_ROUTES': self._custom_prefix_routes_env_json(),
+                    'OLLAMA_SETTINGS_JSON': self._ollama_settings_env_json(),
                     'AUTHZA_USE_GENERAL_API': '1' if bool(getattr(self, 'authza_use_general_api_var', self.config.get('authza_use_general_api', False))) else '0',
                     'OPENAI_TTS_ENDPOINT': getattr(self, 'openai_tts_endpoint_var', '') or (getattr(self, 'openai_base_url_var', '') if str(getattr(self, 'openai_base_url_var', '')).rstrip('/').endswith('/audio/speech') else ''),
                     'GROQ_API_URL': getattr(self, 'groq_base_url_var', '') or '',
@@ -48177,6 +48220,7 @@ Important rules:
             'CUSTOM_IMAGE_EDIT_BASE_URL': 'Custom image/video output and manga image edit base URL',
             'OPENAI_IMAGE_EDIT_BASE_URL': 'Alias for custom image edit base URL',
             'CUSTOM_OPENAI_PREFIX_ROUTES': 'Custom OpenAI-compatible prefix routes',
+            'OLLAMA_SETTINGS_JSON': 'Local Ollama settings',
             'GROQ_API_URL': 'Groq API endpoint',
             'FIREWORKS_API_URL': 'Fireworks API endpoint',
             'USE_CUSTOM_OPENAI_ENDPOINT': 'Use custom OpenAI endpoint',
@@ -48877,6 +48921,7 @@ Important rules:
                 ('CUSTOM_IMAGE_EDIT_BASE_URL', getattr(self, 'custom_image_edit_endpoint_var', '') if getattr(self, 'use_custom_image_edit_endpoint_var', False) else ''),
                 ('OPENAI_IMAGE_EDIT_BASE_URL', getattr(self, 'custom_image_edit_endpoint_var', '') if getattr(self, 'use_custom_image_edit_endpoint_var', False) else ''),
                 ('CUSTOM_OPENAI_PREFIX_ROUTES', self._custom_prefix_routes_env_json()),
+                ('OLLAMA_SETTINGS_JSON', self._ollama_settings_env_json()),
                 ('OPENAI_TTS_ENDPOINT', getattr(self, 'openai_tts_endpoint_var', '') or (getattr(self, 'openai_base_url_var', '') if str(getattr(self, 'openai_base_url_var', '')).rstrip('/').endswith('/audio/speech') else '')),
                 ('TTS_VOICE', getattr(self, 'tts_voice_var', '') or ''),
                 ('GROQ_API_URL', getattr(self, 'groq_base_url_var', '')),

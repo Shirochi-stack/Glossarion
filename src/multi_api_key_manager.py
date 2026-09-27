@@ -3895,7 +3895,7 @@ class MultiAPIKeyDialog(QDialog):
         self._attach_model_autofill(self.fallback_model_combo, self._on_model_requirement_input_changed)
         self._apply_combobox_icon(self.fallback_model_combo)
         self._disable_combobox_mousewheel(self.fallback_model_combo)  # Disable mousewheel
-        add_fallback_grid.addWidget(self.fallback_model_combo, 0, 4)
+        add_fallback_grid.addWidget(self._wrap_model_with_ollama_settings(self.fallback_model_combo), 0, 4)
 
         # Add fallback button
         add_fallback_btn = QPushButton("Add Fallback Key")
@@ -5446,7 +5446,7 @@ class MultiAPIKeyDialog(QDialog):
         self._attach_model_autofill(self.model_combo, self._on_model_requirement_input_changed)
         self._apply_combobox_icon(self.model_combo)
         self._disable_combobox_mousewheel(self.model_combo)  # Disable mousewheel
-        add_grid.addWidget(self.model_combo, 0, 4)
+        add_grid.addWidget(self._wrap_model_with_ollama_settings(self.model_combo), 0, 4)
 
         # Row 1: Cooldown and buttons
         add_grid.addWidget(QLabel("Cooldown (s):"), 1, 0, Qt.AlignLeft)
@@ -6044,7 +6044,7 @@ class MultiAPIKeyDialog(QDialog):
         self._apply_combobox_icon(combo)
         if combo.lineEdit():
             combo.lineEdit().selectAll()
-        layout.addWidget(combo)
+        layout.addWidget(self._wrap_model_with_ollama_settings(combo, dialog))
 
         button_layout = QHBoxLayout()
         ok_btn = QPushButton(accept_text)
@@ -6672,7 +6672,7 @@ class MultiAPIKeyDialog(QDialog):
         self._attach_model_autofill(self.glossary_model_combo, self._on_model_requirement_input_changed)
         self._apply_combobox_icon(self.glossary_model_combo)
         self._disable_combobox_mousewheel(self.glossary_model_combo)
-        add_glossary_grid.addWidget(self.glossary_model_combo, 0, 4)
+        add_glossary_grid.addWidget(self._wrap_model_with_ollama_settings(self.glossary_model_combo), 0, 4)
 
         # Add button
         add_glossary_btn = QPushButton("Add Glossary Key")
@@ -8576,6 +8576,28 @@ class MultiAPIKeyDialog(QDialog):
         log_fn(f"❌ AuthZA login failed: {err}")
         QMessageBox.warning(self, "Z.AI Login Failed", f"Z.AI login failed:\n{err}")
 
+    def _wrap_model_with_ollama_settings(self, combo, dialog_parent=None):
+        """Keep an Ollama settings button directly beside every model editor."""
+        from ollama_settings_dialog import OllamaRouteButtonController
+
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        row.addWidget(combo, 1)
+        button = QPushButton("🦙 Download Ollama")
+        button.setToolTip("Install Ollama or configure its local settings")
+        row.addWidget(button)
+        controller = OllamaRouteButtonController(
+            button, self.translator_gui, combo.currentText, dialog_parent or self,
+        )
+        combo.currentTextChanged.connect(controller.update_model)
+        combo.editTextChanged.connect(controller.update_model)
+        controller.update_model()
+        combo._ollama_settings_button = button
+        combo._ollama_route_controller = controller
+        return container
+
     def _attach_model_autofill(self, combo: QComboBox, on_change=None, model_values=None):
         """Attach the same prefix-priority contains completer used by translator_gui."""
         from PySide6.QtCore import QStringListModel
@@ -10409,7 +10431,7 @@ class MultiAPIKeyDialog(QDialog):
         self._apply_combobox_icon(model_combo)
         self._disable_combobox_mousewheel(model_combo)
         setattr(self, self._dedicated_attr(pool_name, 'model_combo'), model_combo)
-        add_grid.addWidget(model_combo, 0, 4)
+        add_grid.addWidget(self._wrap_model_with_ollama_settings(model_combo), 0, 4)
 
         add_btn = QPushButton(f"Add {spec['label']} Key")
         add_btn.clicked.connect(lambda _checked=False, p=pool_name: self._dedicated_add_key(p))

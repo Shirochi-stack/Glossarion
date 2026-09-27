@@ -2898,6 +2898,7 @@ class UnifiedClient:
         'poe': 'poe',
         'or': 'openrouter',
         'openrouter': 'openrouter',
+        'ollamapull/': 'ollamapull',
         'lr/': 'literouter',
         'lr': 'literouter',
         'ocz/': 'opencode-zen',  # OpenCode Zen free-tier; routed through the OpenCode CLI binary
@@ -2965,6 +2966,7 @@ class UnifiedClient:
     
     # Models/prefixes that authenticate without a traditional API key
     _NO_API_KEY_PREFIXES = (
+        'ollamapull/',
         'autharena/', 'autharena',
         'authgpt/', 'authgpt',
         'authgrok/', 'authgrok',
@@ -3090,6 +3092,8 @@ class UnifiedClient:
             model_l = (model or '').strip().lower()
             if not model_l:
                 return None
+            if model_l.startswith('ollamapull/'):
+                return 'ollamapull'
             if model_l.startswith('vertex/') or '@' in model_l:
                 return 'vertex_model_garden'
             if cls._get_custom_prefix_route_for_model(model_l):
@@ -3204,6 +3208,8 @@ class UnifiedClient:
     @classmethod
     def _model_needs_api_key(cls, model: str) -> bool:
         """Return False for models that authenticate without an API key."""
+        if (model or '').lower().startswith('ollamapull/'):
+            return False
         # Local custom endpoint (Ollama/LM Studio/etc.) → no API key needed
         if cls._is_local_custom_endpoint():
             return False
@@ -5492,6 +5498,8 @@ class UnifiedClient:
 
     def _apply_custom_endpoint_if_needed(self):
         """Apply custom endpoint configuration if needed"""
+        if str(getattr(self, 'model', '') or '').lower().startswith('ollamapull/'):
+            return
         if getattr(self, 'client_type', None) == 'custom_openai' or self._get_custom_prefix_route_for_model(getattr(self, 'model', '')):
             return
 
@@ -5534,6 +5542,8 @@ class UnifiedClient:
     
     def _apply_individual_key_endpoint_if_needed(self):
         """Apply individual key endpoint if configured (multi-key mode) - works independently of global toggle"""
+        if str(getattr(self, 'model', '') or '').lower().startswith('ollamapull/'):
+            return
         # Check if this key has an individual endpoint enabled AND configured
         has_individual_endpoint = (hasattr(self, 'current_key_azure_endpoint') and 
                                  hasattr(self, 'current_key_use_individual_endpoint') and 
@@ -8360,6 +8370,11 @@ class UnifiedClient:
         if self._is_stop_requested() or os.environ.get('TRANSLATION_CANCELLED') == '1':
             return
         if (os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1') and not getattr(self, '_ignore_graceful_stop', False):
+            return
+        # The managed Ollama route owns its local endpoint even when a key or
+        # global OpenAI-compatible endpoint is configured elsewhere.
+        if str(getattr(self, 'model', '') or '').lower().startswith('ollamapull/'):
+            self.client_type = 'ollamapull'
             return
         # If this instance already applied an individual (per-key) endpoint, do NOT let
         # prefix-based detection override the client_type or base URL. This prevents
@@ -18704,6 +18719,7 @@ class UnifiedClient:
         # Map client types to their handler methods
         handlers = {
             'openai': self._send_openai,
+            'ollamapull': self._send_ollamapull,
             'custom_openai': self._send_openai_provider_router,
             'gemini': self._send_gemini,
             'deepseek': self._send_openai_provider_router,  # Consolidated
@@ -18805,6 +18821,8 @@ class UnifiedClient:
             # Always use Gemini handler for Gemini models, regardless of transport
             logger.debug(f"Routing to Gemini handler (actual provider: {actual_provider}, client_type: {self.client_type})")
             return self._send_gemini(messages, temperature, max_tokens, response_name)
+        elif actual_provider == 'ollamapull':
+            return handler(messages, temperature, max_tokens, response_name)
         elif handler == self._send_anthropic and os.getenv('FORCE_NATIVE_ANTHROPIC', '0') == '1':
             # Force Native Anthropic: dispatch with Anthropic signature (4 args, no max_completion_tokens)
             return handler(messages, temperature, max_tokens, response_name)
@@ -18829,6 +18847,8 @@ class UnifiedClient:
         """
         client_type = getattr(self, 'client_type', 'openai')
         model_snapshot = self._get_active_request_model()
+        if str(model_snapshot or '').lower().startswith('ollamapull/'):
+            return 'ollamapull'
 
         # Per-key and global OpenAI-compatible endpoints own the model namespace.
         # Check them before model-prefix routing, otherwise a model like
@@ -27860,6 +27880,60 @@ class UnifiedClient:
             )
 
         return self._authgem_retry_loop(_do_send, label, actual_model, messages, temperature, max_tokens, store=store)
+
+    def _send_ollamapull(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Use the managed local Ollama server and its native chat API."""
+        from ollamapull import (
+            OllamaPullCancelled, OllamaPullError, chat, ensure_ready,
+            native_model_name,
+        )
+
+        model = self._get_active_request_model()
+        try:
+            native_model_name(model)  # Give an actionable error for an empty prefix.
+
+            def stopped() -> bool:
+                if self._is_stop_requested() or os.environ.get('TRANSLATION_CANCELLED') == '1':
+                    return True
+                return (
+                    os.environ.get('GRACEFUL_STOP') == '1'
+                    or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+                ) and not getattr(self, '_ignore_graceful_stop', False)
+
+            # The GUI forwards this logger into its run log, so an automatic
+            # first-use model pull has visible progress outside the settings
+            # dialog as well.
+            ensure_ready(
+                model,
+                progress=lambda message: logger.info("Ollama: %s", message),
+                should_stop=stopped,
+            )
+            use_streaming = self._streaming_enabled()
+
+            def register(response):
+                with self._active_streams_lock:
+                    self._active_streams.add(response)
+
+            def unregister(response):
+                with self._active_streams_lock:
+                    self._active_streams.discard(response)
+
+            result = chat(
+                model, messages, temperature=temperature, max_tokens=max_tokens,
+                stream=use_streaming,
+                log_stream=self._stream_logging_enabled(use_streaming),
+                should_stop=stopped,
+                on_response_open=register,
+                on_response_close=unregister,
+            )
+            return UnifiedResponse(
+                content=result['content'], finish_reason=result['finish_reason'],
+                usage=result['usage'], raw_response=result['raw_response'],
+            )
+        except OllamaPullCancelled as exc:
+            raise UnifiedClientError(str(exc), error_type='cancelled') from exc
+        except OllamaPullError as exc:
+            raise UnifiedClientError(str(exc), error_type='api_error') from exc
 
     def _send_opencode_zen(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send one request through the OpenCode CLI for free-tier Zen models (ocz/)."""

@@ -99,6 +99,7 @@ app_files = [
     ('subtitle_processor.py', '.'),
     ('refinement_prompts.py', '.'),
     ('unified_api_client.py', '.'),
+    ('ollamapull.py', '.'),
     ('google_free_translate.py', '.'),
     ('vision_ocr_source_epub.py', '.'),
     
@@ -190,6 +191,7 @@ app_files = [
 	('installer_utils.py', '.'),
 	
 	('multi_api_key_manager.py', '.'),
+	('ollama_settings_dialog.py', '.'),
 	('individual_endpoint_dialog.py', '.'),
     ('bubble_detector.py', '.'),
     ('local_inpainter.py', '.'),
@@ -308,6 +310,7 @@ app_modules = [
     'txt_processor',
     'scan_html_folder',
     'unified_api_client',
+    'ollamapull',
     'google_free_translate',
     'chapter_splitter',
     'history_manager',
@@ -379,6 +382,7 @@ app_modules = [
     'html_output_utils',
     'individual_endpoint_dialog',
     'multi_api_key_manager',
+    'ollama_settings_dialog',
     'onnx_cpp_backend',
     'tqdm_safety',
     'unified_glossary',

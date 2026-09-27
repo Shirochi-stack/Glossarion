@@ -2728,6 +2728,47 @@ def test_automatic_poll_scope_is_always_resolved_from_current_model(monkeypatch)
     assert len(worker_calls) == 1
 
 
+def test_uninstalled_ollama_auto_poll_stops_before_log_or_worker(monkeypatch):
+    import translator_gui
+
+    logs = []
+    worker_calls = []
+
+    class FakeThread:
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr(translator_gui, "ollamapull_installed", lambda: False)
+    monkeypatch.setattr(
+        translator_gui,
+        "start_provider_model_catalog_refresh",
+        lambda *_args, **kwargs: worker_calls.append(kwargs) or FakeThread(),
+    )
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: "ollamapull/llama3.2"),
+        api_key_entry=SimpleNamespace(text=lambda: ""),
+        custom_prefix_routes=[],
+        model_catalog_updated_signal=SimpleNamespace(connect=lambda _callback: None),
+        _provider_model_catalog_signal_connected=True,
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _set_model_poll_border_active=lambda _active: None,
+        append_log=logs.append,
+    )
+
+    assert not translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(
+        gui, automatic=True
+    )
+    assert logs == []
+    assert worker_calls == []
+
+    # A user-requested refresh remains available even without a local install.
+    assert translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(
+        gui, only_provider="ollamapull"
+    )
+    assert len(worker_calls) == 1
+
+
 def test_model_catalog_poll_border_animation_starts_and_stops(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     qt_widgets = pytest.importorskip("PySide6.QtWidgets")
@@ -3072,3 +3113,152 @@ def test_no_model_warning_centers_and_widens_ok_button(monkeypatch):
     message_box.deleteLater()
     parent.deleteLater()
     app.processEvents()
+
+
+def _isolated_ollamapull_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "GLOSSARION_MODEL_CATALOG_CACHE", str(tmp_path / "model_catalog_cache.json")
+    )
+    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+
+
+def test_local_tags_are_normalized_cached_and_pollable(tmp_path, monkeypatch):
+    _isolated_ollamapull_cache(tmp_path, monkeypatch)
+    import ollamapull
+    monkeypatch.setattr(ollamapull, "_ollama_executable", lambda: "ollama")
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, headers, timeout))
+        return {
+            "models": [
+                {"name": "llama3.2:latest", "model": "llama3.2:latest"},
+                {"name": "namespace/custom:7b"},
+                {"name": "llama3.2:latest"},
+                {"name": "bad name"},
+            ]
+        }
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+
+    assert model_options.catalog_provider_for_model("OLLAMAPULL/llama3.2") == "ollamapull"
+    assert model_options.provider_model_catalog_supports_anonymous_poll(
+        "ollamapull/llama3.2"
+    )
+    assert model_options.due_provider_catalog_for_model("ollamapull/llama3.2") == "ollamapull"
+
+    result = model_options.refresh_ollamapull_model_catalog(timeout=0.25)
+
+    assert calls == [(
+        "http://127.0.0.1:11434/api/tags",
+        {"Accept": "application/json", "User-Agent": "Glossarion/ModelCatalog"},
+        0.25,
+    )]
+    assert result.requested_provider == "ollamapull"
+    assert result.provider_models["ollamapull"] == [
+        "ollamapull/llama3.2:latest",
+        "ollamapull/namespace/custom:7b",
+    ]
+    assert result.statuses["ollamapull"] == "online (2 models)"
+    assert "ollamapull/llama3.2:latest" in result.models
+    assert model_options.due_provider_catalog_for_model("ollamapull/llama3.2") is None
+
+    # A later GUI process can populate its model dropdown from the disk cache.
+    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+    assert "ollamapull/namespace/custom:7b" in model_options.get_model_options()
+
+
+def test_local_connection_failure_retries_soon_without_starting_server(
+    tmp_path, monkeypatch
+):
+    _isolated_ollamapull_cache(tmp_path, monkeypatch)
+    import ollamapull
+    monkeypatch.setattr(ollamapull, "_ollama_executable", lambda: "ollama")
+    now = [1_800_000_000.0]
+    monkeypatch.setattr(model_options.time, "time", lambda: now[0])
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append(url)
+        raise OSError("local Ollama server is stopped")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    failed = model_options.refresh_ollamapull_model_catalog(timeout=0.1)
+
+    assert calls == ["http://127.0.0.1:11434/api/tags"]
+    assert failed.provider_models == {}
+    assert failed.statuses["ollamapull"].startswith("static fallback (OSError")
+    assert model_options.due_provider_catalog_for_model("ollamapull/llama3.2") is None
+
+    now[0] += model_options._OLLAMAPULL_OFFLINE_RETRY_SECONDS + 1
+    assert model_options.due_provider_catalog_for_model("ollamapull/llama3.2") == "ollamapull"
+
+
+def test_absent_ollama_skips_auto_poll_without_spending_attempt_ttl(
+    tmp_path, monkeypatch
+):
+    _isolated_ollamapull_cache(tmp_path, monkeypatch)
+    import ollamapull
+
+    installed = [False]
+    monkeypatch.setattr(
+        ollamapull, "_ollama_executable",
+        lambda: "ollama" if installed[0] else None,
+    )
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda *_args: pytest.fail("auto-poll contacted an absent Ollama server"),
+    )
+
+    assert model_options.due_provider_catalog_for_model("ollamapull/llama3.2") is None
+    assert "ollamapull" not in model_options._load_model_catalog_cache()["attempts"]
+
+    # Installation makes the first automatic catalog refresh immediately due.
+    installed[0] = True
+    assert model_options.due_provider_catalog_for_model("ollamapull/llama3.2") == "ollamapull"
+
+
+def test_empty_local_catalog_clears_old_models_and_pull_hook_refreshes_early(
+    tmp_path, monkeypatch
+):
+    _isolated_ollamapull_cache(tmp_path, monkeypatch)
+    installed = ["old:latest"]
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda _url, _headers, _timeout: {
+            "models": [{"name": name} for name in installed]
+        },
+    )
+
+    first = model_options.refresh_ollamapull_model_catalog(timeout=0.1)
+    assert first.provider_models["ollamapull"] == ["ollamapull/old:latest"]
+    assert model_options.due_provider_catalog_for_model("ollamapull/new:latest") is None
+
+    installed[:] = ["new:latest"]
+    after_pull = model_options.refresh_ollamapull_model_catalog(timeout=0.1)
+    assert after_pull.provider_models["ollamapull"] == ["ollamapull/new:latest"]
+    assert "ollamapull/old:latest" not in model_options.get_model_options()
+    assert "ollamapull/new:latest" in model_options.get_model_options()
+
+    installed.clear()
+    empty = model_options.refresh_ollamapull_model_catalog(timeout=0.1)
+    assert empty.provider_models["ollamapull"] == []
+    assert empty.statuses["ollamapull"] == "online (0 models)"
+    assert "ollamapull/new:latest" not in model_options.get_model_options()
+    assert "ollamapull" not in model_options.get_current_polled_provider_models()
+
+
+def test_invalid_tags_are_not_treated_as_an_empty_catalog(tmp_path, monkeypatch):
+    _isolated_ollamapull_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda _url, _headers, _timeout: {"data": []},
+    )
+
+    result = model_options.refresh_ollamapull_model_catalog(timeout=0.1)
+
+    assert result.provider_models == {}
+    assert "invalid model list" in result.statuses["ollamapull"]

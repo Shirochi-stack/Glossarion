@@ -561,6 +561,7 @@ class ModelCatalogRefreshResult:
 _MODEL_CATALOG_CACHE_VERSION = 3
 _MODEL_CATALOG_CACHE_TTL_SECONDS = 24 * 60 * 60
 _MODEL_POLL_MARKER_TTL_SECONDS = 7 * 24 * 60 * 60
+_OLLAMAPULL_OFFLINE_RETRY_SECONDS = 60
 _MODEL_CATALOG_LOCK = threading.RLock()
 _MODEL_CATALOG_MEMORY_CACHE: Optional[dict] = None
 
@@ -656,6 +657,12 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
         "moonshot", "", "https://api.moonshot.cn/v1/models", ("MOONSHOT_API_KEY",),
         base_url_env="MOONSHOT_API_URL",
     ),
+    # Poll only the already running local server. Model discovery must never
+    # install or launch Ollama; those actions belong to the inference route.
+    ProviderCatalogSpec(
+        "ollamapull", "ollamapull/", "http://127.0.0.1:11434/api/tags",
+        public=True, response_keys=("models",), id_fields=("name", "model"),
+    ),
     # The local proxy is queried only if it is already running. Catalog
     # discovery must never start the proxy or open an OAuth browser window.
     ProviderCatalogSpec("autharena", "autharena/", "http://127.0.0.1/v1/models", public=True),
@@ -675,6 +682,7 @@ STATIC_ONLY_PROVIDER_PREFIXES: Mapping[str, str] = {
 
 
 _PREFIX_PROVIDER_MAP: Tuple[Tuple[str, str], ...] = (
+    ("ollamapull/", "ollamapull"),
     ("autharena/", "autharena"),
     ("authgem-vertex/", "static"),
     ("authgrok/", "authgrok"),
@@ -1220,6 +1228,10 @@ def _fetch_provider_catalog(
         headers["Authorization"] = "Bearer public"
 
     payload = _http_get_json(url, headers, timeout)
+    if spec.name == "ollamapull" and (
+        not isinstance(payload, dict) or not isinstance(payload.get("models"), list)
+    ):
+        raise ValueError("Ollama returned an invalid model list")
     entries = _extract_catalog_entries(payload, spec)
     models: List[str] = []
     for entry in entries:
@@ -1491,7 +1503,7 @@ def provider_model_catalog_refresh_due(
     ``successful_only`` is used when a previously unavailable local service has
     just become ready. In that case, an earlier failed attempt must not suppress
     the first usable poll, while a successful catalog from the last 24 hours
-    should still be reused.
+    should still be reused. Failed local Ollama polls have a shorter retry window.
     """
     provider = str(provider or "").strip()
     if not provider:
@@ -1506,7 +1518,12 @@ def provider_model_catalog_refresh_due(
     if not successful_only:
         try:
             if expected_variant is None or attempt_variants.get(provider) == expected_variant:
-                timestamps.append(float(attempts.get(provider, 0) or 0))
+                attempted_at = float(attempts.get(provider, 0) or 0)
+                if provider != "ollamapull" or (
+                    time.time() - attempted_at
+                    < min(max(0, int(max_age)), _OLLAMAPULL_OFFLINE_RETRY_SECONDS)
+                ):
+                    timestamps.append(attempted_at)
         except (AttributeError, TypeError, ValueError):
             pass
     try:
@@ -1524,6 +1541,15 @@ def provider_model_catalog_refresh_due(
             pass
     last_attempt = max(timestamps or [0.0])
     return (time.time() - last_attempt) >= max(0, int(max_age))
+
+
+def ollamapull_installed() -> bool:
+    """Check for a local Ollama executable without network or process calls."""
+    try:
+        from ollamapull import _ollama_executable
+        return bool(_ollama_executable())
+    except (ImportError, OSError):
+        return False
 
 
 def due_provider_catalog_for_model(
@@ -1547,6 +1573,13 @@ def due_provider_catalog_for_model(
         return None
     if not provider or not provider_model_catalog_refresh_due(provider, max_age=max_age):
         return None
+
+    if provider == "ollamapull":
+        # This runs while the model field is edited on the GUI thread. Reuse
+        # the route's fast executable lookup; do not probe the server, check
+        # for releases, or install Ollama just to decide whether to auto-poll.
+        if not ollamapull_installed():
+            return None
 
     # AuthGrok uses its existing account session and checks it without opening
     # a login window. The actual session validation remains in the worker.
@@ -1694,7 +1727,7 @@ def refresh_provider_model_catalogs(
                 spec = futures[future]
                 try:
                     models = future.result()[1]
-                    if not models:
+                    if not models and spec.name != "ollamapull":
                         raise ValueError("provider returned no usable model IDs")
                     successful[spec.name] = models
                     statuses[spec.name] = f"online ({len(models)} models)"
@@ -1757,6 +1790,19 @@ def refresh_provider_model_catalogs(
         runtime_models = dict(successful)
     options = _merge_dynamic_model_options(_get_static_model_options(), runtime_models)
     return ModelCatalogRefreshResult(options, successful, statuses, only_provider)
+
+
+def refresh_ollamapull_model_catalog(*, timeout: float = 8.0) -> ModelCatalogRefreshResult:
+    """Refresh locally installed Ollama models after a pull or settings action.
+
+    This is a read-only catalog request; it never starts or installs Ollama.
+    The provider-scoped refresh preserves other cached provider models.
+    """
+    return refresh_provider_model_catalogs(
+        active_model="ollamapull/",
+        only_provider="ollamapull",
+        timeout=timeout,
+    )
 
 
 def start_provider_model_catalog_refresh(

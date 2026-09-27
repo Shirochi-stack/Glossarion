@@ -159,6 +159,8 @@
 
 Custom prefix routing is supported for user-defined OpenAI-compatible endpoints; add the prefix route in Model Manager, then use `prefix/model-name` in the model field.
 
+> **Managed local Ollama:** Enter `ollamapull/model-name` in the main model field or Multi API Key Manager. If Ollama is missing, a **🦙 Download Ollama** button appears beside the field; click it to install and start Ollama with visible progress. The button becomes **Ollama Settings** once Ollama is available. Glossarion downloads a missing model on first use and lists locally installed models through its automatic model poll. Settings include context size, multi-token prediction, and an automatic Ollama application update switch. Model downloads can take substantial time and disk space; the translation Stop action interrupts a download in progress.
+
 > **Note:** Many more providers are supported — including Baichuan, Zhipu AI (GLM), Moonshot/Kimi, Baidu ERNIE, Tencent Hunyuan, ByteDance Doubao, MiniMax, Meta Llama, Microsoft Phi, Falcon, and others. See `model_options.py` and `unified_api_client.py` for the full catalog.
 
 ### API Key Setup

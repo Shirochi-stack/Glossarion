@@ -641,6 +641,8 @@ When gender features are on, Glossarion keeps a small sidecar file next to your 
 
 You can run Glossarion against a **local AI** on your own computer (free, private, no internet) using tools like **Ollama** or **LM Studio**, or against **any other OpenAI-compatible server**. There are **three different ways** to point Glossarion at such an endpoint. They exist for different situations and they have a clear pecking order. Here they are, simplest to most flexible.
 
+**Managed Ollama route:** Type `ollamapull/model-name` in the main Model field or Multi API Key Manager to use Ollama on this computer without configuring an endpoint or API key. If Ollama is missing, click **🦙 Download Ollama** beside the model field to install and start it with visible progress. The button becomes **Ollama Settings** once Ollama is available. On first use, Glossarion downloads the named model if needed. Settings include context size, multi-token prediction, other Ollama request options, local status, and an automatic Ollama application update switch. Installed Ollama models also appear in the model search after a successful poll. Stop interrupts a model download in progress. This route is separate from the three endpoint methods below, which remain available for manually managed and remote servers.
+
 > **First, what's an "endpoint"?** It's just the web address where the AI lives. A cloud provider's endpoint is on the internet. A local AI's endpoint is on your own machine, usually:
 > - **Ollama:** `http://localhost:11434/v1`
 > - **LM Studio:** `http://localhost:1234/v1`

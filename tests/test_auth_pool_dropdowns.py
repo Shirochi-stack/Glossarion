@@ -1,4 +1,6 @@
 import ast
+import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -151,3 +153,211 @@ def test_vertex_add_account_keeps_slot_and_opens_login(gui_methods, monkeypatch,
         assert combo.itemData(combo.index) == expected
         assert gui.model_var == 'authgem-vertex0/model'
     assert gui._authgem_pending_account_ids == {5, 6}
+
+
+# Shared local Ollama settings and model-field controls.
+@pytest.fixture(scope="module")
+def ollama_qapp():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication([])
+
+
+def _ollama_test_translator():
+    from PySide6.QtWidgets import QWidget
+
+    class Translator(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.config = {}
+            self.saved = 0
+
+        def save_config(self, show_message=True):
+            self.saved += 1
+            return True
+
+    return Translator()
+
+
+def test_ollamapull_model_name_and_defaults():
+    from ollama_settings_dialog import (
+        _reported_parameter_defaults, normalize_ollama_settings,
+        is_ollamapull_route, ollamapull_model_name,
+    )
+
+    assert is_ollamapull_route("ollamapull")
+    assert is_ollamapull_route("ollamapull/")
+    assert is_ollamapull_route("OLLAMAPULL/llama3.2")
+    assert not is_ollamapull_route("ollama/llama3.2")
+    assert ollamapull_model_name("ollamapull/llama3.2:latest") == "llama3.2:latest"
+    assert ollamapull_model_name("OLLAMAPULL/custom/model") == "custom/model"
+    assert ollamapull_model_name("ollama/llama3.2") == ""
+    assert normalize_ollama_settings(None) == {"auto_update": True, "models": {}}
+    assert _reported_parameter_defaults({
+        "parameters": 'num_ctx 8192\nPARAMETER temperature 0.4\nstop "<end>"',
+    }) == {"num_ctx": "8192", "temperature": "0.4", "stop": '"<end>"'}
+
+
+def test_ollamapull_settings_persist_native_options(ollama_qapp, monkeypatch):
+    from ollama_settings_dialog import OllamaSettingsDialog
+
+    monkeypatch.setattr(OllamaSettingsDialog, "refresh_status", lambda self: None)
+    translator = _ollama_test_translator()
+    translator.config["ollama_settings"] = {
+        "models": {"other-model": {"options": {"seed": 4}}},
+        "future_key": "keep",
+    }
+    dialog = OllamaSettingsDialog(translator, "ollamapull/llama3.2")
+    dialog.option_fields["num_ctx"][0].setText("8192")
+    dialog.option_fields["draft_num_predict"][0].setText("4")
+    dialog.extra_options_edit.setPlainText('{"future_option": 123}')
+    dialog.extra_request_edit.setPlainText('{"logprobs": true}')
+    dialog.think_field.setText("high")
+    dialog.keep_alive_field.setText("10m")
+    dialog.format_field.setText("json")
+    dialog.auto_update_checkbox.setChecked(False)
+    dialog.save_settings()
+
+    saved = translator.config["ollama_settings"]
+    assert saved["auto_update"] is False
+    assert saved["future_key"] == "keep"
+    assert saved["models"]["other-model"]["options"] == {"seed": 4}
+    selected = saved["models"]["llama3.2"]
+    assert selected["options"] == {
+        "future_option": 123, "num_ctx": 8192, "draft_num_predict": 4,
+    }
+    assert selected["request"] == {"logprobs": True}
+    assert selected["think"] == "high"
+    assert selected["keep_alive"] == "10m"
+    assert selected["format"] == "json"
+    assert translator.saved == 1
+    assert json.loads(os.environ["OLLAMA_SETTINGS_JSON"]) == saved
+
+
+def test_ollamapull_advanced_fields_validate_input(ollama_qapp, monkeypatch):
+    from ollama_settings_dialog import OllamaSettingsDialog
+
+    monkeypatch.setattr(OllamaSettingsDialog, "refresh_status", lambda self: None)
+    dialog = OllamaSettingsDialog(_ollama_test_translator(), "ollamapull/test")
+    dialog.extra_options_edit.setPlainText("[]")
+    with pytest.raises(ValueError, match="JSON object"):
+        dialog._collect_model_settings()
+    dialog.extra_options_edit.setPlainText("{}")
+    dialog.extra_request_edit.setPlainText('{"model": "other"}')
+    with pytest.raises(ValueError, match="cannot override"):
+        dialog._collect_model_settings()
+    dialog.extra_request_edit.setPlainText("{}")
+    dialog.option_fields["num_ctx"][0].setText("0")
+    with pytest.raises(ValueError, match="greater than zero"):
+        dialog._collect_model_settings()
+
+
+def test_bare_ollamapull_route_opens_global_settings(ollama_qapp, monkeypatch):
+    from ollama_settings_dialog import OllamaSettingsDialog
+
+    monkeypatch.setattr(OllamaSettingsDialog, "refresh_status", lambda self: None)
+    translator = _ollama_test_translator()
+    dialog = OllamaSettingsDialog(translator, "ollamapull/")
+    assert dialog.model_name == ""
+    assert not dialog.tabs.isTabEnabled(0)
+    dialog.auto_update_checkbox.setChecked(False)
+    dialog.save_settings()
+    assert translator.config["ollama_settings"]["auto_update"] is False
+    assert translator.config["ollama_settings"]["models"] == {}
+
+
+def test_multi_key_ollamapull_button_follows_model_field(ollama_qapp, monkeypatch):
+    from PySide6.QtWidgets import QComboBox, QDialog, QPushButton
+    from multi_api_key_manager import MultiAPIKeyDialog
+    from ollama_settings_dialog import OllamaRouteButtonController
+
+    monkeypatch.setattr(OllamaRouteButtonController, "_check_installation_passively", lambda self: None)
+
+    manager = QDialog()
+    manager.translator_gui = _ollama_test_translator()
+    combo = QComboBox()
+    combo.setEditable(True)
+    container = MultiAPIKeyDialog._wrap_model_with_ollama_settings(manager, combo)
+    button = combo._ollama_settings_button
+    assert container.layout().itemAt(0).widget() is combo
+    assert isinstance(button, QPushButton)
+    assert button.isHidden()
+    combo.setCurrentText("ollamapull")
+    assert not button.isHidden()
+    assert button.text() == "🦙 Download Ollama"
+    combo.setCurrentText("ollamapull/")
+    assert not button.isHidden()
+    combo.setCurrentText("ollamapull/qwen3")
+    assert not button.isHidden()
+    combo.setCurrentText("openai/gpt-4.1")
+    assert button.isHidden()
+
+
+def test_main_ollamapull_button_follows_model_field(ollama_qapp):
+    from PySide6.QtWidgets import QComboBox, QPushButton
+    from translator_gui import TranslatorGUI
+
+    fake = type("ModelView", (), {})()
+    fake.ollama_settings_btn = QPushButton("Ollama Settings")
+    fake.model_combo = QComboBox()
+    fake.model_combo.setEditable(True)
+    TranslatorGUI._update_ollama_settings_button(fake, "ollamapull")
+    assert not fake.ollama_settings_btn.isHidden()
+    TranslatorGUI._update_ollama_settings_button(fake, "ollamapull/")
+    assert not fake.ollama_settings_btn.isHidden()
+    TranslatorGUI._update_ollama_settings_button(fake, "ollamapull/gemma3")
+    assert not fake.ollama_settings_btn.isHidden()
+    TranslatorGUI._update_ollama_settings_button(fake, "authgpt/gpt-6-luna")
+    assert fake.ollama_settings_btn.isHidden()
+
+
+def test_ollamapull_button_rechecks_then_installs_or_opens_settings(ollama_qapp, monkeypatch):
+    import ollama_settings_dialog as module
+    from PySide6.QtWidgets import QPushButton
+
+    monkeypatch.setattr(module.OllamaRouteButtonController, "_check_installation_passively", lambda self: None)
+    translator = _ollama_test_translator()
+    route = ["ollamapull/"]
+    button = QPushButton()
+    controller = module.OllamaRouteButtonController(button, translator, lambda: route[0], translator)
+    controller.update_model()
+    assert button.text() == "🦙 Download Ollama"
+    operations = []
+    monkeypatch.setattr(controller, "_start_job", lambda operation, fn: operations.append(operation))
+    monkeypatch.setattr(controller, "_begin_install", lambda: operations.append("install"))
+    controller._on_clicked()
+    assert operations == ["click_status"]
+    controller._on_job_finished((1, "click_status", {"installed": False}, None))
+    assert operations[-1] == "install"
+
+    controller._busy = False
+    route[0] = "ollamapull/qwen3"
+    opened = []
+    monkeypatch.setattr(module, "open_ollama_settings", lambda *args: opened.append(args))
+    controller.update_model()
+    controller._on_clicked()
+    controller._on_job_finished((2, "click_status", {"installed": True}, None))
+    assert opened and opened[0][1] == "ollamapull/qwen3"
+    assert button.text() == "Ollama Settings"
+
+
+def test_ollamapull_button_status_runs_in_background(ollama_qapp, monkeypatch):
+    import time
+    import ollamapull
+    from PySide6.QtWidgets import QPushButton
+    from ollama_settings_dialog import OllamaRouteButtonController
+
+    monkeypatch.setattr(ollamapull, "get_status", lambda _model="": {"installed": True})
+    translator = _ollama_test_translator()
+    button = QPushButton()
+    controller = OllamaRouteButtonController(
+        button, translator, lambda: "ollamapull", translator,
+    )
+    controller.update_model()
+    assert button.text() == "🦙 Download Ollama"
+    deadline = time.monotonic() + 3
+    while button.text() != "Ollama Settings" and time.monotonic() < deadline:
+        ollama_qapp.processEvents()
+        time.sleep(0.01)
+    assert button.text() == "Ollama Settings"
+    assert not controller._jobs
