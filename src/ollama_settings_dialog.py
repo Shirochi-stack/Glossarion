@@ -7,10 +7,16 @@ configuration. Network and installation work runs outside the Qt UI thread.
 from __future__ import annotations
 
 import copy
+import csv
+import ctypes
 import json
 import math
 import os
+import platform
+import shutil
+import subprocess
 import threading
+from io import StringIO
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Qt, QTimer
@@ -181,20 +187,32 @@ class _OptionEditor(QWidget):
             if saved is not None:
                 self.control.setCurrentIndex(int(saved))
             row.addWidget(self.control, 1)
-        elif key == "num_ctx":
-            self._reported_context_default = None
+        elif key in ("num_ctx", "num_gpu", "num_thread"):
+            self._reported_slider_default = None
             self.slider = QSlider(Qt.Horizontal)
-            self.slider.setRange(1, max(262144, int(saved or 0)))
-            self.slider.setSingleStep(256)
-            self.slider.setPageStep(1024)
-            self.slider.setToolTip("Context size in tokens; drag to adjust.")
-            self.slider.setValue(int(saved) if saved is not None else 8192)
+            if key == "num_ctx":
+                self.slider.setRange(1, max(262144, int(saved or 0)))
+                self.slider.setSingleStep(256)
+                self.slider.setPageStep(1024)
+                suggested = 8192
+                self.slider.setToolTip("Context size in tokens; drag to adjust.")
+            elif key == "num_gpu":
+                self.slider.setRange(-1, max(256, int(saved or 0)))
+                self.slider.setPageStep(8)
+                suggested = -1
+                self.slider.setToolTip("-1 lets Ollama choose GPU layers automatically; 0 uses CPU only.")
+            else:
+                self.slider.setRange(0, max(os.cpu_count() or 1, int(saved or 0)))
+                self.slider.setPageStep(4)
+                suggested = 0
+                self.slider.setToolTip("0 lets Ollama choose the thread count automatically.")
+            self.slider.setValue(int(saved) if saved is not None else suggested)
             self.control = QLabel()
             self.control.setMinimumWidth(166)
             self.control.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.slider.valueChanged.connect(lambda _value: self._update_context_label())
-            self.default.toggled.connect(lambda _checked: self._update_context_label())
-            self._update_context_label()
+            self.slider.valueChanged.connect(lambda _value: self._update_slider_label())
+            self.default.toggled.connect(lambda _checked: self._update_slider_label())
+            self._update_slider_label()
             row.addWidget(self.slider, 1)
             row.addWidget(self.control)
         elif key in SLIDER_OPTIONS:
@@ -252,30 +270,35 @@ class _OptionEditor(QWidget):
             return "true" if self.control.currentIndex() else "false"
         if self.key == "mirostat":
             return str(self.control.currentIndex())
-        if self.key == "num_ctx":
+        if self.key in ("num_ctx", "num_gpu", "num_thread"):
             return str(self.slider.value())
         if isinstance(self.control, QLineEdit):
             return self.control.text()
         return str(self.control.value())
 
-    def _update_context_label(self) -> None:
+    def _update_slider_label(self) -> None:
         if self.default.isChecked():
-            value = self._reported_context_default
-            self.control.setText(f"Model default: {value:,}" if value is not None else "Model default")
+            value = self._reported_slider_default
+            fallback = "Model default" if self.key == "num_ctx" else "Model default: automatic"
+            automatic = (self.key == "num_gpu" and value == -1) or (self.key == "num_thread" and value == 0)
+            self.control.setText("Model default: automatic" if automatic else
+                                 f"Model default: {value:,}" if value is not None else fallback)
         else:
-            self.control.setText(f"{self.slider.value():,}")
+            value = self.slider.value()
+            automatic = (self.key == "num_gpu" and value == -1) or (self.key == "num_thread" and value == 0)
+            self.control.setText("Automatic" if automatic
+                                 else f"{value:,}")
 
     def setPlaceholderText(self, text: str) -> None:
         if self.key == "draft_num_predict":
             self.mode.setToolTip(text + "\n" + self._mode_help)
             return
         self.default.setToolTip(text)
-        if self.key == "num_ctx" and text.startswith("Model default: "):
+        if self.key in ("num_ctx", "num_gpu", "num_thread") and text.startswith("Model default: "):
             try:
                 value = int(text.removeprefix("Model default: ").strip())
-                if value > 0:
-                    self._reported_context_default = value
-                    self._update_context_label()
+                self._reported_slider_default = value
+                self._update_slider_label()
             except ValueError:
                 pass
         if isinstance(self.control, QLineEdit):
@@ -311,6 +334,158 @@ def _json_object(text: str, label: str) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be a JSON object")
     return value
+
+
+def _size_gib(value: int) -> str:
+    return f"{value / (1024 ** 3):.1f} GiB"
+
+
+def _hardware_status() -> dict[str, str]:
+    """Best-effort local hardware snapshot; called only from a background job."""
+    result = {"ram": "Unavailable", "gpu": "Unavailable", "vram": "Unavailable", "cpu": "Unavailable"}
+    system = platform.system()
+    cpu_name = platform.processor().strip()
+    logical_cpus = os.cpu_count()
+    if system == "Windows":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
+                cpu_name = str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip() or cpu_name
+        except (ImportError, OSError):
+            pass
+        powershell = shutil.which("powershell.exe")
+        if powershell and not cpu_name:
+            try:
+                process = subprocess.run(
+                    [powershell, "-NoProfile", "-NonInteractive", "-Command",
+                     "(Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name)"],
+                    capture_output=True, text=True, timeout=5, check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if process.returncode == 0 and process.stdout.strip():
+                    cpu_name = process.stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                pass
+    elif system == "Darwin":
+        try:
+            process = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True, text=True, timeout=3, check=False,
+            )
+            if process.returncode == 0 and process.stdout.strip():
+                cpu_name = process.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    elif system == "Linux":
+        try:
+            with open("/proc/cpuinfo", encoding="utf-8") as stream:
+                cpu_name = next((line.split(":", 1)[1].strip() for line in stream if line.startswith("model name")), cpu_name)
+        except OSError:
+            pass
+    if cpu_name:
+        result["cpu"] = cpu_name + (f" · {logical_cpus} logical CPUs" if logical_cpus else "")
+    elif logical_cpus:
+        result["cpu"] = f"{logical_cpus} logical CPUs"
+
+    try:
+        import psutil
+        memory = psutil.virtual_memory()
+        result["ram"] = f"{_size_gib(memory.total)} total · {_size_gib(memory.available)} available"
+    except (ImportError, AttributeError, OSError):
+        if system == "Windows":
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            memory = MemoryStatus()
+            memory.dwLength = ctypes.sizeof(memory)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory)):
+                result["ram"] = f"{_size_gib(memory.ullTotalPhys)} total · {_size_gib(memory.ullAvailPhys)} available"
+        elif system == "Linux":
+            try:
+                with open("/proc/meminfo", encoding="utf-8") as stream:
+                    fields = {key.rstrip(":"): int(value.split()[0]) * 1024 for key, value in (line.split(":", 1) for line in stream if ":" in line)}
+                result["ram"] = f"{_size_gib(fields['MemTotal'])} total · {_size_gib(fields['MemAvailable'])} available"
+            except (OSError, KeyError, ValueError):
+                pass
+        elif system == "Darwin":
+            try:
+                process = subprocess.run(
+                    ["sysctl", "-n", "hw.memsize"], capture_output=True, text=True,
+                    timeout=3, check=False,
+                )
+                if process.returncode == 0:
+                    result["ram"] = f"{_size_gib(int(process.stdout.strip()))} total"
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pass
+
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi:
+        try:
+            process = subprocess.run(
+                [nvidia_smi, "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=4, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            devices = list(csv.reader(StringIO(process.stdout))) if process.returncode == 0 else []
+            if devices:
+                result["gpu"] = "; ".join(row[0].strip() for row in devices if len(row) >= 3)
+                result["vram"] = "; ".join(
+                    f"{float(row[1]) / 1024:.1f} GiB total · {float(row[2]) / 1024:.1f} GiB free"
+                    for row in devices if len(row) >= 3
+                )
+                return result
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+    if system == "Windows":
+        powershell = shutil.which("powershell.exe")
+        if powershell:
+            try:
+                process = subprocess.run(
+                    [powershell, "-NoProfile", "-NonInteractive", "-Command",
+                     "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json -Compress"],
+                    capture_output=True, text=True, timeout=6, check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                devices = json.loads(process.stdout) if process.returncode == 0 and process.stdout.strip() else []
+                devices = devices if isinstance(devices, list) else [devices]
+                names = [str(device.get("Name") or "").strip() for device in devices if isinstance(device, dict)]
+                result["gpu"] = "; ".join(name for name in names if name) or result["gpu"]
+                # Win32_VideoController.AdapterRAM is capped at 4 GiB on some
+                # drivers, so do not present it as reliable installed VRAM.
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pass
+    elif system == "Darwin":
+        try:
+            process = subprocess.run(
+                ["system_profiler", "SPDisplaysDataType", "-json"],
+                capture_output=True, text=True, timeout=8, check=False,
+            )
+            devices = json.loads(process.stdout).get("SPDisplaysDataType", []) if process.returncode == 0 else []
+            if devices:
+                result["gpu"] = "; ".join(
+                    str(device.get("sppci_model") or device.get("_name") or "GPU")
+                    for device in devices
+                )
+                vram = [str(device.get("spdisplays_vram") or device.get("spdisplays_vram_shared") or "") for device in devices]
+                result["vram"] = "; ".join(value for value in vram if value) or "Shared system memory"
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+    elif system == "Linux":
+        lspci = shutil.which("lspci")
+        if lspci:
+            try:
+                process = subprocess.run([lspci], capture_output=True, text=True, timeout=4, check=False)
+                names = [line.split(": ", 1)[-1] for line in process.stdout.splitlines()
+                         if "VGA compatible controller" in line or "3D controller" in line]
+                result["gpu"] = "; ".join(names) or result["gpu"]
+            except (OSError, subprocess.SubprocessError):
+                pass
+    return result
 
 
 def _reported_parameter_defaults(details: dict) -> dict:
@@ -638,6 +813,18 @@ class OllamaSettingsDialog(QDialog):
                 value.setToolTip("Loaded in memory does not show whether a chat request is generating tokens.")
             self.status_labels[key] = value
             status_layout.addWidget(value, row, 1)
+        for row, (key, label) in enumerate((
+            ("ram", "System RAM"), ("vram", "GPU VRAM"),
+            ("gpu", "GPU"), ("cpu", "CPU"),
+        )):
+            status_layout.addWidget(QLabel(label + ":"), row, 2)
+            value = QLabel("Checking…")
+            value.setWordWrap(True)
+            value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self.status_labels[key] = value
+            status_layout.addWidget(value, row, 3)
+        status_layout.setColumnStretch(1, 1)
+        status_layout.setColumnStretch(3, 2)
         layout.addWidget(status_box)
 
         action_row = QHBoxLayout()
@@ -819,6 +1006,7 @@ class OllamaSettingsDialog(QDialog):
         def task(_progress):
             import ollamapull
             status = ollamapull.get_status(self.model_name)
+            hardware = _hardware_status()
             details = None
             details_error = None
             if self.model_name and status.get("server_running") and status.get("model_installed"):
@@ -826,7 +1014,7 @@ class OllamaSettingsDialog(QDialog):
                     details = ollamapull.get_model_details(self.model_name)
                 except Exception as exc:
                     details_error = str(exc)
-            return {"status": status, "details": details, "details_error": details_error}
+            return {"status": status, "hardware": hardware, "details": details, "details_error": details_error}
 
         self._start_job("status", task)
 
@@ -900,6 +1088,9 @@ class OllamaSettingsDialog(QDialog):
                 "Loaded" if status.get("model_loaded") is True else
                 "Not loaded" if status.get("model_loaded") is False else "Unknown"
             )
+            for key, value in (result.get("hardware") or {}).items():
+                if key in ("ram", "vram", "gpu", "cpu"):
+                    self.status_labels[key].setText(str(value))
             self.update_button.setText("Update Ollama" if status.get("update_available") else "Check / update Ollama")
             details = result.get("details")
             if details:
@@ -908,6 +1099,17 @@ class OllamaSettingsDialog(QDialog):
                 for key, (field, _kind) in self.option_fields.items():
                     if key in defaults:
                         field.setPlaceholderText("Model default: " + defaults[key])
+                model_info = details.get("model_info") if isinstance(details, dict) else None
+                if isinstance(model_info, dict):
+                    try:
+                        layer_count = next(
+                            int(value) for name, value in model_info.items()
+                            if str(name).endswith(".block_count") and int(value) > 0
+                        )
+                        gpu_slider = self.option_fields["num_gpu"][0].slider
+                        gpu_slider.setMaximum(max(layer_count + 1, gpu_slider.value()))
+                    except (StopIteration, TypeError, ValueError):
+                        pass
                 summary = ", ".join(
                     f"{key}={value}" for key, value in defaults.items()
                 ) if defaults else "no explicit parameters reported"

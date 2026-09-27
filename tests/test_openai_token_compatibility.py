@@ -452,6 +452,33 @@ def test_ollamapull_pull_progress_and_graceful_cancel(monkeypatch):
     assert 'closed' in events
 
 
+def test_ollamapull_pull_progress_shows_speed_and_eta(monkeypatch):
+    import ollamapull
+    import model_options
+
+    clock = [0.0]
+    monkeypatch.setattr(ollamapull.time, 'monotonic', lambda: clock[0])
+    messages = []
+
+    class Response:
+        ok = True
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def close(self): pass
+        def iter_lines(self):
+            yield b'{"status":"pulling abc","digest":"abc","total":100000000,"completed":10000000}'
+            clock[0] = 2.0
+            yield b'{"status":"pulling abc","digest":"abc","total":100000000,"completed":30000000}'
+            yield b'{"status":"success"}'
+
+    monkeypatch.setattr(ollamapull.requests, 'post', lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(model_options, 'refresh_ollamapull_model_catalog', lambda **_kwargs: None)
+    ollamapull.pull_model('ollamapull/test', progress=messages.append)
+
+    assert any('30%' in message and '10.0 MB/s' in message and 'ETA 7s' in message
+               for message in messages)
+
+
 def test_ollamapull_installer_platform_commands_and_graphical_elevation(monkeypatch):
     import ollamapull
     import subprocess

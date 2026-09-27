@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 import zipfile
+from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -543,6 +544,15 @@ def _watch_stop(response: requests.Response,
     return finished
 
 
+def _pull_eta(seconds: float) -> str:
+    remaining = max(0, int(seconds + 0.5))
+    if remaining >= 3600:
+        return f"{remaining // 3600}h {(remaining % 3600) // 60}m"
+    if remaining >= 60:
+        return f"{remaining // 60}m {remaining % 60}s"
+    return f"{remaining}s"
+
+
 def pull_model(model_name: str, *, progress: Optional[Callable[[str], None]] = None,
                should_stop: Optional[Callable[[], bool]] = None) -> None:
     name = native_model_name(model_name)
@@ -557,12 +567,29 @@ def pull_model(model_name: str, *, progress: Optional[Callable[[str], None]] = N
                     raise _http_error(response, "model pull")
                 completed = False
                 last_status = ""
+                transfer_key = ""
+                samples = deque(maxlen=32)
                 for item in _iter_json_lines(response, should_stop):
                     status = str(item.get("status") or "")
                     total = item.get("total")
                     current = item.get("completed")
                     if isinstance(total, (float, int)) and total > 0 and isinstance(current, (float, int)):
                         status = f"{status} {current / total:.0%}"
+                        key = str(item.get("digest") or item.get("status") or "")
+                        if key != transfer_key or (samples and current < samples[-1][1]):
+                            samples.clear()
+                            transfer_key = key
+                        now = time.monotonic()
+                        samples.append((now, current))
+                        while len(samples) > 2 and now - samples[0][0] > 8:
+                            samples.popleft()
+                        if len(samples) >= 2:
+                            elapsed = now - samples[0][0]
+                            transferred = current - samples[0][1]
+                            if elapsed >= 0.25 and transferred > 0:
+                                bytes_per_second = transferred / elapsed
+                                status += f" · {bytes_per_second / 1_000_000:.1f} MB/s"
+                                status += f" · ETA {_pull_eta((total - current) / bytes_per_second)}"
                     if status and status != last_status:
                         _progress(progress, f"{name}: {status}")
                         last_status = status
