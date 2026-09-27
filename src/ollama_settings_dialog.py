@@ -182,16 +182,19 @@ class _OptionEditor(QWidget):
                 self.control.setCurrentIndex(int(saved))
             row.addWidget(self.control, 1)
         elif key == "num_ctx":
+            self._reported_context_default = None
             self.slider = QSlider(Qt.Horizontal)
             self.slider.setRange(1, max(262144, int(saved or 0)))
             self.slider.setSingleStep(256)
             self.slider.setPageStep(1024)
             self.slider.setToolTip("Context size in tokens; drag to adjust.")
             self.slider.setValue(int(saved) if saved is not None else 8192)
-            self.control = QLabel(f"{self.slider.value():,}")
-            self.control.setMinimumWidth(92)
+            self.control = QLabel()
+            self.control.setMinimumWidth(166)
             self.control.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.slider.valueChanged.connect(lambda value: self.control.setText(f"{value:,}"))
+            self.slider.valueChanged.connect(lambda _value: self._update_context_label())
+            self.default.toggled.connect(lambda _checked: self._update_context_label())
+            self._update_context_label()
             row.addWidget(self.slider, 1)
             row.addWidget(self.control)
         elif key in SLIDER_OPTIONS:
@@ -255,17 +258,24 @@ class _OptionEditor(QWidget):
             return self.control.text()
         return str(self.control.value())
 
+    def _update_context_label(self) -> None:
+        if self.default.isChecked():
+            value = self._reported_context_default
+            self.control.setText(f"Model default: {value:,}" if value is not None else "Model default")
+        else:
+            self.control.setText(f"{self.slider.value():,}")
+
     def setPlaceholderText(self, text: str) -> None:
         if self.key == "draft_num_predict":
             self.mode.setToolTip(text + "\n" + self._mode_help)
             return
         self.default.setToolTip(text)
-        if self.key == "num_ctx" and self.default.isChecked() and text.startswith("Model default: "):
+        if self.key == "num_ctx" and text.startswith("Model default: "):
             try:
                 value = int(text.removeprefix("Model default: ").strip())
                 if value > 0:
-                    self.slider.setMaximum(max(self.slider.maximum(), value))
-                    self.slider.setValue(value)
+                    self._reported_context_default = value
+                    self._update_context_label()
             except ValueError:
                 pass
         if isinstance(self.control, QLineEdit):
