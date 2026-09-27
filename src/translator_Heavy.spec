@@ -318,6 +318,7 @@ app_files = [
     ('extract_glossary_from_epub.py', '.'),
     ('glossary_usage.py', '.'),
     ('glossary_refinement.py', '.'),
+    ('glossary_translation_gate.py', '.'),
     ('extract_glossary_from_txt.py', '.'),
     ('glossary_process_worker.py', '.'),  # Glossary subprocess worker
     ('chapter_extraction_worker.py', '.'),  # Chapter extraction subprocess worker
@@ -492,6 +493,7 @@ app_modules = [
     'parallel_epub_glossary',
     'glossary_usage',
     'glossary_refinement',
+    'glossary_translation_gate',
     'extract_glossary_from_txt',
     'glossary_process_worker',  # Glossary subprocess worker
     'chapter_extraction_worker',  # Chapter extraction subprocess worker
