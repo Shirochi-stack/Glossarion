@@ -807,6 +807,33 @@ def test_missing_cli_error_has_copyable_install_commands(tmp_path, monkeypatch):
         assert ocagy_cli.NODEJS_WINGET_INSTALL_COMMAND in message
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows npm shim behavior")
+def test_find_executable_prefers_native_binary_over_npm_shim(tmp_path, monkeypatch):
+    npm_dir = tmp_path / "npm"
+    native = npm_dir / "node_modules" / "opencode-ai" / "node_modules" / "opencode-windows-x64" / "bin" / "opencode.exe"
+    native.parent.mkdir(parents=True)
+    native.touch()
+    (npm_dir / "opencode.cmd").touch()
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    # APPDATA/npm is the package location; a stale PATH can still find the shim.
+    monkeypatch.setattr(ocagy_cli.shutil, "which", lambda name: str(npm_dir / "opencode.cmd") if name == "opencode" else None)
+
+    assert ocagy_cli.find_executable() == str(native.resolve())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Node.js PATH behavior")
+def test_subprocess_env_adds_newly_installed_node_to_stale_path(tmp_path, monkeypatch):
+    node_dir = tmp_path / "Local" / "Programs" / "nodejs"
+    node_dir.mkdir(parents=True)
+    (node_dir / "node.exe").touch()
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    monkeypatch.setenv("PATH", str(tmp_path / "old-path"))
+
+    env = ocagy_cli._subprocess_env()
+
+    assert str(node_dir) in env["PATH"].split(os.pathsep)
+
+
 def test_ensure_opencode_installed_runs_installer_and_redetects_cli(monkeypatch):
     state = {"installed": False}
     logs = []

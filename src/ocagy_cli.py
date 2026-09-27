@@ -134,9 +134,11 @@ def _candidate_paths() -> Iterable[Path]:
         if raw:
             yield Path(raw).expanduser()
 
-    found = shutil.which("opencode") or shutil.which("opencode.exe") or shutil.which("opencode.cmd")
-    if found:
-        yield Path(found)
+    # npm's .cmd shim needs node.exe on PATH. Prefer a native binary when both
+    # are installed, including when PATH lists the shim first.
+    found_native = shutil.which("opencode.exe")
+    if found_native:
+        yield Path(found_native)
 
     home = Path.home()
     local_appdata = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
@@ -150,9 +152,12 @@ def _candidate_paths() -> Iterable[Path]:
     yield home / "scoop" / "apps" / "opencode" / "current" / "opencode.exe"
     yield local_appdata / "Programs" / "opencode" / "opencode.exe"
     yield local_appdata / "opencode" / "opencode.exe"
-    yield appdata / "npm" / "opencode.cmd"
     yield appdata / "npm" / "node_modules" / "opencode-ai" / "node_modules" / "opencode-windows-x64" / "bin" / "opencode.exe"
     yield Path("C:/ProgramData/chocolatey/bin/opencode.exe")
+    found = shutil.which("opencode") or shutil.which("opencode.cmd")
+    if found:
+        yield Path(found)
+    yield appdata / "npm" / "opencode.cmd"
 
 
 def find_executable(explicit_path: Optional[str] = None) -> str:
@@ -776,6 +781,18 @@ def _creation_flags(*, visible: bool = False) -> int:
 
 def _subprocess_env(config_dir: Optional[Path] = None) -> Dict[str, str]:
     env = dict(os.environ)
+    if os.name == "nt":
+        # winget may install Node.js while Glossarion is already running. Its
+        # process PATH is then stale, so npm's opencode.cmd cannot find node.exe.
+        home = Path.home()
+        local_appdata = Path(env.get("LOCALAPPDATA", home / "AppData" / "Local"))
+        program_files = Path(env.get("ProgramFiles", "C:/Program Files"))
+        node_dirs = (program_files / "nodejs", local_appdata / "Programs" / "nodejs")
+        path_entries = env.get("PATH", "").split(os.pathsep)
+        existing = {entry.rstrip("\\/").casefold() for entry in path_entries}
+        additions = [str(folder) for folder in node_dirs if (folder / "node.exe").is_file() and str(folder).casefold() not in existing]
+        if additions:
+            env["PATH"] = os.pathsep.join([*additions, env.get("PATH", "")])
     env.setdefault("NO_COLOR", "1")
     env.setdefault("TERM", "dumb")
     env.setdefault("PYTHONUTF8", "1")
