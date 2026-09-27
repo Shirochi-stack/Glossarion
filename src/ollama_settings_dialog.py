@@ -14,9 +14,9 @@ import threading
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Qt, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QScrollArea,
-    QTabWidget, QVBoxLayout, QWidget,
+    QSlider, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 
@@ -98,6 +98,96 @@ COMMON_OPTION_KEYS = {
     name for _group, rows in OPTION_GROUPS for name, _label, _kind in rows
 }
 RESERVED_REQUEST_KEYS = {"model", "messages", "stream", "options", "think", "keep_alive", "format"}
+
+# The slider covers the useful everyday range; the adjacent number field also
+# accepts values beyond it, preserving custom settings from older versions.
+SLIDER_OPTIONS = {
+    "temperature": (0.0, 2.0, 0.01, 0.8),
+    "top_p": (0.0, 1.0, 0.01, 0.9),
+    "min_p": (0.0, 1.0, 0.01, 0.0),
+    "typical_p": (0.0, 1.0, 0.01, 1.0),
+    "tfs_z": (0.0, 2.0, 0.01, 1.0),
+    "repeat_penalty": (0.0, 2.0, 0.01, 1.1),
+    "presence_penalty": (-2.0, 2.0, 0.01, 0.0),
+    "frequency_penalty": (-2.0, 2.0, 0.01, 0.0),
+    "mirostat_tau": (0.0, 10.0, 0.1, 5.0),
+    "mirostat_eta": (0.0, 1.0, 0.01, 0.1),
+}
+
+
+class _OptionEditor(QWidget):
+    """Ollama option with an explicit model-default state."""
+
+    def __init__(self, key: str, kind: str, saved=None, parent=None):
+        super().__init__(parent)
+        self.kind = kind
+        self.key = key
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        self.default = QCheckBox("Model default")
+        self.default.setChecked(saved is None)
+        self.default.setMinimumWidth(112)
+        row.addWidget(self.default)
+
+        if kind == "bool" or key == "mirostat":
+            self.control = QComboBox()
+            choices = ("False", "True") if kind == "bool" else ("Off", "Mirostat 1", "Mirostat 2")
+            self.control.addItems(choices)
+            if saved is not None:
+                self.control.setCurrentIndex(int(saved))
+            row.addWidget(self.control, 1)
+        elif key in SLIDER_OPTIONS:
+            low, high, step, suggested = SLIDER_OPTIONS[key]
+            self.slider = QSlider(Qt.Horizontal)
+            self.slider.setRange(0, round((high - low) / step))
+            self.control = QDoubleSpinBox()
+            self.control.setDecimals(2 if step < 0.1 else 1)
+            self.control.setSingleStep(step)
+            self.control.setRange(-1000000, 1000000)
+            self.control.setValue(float(saved) if saved is not None else suggested)
+            self.control.setMinimumWidth(104)
+            self.slider.setValue(max(0, min(self.slider.maximum(), round((self.control.value() - low) / step))))
+            self.slider.valueChanged.connect(lambda value: self.control.setValue(low + value * step))
+            def sync_slider(value):
+                self.slider.blockSignals(True)
+                self.slider.setValue(max(0, min(self.slider.maximum(), round((value - low) / step))))
+                self.slider.blockSignals(False)
+            self.control.valueChanged.connect(sync_slider)
+            row.addWidget(self.slider, 1)
+            row.addWidget(self.control)
+        elif kind == "int":
+            self.control = QSpinBox()
+            self.control.setRange(-2147483647, 2147483647)
+            self.control.setValue(int(saved) if saved is not None else 0)
+            row.addWidget(self.control, 1)
+        else:
+            self.control = QLineEdit()
+            if saved is not None:
+                self.control.setText(json.dumps(saved) if kind == "array" else str(saved))
+            self.control.setPlaceholderText("Enter JSON array" if kind == "array" else "Enter value")
+            row.addWidget(self.control, 1)
+        self.default.toggled.connect(lambda checked: self.control.setEnabled(not checked))
+        if hasattr(self, "slider"):
+            self.default.toggled.connect(lambda checked: self.slider.setEnabled(not checked))
+            self.slider.setEnabled(not self.default.isChecked())
+        self.control.setEnabled(not self.default.isChecked())
+
+    def text(self) -> str:
+        if self.default.isChecked():
+            return ""
+        if self.kind == "bool":
+            return "true" if self.control.currentIndex() else "false"
+        if self.key == "mirostat":
+            return str(self.control.currentIndex())
+        if isinstance(self.control, QLineEdit):
+            return self.control.text()
+        return str(self.control.value())
+
+    def setPlaceholderText(self, text: str) -> None:
+        self.default.setToolTip(text)
+        if isinstance(self.control, QLineEdit):
+            self.control.setPlaceholderText(text)
 
 
 def parse_option(text: str, kind: str):
@@ -482,6 +572,25 @@ class OllamaSettingsDialog(QDialog):
         layout.addWidget(self.progress_label)
 
         self.tabs = QTabWidget()
+        self.tabs.setObjectName("ollama_settings_tabs")
+        self.tabs.setStyleSheet("""
+            QTabWidget#ollama_settings_tabs::pane { border: 1px solid #485466; border-radius: 5px; background: #202124; }
+            QTabWidget#ollama_settings_tabs QTabBar::tab {
+                background: #292b30; color: #c6ccd5; border: 1px solid #485466;
+                border-bottom: 0; padding: 10px 17px; margin-right: 3px;
+                border-top-left-radius: 5px; border-top-right-radius: 5px;
+            }
+            QTabWidget#ollama_settings_tabs QTabBar::tab:selected {
+                background: #334e69; color: #ffffff; border: 2px solid #69b8f4;
+                border-bottom: 0; font-weight: bold;
+            }
+            QTabWidget#ollama_settings_tabs QTabBar::tab:hover:!selected:!disabled {
+                background: #39414b; color: #ffffff;
+            }
+            QTabWidget#ollama_settings_tabs QTabBar::tab:disabled {
+                background: #202124; color: #777d85; border-color: #363a40;
+            }
+        """)
         layout.addWidget(self.tabs, 1)
         self.option_fields = {}
         options = self._model_settings.get("options")
@@ -491,11 +600,8 @@ class OllamaSettingsDialog(QDialog):
             form = QFormLayout(tab)
             form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
             for key, label, kind in rows:
-                field = QLineEdit()
+                field = _OptionEditor(key, kind, options.get(key))
                 field.setObjectName(f"ollama_option_{key}")
-                field.setPlaceholderText("Use model default" if kind != "bool" else "Default, true, or false")
-                if key in options:
-                    field.setText(json.dumps(options[key]) if kind == "array" else str(options[key]).lower() if kind == "bool" else str(options[key]))
                 if key == "draft_num_predict":
                     field.setToolTip("Multi-token prediction draft length. Availability depends on the installed Ollama version and model.")
                 form.addRow(label + ":", field)
@@ -511,20 +617,27 @@ class OllamaSettingsDialog(QDialog):
         self.auto_update_checkbox = _styled_checkbox("Auto-update Ollama before use")
         self.auto_update_checkbox.setChecked(bool(self._settings.get("auto_update", True)))
         advanced_form.addRow(self.auto_update_checkbox)
-        self.think_field = QLineEdit()
-        self.think_field.setPlaceholderText("Default, true, false, or a model-supported level")
+        self.think_field = QComboBox()
+        self.think_field.setEditable(True)
+        self.think_field.addItems(["Model default", "True", "False", "low", "medium", "high"])
+        self.think_field.setToolTip("Choose a thinking mode, or enter a model-supported level.")
         think = self._model_settings.get("think")
         if think is not None:
-            self.think_field.setText(str(think).lower() if isinstance(think, bool) else str(think))
+            self.think_field.setCurrentText(str(think).lower() if isinstance(think, bool) else str(think))
         advanced_form.addRow("Thinking:", self.think_field)
-        self.keep_alive_field = QLineEdit(str(self._model_settings.get("keep_alive", "")))
-        self.keep_alive_field.setPlaceholderText("Default, 5m, 0, …")
+        self.keep_alive_field = QComboBox()
+        self.keep_alive_field.setEditable(True)
+        self.keep_alive_field.addItems(["Model default", "0", "5m", "30m", "1h", "-1"])
+        if self._model_settings.get("keep_alive") is not None:
+            self.keep_alive_field.setCurrentText(str(self._model_settings["keep_alive"]))
         advanced_form.addRow("Keep model loaded:", self.keep_alive_field)
-        self.format_field = QLineEdit()
+        self.format_field = QComboBox()
+        self.format_field.setEditable(True)
+        self.format_field.addItems(["Model default", "json"])
         saved_format = self._model_settings.get("format")
         if saved_format is not None:
-            self.format_field.setText(json.dumps(saved_format) if isinstance(saved_format, dict) else str(saved_format))
-        self.format_field.setPlaceholderText("Default, json, or a JSON schema object")
+            self.format_field.setCurrentText(json.dumps(saved_format) if isinstance(saved_format, dict) else str(saved_format))
+        self.format_field.setToolTip("Choose JSON or enter a JSON schema object.")
         advanced_form.addRow("Response format:", self.format_field)
         advanced_layout.addLayout(advanced_form)
 
@@ -752,9 +865,9 @@ class OllamaSettingsDialog(QDialog):
         result["options"] = options
         result["request"] = request
 
-        think = self.think_field.text().strip()
+        think = self.think_field.currentText().strip()
         if think:
-            if think.casefold() == "default":
+            if think.casefold() in ("default", "model default"):
                 result.pop("think", None)
             elif think.casefold() in ("true", "false"):
                 result["think"] = think.casefold() == "true"
@@ -762,13 +875,13 @@ class OllamaSettingsDialog(QDialog):
                 result["think"] = think
         else:
             result.pop("think", None)
-        keep_alive = self.keep_alive_field.text().strip()
-        if keep_alive and keep_alive.casefold() != "default":
+        keep_alive = self.keep_alive_field.currentText().strip()
+        if keep_alive and keep_alive.casefold() not in ("default", "model default"):
             result["keep_alive"] = keep_alive
         else:
             result.pop("keep_alive", None)
-        response_format = self.format_field.text().strip()
-        if response_format and response_format.casefold() != "default":
+        response_format = self.format_field.currentText().strip()
+        if response_format and response_format.casefold() not in ("default", "model default"):
             if response_format.startswith("{"):
                 result["format"] = _json_object(response_format, "Response format")
             elif response_format == "json":

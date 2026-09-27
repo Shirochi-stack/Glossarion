@@ -254,6 +254,43 @@ def test_ollamapull_unified_handler_returns_normalized_response(monkeypatch):
     assert response.usage['total_tokens'] == 3
 
 
+def test_ollamapull_graceful_stop_preserves_active_chat_but_hard_stop_cancels(monkeypatch):
+    import ollamapull
+
+    monkeypatch.setenv('GRACEFUL_STOP', '0')
+    monkeypatch.setenv('GRACEFUL_STOP_COMPLETED', '0')
+    monkeypatch.delenv('TRANSLATION_CANCELLED', raising=False)
+    monkeypatch.setattr(ollamapull, 'ensure_ready', lambda _model, **_kwargs: None)
+    client = bare_client('ollamapull/gemma3')
+    client.client_type = 'ollamapull'
+    client._is_stop_requested = lambda: True  # GUI callback after Stop is clicked
+
+    def fake_chat(_model, _messages, **kwargs):
+        monkeypatch.setenv('GRACEFUL_STOP', '1')
+        assert kwargs['should_stop']() is False
+        return {'content': 'done', 'finish_reason': 'stop', 'usage': {}, 'raw_response': {}}
+
+    # A stop before chat should still prevent starting a new request.
+    monkeypatch.setattr(ollamapull, 'chat', fake_chat)
+    monkeypatch.setenv('GRACEFUL_STOP', '1')
+    with pytest.raises(Exception, match='stopped before chat'):
+        client._send_ollamapull([], None, None, None)
+
+    monkeypatch.setenv('GRACEFUL_STOP', '0')
+    client._is_stop_requested = lambda: False
+    assert client._send_ollamapull([], None, None, None).content == 'done'
+
+    def hard_stopped_chat(_model, _messages, **kwargs):
+        monkeypatch.setenv('TRANSLATION_CANCELLED', '1')
+        assert kwargs['should_stop']() is True
+        raise ollamapull.OllamaPullCancelled('hard stop')
+
+    monkeypatch.setenv('GRACEFUL_STOP', '0')
+    monkeypatch.setattr(ollamapull, 'chat', hard_stopped_chat)
+    with pytest.raises(Exception, match='hard stop'):
+        client._send_ollamapull([], None, None, None)
+
+
 def test_ollamapull_stagger_log_does_not_claim_chat_started(monkeypatch):
     monkeypatch.setenv('SEND_INTERVAL_SECONDS', '0.01')
     monkeypatch.setattr(UnifiedClient, '_last_api_call_start_by_scope', {}, raising=False)

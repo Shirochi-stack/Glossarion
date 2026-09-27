@@ -27944,8 +27944,17 @@ class UnifiedClient:
         try:
             native_model_name(model)  # Give an actionable error for an empty prefix.
 
-            def stopped() -> bool:
-                if self._is_stop_requested() or os.environ.get('TRANSLATION_CANCELLED') == '1':
+            def hard_stopped() -> bool:
+                if os.environ.get('TRANSLATION_CANCELLED') == '1':
+                    return True
+                # The GUI's stop callback becomes true for both stop modes.
+                # During a graceful stop it must not close an active chat.
+                if os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                    return False
+                return self._is_stop_requested()
+
+            def stopped_before_chat() -> bool:
+                if hard_stopped():
                     return True
                 return (
                     os.environ.get('GRACEFUL_STOP') == '1'
@@ -27969,8 +27978,10 @@ class UnifiedClient:
             ensure_ready(
                 model,
                 progress=lambda message: logger.info("Ollama: %s", message),
-                should_stop=stopped,
+                should_stop=stopped_before_chat,
             )
+            if stopped_before_chat():
+                raise OllamaPullCancelled("Ollama request stopped before chat began")
             use_streaming = self._streaming_enabled()
 
             def register(response):
@@ -27987,7 +27998,9 @@ class UnifiedClient:
                 log_stream=self._stream_logging_enabled(use_streaming),
                 log_thinking=self._stream_thinking_logging_enabled(),
                 progress=lambda message: logger.info("Ollama: %s", message),
-                should_stop=stopped,
+                # Once /api/chat starts, graceful stop must allow its response
+                # to finish; only a hard stop may close the active stream.
+                should_stop=hard_stopped,
                 on_response_open=register,
                 on_response_close=unregister,
             )
