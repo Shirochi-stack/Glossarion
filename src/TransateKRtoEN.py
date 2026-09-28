@@ -28640,11 +28640,14 @@ def main(log_callback=None, stop_callback=None):
                         if check_stop():
                             break
                         _glossary_dir, _json_path, _csv_path, progress_path = image_translator._vision_ocr_glossary_paths()
-                        qa_failures = retryable_glossary_qa_failures(progress_path)
+                        qa_failures = retryable_glossary_qa_failures(
+                            progress_path,
+                            skip_api_errors=os.getenv('GLOSSARY_SKIP_API_ERROR_RETRIES') == '1',
+                        )
                         if not qa_failures:
                             break
                         print(
-                            f'🔄 Retrying {len(qa_failures)} Vision glossary QA-failed chapter(s) '
+                            f'🔄 Retrying {len(qa_failures)} failed Vision glossary chapter(s) '
                             f'(attempt {attempt}/{max_attempts})...'
                         )
                         run_vision_glossary_prepass(chapters, image_translator, check_stop)

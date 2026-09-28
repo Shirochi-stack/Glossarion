@@ -19,12 +19,8 @@ def progress_path_for_source(source_path, root):
     return next((path for path in candidates if os.path.isfile(path)), None)
 
 
-def retryable_glossary_qa_failures(progress_path):
-    """Return failed chapter indices whose saved QA result merits a new request.
-
-    Transport/API failures have already used UnifiedClient's request retries.
-    Those are deliberately excluded to avoid multiplying the retry budget.
-    """
+def retryable_glossary_qa_failures(progress_path, *, skip_api_errors=False):
+    """Return failed chapter indices; optionally omit API_ERROR-only failures."""
     if not progress_path or not os.path.isfile(progress_path):
         return set()
     try:
@@ -66,7 +62,9 @@ def retryable_glossary_qa_failures(progress_path):
         if isinstance(issues, str):
             issues = [issues]
         normalized = {str(issue).strip().upper() for issue in (issues or [])}
-        if (normalized and normalized != {"API_ERROR"}) or (not normalized and chapter_index in qa_failed):
+        if (normalized or chapter_index in qa_failed) and not (
+            skip_api_errors and normalized == {"API_ERROR"}
+        ):
             retryable.add(chapter_index)
     return retryable
 

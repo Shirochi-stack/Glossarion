@@ -32558,6 +32558,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                     or self.config.get('output_directory')
                                     or os.getcwd()
                                 )
+                                skip_api_errors = self._live_bool_setting(
+                                    'glossary_skip_api_error_retries_checkbox',
+                                    'glossary_skip_api_error_retries_var',
+                                    'glossary_skip_api_error_retries',
+                                    False,
+                                )
                                 max_attempts = self._resolve_max_retries()
                                 for attempt in range(2, max_attempts + 1):
                                     if self.stop_requested or getattr(self, '_glossary_stop_was_requested', False):
@@ -32571,11 +32577,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                             else glossary_root
                                         )
                                         progress_path = progress_path_for_source(source, source_root)
-                                        qa_failure_count += len(retryable_glossary_qa_failures(progress_path))
+                                        qa_failure_count += len(retryable_glossary_qa_failures(
+                                            progress_path, skip_api_errors=skip_api_errors,
+                                        ))
                                     if not qa_failure_count:
                                         break
                                     self.append_log(
-                                        f"🔄 Retrying {qa_failure_count} glossary QA-failed chapter(s) "
+                                        f"🔄 Retrying {qa_failure_count} failed glossary chapter(s) "
                                         f"(attempt {attempt}/{max_attempts})..."
                                     )
                                     self.run_glossary_extraction_direct(
@@ -36236,6 +36244,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 'glossary_require_complete_checkbox',
                 'glossary_require_complete_before_translation_var',
                 'glossary_require_complete_before_translation',
+                False,
+            ) else '0',
+            'GLOSSARY_SKIP_API_ERROR_RETRIES': '1' if self._live_bool_setting(
+                'glossary_skip_api_error_retries_checkbox',
+                'glossary_skip_api_error_retries_var',
+                'glossary_skip_api_error_retries',
                 False,
             ) else '0',
             'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL': '1' if getattr(self, 'never_consider_in_between_files_as_special_var', self.config.get('never_consider_in_between_files_as_special', True)) else '0',

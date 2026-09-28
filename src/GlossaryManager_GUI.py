@@ -2607,6 +2607,10 @@ class GlossaryManagerMixin:
                     require_complete = self.glossary_require_complete_checkbox.isChecked()
                     self.config['glossary_require_complete_before_translation'] = bool(require_complete)
                     self.glossary_require_complete_before_translation_var = bool(require_complete)
+                if hasattr(self, 'glossary_skip_api_error_retries_checkbox'):
+                    skip_api_errors = self.glossary_skip_api_error_retries_checkbox.isChecked()
+                    self.config['glossary_skip_api_error_retries'] = bool(skip_api_errors)
+                    self.glossary_skip_api_error_retries_var = bool(skip_api_errors)
                 
                 # Chapter split toggle (manual glossary)
                 if hasattr(self, 'glossary_enable_chapter_split_checkbox'):
@@ -6568,6 +6572,31 @@ Do not stop after the glossary."""
             )
         )
         layout.addWidget(self.glossary_require_complete_checkbox)
+
+        self.glossary_skip_api_error_retries_checkbox = self._create_styled_checkbox(
+            "Skip extra glossary retries for API_ERROR"
+        )
+        self.glossary_skip_api_error_retries_checkbox.setChecked(bool(
+            self.config.get('glossary_skip_api_error_retries', False)
+        ))
+        self.glossary_skip_api_error_retries_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When 100% glossary progress is required, do not rerun chapters saved with "
+            "only API_ERROR after the API client's normal request retries finish. "
+            "Translation will remain blocked while those chapters are incomplete.\n"
+            "Default OFF: retry those glossary chapters during this run."
+        ))
+        self.glossary_skip_api_error_retries_checkbox.toggled.connect(
+            lambda checked: self.config.__setitem__(
+                'glossary_skip_api_error_retries', bool(checked)
+            )
+        )
+        self.glossary_skip_api_error_retries_checkbox.setEnabled(
+            self.glossary_require_complete_checkbox.isChecked()
+        )
+        self.glossary_require_complete_checkbox.toggled.connect(
+            self.glossary_skip_api_error_retries_checkbox.setEnabled
+        )
+        layout.addWidget(self.glossary_skip_api_error_retries_checkbox)
 
         # Append glossary toggle
         append_widget = QWidget()
