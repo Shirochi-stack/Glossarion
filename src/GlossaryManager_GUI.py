@@ -6562,9 +6562,10 @@ Do not stop after the glossary."""
             self.config.get('glossary_require_complete_before_translation', False)
         ))
         self.glossary_require_complete_checkbox.setToolTip(_wrapped_tooltip_html(
-            "When automatic glossary generation is enabled, stop translation if "
-            "extraction, the optional Minimal pass, or enabled refinement is incomplete.\n"
-            "Default OFF."
+            "Start translation only after automatic glossary extraction and any enabled "
+            "Minimal pass and refinement are complete. If glossary work remains incomplete "
+            "after retries, translation is blocked.\n"
+            "Default OFF: translation may start with an incomplete glossary."
         ))
         self.glossary_require_complete_checkbox.toggled.connect(
             lambda checked: self.config.__setitem__(
@@ -6574,27 +6575,20 @@ Do not stop after the glossary."""
         layout.addWidget(self.glossary_require_complete_checkbox)
 
         self.glossary_skip_api_error_retries_checkbox = self._create_styled_checkbox(
-            "Skip extra glossary retries for API_ERROR"
+            "Skip glossary retries for API_ERROR"
         )
         self.glossary_skip_api_error_retries_checkbox.setChecked(bool(
             self.config.get('glossary_skip_api_error_retries', False)
         ))
         self.glossary_skip_api_error_retries_checkbox.setToolTip(_wrapped_tooltip_html(
-            "When 100% glossary progress is required, do not rerun chapters saved with "
-            "only API_ERROR after the API client's normal request retries finish. "
-            "Translation will remain blocked while those chapters are incomplete.\n"
-            "Default OFF: retry those glossary chapters during this run."
+            "When enabled, do not rerun glossary chapters whose only saved failure is API_ERROR. "
+            "Other failed chapters still retry. The API client still retries each request.\n"
+            "Default off: API_ERROR chapters also retry during this run."
         ))
         self.glossary_skip_api_error_retries_checkbox.toggled.connect(
             lambda checked: self.config.__setitem__(
                 'glossary_skip_api_error_retries', bool(checked)
             )
-        )
-        self.glossary_skip_api_error_retries_checkbox.setEnabled(
-            self.glossary_require_complete_checkbox.isChecked()
-        )
-        self.glossary_require_complete_checkbox.toggled.connect(
-            self.glossary_skip_api_error_retries_checkbox.setEnabled
         )
         layout.addWidget(self.glossary_skip_api_error_retries_checkbox)
 

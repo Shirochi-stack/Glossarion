@@ -28626,10 +28626,7 @@ def main(log_callback=None, stop_callback=None):
             else:
                 os.environ.pop("VISION_GLOSSARY_PREPASS_DONE", None)
                 run_vision_glossary_prepass(chapters, image_translator, check_stop)
-                if (
-                    os.getenv('GLOSSARY_REQUIRE_COMPLETE_BEFORE_TRANSLATION') == '1'
-                    and (os.getenv('AUTO_GLOSSARY_MODE') or '').strip().lower() in ('balanced', 'full')
-                ):
+                if (os.getenv('AUTO_GLOSSARY_MODE') or '').strip().lower() in ('balanced', 'full'):
                     from glossary_translation_gate import retryable_glossary_qa_failures
 
                     try:

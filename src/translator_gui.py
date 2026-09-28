@@ -32542,53 +32542,47 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                 force_balanced_request_merging=(auto_glossary_mode == 'balanced' and has_text_files)
                             )
 
-                            if self._live_bool_setting(
-                                'glossary_require_complete_checkbox',
-                                'glossary_require_complete_before_translation_var',
-                                'glossary_require_complete_before_translation',
-                                False,
-                            ):
-                                from glossary_translation_gate import (
-                                    progress_path_for_source,
-                                    retryable_glossary_qa_failures,
-                                )
+                            from glossary_translation_gate import (
+                                progress_path_for_source,
+                                retryable_glossary_qa_failures,
+                            )
 
-                                glossary_root = os.path.abspath(
-                                    os.environ.get('OUTPUT_DIRECTORY')
-                                    or self.config.get('output_directory')
-                                    or os.getcwd()
-                                )
-                                skip_api_errors = self._live_bool_setting(
-                                    'glossary_skip_api_error_retries_checkbox',
-                                    'glossary_skip_api_error_retries_var',
-                                    'glossary_skip_api_error_retries',
-                                    False,
-                                )
-                                max_attempts = self._resolve_max_retries()
-                                for attempt in range(2, max_attempts + 1):
-                                    if self.stop_requested or getattr(self, '_glossary_stop_was_requested', False):
-                                        break
-                                    qa_failure_count = 0
-                                    for source in self.selected_files:
-                                        source_root = (
-                                            os.path.dirname(os.path.abspath(source))
-                                            if sys.platform == 'darwin'
-                                            and not (os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory'))
-                                            else glossary_root
-                                        )
-                                        progress_path = progress_path_for_source(source, source_root)
-                                        qa_failure_count += len(retryable_glossary_qa_failures(
-                                            progress_path, skip_api_errors=skip_api_errors,
-                                        ))
-                                    if not qa_failure_count:
-                                        break
-                                    self.append_log(
-                                        f"🔄 Retrying {qa_failure_count} failed glossary chapter(s) "
-                                        f"(attempt {attempt}/{max_attempts})..."
+                            glossary_root = os.path.abspath(
+                                os.environ.get('OUTPUT_DIRECTORY')
+                                or self.config.get('output_directory')
+                                or os.getcwd()
+                            )
+                            skip_api_errors = self._live_bool_setting(
+                                'glossary_skip_api_error_retries_checkbox',
+                                'glossary_skip_api_error_retries_var',
+                                'glossary_skip_api_error_retries',
+                                False,
+                            )
+                            max_attempts = self._resolve_max_retries()
+                            for attempt in range(2, max_attempts + 1):
+                                if self.stop_requested or getattr(self, '_glossary_stop_was_requested', False):
+                                    break
+                                failed_count = 0
+                                for source in self.selected_files:
+                                    source_root = (
+                                        os.path.dirname(os.path.abspath(source))
+                                        if sys.platform == 'darwin'
+                                        and not (os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory'))
+                                        else glossary_root
                                     )
-                                    self.run_glossary_extraction_direct(
-                                        force_balanced_request_merging=(auto_glossary_mode == 'balanced' and has_text_files)
-                                    )
+                                    progress_path = progress_path_for_source(source, source_root)
+                                    failed_count += len(retryable_glossary_qa_failures(
+                                        progress_path, skip_api_errors=skip_api_errors,
+                                    ))
+                                if not failed_count:
+                                    break
+                                self.append_log(
+                                    f"🔄 Retrying {failed_count} failed glossary chapter(s) "
+                                    f"(attempt {attempt}/{max_attempts})..."
+                                )
+                                self.run_glossary_extraction_direct(
+                                    force_balanced_request_merging=(auto_glossary_mode == 'balanced' and has_text_files)
+                                )
                             
                             # Check saved stop flag (run_glossary_extraction_direct resets self.stop_requested in finally)
                             if self.stop_requested or getattr(self, '_glossary_stop_was_requested', False):
