@@ -21,6 +21,75 @@ def entry(entry_type, raw_name=None):
     }
 
 
+@pytest.mark.parametrize("bad_response", [("not json", "stop", None),
+                                            ("[]", "stop", None),
+                                            (json.dumps([entry("terms")]), "length", None)])
+def test_completion_gate_retries_invalid_refinement_output(resume, monkeypatch, bad_response):
+    monkeypatch.setenv("GLOSSARY_REQUIRE_COMPLETE_BEFORE_TRANSLATION", "1")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    attempts = []
+
+    def send(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) < 3:
+            return bad_response
+        return json.dumps([entry("terms")]), "stop", None
+
+    result = resume([entry("terms")], selected_types=["terms"], send_override=send)
+
+    assert len(attempts) == 3
+    assert result
+    _, row = refinement._find_type_refinement_progress(resume.progress(), "terms")
+    assert row["status"] == "completed"
+
+
+def test_completion_gate_stops_after_refinement_quality_retry_limit(resume, monkeypatch):
+    monkeypatch.setenv("GLOSSARY_REQUIRE_COMPLETE_BEFORE_TRANSLATION", "1")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    attempts = []
+
+    def send(*args, **kwargs):
+        attempts.append(1)
+        return "[]", "stop", None
+
+    resume([entry("terms")], selected_types=["terms"], send_override=send)
+
+    assert len(attempts) == 3
+    _, row = refinement._find_type_refinement_progress(resume.progress(), "terms")
+    assert row["status"] == "failed"
+    assert row["error"] == "empty_or_invalid_response"
+
+
+def test_refinement_quality_retry_is_off_without_completion_gate(resume, monkeypatch):
+    monkeypatch.setenv("GLOSSARY_REQUIRE_COMPLETE_BEFORE_TRANSLATION", "0")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    attempts = []
+
+    def send(*args, **kwargs):
+        attempts.append(1)
+        return "[]", "stop", None
+
+    resume([entry("terms")], selected_types=["terms"], send_override=send)
+
+    assert len(attempts) == 1
+
+
+def test_completion_gate_does_not_repeat_exhausted_api_error(resume, monkeypatch):
+    monkeypatch.setenv("GLOSSARY_REQUIRE_COMPLETE_BEFORE_TRANSLATION", "1")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    attempts = []
+
+    def send(*args, **kwargs):
+        attempts.append(1)
+        raise RuntimeError("API retries exhausted")
+
+    resume([entry("terms")], selected_types=["terms"], send_override=send)
+
+    assert len(attempts) == 1
+    _, row = refinement._find_type_refinement_progress(resume.progress(), "terms")
+    assert row["status"] == "failed"
+
+
 def test_in_progress_uses_dispatched_pool_model_before_completion(resume, monkeypatch):
     import threading
     selected = threading.local()

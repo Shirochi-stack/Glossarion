@@ -32541,6 +32541,46 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             self.run_glossary_extraction_direct(
                                 force_balanced_request_merging=(auto_glossary_mode == 'balanced' and has_text_files)
                             )
+
+                            if self._live_bool_setting(
+                                'glossary_require_complete_checkbox',
+                                'glossary_require_complete_before_translation_var',
+                                'glossary_require_complete_before_translation',
+                                False,
+                            ):
+                                from glossary_translation_gate import (
+                                    progress_path_for_source,
+                                    retryable_glossary_qa_failures,
+                                )
+
+                                glossary_root = os.path.abspath(
+                                    os.environ.get('OUTPUT_DIRECTORY')
+                                    or self.config.get('output_directory')
+                                    or os.getcwd()
+                                )
+                                max_attempts = self._resolve_max_retries()
+                                for attempt in range(2, max_attempts + 1):
+                                    if self.stop_requested or getattr(self, '_glossary_stop_was_requested', False):
+                                        break
+                                    qa_failure_count = 0
+                                    for source in self.selected_files:
+                                        source_root = (
+                                            os.path.dirname(os.path.abspath(source))
+                                            if sys.platform == 'darwin'
+                                            and not (os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory'))
+                                            else glossary_root
+                                        )
+                                        progress_path = progress_path_for_source(source, source_root)
+                                        qa_failure_count += len(retryable_glossary_qa_failures(progress_path))
+                                    if not qa_failure_count:
+                                        break
+                                    self.append_log(
+                                        f"🔄 Retrying {qa_failure_count} glossary QA-failed chapter(s) "
+                                        f"(attempt {attempt}/{max_attempts})..."
+                                    )
+                                    self.run_glossary_extraction_direct(
+                                        force_balanced_request_merging=(auto_glossary_mode == 'balanced' and has_text_files)
+                                    )
                             
                             # Check saved stop flag (run_glossary_extraction_direct resets self.stop_requested in finally)
                             if self.stop_requested or getattr(self, '_glossary_stop_was_requested', False):
@@ -32627,7 +32667,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         ready, reason = glossary_complete(
                             progress_path,
                             glossary_path,
-                            self.config,
+                            dict(
+                                self.config,
+                                custom_entry_types=(
+                                    getattr(self, 'custom_entry_types', None)
+                                    or self.config.get('custom_entry_types', {})
+                                ),
+                            ),
                             require_minimal_pass=self._glossary_add_minimal_pass_env_value() == '1',
                             is_epub=str(source).lower().endswith('.epub'),
                         )
@@ -36680,6 +36726,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if not str(getattr(self, 'model_var', '') or '').strip():
                 self.append_log("❌ Glossary extraction stopped: no model is selected.")
                 return False
+
+            # Glossary extraction runs before the translation environment is
+            # exported, so pass the live API retry settings here too.
+            os.environ['MAX_RETRIES'] = str(self._resolve_max_retries())
+            os.environ['INDEFINITE_RATE_LIMIT_RETRY'] = '1' if getattr(
+                self, 'indefinite_rate_limit_retry_var',
+                self.config.get('indefinite_rate_limit_retry', False),
+            ) else '0'
+            os.environ['GLOSSARY_REQUIRE_COMPLETE_BEFORE_TRANSLATION'] = '1' if self._live_bool_setting(
+                'glossary_require_complete_checkbox',
+                'glossary_require_complete_before_translation_var',
+                'glossary_require_complete_before_translation',
+                False,
+            ) else '0'
 
             # Re-attach GUI logging handlers FIRST to reclaim logs from standalone header translation
             try:

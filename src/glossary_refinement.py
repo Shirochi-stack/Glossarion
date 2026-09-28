@@ -1612,79 +1612,91 @@ def refine_glossary_entries(
                         progress_file, type_keys[selected_type], model_update,
                         atomic_replace_fn=atomic_replace_fn,
                     )
-            try:
-                raw, finish_reason, _raw_obj = _call_send(
-                    send_fn,
-                    msgs,
-                    client,
-                    temp,
-                    mtoks,
-                    check_stop,
-                    chunk_timeout,
-                    chunk_idx,
-                    total_chunks,
-                    context_label,
-                    before_send_callback=record_dispatched_model,
-                )
-            except Exception as e:
-                cancelled = (
-                    check_stop()
-                    or str(getattr(e, "error_type", "")).lower() == "cancelled"
-                    or any(marker in str(e).lower() for marker in (
-                        "stopped by user", "cancelled by user", "canceled by user",
-                    ))
-                )
-                return {
-                    "status": "stopped" if cancelled else "failed",
-                    "chunk_idx": chunk_idx,
-                    "total_chunks": total_chunks,
-                    "entry_type": chunk_entry_type,
-                    "error": str(e),
-                    "model_name": _actual_request_model_name(client),
-                    "request_context": _actual_request_key_context(client),
-                }
+            # Transport errors already use UnifiedClient's API retry budget.
+            # With the completion gate enabled, retry invalid model output too.
+            max_quality_attempts = 1
+            if os.getenv("GLOSSARY_REQUIRE_COMPLETE_BEFORE_TRANSLATION") == "1":
+                try:
+                    max_quality_attempts = max(1, int(os.getenv("MAX_RETRIES", "7")))
+                except (TypeError, ValueError):
+                    max_quality_attempts = 7
+            for quality_attempt in range(1, max_quality_attempts + 1):
+                if check_stop():
+                    return {"status": "stopped", "chunk_idx": chunk_idx, "total_chunks": total_chunks, "entry_type": chunk_entry_type}
+                try:
+                    raw, finish_reason, _raw_obj = _call_send(
+                        send_fn,
+                        msgs,
+                        client,
+                        temp,
+                        mtoks,
+                        check_stop,
+                        chunk_timeout,
+                        chunk_idx,
+                        total_chunks,
+                        context_label,
+                        before_send_callback=record_dispatched_model,
+                    )
+                except Exception as e:
+                    cancelled = (
+                        check_stop()
+                        or str(getattr(e, "error_type", "")).lower() == "cancelled"
+                        or any(marker in str(e).lower() for marker in (
+                            "stopped by user", "cancelled by user", "canceled by user",
+                        ))
+                    )
+                    return {
+                        "status": "stopped" if cancelled else "failed",
+                        "chunk_idx": chunk_idx,
+                        "total_chunks": total_chunks,
+                        "entry_type": chunk_entry_type,
+                        "error": str(e),
+                        "model_name": _actual_request_model_name(client),
+                        "request_context": _actual_request_key_context(client),
+                    }
 
-            model_name = _actual_request_model_name(client)
-            request_context = _actual_request_key_context(client)
-            response_text = raw[0] if isinstance(raw, tuple) else raw
-            response_text = response_text if isinstance(response_text, str) else str(response_text or "")
-            parsed = parse_response_fn(response_text)
-            parsed = [
-                entry for entry in parsed
-                if isinstance(entry, dict) and _refinement_type_key(entry.get("type", "")) in allowed_types_lc
-            ]
-            parsed = _strip_inactive_description(parsed)
-            if not parsed:
+                model_name = _actual_request_model_name(client)
+                request_context = _actual_request_key_context(client)
+                response_text = raw[0] if isinstance(raw, tuple) else raw
+                response_text = response_text if isinstance(response_text, str) else str(response_text or "")
+                try:
+                    parsed = parse_response_fn(response_text)
+                    parsed = [
+                        entry for entry in parsed
+                        if isinstance(entry, dict) and _refinement_type_key(entry.get("type", "")) in allowed_types_lc
+                    ]
+                    parsed = _strip_inactive_description(parsed)
+                except (TypeError, ValueError):
+                    parsed = []
+                error = None
+                if not parsed:
+                    error = "empty_or_invalid_response"
+                elif _issue_from_finish_reason(finish_reason, None) == "TRUNCATED":
+                    error = "TRUNCATED"
+                if error is None:
+                    return {
+                        "status": "ok",
+                        "chunk_idx": chunk_idx,
+                        "total_chunks": total_chunks,
+                        "entry_type": chunk_entry_type,
+                        "entries": parsed,
+                        "model_name": model_name,
+                        "request_context": request_context,
+                    }
+                if check_stop():
+                    return {"status": "stopped", "chunk_idx": chunk_idx, "total_chunks": total_chunks, "entry_type": chunk_entry_type}
+                if quality_attempt < max_quality_attempts:
+                    log(f"⚠️ Refinement chunk {chunk_idx} returned {error}; retrying ({quality_attempt + 1}/{max_quality_attempts}).")
+                    continue
                 return {
-                    "status": "stopped" if check_stop() else "failed",
+                    "status": "failed",
                     "chunk_idx": chunk_idx,
                     "total_chunks": total_chunks,
                     "entry_type": chunk_entry_type,
-                    "error": "empty_or_invalid_response",
+                    "error": error,
                     "model_name": model_name,
                     "request_context": request_context,
                 }
-
-            if _issue_from_finish_reason(finish_reason, None) == "TRUNCATED":
-                return {
-                    "status": "stopped" if check_stop() else "failed",
-                    "chunk_idx": chunk_idx,
-                    "total_chunks": total_chunks,
-                    "entry_type": chunk_entry_type,
-                    "error": "TRUNCATED",
-                    "model_name": model_name,
-                    "request_context": request_context,
-                }
-
-            return {
-                "status": "ok",
-                "chunk_idx": chunk_idx,
-                "total_chunks": total_chunks,
-                "entry_type": chunk_entry_type,
-                "entries": parsed,
-                "model_name": model_name,
-                "request_context": request_context,
-            }
 
         def _result_model_update(result):
             model_update = dict(result.get("request_context") or {})

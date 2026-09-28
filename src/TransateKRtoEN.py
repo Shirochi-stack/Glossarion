@@ -27210,7 +27210,8 @@ def main(log_callback=None, stop_callback=None):
                         'AUTO_GLOSSARY_PROMPT', 'GLOSSARY_USE_SMART_FILTER', 'GLOSSARY_USE_LEGACY_CSV',
                         'GLOSSARY_PARALLEL_ENABLED', 'GLOSSARY_FILTER_MODE', 'GLOSSARY_SKIP_FREQUENCY_CHECK',
                         'GLOSSARY_SKIP_ALL_VALIDATION', 'MODEL', 'API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY',
-                        'MAX_OUTPUT_TOKENS', 'GLOSSARY_TEMPERATURE', 'MANUAL_GLOSSARY', 'ENABLE_AUTO_GLOSSARY',
+                        'MAX_OUTPUT_TOKENS', 'MAX_RETRIES', 'INDEFINITE_RATE_LIMIT_RETRY',
+                        'GLOSSARY_TEMPERATURE', 'MANUAL_GLOSSARY', 'ENABLE_AUTO_GLOSSARY',
                         'GLOSSARY_DUPLICATE_ALGORITHM', 'GLOSSARY_INCLUDE_GENDER_CONTEXT', 'GLOSSARY_CONTEXT_WINDOW',
                         'GLOSSARY_INCLUDE_BOOK_TITLE', 'EPUB_PATH',
                         'GLOSSARY_CUSTOM_ENTRY_TYPES', 'GLOSSARY_CUSTOM_FIELDS', 'GLOSSARY_ENTRY_TYPE_FILTER_MODE',
@@ -28625,6 +28626,28 @@ def main(log_callback=None, stop_callback=None):
             else:
                 os.environ.pop("VISION_GLOSSARY_PREPASS_DONE", None)
                 run_vision_glossary_prepass(chapters, image_translator, check_stop)
+                if (
+                    os.getenv('GLOSSARY_REQUIRE_COMPLETE_BEFORE_TRANSLATION') == '1'
+                    and (os.getenv('AUTO_GLOSSARY_MODE') or '').strip().lower() in ('balanced', 'full')
+                ):
+                    from glossary_translation_gate import retryable_glossary_qa_failures
+
+                    try:
+                        max_attempts = max(1, int(os.getenv('MAX_RETRIES', '7')))
+                    except (TypeError, ValueError):
+                        max_attempts = 7
+                    for attempt in range(2, max_attempts + 1):
+                        if check_stop():
+                            break
+                        _glossary_dir, _json_path, _csv_path, progress_path = image_translator._vision_ocr_glossary_paths()
+                        qa_failures = retryable_glossary_qa_failures(progress_path)
+                        if not qa_failures:
+                            break
+                        print(
+                            f'🔄 Retrying {len(qa_failures)} Vision glossary QA-failed chapter(s) '
+                            f'(attempt {attempt}/{max_attempts})...'
+                        )
+                        run_vision_glossary_prepass(chapters, image_translator, check_stop)
         except Exception as e:
             print(f"⚠️ Vision auto glossary prepass failed: {e}")
 
