@@ -15378,7 +15378,7 @@ Text to analyze:
                 # Normal GUI close leaves this to shutdown_utils.force_shutdown() after Qt has had
                 # a chance to drain WebEngine teardown events.
                 try:
-                    import psutil, sys
+                    import psutil
                     meipass = getattr(sys, "_MEIPASS", "").lower()
                     victims = []
                     for proc in psutil.process_iter(["name", "exe"]):
