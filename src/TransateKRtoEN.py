@@ -14406,7 +14406,8 @@ def apply_emergency_glossary_compliance(
     """Pre-edit source text by replacing glossary raw_names with translated_names.
     
     Reads EMERGENCY_GLOSSARY_COMPLIANCE, EMERGENCY_GLOSSARY_COMPLIANCE_MODE,
-    and EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES env vars to decide what to replace.
+    EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES, and
+    EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS settings to decide what to replace.
     Supports CSV, token-efficient (parsed), and JSON glossary formats.
     Returns the modified content (unchanged if feature is disabled or no glossary found).
     """
@@ -14430,6 +14431,12 @@ def apply_emergency_glossary_compliance(
     mode = str(_request_glossary_setting(
         settings, "EMERGENCY_GLOSSARY_COMPLIANCE_MODE", "characters"
     ) or "characters").lower()
+    try:
+        min_chars = max(0, min(10, int(_request_glossary_setting(
+            settings, "EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS", 3
+        ))))
+    except (TypeError, ValueError):
+        min_chars = 3
     custom_types = []
     if mode == "custom":
         try:
@@ -14605,7 +14612,7 @@ def apply_emergency_glossary_compliance(
         print("⚠️ Emergency Glossary Compliance: No entries parsed from glossary")
         return content
     
-    # Filter by mode
+    # Filter by mode and source-entry length before applying literal replacements.
     if mode == "characters":
         entries = [(t, r, tr) for t, r, tr in entries if t == "character"]
     elif mode == "custom" and custom_types:
@@ -14621,9 +14628,11 @@ def apply_emergency_glossary_compliance(
                 allowed.add(t_lower + "s")  # term -> terms
         entries = [(t, r, tr) for t, r, tr in entries if t in allowed]
     # mode == "all" keeps everything
+    if min_chars:
+        entries = [(t, r, tr) for t, r, tr in entries if len(r) >= min_chars]
     
     if not entries:
-        print(f"⚠️ Emergency Glossary Compliance: No entries match mode '{mode}'")
+        print(f"⚠️ Emergency Glossary Compliance: No entries match mode '{mode}' and minimum length {min_chars}")
         return content
     
     # Build replacement map sorted longest-first to avoid partial matches

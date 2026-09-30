@@ -9425,8 +9425,8 @@ def _create_processing_options_section(self, parent):
         "<b>Emergency Glossary Compliance</b><br><br>"
         "Pre-edits the source chapter text with the active glossary\u2019s "
         "raw \u2192 translated replacements <i>before</i> sending it to the "
-        "translation API, guaranteeing character / term / location names "
-        "come back consistent even when the model ignores the glossary "
+        "translation API, helping character / term / location names "
+        "stay consistent when the model ignores the glossary "
         "prompt.<br><br>"
         "<b>Mode</b> controls which entry types are substituted:<br>"
         "\u00b7 <b>Characters</b> \u2014 only character-name entries "
@@ -9438,6 +9438,8 @@ def _create_processing_options_section(self, parent):
         "\u00b7 <b>Custom</b> \u2014 pick specific entry types via the "
         "Configure\u2026 dialog (the list is populated from the glossary "
         "file currently attached to the selected EPUB).<br><br>"
+        "Minimum raw entry length skips shorter glossary keys. A value of "
+        "0 includes all lengths; it cannot resolve ambiguous longer matches.<br><br>"
         "Substitutions happen in-memory; the original source file on "
         "disk is never modified. Turn this OFF for prose where "
         "aggressive name-replacement would corrupt wordplay, "
@@ -9475,8 +9477,46 @@ def _create_processing_options_section(self, parent):
     glossary_compliance_configure_btn.setVisible(glossary_compliance_mode_combo.currentIndex() == 2)
     glossary_compliance_row_layout.addWidget(glossary_compliance_configure_btn)
     glossary_compliance_row_layout.addStretch()
-    
-    glossary_compliance_desc = QLabel("Pre-edits source text with glossary entries (raw→translated)<br>before sending to AI for guaranteed name compliance")
+
+    # A length floor avoids forcing short glossary keys into unrelated words.
+    glossary_min_chars_row = QWidget()
+    glossary_min_chars_layout = QHBoxLayout(glossary_min_chars_row)
+    glossary_min_chars_layout.setContentsMargins(20, 0, 0, 0)
+    glossary_min_chars_layout.setSpacing(8)
+    glossary_min_chars_layout.addWidget(QLabel("Minimum raw entry length:"))
+    from PySide6.QtWidgets import QSlider
+    glossary_min_chars_slider = QSlider(Qt.Horizontal)
+    glossary_min_chars_slider.setRange(0, 10)
+    glossary_min_chars_slider.setSingleStep(1)
+    glossary_min_chars_slider.setPageStep(1)
+    glossary_min_chars_slider.setTickPosition(QSlider.TicksBelow)
+    glossary_min_chars_slider.setTickInterval(1)
+    glossary_min_chars_slider.setFixedWidth(180)
+    glossary_min_chars_slider.wheelEvent = lambda event: event.ignore()
+    try:
+        current_min_chars = max(0, min(10, int(getattr(self, 'emergency_glossary_compliance_min_chars_var', 3))))
+    except (TypeError, ValueError):
+        current_min_chars = 3
+    self.emergency_glossary_compliance_min_chars_var = current_min_chars
+    glossary_min_chars_slider.setValue(current_min_chars)
+    glossary_min_chars_layout.addWidget(glossary_min_chars_slider)
+    glossary_min_chars_value = QLabel()
+    glossary_min_chars_value.setMinimumWidth(110)
+    glossary_min_chars_layout.addWidget(glossary_min_chars_value)
+    glossary_min_chars_layout.addStretch()
+
+    def _on_glossary_min_chars_change(value):
+        self.emergency_glossary_compliance_min_chars_var = value
+        glossary_min_chars_value.setText("0 (no minimum)" if value == 0 else f"{value} characters")
+
+    glossary_min_chars_slider.valueChanged.connect(_on_glossary_min_chars_change)
+    _on_glossary_min_chars_change(current_min_chars)
+
+    glossary_min_chars_desc = QLabel("Skips shorter glossary keys during pre-editing; longer matches can still be ambiguous.")
+    glossary_min_chars_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    glossary_min_chars_desc.setContentsMargins(20, 0, 0, 5)
+
+    glossary_compliance_desc = QLabel("Pre-edits source text with glossary entries (raw→translated)<br>before sending to AI to improve name consistency")
     glossary_compliance_desc.setStyleSheet("color: gray; font-size: 10pt;")
     glossary_compliance_desc.setContentsMargins(20, 0, 0, 5)
     glossary_compliance_desc.setTextFormat(Qt.RichText)
@@ -9489,6 +9529,8 @@ def _create_processing_options_section(self, parent):
         try:
             self.emergency_glossary_compliance_var = bool(checked)
             glossary_compliance_row.setVisible(checked)
+            glossary_min_chars_row.setVisible(checked)
+            glossary_min_chars_desc.setVisible(checked)
             glossary_compliance_desc.setVisible(checked)
         except Exception:
             pass
@@ -9520,11 +9562,15 @@ def _create_processing_options_section(self, parent):
     # Initial visibility
     is_enabled = glossary_compliance_cb.isChecked()
     glossary_compliance_row.setVisible(is_enabled)
+    glossary_min_chars_row.setVisible(is_enabled)
+    glossary_min_chars_desc.setVisible(is_enabled)
     glossary_compliance_desc.setVisible(is_enabled)
     
     glossary_compliance_cb.setContentsMargins(0, 2, 0, 0)
     left_v.addWidget(glossary_compliance_cb)
     left_v.addWidget(glossary_compliance_row)
+    left_v.addWidget(glossary_min_chars_row)
+    left_v.addWidget(glossary_min_chars_desc)
     left_v.addWidget(glossary_compliance_desc)
     
     # Enable Decimal Chapter Detection

@@ -4,6 +4,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from unittest.mock import mock_open
 
 import pytest
 from bs4 import BeautifulSoup
@@ -4440,3 +4441,36 @@ def test_progress_context_queues_one_clicked_qa_entry(tmp_path):
     assert dummy._single_qa_resolution_request["output_file"] == (
         "chapter0012.xhtml"
     )
+
+
+@pytest.mark.parametrize(
+    ("minimum", "expected"),
+    [
+        (None, "天气 天君 Sky King Hall"),
+        (0, "Tian气 Sky King Sky King Hall"),
+        (2, "天气 Sky King Sky King Hall"),
+        (3, "天气 天君 Sky King Hall"),
+        (10, "天气 天君 天君殿"),
+    ],
+)
+def test_emergency_compliance_minimum_raw_length(monkeypatch, minimum, expected):
+    monkeypatch.delenv("EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS", raising=False)
+    glossary_content = (
+        "type,raw_name,translated_name\n"
+        "character,天,Tian\n"
+        "character,天君,Sky King\n"
+        "character,天君殿,Sky King Hall\n"
+    )
+    monkeypatch.setattr("builtins.open", mock_open(read_data=glossary_content))
+    settings = {
+        "EMERGENCY_GLOSSARY_COMPLIANCE": "1",
+        "EMERGENCY_GLOSSARY_COMPLIANCE_MODE": "all",
+    }
+    if minimum is not None:
+        settings["EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS"] = minimum
+
+    result = translation_module.apply_emergency_glossary_compliance(
+        "天气 天君 天君殿", ".", __file__, settings=settings
+    )
+
+    assert result == expected

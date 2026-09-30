@@ -16482,6 +16482,10 @@ Recent translations to summarize:
         
         # Emergency glossary compliance custom types (list)
         self.emergency_glossary_compliance_custom_types_var = self.config.get('emergency_glossary_compliance_custom_types', [])
+        try:
+            self.emergency_glossary_compliance_min_chars_var = max(0, min(10, int(self.config.get('emergency_glossary_compliance_min_chars', 3))))
+        except (TypeError, ValueError):
+            self.emergency_glossary_compliance_min_chars_var = 3
         
         # NEW: Initialize extraction mode variable
         self.extraction_mode_var = self.config.get('extraction_mode', 'smart')
@@ -36449,6 +36453,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'EMERGENCY_GLOSSARY_COMPLIANCE': "1" if (getattr(self, 'emergency_glossary_compliance_var', False) and auto_glossary_mode != 'no_glossary') else "0",
             'EMERGENCY_GLOSSARY_COMPLIANCE_MODE': str(getattr(self, 'emergency_glossary_compliance_mode_var', 'characters')),
             'EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES': json.dumps(getattr(self, 'emergency_glossary_compliance_custom_types_var', [])),
+            'EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS': str(getattr(self, 'emergency_glossary_compliance_min_chars_var', 3)),
             'COMPRESS_GLOSSARY_PROMPT': '1' if self.config.get('compress_glossary_prompt') else '0',
             'COMPRESSION_FACTOR': str(self.compression_factor_var),
             'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
@@ -47381,6 +47386,7 @@ Important rules:
                 ('emergency_glossary_compliance', ['emergency_glossary_compliance_var'], False, bool),
                 ('emergency_glossary_compliance_mode', ['emergency_glossary_compliance_mode_var'], 'characters', str),
                 ('emergency_glossary_compliance_custom_types', ['emergency_glossary_compliance_custom_types_var'], [], list),
+                ('emergency_glossary_compliance_min_chars', ['emergency_glossary_compliance_min_chars_var'], 3, lambda v: max(0, min(10, safe_int(v, 3)))),
                 ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),
                 ('token_limit_disabled', ['token_limit_disabled'], False, bool),
                 ('enable_thoughts', ['enable_thoughts_var'], True, bool),

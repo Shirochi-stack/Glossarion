@@ -55,6 +55,7 @@ _GLOSSARY_CONFIG_OPTIONS = {
     'emergency_glossary_compliance': 'EMERGENCY_GLOSSARY_COMPLIANCE',
     'emergency_glossary_compliance_mode': 'EMERGENCY_GLOSSARY_COMPLIANCE_MODE',
     'emergency_glossary_compliance_custom_types': 'EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES',
+    'emergency_glossary_compliance_min_chars': 'EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS',
     'glossary_skip_gender_tracking': 'GLOSSARY_SKIP_GENDER_TRACKING',
     'glossary_gender_noise_threshold': 'GLOSSARY_GENDER_NOISE_THRESHOLD',
     'glossary_gender_tracking_bias': 'GLOSSARY_GENDER_TRACKING_BIAS',
