@@ -3498,6 +3498,49 @@ def _create_response_handling_section(self, parent):
     # Initialize enabled state for GPT controls
     self.toggle_gpt_reasoning_controls()
     
+    # Shared service tier for OpenAI, native Gemini, NanoGPT, and OpenRouter.
+    service_tier_title = QLabel("Service Tier")
+    service_tier_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(service_tier_title)
+    if not hasattr(self, 'gemini_service_tier_var'):
+        self.gemini_service_tier_var = str(self.config.get('gemini_service_tier', 'off') or 'off').lower()
+    tier_row = QWidget()
+    tier_h = QHBoxLayout(tier_row)
+    tier_h.setContentsMargins(20, 2, 0, 0)
+    tier_h.addWidget(QLabel("OpenAI / Gemini / OpenRouter service tier:"))
+    self.gemini_service_tier_combo = QComboBox()
+    self.gemini_service_tier_combo.addItems(["off", "standard", "flex", "fast", "priority"])
+    self.gemini_service_tier_combo.setFixedWidth(100)
+    self.gemini_service_tier_combo.setStyleSheet(_THINKING_COMBO_STYLE)
+    self._add_combobox_arrow(self.gemini_service_tier_combo)
+    self._disable_combobox_mousewheel(self.gemini_service_tier_combo)
+    self.gemini_service_tier_combo.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Also sends the selected service tier to nan/ (NanoGPT) and or/ (OpenRouter) chat requests.<br>"
+        "<b>off</b>: do not send service_tier.<br>"
+        "<b>standard</b>: explicitly request the base tier (sent as default to OpenAI/NanoGPT).<br>"
+        "<b>flex</b>: lower-cost, variable-capacity processing where supported.<br>"
+        "<b>fast</b>: higher-priority processing where supported.<br>"
+        "<b>priority</b>: legacy name for fast on OpenAI routes.<br>"
+        "Availability and pricing depend on the model and provider. "
+        "OpenRouter may use its standard tier when a model has no Flex endpoint."
+        "</p></qt>"
+    )
+    tier_idx = self.gemini_service_tier_combo.findText(self.gemini_service_tier_var)
+    self.gemini_service_tier_combo.setCurrentIndex(tier_idx if tier_idx >= 0 else 0)
+    def _on_service_tier_changed(value):
+        self.gemini_service_tier_var = value
+        self.config['gemini_service_tier'] = value
+        os.environ['GEMINI_SERVICE_TIER'] = value
+    self.gemini_service_tier_combo.currentTextChanged.connect(_on_service_tier_changed)
+    tier_h.addWidget(self.gemini_service_tier_combo)
+    tier_h.addStretch()
+    section_v.addWidget(tier_row)
+    tier_note = QLabel("Also sent to nan/ (NanoGPT) and or/ (OpenRouter) chat requests where supported.")
+    tier_note.setStyleSheet("color: gray; font-size: 9pt;")
+    tier_note.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(tier_note)
+
     # Gemini Thinking Mode
     gemini_title = QLabel("Gemini Thinking Mode")
     gemini_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
@@ -3612,45 +3655,6 @@ def _create_response_handling_section(self, parent):
     thoughts_h.addWidget(enable_thoughts_cb)
     thoughts_h.addStretch()
     section_v.addWidget(thoughts_row)
-
-    # Gemini service tier (independent of thinking, so not disabled with it)
-    if not hasattr(self, 'gemini_service_tier_var'):
-        self.gemini_service_tier_var = str(self.config.get('gemini_service_tier', 'off') or 'off').lower()
-    tier_row = QWidget()
-    tier_h = QHBoxLayout(tier_row)
-    tier_h.setContentsMargins(20, 2, 0, 0)
-    tier_label = QLabel("Service tier:")
-    tier_h.addWidget(tier_label)
-    self.gemini_service_tier_combo = QComboBox()
-    self.gemini_service_tier_combo.addItems(["off", "standard", "flex", "priority"])
-    self.gemini_service_tier_combo.setFixedWidth(90)
-    self.gemini_service_tier_combo.setStyleSheet(_THINKING_COMBO_STYLE)
-    self._add_combobox_arrow(self.gemini_service_tier_combo)
-    self._disable_combobox_mousewheel(self.gemini_service_tier_combo)
-    self.gemini_service_tier_combo.setToolTip(
-        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
-        "Sets service_tier on native Gemini API requests.<br>"
-        "<b>off</b>: parameter not sent (API default).<br>"
-        "<b>standard</b>: normal pricing and latency.<br>"
-        "<b>flex</b>: 50% cheaper, best-effort; may queue for minutes and fail with 503/429 "
-        "when busy (no automatic fallback).<br>"
-        "<b>priority</b>: lowest latency, highest reliability, costs more than standard.<br>"
-        "Not applied to Vertex AI or the OpenAI-compatible endpoint."
-        "</p></qt>"
-    )
-    _tier_idx = self.gemini_service_tier_combo.findText(self.gemini_service_tier_var)
-    self.gemini_service_tier_combo.setCurrentIndex(_tier_idx if _tier_idx >= 0 else 0)
-    def _on_service_tier_changed(text):
-        try:
-            self.gemini_service_tier_var = text
-            self.config['gemini_service_tier'] = text
-            os.environ['GEMINI_SERVICE_TIER'] = text
-        except Exception:
-            pass
-    self.gemini_service_tier_combo.currentTextChanged.connect(_on_service_tier_changed)
-    tier_h.addWidget(self.gemini_service_tier_combo)
-    tier_h.addStretch()
-    section_v.addWidget(tier_row)
 
     # Apply initial lock state if stream thinking is already enabled
     if getattr(self, 'stream_thinking_logs_var', False):
@@ -12522,29 +12526,6 @@ def _create_processing_options_section(self, parent):
     provider_desc.setContentsMargins(20, 0, 0, 8)
     section_v.addWidget(provider_desc)
 
-    # OpenRouter: always route Gemini models to Flex endpoints
-    if not hasattr(self, 'openrouter_gemini_flex_var'):
-        self.openrouter_gemini_flex_var = self.config.get('openrouter_gemini_flex', False)
-
-    gemini_flex_cb = self._create_styled_checkbox("Always use Flex for Gemini models")
-    try:
-        gemini_flex_cb.setChecked(bool(self.openrouter_gemini_flex_var))
-    except Exception:
-        pass
-    def _on_openrouter_gemini_flex_toggle(checked):
-        try:
-            self.openrouter_gemini_flex_var = bool(checked)
-        except Exception:
-            pass
-    gemini_flex_cb.toggled.connect(_on_openrouter_gemini_flex_toggle)
-    gemini_flex_cb.setContentsMargins(0, 4, 0, 0)
-    section_v.addWidget(gemini_flex_cb)
-
-    gemini_flex_desc = QLabel("Pins Gemini models to Google AI Studio / Vertex Flex endpoints (50% cheaper) with no fallback,\noverriding the preferred provider. Requests may queue or 503; models without a Flex endpoint will fail.")
-    gemini_flex_desc.setStyleSheet("color: gray; font-size: 8pt;")
-    gemini_flex_desc.setContentsMargins(20, 0, 0, 8)
-    section_v.addWidget(gemini_flex_desc)
-    
     # Place the section at row 1, column 1 to match the original grid
     try:
         grid = parent.layout()

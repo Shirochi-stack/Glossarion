@@ -18166,6 +18166,66 @@ class UnifiedClient:
             return os.getenv("OPENCODE_ZEN_API_URL", "https://opencode.ai/zen/v1")
         return os.getenv("OPENCODE_API_URL", "https://opencode.ai/zen/go/v1")
 
+    @staticmethod
+    def _selected_service_tier(provider: str) -> Optional[str]:
+        """Translate the shared UI choice to a provider's request value."""
+        choice = str(os.getenv('GEMINI_SERVICE_TIER', 'off') or 'off').strip().lower()
+        if choice not in {'standard', 'flex', 'fast', 'priority'}:
+            return None
+        if provider == 'gemini-native':
+            return 'priority' if choice == 'fast' else choice
+        if provider == 'openai':
+            return {'standard': 'default', 'fast': 'priority'}.get(choice, choice)
+        if provider == 'nanogpt':
+            return 'default' if choice == 'standard' else choice
+        if provider == 'openrouter':
+            return {'standard': 'default', 'fast': 'priority'}.get(choice, choice)
+        return None
+
+    @staticmethod
+    def _validate_nanogpt_service_tier(base_url: str, api_key: str, model: str, tier: str) -> str:
+        """Check NanoGPT's detailed catalog before requesting an explicit tier."""
+        url = f"{base_url.rstrip('/')}/models"
+        try:
+            response = requests.get(
+                url, params={'detailed': 'true'},
+                headers={'Authorization': f'Bearer {api_key}'}, timeout=10,
+            )
+            response.raise_for_status()
+            catalog = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise UnifiedClientError(
+                f"Could not check NanoGPT service tiers for {model}: {exc}",
+                error_type='validation',
+            ) from exc
+        entries = catalog.get('data', catalog.get('models')) if isinstance(catalog, dict) else catalog
+        if not isinstance(entries, list):
+            raise UnifiedClientError(
+                "NanoGPT detailed model list has an unexpected format; service tier was not sent.",
+                error_type='validation',
+            )
+        requested = str(model or '').strip().lower()
+        matches = [entry for entry in entries if isinstance(entry, dict) and
+                   str(entry.get('id') or entry.get('model') or '').strip().lower() == requested]
+        if not matches and '/' not in requested:
+            matches = [entry for entry in entries if isinstance(entry, dict) and
+                       str(entry.get('id') or entry.get('model') or '').strip().lower().endswith('/' + requested)]
+        if len(matches) != 1 or not isinstance(matches[0].get('supported_service_tiers'), list):
+            raise UnifiedClientError(
+                f"NanoGPT tier support could not be verified for model {model}; service tier was not sent.",
+                error_type='validation',
+            )
+        supported = {str(value).strip().lower() for value in matches[0]['supported_service_tiers']}
+        if tier == 'default':
+            return tier
+        equivalent = {'fast', 'priority'} if tier in {'fast', 'priority'} else {tier}
+        if not supported.intersection(equivalent):
+            raise UnifiedClientError(
+                f"NanoGPT model {model} does not support the {tier} service tier.",
+                error_type='validation',
+            )
+        return tier if tier in supported else next(iter(supported.intersection(equivalent)))
+
     def _get_openai_compatible_reasoning_effort(self, provider: str, effective_model: str = "") -> Optional[str]:
         """Return the selected effort for native GPT-6 and compatible opt-in routes."""
         try:
@@ -18427,23 +18487,15 @@ class UnifiedClient:
             usage = None
         return content, finish_reason, usage
 
-    # OpenRouter Flex endpoints for Gemini models (used by the "always Flex" toggle)
-    _OPENROUTER_GEMINI_FLEX_ENDPOINTS = ('google-ai-studio/flex', 'google-vertex/global/flex')
-
     def _openrouter_provider_routing(self, model=None):
         """Build OpenRouter's `provider` body, or None to let OpenRouter choose.
 
-        Tier endpoint slugs (``.../flex``, ``.../priority``) are pinned with fallbacks off,
-        otherwise OpenRouter silently reroutes shed Flex requests to a full-price endpoint.
+        An explicitly chosen tier endpoint slug remains pinned with fallbacks off.
         """
         preferred = (os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto') or '').strip()
         if preferred == 'Auto':
             preferred = ''
         is_tier_slug = preferred.lower().endswith(('/flex', '/priority'))
-        if (os.getenv('OPENROUTER_GEMINI_FLEX', '0') == '1'
-                and 'gemini' in str(model or '').lower()
-                and not preferred.lower().endswith('/flex')):
-            return {"only": list(self._OPENROUTER_GEMINI_FLEX_ENDPOINTS), "allow_fallbacks": False}
         if not preferred:
             return None
         if is_tier_slug:
@@ -21279,17 +21331,13 @@ class UnifiedClient:
                 }
                 if temperature is not None:
                     generation_config_params["temperature"] = temperature
-                # Service tier: "off" (default) omits the parameter entirely
-                gemini_tier = str(os.getenv("GEMINI_SERVICE_TIER", "off") or "off").strip().lower()
-                if gemini_tier not in ("standard", "flex", "priority"):
-                    gemini_tier = ""
+                gemini_tier = self._selected_service_tier('gemini-native')
                 if gemini_tier:
                     generation_config_params["service_tier"] = gemini_tier
 
                 # Log the request - only if not stopping
                 if not self._is_stop_requested():
-                    # service_tier only reaches the native SDK request; the gRPC proto
-                    # and OpenAI-compatible calls have no field for it
+                    # The gRPC proto and Gemini OpenAI-compatible calls have no field for it.
                     _tier = ""
                     if gemini_tier:
                         if use_grpc_transport:
@@ -23691,6 +23739,12 @@ class UnifiedClient:
                 if msg.get('role') == 'system':
                     logger.debug(f"  System prompt preview: {msg.get('content', '')[:100]}...")
         
+        request_service_tier = self._selected_service_tier(provider)
+        if provider == 'nanogpt' and request_service_tier:
+            request_service_tier = self._validate_nanogpt_service_tier(
+                base_url, actual_api_key, effective_model, request_service_tier
+            )
+
         # Use OpenAI SDK for providers known to work well with it
         sdk_compatible = ['openai', 'ollama', 'lmstudio', 'deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq',
                          'electronhub', 'openrouter', 'literouter', 'opencode', 'fireworks', 'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu', 'nanogpt', 'sambanova', 'custom_openai']
@@ -24314,6 +24368,8 @@ class UnifiedClient:
                         **params,
                         "extra_headers": _sanitize_headers_ascii(extra_headers),
                     }
+                    if request_service_tier:
+                        call_kwargs["service_tier"] = request_service_tier
                     if extra_body:
                         call_kwargs["extra_body"] = extra_body
 
@@ -26203,6 +26259,8 @@ class UnifiedClient:
 
             # Apply safety flags
             self._apply_openai_safety(provider, disable_safety, data, headers)
+            if request_service_tier and endpoint in ('/chat/completions', '/responses'):
+                data['service_tier'] = request_service_tier
             if provider == 'openai':
                 self._apply_gpt6_openai_constraints(data, use_responses_api)
             # Save OpenRouter config if requested
