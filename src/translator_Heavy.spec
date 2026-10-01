@@ -272,6 +272,7 @@ datas.append(('WhereIsMyOutput.png', '.'))
 app_files = [
     ('manga_ocr_io.py', '.'),
     ('gemini_policy.py', '.'),
+    ('request_parameters.py', '.'),
     ('epub_package.py', '.'),
     ('epub_special_files.py', '.'),
     ('gender_tracking.py', '.'),
@@ -478,6 +479,7 @@ except Exception as e:
 app_modules = [
     'manga_ocr_io',
     'gemini_policy',
+    'request_parameters',
     'epub_package',
     'epub_special_files',
     'gender_tracking',

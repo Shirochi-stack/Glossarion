@@ -111,6 +111,7 @@ for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'charde
 app_files = [
     ('manga_ocr_io.py', '.'),
     ('gemini_policy.py', '.'),
+    ('request_parameters.py', '.'),
     ('epub_package.py', '.'),
     ('epub_special_files.py', '.'),
     ('gender_tracking.py', '.'),
@@ -291,6 +292,7 @@ datas.append(('enable_debug_mode.py', '.'))
 app_modules = [
     'manga_ocr_io',
     'gemini_policy',
+    'request_parameters',
     'epub_package',
     'epub_special_files',
     'gender_tracking',
