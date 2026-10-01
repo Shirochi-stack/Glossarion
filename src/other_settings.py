@@ -3516,7 +3516,7 @@ def _create_response_handling_section(self, parent):
     self._disable_combobox_mousewheel(self.gemini_service_tier_combo)
     self.gemini_service_tier_combo.setToolTip(
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
-        "Also sends the selected service tier to nan/ (NanoGPT) and or/ (OpenRouter) chat requests.<br>"
+        "Also sends the selected service tier to NanoGPT OpenAI/Gemini models and or/ (OpenRouter) chat requests.<br>"
         "<b>off</b>: do not send service_tier.<br>"
         "<b>standard</b>: explicitly request the base tier (sent as default to OpenAI/NanoGPT).<br>"
         "<b>flex</b>: lower-cost, variable-capacity processing where supported.<br>"
@@ -3536,7 +3536,7 @@ def _create_response_handling_section(self, parent):
     tier_h.addWidget(self.gemini_service_tier_combo)
     tier_h.addStretch()
     section_v.addWidget(tier_row)
-    tier_note = QLabel("Also sent to nan/ (NanoGPT) and or/ (OpenRouter) chat requests where supported.")
+    tier_note = QLabel("Also sent to NanoGPT OpenAI/Gemini models and or/ (OpenRouter) chat requests where supported.")
     tier_note.setStyleSheet("color: gray; font-size: 9pt;")
     tier_note.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(tier_note)

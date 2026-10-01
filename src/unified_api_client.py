@@ -18183,6 +18183,16 @@ class UnifiedClient:
         return None
 
     @staticmethod
+    def _nanogpt_model_supports_service_tier(model: str) -> bool:
+        """Limit NanoGPT tier requests to OpenAI and Gemini chat models."""
+        model = str(model or '').strip().lower().removeprefix('nan/')
+        return (
+            model.startswith('openai/')
+            or model.startswith('google/gemini')
+            or model.startswith('gemini-')
+        )
+
+    @staticmethod
     def _validate_nanogpt_service_tier(base_url: str, api_key: str, model: str, tier: str) -> str:
         """Check NanoGPT's detailed catalog before requesting an explicit tier."""
         url = f"{base_url.rstrip('/')}/models"
@@ -23741,9 +23751,12 @@ class UnifiedClient:
         
         request_service_tier = self._selected_service_tier(provider)
         if provider == 'nanogpt' and request_service_tier:
-            request_service_tier = self._validate_nanogpt_service_tier(
-                base_url, actual_api_key, effective_model, request_service_tier
-            )
+            if self._nanogpt_model_supports_service_tier(effective_model):
+                request_service_tier = self._validate_nanogpt_service_tier(
+                    base_url, actual_api_key, effective_model, request_service_tier
+                )
+            else:
+                request_service_tier = None
 
         # Use OpenAI SDK for providers known to work well with it
         sdk_compatible = ['openai', 'ollama', 'lmstudio', 'deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq',

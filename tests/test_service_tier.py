@@ -91,6 +91,10 @@ def test_nanogpt_default_tier_accepts_default_only_model(monkeypatch):
     ('nanogpt', 'nan/openai/gpt-5.5', 'https://nano-gpt.com/api/v1', 'off', None),
     ('nanogpt', 'nan/openai/gpt-5.5', 'https://nano-gpt.com/api/v1', 'standard', 'default'),
     ('nanogpt', 'nan/openai/gpt-5.5', 'https://nano-gpt.com/api/v1', 'flex', 'flex'),
+    ('nanogpt', 'nan/google/gemini-flash-latest', 'https://nano-gpt.com/api/v1', 'flex', 'flex'),
+    ('nanogpt', 'nan/anthropic/claude-opus-latest', 'https://nano-gpt.com/api/v1', 'flex', None),
+    ('nanogpt', 'nan/deepseek/deepseek-v4-pro', 'https://nano-gpt.com/api/v1', 'standard', None),
+    ('nanogpt', 'nan/qwen-3.6-plus', 'https://nano-gpt.com/api/v1', 'priority', None),
     ('openrouter', 'or/google/gemini-2.5-flash', 'https://openrouter.ai/api/v1', 'off', None),
     ('openrouter', 'or/google/gemini-2.5-flash', 'https://openrouter.ai/api/v1', 'standard', 'default'),
     ('openrouter', 'or/google/gemini-2.5-flash', 'https://openrouter.ai/api/v1', 'flex', 'flex'),
@@ -108,8 +112,8 @@ def test_service_tier_reaches_request_payload(
     request_model = model.removeprefix('nan/').removeprefix('or/')
     if provider == 'nanogpt':
         def catalog_get(*args, **kwargs):
-            if choice == 'off':
-                raise AssertionError('off must not query the tier catalog')
+            if expected is None:
+                raise AssertionError('models without a tier must not query the tier catalog')
             return SimpleNamespace(
                 raise_for_status=lambda: None,
                 json=lambda: {'data': [{'id': request_model, 'supported_service_tiers': ['flex']}]},
