@@ -3233,6 +3233,10 @@ class LocalInpainter:
                     return 'No'
                 if content.startswith('data:image/'):
                     return content
+                # Fallback clients may return the provider's signed image URL
+                # directly instead of a locally saved GENERATED_IMAGE marker.
+                if content.startswith(('http://', 'https://')) and not any(char.isspace() for char in content):
+                    return content
                 match = re.search(r'\[GENERATED_IMAGE:(.*?)\]', content)
                 if match:
                     image_path = match.group(1).strip()

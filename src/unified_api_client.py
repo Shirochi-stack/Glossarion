@@ -11541,6 +11541,18 @@ class UnifiedClient:
 
     def _copy_retry_request_context_to_temp_client(self, temp_client, context=None, request_id=None):
         """Carry request-local metadata onto a temporary retry/fallback client."""
+        # Image edits can reach a different model through fallback keys. Keep
+        # their output routing and stop behavior on that temporary client.
+        if getattr(self, '_force_image_output_mode', False):
+            temp_client._force_image_output_mode = True
+        forced_resolution = getattr(self, '_forced_image_output_resolution', None)
+        if forced_resolution:
+            temp_client._forced_image_output_resolution = forced_resolution
+        if self._should_suppress_custom_image_edit_endpoint():
+            temp_client._suppress_custom_image_edit_endpoint = True
+        if getattr(self, '_ignore_graceful_stop', False):
+            temp_client._ignore_graceful_stop = True
+
         source_chapter_context = None
         source_request_label = None
         source_request_context = None

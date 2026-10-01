@@ -1183,6 +1183,71 @@ def test_custom_image_edit_force_stop_during_request_setup_never_posts(monkeypat
     assert stopped
 
 
+def test_custom_image_edit_accepts_fallback_image_url(monkeypatch):
+    import requests
+    import unified_api_client
+
+    image_url = 'https://images.example.test/edited.png?signature=abc123'
+    edited = np.full((16, 16, 3), 173, dtype=np.uint8)
+    ok, encoded = cv2.imencode('.png', edited)
+    assert ok
+    downloads = []
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def send(self, _messages, **_kwargs):
+            assert self._force_image_output_mode
+            assert self._suppress_custom_image_edit_endpoint
+            return image_url, 'stop'
+
+        def _get_thread_local_client(self):
+            return SimpleNamespace()
+
+    def fake_get(url, **_kwargs):
+        downloads.append(url)
+        return SimpleNamespace(content=encoded.tobytes(), raise_for_status=lambda: None)
+
+    monkeypatch.setenv('USE_INPAINTER_KEYS', '0')
+    monkeypatch.setenv('CUSTOM_IMAGE_EDIT_MODEL', 'nan/wan-2.6-image-edit')
+    monkeypatch.setenv('CUSTOM_IMAGE_EDIT_FULL_PAGE_OUTPUT', '100')
+    monkeypatch.setattr(unified_api_client, 'UnifiedClient', FakeClient)
+    monkeypatch.setattr(requests, 'get', fake_get)
+
+    inpainter = object.__new__(LocalInpainter)
+    inpainter.config = {'custom_image_edit_model': 'nan/wan-2.6-image-edit'}
+    inpainter._custom_image_edit_use_current_provider = True
+    inpainter._check_stop = lambda: False
+    inpainter._log = lambda *_args: None
+    inpainter._log_inpaint_diag = lambda *_args: None
+    original = np.zeros_like(edited)
+    mask = np.full(original.shape[:2], 255, dtype=np.uint8)
+
+    result = inpainter._custom_image_edit_inpaint(original, mask, _pool_prepared=True)
+
+    assert downloads == [image_url]
+    assert np.array_equal(result, edited)
+
+
+def test_fallback_client_preserves_image_edit_request_settings():
+    source = UnifiedClient.__new__(UnifiedClient)
+    source._thread_local = threading.local()
+    source._force_image_output_mode = True
+    source._forced_image_output_resolution = '2K'
+    source._suppress_custom_image_edit_endpoint = True
+    source._ignore_graceful_stop = True
+    fallback = UnifiedClient.__new__(UnifiedClient)
+    fallback._thread_local = threading.local()
+
+    source._copy_retry_request_context_to_temp_client(fallback, context='Inpainter')
+
+    assert fallback._force_image_output_mode is True
+    assert fallback._forced_image_output_resolution == '2K'
+    assert fallback._should_suppress_custom_image_edit_endpoint()
+    assert fallback._ignore_graceful_stop is True
+
+
 def test_clean_uses_detected_region_without_running_ocr(monkeypatch):
     image_path = 'C:/clean-test/page.png'
     monkeypatch.setenv('OUTPUT_DIRECTORY', 'C:/clean-test')
