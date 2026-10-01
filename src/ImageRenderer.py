@@ -271,11 +271,38 @@ def _manga_output_text(value):
     """Keep API failure messages out of manga OCR and translation output."""
     value = str(value or '')
     text = value.strip()
+    if text.upper() == '[API RESPONSE UNAVAILABLE]':
+        return ''
     if UnifiedClient and UnifiedClient._is_api_error_placeholder(text):
         return ''
     if text.startswith(('[Full Page Context Error:', '[Translation Error:', '[Individual Translation Error:')):
         return ''
     return value
+
+
+def _regions_with_ocr_text(regions, recognized_texts):
+    """Keep detected regions whose matching OCR result contains real text."""
+    valid_indexes = set()
+    valid_boxes = set()
+    for item in recognized_texts or []:
+        if not isinstance(item, dict) or not str(_manga_output_text(item.get('text'))).strip():
+            continue
+        try:
+            valid_indexes.add(int(item['region_index']))
+        except (KeyError, TypeError, ValueError):
+            pass
+        valid_boxes.add(tuple(item.get('bbox') or ()))
+    selected = []
+    for index, region in enumerate(regions or []):
+        if index not in valid_indexes and not (
+            isinstance(region, dict) and tuple(region.get('bbox') or ()) in valid_boxes
+        ):
+            continue
+        if isinstance(region, dict):
+            original_index = region.get('rect_index')
+            region = {**region, 'rect_index': index if original_index is None else original_index}
+        selected.append(region)
+    return selected
 
 # MODULE-LEVEL HELPER: Reset all cancellation flags before starting an operation
 def _reset_cancellation_flags(self):
@@ -2504,6 +2531,15 @@ def _run_clean_background(self, image_path: str, regions: list):
                 print(f"[CLEAN_DEBUG] INCLUDING region {i} (rect_index={rect_index})")
             
             filtered_regions.append(region)
+
+        if filtered_regions:
+            recognized_texts = _run_ocr_on_regions(
+                self, image_path, filtered_regions, _get_ocr_config(self)
+            )
+            filtered_regions = _regions_with_ocr_text(filtered_regions, recognized_texts)
+        if not filtered_regions:
+            self._log("⏭️ No OCR-confirmed text to clean; preserving original image", "info")
+            return
         
         self._log(f"🎨 Creating mask from {len(filtered_regions)} regions ({excluded_count} excluded)", "info")
         
@@ -2562,6 +2598,10 @@ def _run_clean_background(self, image_path: str, regions: list):
             else:
                 # Draw filled rectangle on mask
                 cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+
+        if not np.any(mask):
+            self._log("⏭️ No eligible text mask; preserving original image", "info")
+            return
         
         # Get inpainting settings from manga integration config
         inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
@@ -3227,16 +3267,21 @@ def _run_inpainting_sync(
         print(f"[INPAINT_SYNC] Processing {len(regions)} regions for inpainting")
         for i, region in enumerate(regions):
             # Check if this region should be excluded
-            if i in excluded_regions:
+            original_index = region.get('rect_index') if isinstance(region, dict) else None
+            region_index = i if original_index is None else original_index
+            if region_index in excluded_regions:
                 excluded_count += 1
-                print(f"[INPAINT_SYNC] Skipping region {i} (excluded from clean)")
+                print(f"[INPAINT_SYNC] Skipping region {region_index} (excluded from clean)")
                 continue
             if preserve_free_text and _is_free_text_region_metadata(region):
                 free_text_skipped_count += 1
                 print(f"[INPAINT_SYNC] Skipping region {i} (free text preserved)")
                 continue
+            if isinstance(region, dict) and 'text' in region and not str(_manga_output_text(region['text'])).strip():
+                print(f"[INPAINT_SYNC] Skipping region {i} (no OCR text)")
+                continue
             
-            regions_to_inpaint.append((i, region))
+            regions_to_inpaint.append((region_index, region))
         
         print(f"[INPAINT_SYNC] Creating mask from {len(regions_to_inpaint)} regions ({excluded_count} excluded, {free_text_skipped_count} free-text preserved)")
         for region_index, region in regions_to_inpaint:
@@ -3282,6 +3327,10 @@ def _run_inpainting_sync(
             else:
                 # Draw filled rectangle on mask
                 cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+
+        if not np.any(mask):
+            print("[INPAINT_SYNC] No eligible text regions; skipping inpainting")
+            return None
         
         # Get inpainting settings from manga integration config
         inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
@@ -3802,38 +3851,7 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                         self._log(f"✅ Using custom OCR prompt from GUI ({len(self.ocr_prompt)} chars)", "info")
                         self._log(f"OCR Prompt being set: {self.ocr_prompt[:150]}...", "debug")
                     else:
-                        os.environ['OCR_SYSTEM_PROMPT'] = (
-                            "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
-                            "ABSOLUTE RULES:\n"
-                            "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\n"
-                            "2. NEVER TRANSLATE OR MODIFY\n"
-                            "3. NEVER EXPLAIN, DESCRIBE, OR COMMENT\n"
-                            "4. NEVER SAY \"I can't\" or \"I cannot\" or \"no text\" or \"blank image\"\n"
-                            "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\n"
-                            "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\n"
-                            "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\n"
-                            "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)\n\n"
-                            "LANGUAGE PRESERVATION:\n"
-                            "- Korean text → Output in Korean\n"
-                            "- Japanese text → Output in Japanese\n"
-                            "- Chinese text → Output in Chinese\n"
-                            "- English text → Output in English\n"
-                            "- CJK quotation marks (「」『』【】《》〈〉) → Preserve exactly as shown\n\n"
-                            "FORMATTING:\n"
-                            "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\n"
-                            "- NEVER use \\n or line breaks in your output\n\n"
-                            "FORBIDDEN RESPONSES:\n"
-                            "- \"I can see this appears to be...\"\n"
-                            "- \"I cannot make out any clear text...\"\n"
-                            "- \"This appears to be blank...\"\n"
-                            "- \"If there is text present...\"\n"
-                            "- ANY explanatory text\n\n"
-                            "YOUR ONLY OUTPUT: The exact visible text. Nothing more. Nothing less.\n"
-                            "If image has a dot → Output: .\n"
-                            "If image has two dots → Output: . .\n"
-                            "If image has text → Output: [that text]\n"
-                            "If image is truly blank → Output: [empty/no response]"
-                        )
+                        os.environ['OCR_SYSTEM_PROMPT'] = self._default_manga_ocr_prompt()
                         self._log("✅ Using default OCR prompt", "info")
                 except Exception:
                     pass
@@ -4941,7 +4959,7 @@ def _is_custom_image_edit_workflow(self) -> bool:
         return False
 
 def _regions_for_custom_image_edit(self, image_path: str, use_current_rectangles: bool = True):
-    """Return existing preview regions or run detection for custom-image-edit workflows."""
+    """Return only custom-image-edit regions confirmed to contain OCR text."""
     try:
         has_rectangles = (
             use_current_rectangles
@@ -4951,32 +4969,41 @@ def _regions_for_custom_image_edit(self, image_path: str, use_current_rectangles
             and len(self.image_preview_widget.viewer.rectangles) > 0
         )
         if has_rectangles:
-            return _extract_regions_from_preview(self)
+            regions = _extract_regions_from_preview(self)
+        else:
+            detection_config = _get_detection_config(self) or {}
+            if detection_config.get('detect_empty_bubbles', True):
+                detection_config['detect_empty_bubbles'] = False
+            regions = _run_detection_sync(self, image_path, detection_config)
+            if regions:
+                try:
+                    self.update_queue.put(('detect_results', {
+                        'image_path': image_path,
+                        'regions': regions
+                    }))
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'image_state_manager'):
+                        self.image_state_manager.update_state(image_path, {'detection_regions': regions})
+                except Exception:
+                    pass
 
-        detection_config = _get_detection_config(self) or {}
-        if detection_config.get('detect_empty_bubbles', True):
-            detection_config['detect_empty_bubbles'] = False
-        regions = _run_detection_sync(self, image_path, detection_config)
-        if regions:
-            try:
-                self.update_queue.put(('detect_results', {
-                    'image_path': image_path,
-                    'regions': regions
-                }))
-            except Exception:
-                pass
-            try:
-                if hasattr(self, 'image_state_manager'):
-                    self.image_state_manager.update_state(image_path, {'detection_regions': regions})
-            except Exception:
-                pass
-        return regions or []
+        if not regions:
+            return []
+        recognized_texts = _run_ocr_on_regions(self, image_path, regions, _get_ocr_config(self))
+        confirmed_regions = _regions_with_ocr_text(regions, recognized_texts)
+        self._log(
+            f"🧹 Image edit: {len(confirmed_regions)}/{len(regions)} regions contain OCR text",
+            "info",
+        )
+        return confirmed_regions
     except Exception as e:
         print(f"[CUSTOM_IMAGE_EDIT] Failed to resolve regions: {e}")
         return []
 
 def _run_custom_image_edit_translate_clicked(self):
-    """Use custom-image-edit as the Translate button workflow without OCR/text rendering."""
+    """Use custom-image-edit as the Translate button workflow without text rendering."""
     try:
         image_path = self.image_preview_widget.current_image_path
         self._translating_image_path = image_path
@@ -5005,7 +5032,7 @@ def _run_custom_image_edit_translate_clicked(self):
 def _run_custom_image_edit_translate_background(self, image_path: str):
     _reset_cancellation_flags(self)
     try:
-        self._log("ðŸ§½ Custom image edit mode: editing image without OCR...", "info")
+        self._log("Custom image edit mode: confirming OCR text before editing...", "info")
         regions = _regions_for_custom_image_edit(self, image_path, use_current_rectangles=True)
         if not regions:
             self._log("âš ï¸ No regions found for custom image edit", "warning")
@@ -5166,11 +5193,17 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
                 self._log(f"🧽 Running automatic inpainting (concurrent)...", "info")
                 regions = []
                 for text_data in recognized_texts:
+                    if not str(_manga_output_text(text_data.get('text'))).strip():
+                        continue
                     bbox = text_data['bbox']
                     region_dict = {
                         'bbox': bbox,
+                        'text': text_data['text'],
+                        'rect_index': text_data.get('region_index'),
                         'coords': [[bbox[0], bbox[1]], [bbox[0] + bbox[2], bbox[1]], [bbox[0] + bbox[2], bbox[1] + bbox[3]], [bbox[0], bbox[1] + bbox[3]]],
                         'confidence': text_data.get('confidence', 1.0),
+                        'bubble_type': text_data.get('bubble_type'),
+                        'region_type': text_data.get('region_type'),
                         'shape': 'ellipse' if getattr(self, '_use_circle_shapes', False) else 'rect'
                     }
                     regions.append(region_dict)
@@ -11829,7 +11862,7 @@ def _on_translate_all_clicked(self):
         _restore_translate_all_button(self, )
 
 def _run_custom_image_edit_translate_all_clicked(self, image_paths: list):
-    """Use custom-image-edit as the Translate All workflow without OCR/text rendering."""
+    """Use custom-image-edit as the Translate All workflow without text rendering."""
     try:
         total_images = len(image_paths)
         _disable_workflow_buttons(self, exclude=None)
@@ -12098,7 +12131,8 @@ def _run_translate_all_background(self, image_paths: list):
                     # Only run inpainting if method is not 'none' and is 'local' or 'hybrid'
                     elif inpaint_method in ['local', 'hybrid']:
                         self._log(f"🧹 [{idx}/{total}] Cleaning image...", "info")
-                        cleaned_path = _run_inpainting_sync(self, image_path, regions)
+                        clean_regions = _regions_with_ocr_text(regions, recognized_texts)
+                        cleaned_path = _run_inpainting_sync(self, image_path, clean_regions) if clean_regions else None
                         
                         if cleaned_path and os.path.exists(cleaned_path):
                             # Store cleaned image path for rendering

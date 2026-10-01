@@ -17,7 +17,7 @@ from manga_integration import (
 )
 import manga_ocr_io
 from local_inpainter import LocalInpainter
-from ocr_manager import CustomAPIProvider
+from ocr_manager import CustomAPIProvider, OCRManager, OCRResult
 from unified_api_client import UnifiedClient
 
 
@@ -838,6 +838,33 @@ def test_custom_manga_ocr_does_not_keep_api_failures(
     assert [result.text for result in results] == expected
 
 
+def test_custom_manga_ocr_no_text_marker_does_not_retry(monkeypatch):
+    provider = CustomAPIProvider()
+    provider.is_loaded = True
+    provider.max_retries = 3
+    calls = []
+    provider.client = SimpleNamespace(send=lambda **kwargs: (calls.append(kwargs) or '[AI RESPONSE UNAVAILABLE]', 'stop'))
+    monkeypatch.setattr(provider, '_apply_manga_ocr_thinking_override', lambda: None)
+    monkeypatch.setattr(provider, '_restore_thinking_override', lambda _value: None)
+
+    assert provider.detect_text(np.zeros((60, 60, 3), dtype=np.uint8)) == []
+    assert len(calls) == 1
+
+
+def test_ocr_manager_discards_no_text_marker_from_ai_provider():
+    manager = object.__new__(OCRManager)
+    manager.current_provider = 'Qwen2-VL'
+    manager.providers = {
+        'Qwen2-VL': SimpleNamespace(detect_text=lambda *_args, **_kwargs: [
+            OCRResult(text='[AI RESPONSE UNAVAILABLE]', bbox=(0, 0, 5, 5), confidence=1.0),
+            OCRResult(text='こんにちは', bbox=(5, 5, 10, 10), confidence=1.0),
+        ])
+    }
+
+    results = manager.detect_text(np.zeros((20, 20, 3), dtype=np.uint8))
+    assert [result.text for result in results] == ['こんにちは']
+
+
 @pytest.mark.parametrize(
     ('content', 'expected'),
     [
@@ -1037,3 +1064,77 @@ def test_custom_image_edit_receives_live_manga_crop_settings():
     assert inpainter.config['manga_batch_image_requests_enabled'] is False
     assert inpainter.config['manga_batch_image_requests_size'] == 5
     assert inpainter.config['batch_size'] == '7'
+
+
+def test_legacy_ocr_prompt_migrates_once_without_replacing_custom_text():
+    old = (
+        "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
+        "Keep my custom instruction.\n"
+        "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)\n"
+        "If image is truly blank → Output: [empty/no response]"
+    )
+    migrated = MangaTranslationTab._migrate_legacy_manga_ocr_prompt(old)
+
+    assert "Keep my custom instruction." in migrated
+    assert "automatic text detector" in migrated
+    assert "[AI RESPONSE UNAVAILABLE]" in migrated
+    assert "IF YOU SEE NOTHING, OUTPUT NOTHING" not in migrated
+    assert MangaTranslationTab._migrate_legacy_manga_ocr_prompt(migrated) == migrated
+    assert MangaTranslationTab._migrate_legacy_manga_ocr_prompt("another custom prompt") == "another custom prompt"
+
+
+def test_inpaint_mask_excludes_empty_and_unavailable_ocr_regions():
+    config = {'manga_settings': {
+        'auto_iterations': False,
+        'mask_dilation': 0,
+        'text_bubble_dilation_iterations': 0,
+        'empty_bubble_dilation_iterations': 0,
+        'free_text_dilation_iterations': 0,
+    }}
+    owner = SimpleNamespace(
+        main_gui=SimpleNamespace(config=config),
+        ocr_provider='custom-api',
+        free_text_only_bg_opacity=False,
+        _log=lambda *_args: None,
+    )
+    regions = [
+        manga_translator.TextRegion(text=text, vertices=[], bounding_box=(x, 0, 10, 10), confidence=1,
+                   region_type='text_block')
+        for x, text in ((0, ''), (20, '[AI RESPONSE UNAVAILABLE]'),
+                        (40, '[API RESPONSE UNAVAILABLE]'), (60, 'Hello'))
+    ]
+    for region in regions:
+        region.bubble_type = 'text_bubble'
+
+    image = np.zeros((20, 80, 3), dtype=np.uint8)
+    mask = manga_translator.MangaTranslator.create_text_mask(owner, image, regions)
+
+    assert not mask[:, :50].any()
+    assert mask[:, 60:].any()
+    assert np.array_equal(
+        manga_translator.MangaTranslator.inpaint_regions(owner, image, np.zeros(image.shape[:2], dtype=np.uint8)),
+        image,
+    )
+
+
+def test_custom_image_edit_only_selects_ocr_confirmed_regions(monkeypatch):
+    regions = [
+        {'bbox': [0, 0, 20, 20], 'bubble_type': 'text_bubble'},
+        {'bbox': [30, 0, 20, 20], 'bubble_type': 'text_bubble'},
+    ]
+    monkeypatch.setattr(ImageRenderer, '_run_detection_sync', lambda *_args: regions)
+    monkeypatch.setattr(ImageRenderer, '_get_detection_config', lambda *_args: {})
+    monkeypatch.setattr(ImageRenderer, '_get_ocr_config', lambda *_args: {'provider': 'custom-api'})
+    monkeypatch.setattr(ImageRenderer, '_run_ocr_on_regions', lambda *_args: [
+        {'region_index': 0, 'bbox': regions[0]['bbox'], 'text': '[AI RESPONSE UNAVAILABLE]'},
+        {'region_index': 1, 'bbox': regions[1]['bbox'], 'text': 'Hello'},
+    ])
+    owner = SimpleNamespace(
+        _log=lambda *_args: None,
+        update_queue=SimpleNamespace(put=lambda *_args: None),
+        image_state_manager=SimpleNamespace(update_state=lambda *_args: None),
+    )
+
+    assert ImageRenderer._regions_for_custom_image_edit(
+        owner, 'page.png', use_current_rectangles=False
+    ) == [{**regions[1], 'rect_index': 1}]

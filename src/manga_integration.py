@@ -972,26 +972,7 @@ class MangaTranslationTab(QObject):
         )
 
         # Initialize the OCR system prompt
-        self.ocr_prompt = self.main_gui.config.get('manga_ocr_prompt', 
-            "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
-            "CRITICAL RULES:\n"
-            "1. DO NOT TRANSLATE ANYTHING\n"
-            "2. DO NOT MODIFY THE TEXT\n"
-            "3. DO NOT EXPLAIN OR COMMENT\n"
-            "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
-            "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
-            "If you see Korean text, output it in Korean.\n"
-            "If you see Japanese text, output it in Japanese.\n"
-            "If you see Chinese text, output it in Chinese.\n"
-            "If you see English text, output it in English.\n\n"
-            "IMPORTANT: Only use line breaks where they naturally occur in the original text "
-            "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
-            "between every word/character.\n\n"
-            "For vertical text common in manga/comics, transcribe it as a continuous line unless "
-            "there are clear visual breaks.\n\n"
-            "NEVER translate. ONLY extract exactly what is written.\n"
-            "Output ONLY the raw text, nothing else."
-        )
+        self.ocr_prompt = self.main_gui.config.get('manga_ocr_prompt', self._default_manga_ocr_prompt())
         
         # flag to skip status checks during init
         self._initializing_gui = True
@@ -7658,40 +7639,16 @@ class MangaTranslationTab(QObject):
         self.manga_loaded_glossary_text = ''
         self.manga_generated_glossary_text = ''
  
-        # Load OCR prompt (UPDATED: Improved default)
-        ocr_prompt_default = (
-            "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
-            "ABSOLUTE RULES:\n"
-            "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\n"
-            "2. NEVER TRANSLATE OR MODIFY\n"
-            "3. NEVER EXPLAIN, DESCRIBE, OR COMMENT\n"
-            "4. NEVER SAY \"I can't\" or \"I cannot\" or \"no text\" or \"blank image\"\n"
-            "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\n"
-            "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\n"
-            "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\n"
-            "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)\n\n"
-            "LANGUAGE PRESERVATION:\n"
-            "- Korean text → Output in Korean\n"
-            "- Japanese text → Output in Japanese\n"
-            "- Chinese text → Output in Chinese\n"
-            "- English text → Output in English\n"
-            "- CJK quotation marks (「」『』【】《》〈〉) → Preserve exactly as shown\n\n"
-            "FORMATTING:\n"
-            "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\n"
-            "- NEVER use \\n or line breaks in your output\n\n"
-            "FORBIDDEN RESPONSES:\n"
-            "- \"I can see this appears to be...\"\n"
-            "- \"I cannot make out any clear text...\"\n"
-            "- \"This appears to be blank...\"\n"
-            "- \"If there is text present...\"\n"
-            "- ANY explanatory text\n\n"
-            "YOUR ONLY OUTPUT: The exact visible text. Nothing more. Nothing less.\n"
-            "If image has a dot → Output: .\n"
-            "If image has two dots → Output: . .\n"
-            "If image has text → Output: [that text]\n"
-            "If image is truly blank → Output: [empty/no response]"
-        )
+        # Load OCR prompt
+        ocr_prompt_default = self._default_manga_ocr_prompt()
         self.ocr_prompt = config.get('manga_ocr_prompt', ocr_prompt_default)
+        migrated_ocr_prompt = self._migrate_legacy_manga_ocr_prompt(self.ocr_prompt)
+        if migrated_ocr_prompt != self.ocr_prompt:
+            self.ocr_prompt = migrated_ocr_prompt
+            config['manga_ocr_prompt'] = migrated_ocr_prompt
+            if hasattr(self.main_gui, 'save_config'):
+                self.main_gui.save_config(show_message=False)
+            print("[MANGA_INIT] Migrated legacy OCR no-text rule to [AI RESPONSE UNAVAILABLE]")
         
         # If OCR prompt wasn't in config, save it now
         if 'manga_ocr_prompt' not in config:
@@ -8436,10 +8393,65 @@ class MangaTranslationTab(QObject):
         # Persist via unified save path
         self._save_rendering_settings()
     
+    def _default_manga_ocr_prompt(self):
+        return (
+            "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
+            "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself.\n\n"
+            "ABSOLUTE RULES:\n"
+            "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\n"
+            "2. NEVER TRANSLATE OR MODIFY\n"
+            "3. NEVER EXPLAIN, DESCRIBE, OR COMMENT\n"
+            "4. NEVER SAY \"I can't\" or \"I cannot\" or \"no text\" or \"blank image\"\n"
+            "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\n"
+            "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\n"
+            "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\n"
+            "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\n\n"
+            "LANGUAGE PRESERVATION:\n"
+            "- Korean text → Output in Korean\n"
+            "- Japanese text → Output in Japanese\n"
+            "- Chinese text → Output in Chinese\n"
+            "- English text → Output in English\n"
+            "- CJK quotation marks (「」『』【】《》〈〉) → Preserve exactly as shown\n\n"
+            "FORMATTING:\n"
+            "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\n"
+            "- NEVER use \\n or line breaks in your output\n\n"
+            "FORBIDDEN RESPONSES:\n"
+            "- \"I can see this appears to be...\"\n"
+            "- \"I cannot make out any clear text...\"\n"
+            "- \"This appears to be blank...\"\n"
+            "- \"If there is text present...\"\n"
+            "- ANY explanatory text\n\n"
+            "YOUR ONLY OUTPUT: The exact visible text. Nothing more. Nothing less.\n"
+            "If image has a dot → Output: .\n"
+            "If image has two dots → Output: . .\n"
+            "If image has text → Output: [that text]\n"
+            "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"
+        )
+
+    @staticmethod
+    def _migrate_legacy_manga_ocr_prompt(prompt):
+        """Update only saved prompts with the old empty-response OCR rule."""
+        legacy_rule = "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)"
+        if not isinstance(prompt, str) or legacy_rule not in prompt:
+            return prompt
+
+        prompt = prompt.replace(
+            legacy_rule,
+            "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]",
+        ).replace(
+            "If image is truly blank → Output: [empty/no response]",
+            "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]",
+        )
+        detector_note = "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself."
+        if detector_note not in prompt:
+            intro = "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
+            prompt = prompt.replace(intro, intro + detector_note + "\n\n", 1) if intro in prompt else detector_note + "\n\n" + prompt
+        return prompt
+
     def _edit_context_prompt(self):
         """Open dialog to edit full page context prompt and OCR prompt"""
-        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QLabel, QTextEdit, 
-                                        QPushButton, QHBoxLayout)
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QLabel, QTextEdit,
+                                        QPushButton, QHBoxLayout, QMessageBox)
         from PySide6.QtCore import Qt
         
         # Create PySide6 dialog
@@ -8508,6 +8520,17 @@ class MangaTranslationTab(QObject):
             dialog.accept()
         
         def reset_prompt():
+            choice = QMessageBox.warning(
+                dialog,
+                "Reset Prompts",
+                "Reset both prompts to their defaults? This replaces the text currently shown in both editors. "
+                "Changes are saved only when you click Save.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if choice != QMessageBox.Yes:
+                return
+
             default_prompt = (
                 "You will receive multiple text segments from a manga page, each prefixed with an index like [0], [1], etc. "
                 "Translate each segment considering the context of all segments together. "
@@ -8529,40 +8552,7 @@ class MangaTranslationTab(QObject):
             )
             text_editor.setPlainText(default_prompt)
             
-            # UPDATED: Improved OCR prompt (matches ocr_manager.py)
-            default_ocr = (
-                "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
-                "ABSOLUTE RULES:\n"
-                "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\n"
-                "2. NEVER TRANSLATE OR MODIFY\n"
-                "3. NEVER EXPLAIN, DESCRIBE, OR COMMENT\n"
-                "4. NEVER SAY \"I can't\" or \"I cannot\" or \"no text\" or \"blank image\"\n"
-                "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\n"
-                "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\n"
-                "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\n"
-                "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)\n\n"
-                "LANGUAGE PRESERVATION:\n"
-                "- Korean text → Output in Korean\n"
-                "- Japanese text → Output in Japanese\n"
-                "- Chinese text → Output in Chinese\n"
-                "- English text → Output in English\n"
-                "- CJK quotation marks (「」『』【】《》〈〉) → Preserve exactly as shown\n\n"
-                "FORMATTING:\n"
-                "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\n"
-                "- NEVER use \\n or line breaks in your output\n\n"
-                "FORBIDDEN RESPONSES:\n"
-                "- \"I can see this appears to be...\"\n"
-                "- \"I cannot make out any clear text...\"\n"
-                "- \"This appears to be blank...\"\n"
-                "- \"If there is text present...\"\n"
-                "- ANY explanatory text\n\n"
-                "YOUR ONLY OUTPUT: The exact visible text. Nothing more. Nothing less.\n"
-                "If image has a dot → Output: .\n"
-                "If image has two dots → Output: . .\n"
-                "If image has text → Output: [that text]\n"
-                "If image is truly blank → Output: [empty/no response]"
-            )
-            ocr_editor.setPlainText(default_ocr)
+            ocr_editor.setPlainText(self._default_manga_ocr_prompt())
         
         # Button layout
         button_layout = QHBoxLayout()
@@ -11310,10 +11300,11 @@ class MangaTranslationTab(QObject):
 
     def _default_custom_image_edit_system_prompt(self):
         return (
-            "This is an image editing task. Erase only the written characters and letters from this image. "
-            "Preserve speech bubbles, text boxes, frames, and all other visual elements — only remove the text inside them. "
-            "Maintain the same speech bubble styling, shape, color, and appearance. "
-            "Do NOT return plain text or OCR — you MUST return the generated edited image."
+            "This is an image inpainting task. Remove the written characters and reconstruct the image content they cover. "
+            "Redraw the underlying speech-bubble interior or artwork to match the surrounding colors, texture, "
+            "gradients, shading, and linework, with seamless edges, as though the text was never there. "
+            "Preserve speech-bubble outlines, text-box borders, panel frames, artwork, composition, and image dimensions. "
+            "Do not add or replace text. Return only the generated edited image, never an OCR transcription or explanation."
         )
 
     def _is_old_custom_image_edit_default_prompt(self, prompt):
@@ -15967,38 +15958,7 @@ class MangaTranslationTab(QObject):
                     self._log(f"OCR Prompt being set: {self.ocr_prompt[:150]}...", "debug")
                 else:
                     # Fallback to default OCR prompt
-                    os.environ['OCR_SYSTEM_PROMPT'] = (
-                    "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
-                    "ABSOLUTE RULES:\n"
-                    "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\n"
-                    "2. NEVER TRANSLATE OR MODIFY\n"
-                    "3. NEVER EXPLAIN, DESCRIBE, OR COMMENT\n"
-                    "4. NEVER SAY \"I can't\" or \"I cannot\" or \"no text\" or \"blank image\"\n"
-                    "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\n"
-                    "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\n"
-                    "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\n"
-                    "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)\n\n"
-                    "LANGUAGE PRESERVATION:\n"
-                    "- Korean text → Output in Korean\n"
-                    "- Japanese text → Output in Japanese\n"
-                    "- Chinese text → Output in Chinese\n"
-                    "- English text → Output in English\n"
-                    "- CJK quotation marks (「」『』【】《》〈〉) → Preserve exactly as shown\n\n"
-                    "FORMATTING:\n"
-                    "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\n"
-                    "- NEVER use \\n or line breaks in your output\n\n"
-                    "FORBIDDEN RESPONSES:\n"
-                    "- \"I can see this appears to be...\"\n"
-                    "- \"I cannot make out any clear text...\"\n"
-                    "- \"This appears to be blank...\"\n"
-                    "- \"If there is text present...\"\n"
-                    "- ANY explanatory text\n\n"
-                    "YOUR ONLY OUTPUT: The exact visible text. Nothing more. Nothing less.\n"
-                    "If image has a dot → Output: .\n"
-                    "If image has two dots → Output: . .\n"
-                    "If image has text → Output: [that text]\n"
-                    "If image is truly blank → Output: [empty/no response]"
-                    )
+                    os.environ['OCR_SYSTEM_PROMPT'] = self._default_manga_ocr_prompt()
                     self._log("✅ Using default OCR prompt", "info")
                 
                 self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)")

@@ -201,6 +201,7 @@ class CustomAPIProvider(OCRProvider):
         self.ocr_prompt = os.environ.get('OCR_SYSTEM_PROMPT', 
             os.environ.get('SYSTEM_PROMPT', 
             "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
+            "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself.\n\n"
             "ABSOLUTE RULES:\n"
             "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\n"
             "2. NEVER TRANSLATE OR MODIFY\n"
@@ -209,7 +210,7 @@ class CustomAPIProvider(OCRProvider):
             "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\n"
             "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\n"
             "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\n"
-            "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)\n\n"
+            "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\n\n"
             "LANGUAGE PRESERVATION:\n"
             "- Korean text → Output in Korean\n"
             "- Japanese text → Output in Japanese\n"
@@ -229,7 +230,7 @@ class CustomAPIProvider(OCRProvider):
             "If image has a dot → Output: .\n"
             "If image has two dots → Output: . .\n"
             "If image has text → Output: [that text]\n"
-            "If image is truly blank → Output: [empty/no response]"
+            "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"
             ))
         
         # Use existing temperature and token settings  
@@ -784,6 +785,11 @@ class CustomAPIProvider(OCRProvider):
 
                     # Validate content
                     has_content = bool(content and str(content).strip())
+                    if (has_content
+                            and str(content).strip().upper() == '[AI RESPONSE UNAVAILABLE]'
+                            and not UnifiedClient._is_failed_finish_reason(finish_reason)):
+                        self._log("No text in detector-selected image; skipping OCR result")
+                        break
                     refused = False
                     if has_content:
                         # Filter out explicit failure markers
@@ -1214,6 +1220,7 @@ class Qwen2VL(OCRProvider):
         # Get OCR prompt from environment or use default (UPDATED: Improved prompt)
         self.ocr_prompt = os.environ.get('OCR_SYSTEM_PROMPT', 
             "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
+            "The image was selected by an automatic text detector. Detection can be wrong, so verify the image itself.\n\n"
             "ABSOLUTE RULES:\n"
             "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\n"
             "2. NEVER TRANSLATE OR MODIFY\n"
@@ -1222,7 +1229,7 @@ class Qwen2VL(OCRProvider):
             "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\n"
             "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\n"
             "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\n"
-            "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)\n\n"
+            "8. IF THERE ARE NO VISIBLE CHARACTERS, PUNCTUATION, OR SYMBOLS TO TRANSCRIBE, OUTPUT EXACTLY [AI RESPONSE UNAVAILABLE]\n\n"
             "LANGUAGE PRESERVATION:\n"
             "- Korean text → Output in Korean\n"
             "- Japanese text → Output in Japanese\n"
@@ -1242,7 +1249,7 @@ class Qwen2VL(OCRProvider):
             "If image has a dot → Output: .\n"
             "If image has two dots → Output: . .\n"
             "If image has text → Output: [that text]\n"
-            "If image is truly blank → Output: [empty/no response]"
+            "If image has no visible text or symbols → Output: [AI RESPONSE UNAVAILABLE]"
         )
     
     def set_ocr_prompt(self, prompt: str):
@@ -2652,7 +2659,13 @@ class OCRManager:
             return []
         
         print(f"[DEBUG] Using provider: {provider_name}")
-        return provider.detect_text(image, **kwargs)
+        results = provider.detect_text(image, **kwargs)
+        if not isinstance(results, list):
+            return results
+        return [
+            result for result in results
+            if str(getattr(result, 'text', '') or '').strip().upper() != '[AI RESPONSE UNAVAILABLE]'
+        ]
     
     def set_stop_flag(self, stop_flag):
         """Set stop flag for all providers"""
