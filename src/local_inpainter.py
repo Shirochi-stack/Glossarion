@@ -1390,19 +1390,13 @@ class LocalInpainter:
         except Exception:
             pass
         return False
+
+    def _custom_image_edit_force_stopped(self) -> bool:
+        """Allow the current page to finish on graceful stop, but honor force stop."""
+        return os.environ.get('GRACEFUL_STOP') != '1' and self._check_stop()
     
     def _log(self, message: str, level: str = "info"):
-        """Log message with stop suppression"""
-        # Suppress logs when stopped (allow only essential stop confirmation messages)
-        if self._check_stop():
-            essential_stop_keywords = [
-                "⏹️ Translation stopped by user",
-                "⏹️ Inpainting stopped",
-                "cleanup", "🧹"
-            ]
-            if not any(keyword in message for keyword in essential_stop_keywords):
-                return
-        
+        """Forward inpainting messages even when cancellation is pending."""
         if self.log_callback:
             self.log_callback(message, level)
         else:
@@ -2705,6 +2699,9 @@ class LocalInpainter:
 
     def _custom_image_edit_inpaint_chunked(self, image, mask, iterations=None):
         """Send one image-edit request per masked crop and assemble the page."""
+        if self._custom_image_edit_force_stopped():
+            return None
+
         def log_crop_progress(message, level="info"):
             # The image-edit request trace is printed to the console; keep crop
             # progress beside it as well as in the manga panel's log callback.
@@ -2772,12 +2769,13 @@ class LocalInpainter:
 
         def edit_crop(job):
             _, request_index, start, end = job
-            if self._check_stop() and os.environ.get('GRACEFUL_STOP') != '1':
+            if self._custom_image_edit_force_stopped():
                 return None
             log_crop_progress(f"Custom image edit request {request_index}/{request_count}: rows {start}-{end}")
-            return self._custom_image_edit_inpaint(
+            edited = self._custom_image_edit_inpaint(
                 image[start:end], mask[start:end], iterations=iterations, _pool_prepared=True
             )
+            return None if self._custom_image_edit_force_stopped() else edited
 
         edited_crops = {}
         if workers == 1:
@@ -2790,6 +2788,8 @@ class LocalInpainter:
         try:
             for job, edited in completed:
                 range_index, request_index, start, end = job
+                if self._custom_image_edit_force_stopped():
+                    return None
                 if edited is None or edited.shape != image[start:end].shape:
                     log_crop_progress(f"Custom image edit crop {request_index}/{request_count} failed", "error")
                     return None
@@ -2800,6 +2800,9 @@ class LocalInpainter:
         finally:
             if workers > 1:
                 executor.shutdown(wait=True, cancel_futures=True)
+
+        if self._custom_image_edit_force_stopped():
+            return None
 
         result = image.copy()
         previous_end = 0
@@ -2817,7 +2820,7 @@ class LocalInpainter:
                 result[start:overlap_end] = np.clip(blended, 0, 255).astype(np.uint8)
             result[overlap_end:end] = edited[overlap_end - start:]
             previous_end = end
-        return result
+        return None if self._custom_image_edit_force_stopped() else result
 
     def _custom_image_edit_inpaint(self, image, mask, iterations=None, _pool_prepared=False):
         """Inpaint through an OpenAI-compatible /images/edits endpoint."""
@@ -2832,6 +2835,8 @@ class LocalInpainter:
             _, mask_gray = cv2.threshold(mask_gray, 0, 255, cv2.THRESH_BINARY)
             if np.count_nonzero(mask_gray) == 0:
                 return image.copy()
+            if self._custom_image_edit_force_stopped():
+                return None
 
             use_current_provider_attr = getattr(self, '_custom_image_edit_use_current_provider', None)
             if use_current_provider_attr is None:
@@ -2939,11 +2944,9 @@ class LocalInpainter:
                 or self.config.get('custom_image_edit_prompt')
                 or os.environ.get('QWEN_IMAGE_EDIT_INPAINT_PROMPT')
                 or (
-                    "This is an image inpainting task. Remove the written characters and reconstruct the image content they cover. "
-                    "Redraw the underlying speech-bubble interior or artwork to match the surrounding colors, texture, "
-                    "gradients, shading, and linework, with seamless edges, as though the text was never there. "
-                    "Preserve speech-bubble outlines, text-box borders, panel frames, artwork, composition, and image dimensions. "
-                    "Do not add or replace text. Return only the generated edited image, never an OCR transcription or explanation."
+                    "Remove the written text from this image. Redraw only the areas it covered to match their immediate surroundings. "
+                    "Keep speech-bubble outlines, text-box borders, panel frames, other artwork, and image dimensions unchanged. "
+                    "Do not add text. Return only the edited image."
                 )
             )
             user_prompt_template = self.config.get('custom_image_edit_user_prompt', '')
@@ -3205,6 +3208,8 @@ class LocalInpainter:
                 # Inpainting is a concurrent background task — it must NOT be
                 # killed by the translation pipeline's graceful-stop signal.
                 client._ignore_graceful_stop = True
+                if self._custom_image_edit_force_stopped():
+                    return None
                 content, _finish_reason = client.send(
                     messages,
                     temperature=float(self.config.get('temperature', 0.3) or 0.3),
@@ -3269,6 +3274,8 @@ class LocalInpainter:
                     'response_modalities': ['IMAGE', 'TEXT'],
                     'image_generation_config': {'image_size': image_resolution},
                 }
+                if self._custom_image_edit_force_stopped():
+                    return None
                 return requests.post(json_url, headers=json_headers, json=payload, timeout=timeout)
 
             if getattr(self, '_custom_image_edit_use_current_provider', False):
@@ -3303,16 +3310,24 @@ class LocalInpainter:
                     nanogpt_image_data_url = _nanogpt_image_data_url_from_bgr(proc_bgr)
                     payload['imageDataUrl'] = nanogpt_image_data_url
                     self._log(f"NanoGPT image edit payload includes imageDataUrl ({len(nanogpt_image_data_url)} chars)", "info")
+                    if self._custom_image_edit_force_stopped():
+                        return None
                     resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
                 else:
+                    if self._custom_image_edit_force_stopped():
+                        return None
                     resp = requests.post(url, headers=headers, data=form_data, files=files, timeout=timeout)
                     if resp.status_code == 415 and 'application/json' in str(resp.text).lower():
                         self._log("Custom image edit endpoint expects JSON; retrying via chat image-output request", "info")
                         resp = _json_image_edit_request()
+                if self._custom_image_edit_force_stopped():
+                    return None
                 if resp.status_code not in (200, 201):
                     raise RuntimeError(f"Custom image edit endpoint error ({resp.status_code}): {resp.text[:500]}")
 
                 data = resp.json()
+            if self._custom_image_edit_force_stopped():
+                return None
             def _extract_image_value(obj):
                 if not isinstance(obj, dict):
                     return None
@@ -3390,6 +3405,8 @@ class LocalInpainter:
                 _, image_b64 = image_value.split(',', 1)
                 out_bytes = base64.b64decode(image_b64)
             elif isinstance(image_value, str) and image_value.startswith(('http://', 'https://')):
+                if self._custom_image_edit_force_stopped():
+                    return None
                 out_resp = requests.get(image_value, timeout=timeout)
                 out_resp.raise_for_status()
                 out_bytes = out_resp.content
@@ -3403,6 +3420,8 @@ class LocalInpainter:
             out_bgr = cv2.imdecode(out_arr, cv2.IMREAD_COLOR)
             if out_bgr is None:
                 raise RuntimeError("Custom image edit endpoint returned unreadable image bytes")
+            if self._custom_image_edit_force_stopped():
+                return None
             target_h, target_w = crop_bgr.shape[:2]
             if out_bgr.shape[:2] != (target_h, target_w):
                 resize_info = nanogpt_input_resize_info if is_nanogpt_image else None
@@ -3501,7 +3520,7 @@ class LocalInpainter:
             result[top:bottom, left:right] = blended_crop
             self._log_inpaint_diag('custom-image-edit', result, mask_gray)
             self._log("✅ Custom image edit inpainting complete", "info")
-            return result
+            return None if self._custom_image_edit_force_stopped() else result
         except Exception as e:
             logger.error(f"Custom image edit inpainting failed: {e}")
             logger.error(traceback.format_exc())
@@ -4619,11 +4638,16 @@ class LocalInpainter:
             _skip_hd: Skip HD processing
             _skip_tiling: Skip tiling
         """
-        disable_performance_mode = bool(
-            _skip_hd
-            or _skip_tiling
-            or self.config.get('manga_disable_inpaint_performance_mode', False)
-            or self.config.get('disable_performance_mode', False)
+        # Custom image edit always follows its text mask and chunk settings.
+        # The local-model performance toggle does not change API edit requests.
+        disable_performance_mode = (
+            not self._is_custom_image_edit_method(getattr(self, 'current_method', None))
+            and bool(
+                _skip_hd
+                or _skip_tiling
+                or self.config.get('manga_disable_inpaint_performance_mode', False)
+                or self.config.get('disable_performance_mode', False)
+            )
         )
         if disable_performance_mode:
             _skip_hd = True
@@ -4640,9 +4664,12 @@ class LocalInpainter:
             return self._mp_inpaint(image, mask, refinement=refinement, iterations=iterations)
         
         # Check for stop at start
-        if self._check_stop():
+        if self._check_stop() and not (
+            self._is_custom_image_edit_method(getattr(self, 'current_method', None))
+            and os.environ.get('GRACEFUL_STOP') == '1'
+        ):
             self._log("⏹️ Inpainting stopped by user", "warning")
-            return image
+            return None if self._is_custom_image_edit_method(getattr(self, 'current_method', None)) else image
         
         if not self.model_loaded:
             self._log("No model loaded", "error")

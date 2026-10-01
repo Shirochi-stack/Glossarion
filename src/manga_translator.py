@@ -1188,7 +1188,8 @@ class MangaTranslator:
         import threading
         if not hasattr(builtins, '_manga_log_callbacks'):
             builtins._manga_log_callbacks = {}
-        builtins._manga_log_callbacks[id(self)] = log_callback
+        if log_callback:
+            builtins._manga_log_callbacks[id(self)] = log_callback
         
         # Store original print as class variable for fallback (only once)
         if not hasattr(MangaTranslator, '_original_print_backup'):
@@ -3142,21 +3143,7 @@ class MangaTranslator:
     def _log(self, message: str, level: str = "info"):
         """Log message to GUI or console, and also to file logger.
         The file logger is configured in translator_gui._setup_file_logging().
-        Enhanced with comprehensive stop suppression.
         """
-        # Enhanced stop suppression - allow only essential stop confirmation messages
-        if self._check_stop() or self.is_globally_cancelled():
-            # Only allow very specific stop confirmation messages - nothing else
-            essential_stop_keywords = [
-                "⏹️ Translation stopped by user",
-                "🧹 Cleaning up models to free RAM",
-                "✅ Model cleanup complete - RAM should be freed",
-                "✅ All models cleaned up - RAM freed!"
-            ]
-            # Suppress ALL other messages when stopped - be very restrictive
-            if not any(keyword in message for keyword in essential_stop_keywords):
-                return
-            
         # Concise pipeline logs: keep only high-level messages and errors/warnings
         # Exclude all debug messages (blue text) in concise mode
         if getattr(self, 'concise_logs', False):
@@ -11008,7 +10995,7 @@ class MangaTranslator:
         
         # Get iterations setting (from auto_iterations logic or config)
         iterations = getattr(self, '_current_inpainter_iterations', 1)
-        disable_performance_mode = bool(
+        disable_performance_mode = str(local_method or '').lower() != 'custom-image-edit' and bool(
             getattr(getattr(self, 'main_gui', None), 'manga_disable_inpaint_performance_mode_var', False)
             or getattr(getattr(self, 'main_gui', None), 'config', {}).get('manga_disable_inpaint_performance_mode', False)
             or self.manga_settings.get('inpainting', {}).get('disable_performance_mode', False)

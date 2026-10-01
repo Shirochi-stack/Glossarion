@@ -14168,11 +14168,9 @@ Text to analyze:
             'custom_image_edit_system_prompt',
             self.config.get(
                 'custom_image_edit_prompt',
-                "This is an image inpainting task. Remove the written characters and reconstruct the image content they cover. "
-                "Redraw the underlying speech-bubble interior or artwork to match the surrounding colors, texture, "
-                "gradients, shading, and linework, with seamless edges, as though the text was never there. "
-                "Preserve speech-bubble outlines, text-box borders, panel frames, artwork, composition, and image dimensions. "
-                "Do not add or replace text. Return only the generated edited image, never an OCR transcription or explanation."
+                "Remove the written text from this image. Redraw only the areas it covered to match their immediate surroundings. "
+                "Keep speech-bubble outlines, text-box borders, panel frames, other artwork, and image dimensions unchanged. "
+                "Do not add text. Return only the edited image."
             )
         )
 

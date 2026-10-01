@@ -778,7 +778,7 @@ def _run_detect_background(self, image_path: str, detection_config: dict):
             api_key = self.main_gui.config.get('api_key', '') or 'dummy'
             model = self.main_gui.config.get('model', 'gpt-4o-mini')
             uc = UnifiedClient(model=model, api_key=api_key)
-            temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=lambda m, l: None, skip_inpainter_init=True)
+            temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=None, skip_inpainter_init=True)
             # Use the translator's pool-aware method to get detector
             detector = temp_translator._get_thread_bubble_detector()
             # Immediately update GUI pool tracker after checkout
@@ -2532,13 +2532,8 @@ def _run_clean_background(self, image_path: str, regions: list):
             
             filtered_regions.append(region)
 
-        if filtered_regions:
-            recognized_texts = _run_ocr_on_regions(
-                self, image_path, filtered_regions, _get_ocr_config(self)
-            )
-            filtered_regions = _regions_with_ocr_text(filtered_regions, recognized_texts)
         if not filtered_regions:
-            self._log("⏭️ No OCR-confirmed text to clean; preserving original image", "info")
+            self._log("⏭️ No eligible regions to clean; preserving original image", "info")
             return
         
         self._log(f"🎨 Creating mask from {len(filtered_regions)} regions ({excluded_count} excluded)", "info")
@@ -2606,6 +2601,7 @@ def _run_clean_background(self, image_path: str, regions: list):
         # Get inpainting settings from manga integration config
         inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
         local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
+        is_custom_image_edit = inpaint_method == 'local' and str(local_model or '').lower() == 'custom-image-edit'
         
         if inpaint_method == 'local':
             # Use local inpainter with the same method as manga_translator
@@ -2613,7 +2609,6 @@ def _run_clean_background(self, image_path: str, regions: list):
             
             # Get model path from config (same way as manga_translator)
             model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
-            is_custom_image_edit = str(local_model or '').lower() == 'custom-image-edit'
             if is_custom_image_edit and not model_path:
                 model_path = getattr(self.main_gui, 'custom_image_edit_endpoint_var', '') or self.main_gui.config.get('custom_image_edit_endpoint', '')
             try:
@@ -2647,7 +2642,7 @@ def _run_clean_background(self, image_path: str, regions: list):
                     api_key = self.main_gui.config.get('api_key', '') or 'dummy'
                     model = self.main_gui.config.get('model', 'gpt-4o-mini')
                     uc = UnifiedClient(model=model, api_key=api_key)
-                    temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=lambda m, l: None, skip_inpainter_init=True)
+                    temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=None, skip_inpainter_init=True)
                     
                     # POLL for inpainter with timeout (same as translator initialization)
                     inpainter = None
@@ -2713,7 +2708,7 @@ def _run_clean_background(self, image_path: str, regions: list):
                 # For now, use the first custom iteration value found
                 # TODO: Implement per-region inpainting with different iterations
                 first_iteration_value = next(iter(custom_iterations.values()))
-                disable_performance_mode = bool(self.main_gui.config.get('manga_disable_inpaint_performance_mode', False))
+                disable_performance_mode = not is_custom_image_edit and bool(self.main_gui.config.get('manga_disable_inpaint_performance_mode', False))
                 cleaned_image = inpainter.inpaint(
                     image,
                     mask,
@@ -2723,7 +2718,7 @@ def _run_clean_background(self, image_path: str, regions: list):
                 )
             else:
                 self._log("🧽 Running local inpainting with auto iterations", "info")
-                disable_performance_mode = bool(self.main_gui.config.get('manga_disable_inpaint_performance_mode', False))
+                disable_performance_mode = not is_custom_image_edit and bool(self.main_gui.config.get('manga_disable_inpaint_performance_mode', False))
                 cleaned_image = inpainter.inpaint(
                     image,
                     mask,
@@ -2977,7 +2972,7 @@ def _run_detection_sync(self, image_path: str, detection_config: dict) -> list:
             api_key = self.main_gui.config.get('api_key', '') or 'dummy'
             model = self.main_gui.config.get('model', 'gpt-4o-mini')
             uc = UnifiedClient(model=model, api_key=api_key)
-            temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=lambda m, l: None, skip_inpainter_init=True)
+            temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=None, skip_inpainter_init=True)
             detector = temp_translator._get_thread_bubble_detector()
             # Check if detector is None (pool checkout can return None)
             if detector is None:
@@ -3336,6 +3331,7 @@ def _run_inpainting_sync(
         inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
         local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
         
+        is_custom_image_edit = False
         if inpaint_method == 'local':
             # Use local inpainter with the same method as manga_translator
             print(f"[INPAINT_SYNC] Using local inpainter: {local_model}")
@@ -3481,7 +3477,7 @@ def _run_inpainting_sync(
             if inpainter is not None:
                 try:
                     cfg = getattr(self.main_gui, 'config', {}) if hasattr(self, 'main_gui') else {}
-                    disable_performance_mode = bool(
+                    disable_performance_mode = not is_custom_image_edit and bool(
                         getattr(self.main_gui, 'manga_disable_inpaint_performance_mode_var', False)
                         or (cfg.get('manga_disable_inpaint_performance_mode', False) if isinstance(cfg, dict) else False)
                     )
@@ -3520,7 +3516,7 @@ def _run_inpainting_sync(
                         inpainter.config['model'] = model_name
                         inpainter.config['custom_image_edit_model'] = model_name
                         inpainter._custom_image_edit_model_ref = model_name
-                    disable_performance_mode = bool(
+                    disable_performance_mode = not is_custom_image_edit and bool(
                         getattr(self.main_gui, 'manga_disable_inpaint_performance_mode_var', False)
                         or (cfg.get('manga_disable_inpaint_performance_mode', False) if isinstance(cfg, dict) else False)
                     )
@@ -3593,7 +3589,7 @@ def _run_inpainting_sync(
                 if is_custom_image_edit:
                     previous_inpainter_log_callback = getattr(inpainter, 'log_callback', None)
                     inpainter.set_log_callback(self._log)
-                disable_performance_mode = bool(
+                disable_performance_mode = not is_custom_image_edit and bool(
                     getattr(inpainter, 'config', {}).get('manga_disable_inpaint_performance_mode', False)
                     if hasattr(inpainter, 'config') else False
                 )
@@ -3681,6 +3677,15 @@ def _run_inpainting_sync(
             print(f"[INPAINT_SYNC] Using OpenCV inpainting (fallback)")
             cleaned_image = cv2.inpaint(image, mask, 3, cv2.INPAINT_TELEA)
         
+        if (
+            is_custom_image_edit
+            and cleaned_image is not None
+            and os.environ.get('GRACEFUL_STOP') != '1'
+            and _is_translation_cancelled(self)
+        ):
+            print("[INPAINT_SYNC] Force-cancelled before saving custom image edit result")
+            return None
+
         if cleaned_image is not None:
             # Save cleaned image into per-image isolated folder and return path
             # Check for OUTPUT_DIRECTORY override (prefer config over env var)
@@ -3706,6 +3711,9 @@ def _run_inpainting_sync(
             else:
                 cleaned_path = os.path.join(output_dir, f"{base}_cleaned{ext}")
 
+            if is_custom_image_edit and os.environ.get('GRACEFUL_STOP') != '1' and _is_translation_cancelled(self):
+                print("[INPAINT_SYNC] Force-cancelled before writing custom image edit result")
+                return None
             cv2.imwrite(cleaned_path, cleaned_image)
             if save_as == 'translated':
                 print(f"[INPAINT_SYNC] Saved translated image to: {cleaned_path}")
@@ -7372,7 +7380,7 @@ def _run_inpainting_on_region(self, image, mask, region_index, custom_iterations
             # Run inpainting with custom iterations if available
             if custom_iterations is not None:
                 print(f"[INPAINT_REGION] Using custom iterations: {custom_iterations}")
-                disable_performance_mode = bool(self.main_gui.config.get('manga_disable_inpaint_performance_mode', False))
+                disable_performance_mode = not is_custom_image_edit and bool(self.main_gui.config.get('manga_disable_inpaint_performance_mode', False))
                 cleaned_image = inpainter.inpaint(
                     image,
                     mask,
@@ -7382,7 +7390,7 @@ def _run_inpainting_on_region(self, image, mask, region_index, custom_iterations
                 )
             else:
                 print(f"[INPAINT_REGION] Using auto iterations")
-                disable_performance_mode = bool(self.main_gui.config.get('manga_disable_inpaint_performance_mode', False))
+                disable_performance_mode = not is_custom_image_edit and bool(self.main_gui.config.get('manga_disable_inpaint_performance_mode', False))
                 cleaned_image = inpainter.inpaint(
                     image,
                     mask,

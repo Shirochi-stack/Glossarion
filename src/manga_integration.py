@@ -5639,11 +5639,10 @@ class MangaTranslationTab(QObject):
         disable_performance_cb = self._create_styled_checkbox("Disable Performance Mode")
         disable_performance_cb.setToolTip(
             "Off: use faster resize, crop, and tiling optimizations\n"
-            "for local inpainters.\n\n"
+            "for local LaMa/ONNX inpainters.\n\n"
             "On: process the full image locally when possible.\n"
             "This can be slower and use more memory.\n\n"
-            "Custom image edit API requests still skip crops\n"
-            "without a text mask in either mode."
+            "This setting does not apply to custom image edit."
         )
         try:
             disable_performance_cb.setChecked(bool(self.disable_inpaint_performance_mode_value))
@@ -11304,11 +11303,9 @@ class MangaTranslationTab(QObject):
 
     def _default_custom_image_edit_system_prompt(self):
         return (
-            "This is an image inpainting task. Remove the written characters and reconstruct the image content they cover. "
-            "Redraw the underlying speech-bubble interior or artwork to match the surrounding colors, texture, "
-            "gradients, shading, and linework, with seamless edges, as though the text was never there. "
-            "Preserve speech-bubble outlines, text-box borders, panel frames, artwork, composition, and image dimensions. "
-            "Do not add or replace text. Return only the generated edited image, never an OCR transcription or explanation."
+            "Remove the written text from this image. Redraw only the areas it covered to match their immediate surroundings. "
+            "Keep speech-bubble outlines, text-box borders, panel frames, other artwork, and image dimensions unchanged. "
+            "Do not add text. Return only the edited image."
         )
 
     def _is_old_custom_image_edit_default_prompt(self, prompt):
@@ -14278,22 +14275,9 @@ class MangaTranslationTab(QObject):
         return False
     
     def _log(self, message: str, level: str = "info"):
-        """Log message to GUI text widget or console with enhanced stop suppression"""
+        """Log messages to the manga panel regardless of translation stop state."""
         if self._should_suppress_debug_log(message, level):
             return
-
-        # Enhanced stop suppression - allow only essential stop confirmation messages
-        if self._is_stop_requested() or self.is_globally_cancelled():
-            # Only allow very specific stop confirmation messages - nothing else
-            essential_stop_keywords = [
-                "⏹️ Translation stopped by user",
-                "🧹 Cleaning up models to free RAM",
-                "✅ Model cleanup complete - RAM should be freed",
-                "✅ All models cleaned up - RAM freed!"
-            ]
-            # Suppress ALL other messages when stopped - be very restrictive
-            if not any(keyword in message for keyword in essential_stop_keywords):
-                return
         
         # Lightweight deduplication: ignore identical lines within a short interval
         try:

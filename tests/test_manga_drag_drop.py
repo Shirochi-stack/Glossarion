@@ -3,6 +3,7 @@ import threading
 from queue import Queue
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import pytest
 from PySide6.QtCore import QEvent, QMimeData, QUrl
@@ -17,7 +18,7 @@ from manga_integration import (
 )
 import manga_ocr_io
 from local_inpainter import LocalInpainter
-from ocr_manager import CustomAPIProvider, OCRManager, OCRResult
+from ocr_manager import CustomAPIProvider, OCRManager, OCRProvider, OCRResult
 from unified_api_client import UnifiedClient
 
 
@@ -65,6 +66,52 @@ class _DropHarness:
 
     def _log(self, message, level):
         self.logs.append((message, level))
+
+
+def test_manga_logger_keeps_backend_messages_after_stop(monkeypatch):
+    import logging
+
+    monkeypatch.setattr(MangaTranslationTab, '_persistent_log', [])
+    updates = Queue()
+    harness = SimpleNamespace(
+        _should_suppress_debug_log=lambda *_args: False,
+        _is_stop_requested=lambda: True,
+        is_globally_cancelled=lambda: True,
+        log_text=object(),
+        update_queue=updates,
+    )
+    harness._log = lambda message, level='info': MangaTranslationTab._log(harness, message, level)
+    handler = manga_integration._MangaGuiLogHandler(harness)
+    record = logging.LogRecord(
+        'unified_api_client', logging.INFO, __file__, 1,
+        'Backend request completed after stop', (), None,
+    )
+
+    worker = threading.Thread(target=handler.emit, args=(record,))
+    worker.start()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert updates.get_nowait() == ('log', 'Backend request completed after stop', 'info')
+    assert MangaTranslationTab._persistent_log[-1] == ('Backend request completed after stop', 'info')
+
+
+@pytest.mark.parametrize(
+    'log_method',
+    [manga_translator.MangaTranslator._log, LocalInpainter._log, OCRProvider._log],
+)
+def test_manga_backend_callbacks_keep_messages_after_stop(log_method):
+    received = []
+    harness = SimpleNamespace(
+        _check_stop=lambda: True,
+        is_globally_cancelled=lambda: True,
+        concise_logs=False,
+        log_callback=lambda message, level: received.append((message, level)),
+    )
+
+    log_method(harness, 'Backend diagnostic after stop', 'info')
+
+    assert received == [('Backend diagnostic after stop', 'info')]
 
 
 def test_skip_display_prefix_uses_emoji_and_accepts_legacy_marker():
@@ -1050,6 +1097,129 @@ def test_custom_image_edit_crops_run_in_parallel_with_selected_limit(
     assert np.all(result[mask > 0] == (0, 0, 255))
     assert any(f'concurrency: {expected_workers} simultaneous' in message for message in messages)
     assert sum('Custom image edit request ' in message for message in messages) == 3
+
+
+def test_custom_image_edit_finishes_current_page_on_graceful_stop(monkeypatch):
+    monkeypatch.setenv('GRACEFUL_STOP', '1')
+    inpainter = object.__new__(LocalInpainter)
+    inpainter.config = {'manga_settings': {'preprocessing': {'chunk_height': 100, 'chunk_overlap': 10}}}
+    inpainter.current_method = 'custom-image-edit'
+    inpainter.model_loaded = True
+    inpainter._mp_enabled = False
+    inpainter._check_stop = lambda: True
+    inpainter._log = lambda *_args, **_kwargs: None
+    inpainter._sync_inpainter_key_pool_from_config = lambda: None
+    calls = []
+
+    def fake_edit(crop, crop_mask, **_kwargs):
+        calls.append(crop.shape[0])
+        return crop.copy()
+
+    inpainter._custom_image_edit_inpaint = fake_edit
+    image = np.zeros((240, 8, 3), dtype=np.uint8)
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    mask[20:30, 1:7] = 255
+    mask[170:180, 1:7] = 255
+
+    result = inpainter.inpaint(image, mask)
+
+    assert result is not None
+    assert len(calls) == 2
+
+
+def test_custom_image_edit_discards_result_and_skips_queued_crop_on_force_stop(monkeypatch):
+    monkeypatch.setenv('GRACEFUL_STOP', '0')
+    inpainter = object.__new__(LocalInpainter)
+    inpainter.config = {
+        'manga_settings': {'preprocessing': {'chunk_height': 100, 'chunk_overlap': 10}},
+        'manga_batch_image_requests_enabled': True,
+        'manga_batch_image_requests_size': 1,
+    }
+    inpainter._log = lambda *_args, **_kwargs: None
+    inpainter._sync_inpainter_key_pool_from_config = lambda: None
+    stopped = False
+    calls = []
+    inpainter._check_stop = lambda: stopped
+
+    def fake_edit(crop, crop_mask, **_kwargs):
+        nonlocal stopped
+        calls.append(crop.shape[0])
+        stopped = True
+        return crop.copy()
+
+    inpainter._custom_image_edit_inpaint = fake_edit
+    image = np.zeros((240, 8, 3), dtype=np.uint8)
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    mask[20:30, 1:7] = 255
+    mask[170:180, 1:7] = 255
+
+    assert inpainter._custom_image_edit_inpaint_chunked(image, mask) is None
+    assert len(calls) == 1
+
+
+def test_custom_image_edit_force_stop_during_request_setup_never_posts(monkeypatch):
+    import requests
+
+    monkeypatch.setenv('GRACEFUL_STOP', '0')
+    monkeypatch.setenv('USE_INPAINTER_KEYS', '0')
+    inpainter = object.__new__(LocalInpainter)
+    inpainter.config = {'custom_image_edit_model': 'nan/wan-2.6-image-edit'}
+    inpainter._custom_image_edit_use_current_provider = False
+    inpainter._custom_image_edit_endpoint = 'https://nano-gpt.com/v1'
+    stopped = False
+    inpainter._check_stop = lambda: stopped
+
+    def log(message, *_args):
+        nonlocal stopped
+        if 'request starting' in message:
+            stopped = True
+
+    inpainter._log = log
+    monkeypatch.setattr(requests, 'post', lambda *_args, **_kwargs: pytest.fail('request sent after force stop'))
+    image = np.zeros((16, 16, 3), dtype=np.uint8)
+    mask = np.full((16, 16), 255, dtype=np.uint8)
+
+    assert inpainter._custom_image_edit_inpaint(image, mask, _pool_prepared=True) is None
+    assert stopped
+
+
+def test_clean_uses_detected_region_without_running_ocr(monkeypatch):
+    image_path = 'C:/clean-test/page.png'
+    monkeypatch.setenv('OUTPUT_DIRECTORY', 'C:/clean-test')
+    monkeypatch.setattr(ImageRenderer, '_reset_cancellation_flags', lambda _self: None)
+    monkeypatch.setattr(ImageRenderer, '_is_translation_cancelled', lambda _self: False)
+    monkeypatch.setattr(
+        ImageRenderer,
+        '_run_ocr_on_regions',
+        lambda *_args, **_kwargs: pytest.fail('Clean should not run OCR'),
+    )
+    monkeypatch.setattr(cv2, 'imread', lambda _path: np.full((32, 32, 3), 255, dtype=np.uint8))
+    monkeypatch.setattr(ImageRenderer.os, 'makedirs', lambda *_args, **_kwargs: None)
+    mask_pixels = []
+    written_paths = []
+
+    def fake_inpaint(image, mask, *_args):
+        mask_pixels.append(int(np.count_nonzero(mask)))
+        return image.copy()
+
+    monkeypatch.setattr(cv2, 'inpaint', fake_inpaint)
+    monkeypatch.setattr(cv2, 'imwrite', lambda path, _image: written_paths.append(path) or True)
+    harness = SimpleNamespace(
+        main_gui=SimpleNamespace(config={'manga_inpaint_method': 'none'}),
+        image_preview_widget=SimpleNamespace(viewer=SimpleNamespace(rectangles=[])),
+        update_queue=Queue(),
+        _log=lambda *_args, **_kwargs: None,
+    )
+
+    ImageRenderer._run_clean_background(
+        harness,
+        image_path,
+        [{'bbox': [8, 8, 12, 12], 'rect_index': 0, 'text': ''}],
+    )
+
+    assert len(mask_pixels) == 1 and mask_pixels[0] > 0
+    assert len(written_paths) == 1
+    assert written_paths[0].endswith('page_cleaned.png')
 
 
 def test_custom_image_edit_receives_live_manga_crop_settings():

@@ -123,17 +123,7 @@ class OCRProvider:
         self.last_error = None
         
     def _log(self, message: str, level: str = "info"):
-        """Log message with stop suppression"""
-        # Suppress logs when stopped (allow only essential stop confirmation messages)
-        if self._check_stop():
-            essential_stop_keywords = [
-                "⏹️ Translation stopped by user",
-                "⏹️ OCR processing stopped",
-                "cleanup", "🧹"
-            ]
-            if not any(keyword in message for keyword in essential_stop_keywords):
-                return
-        
+        """Forward OCR messages even when cancellation is pending."""
         if self.log_callback:
             self.log_callback(message, level)
         else:
