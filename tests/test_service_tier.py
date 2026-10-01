@@ -99,6 +99,10 @@ def test_nanogpt_default_tier_accepts_default_only_model(monkeypatch):
     ('openrouter', 'or/google/gemini-2.5-flash', 'https://openrouter.ai/api/v1', 'standard', 'default'),
     ('openrouter', 'or/google/gemini-2.5-flash', 'https://openrouter.ai/api/v1', 'flex', 'flex'),
     ('openrouter', 'or/openai/gpt-5.5', 'https://openrouter.ai/api/v1', 'flex', 'flex'),
+    ('openrouter', 'or/~openai/gpt-latest', 'https://openrouter.ai/api/v1', 'fast', 'priority'),
+    ('openrouter', 'or/anthropic/claude-opus-latest', 'https://openrouter.ai/api/v1', 'priority', None),
+    ('openrouter', 'or/deepseek/deepseek-v4-pro', 'https://openrouter.ai/api/v1', 'flex', None),
+    ('openrouter', 'or/google/gemma-3-27b-it', 'https://openrouter.ai/api/v1', 'standard', None),
 ])
 @pytest.mark.parametrize('use_sdk', [True, False])
 def test_service_tier_reaches_request_payload(

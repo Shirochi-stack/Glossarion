@@ -18183,9 +18183,9 @@ class UnifiedClient:
         return None
 
     @staticmethod
-    def _nanogpt_model_supports_service_tier(model: str) -> bool:
-        """Limit NanoGPT tier requests to OpenAI and Gemini chat models."""
-        model = str(model or '').strip().lower().removeprefix('nan/')
+    def _is_openai_or_gemini_service_tier_model(model: str) -> bool:
+        """Limit aggregator tier requests to OpenAI and Gemini chat models."""
+        model = str(model or '').strip().lower().removeprefix('nan/').removeprefix('or/').removeprefix('~')
         return (
             model.startswith('openai/')
             or model.startswith('google/gemini')
@@ -23750,13 +23750,13 @@ class UnifiedClient:
                     logger.debug(f"  System prompt preview: {msg.get('content', '')[:100]}...")
         
         request_service_tier = self._selected_service_tier(provider)
-        if provider == 'nanogpt' and request_service_tier:
-            if self._nanogpt_model_supports_service_tier(effective_model):
+        if provider in ('nanogpt', 'openrouter') and request_service_tier:
+            if not self._is_openai_or_gemini_service_tier_model(effective_model):
+                request_service_tier = None
+            elif provider == 'nanogpt':
                 request_service_tier = self._validate_nanogpt_service_tier(
                     base_url, actual_api_key, effective_model, request_service_tier
                 )
-            else:
-                request_service_tier = None
 
         # Use OpenAI SDK for providers known to work well with it
         sdk_compatible = ['openai', 'ollama', 'lmstudio', 'deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq',
