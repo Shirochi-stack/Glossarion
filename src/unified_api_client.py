@@ -135,6 +135,7 @@ from reasoning_compatibility import (
     repair_reasoning_effort, call_with_reasoning_retry,
 )
 import json
+from request_parameters import normalize_request_parameters
 import requests
 import contextvars
 from requests.adapters import HTTPAdapter
@@ -4705,6 +4706,7 @@ class UnifiedClient:
             self._thread_local.current_httpx_client = None
             self._thread_local.current_oai_http_client = None
             self._thread_local.output_token_limit = None
+            self._thread_local.request_parameters = {}
             
             # THREAD-LOCAL CACHE
             self._thread_local.request_cache = {}  # Each thread gets its own cache!
@@ -4752,6 +4754,9 @@ class UnifiedClient:
         output_limit = self._positive_int_or_none(self._key_setting(key_entry, key_data, 'individual_output_token_limit'))
         key_temperature = self._float_or_none(self._key_setting(key_entry, key_data, 'individual_key_temperature'))
         api_delay = self._float_or_none(self._key_setting(key_entry, key_data, 'api_call_delay', 0.0)) or 0.0
+        request_parameters = normalize_request_parameters(
+            self._key_setting(key_entry, key_data, 'request_parameters', {})
+        )
         active_delay = api_delay if apply_delay else 0.0
 
         if google_creds:
@@ -4765,6 +4770,7 @@ class UnifiedClient:
         self.current_key_azure_api_version = azure_api_version
         self.current_key_use_individual_endpoint = use_individual_endpoint
         self.current_key_output_token_limit = output_limit
+        self.current_key_request_parameters = request_parameters
         self._per_key_api_delay = active_delay if active_delay > 0 else None
 
         tls.google_credentials = self.current_key_google_creds
@@ -4773,6 +4779,7 @@ class UnifiedClient:
         tls.azure_api_version = self.current_key_azure_api_version
         tls.use_individual_endpoint = self.current_key_use_individual_endpoint
         tls.output_token_limit = output_limit
+        tls.request_parameters = dict(request_parameters)
         tls.per_key_max_output_tokens = output_limit
         tls.individual_key_temperature = key_temperature
         tls.api_call_delay = active_delay
@@ -4782,6 +4789,20 @@ class UnifiedClient:
             'individual_key_temperature': key_temperature,
             'api_call_delay': api_delay,
         }
+
+    def _active_request_parameters(self):
+        """Return the selected key's request fields for this thread only."""
+        tls = self._get_thread_local_client()
+        return normalize_request_parameters(getattr(tls, 'request_parameters', {}))
+
+    @staticmethod
+    def _add_request_parameters_to_sdk_kwargs(kwargs, parameters):
+        """Put known SDK arguments at the top level and extensions in extra_body."""
+        for name, value in parameters.items():
+            if name == 'service_tier' or name in kwargs:
+                kwargs[name] = value
+            else:
+                kwargs.setdefault('extra_body', {})[name] = value
     
     def _ensure_thread_client(self):
         """Ensure the current thread has a properly initialized client with thread safety"""
@@ -4965,6 +4986,7 @@ class UnifiedClient:
                         tls.google_region = None
                         tls.use_individual_endpoint = False
                         tls.output_token_limit = None
+                        tls.request_parameters = {}
                         tls.per_key_max_output_tokens = None
                         tls.individual_key_temperature = None
                         tls.api_call_delay = 0.0
@@ -4982,6 +5004,7 @@ class UnifiedClient:
                             self.current_key_google_region = None
                             self.current_key_use_individual_endpoint = False
                             self.current_key_output_token_limit = None
+                            self.current_key_request_parameters = {}
                         for _attr in ('_original_client_type', '_custom_prefix_route'):
                             if hasattr(self, _attr):
                                 try:
@@ -5011,6 +5034,7 @@ class UnifiedClient:
                         self.current_key_google_region = getattr(tls, 'google_region', None)
                         self.current_key_use_individual_endpoint = getattr(tls, 'use_individual_endpoint', False)
                         self.current_key_output_token_limit = getattr(tls, 'output_token_limit', None)
+                        self.current_key_request_parameters = dict(getattr(tls, 'request_parameters', {}))
                     # Restore per-key delay from thread-local (handles rotation without re-entering lock)
                     _key_delay = getattr(tls, 'api_call_delay', 0.0) or 0.0
                     self._per_key_api_delay = _key_delay if _key_delay > 0 else None
@@ -5031,6 +5055,7 @@ class UnifiedClient:
                 self.model = tls.model
                 self.key_identifier = tls.key_identifier
                 self.current_key_output_token_limit = None
+                self.current_key_request_parameters = {}
             
             logger.debug(f"[Thread-{thread_name}] Single-key mode: Using {self.model}")
             self._setup_client()
@@ -5068,6 +5093,9 @@ class UnifiedClient:
                 key = self._api_key_pool.keys[key_index]
                 self.api_key = key.api_key
                 self.model = key.model
+                parameters = normalize_request_parameters(getattr(key, 'request_parameters', {}))
+                self.current_key_request_parameters = parameters
+                self._get_thread_local_client().request_parameters = dict(parameters)
             return
         
         # Get next available key for this thread
@@ -5082,6 +5110,9 @@ class UnifiedClient:
                     self.api_key = key.api_key
                     self.model = key.model
                     self.current_key_index = key_index
+                    parameters = normalize_request_parameters(getattr(key, 'request_parameters', {}))
+                    self.current_key_request_parameters = parameters
+                    self._get_thread_local_client().request_parameters = dict(parameters)
                     _is_gp = (self._api_key_pool is getattr(self.__class__, '_glossary_key_pool', None))
                     _pfx = "GlossaryKey" if _is_gp else "Key"
                     self.key_identifier = f"{_pfx}#{key_index+1} ({self.model})"
@@ -5145,6 +5176,8 @@ class UnifiedClient:
             self.current_key_google_region = None
             self.current_key_use_individual_endpoint = False
             self.current_key_output_token_limit = None
+            self.current_key_request_parameters = {}
+            self._get_thread_local_client().request_parameters = {}
             for _attr in ('_original_client_type', '_custom_prefix_route'):
                 if hasattr(self, _attr):
                     try:
@@ -21344,6 +21377,9 @@ class UnifiedClient:
                 gemini_tier = self._selected_service_tier('gemini-native')
                 if gemini_tier:
                     generation_config_params["service_tier"] = gemini_tier
+                for name, value in self._active_request_parameters().items():
+                    if name in types.GenerateContentConfig.model_fields:
+                        generation_config_params[name] = value
 
                 # Log the request - only if not stopping
                 if not self._is_stop_requested():
@@ -23433,6 +23469,7 @@ class UnifiedClient:
         """Send request to OpenAI-compatible APIs with safety settings"""
         max_retries = self._get_max_retries()
         api_delay = self._get_send_interval()
+        key_request_parameters = self._active_request_parameters()
         
         # Determine effective model for this call (do not rely on shared self.model)
         if model_override is not None:
@@ -23560,6 +23597,7 @@ class UnifiedClient:
                                 params["max_completion_tokens"] = norm_max_completion_tokens
                             elif norm_max_tokens is not None:
                                 params["max_tokens"] = norm_max_tokens
+                            self._add_request_parameters_to_sdk_kwargs(params, key_request_parameters)
 
                             # Use Idempotency-Key via headers for compatibility
                             idem_key = self._get_idempotency_key()
@@ -23749,7 +23787,10 @@ class UnifiedClient:
                 if msg.get('role') == 'system':
                     logger.debug(f"  System prompt preview: {msg.get('content', '')[:100]}...")
         
-        request_service_tier = self._selected_service_tier(provider)
+        request_service_tier = (
+            None if 'service_tier' in key_request_parameters
+            else self._selected_service_tier(provider)
+        )
         if provider in ('nanogpt', 'openrouter') and request_service_tier:
             if not self._is_openai_or_gemini_service_tier_model(effective_model):
                 request_service_tier = None
@@ -24385,6 +24426,7 @@ class UnifiedClient:
                         call_kwargs["service_tier"] = request_service_tier
                     if extra_body:
                         call_kwargs["extra_body"] = extra_body
+                    self._add_request_parameters_to_sdk_kwargs(call_kwargs, key_request_parameters)
 
                     if provider == 'openai':
                         self._apply_gpt6_openai_constraints(call_kwargs, use_responses_api)
@@ -26274,6 +26316,7 @@ class UnifiedClient:
             self._apply_openai_safety(provider, disable_safety, data, headers)
             if request_service_tier and endpoint in ('/chat/completions', '/responses'):
                 data['service_tier'] = request_service_tier
+            data.update(key_request_parameters)
             if provider == 'openai':
                 self._apply_gpt6_openai_constraints(data, use_responses_api)
             # Save OpenRouter config if requested
@@ -29107,6 +29150,7 @@ class UnifiedClient:
                     log_stream=authnd_log_stream,
                     cancel_check=_authnd_pre_dispatch_cancelled,
                     before_send_callback=_authnd_provider_started,
+                    request_parameters=self._active_request_parameters(),
                 )
 
                 content = result.get("content", "")
@@ -30924,6 +30968,7 @@ class UnifiedClient:
             data["max_completion_tokens"] = max_tokens
         else:
             data["max_tokens"] = max_tokens
+        data.update(self._active_request_parameters())
         
         try:
             resp = requests.post(

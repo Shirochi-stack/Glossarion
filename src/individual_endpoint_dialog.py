@@ -8,12 +8,17 @@ import os
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QCheckBox, QComboBox, QGroupBox, QGridLayout,
-    QFrame, QScrollArea, QWidget, QMessageBox
+    QFrame, QScrollArea, QWidget, QMessageBox, QTableWidget,
+    QTableWidgetItem, QAbstractItemView, QHeaderView
 )
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QPixmap, QTransform, QGuiApplication
 from spinning import create_icon_label, animate_icon
 from typing import Callable
+from request_parameters import (
+    RESERVED_REQUEST_PARAMETERS, display_parameter_value,
+    normalize_request_parameters, parse_parameter_value,
+)
 
 try:
     # For type hints only; not required at runtime
@@ -22,13 +27,149 @@ except Exception:
     pass
 
 
+class _ParameterSuggestionLabel(QLabel):
+    def __init__(self, text, add_suggestion, parent=None):
+        super().__init__(text, parent)
+        self._add_suggestion = add_suggestion
+
+    def mouseDoubleClickEvent(self, event):
+        self._add_suggestion()
+        event.accept()
+
+
+class RequestParametersEditor(QWidget):
+    """Edit top-level request-body fields without requiring users to write JSON."""
+
+    def __init__(self, parameters=None, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.table = QTableWidget(0, 2, self)
+        self.table.setHorizontalHeaderLabels(["Parameter", "Value (text or JSON)"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setMinimumHeight(115)
+        layout.addWidget(self.table)
+
+        controls = QHBoxLayout()
+        add_button = QPushButton("Add parameter")
+        add_button.clicked.connect(lambda: self.add_row())
+        controls.addWidget(add_button)
+        remove_button = QPushButton("Remove selected")
+        remove_button.clicked.connect(self.remove_selected)
+        controls.addWidget(remove_button)
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        suggestion = _ParameterSuggestionLabel(
+            'Suggestion: service_tier = flex  (double-click to add)',
+            lambda: self.set_parameter('service_tier', 'flex'), self,
+        )
+        suggestion.setStyleSheet('color: #80c9ef;')
+        suggestion.setToolTip('Double-click to add service_tier with the value flex')
+        layout.addWidget(suggestion)
+        note = QLabel(
+            'Add body fields directly; do not enter extra_body. OpenAI-compatible and AuthND requests send them; '
+            'native Gemini accepts supported settings. Plain values are text; use JSON for numbers, booleans, '
+            'lists or objects. Blank values are ignored; use JSON "" to send an empty string.'
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet('color: gray; font-size: 9pt;')
+        layout.addWidget(note)
+
+        for name, value in normalize_request_parameters(parameters).items():
+            self.add_row(name, display_parameter_value(value))
+
+    def add_row(self, name='', value=''):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem(name))
+        self.table.setItem(row, 1, QTableWidgetItem(value))
+        if not name:
+            self.table.setCurrentCell(row, 0)
+            self.table.editItem(self.table.item(row, 0))
+
+    def remove_selected(self):
+        for row in sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True):
+            self.table.removeRow(row)
+
+    def set_parameter(self, name, value):
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item and item.text().strip() == name:
+                self.table.item(row, 1).setText(value)
+                self.table.setCurrentCell(row, 1)
+                return
+        self.add_row(name, value)
+
+    def parameters(self):
+        result = {}
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            value_item = self.table.item(row, 1)
+            name = name_item.text().strip() if name_item else ''
+            value = value_item.text() if value_item else ''
+            if not value.strip():
+                continue
+            if not name:
+                raise ValueError(f'Row {row + 1} needs a parameter name.')
+            if name.lower() in RESERVED_REQUEST_PARAMETERS:
+                raise ValueError(f'{name} is managed by Glossarion and cannot be changed here.')
+            if name in result:
+                raise ValueError(f'{name} appears more than once.')
+            result[name] = parse_parameter_value(value)
+        if len(normalize_request_parameters(result)) != len(result):
+            raise ValueError('One or more values cannot be saved as JSON.')
+        return result
+
+
+class RequestParametersDialog(QDialog):
+    """Standalone editor opened from any API key entry’s context menu."""
+
+    def __init__(self, parent, model, parameters=None):
+        super().__init__(parent)
+        self.setWindowTitle(f'Custom Request Parameters — {model}')
+        self.resize(600, 350)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel('Parameters added to requests made with this API key:'))
+        self.editor = RequestParametersEditor(parameters, self)
+        layout.addWidget(self.editor)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(20)
+        buttons.addStretch()
+        cancel = QPushButton('Cancel')
+        cancel.setMinimumWidth(150)
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        save = QPushButton('Save')
+        save.setMinimumWidth(150)
+        save.clicked.connect(self._save)
+        buttons.addWidget(save)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+        self.request_parameters = normalize_request_parameters(parameters)
+
+    def _save(self):
+        try:
+            self.request_parameters = self.editor.parameters()
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Invalid parameter', str(exc))
+            return
+        self.accept()
+
+
 class IndividualEndpointDialog(QDialog):
-    def __init__(self, parent, translator_gui, key, refresh_callback: Callable[[], None], status_callback: Callable[[str], None]):
+    def __init__(self, parent, translator_gui, key, refresh_callback: Callable[[], None],
+                 status_callback: Callable[[str], None], persist_to_main_config=True):
         super().__init__(parent)
         self.translator_gui = translator_gui
         self.key = key
         self.refresh_callback = refresh_callback
         self.status_callback = status_callback
+        self.persist_to_main_config = persist_to_main_config
         
         self._build()
     
@@ -87,8 +228,8 @@ class IndividualEndpointDialog(QDialog):
         # Use screen ratios for sizing (decreased from 37% x 41% to 30% x 35%)
         from PySide6.QtWidgets import QApplication
         screen = QApplication.primaryScreen().geometry()
-        width = int(screen.width() * 0.25)  # 30% of screen width
-        height = int(screen.height() * 0.25)  # 35% of screen height
+        width = min(screen.width() - 40, max(680, int(screen.width() * 0.35)))
+        height = min(screen.height() - 40, max(600, int(screen.height() * 0.55)))
         self.setMinimumSize(width, height)
         
         # Main layout
@@ -318,6 +459,14 @@ class IndividualEndpointDialog(QDialog):
         form_layout.setColumnStretch(1, 1)
         
         main_layout.addWidget(form_group)
+
+        parameters_group = QGroupBox('Custom Request Parameters')
+        parameters_layout = QVBoxLayout(parameters_group)
+        self.request_parameters_editor = RequestParametersEditor(
+            getattr(self.key, 'request_parameters', {}), parameters_group
+        )
+        parameters_layout.addWidget(self.request_parameters_editor)
+        main_layout.addWidget(parameters_group)
         
         # Buttons
         button_layout = QHBoxLayout()
@@ -397,6 +546,9 @@ class IndividualEndpointDialog(QDialog):
                     entry['use_individual_endpoint'] = bool(getattr(self.key, 'use_individual_endpoint', False))
                     entry['azure_endpoint'] = getattr(self.key, 'azure_endpoint', None)
                     entry['azure_api_version'] = getattr(self.key, 'azure_api_version', None)
+                    entry['request_parameters'] = normalize_request_parameters(
+                        getattr(self.key, 'request_parameters', {})
+                    )
                     break
             # Save without message
             if hasattr(self.translator_gui, 'save_config'):
@@ -408,15 +560,26 @@ class IndividualEndpointDialog(QDialog):
     def _on_save(self):
         if not self._validate():
             return
+        try:
+            request_parameters = self.request_parameters_editor.parameters()
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Invalid parameter', str(exc))
+            return
         enabled = self.enable_checkbox.isChecked()
         url = self.endpoint_entry.text().strip()
         ver = self.api_version_combo.currentText().strip()
+        previous_endpoint = (
+            bool(getattr(self.key, 'use_individual_endpoint', False)),
+            getattr(self.key, 'azure_endpoint', None),
+            getattr(self.key, 'azure_api_version', None),
+        )
 
         # Apply to key object
         self.key.use_individual_endpoint = enabled
         self.key.azure_endpoint = url if enabled else None
         # Keep API version even if disabled, but it's only used when enabled
         self.key.azure_api_version = ver or getattr(self.key, 'azure_api_version', '2025-01-01-preview')
+        self.key.request_parameters = request_parameters
 
         # Notify parent UI
         if callable(self.refresh_callback):
@@ -426,15 +589,24 @@ class IndividualEndpointDialog(QDialog):
                 pass
         if callable(self.status_callback):
             try:
-                if enabled and url:
-                    self.status_callback(f"Individual endpoint set: {url}")
+                current_endpoint = (
+                    self.key.use_individual_endpoint,
+                    self.key.azure_endpoint,
+                    self.key.azure_api_version,
+                )
+                if current_endpoint != previous_endpoint:
+                    if enabled and url:
+                        self.status_callback(f"Individual endpoint set: {url}")
+                    else:
+                        self.status_callback("Individual endpoint disabled")
                 else:
-                    self.status_callback("Individual endpoint disabled")
+                    self.status_callback("Key settings saved")
             except Exception:
                 pass
 
         # Best-effort persistence to config
-        self._persist_to_config_if_possible()
+        if self.persist_to_main_config:
+            self._persist_to_config_if_possible()
 
         self.accept()
 

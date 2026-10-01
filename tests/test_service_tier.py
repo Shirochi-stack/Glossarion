@@ -1,8 +1,15 @@
+import os
 from types import SimpleNamespace
 
 import pytest
 
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
 import unified_api_client as api
+from multi_api_key_manager import APIKeyEntry
+from request_parameters import (
+    display_parameter_value, normalize_request_parameters, parse_parameter_value,
+)
 from unified_api_client import UnifiedClient, UnifiedClientError
 
 
@@ -160,3 +167,110 @@ def test_service_tier_reaches_request_payload(
         assert 'service_tier' not in calls[0]
     else:
         assert calls[0]['service_tier'] == expected
+
+
+def test_custom_request_parameter_values_and_key_serialization():
+    parameters = {
+        'service_tier': 'flex', 'top_p': 0.7,
+        'metadata': {'source': 'test'}, 'model': 'blocked',
+    }
+    key = APIKeyEntry('key', 'nan/openai/gpt-5.5', request_parameters=parameters)
+    assert key.request_parameters == {
+        'service_tier': 'flex', 'top_p': 0.7, 'metadata': {'source': 'test'},
+    }
+    assert APIKeyEntry.from_dict(key.to_dict()).request_parameters == key.request_parameters
+    assert parse_parameter_value(display_parameter_value('123')) == '123'
+    assert parse_parameter_value(display_parameter_value({'enabled': True})) == {'enabled': True}
+    assert normalize_request_parameters({'messages': [], 'x': float('nan')}) == {}
+
+
+def test_custom_request_parameter_double_click_suggestion():
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QLabel
+    from individual_endpoint_dialog import RequestParametersEditor
+
+    app = QApplication.instance() or QApplication([])
+    editor = RequestParametersEditor()
+    suggestion = next(label for label in editor.findChildren(QLabel)
+                      if 'double-click to add' in label.text())
+    QTest.mouseDClick(suggestion, Qt.LeftButton)
+    editor.add_row('unused', '')
+    editor.add_row('', '')
+    assert editor.parameters() == {'service_tier': 'flex'}
+    editor.set_parameter('explicit_empty', '""')
+    assert editor.parameters()['explicit_empty'] == ''
+    editor.close()
+    assert app is not None
+
+
+def test_custom_request_parameters_save_without_endpoint():
+    from PySide6.QtWidgets import QApplication
+    from individual_endpoint_dialog import IndividualEndpointDialog
+
+    app = QApplication.instance() or QApplication([])
+    key = APIKeyEntry('key', 'nan/openai/gpt-5.5')
+    config = {'multi_api_keys': [key.to_dict()]}
+    gui = SimpleNamespace(config=config, save_config=lambda **kwargs: None)
+    dialog = IndividualEndpointDialog(None, gui, key, lambda: None, lambda message: None)
+    dialog.request_parameters_editor.set_parameter('service_tier', 'flex')
+    dialog._on_save()
+    assert key.request_parameters == {'service_tier': 'flex'}
+    assert config['multi_api_keys'][0]['request_parameters'] == {'service_tier': 'flex'}
+    assert not key.use_individual_endpoint
+    dialog.close()
+    assert app is not None
+
+
+@pytest.mark.parametrize('use_sdk', [True, False])
+def test_custom_request_parameters_reach_selected_nanogpt_key(monkeypatch, use_sdk):
+    calls = []
+    monkeypatch.setenv('GEMINI_SERVICE_TIER', 'standard')
+    monkeypatch.setenv('USE_CUSTOM_OPENAI_ENDPOINT', '0')
+    monkeypatch.setenv('ENABLE_STREAMING', '0')
+    monkeypatch.setenv('SAVE_PAYLOAD', '0')
+    if use_sdk:
+        def create(**kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='OK'), finish_reason='stop')],
+                usage=None,
+            )
+        fake_sdk = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+            close=lambda: None,
+        )
+        monkeypatch.setattr(api.openai, 'OpenAI', lambda **kwargs: fake_sdk)
+        monkeypatch.setattr(api, 'httpx', None)
+
+    client = UnifiedClient('test-key', 'nan/openai/gpt-5.5', '.')
+    key = APIKeyEntry('test-key', 'nan/openai/gpt-5.5', request_parameters={
+        'service_tier': 'flex', 'top_p': 0.7,
+    })
+    client._apply_key_runtime_overrides(key_entry=key)
+    monkeypatch.setattr(client, '_get_max_retries', lambda: 1)
+    monkeypatch.setattr(client, '_get_send_interval', lambda: 0)
+    monkeypatch.setattr(client, '_streaming_enabled', lambda: False)
+    monkeypatch.setattr(client, '_is_stop_requested', lambda: False)
+    monkeypatch.setattr(client, '_save_response', lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, '_should_show_api_lifecycle_logs', lambda: False)
+    if not use_sdk:
+        monkeypatch.setattr(api, 'openai', None)
+        monkeypatch.setattr(client, '_http_request_with_retries', lambda **kwargs: (
+            calls.append(kwargs['json']) or SimpleNamespace(
+                headers={'content-type': 'application/json'},
+                json=lambda: {'choices': [{'message': {'content': 'OK'}, 'finish_reason': 'stop'}]},
+            )
+        ))
+
+    result = client._send_openai_compatible(
+        [{'role': 'user', 'content': 'Reply OK.'}], 0.5, 100,
+        'https://nano-gpt.com/api/v1', 'parameter-test',
+        provider='nanogpt', model_override='openai/gpt-5.5',
+    )
+    assert result.content == 'OK'
+    assert calls[0]['service_tier'] == 'flex'
+    assert (calls[0]['extra_body']['top_p'] if use_sdk else calls[0]['top_p']) == 0.7
+
+    client._apply_key_runtime_overrides(key_entry=APIKeyEntry('other', 'nan/openai/gpt-5.5'))
+    assert client._active_request_parameters() == {}

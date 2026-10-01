@@ -536,6 +536,7 @@ def test_send_chat_completion_honors_request_local_queue_cancel(monkeypatch):
 def test_authnd_provider_boundary_callback_runs_immediately_before_post(monkeypatch):
     authnd._cancel_event.clear()
     events = []
+    sent_parameters = []
 
     monkeypatch.setattr(
         authnd,
@@ -551,6 +552,7 @@ def test_authnd_provider_boundary_callback_runs_immediately_before_post(monkeypa
 
     def fake_post_prediction(**kwargs):
         events.append("post")
+        sent_parameters.append(kwargs["request_parameters"])
         return {"content": "ok", "finish_reason": "stop"}
 
     monkeypatch.setattr(authnd, "_post_prediction", fake_post_prediction)
@@ -560,10 +562,12 @@ def test_authnd_provider_boundary_callback_runs_immediately_before_post(monkeypa
         model="z-ai/glm-5.1",
         stream=False,
         before_send_callback=lambda: events.append("boundary"),
+        request_parameters={"service_tier": "flex"},
     )
 
     assert result["content"] == "ok"
     assert events == ["metadata", "token", "boundary", "post"]
+    assert sent_parameters == [{"service_tier": "flex"}]
 
 
 def test_authnd_stream_logs_queue_and_prefill_timing(monkeypatch):
@@ -711,7 +715,7 @@ def reasoning_transport(request, monkeypatch):
 
     monkeypatch.setattr(authnd.requests, 'get', get_spec)
 
-    def send():
+    def send(request_parameters=None):
         return authnd._post_prediction(
             messages=[{'role': 'user', 'content': 'Reply OK.'}],
             model_id=state['model'].split('/')[-1], model_path=state['model'],
@@ -721,6 +725,7 @@ def reasoning_transport(request, monkeypatch):
             timeout=30, connect_timeout=10, stream=request.param != 'requests_json',
             log_stream=False, log_fn=logs.append,
             progress_label='Chapter 1 API call in progress (reasoning_effort: max)',
+            request_parameters=request_parameters,
         )
 
     return send, calls, responses, logs, state, Response
@@ -748,6 +753,16 @@ def test_kimi_k3_max_reaches_transport(reasoning_transport, monkeypatch):
             'NVIDIA queue / prefill — response headers received in' in message
             for message in logs
         )
+
+
+def test_custom_request_parameters_reach_authnd_payload(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    responses.append(Response(200, {'choices': [{'message': {'content': 'OK'},
+                                                 'delta': {'content': 'OK'}, 'finish_reason': 'stop'}]}))
+    assert send({'service_tier': 'flex', 'custom_flag': True, 'model': 'blocked'})['content'] == 'OK'
+    assert calls[0]['service_tier'] == 'flex'
+    assert calls[0]['custom_flag'] is True
+    assert calls[0]['model'] == state['model']
 
 
 @pytest.mark.parametrize('requested,supported,expected', [

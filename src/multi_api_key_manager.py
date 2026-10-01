@@ -6,6 +6,7 @@ Handles multiple API keys with round-robin load balancing and rate limit managem
 
 import os
 import sys
+from request_parameters import normalize_request_parameters
 
 # GUI imports - optional for Discord bot
 _HEADLESS_IMPORT = (
@@ -282,9 +283,10 @@ from model_options import (
 try:
     if _HEADLESS_IMPORT:
         raise ImportError("headless key-manager import requested")
-    from individual_endpoint_dialog import IndividualEndpointDialog
+    from individual_endpoint_dialog import IndividualEndpointDialog, RequestParametersDialog
 except Exception:
     IndividualEndpointDialog = None
+    RequestParametersDialog = None
 
 logger = logging.getLogger(__name__)
 
@@ -549,7 +551,8 @@ class APIKeyEntry:
     def __init__(self, api_key: str, model: str, cooldown: int = 60, enabled: bool = True,
                  google_credentials: str = None, azure_endpoint: str = None, google_region: str = None,
                  azure_api_version: str = None, use_individual_endpoint: bool = False, individual_output_token_limit: Optional[int] = None,
-                 individual_key_temperature: Optional[float] = None, api_call_delay: float = 0.0):
+                 individual_key_temperature: Optional[float] = None, api_call_delay: float = 0.0,
+                 request_parameters: Optional[dict] = None):
         self.api_key = api_key
         self.model = model
         self.cooldown = cooldown
@@ -559,6 +562,7 @@ class APIKeyEntry:
         self.google_region = google_region  # Google Cloud region (e.g., us-east5, us-central1)
         self.azure_api_version = azure_api_version or '2025-01-01-preview'  # Azure API version
         self.use_individual_endpoint = use_individual_endpoint  # Toggle to enable/disable individual endpoint
+        self.request_parameters = normalize_request_parameters(request_parameters)
         # Individual output token limit for this key (overrides global limit when set)
         try:
             if individual_output_token_limit is not None and individual_output_token_limit != "" and int(individual_output_token_limit) > 0:
@@ -646,6 +650,7 @@ class APIKeyEntry:
             'google_region': self.google_region,
             'azure_api_version': self.azure_api_version,
             'use_individual_endpoint': self.use_individual_endpoint,
+            'request_parameters': dict(self.request_parameters),
             'individual_output_token_limit': self.individual_output_token_limit,
             'individual_key_temperature': self.individual_key_temperature,
             'api_call_delay': getattr(self, 'api_call_delay', 0.0),
@@ -676,6 +681,7 @@ class APIKeyEntry:
             google_region=data.get('google_region'),
             azure_api_version=data.get('azure_api_version'),
             use_individual_endpoint=data.get('use_individual_endpoint', False),
+            request_parameters=data.get('request_parameters'),
             individual_output_token_limit=data.get('individual_output_token_limit'),
             individual_key_temperature=data.get('individual_key_temperature'),
             api_call_delay=data.get('api_call_delay', 0.0),
@@ -765,6 +771,7 @@ class APIKeyPool:
                     google_region=key_data.get('google_region'),
                     azure_api_version=key_data.get('azure_api_version'),
                     use_individual_endpoint=key_data.get('use_individual_endpoint', False),
+                    request_parameters=key_data.get('request_parameters'),
                     individual_output_token_limit=key_data.get('individual_output_token_limit'),
                     individual_key_temperature=key_data.get('individual_key_temperature'),
                     api_call_delay=key_data.get('api_call_delay', 0.0)
@@ -4180,6 +4187,10 @@ class MultiAPIKeyDialog(QDialog):
             move_callback=self._move_fallback_key,
             change_model_callback=self._change_fallback_model_for_selected,
             configure_endpoint_callback=self._configure_fallback_individual_endpoint,
+            configure_parameters_callback=lambda i: self._edit_key_request_parameters(
+                fallback_keys[i],
+                lambda: (self.translator_gui.save_config(show_message=False), self._load_fallback_keys()),
+            ),
             disable_endpoint_callback=lambda i: self._toggle_fallback_individual_endpoint(i, False),
             set_cooldown_callback=self._set_fallback_cooldown_for_selected,
             set_limit_callback=self._set_fallback_output_token_limit_for_selected,
@@ -4943,7 +4954,8 @@ class MultiAPIKeyDialog(QDialog):
             azure_endpoint=key_data.get('azure_endpoint'),
             google_region=key_data.get('google_region'),
             azure_api_version=key_data.get('azure_api_version'),
-            use_individual_endpoint=key_data.get('use_individual_endpoint', False)
+            use_individual_endpoint=key_data.get('use_individual_endpoint', False),
+            request_parameters=key_data.get('request_parameters'),
         )
 
         # Define callback to update config after dialog closes
@@ -4952,6 +4964,7 @@ class MultiAPIKeyDialog(QDialog):
             fallback_keys[fallback_index]['azure_endpoint'] = temp_key.azure_endpoint
             fallback_keys[fallback_index]['azure_api_version'] = temp_key.azure_api_version
             fallback_keys[fallback_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
+            fallback_keys[fallback_index]['request_parameters'] = dict(temp_key.request_parameters)
 
             # Save to config
             self.translator_gui.config['fallback_keys'] = fallback_keys
@@ -4968,7 +4981,10 @@ class MultiAPIKeyDialog(QDialog):
         if IndividualEndpointDialog is None:
             QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
             return
-        dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_fallback_status)
+        dialog = IndividualEndpointDialog(
+            self, self.translator_gui, temp_key, on_endpoint_configured,
+            self._show_fallback_status, persist_to_main_config=False,
+        )
         dialog.exec_()
 
     def _set_fallback_cooldown_for_selected(self):
@@ -6239,7 +6255,7 @@ class MultiAPIKeyDialog(QDialog):
 
     def _show_shared_key_context_menu(
         self, *, tree, position, total_keys, key_at_index, move_callback,
-        change_model_callback, configure_endpoint_callback,
+        change_model_callback, configure_endpoint_callback, configure_parameters_callback,
         disable_endpoint_callback, set_cooldown_callback,
         set_limit_callback, clear_limit_callback,
         set_temp_callback, clear_temp_callback, set_delay_callback,
@@ -6288,6 +6304,9 @@ class MultiAPIKeyDialog(QDialog):
                 menu.addAction("🚫 Disable Individual Endpoint").triggered.connect(lambda i=key_index: disable_endpoint_callback(i))
             else:
                 menu.addAction("🔧 Configure Individual Endpoint").triggered.connect(lambda i=key_index: configure_endpoint_callback(i))
+            menu.addAction("🧩 Custom Request Parameters").triggered.connect(
+                lambda i=key_index: configure_parameters_callback(i)
+            )
             menu.addSeparator()
 
         menu.addAction(selected_label("🎯 Set Output Token Limit")).triggered.connect(set_limit_callback)
@@ -6308,6 +6327,26 @@ class MultiAPIKeyDialog(QDialog):
 
         menu.exec_(tree.viewport().mapToGlobal(position))
 
+    def _edit_key_request_parameters(self, key_data, save_callback):
+        """Edit the request-body fields belonging to one key entry."""
+        if RequestParametersDialog is None:
+            QMessageBox.critical(self, "Error", "Request parameter editor is not available.")
+            return
+        if isinstance(key_data, dict):
+            model = key_data.get('model', '')
+            parameters = key_data.get('request_parameters', {})
+        else:
+            model = getattr(key_data, 'model', '')
+            parameters = getattr(key_data, 'request_parameters', {})
+        dialog = RequestParametersDialog(self, model, parameters)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        if isinstance(key_data, dict):
+            key_data['request_parameters'] = dialog.request_parameters
+        else:
+            key_data.request_parameters = dialog.request_parameters
+        save_callback()
+
     def _show_context_menu(self, position):
         """Show context menu with reorder and per-key settings"""
         self._show_shared_key_context_menu(
@@ -6318,6 +6357,10 @@ class MultiAPIKeyDialog(QDialog):
             move_callback=self._move_key,
             change_model_callback=self._change_model_for_selected,
             configure_endpoint_callback=self._configure_individual_endpoint,
+            configure_parameters_callback=lambda i: self._edit_key_request_parameters(
+                self.key_pool.keys[i],
+                lambda: (self._save_keys_to_config(), self._refresh_key_list()),
+            ),
             disable_endpoint_callback=lambda i: self._toggle_individual_endpoint(i, False),
             set_cooldown_callback=self._set_cooldown_for_selected,
             set_limit_callback=self._set_output_token_limit_for_selected,
@@ -6486,7 +6529,11 @@ class MultiAPIKeyDialog(QDialog):
         if IndividualEndpointDialog is None:
             QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
             return
-        dialog = IndividualEndpointDialog(self, self.translator_gui, key, self._refresh_key_list, self._show_status)
+        dialog = IndividualEndpointDialog(
+            self, self.translator_gui, key,
+            lambda: (self._save_keys_to_config(), self._refresh_key_list()),
+            self._show_status,
+        )
         dialog.exec_()
 
     def _toggle_endpoint_fields(self, enable_checkbox, endpoint_entry, version_combo):
@@ -7584,6 +7631,10 @@ class MultiAPIKeyDialog(QDialog):
             move_callback=self._move_glossary_key,
             change_model_callback=self._change_glossary_model_for_selected,
             configure_endpoint_callback=self._configure_glossary_individual_endpoint,
+            configure_parameters_callback=lambda i: self._edit_key_request_parameters(
+                glossary_keys[i],
+                lambda: (self.translator_gui.save_config(show_message=False), self._load_glossary_keys()),
+            ),
             disable_endpoint_callback=lambda i: self._toggle_glossary_individual_endpoint(i, False),
             set_cooldown_callback=self._set_glossary_cooldown_for_selected,
             set_limit_callback=self._set_glossary_output_token_limit_for_selected,
@@ -7747,13 +7798,15 @@ class MultiAPIKeyDialog(QDialog):
             azure_endpoint=key_data.get('azure_endpoint'),
             google_region=key_data.get('google_region'),
             azure_api_version=key_data.get('azure_api_version'),
-            use_individual_endpoint=key_data.get('use_individual_endpoint', False)
+            use_individual_endpoint=key_data.get('use_individual_endpoint', False),
+            request_parameters=key_data.get('request_parameters'),
         )
 
         def on_endpoint_configured():
             glossary_keys[glossary_index]['azure_endpoint'] = temp_key.azure_endpoint
             glossary_keys[glossary_index]['azure_api_version'] = temp_key.azure_api_version
             glossary_keys[glossary_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
+            glossary_keys[glossary_index]['request_parameters'] = dict(temp_key.request_parameters)
             self.translator_gui.config['glossary_keys'] = glossary_keys
             self.translator_gui.save_config(show_message=False)
             self._load_glossary_keys()
@@ -7763,7 +7816,10 @@ class MultiAPIKeyDialog(QDialog):
         if IndividualEndpointDialog is None:
             QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
             return
-        dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_glossary_status)
+        dialog = IndividualEndpointDialog(
+            self, self.translator_gui, temp_key, on_endpoint_configured,
+            self._show_glossary_status, persist_to_main_config=False,
+        )
         dialog.exec_()
 
     def _set_glossary_cooldown_for_selected(self):
@@ -10984,6 +11040,10 @@ class MultiAPIKeyDialog(QDialog):
             move_callback=lambda direction: self._dedicated_move_key(pool_name, direction),
             change_model_callback=lambda: self._dedicated_change_model_for_selected(pool_name),
             configure_endpoint_callback=lambda i: self._dedicated_configure_endpoint(pool_name, i),
+            configure_parameters_callback=lambda i: self._edit_key_request_parameters(
+                keys[i],
+                lambda: (self._dedicated_set_keys(pool_name, keys), self._dedicated_load_keys(pool_name)),
+            ),
             disable_endpoint_callback=lambda i: self._dedicated_toggle_individual_endpoint(pool_name, i, False),
             set_cooldown_callback=lambda: self._dedicated_set_cooldown_for_selected(pool_name),
             set_limit_callback=lambda: self._dedicated_set_output_token_limit_for_selected(pool_name),
@@ -11071,12 +11131,14 @@ class MultiAPIKeyDialog(QDialog):
             google_region=key_data.get('google_region'),
             azure_api_version=key_data.get('azure_api_version'),
             use_individual_endpoint=key_data.get('use_individual_endpoint', False),
+            request_parameters=key_data.get('request_parameters'),
         )
 
         def on_endpoint_configured():
             keys[key_index]['azure_endpoint'] = temp_key.azure_endpoint
             keys[key_index]['azure_api_version'] = temp_key.azure_api_version
             keys[key_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
+            keys[key_index]['request_parameters'] = dict(temp_key.request_parameters)
             self._dedicated_set_keys(pool_name, keys)
             self._dedicated_load_keys(pool_name)
             self._dedicated_status(pool_name, f"Individual endpoint {'configured' if temp_key.use_individual_endpoint else 'disabled'}")
@@ -11084,7 +11146,11 @@ class MultiAPIKeyDialog(QDialog):
         if IndividualEndpointDialog is None:
             QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
             return
-        IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, lambda msg: self._dedicated_status(pool_name, msg)).exec_()
+        IndividualEndpointDialog(
+            self, self.translator_gui, temp_key, on_endpoint_configured,
+            lambda msg: self._dedicated_status(pool_name, msg),
+            persist_to_main_config=False,
+        ).exec_()
 
     def _dedicated_toggle_individual_endpoint(self, pool_name: str, key_index: int, enabled: bool):
         keys = self._dedicated_keys(pool_name)

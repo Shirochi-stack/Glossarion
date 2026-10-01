@@ -31,6 +31,7 @@ import requests
 from reasoning_compatibility import (
     ReasoningEffortRejected, normalize_none_effort, call_with_reasoning_retry,
 )
+from request_parameters import normalize_request_parameters
 
 
 BUILD_BASE_URL = "https://build.nvidia.com"
@@ -2403,6 +2404,7 @@ def _post_prediction(
     suppress_chat_template_kwargs: bool = False,
     cancel_check: Optional[Callable[[], bool]] = None,
     metadata: Optional[Dict[str, str]] = None,
+    request_parameters: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     metadata = dict(metadata) if metadata is not None else _resolve_model_metadata(page_url)
     org_id = metadata.get("namespace") or DEFAULT_ORG_ID
@@ -2433,6 +2435,15 @@ def _post_prediction(
     normalize_none_effort(payload, lambda message: _log(log_fn, message))
     if suppress_chat_template_kwargs:
         payload.pop("chat_template_kwargs", None)
+    payload.update(normalize_request_parameters(request_parameters))
+    if "max_tokens" in payload:
+        known_limit = _endpoint_output_token_limit(metadata)
+        try:
+            requested_max_tokens = int(payload["max_tokens"])
+        except (TypeError, ValueError):
+            requested_max_tokens = None
+        if known_limit is not None and requested_max_tokens is not None and requested_max_tokens > known_limit:
+            payload["max_tokens"] = known_limit
 
     _log(
         log_fn,
@@ -2731,6 +2742,7 @@ def send_chat_completion(
     progress_label: Optional[str] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     before_send_callback: Optional[Callable[[], None]] = None,
+    request_parameters: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     del account_id  # AuthND has no account slots; kept for unified handler symmetry.
     def _request_cancelled() -> bool:
@@ -2854,6 +2866,7 @@ def send_chat_completion(
                 suppress_chat_template_kwargs=suppress_chat_template_kwargs,
                 cancel_check=cancel_check,
                 metadata=metadata,
+                request_parameters=request_parameters,
             )
             result["model"] = model_id
             result["page_url"] = page_url
@@ -2894,6 +2907,7 @@ def send_chat_completion(
                     log_fn=log_fn,
                     suppress_chat_template_kwargs=True,
                     cancel_check=cancel_check,
+                    request_parameters=request_parameters,
                 )
                 result["model"] = model_id
                 result["page_url"] = page_url
