@@ -7941,6 +7941,12 @@ class MangaTranslator:
 
                 response_text = response_text.strip()
 
+                from unified_api_client import UnifiedClient
+                if (UnifiedClient._is_failed_finish_reason(finish_reason)
+                        or UnifiedClient._is_api_error_placeholder(response_text)):
+                    self._log(f"❌ API translation failed (finish_reason: {finish_reason}); leaving region blank", "error")
+                    return ""
+
                 # If it's a stringified tuple like "('text', 'stop')", extract the first element
                 if response_text.startswith("('") or response_text.startswith('("'):
                     import ast, re
@@ -8138,6 +8144,9 @@ class MangaTranslator:
             response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
             translated = response_text
             translated = self._clean_translation_text(translated)
+            if UnifiedClient._is_api_error_placeholder(translated):
+                self._log("❌ API returned a failure placeholder; leaving region blank", "error")
+                return ""
             
             # Apply glossary if available
             if hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
@@ -8226,7 +8235,7 @@ class MangaTranslator:
             self._log(f"   Error type: {type(e).__name__}", "error")
             import traceback
             self._log(f"   Traceback: {traceback.format_exc()}", "error")
-            return text
+            return ""
 
     def translate_full_page_context(self, regions: List[TextRegion], image_path: str, _in_fallback=False) -> Dict[str, str]:
         """Translate all text regions with full page context in a single request
@@ -8549,6 +8558,12 @@ class MangaTranslator:
                                 response_text = response_text.replace('\\"', '"')
                                 response_text = response_text.replace('\\\\', '\\')
                                 self._log("📦 Extracted response using regex from tuple string", "debug")
+
+                from unified_api_client import UnifiedClient
+                if (UnifiedClient._is_failed_finish_reason(finish_reason)
+                        or UnifiedClient._is_api_error_placeholder(response_text)):
+                    self._log(f"❌ Full page API translation failed (finish_reason: {finish_reason}); leaving regions blank", "error")
+                    return {}
                 
                 # CHECK 6: Immediately after API response
                 if self._check_stop():
@@ -9026,12 +9041,13 @@ class MangaTranslator:
             #      drop newlines between Japanese characters when emitting JSON
             #      keys). The `[N]` prefix is authoritative for ordering.
             import re as _re_map
+            from unified_api_client import UnifiedClient
             _index_prefix_re = _re_map.compile(r'^\s*\[(\d+)\]\s*')
 
             def _apply_translation(region_idx: int, translated_text: str, match_kind: str) -> None:
                 region = regions[region_idx]
                 # Apply glossary replacements efficiently
-                text = translated_text
+                text = '' if UnifiedClient._is_api_error_placeholder(translated_text) else translated_text
                 if text and glossary_replacements:
                     for source, target in glossary_replacements:
                         if source in text:
@@ -9091,6 +9107,8 @@ class MangaTranslator:
                     if i in matched_regions or i >= len(translation_values):
                         continue
                     translated_text = translation_values[i]
+                    if UnifiedClient._is_api_error_placeholder(translated_text):
+                        translated_text = ''
                     if translated_text and glossary_replacements:
                         for source, target in glossary_replacements:
                             if source in translated_text:
@@ -9807,6 +9825,11 @@ class MangaTranslator:
             if isinstance(cfg, dict):
                 system_prompt = cfg.get('custom_image_edit_system_prompt', '') or cfg.get('custom_image_edit_prompt', '')
                 user_prompt = cfg.get('custom_image_edit_user_prompt', '')
+                inpainter.config['manga_settings'] = cfg.get('manga_settings') or getattr(self, 'manga_settings', {})
+                inpainter.config['manga_batch_image_requests_enabled'] = cfg.get('manga_batch_image_requests_enabled', True)
+                inpainter.config['manga_batch_image_requests_size'] = cfg.get('manga_batch_image_requests_size', 5)
+                live_batch_size = getattr(self.main_gui, 'batch_size_var', cfg.get('batch_size', 1))
+                inpainter.config['batch_size'] = live_batch_size.get() if hasattr(live_batch_size, 'get') else live_batch_size
                 inpainter.config['use_inpainter_keys'] = bool(cfg.get('use_inpainter_keys', False))
                 inpainter.config['inpainter_keys'] = cfg.get('inpainter_keys', []) or []
                 inpainter.config['force_key_rotation'] = cfg.get('force_key_rotation', True)
@@ -11206,6 +11229,18 @@ class MangaTranslator:
             except Exception:
                 pass
             return inp_obj
+
+        def _run_inpaint(inp_obj):
+            if (str(local_method or '').lower() != 'custom-image-edit'
+                    or not hasattr(inp_obj, 'set_log_callback')):
+                return inp_obj.inpaint(image, mask, **inpaint_kwargs)
+            self._apply_custom_image_edit_request_config(inp_obj)
+            previous_callback = getattr(inp_obj, 'log_callback', None)
+            inp_obj.set_log_callback(self._log)
+            try:
+                return inp_obj.inpaint(image, mask, **inpaint_kwargs)
+            finally:
+                inp_obj.set_log_callback(previous_callback)
         
         # Use provided inpainter if available, otherwise get from thread-local pool
         if inpainter is not None:
@@ -11219,9 +11254,9 @@ class MangaTranslator:
             lock = getattr(self, '_inpaint_lock', None)
             if lock:
                 with lock:
-                    return inp.inpaint(image, mask, **inpaint_kwargs)
+                    return _run_inpaint(inp)
             else:
-                return inp.inpaint(image, mask, **inpaint_kwargs)
+                return _run_inpaint(inp)
         else:
             # Conservative fallback: try shared instance only; do not attempt risky reloads that can corrupt output
             try:
@@ -11232,9 +11267,9 @@ class MangaTranslator:
                     lock = getattr(self, '_inpaint_lock', None)
                     if lock:
                         with lock:
-                            return shared_inp.inpaint(image, mask, **inpaint_kwargs)
+                            return _run_inpaint(shared_inp)
                     else:
-                        return shared_inp.inpaint(image, mask, **inpaint_kwargs)
+                        return _run_inpaint(shared_inp)
             except Exception:
                 pass
             
@@ -11262,9 +11297,9 @@ class MangaTranslator:
                         lock = getattr(self, '_inpaint_lock', None)
                         if lock:
                             with lock:
-                                return retry_inp.inpaint(image, mask, **inpaint_kwargs)
+                                return _run_inpaint(retry_inp)
                         else:
-                            return retry_inp.inpaint(image, mask, **inpaint_kwargs)
+                            return _run_inpaint(retry_inp)
                     
                     # Log progress periodically
                     elapsed = time.time() - poll_start

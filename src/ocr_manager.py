@@ -727,7 +727,7 @@ class CustomAPIProvider(OCRProvider):
             # But we're NOT using send_image, we're using regular send
 
             # Retry-aware call
-            from unified_api_client import UnifiedClientError  # local import to avoid hard dependency at module import time
+            from unified_api_client import UnifiedClient, UnifiedClientError  # local import to avoid hard dependency at module import time
             max_attempts = max(1, self.max_retries)
             attempt = 0
             last_error = None
@@ -787,7 +787,9 @@ class CustomAPIProvider(OCRProvider):
                     refused = False
                     if has_content:
                         # Filter out explicit failure markers
-                        if "[" in content and "FAILED]" in content:
+                        if UnifiedClient._is_failed_finish_reason(finish_reason) or UnifiedClient._is_api_error_placeholder(content):
+                            refused = True
+                        elif "[" in content and "FAILED]" in content:
                             refused = True
                         elif any(phrase.lower() in content.lower() for phrase in refusal_phrases):
                             refused = True

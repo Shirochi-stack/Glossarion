@@ -2662,7 +2662,164 @@ class LocalInpainter:
         except Exception as e:
             logger.warning(f"Failed to sync image gen/edit key pool from config: {e}")
 
-    def _custom_image_edit_inpaint(self, image, mask, iterations=None):
+    @staticmethod
+    def _custom_image_edit_chunk_ranges(mask, chunk_height, overlap):
+        """Split a tall page only at rows outside detected text masks."""
+        height = mask.shape[0]
+        if height <= chunk_height:
+            return [(0, height)]
+
+        # The mask is built from detected text boxes. A boundary is safe only
+        # when the rows on both sides contain no part of any box.
+        busy = np.any(mask > 0, axis=1)
+        safe = np.ones(height + 1, dtype=bool)
+        safe[1:height] = ~(busy[:-1] | busy[1:])
+        safe_rows = np.flatnonzero(safe)
+        ranges = []
+        start = 0
+        while start < height:
+            target = min(height, start + chunk_height)
+            if target == height:
+                ranges.append((start, height))
+                break
+
+            minimum = start + max(1, chunk_height // 2)
+            before = safe_rows[(safe_rows >= minimum) & (safe_rows <= target)]
+            if before.size:
+                end = int(before[-1])
+            else:
+                after = safe_rows[(safe_rows > target) & (safe_rows < height)]
+                end = int(after[0]) if after.size else height
+            ranges.append((start, end))
+            if end == height:
+                break
+
+            # Keep as much configured overlap as fits in this empty gap. No
+            # request starts or ends inside a detected text box.
+            gap_start = end
+            while gap_start > start and safe[gap_start - 1]:
+                gap_start -= 1
+            start = max(start + 1, gap_start, end - overlap)
+
+        return ranges
+
+    def _custom_image_edit_inpaint_chunked(self, image, mask, iterations=None):
+        """Send one image-edit request per masked crop and assemble the page."""
+        def log_crop_progress(message, level="info"):
+            # The image-edit request trace is printed to the console; keep crop
+            # progress beside it as well as in the manga panel's log callback.
+            print(f"[CUSTOM_IMAGE_EDIT] {message}")
+            self._log(message, level)
+
+        settings = self.config.get('manga_settings', {}) or {}
+        preprocessing = settings.get('preprocessing', {}) if isinstance(settings, dict) else {}
+        if not isinstance(preprocessing, dict):
+            preprocessing = {}
+        try:
+            chunk_height = max(1, int(preprocessing.get('chunk_height', 2000)))
+        except (TypeError, ValueError):
+            chunk_height = 2000
+        try:
+            overlap = max(0, min(int(preprocessing.get('chunk_overlap', 100)), chunk_height - 1))
+        except (TypeError, ValueError):
+            overlap = min(100, chunk_height - 1)
+
+        if len(mask.shape) == 3:
+            mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+        if image.shape[0] <= chunk_height:
+            request_count = int(np.any(mask))
+            request_label = f"{request_count} crop request{'s' if request_count != 1 else ''}"
+            log_crop_progress(f"Custom image edit: {request_label} for {image.shape[0]}px page")
+            ranges = [(0, image.shape[0])]
+        else:
+            ranges = self._custom_image_edit_chunk_ranges(mask, chunk_height, overlap)
+            request_count = sum(bool(np.any(mask[start:end])) for start, end in ranges)
+            request_label = f"{request_count} crop request{'s' if request_count != 1 else ''}"
+            log_crop_progress(
+                f"Custom image edit: {request_label} for {image.shape[0]}px page "
+                f"(height={chunk_height}px, overlap={overlap}px; cuts avoid text boxes)",
+            )
+            if any(end - start > chunk_height for start, end in ranges):
+                log_crop_progress(
+                    "Custom image edit extended a crop past the target height to keep a text box whole",
+                    "warning",
+                )
+        if not request_count:
+            return image.copy()
+
+        enabled = self._bool_config_value(self.config.get('manga_batch_image_requests_enabled', True), True)
+        raw_workers = (
+            self.config.get('manga_batch_image_requests_size', 5)
+            if enabled else self.config.get('batch_size', os.environ.get('BATCH_SIZE', 1))
+        )
+        try:
+            workers = min(request_count, max(1, int(raw_workers)))
+        except (TypeError, ValueError):
+            workers = 1
+        source = 'Batch Image Requests' if enabled else 'Batch Translation size'
+        log_crop_progress(
+            f"Custom image edit concurrency: {workers} simultaneous crop request{'s' if workers != 1 else ''} "
+            f"({source})"
+        )
+
+        # Set up the shared Image Gen/Edit key pool once before worker threads
+        # select keys. Reloading it during parallel requests resets assignments.
+        self._sync_inpainter_key_pool_from_config()
+        jobs = []
+        for range_index, (start, end) in enumerate(ranges):
+            if np.any(mask[start:end]):
+                jobs.append((range_index, len(jobs) + 1, start, end))
+
+        def edit_crop(job):
+            _, request_index, start, end = job
+            if self._check_stop() and os.environ.get('GRACEFUL_STOP') != '1':
+                return None
+            log_crop_progress(f"Custom image edit request {request_index}/{request_count}: rows {start}-{end}")
+            return self._custom_image_edit_inpaint(
+                image[start:end], mask[start:end], iterations=iterations, _pool_prepared=True
+            )
+
+        edited_crops = {}
+        if workers == 1:
+            completed = ((job, edit_crop(job)) for job in jobs)
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='image-edit-crop')
+            futures = {executor.submit(edit_crop, job): job for job in jobs}
+            completed = ((futures[future], future.result()) for future in as_completed(futures))
+        try:
+            for job, edited in completed:
+                range_index, request_index, start, end = job
+                if edited is None or edited.shape != image[start:end].shape:
+                    log_crop_progress(f"Custom image edit crop {request_index}/{request_count} failed", "error")
+                    return None
+                edited_crops[range_index] = edited
+        except Exception as exc:
+            log_crop_progress(f"Custom image edit crop request failed: {exc}", "error")
+            return None
+        finally:
+            if workers > 1:
+                executor.shutdown(wait=True, cancel_futures=True)
+
+        result = image.copy()
+        previous_end = 0
+        for range_index, (start, end) in enumerate(ranges):
+            if range_index not in edited_crops:
+                previous_end = end
+                continue
+            edited = edited_crops[range_index]
+            overlap_end = min(previous_end, end)
+            if overlap_end > start:
+                count = overlap_end - start
+                weight = (np.arange(1, count + 1, dtype=np.float32) / (count + 1))[:, None, None]
+                blended = (result[start:overlap_end].astype(np.float32) * (1 - weight)
+                           + edited[:count].astype(np.float32) * weight)
+                result[start:overlap_end] = np.clip(blended, 0, 255).astype(np.uint8)
+            result[overlap_end:end] = edited[overlap_end - start:]
+            previous_end = end
+        return result
+
+    def _custom_image_edit_inpaint(self, image, mask, iterations=None, _pool_prepared=False):
         """Inpaint through an OpenAI-compatible /images/edits endpoint."""
         try:
             import base64
@@ -2705,7 +2862,8 @@ class LocalInpainter:
                 logger.error("No default image edit endpoint could be resolved")
                 return image
 
-            self._sync_inpainter_key_pool_from_config()
+            if not _pool_prepared:
+                self._sync_inpainter_key_pool_from_config()
 
             def _peek_image_gen_edit_pool_key():
                 try:
@@ -2840,8 +2998,11 @@ class LocalInpainter:
             if not ok_mask:
                 raise RuntimeError("Failed to encode mask for custom image edit endpoint")
 
+            nanogpt_input_resize_info = None
+
             def _nanogpt_image_data_url_from_bgr(bgr_img):
                 """Encode NanoGPT edit input small enough for request body limits."""
+                nonlocal nanogpt_input_resize_info
                 max_chars = int(os.environ.get('NANOGPT_MAX_INPUT_IMAGE_CHARS', '3000000') or '3000000')
                 max_dim = int(os.environ.get('NANOGPT_MAX_INPUT_IMAGE_DIM', '1536') or '1536')
                 qualities = [90, 85, 80, 75, 70, 65, 60, 55, 50]
@@ -2870,7 +3031,7 @@ class LocalInpainter:
                 if not manga_quality_enabled:
                     image_b64 = base64.b64encode(img_buf.tobytes()).decode('ascii')
                     info['chars'] = len(image_b64)
-                    self._nanogpt_last_input_resize_info = info
+                    nanogpt_input_resize_info = info
                     return f"data:image/png;base64,{image_b64}"
 
                 requested_fmt = str(os.environ.get('MANGA_IMAGE_REQUEST_FORMAT', 'webp') or 'webp').strip().lower()
@@ -2882,7 +3043,7 @@ class LocalInpainter:
                     if ok_jpg:
                         data_url = 'data:image/jpeg;base64,' + base64.b64encode(jpg_buf.tobytes()).decode('ascii')
                         info.update({'quality': q, 'chars': len(data_url)})
-                        self._nanogpt_last_input_resize_info = info
+                        nanogpt_input_resize_info = info
                         self._log(f"NanoGPT input image encoded as JPEG q={q}: {w0}x{h0}, chars={len(data_url)}", "info")
                         return data_url
                 elif requested_fmt == 'png':
@@ -2891,7 +3052,7 @@ class LocalInpainter:
                     if ok_png:
                         data_url = 'data:image/png;base64,' + base64.b64encode(png_buf.tobytes()).decode('ascii')
                         info.update({'quality': None, 'chars': len(data_url)})
-                        self._nanogpt_last_input_resize_info = info
+                        nanogpt_input_resize_info = info
                         self._log(f"NanoGPT input image encoded as PNG level={level}: {w0}x{h0}, chars={len(data_url)}", "info")
                         return data_url
                 else:
@@ -2909,7 +3070,7 @@ class LocalInpainter:
                             'dimensions_reduced': False,
                         }
                         if len(data_url) <= max_chars:
-                            self._nanogpt_last_input_resize_info = best_info
+                            nanogpt_input_resize_info = best_info
                             self._log(f"NanoGPT input image encoded as WebP q={q}: {w0}x{h0}, chars={len(data_url)}", "info")
                             return data_url
                         self._log(
@@ -2941,7 +3102,7 @@ class LocalInpainter:
                             'dimensions_reduced': (work.shape[1], work.shape[0]) != (w0, h0),
                         }
                         if len(data_url) <= max_chars:
-                            self._nanogpt_last_input_resize_info = best_info
+                            nanogpt_input_resize_info = best_info
                             self._log(
                                 f"NanoGPT input image compressed for payload limit: {w0}x{h0} -> "
                                 f"{work.shape[1]}x{work.shape[0]}, q={quality}, chars={len(data_url)}",
@@ -2949,11 +3110,11 @@ class LocalInpainter:
                             )
                             return data_url
                 if best_data_url:
-                    self._nanogpt_last_input_resize_info = best_info
+                    nanogpt_input_resize_info = best_info
                     self._log(f"NanoGPT input image still large after shrinking: chars={len(best_data_url)}", "warning")
                     return best_data_url
                 image_b64_fallback = base64.b64encode(img_buf.tobytes()).decode('ascii')
-                self._nanogpt_last_input_resize_info = info
+                nanogpt_input_resize_info = info
                 return f"data:image/png;base64,{image_b64_fallback}"
 
             direct_pool_key_info = _checkout_image_gen_edit_pool_key()
@@ -2992,7 +3153,8 @@ class LocalInpainter:
                 f"proc={proc_bgr.shape[1]}x{proc_bgr.shape[0]}, mask={mask_pct:.1f}%)",
                 "info"
             )
-            self._sync_inpainter_key_pool_from_config()
+            if not _pool_prepared:
+                self._sync_inpainter_key_pool_from_config()
 
             def _current_provider_image_value():
                 """Use the active main UnifiedClient provider/model for blank URL mode."""
@@ -3242,7 +3404,7 @@ class LocalInpainter:
                 raise RuntimeError("Custom image edit endpoint returned unreadable image bytes")
             target_h, target_w = crop_bgr.shape[:2]
             if out_bgr.shape[:2] != (target_h, target_w):
-                resize_info = getattr(self, '_nanogpt_last_input_resize_info', None) if is_nanogpt_image else None
+                resize_info = nanogpt_input_resize_info if is_nanogpt_image else None
                 if resize_info:
                     sent_w, sent_h = resize_info.get('sent_size', (out_bgr.shape[1], out_bgr.shape[0]))
                     src_w, src_h = resize_info.get('source_size', (target_w, target_h))
@@ -4469,7 +4631,9 @@ class LocalInpainter:
         # If worker process is enabled, delegate to it (handles stop flag internally).
         # Some local models are loaded only inside the worker; in that case
         # model_loaded=True but self.model is None in the GUI process.
-        if getattr(self, '_mp_enabled', False) and (not disable_performance_mode or not callable(getattr(self, 'model', None))):
+        if (getattr(self, '_mp_enabled', False)
+                and not self._is_custom_image_edit_method(getattr(self, 'current_method', None))
+                and (not disable_performance_mode or not callable(getattr(self, 'model', None)))):
             if disable_performance_mode and not callable(getattr(self, 'model', None)):
                 logger.info("Disable Performance Mode requested, but model is worker-loaded; using worker path instead")
             return self._mp_inpaint(image, mask, refinement=refinement, iterations=iterations)
@@ -4492,13 +4656,12 @@ class LocalInpainter:
             # Store original dimensions
             orig_h, orig_w = image.shape[:2]
 
-            # Endpoint-backed image editing must see the full source image.
-            # Bypass HD resize/crop preprocessing, which is only meant for local
-            # inpainting models and can otherwise turn one page into a region crop.
+            # Endpoint-backed editing uses the manga chunk controls. Its own
+            # crop planner keeps detected text boxes whole between requests.
             if self._is_custom_image_edit_method(self.current_method):
                 if len(mask.shape) == 3:
                     mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-                return self._custom_image_edit_inpaint(image, mask, iterations=iterations)
+                return self._custom_image_edit_inpaint_chunked(image, mask, iterations=iterations)
             
             # HD strategy (mirror of comic-translate): optional RESIZE or CROP before core inpainting
             if not _skip_hd:

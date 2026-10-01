@@ -3,16 +3,22 @@ import threading
 from queue import Queue
 from types import SimpleNamespace
 
+import numpy as np
+import pytest
 from PySide6.QtCore import QEvent, QMimeData, QUrl
 
 import ImageRenderer
 import manga_integration
+import manga_translator
 from manga_integration import (
     MangaTranslationTab,
     _manga_filename_without_skip_prefix,
     _translation_run_token_matches,
 )
 import manga_ocr_io
+from local_inpainter import LocalInpainter
+from ocr_manager import CustomAPIProvider
+from unified_api_client import UnifiedClient
 
 
 class _FakeListWidget:
@@ -801,3 +807,233 @@ def test_completed_translation_switches_and_refreshes_both_previews(tmp_path):
         str(image),
         {'rendered_image_path': str(translated)},
     )]
+
+
+@pytest.mark.parametrize('context', ['manga', 'manga_ocr'])
+def test_manga_api_failure_fallback_is_blank(context):
+    client = object.__new__(UnifiedClient)
+    assert client._handle_empty_result([], context, {'error': 'content_filter'}) == ''
+
+
+@pytest.mark.parametrize(
+    ('content', 'finish_reason', 'expected'),
+    [
+        ('[AI RESPONSE UNAVAILABLE]', 'error', []),
+        ('[RATE LIMITED]', 'stop', []),
+        ('partial OCR text', 'content_filter', []),
+        ('こんにちは', 'stop', ['こんにちは']),
+    ],
+)
+def test_custom_manga_ocr_does_not_keep_api_failures(
+    monkeypatch, content, finish_reason, expected
+):
+    provider = CustomAPIProvider()
+    provider.is_loaded = True
+    provider.max_retries = 1
+    provider.client = SimpleNamespace(send=lambda **_kwargs: (content, finish_reason))
+    monkeypatch.setattr(provider, '_apply_manga_ocr_thinking_override', lambda: None)
+    monkeypatch.setattr(provider, '_restore_thinking_override', lambda _value: None)
+
+    results = provider.detect_text(np.zeros((60, 60, 3), dtype=np.uint8))
+    assert [result.text for result in results] == expected
+
+
+@pytest.mark.parametrize(
+    ('content', 'expected'),
+    [
+        ('[AI RESPONSE UNAVAILABLE]', ''),
+        ('[Translation Error: timeout]', ''),
+        ('A real translation', 'A real translation'),
+    ],
+)
+def test_manga_output_drops_error_placeholders(content, expected):
+    assert ImageRenderer._manga_output_text(content) == expected
+
+
+def test_automatic_manga_translation_leaves_failed_api_region_blank(monkeypatch):
+    translator = object.__new__(manga_translator.MangaTranslator)
+    translator.main_gui = SimpleNamespace(
+        profile_var='Default',
+        prompt_profiles={'Default': 'Translate the text'},
+    )
+    translator.client = object()
+    translator.temperature = 0
+    translator.max_tokens = 100
+    translator.contextual_enabled = False
+    translator.history_manager = None
+    translator.visual_context_enabled = False
+    translator.input_token_limit = None
+    translator._log = lambda *_args, **_kwargs: None
+    translator._check_stop = lambda: False
+    translator._append_manga_glossary_to_system_prompt = lambda prompt, **_kwargs: prompt
+    monkeypatch.setattr(
+        manga_translator,
+        'send_with_interrupt',
+        lambda **_kwargs: ('[AI RESPONSE UNAVAILABLE]', 'error', None),
+    )
+
+    assert translator.translate_text('source text') == ''
+
+
+def test_custom_image_edit_chunks_tall_page_without_cutting_text_boxes():
+    inpainter = object.__new__(LocalInpainter)
+    inpainter.config = {
+        'manga_settings': {'preprocessing': {'chunk_height': 2000, 'chunk_overlap': 100}}
+    }
+    inpainter.current_method = 'custom-image-edit'
+    inpainter.model_loaded = True
+    inpainter._mp_enabled = False
+    inpainter._check_stop = lambda: False
+    inpainter._log = lambda *_args, **_kwargs: None
+    inpainter._sync_inpainter_key_pool_from_config = lambda: None
+
+    image = np.zeros((4500, 20, 3), dtype=np.uint8)
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    boxes = [(100, 150), (1950, 2050), (3800, 3850)]
+    for top, bottom in boxes:
+        mask[top:bottom, 2:18] = 255
+
+    ranges = inpainter._custom_image_edit_chunk_ranges(mask, 2000, 100)
+    assert len(ranges) == 3
+    for top, bottom in boxes:
+        assert sum(start <= top and end >= bottom for start, end in ranges) == 1
+    for (_, previous_end), (next_start, _) in zip(ranges, ranges[1:]):
+        assert 0 <= previous_end - next_start <= 100
+        assert not np.any(mask[next_start:previous_end])
+
+    requests = []
+
+    def fake_edit(crop, crop_mask, iterations=None, _pool_prepared=False):
+        requests.append((crop.shape[0], int(np.count_nonzero(crop_mask))))
+        edited = crop.copy()
+        edited[crop_mask > 0] = (0, 0, 255)
+        return edited
+
+    inpainter._custom_image_edit_inpaint = fake_edit
+    result = inpainter.inpaint(image, mask)
+
+    assert len(requests) == 3
+    assert result.shape == image.shape
+    assert np.all(result[mask > 0] == (0, 0, 255))
+    assert np.all(result[mask == 0] == 0)
+
+
+def test_custom_image_edit_keeps_a_box_whole_when_crop_must_grow():
+    mask = np.zeros((4300, 8), dtype=np.uint8)
+    mask[1700:2400, 1:7] = 255
+    mask[3500:3550, 1:7] = 255
+
+    ranges = LocalInpainter._custom_image_edit_chunk_ranges(mask, 2000, 100)
+
+    assert len(ranges) >= 2
+    assert any(start <= 1700 and end >= 2400 for start, end in ranges)
+    assert all(not np.any(mask[start:start + 1]) for start, _ in ranges[1:])
+
+
+def test_custom_image_edit_logs_actual_request_count_for_sparse_page(capsys):
+    inpainter = object.__new__(LocalInpainter)
+    inpainter.config = {
+        'manga_settings': {'preprocessing': {'chunk_height': 2000, 'chunk_overlap': 100}}
+    }
+    inpainter._check_stop = lambda: False
+    inpainter._sync_inpainter_key_pool_from_config = lambda: None
+    panel_messages = []
+    inpainter.set_log_callback(lambda message, level: panel_messages.append(message))
+    requests = []
+
+    def fake_edit(crop, crop_mask, iterations=None, _pool_prepared=False):
+        requests.append(crop.shape[0])
+        return crop.copy()
+
+    inpainter._custom_image_edit_inpaint = fake_edit
+    image = np.zeros((4500, 20, 3), dtype=np.uint8)
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    mask[100:150, 2:18] = 255
+
+    inpainter._custom_image_edit_inpaint_chunked(image, mask)
+
+    assert len(requests) == 1
+    assert any('1 crop request' in message for message in panel_messages)
+    assert any('request 1/1' in message for message in panel_messages)
+    console = capsys.readouterr().out
+    assert '1 crop request' in console
+    assert 'request 1/1' in console
+
+
+@pytest.mark.parametrize(
+    ('enabled', 'image_size', 'translation_size', 'expected_workers'),
+    [
+        (True, 2, 3, 2),
+        (False, 1, 3, 3),
+    ],
+)
+def test_custom_image_edit_crops_run_in_parallel_with_selected_limit(
+    enabled, image_size, translation_size, expected_workers
+):
+    inpainter = object.__new__(LocalInpainter)
+    inpainter.config = {
+        'manga_settings': {'preprocessing': {'chunk_height': 2000, 'chunk_overlap': 100}},
+        'manga_batch_image_requests_enabled': enabled,
+        'manga_batch_image_requests_size': image_size,
+        'batch_size': translation_size,
+    }
+    inpainter._check_stop = lambda: False
+    inpainter._sync_inpainter_key_pool_from_config = lambda: None
+    messages = []
+    inpainter.set_log_callback(lambda message, level: messages.append(message))
+    image = np.zeros((4500, 20, 3), dtype=np.uint8)
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    for top, bottom in [(100, 150), (1950, 2050), (3800, 3850)]:
+        mask[top:bottom, 2:18] = 255
+
+    barrier = threading.Barrier(expected_workers)
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+    calls = 0
+
+    def fake_edit(crop, crop_mask, iterations=None, _pool_prepared=False):
+        nonlocal active, peak, calls
+        assert _pool_prepared
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            calls += 1
+            call_number = calls
+        if call_number <= expected_workers:
+            barrier.wait(timeout=3)
+        with lock:
+            active -= 1
+        edited = crop.copy()
+        edited[crop_mask > 0] = (0, 0, 255)
+        return edited
+
+    inpainter._custom_image_edit_inpaint = fake_edit
+    result = inpainter._custom_image_edit_inpaint_chunked(image, mask)
+
+    assert peak == expected_workers
+    assert np.all(result[mask > 0] == (0, 0, 255))
+    assert any(f'concurrency: {expected_workers} simultaneous' in message for message in messages)
+    assert sum('Custom image edit request ' in message for message in messages) == 3
+
+
+def test_custom_image_edit_receives_live_manga_crop_settings():
+    preprocessing = {'chunk_height': 1200, 'chunk_overlap': 60}
+    translator = object.__new__(manga_translator.MangaTranslator)
+    translator.main_gui = SimpleNamespace(
+        config={
+            'manga_settings': {'preprocessing': preprocessing},
+            'manga_batch_image_requests_enabled': False,
+            'manga_batch_image_requests_size': 5,
+            'batch_size': 2,
+        },
+        batch_size_var='7',
+    )
+    inpainter = SimpleNamespace(config={})
+
+    translator._apply_custom_image_edit_request_config(inpainter)
+
+    assert inpainter.config['manga_settings']['preprocessing'] == preprocessing
+    assert inpainter.config['manga_batch_image_requests_enabled'] is False
+    assert inpainter.config['manga_batch_image_requests_size'] == 5
+    assert inpainter.config['batch_size'] == '7'

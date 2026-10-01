@@ -5564,6 +5564,42 @@ class MangaTranslationTab(QObject):
         local_inpaint_layout.addWidget(custom_image_edit_output_frame)
         self.custom_image_edit_output_frame = custom_image_edit_output_frame
 
+        self.batch_image_requests_frame = QWidget()
+        batch_image_layout = QHBoxLayout(self.batch_image_requests_frame)
+        batch_image_layout.setContentsMargins(0, 0, 0, 0)
+        batch_image_layout.setSpacing(10)
+        batch_image_spacer = QLabel("")
+        batch_image_spacer.setMinimumWidth(95)
+        batch_image_layout.addWidget(batch_image_spacer)
+        self.batch_image_requests_checkbox = self._create_styled_checkbox("Batch Image Requests")
+        self.batch_image_requests_checkbox.setChecked(bool(getattr(self, 'batch_image_requests_enabled_value', True)))
+        self.batch_image_requests_checkbox.setToolTip(
+            "Send image edit crops in parallel. When off, use the Batch Translation size instead."
+        )
+        batch_image_layout.addWidget(self.batch_image_requests_checkbox)
+        self.batch_image_requests_spinbox = QSpinBox()
+        self.batch_image_requests_spinbox.setRange(1, 32)
+        self.batch_image_requests_spinbox.setValue(int(getattr(self, 'batch_image_requests_size_value', 5)))
+        self.batch_image_requests_spinbox.setToolTip("Maximum simultaneous image edit crop requests.")
+        self.batch_image_requests_spinbox.setEnabled(self.batch_image_requests_checkbox.isChecked())
+        self._disable_combobox_mousewheel(self.batch_image_requests_spinbox)
+        self.batch_image_requests_checkbox.toggled.connect(
+            lambda checked: (
+                setattr(self, 'batch_image_requests_enabled_value', bool(checked)),
+                self.batch_image_requests_spinbox.setEnabled(bool(checked)),
+                self._save_rendering_settings(),
+            )
+        )
+        self.batch_image_requests_spinbox.valueChanged.connect(
+            lambda value: (
+                setattr(self, 'batch_image_requests_size_value', int(value)),
+                self._save_rendering_settings(),
+            )
+        )
+        batch_image_layout.addWidget(self.batch_image_requests_spinbox)
+        batch_image_layout.addStretch()
+        local_inpaint_layout.addWidget(self.batch_image_requests_frame)
+
         # Model file selection
         model_path_frame = QWidget()
         model_path_layout = QHBoxLayout(model_path_frame)
@@ -7674,6 +7710,11 @@ class MangaTranslationTab(QObject):
             self.custom_api_ocr_batch_size_value = max(1, int(config.get('manga_custom_api_ocr_batch_size', 5)))
         except Exception:
             self.custom_api_ocr_batch_size_value = 5
+        self.batch_image_requests_enabled_value = bool(config.get('manga_batch_image_requests_enabled', True))
+        try:
+            self.batch_image_requests_size_value = max(1, int(config.get('manga_batch_image_requests_size', 5)))
+        except (TypeError, ValueError):
+            self.batch_image_requests_size_value = 5
         self.manga_ocr_disable_thinking_value = bool(
             ((config.get('manga_settings') or {}).get('ocr') or {}).get('manga_ocr_disable_thinking', True)
         )
@@ -7893,6 +7934,10 @@ class MangaTranslationTab(QObject):
                 self.custom_api_ocr_batch_enabled_value = bool(self.custom_api_ocr_batch_checkbox.isChecked())
             if hasattr(self, 'custom_api_ocr_batch_size_spinbox'):
                 self.custom_api_ocr_batch_size_value = int(self.custom_api_ocr_batch_size_spinbox.value())
+            if hasattr(self, 'batch_image_requests_checkbox'):
+                self.batch_image_requests_enabled_value = bool(self.batch_image_requests_checkbox.isChecked())
+            if hasattr(self, 'batch_image_requests_spinbox'):
+                self.batch_image_requests_size_value = int(self.batch_image_requests_spinbox.value())
             if hasattr(self, 'manga_image_request_quality_checkbox'):
                 self.manga_image_request_quality_enabled_value = bool(self.manga_image_request_quality_checkbox.isChecked())
             if hasattr(self, 'manga_image_request_format_combo'):
@@ -8131,6 +8176,10 @@ class MangaTranslationTab(QObject):
                 self.main_gui.config['manga_custom_api_ocr_batch_enabled'] = bool(self.custom_api_ocr_batch_enabled_value)
             if hasattr(self, 'custom_api_ocr_batch_size_value'):
                 self.main_gui.config['manga_custom_api_ocr_batch_size'] = int(self.custom_api_ocr_batch_size_value)
+            if hasattr(self, 'batch_image_requests_enabled_value'):
+                self.main_gui.config['manga_batch_image_requests_enabled'] = bool(self.batch_image_requests_enabled_value)
+            if hasattr(self, 'batch_image_requests_size_value'):
+                self.main_gui.config['manga_batch_image_requests_size'] = int(self.batch_image_requests_size_value)
             if hasattr(self, 'manga_image_request_quality_enabled_value'):
                 ms = self.main_gui.config.setdefault('manga_settings', {})
                 comp = ms.setdefault('compression', {})
@@ -11519,6 +11568,8 @@ class MangaTranslationTab(QObject):
             self.custom_image_edit_keys_btn.setVisible(custom_selected)
         if hasattr(self, 'custom_image_edit_output_frame'):
             self.custom_image_edit_output_frame.setVisible(custom_selected)
+        if hasattr(self, 'batch_image_requests_frame'):
+            self.batch_image_requests_frame.setVisible(custom_selected)
         if hasattr(self, 'custom_image_edit_area_spin'):
             self.custom_image_edit_area_spin.setVisible(custom_selected)
         if hasattr(self, 'custom_image_edit_area_label'):

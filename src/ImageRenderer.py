@@ -267,6 +267,16 @@ try:
 except ImportError:
     UnifiedClient = None
 
+def _manga_output_text(value):
+    """Keep API failure messages out of manga OCR and translation output."""
+    value = str(value or '')
+    text = value.strip()
+    if UnifiedClient and UnifiedClient._is_api_error_placeholder(text):
+        return ''
+    if text.startswith(('[Full Page Context Error:', '[Translation Error:', '[Individual Translation Error:')):
+        return ''
+    return value
+
 # MODULE-LEVEL HELPER: Reset all cancellation flags before starting an operation
 def _reset_cancellation_flags(self):
     """Reset all cancellation flags before starting a new operation.
@@ -1274,9 +1284,13 @@ def _rehydrate_text_state_from_persisted(self, image_path: str):
             if isinstance(r, dict) and r.get('deleted'):
                 continue
             if isinstance(r, str):
+                if not _manga_output_text(r):
+                    continue
                 active_rec.append({'text': r, 'bbox': [0, 0, 100, 100], 'region_index': i})
                 recognition_data[int(i)] = {'text': r, 'bbox': [0, 0, 100, 100]}
             elif isinstance(r, dict) and 'text' in r:
+                if not _manga_output_text(r.get('text')):
+                    continue
                 idx = r.get('region_index', i)
                 active_rec.append({'text': r.get('text', ''), 'bbox': r.get('bbox', [0, 0, 100, 100]), 'region_index': idx})
                 recognition_data[int(idx)] = {'text': r.get('text', ''), 'bbox': r.get('bbox', [0, 0, 100, 100])}
@@ -1296,6 +1310,7 @@ def _rehydrate_text_state_from_persisted(self, image_path: str):
                 continue
             idx = t.get('original', {}).get('region_index', i) if isinstance(t, dict) else i
             if isinstance(t, dict):
+                t = {**t, 'translation': _manga_output_text(t.get('translation'))}
                 translation_data[int(idx)] = {
                     'original': t.get('original', {}).get('text', ''),
                     'translation': t.get('translation', '')
@@ -1895,7 +1910,7 @@ def _restore_image_state_overlays_only(self, image_path: str):
                     idx = result.get('original', {}).get('region_index', i)
                     self._translation_data[int(idx)] = {
                         'original': result.get('original', {}).get('text', ''),
-                        'translation': result.get('translation', '')
+                        'translation': _manga_output_text(result.get('translation'))
                     }
                 print(f"[STATE] Restored translation_data for {len(self._translation_data)} regions")
         except Exception as te:
@@ -2407,6 +2422,8 @@ def _run_clean_background(self, image_path: str, regions: list):
     mask = None
     inpainter = None  # Track for pool return
     temp_translator = None  # Track temporary translator for pool cleanup
+    previous_inpainter_log_callback = None
+    custom_image_edit_log_attached = False
     
     # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
     _reset_cancellation_flags(self)
@@ -2644,6 +2661,11 @@ def _run_clean_background(self, image_path: str, regions: list):
                 print(f"[CLEAN] Cancelled before inpainting")
                 self.update_queue.put(('clean_button_restore', None))
                 return
+
+            if is_custom_image_edit:
+                previous_inpainter_log_callback = getattr(inpainter, 'log_callback', None)
+                inpainter.set_log_callback(self._log)
+                custom_image_edit_log_attached = True
             
             if custom_iterations:
                 iterations_str = ', '.join([f"{region}:{iters}" for region, iters in custom_iterations.items()])
@@ -2722,6 +2744,8 @@ def _run_clean_background(self, image_path: str, regions: list):
         self._log(f"❌ Background cleaning failed: {str(e)}", "error")
         print(f"Background clean error traceback: {traceback.format_exc()}")
     finally:
+        if custom_image_edit_log_attached and inpainter is not None:
+            inpainter.set_log_callback(previous_inpainter_log_callback)
         # Return inpainter to pool if checked out via temporary translator
         try:
             if temp_translator is not None:
@@ -3422,6 +3446,8 @@ def _run_inpainting_sync(
                     cfg = getattr(self.main_gui, 'config', {}) if hasattr(self, 'main_gui') else {}
                     if isinstance(cfg, dict):
                         inpainter.config.update(cfg)
+                        live_batch_size = getattr(self.main_gui, 'batch_size_var', cfg.get('batch_size', 1))
+                        inpainter.config['batch_size'] = live_batch_size.get() if hasattr(live_batch_size, 'get') else live_batch_size
                     override_enabled = bool(
                         getattr(self.main_gui, 'use_custom_image_edit_endpoint_var', False)
                         or (cfg.get('use_custom_image_edit_endpoint', False) if isinstance(cfg, dict) else False)
@@ -3513,7 +3539,11 @@ def _run_inpainting_sync(
 
             # Run inpainting/image editing
             print(f"[INPAINT_SYNC] Running local inpainting...")
+            previous_inpainter_log_callback = None
             try:
+                if is_custom_image_edit:
+                    previous_inpainter_log_callback = getattr(inpainter, 'log_callback', None)
+                    inpainter.set_log_callback(self._log)
                 disable_performance_mode = bool(
                     getattr(inpainter, 'config', {}).get('manga_disable_inpaint_performance_mode', False)
                     if hasattr(inpainter, 'config') else False
@@ -3525,6 +3555,8 @@ def _run_inpainting_sync(
                     _skip_tiling=disable_performance_mode,
                 )
             finally:
+                if is_custom_image_edit:
+                    inpainter.set_log_callback(previous_inpainter_log_callback)
                 if old_mp_enabled is not None:
                     try:
                         inpainter._mp_enabled = old_mp_enabled
@@ -5438,11 +5470,11 @@ def _translate_with_full_page_context(self, recognized_texts: list, image_path: 
         translated_texts = []
         for i, (region, text_data) in enumerate(zip(regions, recognized_texts)):
             if hasattr(region, 'translated_text') and region.translated_text:
-                translation = region.translated_text
+                translation = _manga_output_text(region.translated_text)
                 print(f"[DEBUG] Region {i+1} translated: '{region.text[:20]}...' -> '{translation[:20]}...'")
             else:
-                translation = text_data['text']  # Fallback to original
-                print(f"[DEBUG] Region {i+1} no translation, using original: '{translation[:20]}...'")
+                translation = ''
+                print(f"[DEBUG] Region {i+1} has no translation; leaving output blank")
             
             translated_texts.append({
                 'original': text_data,
@@ -5457,10 +5489,10 @@ def _translate_with_full_page_context(self, recognized_texts: list, image_path: 
         import traceback
         self._log(f"❌ Full page context translation failed: {str(e)}", "error")
         print(f"[DEBUG] Full page context error traceback: {traceback.format_exc()}")
-        # Fallback to original texts
+        # Keep failed regions blank in the manga output.
         return [{
             'original': text_data,
-            'translation': f"[Full Page Context Error: {str(e)}]",
+            'translation': '',
             'bbox': text_data['bbox']
         } for text_data in recognized_texts]
 
@@ -5776,10 +5808,18 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
                 # Extract translated text from response (UnifiedClient returns tuple or response object)
                 if hasattr(response, 'content'):
                     translated_text = response.content
+                    finish_reason = getattr(response, 'finish_reason', None)
                 elif isinstance(response, tuple) and len(response) >= 1:
                     translated_text = response[0]  # (content, finish_reason)
+                    finish_reason = response[1] if len(response) > 1 else None
                 else:
-                    translated_text = str(response)
+                    translated_text = response
+                    finish_reason = None
+
+                if UnifiedClient._is_failed_finish_reason(finish_reason):
+                    translated_text = ''
+                else:
+                    translated_text = _manga_output_text(translated_text)
                 
                 print(f"[DEBUG] Processed response: '{translated_text[:50]}...'")
                 
@@ -5805,7 +5845,7 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
                 print(f"[DEBUG] Translation error traceback: {traceback.format_exc()}")
                 translated_texts.append({
                     'original': text_data,
-                    'translation': f"[Translation Error: {str(e)}]",
+                    'translation': '',
                     'bbox': text_data['bbox']
                 })
         
@@ -5815,10 +5855,10 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
         # traceback already imported at top of function
         self._log(f"❌ Individual translation failed: {str(e)}", "error")
         print(f"[DEBUG] Individual translation error traceback: {traceback.format_exc()}")
-        # Fallback to original texts
+        # Keep failed regions blank in the manga output.
         return [{
             'original': text_data,
-            'translation': f"[Individual Translation Error: {str(e)}]",
+            'translation': '',
             'bbox': text_data['bbox']
         } for text_data in recognized_texts]
 
@@ -5906,6 +5946,8 @@ def _update_rectangles_with_recognition(self, recognized_texts: list):
                 return 0.0
         
         for i, text_data in enumerate(recognized_texts):
+            if not _manga_output_text(text_data.get('text')):
+                continue
             region_index = text_data.get('region_index', i)
             rect_item = None
 
@@ -5997,7 +6039,7 @@ def _update_rectangles_with_translations(self, translated_texts: list):
                 bbox_val = [int(rr.x()), int(rr.y()), int(rr.width()), int(rr.height())]
             self._translation_data[region_index] = {
                 'original': result['original']['text'],
-                'translation': result['translation'],
+                'translation': _manga_output_text(result.get('translation')),
                 'bbox': bbox_val
             }
         
@@ -6225,6 +6267,11 @@ def _process_ocr_result(self, recognized_texts, rect_item, region_index, bbox, o
     try:
         # Stop pulse effect regardless of outcome
         _remove_rectangle_pulse_effect(self, rect_item, region_index)
+
+        recognized_texts = [
+            result for result in (recognized_texts or [])
+            if _manga_output_text(result.get('text'))
+        ]
         
         # Log the results
         if recognized_texts and len(recognized_texts) > 0:
@@ -8879,7 +8926,8 @@ def _translate_this_text_background(self, message: str, region_index: int):
             _restore_translate_this_text_thinking_override(original_thinking_env)
         
         # Check if we got a valid translation
-        if not translation_result or not translation_result.strip():
+        if (UnifiedClient._is_failed_finish_reason(finish_reason)
+                or not _manga_output_text(translation_result)):
             self._log(f"❌ Empty response from API for region {region_index}", "error")
             return
         
@@ -11157,7 +11205,9 @@ def _add_text_overlay_to_viewer(self, translated_texts: list):
         for i, result in enumerate(translated_texts):
             try:
                 bbox = result.get('bbox')
-                translation = result.get('translation', '')
+                translation = _manga_output_text(result.get('translation'))
+                if not translation.strip():
+                    continue
                 region_index = (result.get('original', {}) or {}).get('region_index', i)
                 
                 # Prefer current BLUE rectangle geometry if available; fallback to bbox
@@ -12458,7 +12508,10 @@ def _process_recognize_results(self, results: dict):
         return
     
     try:
-        recognized_texts = results['recognized_texts']
+        recognized_texts = [
+            item for item in results['recognized_texts']
+            if _manga_output_text(item.get('text'))
+        ]
         image_path = results.get('image_path') or getattr(self, '_current_image_path', None)
         
         # Persist recognized texts to state for this image
@@ -12520,7 +12573,10 @@ def _process_translate_results(self, results: dict):
         return
     
     try:
-        translated_texts = results['translated_texts']
+        translated_texts = [
+            {**item, 'translation': _manga_output_text(item.get('translation'))}
+            for item in results['translated_texts']
+        ]
         image_path = results.get('image_path')  # This might be cleaned image
         original_image_path = results.get('original_image_path', image_path)  # Original for mapping
         
