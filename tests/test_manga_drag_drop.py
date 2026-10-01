@@ -43,6 +43,14 @@ class _DropHarness:
     def _add_cbz_archive_images(self, _path, _image_extensions):
         return 0
 
+    def _apply_manga_file_sort(self):
+        MangaTranslationTab._apply_manga_file_sort(self)
+
+    def _rebuild_manga_file_listbox(self):
+        self.list_items = list(self.selected_files)
+        if self.list_items and self.file_listbox.currentRow() < 0:
+            self.file_listbox.setCurrentRow(0)
+
     def _update_manga_image_range_display(self):
         pass
 
@@ -403,8 +411,8 @@ def test_folder_drop_recurses_and_skips_generated_output_folders(tmp_path):
 
     assert harness.selected_files == [
         os.path.abspath(page_2),
-        os.path.abspath(page_10),
         os.path.abspath(nested_page),
+        os.path.abspath(page_10),
     ]
     assert harness.list_items == harness.selected_files
     assert harness.file_listbox.current_row == 0

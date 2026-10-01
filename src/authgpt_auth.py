@@ -30,6 +30,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 from typing import Optional, Dict, List, Tuple, Any
 
 import requests
+from app_version import APP_VERSION
 from reasoning_compatibility import normalize_none_effort, call_with_reasoning_retry
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ TOKEN_REFRESH_MARGIN_SECONDS = 300  # refresh when <5 min remaining
 
 CHATGPT_BASE_URL = "https://chatgpt.com/backend-api"
 RESPONSES_ENDPOINT = "/codex/responses"
+ACCOUNT_MODELS_URL = "https://api.openai.com/v1/models"
 
 _DEFAULT_TOKEN_DIR = os.path.join(os.path.expanduser("~"), ".glossarion")
 _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authgpt_tokens.json")
@@ -663,15 +665,57 @@ def fetch_available_models(
     timeout: int = 10,
     base_url: Optional[str] = None,
 ) -> List[str]:
-    """Return the model manifest exposed to the signed-in ChatGPT account.
+    """Return displayable models for the signed-in ChatGPT account.
 
-    Codex uses ``GET /models`` on the same ``/backend-api/codex`` backend as
-    the Responses transport. This operation is read-only; callers obtain the
-    token with ``auto_login=False`` so polling can never open a login window.
+    The account catalog is the primary source. The older Codex backend
+    manifest remains a fallback for tokens that cannot access that catalog.
+    Polling is read-only and never opens an interactive login window.
     """
     effective_base = str(
         base_url or os.getenv("AUTHGPT_BASE_URL", CHATGPT_BASE_URL) or ""
     ).rstrip("/")
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    }
+
+    def parse_models(payload: object, *, require_list_visibility: bool) -> List[str]:
+        if not isinstance(payload, dict):
+            return []
+        entries = payload.get("models")
+        if not require_list_visibility and not isinstance(entries, list):
+            entries = payload.get("data")
+        if not isinstance(entries, list):
+            return []
+        models: List[str] = []
+        seen = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            visibility = str(entry.get("visibility", "") or "").casefold()
+            if (require_list_visibility and visibility != "list") or visibility == "hide":
+                continue
+            model = str(entry.get("slug") or entry.get("id") or "").strip()
+            key = model.casefold()
+            if model and key not in seen:
+                seen.add(key)
+                models.append(model)
+        return models
+
+    if effective_base == CHATGPT_BASE_URL:
+        try:
+            response = requests.get(
+                ACCOUNT_MODELS_URL,
+                headers=headers,
+                timeout=max(1, int(round(timeout))),
+            )
+            response.raise_for_status()
+            models = parse_models(response.json(), require_list_visibility=True)
+            if models:
+                return models
+        except (requests.RequestException, ValueError):
+            logger.debug("AuthGPT: Account model catalog unavailable; trying Codex manifest")
+
     codex_base = (
         effective_base
         if effective_base.casefold().endswith("/codex")
@@ -679,31 +723,14 @@ def fetch_available_models(
     )
     response = requests.get(
         f"{codex_base}/models",
-        # The backend validates this as a semantic version. A neutral value is
-        # sufficient for manifest compatibility filtering.
-        params={"client_version": "0.0.0"},
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/json",
-        },
+        # The backend uses this semantic version for compatibility filtering.
+        # Sending 0.0.0 hides models that require a newer client.
+        params={"client_version": APP_VERSION},
+        headers=headers,
         timeout=max(1, int(round(timeout))),
     )
     response.raise_for_status()
-    payload = response.json()
-    entries = payload.get("models", []) if isinstance(payload, dict) else []
-    models: List[str] = []
-    seen = set()
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("visibility", "list") or "list").casefold() == "hide":
-            continue
-        model = str(entry.get("slug") or entry.get("id") or "").strip()
-        key = model.casefold()
-        if model and key not in seen:
-            seen.add(key)
-            models.append(model)
-    return models
+    return parse_models(response.json(), require_list_visibility=False)
 
 
 # ===========================================================================

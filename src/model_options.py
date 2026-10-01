@@ -991,6 +991,12 @@ def _write_model_catalog_cache(cache: dict) -> None:
 
 def _provider_catalog_variant(provider: str) -> Optional[str]:
     """Return the endpoint/credential variant that owns a provider cache."""
+    if str(provider or "").split(":", 1)[0] == "nanogpt":
+        # Older NanoGPT cache entries only contain text models.
+        return "text_image_video_v1"
+    if str(provider or "").split(":", 1)[0] == "authgpt":
+        # Replace catalogs fetched from Codex with client_version=0.0.0.
+        return "account_models_v1"
     if str(provider or "").split(":", 1)[0] != "authza":
         return None
     try:
@@ -1288,6 +1294,18 @@ def _fetch_provider_catalog(
     ):
         raise ValueError("Ollama returned an invalid model list")
     entries = _extract_catalog_entries(payload, spec)
+    if spec.name == "nanogpt":
+        # /api/v1/models lists text models only. NanoGPT publishes image and
+        # video models on separate catalogs, but all use the same nan/ route.
+        catalog_root = url.rsplit("/", 1)[0]
+        for catalog in ("image-models", "video-models"):
+            media_payload = _http_get_json(
+                f"{catalog_root}/{catalog}", headers, timeout
+            )
+            media_entries = _extract_catalog_entries(media_payload, spec)
+            if not media_entries:
+                raise ValueError(f"NanoGPT returned no {catalog} entries")
+            entries.extend(media_entries)
     models: List[str] = []
     for entry in entries:
         if isinstance(entry, str):

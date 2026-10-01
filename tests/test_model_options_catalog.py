@@ -346,6 +346,52 @@ def test_openrouter_online_catalog_replaces_static_provider_section(tmp_path, mo
     assert "or/vendor/new-model" in model_options.get_model_options()
 
 
+def test_nanogpt_poll_combines_text_image_and_video_catalogs(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    assert not model_options._catalog_record_matches_variant(
+        "nanogpt", {"fetched_at": 1, "models": ["nan/openai/gpt-latest"]}
+    )
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, dict(headers)))
+        if url.endswith("/image-models"):
+            return {"data": [{"id": "wan-2.6-image-edit"}, {"id": "gpt-image-2"}]}
+        if url.endswith("/video-models"):
+            return {"data": [{"id": "wan-2.7-video"}]}
+        if url.endswith("/models"):
+            return {"data": [{"id": "openai/gpt-latest"}]}
+        raise AssertionError(f"unexpected NanoGPT catalog: {url}")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="nan/openai/gpt-latest",
+        active_api_key="nano-test-key",
+        only_provider="nanogpt",
+        timeout=0.1,
+    )
+
+    expected = [
+        "nan/openai/gpt-latest",
+        "nan/wan-2.6-image-edit",
+        "nan/gpt-image-2",
+        "nan/wan-2.7-video",
+    ]
+    assert result.provider_models["nanogpt"] == expected
+    assert result.statuses["nanogpt"] == "online (4 models)"
+    assert model_options.get_current_polled_provider_models()["nanogpt"] == expected
+    assert (
+        model_options._load_model_catalog_cache()["providers"]["nanogpt"]["variant"]
+        == "text_image_video_v1"
+    )
+    assert [url for url, _headers in calls] == [
+        "https://nano-gpt.com/api/v1/models",
+        "https://nano-gpt.com/api/v1/image-models",
+        "https://nano-gpt.com/api/v1/video-models",
+    ]
+    assert all(headers["Authorization"] == "Bearer nano-test-key" for _, headers in calls)
+
+
 def test_antigravity_catalog_retains_local_tier_aliases():
     merged = model_options._merge_dynamic_model_options(
         ["gemini-3.5-flash", "antigravity/obsolete-model"],
@@ -3454,3 +3500,18 @@ def test_local_catalog_readiness_checks_local_port_without_cli(monkeypatch):
     assert checked == [(('localhost', 11434), 0.1)]
     assert model_options.local_catalog_available("lmstudio")
     assert checked[-1] == (('localhost', 1234), 0.1)
+
+
+def test_authgpt_catalog_upgrade_invalidates_old_manifest_cache(monkeypatch):
+    assert model_options._provider_catalog_variant('authgpt') == 'account_models_v1'
+    assert model_options._provider_catalog_variant('authgpt:2') == 'account_models_v1'
+    assert not model_options._catalog_record_matches_variant(
+        'authgpt', {'fetched_at': 1, 'models': ['authgpt/gpt-old']}
+    )
+    now = model_options.time.time()
+    monkeypatch.setattr(model_options, '_load_model_catalog_cache', lambda: {
+        'attempts': {'authgpt': now},
+        'attempt_variants': {},
+        'providers': {'authgpt': {'fetched_at': now, 'models': ['authgpt/gpt-old']}},
+    })
+    assert model_options.provider_model_catalog_refresh_due('authgpt')

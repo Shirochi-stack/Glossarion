@@ -2,6 +2,7 @@ import json
 import copy
 import sys
 import types
+from types import SimpleNamespace
 
 import pytest
 
@@ -255,3 +256,63 @@ def test_astra_succeeds_on_first_request_with_note(fake_transport):
     assert bodies[0]["reasoning"] == {"effort": "max"}
     assert any(line.startswith("📝") and "128000" in line for line in logs)
     assert not any("retrying" in line or "❌" in line for line in logs)
+
+
+def test_authgpt_model_poll_uses_account_catalog(monkeypatch):
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {'models': [
+                {'slug': 'gpt-6.1-sol', 'visibility': 'list'},
+                {'slug': 'gpt-6-luna', 'visibility': 'list'},
+                {'slug': 'GPT-6.1-SOL', 'visibility': 'list'},
+                {'slug': 'internal-model', 'visibility': 'hide'},
+            ]},
+        )
+
+    monkeypatch.delenv('AUTHGPT_BASE_URL', raising=False)
+    monkeypatch.setattr(authgpt_auth.requests, 'get', get)
+    assert authgpt_auth.fetch_available_models('test-token') == ['gpt-6.1-sol', 'gpt-6-luna']
+    assert len(calls) == 1
+    assert calls[0][0] == 'https://api.openai.com/v1/models'
+    assert calls[0][1]['headers']['Authorization'] == 'Bearer test-token'
+    assert 'params' not in calls[0][1]
+
+
+def test_authgpt_model_poll_falls_back_to_codex_manifest(monkeypatch):
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        if url == 'https://api.openai.com/v1/models':
+            raise authgpt_auth.requests.HTTPError('catalog unavailable')
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {'models': [{'slug': 'gpt-6-astra', 'visibility': 'list'}]},
+        )
+
+    monkeypatch.delenv('AUTHGPT_BASE_URL', raising=False)
+    monkeypatch.setattr(authgpt_auth.requests, 'get', get)
+    assert authgpt_auth.fetch_available_models('test-token') == ['gpt-6-astra']
+    assert [url for url, _kwargs in calls] == [
+        'https://api.openai.com/v1/models',
+        'https://chatgpt.com/backend-api/codex/models',
+    ]
+    assert calls[1][1]['params'] == {'client_version': authgpt_auth.APP_VERSION}
+
+
+def test_authgpt_model_poll_respects_custom_backend(monkeypatch):
+    calls = []
+    monkeypatch.setattr(authgpt_auth.requests, 'get', lambda url, **kwargs: (
+        calls.append(url) or SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {'models': [{'slug': 'local-model'}]},
+        )
+    ))
+    assert authgpt_auth.fetch_available_models(
+        'test-token', base_url='https://example.test/backend-api'
+    ) == ['local-model']
+    assert calls == ['https://example.test/backend-api/codex/models']

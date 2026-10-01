@@ -88,7 +88,7 @@ def _natural_sort_key(text):
     Examples: '1.png', '2.png', '10.png' -> sorted correctly as 1, 2, 10
     """
     def convert(part):
-        return int(part) if part.isdigit() else part.lower()
+        return (0, int(part)) if part.isdigit() else (1, part.lower())
     return [convert(c) for c in re.split('([0-9]+)', text)]
 
 
@@ -886,6 +886,7 @@ class MangaTranslationTab(QObject):
         except Exception:
             self.executor = None
         self.selected_files = []
+        self._manga_file_sort = ('numeric', False)
         self.skipped_processing_files = set()
         self.manga_image_range_value = ""
         self._manga_processing_files = None
@@ -4103,8 +4104,8 @@ class MangaTranslationTab(QObject):
         sort_label.setStyleSheet("color: #e0e0e0; font-weight: bold;")
         sort_btn_layout.addWidget(sort_label)
         
-        # Track sort state for each type (ascending by default)
-        self._sort_ascending = {'name': True, 'numeric': True, 'date': True}
+        # Number starts sorted ascending, so its next click reverses the order.
+        self._sort_ascending = {'name': True, 'numeric': False, 'date': True}
         
         # Name sort button
         self.sort_name_btn = QPushButton("↑ Name")
@@ -4115,7 +4116,7 @@ class MangaTranslationTab(QObject):
         
         # Numeric sort button
         self.sort_numeric_btn = QPushButton("↑ Number")
-        self.sort_numeric_btn.setToolTip("Sort numerically (1, 2, 10). Click again to reverse.")
+        self.sort_numeric_btn.setToolTip("Sorted numerically (1, 2, 10). Click to reverse.")
         self.sort_numeric_btn.clicked.connect(lambda: self._toggle_sort('numeric'))
         self.sort_numeric_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 4px 8px; font-size: 9pt; } QPushButton:hover { background-color: #5a6268; }")
         sort_btn_layout.addWidget(self.sort_numeric_btn)
@@ -9480,6 +9481,7 @@ class MangaTranslationTab(QObject):
         moved_path = files.pop(source_row)
         files.insert(destination_row, moved_path)
         self.selected_files = files
+        self._manga_file_sort = None
         self._rebuild_manga_file_listbox(current_path=moved_path)
         if hasattr(self, 'image_preview_widget'):
             self._update_manga_preview_image_list_for_range()
@@ -12848,6 +12850,7 @@ class MangaTranslationTab(QObject):
                 if first_added_path is None:
                     first_added_path = path
 
+        self._apply_manga_file_sort()
         if first_added_path and self.file_listbox.currentRow() < 0:
             try:
                 self.file_listbox.setCurrentRow(self.selected_files.index(first_added_path))
@@ -13015,6 +13018,8 @@ class MangaTranslationTab(QObject):
                     self.selected_files.append(path)
                     self._add_manga_file_item(path)
         
+        self._apply_manga_file_sort()
+
         # Auto-select first image to trigger preview
         if len(self.selected_files) > 0 and self.file_listbox.count() > 0:
             self.file_listbox.setCurrentRow(0)
@@ -13068,6 +13073,8 @@ class MangaTranslationTab(QObject):
                                 self.file_listbox.setCurrentRow(0)
                     elif ext == cbz_ext:
                         added_images += self._add_cbz_archive_images(filepath, image_extensions)
+
+        self._apply_manga_file_sort()
 
         if added_images:
             if len(folders) > 1:
@@ -13231,7 +13238,7 @@ class MangaTranslationTab(QObject):
         
         # Get current state and toggle it
         if not hasattr(self, '_sort_ascending'):
-            self._sort_ascending = {'name': True, 'numeric': True, 'date': True}
+            self._sort_ascending = {'name': True, 'numeric': False, 'date': True}
         
         is_ascending = self._sort_ascending.get(sort_type, True)
         
@@ -13253,6 +13260,25 @@ class MangaTranslationTab(QObject):
         elif sort_type == 'date':
             self.sort_date_btn.setText(f"{arrow} Date")
             self.sort_date_btn.setToolTip(f"Sort by date ({'newest first' if not is_ascending else 'oldest first'}). Click to switch.")
+
+    def _apply_manga_file_sort(self):
+        """Apply the active sort after loading images without logging a manual action."""
+        sort_state = getattr(self, '_manga_file_sort', ('numeric', False))
+        if not sort_state or not self.selected_files:
+            return
+        sort_type, reverse = sort_state
+        if sort_type == 'numeric':
+            key = lambda path: _natural_sort_key(os.path.basename(path))
+        elif sort_type == 'name':
+            key = lambda path: os.path.basename(path).lower()
+        elif sort_type == 'date':
+            key = lambda path: os.path.getmtime(path) if os.path.exists(path) else 0
+        else:
+            return
+        previous_order = list(self.selected_files)
+        self.selected_files.sort(key=key, reverse=reverse)
+        if self.selected_files != previous_order:
+            self._rebuild_manga_file_listbox()
     
     def _sort_files(self, sort_type, reverse=False):
         """Sort the file list according to the specified type.
@@ -13289,6 +13315,8 @@ class MangaTranslationTab(QObject):
         elif sort_type == 'date':
             # Sort by file modification date
             self.selected_files.sort(key=lambda x: os.path.getmtime(x) if os.path.exists(x) else 0, reverse=reverse)
+
+        self._manga_file_sort = None if sort_type == 'reverse' else (sort_type, reverse)
         
         # Rebuild the listbox and restore selection to the same file if possible.
         self._rebuild_manga_file_listbox(current_path=current_path)
@@ -13341,6 +13369,7 @@ class MangaTranslationTab(QObject):
             
             # Update selected_files with new order
             self.selected_files = new_order
+            self._manga_file_sort = None
             
             # Update thumbnail preview list
             if hasattr(self, 'image_preview_widget'):
@@ -13418,6 +13447,7 @@ class MangaTranslationTab(QObject):
                 if filepath not in self.selected_files:
                     self.selected_files.append(filepath)
                     self._add_manga_file_item(filepath)
+            self._apply_manga_file_sort()
             
             # Auto-select first image
             if self.file_listbox.count() > 0:
