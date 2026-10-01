@@ -5638,8 +5638,12 @@ class MangaTranslationTab(QObject):
         disable_performance_layout.addWidget(disable_performance_spacer)
         disable_performance_cb = self._create_styled_checkbox("Disable Performance Mode")
         disable_performance_cb.setToolTip(
-            "Off: use faster resize/crop/tiling optimizations for local inpainters. "
-            "On: process the full image in the local inpainter path when possible. This can be slower and use more memory."
+            "Off: use faster resize, crop, and tiling optimizations\n"
+            "for local inpainters.\n\n"
+            "On: process the full image locally when possible.\n"
+            "This can be slower and use more memory.\n\n"
+            "Custom image edit API requests still skip crops\n"
+            "without a text mask in either mode."
         )
         try:
             disable_performance_cb.setChecked(bool(self.disable_inpaint_performance_mode_value))

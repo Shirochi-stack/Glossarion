@@ -902,10 +902,12 @@ def test_automatic_manga_translation_leaves_failed_api_region_blank(monkeypatch)
     assert translator.translate_text('source text') == ''
 
 
-def test_custom_image_edit_chunks_tall_page_without_cutting_text_boxes():
+@pytest.mark.parametrize('disable_performance_mode', [False, True])
+def test_custom_image_edit_chunks_tall_page_without_cutting_text_boxes(disable_performance_mode):
     inpainter = object.__new__(LocalInpainter)
     inpainter.config = {
-        'manga_settings': {'preprocessing': {'chunk_height': 2000, 'chunk_overlap': 100}}
+        'manga_settings': {'preprocessing': {'chunk_height': 2000, 'chunk_overlap': 100}},
+        'manga_disable_inpaint_performance_mode': disable_performance_mode,
     }
     inpainter.current_method = 'custom-image-edit'
     inpainter.model_loaded = True
@@ -940,9 +942,15 @@ def test_custom_image_edit_chunks_tall_page_without_cutting_text_boxes():
     result = inpainter.inpaint(image, mask)
 
     assert len(requests) == 3
+    assert all(masked_pixels > 0 for _, masked_pixels in requests)
     assert result.shape == image.shape
     assert np.all(result[mask > 0] == (0, 0, 255))
     assert np.all(result[mask == 0] == 0)
+
+    requests.clear()
+    blank_result = inpainter.inpaint(image, np.zeros_like(mask))
+    assert np.array_equal(blank_result, image)
+    assert not requests
 
 
 def test_custom_image_edit_keeps_a_box_whole_when_crop_must_grow():
