@@ -3456,8 +3456,10 @@ def _create_response_handling_section(self, parent):
     gpt_h2.setContentsMargins(40, 5, 0, 0)
     self.openrouter_use_reasoning_tokens_cb = self._create_styled_checkbox("Use OR token budget instead of Effort")
     self.openrouter_use_reasoning_tokens_cb.setToolTip(
-        "Sends reasoning.max_tokens instead of reasoning.effort. OpenRouter may translate "
-        "the budget into an effort level for models without a direct reasoning token limit."
+        _wrapped_tooltip_html(
+            "Sends reasoning.max_tokens instead of reasoning.effort. OpenRouter may translate "
+            "the budget into an effort level for models without a direct reasoning token limit."
+        )
     )
     self.openrouter_use_reasoning_tokens_cb.setChecked(
         bool(getattr(self, 'openrouter_use_reasoning_tokens_var', False))
@@ -3500,9 +3502,11 @@ def _create_response_handling_section(self, parent):
         "⚠️ Force reasoning parameters on unknown routes"
     )
     self.pass_thinking_all_openai_cb.setToolTip(
-        "Pass the selected reasoning_effort to OpenAI-compatible routes without dedicated "
-        "reasoning handling, including custom model routes. Sends none when thinking is off. "
-        "Unsupported APIs may reject it."
+        _wrapped_tooltip_html(
+            "Pass the selected reasoning_effort to OpenAI-compatible routes without dedicated "
+            "reasoning handling, including custom model routes. Sends none when thinking is off. "
+            "Unsupported APIs may reject it."
+        )
     )
     try:
         self.pass_thinking_all_openai_cb.setChecked(bool(self.pass_thinking_all_openai_var))
@@ -3581,9 +3585,11 @@ def _create_response_handling_section(self, parent):
         bool(self.force_service_tier_unknown_routes_var)
     )
     self.force_service_tier_unknown_routes_cb.setToolTip(
-        "Pass the selected service tier to other OpenAI-compatible providers and to "
-        "NanoGPT/OpenRouter models outside the known OpenAI and Gemini families. "
-        "The API may reject unsupported tiers. Per-key custom parameters take precedence."
+        _wrapped_tooltip_html(
+            "Pass the selected service tier to other OpenAI-compatible providers and to "
+            "NanoGPT/OpenRouter models outside the known OpenAI and Gemini families. "
+            "The API may reject unsupported tiers. Per-key custom parameters take precedence."
+        )
     )
     def _on_force_service_tier_unknown_routes(checked):
         self.force_service_tier_unknown_routes_var = bool(checked)
