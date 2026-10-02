@@ -215,6 +215,7 @@ app_files = [
     ('installer_utils.py', '.'),
 
     ('multi_api_key_manager.py', '.'),
+    ('key_contexts.py', '.'),
     ('ollama_settings_dialog.py', '.'),
     ('individual_endpoint_dialog.py', '.'),
     ('bubble_detector.py', '.'),
@@ -390,6 +391,7 @@ app_modules = [
     'pdf_output_naming',
     'installer_utils',
     'multi_api_key_manager',
+    'key_contexts',
     'ollama_settings_dialog',
     'individual_endpoint_dialog',
     'bubble_detector',

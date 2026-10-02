@@ -226,6 +226,7 @@ app_files = [
 	('installer_utils.py', '.'),
 	
 	('multi_api_key_manager.py', '.'),
+	('key_contexts.py', '.'),
 	('ollama_settings_dialog.py', '.'),
 	('individual_endpoint_dialog.py', '.'),
 	('model_options.py', '.'),
@@ -414,6 +415,7 @@ app_modules = [
     'html_output_utils',
     'individual_endpoint_dialog',
     'multi_api_key_manager',
+    'key_contexts',
     'ollama_settings_dialog',
     'tqdm_safety',
     'unified_glossary',
