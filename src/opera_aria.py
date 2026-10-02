@@ -23,6 +23,7 @@ returns {"content", "finish_reason", "usage", "raw_response"}.
 from __future__ import annotations
 
 import base64
+from contextlib import ExitStack
 import glob
 import hashlib
 import json
@@ -733,7 +734,7 @@ def _accumulate(acc: str, piece: str) -> str:
 
 
 def _post_chat(token: str, query: str, timeout: int, stream: bool = True,
-               think: bool = False):
+               think: bool = False, log_fn=None):
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -746,13 +747,27 @@ def _post_chat(token: str, query: str, timeout: int, stream: bool = True,
     payload = {"query": query, "stream": stream, "request_source": "side_panel"}
     if think:
         payload["think_harder"] = True
+    from tor_proxy import TorProxyError, new_proxy_url
+    try:
+        proxy = new_proxy_url(log_fn=log_fn, cancelled=_is_cancelled)
+    except TorProxyError as exc:
+        raise OperaAriaError(f"Opera Aria Tor proxy: {exc}", error_type="config_error") from exc
     return requests.post(CHAT_ENDPOINT_V2, headers=headers, json=payload,
-                         stream=stream, timeout=timeout)
+                         stream=stream, timeout=timeout,
+                         proxies={"http": proxy, "https": proxy}, allow_redirects=False)
 
 
 def _run_chat(messages: Iterable[Dict[str, Any]], *, model: str, timeout: int,
               log_fn=None, log_stream: Optional[bool] = None,
               stream: Optional[bool] = None) -> Dict[str, Any]:
+    with ExitStack() as responses:
+        return _run_chat_impl(messages, model=model, timeout=timeout,
+                              log_fn=log_fn, log_stream=log_stream,
+                              stream=stream, responses=responses)
+
+
+def _run_chat_impl(messages: Iterable[Dict[str, Any]], *, model: str, timeout: int,
+                   log_fn=None, log_stream=None, stream=None, responses):
     # The transport is always SSE (Opera's JSON reply shape is not relied on).
     # ``stream`` is the real-time streaming toggle: off means the reply is
     # collected silently and only the final result is returned.
@@ -767,12 +782,15 @@ def _run_chat(messages: Iterable[Dict[str, Any]], *, model: str, timeout: int,
     think_on = _think_harder_for(model)
     _log(log_fn, f"🎭 Opera Aria: sending request ({len(query):,} chars, model={model}"
                  f"{', think harder' if think_on else ''})")
-    resp = _post_chat(token, query, timeout, think=think_on)
+    resp = _post_chat(token, query, timeout, think=think_on, log_fn=log_fn)
+    responses.callback(resp.close)
 
     if resp.status_code in (401, 403):
+        resp.close()
         _log(log_fn, "⚠️ Opera Aria: token rejected; re-minting and retrying")
         token = get_token(force_refresh=True, log_fn=log_fn)
-        resp = _post_chat(token, query, timeout, think=think_on)
+        resp = _post_chat(token, query, timeout, think=think_on, log_fn=log_fn)
+        responses.callback(resp.close)
 
     if resp.status_code != 200:
         raise OperaAriaError(

@@ -3092,6 +3092,13 @@ def send_opencode_zen_completion(
 
     env = _subprocess_env()
     env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(max(1, int(max_tokens)))
+    # Apply only to ocz/; paid OpenCode aliases retain their existing transport.
+    if str(model or "").strip().startswith("ocz/"):
+        from tor_proxy import TorProxyError, new_proxy_url, proxy_environment
+        try:
+            env = proxy_environment(env, new_proxy_url(logger, is_cancelled))
+        except TorProxyError as exc:
+            raise OcAgyError(f"OpenCode Zen Tor proxy: {exc}") from exc
 
     start = time.time()
 
