@@ -208,7 +208,7 @@ def ensure_tor_installed(log_fn=None, cancelled=None):
     binary = _find_binary()
     if binary:
         if log_fn:
-            log_fn(f"Found existing Tor installation: {binary}")
+            log_fn(f"📍 Found existing Tor installation: {binary}")
         return binary
     if log_fn:
         log_fn("Tor was not found; downloading the official expert bundle...")
@@ -293,36 +293,20 @@ def _wait_for_bootstrap(log_fn, cancelled, instance=None):
     started = time.monotonic()
     deadline = started + _BOOTSTRAP_WAIT_SECONDS
     last_progress = "no bootstrap progress reported"
-    last_notice = started
-    seen_warnings = set()
     status = ""
     while time.monotonic() < deadline:
         if cancelled and cancelled():
             raise TorProxyError("Tor startup cancelled.")
         status = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
         progress = re.findall(r"Bootstrapped \d+%[^\r\n]*", status)
-        now = time.monotonic()
-        if progress and progress[-1] != last_progress:
+        if progress:
             last_progress = progress[-1]
-            last_notice = now
-            if log_fn:
-                log_fn(f"Tor: {last_progress}")
-        elif log_fn and now - last_notice >= 10:
-            log_fn(f"Tor is still starting: {last_progress} ({int(now - started)}s elapsed)")
-            last_notice = now
-        for warning in re.findall(r"\[(?:warn|err)\] ([^\r\n]*)", status):
-            if warning not in seen_warnings:
-                seen_warnings.add(warning)
-                if log_fn:
-                    log_fn(f"Tor warning: {warning}")
         if instance.process.poll() is not None:
             raise TorProxyError(
                 f"Tor exited during startup (code {instance.process.returncode}, binary {instance.binary}): "
                 + (status[-2500:] or "No console output was produced."))
         if "Bootstrapped 100%" in status:
             instance.port = instance.starting_port
-            if log_fn:
-                log_fn("Tor proxy is ready; sending the API request.")
             return
         time.sleep(0.1)
     raise TorBootstrapTimeout(
@@ -334,16 +318,11 @@ def _wait_for_bootstrap(log_fn, cancelled, instance=None):
 
 def _instance_proxy_url(instance, log_fn=None, cancelled=None):
     """Return a unique authenticated HTTP proxy URL; never fall back to direct."""
-    wait_started = time.monotonic()
-    wait_reported = False
     try:
         # Waiting callers can still cancel while another thread bootstraps Tor.
         while not instance.lock.acquire(timeout=0.1):
             if cancelled and cancelled():
                 raise TorProxyError("Tor request cancelled while waiting for startup.")
-            if log_fn and not wait_reported and time.monotonic() - wait_started >= 2:
-                log_fn("Tor is starting for another request; waiting for the shared proxy...")
-                wait_reported = True
         try:
             if cancelled and cancelled():
                 raise TorProxyError("Tor request cancelled.")
@@ -369,7 +348,7 @@ def _instance_proxy_url(instance, log_fn=None, cancelled=None):
                     f'DataDirectory {json.dumps(str(runtime / "data"), ensure_ascii=False)}\n'
                     'Log notice stdout\n' + _geoip_config(binary), encoding="utf-8")
                 if log_fn:
-                    log_fn(f"Starting Tor instance {instance.index + 1} ({binary}); waiting for network bootstrap (up to {_BOOTSTRAP_WAIT_SECONDS}s)...")
+                    log_fn(f"🚀 Starting Tor instance {instance.index + 1} ({binary}); waiting for network bootstrap (up to {_BOOTSTRAP_WAIT_SECONDS}s)...")
                 try:
                     # Capture early configuration errors too. Tor's Log option
                     # does not parse quoted filenames like ordinary path options.
@@ -410,8 +389,6 @@ def new_proxy_url(log_fn=None, cancelled=None):
         instance = _INSTANCES[_POOL_NEXT % size]
         _POOL_NEXT += 1
     proxy = _instance_proxy_url(instance, log_fn, cancelled)
-    if log_fn:
-        log_fn(f'Tor instance {instance.index + 1}/{size} selected for this request.')
     return proxy
 
 

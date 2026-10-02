@@ -759,7 +759,7 @@ def _post_chat(token: str, query: str, timeout: int, stream: bool = True,
     if proxy:
         proxy_address = urllib.parse.urlsplit(proxy)
         circuit_label = hashlib.sha256(proxy.encode("utf-8")).hexdigest()[:8]
-        _log(log_fn, f"🧅 Opera Aria: routing chat POST through Tor "
+        _log(log_fn, f"🧄 Opera Aria: routing chat POST through Tor "
                      f"({proxy_address.hostname}:{proxy_address.port}, fresh circuit identity {circuit_label})")
         options = {"proxies": {"http": proxy, "https": proxy}, "allow_redirects": False}
     try:

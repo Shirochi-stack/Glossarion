@@ -161,6 +161,7 @@ def test_ocz_both_modes_get_tor_but_paid_alias_does_not(monkeypatch, streaming):
     assert proxy.call_count == 1
     routing_logs = [line for line in logs if "routing request through Tor" in line]
     assert len(routing_logs) == 1
+    assert routing_logs[0].startswith("🧄")
     assert "127.0.0.1:" in routing_logs[0]
     assert "fresh circuit identity" in routing_logs[0]
     assert ":tor@" not in routing_logs[0]
@@ -393,7 +394,7 @@ def test_parallel_opera_posts_have_independent_proxies(monkeypatch):
     assert len(set(urls)) == 8
 
 
-def test_startup_reports_bootstrap_progress_and_ready(monkeypatch, tmp_path):
+def test_startup_emits_only_one_condensed_status(monkeypatch, tmp_path):
     monkeypatch.setattr(tor_proxy._INSTANCES[0], "process", None)
     monkeypatch.setattr(tor_proxy._INSTANCES[0], "port", None)
     monkeypatch.setattr(tor_proxy._INSTANCES[0], "runtime", None)
@@ -416,9 +417,9 @@ def test_startup_reports_bootstrap_progress_and_ready(monkeypatch, tmp_path):
     monkeypatch.setattr(tor_proxy.time, "sleep", next_stage)
     try:
         tor_proxy.new_proxy_url(log_fn=logs.append)
-        assert any("55%" in line for line in logs)
-        assert any("100%" in line for line in logs)
-        assert any("proxy is ready" in line for line in logs)
+        assert len(logs) == 1
+        assert logs[0].startswith('🚀 Starting Tor instance 1')
+        assert not any('Bootstrapped' in line or 'selected' in line for line in logs)
     finally:
         tor_proxy._stop()
 
@@ -461,7 +462,7 @@ def test_existing_installation_is_reported_without_download(monkeypatch):
     monkeypatch.setattr(tor_proxy.requests, "Session", session)
     logs = []
     assert tor_proxy.ensure_tor_installed(log_fn=logs.append) == "existing/tor.exe"
-    assert logs == ["Found existing Tor installation: existing/tor.exe"]
+    assert logs == ["📍 Found existing Tor installation: existing/tor.exe"]
     session.assert_not_called()
 
 
@@ -477,6 +478,7 @@ def test_opera_logs_tor_routing_for_each_post_without_credentials(monkeypatch):
         response = opera_aria._post_chat("private-bearer", "Hello", 30, log_fn=logs.append)
         response.close()
     assert len(logs) == 2
+    assert all(line.startswith("🧄") for line in logs)
     assert all("routing chat POST through Tor" in line for line in logs)
     assert all("127.0.0.1:" in line for line in logs)
     assert logs[0] != logs[1]

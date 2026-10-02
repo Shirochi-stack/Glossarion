@@ -3179,7 +3179,7 @@ def _send_opencode_zen_completion_impl(
         env = proxy_environment(env, proxy)
         proxy_address = urllib.parse.urlsplit(proxy)
         circuit_label = hashlib.sha256(proxy.encode("utf-8")).hexdigest()[:8]
-        logger(f"🧅 OpenCode Zen: routing request through Tor "
+        logger(f"🧄 OpenCode Zen: routing request through Tor "
                f"({proxy_address.hostname}:{proxy_address.port}, fresh circuit identity {circuit_label})")
 
     start = time.time()
