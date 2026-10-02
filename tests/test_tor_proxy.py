@@ -612,6 +612,6 @@ def test_request_ports_forward_parallel_traffic_and_close_after_use(monkeypatch)
         worker.join(timeout=2)
 
 
-def test_tor_enabled_by_default(monkeypatch):
+def test_tor_disabled_by_default(monkeypatch):
     monkeypatch.delenv("GLOSSARION_TOR_ENABLED", raising=False)
-    assert tor_proxy.enabled()
+    assert not tor_proxy.enabled()

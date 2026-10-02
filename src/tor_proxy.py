@@ -60,7 +60,7 @@ _RELAY_LOCK = threading.Lock()
 
 
 def enabled():
-    return os.getenv("GLOSSARION_TOR_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
+    return os.getenv("GLOSSARION_TOR_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 class _RelayHandler(socketserver.BaseRequestHandler):

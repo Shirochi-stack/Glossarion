@@ -1,7 +1,7 @@
 # Tor for OCZ and Opera
 
 `ocz/` translation calls and `search/opera` (including `search/opera-think`)
-chat POSTs optionally use a managed Tor HTTP CONNECT proxy. Tor is enabled by
+chat POSTs optionally use a managed Tor HTTP CONNECT proxy. Tor is disabled by
 default. Configure **TOR proxy rotation** in Other Settings, in the **search/opera
 and ocz/ TOR Proxy Rotation** section above Gemini Free Browser Chunking.
 The toggle is saved with settings and passed to translation subprocesses.
@@ -55,7 +55,7 @@ Setup failures are reported rather than silently sending chat requests directly.
 
 Optional environment settings:
 
-- `GLOSSARION_TOR_ENABLED`: `1` enables Tor and per-request ports; default `1`; `0` disables it.
+- `GLOSSARION_TOR_ENABLED`: `1` enables Tor and per-request ports; default `0`; `1` enables it.
 - `GLOSSARION_TOR_BINARY`: explicit path to a Tor executable.
 - `GLOSSARION_TOR_DIR`: override the installation/cache directory.
 - `GLOSSARION_TOR_INSTANCES`: instance pool size (1–8, default 4).
