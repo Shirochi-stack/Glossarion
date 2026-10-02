@@ -88,6 +88,35 @@ def test_other_settings_toggle_on_restores_selected_openrouter_budget(monkeypatc
     assert os.environ["OPENROUTER_USE_REASONING_TOKENS"] == "1"
 
 
+def test_force_reasoning_for_unknown_compatible_route(monkeypatch):
+    monkeypatch.setenv("ENABLE_GPT_THINKING", "1")
+    monkeypatch.setenv("GPT_EFFORT", "high")
+    monkeypatch.setenv("PASS_THINKING_TO_OPENAI_COMPATIBLE", "0")
+    client = UnifiedClient.__new__(UnifiedClient)
+
+    assert client._get_openai_compatible_reasoning_effort(
+        "custom_openai", "anthropic/claude-custom"
+    ) is None
+
+    monkeypatch.setenv("PASS_THINKING_TO_OPENAI_COMPATIBLE", "1")
+    assert client._get_openai_compatible_reasoning_effort(
+        "custom_openai", "anthropic/claude-custom"
+    ) == "high"
+    assert client._get_openai_compatible_reasoning_effort(
+        "openrouter", "anthropic/claude-custom"
+    ) is None
+
+    monkeypatch.setenv("GPT_EFFORT", "none")
+    assert client._get_openai_compatible_reasoning_effort(
+        "custom_openai", "anthropic/claude-custom"
+    ) == "none"
+
+    monkeypatch.setenv("ENABLE_GPT_THINKING", "0")
+    assert client._get_openai_compatible_reasoning_effort(
+        "custom_openai", "anthropic/claude-custom"
+    ) == "none"
+
+
 def test_deepseek_v4_effort_options_and_normalization_include_none_and_low():
     assert DEEPSEEK_V4_EFFORT_OPTIONS == ("none", "low", "high", "max")
     assert UnifiedClient._normalize_deepseek_v4_effort("none") == "none"

@@ -2009,6 +2009,7 @@ class _InputOutputDialog(QDialog):
         'GPT_EFFORT',
         'OPENROUTER_USE_REASONING_TOKENS',
         'PASS_THINKING_TO_OPENAI_COMPATIBLE',
+        'FORCE_SERVICE_TIER_UNKNOWN_ROUTES',
         'GEMINI_THINKING_LEVEL',
         'GEMINI_SERVICE_TIER',
         'THINKING_BUDGET',
@@ -13845,6 +13846,12 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.enable_thoughts_var = self.config.get('enable_thoughts', True)
         self.gemini_service_tier_var = str(self.config.get('gemini_service_tier', 'off') or 'off')
         os.environ['GEMINI_SERVICE_TIER'] = self.gemini_service_tier_var
+        self.force_service_tier_unknown_routes_var = bool(
+            self.config.get('force_service_tier_unknown_routes', False)
+        )
+        os.environ['FORCE_SERVICE_TIER_UNKNOWN_ROUTES'] = (
+            '1' if self.force_service_tier_unknown_routes_var else '0'
+        )
         # NEW: GPT/OpenRouter reasoning controls
         self.enable_gpt_thinking_var = self.config.get('enable_gpt_thinking', True)
         self.gpt_reasoning_tokens_var = str(self.config.get('gpt_reasoning_tokens', '2000'))
@@ -36471,6 +36478,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'THINKING_BUDGET': self.thinking_budget_var if self.enable_gemini_thinking_var else '0',
             'GEMINI_THINKING_LEVEL': getattr(self, 'thinking_level_var', 'high'),
             'GEMINI_SERVICE_TIER': getattr(self, 'gemini_service_tier_var', 'off'),
+            'FORCE_SERVICE_TIER_UNKNOWN_ROUTES': '1' if self.force_service_tier_unknown_routes_var else '0',
             # GPT/OpenRouter reasoning
             'ENABLE_GPT_THINKING': "1" if self.enable_gpt_thinking_var else "0",
             'GPT_REASONING_TOKENS': self.gpt_reasoning_tokens_var if self.enable_gpt_thinking_var else '',
@@ -36858,6 +36866,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['THINKING_BUDGET'] = self.thinking_budget_var if self.enable_gemini_thinking_var else '0'
                 os.environ['GEMINI_THINKING_LEVEL'] = getattr(self, 'thinking_level_var', 'high')
                 os.environ['GEMINI_SERVICE_TIER'] = getattr(self, 'gemini_service_tier_var', 'off')
+                os.environ['FORCE_SERVICE_TIER_UNKNOWN_ROUTES'] = '1' if self.force_service_tier_unknown_routes_var else '0'
                 # GPT/OpenRouter reasoning
                 os.environ['ENABLE_GPT_THINKING'] = "1" if self.enable_gpt_thinking_var else "0"
                 os.environ['GPT_REASONING_TOKENS'] = self.gpt_reasoning_tokens_var if self.enable_gpt_thinking_var else ''
@@ -47575,6 +47584,7 @@ Important rules:
                 ('enable_gemini_thinking', ['enable_gemini_thinking_var'], False, bool),
                 ('thinking_budget', ['thinking_budget_var'], 0, lambda v: int(v) if str(v).lstrip('-').isdigit() else 0),
                 ('thinking_level', ['thinking_level_var'], 'high', str),
+                ('force_service_tier_unknown_routes', ['force_service_tier_unknown_routes_var'], False, bool),
                 ('enable_gpt_thinking', ['enable_gpt_thinking_var'], False, bool),
                 ('gpt_reasoning_tokens', ['gpt_reasoning_tokens_var'], 0, lambda v: int(v) if str(v).lstrip('-').isdigit() else 0),
                 ('gpt_effort', ['gpt_effort_var'], 'auto', str),
@@ -48327,7 +48337,8 @@ Important rules:
             'GPT_REASONING_TOKENS': 'GPT reasoning effort tokens',
             'GPT_EFFORT': 'GPT reasoning effort level',
             'OPENROUTER_USE_REASONING_TOKENS': 'Use OpenRouter reasoning token budget instead of effort',
-            'PASS_THINKING_TO_OPENAI_COMPATIBLE': 'Pass reasoning effort to all OpenAI-compatible routes',
+            'PASS_THINKING_TO_OPENAI_COMPATIBLE': 'Force reasoning effort on unknown OpenAI-compatible routes',
+            'FORCE_SERVICE_TIER_UNKNOWN_ROUTES': 'Force service tier on unknown OpenAI-compatible routes',
             'ENABLE_DEEPSEEK_THINKING': 'Enable DeepSeek thinking mode',
             'DEEPSEEK_USE_RESPONSES_API': 'Use the DeepSeek Responses API format',
             
@@ -49030,6 +49041,7 @@ Important rules:
                 ('GPT_EFFORT', getattr(self, 'gpt_effort_var', 'medium')),
                 ('OPENROUTER_USE_REASONING_TOKENS', '1' if getattr(self, 'openrouter_use_reasoning_tokens_var', False) else '0'),
                 ('PASS_THINKING_TO_OPENAI_COMPATIBLE', '1' if getattr(self, 'pass_thinking_all_openai_var', False) else '0'),
+                ('FORCE_SERVICE_TIER_UNKNOWN_ROUTES', '1' if getattr(self, 'force_service_tier_unknown_routes_var', False) else '0'),
 
                 # Custom API endpoints
                 ('OPENAI_CUSTOM_BASE_URL', getattr(self, 'openai_base_url_var', '')),

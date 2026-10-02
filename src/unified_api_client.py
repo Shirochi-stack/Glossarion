@@ -18335,6 +18335,31 @@ class UnifiedClient:
         elif tier:
             print(f'⚙️ [nanogpt] Service tier for {model}: {tier}')
 
+    def _log_openai_request_options(self, model: str, payload: dict) -> None:
+        """Log the reasoning effort and service tier sent to the official OpenAI route."""
+        reasoning = payload.get('reasoning')
+        effort = (reasoning.get('effort') if isinstance(reasoning, dict) else None) or payload.get('reasoning_effort')
+        tier = payload.get('service_tier')
+        if not effort and not tier:
+            return
+        try:
+            tls = self._get_thread_local_client()
+            if not hasattr(tls, 'openai_request_options_logged'):
+                tls.openai_request_options_logged = set()
+            state_key = (str(model or ''), str(effort or ''), str(tier or ''))
+            if state_key in tls.openai_request_options_logged:
+                return
+            tls.openai_request_options_logged.add(state_key)
+        except Exception:
+            pass
+        details = []
+        if effort:
+            details.append(f'reasoning_effort={effort}')
+        if tier:
+            details.append(f'service_tier={tier}')
+        icon = '🧠' if effort else '⚙️'
+        self._debug_log(f"{icon} [openai] {', '.join(details)} (model={model})")
+
     def _log_openrouter_chat_options(self, model: str, payload: dict) -> None:
         """Report the reasoning and service tier in an outgoing OpenRouter request."""
         if self._is_stop_requested():
@@ -18380,32 +18405,34 @@ class UnifiedClient:
                 request = {'model': effective_model, 'reasoning_effort': selected}
                 normalize_none_effort(request, self._log_once)
                 return request['reasoning_effort'] if request['reasoning_effort'] in ('low', 'medium', 'high', 'xhigh', 'max') else 'medium'
-            if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
-                return None
-            effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
-            provider = (provider or '').strip().lower()
-            if effort not in ('none', 'low', 'medium', 'high', 'xhigh', 'max'):
-                effort = 'medium'
-            if effort == 'none':
-                return None
-
             provider = (provider or '').strip().lower()
             pass_all = os.getenv('PASS_THINKING_TO_OPENAI_COMPATIBLE', '0') == '1'
+            dedicated_provider = provider in {
+                'deepseek', 'gemini-openai', 'openrouter', 'nanogpt', 'anthropic'
+            }
+            if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
+                return 'none' if pass_all and not dedicated_provider and provider not in {'opencode', 'nvidia'} else None
+            effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
+            if effort not in ('none', 'low', 'medium', 'high', 'xhigh', 'max'):
+                effort = 'medium'
 
             # Official OpenCode and NVIDIA NIM routes use the main GPT thinking controls.
             if provider in {'opencode', 'nvidia'}:
-                return effort
+                return effort if effort != 'none' else None
 
-            if provider in {'deepseek', 'gemini-openai', 'openrouter', 'nanogpt', 'anthropic'}:
-                return None
-
-            # Claude/Anthropic models have their own extended-thinking controls,
-            # even when reached through an OpenAI-compatible wrapper.
-            if 'claude' in (effective_model or '').lower() or 'anthropic' in (effective_model or '').lower():
+            if dedicated_provider:
                 return None
 
             if pass_all:
                 return effort
+
+            if effort == 'none':
+                return None
+
+            # Avoid guessing the control for Claude-named custom routes unless
+            # the user explicitly chose to force the compatible parameter.
+            if 'claude' in (effective_model or '').lower() or 'anthropic' in (effective_model or '').lower():
+                return None
         except Exception:
             return None
         return None
@@ -23869,10 +23896,14 @@ class UnifiedClient:
             None if 'service_tier' in key_request_parameters
             else self._selected_service_tier(provider)
         )
+        force_unknown_tier = os.getenv('FORCE_SERVICE_TIER_UNKNOWN_ROUTES', '0') == '1'
+        if force_unknown_tier and request_service_tier is None and 'service_tier' not in key_request_parameters:
+            request_service_tier = self._selected_service_tier('openai')
         if provider in ('nanogpt', 'openrouter') and request_service_tier:
-            if not self._is_openai_or_gemini_service_tier_model(effective_model):
+            known_tier_model = self._is_openai_or_gemini_service_tier_model(effective_model)
+            if not known_tier_model and not force_unknown_tier:
                 request_service_tier = None
-            elif provider == 'nanogpt':
+            elif provider == 'nanogpt' and known_tier_model:
                 request_service_tier = self._validate_nanogpt_service_tier(
                     base_url, actual_api_key, effective_model, request_service_tier
                 )
@@ -24317,18 +24348,19 @@ class UnifiedClient:
                                 params["reasoning"].setdefault("summary", "auto")
                         else:
                             params.setdefault("reasoning_effort", generic_reasoning_effort)
-                        try:
-                            tls = self._get_thread_local_client()
-                            if not hasattr(tls, 'openai_compatible_reasoning_logged'):
-                                tls.openai_compatible_reasoning_logged = set()
-                            state_key = (str(provider or ''), str(effective_model or ''), str(generic_reasoning_effort))
-                            if state_key not in tls.openai_compatible_reasoning_logged:
-                                tls.openai_compatible_reasoning_logged.add(state_key)
-                                self._debug_log(
-                                    f"🧠 [{provider}] reasoning_effort={generic_reasoning_effort} (model={effective_model})"
-                                )
-                        except Exception:
-                            pass
+                        if provider != 'openai':
+                            try:
+                                tls = self._get_thread_local_client()
+                                if not hasattr(tls, 'openai_compatible_reasoning_logged'):
+                                    tls.openai_compatible_reasoning_logged = set()
+                                state_key = (str(provider or ''), str(effective_model or ''), str(generic_reasoning_effort))
+                                if state_key not in tls.openai_compatible_reasoning_logged:
+                                    tls.openai_compatible_reasoning_logged.add(state_key)
+                                    self._debug_log(
+                                        f"🧠 [{provider}] reasoning_effort={generic_reasoning_effort} (model={effective_model})"
+                                    )
+                            except Exception:
+                                pass
                     elif self._get_openai_compatible_thinking_disabled(provider, effective_model):
                         extra_body.setdefault("thinking", {"type": "disabled"})
                         try:
@@ -24474,6 +24506,7 @@ class UnifiedClient:
 
                     if provider == 'openai':
                         self._apply_gpt6_openai_constraints(call_kwargs, use_responses_api)
+                        self._log_openai_request_options(effective_model, call_kwargs)
 
                     # Optional streaming toggle (text-only aggregation) - honor env, config, or runtime var
                     use_streaming = self._streaming_enabled()
@@ -26353,6 +26386,7 @@ class UnifiedClient:
                 self._log_openrouter_chat_options(effective_model, data)
             if provider == 'openai':
                 self._apply_gpt6_openai_constraints(data, use_responses_api)
+                self._log_openai_request_options(effective_model, data)
             # Save OpenRouter config if requested
             if provider == 'openrouter' and os.getenv("SAVE_PAYLOAD", "1") == "1":
                 cfg = {

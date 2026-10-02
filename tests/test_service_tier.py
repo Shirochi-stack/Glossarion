@@ -155,6 +155,8 @@ def test_service_tier_reaches_request_payload(
         monkeypatch.setattr(api.openai, 'OpenAI', lambda **kwargs: fake_sdk)
         monkeypatch.setattr(api, 'httpx', None)
     client = UnifiedClient('test-key', model, os.getcwd())
+    if provider == 'openai':
+        monkeypatch.setattr(client, '_debug_log', logs.append)
     monkeypatch.setattr(client, '_get_max_retries', lambda: 1)
     monkeypatch.setattr(client, '_get_send_interval', lambda: 0)
     monkeypatch.setattr(client, '_streaming_enabled', lambda: False)
@@ -178,6 +180,12 @@ def test_service_tier_reaches_request_payload(
         assert 'service_tier' not in calls[0]
     else:
         assert calls[0]['service_tier'] == expected
+    if provider == 'openai':
+        request_logs = [line for line in logs if '[openai] service_tier=' in line]
+        if expected is None:
+            assert request_logs == []
+        else:
+            assert request_logs == [f'⚙️ [openai] service_tier={expected} (model={request_model})']
     if provider == 'openrouter':
         log = '\n'.join(logs)
         request_logs = [line for line in logs if '🧠 [openrouter] Thinking' in line]
@@ -195,6 +203,70 @@ def test_service_tier_reaches_request_payload(
             assert all('service_tier=' not in line for line in request_logs)
         else:
             assert any(f'service_tier={expected}' in line for line in request_logs)
+
+
+@pytest.mark.parametrize('use_sdk', [True, False])
+@pytest.mark.parametrize('choice,key_tier,expected_tier', [
+    ('off', None, None),
+    ('flex', None, 'flex'),
+    ('standard', 'flex', 'flex'),
+])
+def test_official_openai_log_matches_sent_service_tier(
+    monkeypatch, use_sdk, choice, key_tier, expected_tier
+):
+    calls = []
+    logs = []
+    monkeypatch.setenv('GEMINI_SERVICE_TIER', choice)
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+    monkeypatch.setenv('GPT_EFFORT', 'medium')
+    monkeypatch.setenv('ENABLE_STREAMING', '0')
+    monkeypatch.setenv('USE_CUSTOM_OPENAI_ENDPOINT', '0')
+    response_body = {'status': 'completed', 'output': [{'type': 'message', 'content': [
+        {'type': 'output_text', 'text': 'OK'},
+    ]}]}
+    if use_sdk:
+        def create(**kwargs):
+            calls.append(kwargs)
+            return response_body
+        fake_sdk = SimpleNamespace(
+            responses=SimpleNamespace(create=create), close=lambda: None,
+        )
+        monkeypatch.setattr(api.openai, 'OpenAI', lambda **_kwargs: fake_sdk)
+        monkeypatch.setattr(api, 'httpx', None)
+
+    client = UnifiedClient('test-key', 'gpt-6-luna', os.getcwd())
+    if key_tier:
+        client._apply_key_runtime_overrides(key_entry=APIKeyEntry(
+            'test-key', 'gpt-6-luna', request_parameters={'service_tier': key_tier},
+        ))
+    monkeypatch.setattr(client, '_debug_log', logs.append)
+    monkeypatch.setattr(client, '_get_max_retries', lambda: 1)
+    monkeypatch.setattr(client, '_get_send_interval', lambda: 0)
+    monkeypatch.setattr(client, '_streaming_enabled', lambda: False)
+    monkeypatch.setattr(client, '_is_stop_requested', lambda: False)
+    monkeypatch.setattr(client, '_save_response', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(client, '_should_show_api_lifecycle_logs', lambda: False)
+    if not use_sdk:
+        monkeypatch.setattr(api, 'openai', None)
+        monkeypatch.setattr(client, '_http_request_with_retries', lambda **kwargs: (
+            calls.append(kwargs['json']) or SimpleNamespace(
+                headers={'content-type': 'application/json'}, json=lambda: response_body,
+            )
+        ))
+
+    result = client._send_openai_compatible(
+        [{'role': 'user', 'content': 'Reply OK.'}], 0.5, 100,
+        'https://api.openai.com/v1', 'openai-log-test', provider='openai',
+    )
+
+    assert result.content == 'OK'
+    assert calls[0].get('service_tier') == expected_tier
+    request_logs = [line for line in logs if '🧠 [openai] reasoning_effort=' in line]
+    assert request_logs == [
+        f'🧠 [openai] reasoning_effort=medium'
+        + (f', service_tier={expected_tier}' if expected_tier else '')
+        + ' (model=gpt-6-luna)'
+    ]
 
 
 def test_openrouter_sdk_parse_fallback_preserves_tier_and_logs_http_request(monkeypatch):
@@ -244,6 +316,62 @@ def test_openrouter_sdk_parse_fallback_preserves_tier_and_logs_http_request(monk
     assert 'max_tokens' not in calls[0]['reasoning']
     assert sum('Thinking enabled for openai/gpt-6-luna: effort=high, service_tier=flex' in line
                for line in logs) == 2
+
+
+@pytest.mark.parametrize('use_sdk', [True, False])
+@pytest.mark.parametrize('provider,model', [
+    ('nanogpt', 'anthropic/claude-opus-latest'),
+    ('openrouter', 'deepseek/deepseek-v4-pro'),
+    ('custom_openai', 'unknown-model'),
+])
+def test_force_service_tier_on_unknown_compatible_routes(monkeypatch, use_sdk, provider, model):
+    calls = []
+    monkeypatch.setenv('GEMINI_SERVICE_TIER', 'flex')
+    monkeypatch.setenv('FORCE_SERVICE_TIER_UNKNOWN_ROUTES', '1')
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '0')
+    monkeypatch.setenv('ENABLE_STREAMING', '0')
+    monkeypatch.setattr(api.requests, 'get', lambda *_args, **_kwargs: (
+        pytest.fail('Unknown NanoGPT routes must not run the known-model tier preflight')
+    ))
+    if use_sdk:
+        def create(**kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='OK'), finish_reason='stop')],
+                usage=None,
+            )
+        fake_sdk = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+            close=lambda: None,
+        )
+        monkeypatch.setattr(api.openai, 'OpenAI', lambda **_kwargs: fake_sdk)
+        monkeypatch.setattr(api, 'httpx', None)
+
+    client_model = (f'nan/{model}' if provider == 'nanogpt' else
+                    'gpt-4o' if provider == 'custom_openai' else f'or/{model}')
+    client = UnifiedClient('test-key', client_model, os.getcwd())
+    monkeypatch.setattr(client, '_get_max_retries', lambda: 1)
+    monkeypatch.setattr(client, '_get_send_interval', lambda: 0)
+    monkeypatch.setattr(client, '_streaming_enabled', lambda: False)
+    monkeypatch.setattr(client, '_is_stop_requested', lambda: False)
+    monkeypatch.setattr(client, '_save_response', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(client, '_should_show_api_lifecycle_logs', lambda: False)
+    if not use_sdk:
+        monkeypatch.setattr(api, 'openai', None)
+        monkeypatch.setattr(client, '_http_request_with_retries', lambda **kwargs: (
+            calls.append(kwargs['json']) or SimpleNamespace(
+                headers={'content-type': 'application/json'},
+                json=lambda: {'choices': [{'message': {'content': 'OK'}, 'finish_reason': 'stop'}]},
+            )
+        ))
+
+    result = client._send_openai_compatible(
+        [{'role': 'user', 'content': 'Reply OK.'}], 0.5, 100,
+        'https://example.test/v1', 'forced-tier-test', provider=provider, model_override=model,
+    )
+
+    assert result.content == 'OK'
+    assert calls[0]['service_tier'] == 'flex'
 
 
 @pytest.mark.parametrize('use_sdk', [True, False])
@@ -372,6 +500,7 @@ def test_custom_request_parameters_save_without_endpoint():
 def test_custom_request_parameters_reach_selected_nanogpt_key(monkeypatch, use_sdk):
     calls = []
     monkeypatch.setenv('GEMINI_SERVICE_TIER', 'standard')
+    monkeypatch.setenv('FORCE_SERVICE_TIER_UNKNOWN_ROUTES', '1')
     monkeypatch.setenv('USE_CUSTOM_OPENAI_ENDPOINT', '0')
     monkeypatch.setenv('ENABLE_STREAMING', '0')
     monkeypatch.setenv('SAVE_PAYLOAD', '0')

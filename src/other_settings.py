@@ -3496,7 +3496,14 @@ def _create_response_handling_section(self, parent):
     gpt_h3.setContentsMargins(40, 2, 0, 0)
     if not hasattr(self, 'pass_thinking_all_openai_var'):
         self.pass_thinking_all_openai_var = bool(self.config.get('pass_thinking_all_openai', False))
-    self.pass_thinking_all_openai_cb = self._create_styled_checkbox("Pass thinking to all OpenAI compatible models")
+    self.pass_thinking_all_openai_cb = self._create_styled_checkbox(
+        "⚠️ Force reasoning parameters on unknown routes"
+    )
+    self.pass_thinking_all_openai_cb.setToolTip(
+        "Pass the selected reasoning_effort to OpenAI-compatible routes without dedicated "
+        "reasoning handling, including custom model routes. Sends none when thinking is off. "
+        "Unsupported APIs may reject it."
+    )
     try:
         self.pass_thinking_all_openai_cb.setChecked(bool(self.pass_thinking_all_openai_var))
     except Exception:
@@ -3560,6 +3567,32 @@ def _create_response_handling_section(self, parent):
     tier_h.addWidget(self.gemini_service_tier_combo)
     tier_h.addStretch()
     section_v.addWidget(tier_row)
+    if not hasattr(self, 'force_service_tier_unknown_routes_var'):
+        self.force_service_tier_unknown_routes_var = bool(
+            self.config.get('force_service_tier_unknown_routes', False)
+        )
+    tier_force_row = QWidget()
+    tier_force_h = QHBoxLayout(tier_force_row)
+    tier_force_h.setContentsMargins(40, 2, 0, 0)
+    self.force_service_tier_unknown_routes_cb = self._create_styled_checkbox(
+        "⚠️ Force service tier on unknown routes"
+    )
+    self.force_service_tier_unknown_routes_cb.setChecked(
+        bool(self.force_service_tier_unknown_routes_var)
+    )
+    self.force_service_tier_unknown_routes_cb.setToolTip(
+        "Pass the selected service tier to other OpenAI-compatible providers and to "
+        "NanoGPT/OpenRouter models outside the known OpenAI and Gemini families. "
+        "The API may reject unsupported tiers. Per-key custom parameters take precedence."
+    )
+    def _on_force_service_tier_unknown_routes(checked):
+        self.force_service_tier_unknown_routes_var = bool(checked)
+        self.config['force_service_tier_unknown_routes'] = bool(checked)
+        os.environ['FORCE_SERVICE_TIER_UNKNOWN_ROUTES'] = '1' if checked else '0'
+    self.force_service_tier_unknown_routes_cb.toggled.connect(_on_force_service_tier_unknown_routes)
+    tier_force_h.addWidget(self.force_service_tier_unknown_routes_cb)
+    tier_force_h.addStretch()
+    section_v.addWidget(tier_force_row)
     tier_note = QLabel("Also sent to OpenAI/Gemini models through NanoGPT and OpenRouter where supported.")
     tier_note.setStyleSheet("color: gray; font-size: 9pt;")
     tier_note.setContentsMargins(20, 0, 0, 10)
