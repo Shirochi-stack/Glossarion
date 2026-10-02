@@ -1274,6 +1274,27 @@ def normalize_polled_models(raw_models: Iterable[str]) -> List[str]:
     return list(dict.fromkeys(result))
 
 
+def poll_zen_models(timeout: float = 8.0) -> List[str]:
+    """Poll free Zen models recognized by the CLI used to send ocz/ requests."""
+    try:
+        listing = _run_short(["models", "opencode"], timeout=max(1, int(round(float(timeout)))))
+    except subprocess.TimeoutExpired as exc:
+        raise OcAgyError("OpenCode Zen model polling timed out") from exc
+    if listing.returncode != 0:
+        detail = _zen_error_detail(listing.stderr or listing.stdout or '')
+        raise OcAgyError(f"OpenCode Zen model polling failed: {detail}")
+    # Only accept model IDs printed as catalog rows, never IDs in diagnostic logs.
+    rows = _clean_text(listing.stdout or '').splitlines()
+    models = list(dict.fromkeys(
+        'ocz/' + row.strip().split('/', 1)[1]
+        for row in rows
+        if re.fullmatch(r'opencode/[A-Za-z0-9._-]+-free', row.strip())
+    ))
+    if not models:
+        raise OcAgyError("OpenCode returned no usable free Zen model IDs")
+    return models
+
+
 def poll_models(timeout: float = 8.0) -> List[str]:
     """Poll OpenCode's Google catalog using the existing OcAgy OAuth account."""
     _require_oauth_account()

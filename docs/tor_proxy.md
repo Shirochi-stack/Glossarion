@@ -60,8 +60,10 @@ No additional SOCKS Python dependency is needed.
 
 OCZ captures error-level CLI diagnostics so internal model lookup failures are
 reported directly. Missing or unavailable models are configuration errors rather
-than retryable transport failures. A model listed by Zen may still be deprecated
-in OpenCode or unavailable at its upstream provider. Tor does not resolve that.
+than retryable transport failures. OCZ model polling uses `opencode models opencode`
+and marks only its free model IDs as polled. Older HTTP-catalog confirmations are
+ignored. CLI recognition does not guarantee upstream availability. Tor does not
+resolve upstream model errors.
 
 References: [Tor HTTP CONNECT isolation](https://spec.torproject.org/http-connect.html),
 [Bun proxy environment support](https://bun.sh/docs/runtime/networking/fetch),

@@ -991,6 +991,9 @@ def _write_model_catalog_cache(cache: dict) -> None:
 
 def _provider_catalog_variant(provider: str) -> Optional[str]:
     """Return the endpoint/credential variant that owns a provider cache."""
+    if str(provider or '') == 'opencode-zen':
+        # HTTP Zen catalogs can advertise IDs absent from the installed CLI.
+        return 'opencode_cli_free_v1'
     if str(provider or "").split(":", 1)[0] == "nanogpt":
         # Older NanoGPT cache entries only contain text models.
         return "text_image_video_v1"
@@ -1263,6 +1266,9 @@ def _fetch_provider_catalog(
     api_key: str = "",
     timeout: float = 8.0,
 ) -> List[str]:
+    if spec.name == "opencode-zen":
+        from ocagy_cli import poll_zen_models
+        return poll_zen_models(timeout=timeout)
     if spec.name == "autharena":
         from autharena_proxy import list_models
         return ["autharena/" + m["id"] for m in list_models(timeout=max(timeout, 120))]

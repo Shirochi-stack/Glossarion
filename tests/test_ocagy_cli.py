@@ -17,6 +17,29 @@ if str(SRC) not in sys.path:
 import ocagy_cli
 
 
+def test_zen_poll_accepts_only_free_cli_catalog_rows(monkeypatch):
+    calls = []
+    def listing(args, timeout):
+        calls.append((args, timeout))
+        return SimpleNamespace(returncode=0, stdout=(
+            'opencode/mimo-v2.6-flash-free\n'
+            'opencode/paid-model\n'
+            'warning: opencode/deepseek-v4-flash-free\n'
+            'google/other-free\n'
+            'opencode/mimo-v2.6-flash-free\n'
+        ), stderr='')
+    monkeypatch.setattr(ocagy_cli, '_run_short', listing)
+    assert ocagy_cli.poll_zen_models(timeout=9) == ['ocz/mimo-v2.6-flash-free']
+    assert calls == [(['models', 'opencode'], 9)]
+
+
+def test_zen_poll_failure_does_not_confirm_models_in_error_logs(monkeypatch):
+    monkeypatch.setattr(ocagy_cli, '_run_short', lambda *args, **kwargs:
+                        SimpleNamespace(returncode=1, stdout='', stderr='opencode/invalid-free'))
+    with pytest.raises(ocagy_cli.OcAgyError, match='polling failed'):
+        ocagy_cli.poll_zen_models()
+
+
 def test_zen_error_detail_unwraps_effect_causes_without_duplicate_logs():
     detail = (
         'Model not found: opencode/deepseek-v4-flash-free. '

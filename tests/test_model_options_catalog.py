@@ -11,6 +11,37 @@ import pytest
 from unified_api_client import UnifiedClient, UnifiedClientError
 
 
+def test_zen_catalog_uses_cli_instead_of_http(monkeypatch):
+    import ocagy_cli
+    calls = []
+    monkeypatch.setattr(ocagy_cli, 'poll_zen_models',
+                        lambda timeout: calls.append(timeout) or ['ocz/mimo-v2.6-flash-free'])
+    monkeypatch.setattr(model_options.urllib.request, 'urlopen',
+                        lambda *args, **kwargs: pytest.fail('Zen polling must use the CLI'))
+    spec = next(spec for spec in model_options.PROVIDER_CATALOG_SPECS if spec.name == 'opencode-zen')
+    assert model_options._fetch_provider_catalog(spec, timeout=8) == ['ocz/mimo-v2.6-flash-free']
+    assert calls == [8]
+
+
+def test_zen_http_cache_cannot_supply_poll_checkmarks(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    record = {'fetched_at': model_options.time.time(), 'models': ['ocz/deepseek-v4-flash-free']}
+    model_options._write_model_catalog_cache({
+        'version': model_options._MODEL_CATALOG_CACHE_VERSION,
+        'providers': {'opencode-zen': record},
+        'last_successful': {'opencode-zen': record},
+    })
+    assert 'opencode-zen' not in model_options.get_current_polled_provider_models()
+    assert 'opencode-zen' not in model_options._cached_provider_models()
+    record['variant'] = 'opencode_cli_free_v1'
+    model_options._write_model_catalog_cache({
+        'version': model_options._MODEL_CATALOG_CACHE_VERSION,
+        'providers': {'opencode-zen': record},
+        'last_successful': {'opencode-zen': record},
+    })
+    assert model_options.get_current_polled_provider_models()['opencode-zen'] == record['models']
+
+
 def test_prepared_poll_catalog_is_not_rescanned_per_model_row():
     class NoIteration(model_options.PolledModelKeys):
         def __iter__(self):
@@ -31,6 +62,11 @@ def test_unprepared_poll_catalog_still_normalizes_and_observes_changes():
 
 
 def _isolated_cache(tmp_path, monkeypatch):
+    import autharena_proxy
+    import ocagy_cli
+    # Catalog tests must not inspect real accounts or start the installed CLI.
+    monkeypatch.setattr(autharena_proxy, 'list_accounts', lambda: [])
+    monkeypatch.setattr(ocagy_cli, 'poll_zen_models', lambda timeout: [])
     cache_path = tmp_path / "model_catalog_cache.json"
     monkeypatch.setenv("GLOSSARION_MODEL_CATALOG_CACHE", str(cache_path))
     monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)

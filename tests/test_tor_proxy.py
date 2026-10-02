@@ -92,6 +92,32 @@ def test_ocz_both_modes_get_tor_but_paid_alias_does_not(monkeypatch, streaming):
     assert ":tor@" not in routing_logs[0]
 
 
+@pytest.mark.parametrize('streaming', [True, False])
+def test_ocz_retry_after_failure_gets_new_port_and_identity(monkeypatch, streaming):
+    monkeypatch.setattr(ocagy_cli, 'is_cancelled', lambda: False)
+    monkeypatch.setattr(ocagy_cli, 'ensure_opencode_installed', lambda **kw: 'fake')
+    monkeypatch.setattr(ocagy_cli, '_subprocess_env', lambda: {})
+    monkeypatch.setattr(tor_proxy, 'new_proxy_url', lambda **kw:
+                        f'http://{tor_proxy.uuid.uuid4().hex}:tor@127.0.0.1:19050')
+    attempts = []
+
+    def run(**kwargs):
+        attempts.append(urlsplit(kwargs['subprocess_env']['HTTPS_PROXY']))
+        if len(attempts) == 1:
+            raise ocagy_cli.OcAgyError('Temporary upstream failure')
+        return {'content': 'OK', 'finish_reason': 'stop'}
+
+    monkeypatch.setattr(ocagy_cli, '_send_via_server_zen', run)
+    monkeypatch.setattr(ocagy_cli, '_run_opencode_zen_buffered', run)
+    params = dict(messages=[{'role': 'user', 'content': 'Hello'}],
+                  model='ocz/example-free', log_stream=streaming)
+    with pytest.raises(ocagy_cli.OcAgyError, match='Temporary upstream failure'):
+        ocagy_cli.send_opencode_zen_completion(**params)
+    assert ocagy_cli.send_opencode_zen_completion(**params)['content'] == 'OK'
+    assert attempts[0].port != attempts[1].port
+    assert attempts[0].username != attempts[1].username
+
+
 def test_opera_retry_rotates_and_closes_responses(monkeypatch):
     opera_aria.reset_cancel()
     monkeypatch.setattr(opera_aria, "get_token", lambda **kw: "token")
@@ -108,6 +134,9 @@ def test_opera_retry_rotates_and_closes_responses(monkeypatch):
         messages=[{"role": "user", "content": "Hello"}], log_stream=False)
     assert result["content"] == "OK"
     assert post.call_args_list[0].kwargs["proxies"] != post.call_args_list[1].kwargs["proxies"]
+    attempt_urls = [urlsplit(call.kwargs['proxies']['https']) for call in post.call_args_list]
+    assert attempt_urls[0].port != attempt_urls[1].port
+    assert attempt_urls[0].username != attempt_urls[1].username
     assert post.call_args.kwargs["allow_redirects"] is False
     assert rejected_close.called and success_close.called
 
