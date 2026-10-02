@@ -553,8 +553,8 @@ def test_geoip_paths_resolve_tor_browser_data_in_paths_with_spaces(tmp_path):
     assert ocagy_cli.json.loads(options["GeoIPv6File"]) == str((data / "geoip6").resolve())
 
 
-def test_tor_disabled_by_default_skips_setup_for_both_routes(monkeypatch):
-    monkeypatch.delenv("GLOSSARION_TOR_ENABLED", raising=False)
+def test_tor_explicitly_disabled_skips_setup_for_both_routes(monkeypatch):
+    monkeypatch.setenv("GLOSSARION_TOR_ENABLED", "0")
     assert not tor_proxy.enabled()
     setup = Mock(side_effect=AssertionError("Tor must not start while disabled"))
     monkeypatch.setattr(tor_proxy, "new_proxy_url", setup)
@@ -610,3 +610,8 @@ def test_request_ports_forward_parallel_traffic_and_close_after_use(monkeypatch)
         upstream.shutdown()
         upstream.server_close()
         worker.join(timeout=2)
+
+
+def test_tor_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("GLOSSARION_TOR_ENABLED", raising=False)
+    assert tor_proxy.enabled()

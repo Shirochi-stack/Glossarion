@@ -4241,12 +4241,12 @@ def _create_response_handling_section(self, parent):
     tor_layout = QHBoxLayout(tor_row)
     tor_layout.setContentsMargins(16, 2, 0, 4)
     self.tor_proxy_enabled_checkbox = self._create_styled_checkbox("Enable TOR proxy rotation")
-    tor_enabled = str(self.config.get('tor_proxy_enabled', False)).strip().lower() in ('1', 'true', 'yes', 'on')
+    tor_enabled = str(self.config.get('tor_proxy_enabled', True)).strip().lower() in ('1', 'true', 'yes', 'on')
     self.tor_proxy_enabled_var = tor_enabled
     self.tor_proxy_enabled_checkbox.setChecked(tor_enabled)
     self.tor_proxy_enabled_checkbox.setToolTip(_wrapped_tooltip_html(
         "Applies to search/opera, search/opera-think, and ocz/. Tor is installed automatically if needed. "
-        "Parallel requests use separate ports and circuit identities. Disabled by default."))
+        "Parallel requests use separate ports and circuit identities. Enabled by default."))
     os.environ['GLOSSARION_TOR_ENABLED'] = '1' if tor_enabled else '0'
 
     def _set_tor_enabled(checked):
