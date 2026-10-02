@@ -110,16 +110,27 @@ def test_nanogpt_default_tier_accepts_default_only_model(monkeypatch):
     ('openrouter', 'or/anthropic/claude-opus-latest', 'https://openrouter.ai/api/v1', 'priority', None),
     ('openrouter', 'or/deepseek/deepseek-v4-pro', 'https://openrouter.ai/api/v1', 'flex', None),
     ('openrouter', 'or/google/gemma-3-27b-it', 'https://openrouter.ai/api/v1', 'standard', None),
+    ('openrouter', 'or/x-ai/grok-4', 'https://openrouter.ai/api/v1', 'flex', None),
 ])
 @pytest.mark.parametrize('use_sdk', [True, False])
 def test_service_tier_reaches_request_payload(
-    monkeypatch, tmp_path, use_sdk, provider, model, base_url, choice, expected
+    monkeypatch, use_sdk, provider, model, base_url, choice, expected
 ):
     calls = []
+    logs = []
     monkeypatch.setenv('GEMINI_SERVICE_TIER', choice)
     monkeypatch.setenv('USE_CUSTOM_OPENAI_ENDPOINT', '0')
     monkeypatch.setenv('ENABLE_STREAMING', '0')
     monkeypatch.setenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto')
+    budget_mode = (
+        provider == 'openrouter' and model == 'or/google/gemini-2.5-flash' and choice == 'flex'
+    )
+    if provider == 'openrouter':
+        monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+        monkeypatch.setenv('GPT_REASONING_TOKENS', '2000')
+        monkeypatch.setenv('GPT_EFFORT', 'high')
+        monkeypatch.setenv('OPENROUTER_USE_REASONING_TOKENS', '1' if budget_mode else '0')
+        monkeypatch.setattr(api, 'print', lambda *args, **_kwargs: logs.append(' '.join(map(str, args))))
     request_model = model.removeprefix('nan/').removeprefix('or/')
     if provider == 'nanogpt':
         def catalog_get(*args, **kwargs):
@@ -143,7 +154,7 @@ def test_service_tier_reaches_request_payload(
         )
         monkeypatch.setattr(api.openai, 'OpenAI', lambda **kwargs: fake_sdk)
         monkeypatch.setattr(api, 'httpx', None)
-    client = UnifiedClient('test-key', model, str(tmp_path))
+    client = UnifiedClient('test-key', model, os.getcwd())
     monkeypatch.setattr(client, '_get_max_retries', lambda: 1)
     monkeypatch.setattr(client, '_get_send_interval', lambda: 0)
     monkeypatch.setattr(client, '_streaming_enabled', lambda: False)
@@ -167,6 +178,72 @@ def test_service_tier_reaches_request_payload(
         assert 'service_tier' not in calls[0]
     else:
         assert calls[0]['service_tier'] == expected
+    if provider == 'openrouter':
+        log = '\n'.join(logs)
+        request_logs = [line for line in logs if '🧠 [openrouter] Thinking' in line]
+        assert request_logs
+        reasoning = calls[0].get('reasoning', calls[0].get('extra_body', {}).get('reasoning'))
+        if budget_mode:
+            assert reasoning['max_tokens'] == 2000
+            assert 'effort' not in reasoning
+            assert f'Thinking enabled for {request_model}: max_tokens=2,000' in log
+        else:
+            assert reasoning['effort'] == 'high'
+            assert 'max_tokens' not in reasoning
+            assert f'Thinking enabled for {request_model}: effort=high' in log
+        if expected is None:
+            assert all('service_tier=' not in line for line in request_logs)
+        else:
+            assert any(f'service_tier={expected}' in line for line in request_logs)
+
+
+def test_openrouter_sdk_parse_fallback_preserves_tier_and_logs_http_request(monkeypatch):
+    calls = []
+    logs = []
+    model = 'openai/gpt-6-luna'
+    monkeypatch.setenv('GEMINI_SERVICE_TIER', 'flex')
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+    monkeypatch.setenv('GPT_REASONING_TOKENS', '2000')
+    monkeypatch.setenv('GPT_EFFORT', 'high')
+    monkeypatch.setenv('OPENROUTER_USE_REASONING_TOKENS', '0')
+    monkeypatch.setenv('ENABLE_STREAMING', '0')
+    monkeypatch.setattr(api, 'print', lambda *args, **_kwargs: logs.append(' '.join(map(str, args))))
+
+    def sdk_create(**_kwargs):
+        raise ValueError('Expecting value')
+
+    fake_sdk = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=sdk_create)),
+        close=lambda: None,
+    )
+    monkeypatch.setattr(api.openai, 'OpenAI', lambda **_kwargs: fake_sdk)
+    monkeypatch.setattr(api, 'httpx', None)
+
+    client = UnifiedClient('test-key', f'or/{model}', os.getcwd())
+    monkeypatch.setattr(client, '_get_max_retries', lambda: 1)
+    monkeypatch.setattr(client, '_get_send_interval', lambda: 0)
+    monkeypatch.setattr(client, '_streaming_enabled', lambda: False)
+    monkeypatch.setattr(client, '_is_stop_requested', lambda: False)
+    monkeypatch.setattr(client, '_save_response', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(client, '_http_request_with_retries', lambda **kwargs: (
+        calls.append(kwargs['json']) or SimpleNamespace(
+            headers={'content-type': 'application/json'},
+            json=lambda: {'choices': [{'message': {'content': 'OK'}, 'finish_reason': 'stop'}]},
+        )
+    ))
+
+    result = client._send_openai_compatible(
+        [{'role': 'user', 'content': 'Reply OK.'}], 0.5, 100,
+        'https://openrouter.ai/api/v1', 'fallback-tier-test',
+        provider='openrouter', model_override=model,
+    )
+
+    assert result.content == 'OK'
+    assert calls[0]['service_tier'] == 'flex'
+    assert calls[0]['reasoning']['effort'] == 'high'
+    assert 'max_tokens' not in calls[0]['reasoning']
+    assert sum('Thinking enabled for openai/gpt-6-luna: effort=high, service_tier=flex' in line
+               for line in logs) == 2
 
 
 @pytest.mark.parametrize('use_sdk', [True, False])

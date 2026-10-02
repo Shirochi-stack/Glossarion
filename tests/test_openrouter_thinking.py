@@ -37,6 +37,23 @@ def test_toggle_on_preserves_openrouter_reasoning_payload(monkeypatch):
     assert payload == {"reasoning": {"enabled": True, "effort": "high"}}
 
 
+def test_openrouter_status_uses_effort_for_gemini_and_openai_unless_budget_selected(monkeypatch):
+    monkeypatch.setenv("ENABLE_GPT_THINKING", "1")
+    monkeypatch.setenv("GPT_REASONING_TOKENS", "2000")
+    monkeypatch.setenv("GPT_EFFORT", "high")
+    monkeypatch.setenv("OPENROUTER_USE_REASONING_TOKENS", "0")
+    client = UnifiedClient.__new__(UnifiedClient)
+    active_model = ["or/openai/gpt-6-luna"]
+    monkeypatch.setattr(client, "_get_active_request_model", lambda: active_model[0])
+
+    assert client._get_thinking_status_label() == " (effort: high)"
+    active_model[0] = "or/google/gemini-3-flash"
+    assert client._get_thinking_status_label() == " (effort: high)"
+
+    monkeypatch.setenv("OPENROUTER_USE_REASONING_TOKENS", "1")
+    assert client._get_thinking_status_label() == " (reasoning tokens: 2,000)"
+
+
 def test_other_settings_toggle_off_updates_live_openrouter_state(monkeypatch):
     monkeypatch.setenv("ENABLE_GPT_THINKING", "1")
     monkeypatch.setenv("GPT_REASONING_TOKENS", "4096")
@@ -55,6 +72,20 @@ def test_other_settings_toggle_off_updates_live_openrouter_state(monkeypatch):
     assert os.environ["ENABLE_GPT_THINKING"] == "0"
     assert os.environ["GPT_REASONING_TOKENS"] == ""
     assert control_refreshes == [True]
+
+
+def test_other_settings_toggle_on_restores_selected_openrouter_budget(monkeypatch):
+    gui = SimpleNamespace(
+        config={},
+        enable_gpt_thinking_var=False,
+        gpt_reasoning_tokens_var="4096",
+        openrouter_use_reasoning_tokens_var=True,
+        toggle_gpt_reasoning_controls=lambda: None,
+    )
+
+    assert _apply_gpt_thinking_toggle(gui, True) is True
+    assert os.environ["GPT_REASONING_TOKENS"] == "4096"
+    assert os.environ["OPENROUTER_USE_REASONING_TOKENS"] == "1"
 
 
 def test_deepseek_v4_effort_options_and_normalization_include_none_and_low():

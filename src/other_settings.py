@@ -1389,13 +1389,17 @@ def toggle_gpt_reasoning_controls(self):
     """Enable/disable GPT reasoning controls and labels based on toggle state (PySide6 version)"""
     try:
         enabled = bool(self.enable_gpt_thinking_var)
+        budget_enabled = enabled and bool(getattr(self, 'openrouter_use_reasoning_tokens_var', False))
+
+        if hasattr(self, 'openrouter_use_reasoning_tokens_cb'):
+            self.openrouter_use_reasoning_tokens_cb.setEnabled(enabled)
         
         # Tokens entry and label
         if hasattr(self, 'gpt_reasoning_tokens_entry'):
-            _set_thinking_widget_enabled(self.gpt_reasoning_tokens_entry, enabled)
+            _set_thinking_widget_enabled(self.gpt_reasoning_tokens_entry, budget_enabled)
         if hasattr(self, 'gpt_reasoning_tokens_label'):
-            self.gpt_reasoning_tokens_label.setEnabled(enabled)
-            color = "white" if enabled else "#808080"
+            self.gpt_reasoning_tokens_label.setEnabled(budget_enabled)
+            color = "white" if budget_enabled else "#808080"
             self.gpt_reasoning_tokens_label.setStyleSheet(f"color: {color};")
             
         # Effort combo and label
@@ -1408,8 +1412,8 @@ def toggle_gpt_reasoning_controls(self):
 
         # GPT tokens label
         if hasattr(self, 'gpt_tokens_label'):
-            self.gpt_tokens_label.setEnabled(enabled)
-            color = "white" if enabled else "#808080"
+            self.gpt_tokens_label.setEnabled(budget_enabled)
+            color = "white" if budget_enabled else "#808080"
             self.gpt_tokens_label.setStyleSheet(f"color: {color};")
             
         # Description label
@@ -1430,8 +1434,12 @@ def _apply_gpt_thinking_toggle(self, checked) -> bool:
     except Exception:
         pass
     os.environ['ENABLE_GPT_THINKING'] = '1' if enabled else '0'
-    if not enabled:
-        os.environ['GPT_REASONING_TOKENS'] = ''
+    os.environ['GPT_REASONING_TOKENS'] = (
+        str(getattr(self, 'gpt_reasoning_tokens_var', '') or '') if enabled else ''
+    )
+    os.environ['OPENROUTER_USE_REASONING_TOKENS'] = (
+        '1' if getattr(self, 'openrouter_use_reasoning_tokens_var', False) else '0'
+    )
     try:
         self.toggle_gpt_reasoning_controls()
     except Exception:
@@ -3442,10 +3450,26 @@ def _create_response_handling_section(self, parent):
     gpt_h1.addStretch()
     section_v.addWidget(gpt_row1)
     
-    # Second row for OpenRouter-specific token budget
+    # Second row for an optional OpenRouter token budget override
     gpt_row2 = QWidget()
     gpt_h2 = QHBoxLayout(gpt_row2)
     gpt_h2.setContentsMargins(40, 5, 0, 0)
+    self.openrouter_use_reasoning_tokens_cb = self._create_styled_checkbox("Use OR token budget instead of Effort")
+    self.openrouter_use_reasoning_tokens_cb.setToolTip(
+        "Sends reasoning.max_tokens instead of reasoning.effort. OpenRouter may translate "
+        "the budget into an effort level for models without a direct reasoning token limit."
+    )
+    self.openrouter_use_reasoning_tokens_cb.setChecked(
+        bool(getattr(self, 'openrouter_use_reasoning_tokens_var', False))
+    )
+    def _on_or_budget_toggle(checked):
+        self.openrouter_use_reasoning_tokens_var = bool(checked)
+        self.config['openrouter_use_reasoning_tokens'] = bool(checked)
+        os.environ['OPENROUTER_USE_REASONING_TOKENS'] = '1' if checked else '0'
+        self.toggle_gpt_reasoning_controls()
+    self.openrouter_use_reasoning_tokens_cb.toggled.connect(_on_or_budget_toggle)
+    gpt_h2.addWidget(self.openrouter_use_reasoning_tokens_cb)
+    gpt_h2.addSpacing(12)
     self.gpt_reasoning_tokens_label = QLabel("OR Thinking Tokens:")
     gpt_h2.addWidget(self.gpt_reasoning_tokens_label)
     self.gpt_reasoning_tokens_entry = QLineEdit()
@@ -3490,7 +3514,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(gpt_row3)
     
     # Store reference to description label for enable/disable
-    self.gpt_desc_label = QLabel("Controls reasoning for GPT-5, OpenRouter, OpenCode, NIM/AuthND, DeepSeek V4, and NanoGPT.\nEffort sets reasoning_effort where supported; Tokens sets a budget where supported.\nDeepSeek V4: xhigh→max. NanoGPT Chat Completions uses Effort, not Tokens.")
+    self.gpt_desc_label = QLabel("Controls reasoning for GPT-5, OpenRouter, OpenCode, NIM/AuthND, DeepSeek V4, and NanoGPT.\nOpenRouter uses Effort for reasoning models; its optional token budget replaces Effort when selected.\nDeepSeek V4: xhigh→max. NanoGPT Chat Completions uses Effort, not Tokens.")
     self.gpt_desc_label.setStyleSheet("color: gray; font-size: 9pt;")
     self.gpt_desc_label.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(self.gpt_desc_label)

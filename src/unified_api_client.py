@@ -16751,12 +16751,16 @@ class UnifiedClient:
             return f" (reasoning_effort: {effort})" if effort else ""
 
         _openai_prefixes = ('gpt', 'o1', 'o3', 'o4', 'codex', 'chatgpt')
-        if model_lower.startswith('or/') or any(model_lower.startswith(p) for p in _openai_prefixes):
+        if model_lower.startswith(('or/', 'openrouter/')) or any(model_lower.startswith(p) for p in _openai_prefixes):
             if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
                 return ""
-            tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
-            if model_lower.startswith('or/') and tokens_str.isdigit() and int(tokens_str) > 0:
-                return f" (reasoning tokens: {int(tokens_str):,})"
+            if model_lower.startswith(('or/', 'openrouter/')):
+                reasoning = self._openrouter_reasoning_fields(exclude=False)
+                if 'max_tokens' in reasoning:
+                    return f" (reasoning tokens: {reasoning['max_tokens']:,})"
+                if 'effort' in reasoning:
+                    return f" (effort: {reasoning['effort']})"
+                return " (thinking enabled)"
             effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
             if effort not in ('none', 'low', 'medium', 'high', 'xhigh', 'max'):
                 effort = 'medium'
@@ -18330,6 +18334,43 @@ class UnifiedClient:
             print(f'🧠 [nanogpt] Thinking {state} for {model}: {details}')
         elif tier:
             print(f'⚙️ [nanogpt] Service tier for {model}: {tier}')
+
+    def _log_openrouter_chat_options(self, model: str, payload: dict) -> None:
+        """Report the reasoning and service tier in an outgoing OpenRouter request."""
+        if self._is_stop_requested():
+            return
+        extra_body = payload.get('extra_body') or {}
+        if not isinstance(extra_body, dict):
+            extra_body = {}
+        reasoning = payload.get('reasoning') or extra_body.get('reasoning')
+        if isinstance(reasoning, dict) and reasoning:
+            state = ('disabled' if reasoning.get('enabled') is False or reasoning.get('effort') == 'none'
+                     else 'enabled')
+            details = []
+            if reasoning.get('effort') is not None:
+                details.append(f"effort={reasoning['effort']}")
+            if reasoning.get('max_tokens') is not None:
+                tokens = reasoning['max_tokens']
+                details.append(f"max_tokens={tokens:,}" if isinstance(tokens, int) else f'max_tokens={tokens}')
+        else:
+            state = 'not specified'
+            details = []
+        if payload.get('service_tier'):
+            details.append(f"service_tier={payload['service_tier']}")
+        suffix = f": {', '.join(details)}" if details else ''
+        print(f"🧠 [openrouter] Thinking {state} for {model}{suffix}")
+
+    @staticmethod
+    def _openrouter_reasoning_fields(*, exclude: bool) -> dict:
+        """Use gateway effort unless the user explicitly selects a token budget."""
+        effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
+        if effort not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+            effort = 'medium'
+        if os.getenv('OPENROUTER_USE_REASONING_TOKENS', '0') == '1':
+            tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
+            if tokens_str.isdigit() and int(tokens_str) > 0:
+                return {'max_tokens': int(tokens_str), 'exclude': exclude}
+        return {'effort': effort, 'exclude': exclude}
 
     def _get_openai_compatible_reasoning_effort(self, provider: str, effective_model: str = "") -> Optional[str]:
         """Return the selected effort for native GPT-6 and compatible opt-in routes."""
@@ -24153,24 +24194,9 @@ class UnifiedClient:
                     if provider == 'openrouter':
                         try:
                             enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
-                            # Thinking-model suffixes still affect the enabled payload,
-                            # but an explicit UI toggle-off must take precedence.
-                            _is_thinking_model = ':thinking' in (effective_model or '').lower() or '-thinking' in (effective_model or '').lower()
                             if enable_gpt:
                                 # exclude=False: include reasoning content in the response stream
-                                reasoning = {"enabled": True, "exclude": False}
-                                tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
-                                if tokens_str.isdigit() and int(tokens_str) > 0:
-                                    reasoning.pop('effort', None)
-                                    reasoning["max_tokens"] = int(tokens_str)
-                                elif not _is_thinking_model:
-                                    # Only set effort for non-thinking models (thinking models handle it internally)
-                                    effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
-                                    if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
-                                        effort = 'medium'
-                                    reasoning.pop('max_tokens', None)
-                                    reasoning["effort"] = effort
-                                extra_body["reasoning"] = reasoning
+                                extra_body["reasoning"] = self._openrouter_reasoning_fields(exclude=False)
                             self._apply_openrouter_thinking_disabled(extra_body)
                         except Exception:
                             pass
@@ -24443,6 +24469,8 @@ class UnifiedClient:
                     self._add_request_parameters_to_sdk_kwargs(call_kwargs, key_request_parameters)
                     if provider == 'nanogpt':
                         self._log_nanogpt_chat_options(effective_model, call_kwargs)
+                    elif provider == 'openrouter':
+                        self._log_openrouter_chat_options(effective_model, call_kwargs)
 
                     if provider == 'openai':
                         self._apply_gpt6_openai_constraints(call_kwargs, use_responses_api)
@@ -25871,16 +25899,7 @@ class UnifiedClient:
                             try:
                                 enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
                                 if enable_gpt:
-                                    reasoning = {"enabled": True, "exclude": True}
-                                    tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
-                                    if tokens_str.isdigit() and int(tokens_str) > 0:
-                                        reasoning["max_tokens"] = int(tokens_str)
-                                    else:
-                                        effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
-                                        if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
-                                            effort = 'medium'
-                                        reasoning["effort"] = effort
-                                    body["reasoning"] = reasoning
+                                    body["reasoning"] = self._openrouter_reasoning_fields(exclude=True)
                                 self._apply_openrouter_thinking_disabled(body)
                             except Exception:
                                 pass
@@ -25891,6 +25910,10 @@ class UnifiedClient:
                                     body["provider"] = _routing
                             except Exception:
                                 pass
+                            if request_service_tier:
+                                body['service_tier'] = request_service_tier
+                            body.update(key_request_parameters)
+                            self._log_openrouter_chat_options(effective_model, body)
                             # Make HTTP request
                             endpoint = "/chat/completions"
                             http_headers["Idempotency-Key"] = self._get_idempotency_key()
@@ -26244,18 +26267,7 @@ class UnifiedClient:
                     try:
                         enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
                         if enable_gpt:
-                            reasoning = {"enabled": True, "exclude": True}
-                            tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
-                            if tokens_str.isdigit() and int(tokens_str) > 0:
-                                reasoning.pop('effort', None)
-                                reasoning["max_tokens"] = int(tokens_str)
-                            else:
-                                effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
-                                if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
-                                    effort = 'medium'
-                                reasoning.pop('max_tokens', None)
-                                reasoning["effort"] = effort
-                            data["reasoning"] = reasoning
+                            data["reasoning"] = self._openrouter_reasoning_fields(exclude=True)
                         self._apply_openrouter_thinking_disabled(data)
                     except Exception:
                         pass
@@ -26337,6 +26349,8 @@ class UnifiedClient:
             data.update(key_request_parameters)
             if provider == 'nanogpt' and endpoint == '/chat/completions':
                 self._log_nanogpt_chat_options(effective_model, data)
+            elif provider == 'openrouter' and endpoint == '/chat/completions':
+                self._log_openrouter_chat_options(effective_model, data)
             if provider == 'openai':
                 self._apply_gpt6_openai_constraints(data, use_responses_api)
             # Save OpenRouter config if requested
@@ -26354,18 +26368,7 @@ class UnifiedClient:
                 try:
                     enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
                     if enable_gpt:
-                        reasoning = {"enabled": True, "exclude": True}
-                        tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
-                        if tokens_str.isdigit() and int(tokens_str) > 0:
-                            reasoning.pop('effort', None)
-                            reasoning["max_tokens"] = int(tokens_str)
-                        else:
-                            effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
-                            if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
-                                effort = 'medium'
-                            reasoning.pop('max_tokens', None)
-                            reasoning["effort"] = effort
-                        cfg["reasoning"] = reasoning
+                        cfg["reasoning"] = self._openrouter_reasoning_fields(exclude=True)
                     self._apply_openrouter_thinking_disabled(cfg)
                 except Exception:
                     pass

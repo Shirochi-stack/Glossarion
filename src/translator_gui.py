@@ -2007,6 +2007,7 @@ class _InputOutputDialog(QDialog):
         'ENABLE_GPT_THINKING',
         'GPT_REASONING_TOKENS',
         'GPT_EFFORT',
+        'OPENROUTER_USE_REASONING_TOKENS',
         'PASS_THINKING_TO_OPENAI_COMPATIBLE',
         'GEMINI_THINKING_LEVEL',
         'GEMINI_SERVICE_TIER',
@@ -13848,6 +13849,9 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.enable_gpt_thinking_var = self.config.get('enable_gpt_thinking', True)
         self.gpt_reasoning_tokens_var = str(self.config.get('gpt_reasoning_tokens', '2000'))
         self.gpt_effort_var = self.config.get('gpt_effort', 'medium')
+        self.openrouter_use_reasoning_tokens_var = bool(
+            self.config.get('openrouter_use_reasoning_tokens', False)
+        )
         self.pass_thinking_all_openai_var = self.config.get('pass_thinking_all_openai', False)
         # NEW: DeepSeek thinking (OpenAI-compatible extra_body)
         self.enable_deepseek_thinking_var = self.config.get('enable_deepseek_thinking', True)
@@ -36471,6 +36475,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ENABLE_GPT_THINKING': "1" if self.enable_gpt_thinking_var else "0",
             'GPT_REASONING_TOKENS': self.gpt_reasoning_tokens_var if self.enable_gpt_thinking_var else '',
             'GPT_EFFORT': self.gpt_effort_var,
+            'OPENROUTER_USE_REASONING_TOKENS': '1' if self.openrouter_use_reasoning_tokens_var else '0',
             'PASS_THINKING_TO_OPENAI_COMPATIBLE': "1" if getattr(self, 'pass_thinking_all_openai_var', False) else "0",
             # DeepSeek thinking (DeepSeek OpenAI-compatible API)
             'ENABLE_DEEPSEEK_THINKING': "1" if getattr(self, 'enable_deepseek_thinking_var', True) else "0",
@@ -36857,6 +36862,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['ENABLE_GPT_THINKING'] = "1" if self.enable_gpt_thinking_var else "0"
                 os.environ['GPT_REASONING_TOKENS'] = self.gpt_reasoning_tokens_var if self.enable_gpt_thinking_var else ''
                 os.environ['GPT_EFFORT'] = self.gpt_effort_var
+                os.environ['OPENROUTER_USE_REASONING_TOKENS'] = '1' if self.openrouter_use_reasoning_tokens_var else '0'
                 os.environ['PASS_THINKING_TO_OPENAI_COMPATIBLE'] = '1' if getattr(self, 'pass_thinking_all_openai_var', False) else '0'
                 # DeepSeek thinking
                 os.environ['ENABLE_DEEPSEEK_THINKING'] = "1" if getattr(self, 'enable_deepseek_thinking_var', True) else "0"
@@ -47572,6 +47578,7 @@ Important rules:
                 ('enable_gpt_thinking', ['enable_gpt_thinking_var'], False, bool),
                 ('gpt_reasoning_tokens', ['gpt_reasoning_tokens_var'], 0, lambda v: int(v) if str(v).lstrip('-').isdigit() else 0),
                 ('gpt_effort', ['gpt_effort_var'], 'auto', str),
+                ('openrouter_use_reasoning_tokens', ['openrouter_use_reasoning_tokens_var'], False, bool),
                 ('pass_thinking_all_openai', ['pass_thinking_all_openai_var'], False, bool),
                 ('enable_deepseek_thinking', ['enable_deepseek_thinking_var'], True, bool),
                 ('deepseek_effort', ['deepseek_effort_var'], 'high', str),
@@ -48319,6 +48326,7 @@ Important rules:
             'ENABLE_GPT_THINKING': 'Enable GPT-4o reasoning',
             'GPT_REASONING_TOKENS': 'GPT reasoning effort tokens',
             'GPT_EFFORT': 'GPT reasoning effort level',
+            'OPENROUTER_USE_REASONING_TOKENS': 'Use OpenRouter reasoning token budget instead of effort',
             'PASS_THINKING_TO_OPENAI_COMPATIBLE': 'Pass reasoning effort to all OpenAI-compatible routes',
             'ENABLE_DEEPSEEK_THINKING': 'Enable DeepSeek thinking mode',
             'DEEPSEEK_USE_RESPONSES_API': 'Use the DeepSeek Responses API format',
@@ -49020,6 +49028,7 @@ Important rules:
                 ('ENABLE_GPT_THINKING', '1' if getattr(self, 'enable_gpt_thinking_var', True) else '0'),
                 ('GPT_REASONING_TOKENS', str(getattr(self, 'gpt_reasoning_tokens_var', '2000')) if getattr(self, 'enable_gpt_thinking_var', True) else ''),
                 ('GPT_EFFORT', getattr(self, 'gpt_effort_var', 'medium')),
+                ('OPENROUTER_USE_REASONING_TOKENS', '1' if getattr(self, 'openrouter_use_reasoning_tokens_var', False) else '0'),
                 ('PASS_THINKING_TO_OPENAI_COMPATIBLE', '1' if getattr(self, 'pass_thinking_all_openai_var', False) else '0'),
 
                 # Custom API endpoints
