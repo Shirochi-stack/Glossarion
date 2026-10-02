@@ -169,6 +169,75 @@ def test_service_tier_reaches_request_payload(
         assert calls[0]['service_tier'] == expected
 
 
+@pytest.mark.parametrize('use_sdk', [True, False])
+@pytest.mark.parametrize('tier', ['off', 'flex'])
+def test_nanogpt_logs_sent_effort_and_tier_without_budget_tokens(
+    monkeypatch, use_sdk, tier,
+):
+    calls = []
+    logs = []
+    model = 'openai/gpt-6-luna'
+    monkeypatch.setattr(api, 'print', lambda *args, **_kwargs: logs.append(' '.join(map(str, args))))
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+    monkeypatch.setenv('GPT_REASONING_TOKENS', '2000')
+    monkeypatch.setenv('GPT_EFFORT', 'medium')
+    monkeypatch.setenv('GEMINI_SERVICE_TIER', tier)
+    monkeypatch.setenv('ENABLE_STREAMING', '0')
+    monkeypatch.setenv('USE_CUSTOM_OPENAI_ENDPOINT', '0')
+    if tier == 'flex':
+        monkeypatch.setattr(api.requests, 'get', lambda *_args, **_kwargs: SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {'data': [{'id': model, 'supported_service_tiers': ['flex']}]},
+        ))
+    if use_sdk:
+        def create(**kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='OK'), finish_reason='stop')],
+                usage=None,
+            )
+        fake_sdk = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+            close=lambda: None,
+        )
+        monkeypatch.setattr(api.openai, 'OpenAI', lambda **_kwargs: fake_sdk)
+        monkeypatch.setattr(api, 'httpx', None)
+
+    client = UnifiedClient('test-key', f'nan/{model}', os.getcwd())
+    monkeypatch.setattr(client, '_get_max_retries', lambda: 1)
+    monkeypatch.setattr(client, '_get_send_interval', lambda: 0)
+    monkeypatch.setattr(client, '_streaming_enabled', lambda: False)
+    monkeypatch.setattr(client, '_is_stop_requested', lambda: False)
+    monkeypatch.setattr(client, '_save_response', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(client, '_should_show_api_lifecycle_logs', lambda: False)
+    if not use_sdk:
+        monkeypatch.setattr(api, 'openai', None)
+        monkeypatch.setattr(client, '_http_request_with_retries', lambda **kwargs: (
+            calls.append(kwargs['json']) or SimpleNamespace(
+                headers={'content-type': 'application/json'},
+                json=lambda: {'choices': [{'message': {'content': 'OK'}, 'finish_reason': 'stop'}]},
+            )
+        ))
+
+    result = client._send_openai_compatible(
+        [{'role': 'user', 'content': 'Reply OK.'}], 0.5, 100,
+        'https://nano-gpt.com/api/v1', 'nano-options-test',
+        provider='nanogpt', model_override=model,
+    )
+
+    assert result.content == 'OK'
+    payload = calls[0]
+    reasoning = payload.get('extra_body', payload) if use_sdk else payload
+    assert reasoning['reasoning_effort'] == 'medium'
+    assert 'thinking' not in reasoning
+    assert 'budget_tokens' not in str(payload)
+    assert payload.get('service_tier') == (None if tier == 'off' else 'flex')
+    log = '\n'.join(logs)
+    assert f'Thinking enabled for {model}: effort=medium' in log
+    assert 'budget_tokens' not in log
+    assert ('service_tier=flex' in log) == (tier == 'flex')
+
+
 def test_custom_request_parameter_values_and_key_serialization():
     parameters = {
         'service_tier': 'flex', 'top_p': 0.7,

@@ -18300,6 +18300,37 @@ class UnifiedClient:
             )
         return tier if tier in supported else next(iter(supported.intersection(equivalent)))
 
+    @staticmethod
+    def _nanogpt_chat_reasoning_fields(model: str) -> dict:
+        """Use NanoGPT Chat Completions' documented effort control."""
+        enabled = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
+        thinking_model = ':thinking' in str(model).lower() or '-thinking' in str(model).lower()
+        if not (enabled or thinking_model):
+            return {}
+        effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
+        if effort not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+            effort = 'medium'
+        return {'reasoning_effort': effort}
+
+    def _log_nanogpt_chat_options(self, model: str, payload: dict) -> None:
+        """Describe only reasoning and tier fields present in the outgoing request."""
+        if self._is_stop_requested():
+            return
+        extra_body = payload.get('extra_body') or {}
+        effort = payload.get('reasoning_effort') or extra_body.get('reasoning_effort')
+        tier = payload.get('service_tier')
+        if effort is not None:
+            enabled = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
+            thinking_model = ':thinking' in str(model).lower() or '-thinking' in str(model).lower()
+            state = ('disabled' if effort == 'none' else
+                     'auto-detected' if thinking_model and not enabled else 'enabled')
+            details = f'effort={effort}'
+            if tier:
+                details += f', service_tier={tier}'
+            print(f'🧠 [nanogpt] Thinking {state} for {model}: {details}')
+        elif tier:
+            print(f'⚙️ [nanogpt] Service tier for {model}: {tier}')
+
     def _get_openai_compatible_reasoning_effort(self, provider: str, effective_model: str = "") -> Optional[str]:
         """Return the selected effort for native GPT-6 and compatible opt-in routes."""
         try:
@@ -18704,31 +18735,6 @@ class UnifiedClient:
         # Bind current run id to this thread so transport logs can be suppressed for stale runs.
         self._bind_thread_run_id_for_request()
         self._restore_thread_endpoint_state_if_needed()
-
-        # Log NanoGPT thinking configuration BEFORE the stagger delay so it
-        # appears in the console before the "API call in progress" line.
-        if getattr(self, 'client_type', '') == 'nanogpt' and not self._is_stop_requested():
-            try:
-                _eff = (self.model or '')[4:] if (self.model or '').lower().startswith('nan/') else (self.model or '')
-                _is_vid = self._is_video_gen_model(_eff)
-                _is_img = self._is_image_gen_model(_eff)
-                if not _is_vid and not _is_img:
-                    _enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
-                    _is_think_model = ':thinking' in _eff.lower() or '-thinking' in _eff.lower()
-                    if _enable_gpt or _is_think_model:
-                        _tok = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
-                        _budget = int(_tok) if _tok.isdigit() and int(_tok) > 0 else 0
-                        if _budget >= 1024:
-                            _desc = f"budget_tokens={_budget}"
-                        else:
-                            _eff_effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
-                            if _eff_effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
-                                _eff_effort = 'medium'
-                            _desc = f"effort={_eff_effort}"
-                        _src = "auto-detected" if (_is_think_model and not _enable_gpt) else "enabled"
-                        print(f"\U0001f9e0 [nanogpt] Thinking {_src} for {_eff}: {_desc}")
-            except Exception:
-                pass
 
         self._apply_api_call_stagger()
 
@@ -24202,34 +24208,11 @@ class UnifiedClient:
                         except Exception:
                             pass
 
-                    # Inject NanoGPT reasoning / thinking configuration via extra_body
-                    # Reuses the same ENABLE_GPT_THINKING toggle and GPT_REASONING_TOKENS / GPT_EFFORT env vars
+                    # NanoGPT Chat Completions documents reasoning_effort, not
+                    # the Anthropic Messages thinking.budget_tokens field.
                     # Docs: https://docs.nano-gpt.com/api-reference/miscellaneous/extended-thinking
                     if provider == 'nanogpt':
-                        try:
-                            enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
-                            _is_thinking_model = ':thinking' in (effective_model or '').lower() or '-thinking' in (effective_model or '').lower()
-                            if enable_gpt or _is_thinking_model:
-                                tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
-                                budget = int(tokens_str) if tokens_str.isdigit() and int(tokens_str) > 0 else 0
-
-                                if budget >= 1024:
-                                    # NanoGPT Messages-style thinking object (budget_tokens must be >= 1024)
-                                    extra_body["thinking"] = {"type": "enabled", "budget_tokens": budget}
-                                    # Also set reasoning_effort so the Chat Completions path picks it up
-                                    extra_body["reasoning_effort"] = "high"
-                                else:
-                                    # Use effort-based reasoning (none/low/medium/high/xhigh)
-                                    effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
-                                    if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
-                                        effort = 'medium'
-                                    extra_body["reasoning_effort"] = effort
-                                    if effort != 'none':
-                                        extra_body["reasoning"] = {"effort": effort}
-
-
-                        except Exception:
-                            pass
+                        extra_body.update(self._nanogpt_chat_reasoning_fields(effective_model))
 
                     # DeepSeek thinking / reasoning_effort
                     # - deepseek-v4-flash / deepseek-v4-pro: BOTH top-level params (per official docs):
@@ -24458,6 +24441,8 @@ class UnifiedClient:
                     if extra_body:
                         call_kwargs["extra_body"] = extra_body
                     self._add_request_parameters_to_sdk_kwargs(call_kwargs, key_request_parameters)
+                    if provider == 'nanogpt':
+                        self._log_nanogpt_chat_options(effective_model, call_kwargs)
 
                     if provider == 'openai':
                         self._apply_gpt6_openai_constraints(call_kwargs, use_responses_api)
@@ -26347,7 +26332,11 @@ class UnifiedClient:
             self._apply_openai_safety(provider, disable_safety, data, headers)
             if request_service_tier and endpoint in ('/chat/completions', '/responses'):
                 data['service_tier'] = request_service_tier
+            if provider == 'nanogpt' and endpoint == '/chat/completions':
+                data.update(self._nanogpt_chat_reasoning_fields(effective_model))
             data.update(key_request_parameters)
+            if provider == 'nanogpt' and endpoint == '/chat/completions':
+                self._log_nanogpt_chat_options(effective_model, data)
             if provider == 'openai':
                 self._apply_gpt6_openai_constraints(data, use_responses_api)
             # Save OpenRouter config if requested
