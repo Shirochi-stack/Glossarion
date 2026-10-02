@@ -11,6 +11,7 @@ SPEC_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals()
 if SPEC_DIR not in sys.path:
     sys.path.insert(0, SPEC_DIR)
 from app_version import get_spec_app_name
+from windows_version_info import get_windows_version_info
 
 # Fix DLL search path for WeasyPrint during build
 # Check GTK_FOLDER env var first (set by CI), then fallback to common locations
@@ -1470,7 +1471,7 @@ if ONE_FILE:
         codesign_identity=None,
         entitlements_file=None,
         icon=APP_ICON,
-        version='version_info.txt' if os.path.exists('version_info.txt') else None,
+        version=get_windows_version_info(APP_NAME),
     )
 else:
     # Folder distribution
@@ -1490,7 +1491,7 @@ else:
         codesign_identity=None,
         entitlements_file=None,
         icon=APP_ICON,
-        version='version_info.txt' if os.path.exists('version_info.txt') else None,
+        version=get_windows_version_info(APP_NAME),
     )
     
     coll = COLLECT(
@@ -1538,8 +1539,9 @@ This build includes:
 
 The executable will be ~160MB due to included ML libraries and OpenCV.
 
-For version information:
-Create a version_info.txt file with Windows version resource information
+Windows version information:
+Publisher and version metadata come from windows_version_info.py and app_version.py.
+Sign the finished executable separately for a verified Windows publisher identity.
 
 Note: Warnings about missing 'dask', 'torch', 'cupy', etc. are expected
 and safe to ignore. These are optional scipy dependencies.

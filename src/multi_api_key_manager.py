@@ -9973,6 +9973,10 @@ class MultiAPIKeyDialog(QDialog):
             button.clicked.connect(lambda checked=False, values=allowed: set_routes(values))
             shortcuts.addWidget(button)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.setCenterButtons(True)
+        buttons.layout().setSpacing(16)
+        for button in buttons.buttons():
+            button.setMinimumWidth(120)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)

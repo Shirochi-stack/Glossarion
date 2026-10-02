@@ -13,6 +13,7 @@ SPEC_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals()
 if SPEC_DIR not in sys.path:
     sys.path.insert(0, SPEC_DIR)
 from app_version import APP_VERSION, get_spec_app_name
+from windows_version_info import get_windows_version_info
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
@@ -1279,6 +1280,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name=APP_NAME,
+    version=get_windows_version_info(APP_NAME),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
