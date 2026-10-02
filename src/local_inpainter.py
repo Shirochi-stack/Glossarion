@@ -2875,11 +2875,12 @@ class LocalInpainter:
                     if os.environ.get('USE_INPAINTER_KEYS', '0') != '1':
                         return None
                     from unified_api_client import UnifiedClient
+                    from key_contexts import key_enabled_for_context
                     pool = getattr(UnifiedClient, '_inpainter_key_pool', None)
                     if not pool or not getattr(pool, 'keys', None):
                         return None
                     for entry in pool.keys:
-                        if getattr(entry, 'enabled', True) and getattr(entry, 'model', ''):
+                        if key_enabled_for_context(entry, 'inpainter') and getattr(entry, 'model', ''):
                             return entry
                 except Exception:
                     return None
@@ -2890,16 +2891,17 @@ class LocalInpainter:
                     if os.environ.get('USE_INPAINTER_KEYS', '0') != '1':
                         return None
                     from unified_api_client import UnifiedClient
+                    from key_contexts import key_enabled_for_context
                     pool = getattr(UnifiedClient, '_inpainter_key_pool', None)
                     if not pool or not getattr(pool, 'keys', None):
                         return None
                     if hasattr(pool, 'get_key_for_thread'):
-                        key_info = pool.get_key_for_thread(force_rotation=True)
+                        key_info = pool.get_key_for_thread(force_rotation=True, context='inpainter')
                         if key_info:
                             key_entry, key_idx, key_id = key_info
                             return key_entry, key_idx, key_id, pool
                     for idx, entry in enumerate(pool.keys):
-                        if getattr(entry, 'enabled', True) and getattr(entry, 'model', ''):
+                        if key_enabled_for_context(entry, 'inpainter') and getattr(entry, 'model', ''):
                             return entry, idx, f"ImageGenEditKey#{idx + 1} ({entry.model})", pool
                 except Exception as exc:
                     logger.warning(f"Failed to check out Image Gen/Edit key for custom image edit: {exc}")

@@ -7,6 +7,8 @@ Handles multiple API keys with round-robin load balancing and rate limit managem
 import os
 import sys
 from request_parameters import normalize_request_parameters
+from key_contexts import (CONTEXT_LABELS, POOL_CONTEXTS, key_enabled_for_context,
+                          normalize_disabled_contexts)
 
 # GUI imports - optional for Discord bot
 _HEADLESS_IMPORT = (
@@ -552,11 +554,12 @@ class APIKeyEntry:
                  google_credentials: str = None, azure_endpoint: str = None, google_region: str = None,
                  azure_api_version: str = None, use_individual_endpoint: bool = False, individual_output_token_limit: Optional[int] = None,
                  individual_key_temperature: Optional[float] = None, api_call_delay: float = 0.0,
-                 request_parameters: Optional[dict] = None):
+                 request_parameters: Optional[dict] = None, disabled_contexts=None):
         self.api_key = api_key
         self.model = model
         self.cooldown = cooldown
         self.enabled = enabled
+        self.disabled_contexts = normalize_disabled_contexts(disabled_contexts)
         self.google_credentials = google_credentials  # Path to Google service account JSON
         self.azure_endpoint = azure_endpoint  # Azure endpoint URL (only used if use_individual_endpoint is True)
         self.google_region = google_region  # Google Cloud region (e.g., us-east5, us-central1)
@@ -604,9 +607,9 @@ class APIKeyEntry:
         self.last_test_time = None
         self.last_test_message = None
 
-    def is_available(self) -> bool:
+    def is_available(self, context=None) -> bool:
         with self._lock:
-            if not self.enabled:
+            if not key_enabled_for_context(self, context):
                 return False
             if self.last_error_time and self.is_cooling_down:
                 time_since_error = time.time() - self.last_error_time
@@ -645,6 +648,7 @@ class APIKeyEntry:
             'model': self.model,
             'cooldown': self.cooldown,
             'enabled': self.enabled,
+            'disabled_contexts': list(self.disabled_contexts),
             'google_credentials': self.google_credentials,
             'azure_endpoint': self.azure_endpoint,
             'google_region': self.google_region,
@@ -676,6 +680,7 @@ class APIKeyEntry:
             model=data.get('model', ''),
             cooldown=data.get('cooldown', 60),
             enabled=data.get('enabled', True),
+            disabled_contexts=data.get('disabled_contexts'),
             google_credentials=data.get('google_credentials'),
             azure_endpoint=data.get('azure_endpoint'),
             google_region=data.get('google_region'),
@@ -766,6 +771,7 @@ class APIKeyPool:
                     model=model,
                     cooldown=key_data.get('cooldown', 60),
                     enabled=key_data.get('enabled', True),
+                    disabled_contexts=key_data.get('disabled_contexts'),
                     google_credentials=key_data.get('google_credentials'),
                     azure_endpoint=key_data.get('azure_endpoint'),
                     google_region=key_data.get('google_region'),
@@ -844,7 +850,7 @@ class APIKeyPool:
                 logger.debug(f"{log_message}; unchanged reload suppressed")
 
     def get_key_for_thread(self, force_rotation: bool = False,
-                          rotation_frequency: int = 1) -> Optional[Tuple[APIKeyEntry, int, str]]:
+                          rotation_frequency: int = 1, context=None) -> Optional[Tuple[APIKeyEntry, int, str]]:
         """Get a key for the current thread with proper rotation logic"""
         # Check for stop request at start
         if self._is_stop_requested():
@@ -872,7 +878,7 @@ class APIKeyPool:
                     # Check if the assigned key is still available
                     # Use the key-specific lock for checking availability
                     with self.key_locks.get(key_index, threading.Lock()):
-                        if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                        if key.is_available(context) and not self._rate_limit_cache.is_rate_limited(key_id):
                             logger.debug(f"[Thread-{thread_name}] Reusing assigned {key_id}")
 
                             # Track usage
@@ -905,7 +911,7 @@ class APIKeyPool:
 
                 # Use key-specific lock when checking and modifying key state
                 with self.key_locks.get(key_index, threading.Lock()):
-                    if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                    if key.is_available(context) and not self._rate_limit_cache.is_rate_limited(key_id):
                         # Assign to thread
                         self._thread_assignments[thread_id] = (key_index, time.time())
 
@@ -953,7 +959,7 @@ class APIKeyPool:
             min_cooldown = float('inf')
 
             for i, key in enumerate(self.keys):
-                if key.enabled:  # At least check if enabled
+                if key_enabled_for_context(key, context):  # At least check if enabled
                     key_id = f"Key#{i+1} ({key.model})"
                     remaining = self._rate_limit_cache.get_remaining_cooldown(key_id)
 
@@ -979,7 +985,7 @@ class APIKeyPool:
             return None
 
     def get_key_for_request(self, force_rotation: bool = False,
-                            rotation_frequency: int = 1) -> Optional[Tuple[APIKeyEntry, int, str]]:
+                            rotation_frequency: int = 1, context=None) -> Optional[Tuple[APIKeyEntry, int, str]]:
         """Select a key for a stateless request while respecting rotation frequency.
 
         Dedicated batch/parallel requests use a fresh temporary client for each
@@ -1009,7 +1015,7 @@ class APIKeyPool:
                 current_key_id = f"Key#{current_index+1} ({current_key.model})"
                 with self.key_locks.get(current_index, threading.Lock()):
                     current_available = (
-                        current_key.is_available()
+                        current_key.is_available(context)
                         and not self._rate_limit_cache.is_rate_limited(current_key_id)
                     )
 
@@ -1033,7 +1039,7 @@ class APIKeyPool:
                 key_id = f"Key#{key_index+1} ({key.model})"
 
                 with self.key_locks.get(key_index, threading.Lock()):
-                    if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                    if key.is_available(context) and not self._rate_limit_cache.is_rate_limited(key_id):
                         self._request_rotation_index = key_index
                         self._request_rotation_count = 1
                         return key, key_index, key_id
@@ -2663,6 +2669,7 @@ class MultiAPIKeyDialog(QDialog):
             try:
                 if checkbox and checkmark:
                     if checkbox.isChecked():
+                        checkmark.setText("−" if checkbox.checkState() == Qt.PartiallyChecked else "✓")
                         position_checkmark()
                         checkmark.show()
                     else:
@@ -4077,7 +4084,7 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_tree.setColumnWidth(2, 105)  # Output Limit
         self.fallback_tree.setColumnWidth(3, 100)  # Temperature
         self.fallback_tree.setColumnWidth(4, 90)   # API Delay
-        self.fallback_tree.setColumnWidth(5, 100)  # Status
+        self.fallback_tree.setColumnWidth(5, 170)  # Status
         self.fallback_tree.setColumnWidth(6, 42)   # Success
         self.fallback_tree.setColumnWidth(7, 42)   # Errors
         self.fallback_tree.setColumnWidth(8, 80)   # Requests
@@ -4091,7 +4098,7 @@ class MultiAPIKeyDialog(QDialog):
         self._enable_api_key_tree_font_zoom(self.fallback_tree)
         self._enable_api_key_tree_responsive_columns(
             self.fallback_tree,
-            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 100, 42, 42, 80),
+            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 170, 42, 42, 80),
         )
 
         self.fallback_tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -4108,6 +4115,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Connect double-click for inline editing (consistent with multi-key tree)
         self.fallback_tree.itemDoubleClicked.connect(self._on_fallback_click)
+        self.fallback_tree.itemClicked.connect(lambda item, col: self._key_status_clicked('fallback', item, col))
 
         container_layout.addWidget(self.fallback_tree)
 
@@ -4199,6 +4207,7 @@ class MultiAPIKeyDialog(QDialog):
             clear_temp_callback=self._clear_fallback_key_temperature_for_selected,
             set_delay_callback=self._set_fallback_api_call_delay_for_selected,
             clear_delay_callback=self._clear_fallback_api_call_delay_for_selected,
+            configure_contexts_callback=lambda: self._edit_selected_key_contexts('fallback'),
             test_callback=self._test_selected_fallback,
             enable_callback=self._enable_selected_fallback,
             disable_callback=self._disable_selected_fallback,
@@ -4348,6 +4357,7 @@ class MultiAPIKeyDialog(QDialog):
 
             # Disable drop on this item to prevent nesting (keep it a flat list)
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+            self._decorate_key_context_status(item, key_data, 'fallback')
             tree_items.append(item)
 
         if tree_items:
@@ -4393,6 +4403,7 @@ class MultiAPIKeyDialog(QDialog):
         else:
             status, color = "Enabled", Qt.gray
         item.setText(5, status)
+        self._decorate_key_context_status(item, key_data or {}, 'fallback')
         for col in range(item.columnCount()):
             item.setForeground(col, color)
 
@@ -4566,31 +4577,33 @@ class MultiAPIKeyDialog(QDialog):
         if index < self.fallback_tree.topLevelItemCount():
             item = self.fallback_tree.topLevelItem(index)
             if item:
-                # Update status (column 3) and apply coloring (consistent with multi-key tree)
+                # Update status (column 5) and apply coloring (consistent with multi-key tree)
                 if success:
-                    item.setText(3, "✅ Passed")
+                    item.setText(5, "✅ Passed")
                     color = Qt.darkGreen
                 else:
-                    item.setText(3, "❌ Failed")
+                    item.setText(5, "❌ Failed")
                     color = Qt.red
+                key_data = self.translator_gui.config.get('fallback_keys', [])[index]
+                self._decorate_key_context_status(item, key_data, 'fallback')
                 for col in range(item.columnCount()):
                     item.setForeground(col, color)
-                # Update success (col 4) / errors (col 5) cells
+                # Update success (col 6) / errors (col 7) cells
                 try:
                     if success:
-                        current = int(item.text(4))
-                        item.setText(4, str(current + 1))
+                        current = int(item.text(6))
+                        item.setText(6, str(current + 1))
                     else:
-                        current = int(item.text(5))
-                        item.setText(5, str(current + 1))
+                        current = int(item.text(7))
+                        item.setText(7, str(current + 1))
                 except Exception:
                     pass
-                # Update times used cell (column 6)
+                # Update times used cell (column 8)
                 try:
-                    current_times = int(item.text(6))
-                    item.setText(6, str(current_times + 1))
+                    current_times = int(item.text(8))
+                    item.setText(8, str(current_times + 1))
                 except Exception:
-                    item.setText(6, "1")
+                    item.setText(8, "1")
 
     @Slot(int) if HAS_GUI else lambda x: x
     def _update_fallback_timeout_status(self, index):
@@ -4598,7 +4611,9 @@ class MultiAPIKeyDialog(QDialog):
         if index < self.fallback_tree.topLevelItemCount():
             item = self.fallback_tree.topLevelItem(index)
             if item:
-                item.setText(3, "⏱️ Timed Out")
+                item.setText(5, "⏱️ Timed Out")
+                key_data = self.translator_gui.config.get('fallback_keys', [])[index]
+                self._decorate_key_context_status(item, key_data, 'fallback')
                 for col in range(item.columnCount()):
                     item.setForeground(col, Qt.darkYellow)
 
@@ -4777,25 +4792,29 @@ class MultiAPIKeyDialog(QDialog):
             index = self._fallback_config_index_for_item(item)
             if 0 <= index < len(fallback_keys):
                 fallback_keys[index]['enabled'] = True
+                fallback_keys[index]['disabled_contexts'] = []
                 self._set_fallback_item_enabled_display(item, True, fallback_keys[index])
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
+        if self._can_emit_live_key_pool_updates():
+            os.environ['FALLBACK_KEYS'] = json.dumps(fallback_keys)
         self._show_fallback_status(f"Enabled {len(selected)} fallback key(s)")
         self._notify_authgpt_visibility()
 
     def _disable_selected_fallback(self):
-        """Disable selected fallback keys"""
         selected = self.fallback_tree.selectedItems()
         if not selected:
             return
-        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        keys = self.translator_gui.config.get('fallback_keys', [])
         for item in selected:
             index = self._fallback_config_index_for_item(item)
-            if 0 <= index < len(fallback_keys):
-                fallback_keys[index]['enabled'] = False
-                self._set_fallback_item_enabled_display(item, False, fallback_keys[index])
-        self.translator_gui.config['fallback_keys'] = fallback_keys
+            if 0 <= index < len(keys):
+                keys[index]['enabled'] = False
+                self._set_fallback_item_enabled_display(item, False, keys[index])
         self.translator_gui.save_config(show_message=False)
+        if self._can_emit_live_key_pool_updates():
+            os.environ['FALLBACK_KEYS'] = json.dumps(keys)
+        self._broadcast_key_pool_config_changed('fallback', refresh_keys=True)
         self._show_fallback_status(f"Disabled {len(selected)} fallback key(s)")
         self._notify_authgpt_visibility()
 
@@ -5367,7 +5386,7 @@ class MultiAPIKeyDialog(QDialog):
         self.tree.setColumnWidth(3, 105)  # Output Limit
         self.tree.setColumnWidth(4, 100)  # Temperature
         self.tree.setColumnWidth(5, 90)   # API Delay
-        self.tree.setColumnWidth(6, 100)  # Status
+        self.tree.setColumnWidth(6, 170)  # Status
         self.tree.setColumnWidth(7, 42)   # Success
         self.tree.setColumnWidth(8, 42)   # Errors
         self.tree.setColumnWidth(9, 80)   # Requests
@@ -5381,7 +5400,7 @@ class MultiAPIKeyDialog(QDialog):
         self._enable_api_key_tree_font_zoom(self.tree)
         self._enable_api_key_tree_responsive_columns(
             self.tree,
-            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 42, 105, 100, 90, 100, 42, 42, 80),
+            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 42, 105, 100, 90, 170, 42, 42, 80),
         )
 
         # Set context menu
@@ -5400,6 +5419,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Connect signals
         self.tree.itemDoubleClicked.connect(self._on_click)
+        self.tree.itemClicked.connect(lambda item, col: self._key_status_clicked('main', item, col))
         self.tree.itemSelectionChanged.connect(self._on_selection_change)
 
         # Track editing state
@@ -5961,6 +5981,7 @@ class MultiAPIKeyDialog(QDialog):
 
             # Disable drop on this item to prevent nesting (keep it a flat list)
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+            self._decorate_key_context_status(item, key, 'main')
             tree_items.append(item)
 
         if tree_items:
@@ -6260,7 +6281,8 @@ class MultiAPIKeyDialog(QDialog):
         set_limit_callback, clear_limit_callback,
         set_temp_callback, clear_temp_callback, set_delay_callback,
         clear_delay_callback, test_callback, enable_callback, disable_callback,
-        remove_callback, clear_all_callback=None, index_resolver=None
+        remove_callback, clear_all_callback=None, index_resolver=None,
+        configure_contexts_callback=None
     ):
         """Shared context menu for every API key tree."""
         item = tree.itemAt(position)
@@ -6319,6 +6341,8 @@ class MultiAPIKeyDialog(QDialog):
         menu.addAction("🧹 Clear API Call Delay").triggered.connect(clear_delay_callback)
         menu.addSeparator()
         menu.addAction("🧪 Test Selected").triggered.connect(test_callback)
+        if configure_contexts_callback:
+            menu.addAction(selected_label("🎛️ Configure Request Contexts…")).triggered.connect(configure_contexts_callback)
         menu.addAction("✅ Enable Selected").triggered.connect(enable_callback)
         menu.addAction("🚫 Disable Selected").triggered.connect(disable_callback)
         menu.addAction("🗑️ Remove Selected").triggered.connect(remove_callback)
@@ -6369,6 +6393,7 @@ class MultiAPIKeyDialog(QDialog):
             clear_temp_callback=self._clear_key_temperature_for_selected,
             set_delay_callback=self._set_api_call_delay_for_selected,
             clear_delay_callback=self._clear_api_call_delay_for_selected,
+            configure_contexts_callback=lambda: self._edit_selected_key_contexts('main'),
             test_callback=self._test_selected,
             enable_callback=self._enable_selected,
             disable_callback=self._disable_selected,
@@ -6886,7 +6911,7 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_tree.setColumnWidth(2, 105)
         self.glossary_tree.setColumnWidth(3, 100)
         self.glossary_tree.setColumnWidth(4, 90)
-        self.glossary_tree.setColumnWidth(5, 100)
+        self.glossary_tree.setColumnWidth(5, 170)
         self.glossary_tree.setColumnWidth(6, 42)
         self.glossary_tree.setColumnWidth(7, 42)
         self.glossary_tree.setColumnWidth(8, 80)
@@ -6899,7 +6924,7 @@ class MultiAPIKeyDialog(QDialog):
         self._enable_api_key_tree_font_zoom(self.glossary_tree)
         self._enable_api_key_tree_responsive_columns(
             self.glossary_tree,
-            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 100, 42, 42, 80),
+            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 170, 42, 42, 80),
         )
 
         self.glossary_tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -6912,6 +6937,7 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_tree.model().rowsMoved.connect(self._on_glossary_rows_moved)
         self.glossary_tree.itemSelectionChanged.connect(self._on_glossary_selection_change)
         self.glossary_tree.itemDoubleClicked.connect(self._on_glossary_click)
+        self.glossary_tree.itemClicked.connect(lambda item, col: self._key_status_clicked('glossary', item, col))
 
         container_layout.addWidget(self.glossary_tree)
         parent_layout.addWidget(self.glossary_tree_container)
@@ -7057,6 +7083,7 @@ class MultiAPIKeyDialog(QDialog):
                 item.setToolTip(col, tooltip)
 
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+            self._decorate_key_context_status(item, key_data, 'glossary')
             tree_items.append(item)
 
         if tree_items:
@@ -7254,27 +7281,29 @@ class MultiAPIKeyDialog(QDialog):
             item = self.glossary_tree.topLevelItem(index)
             if item:
                 if success:
-                    item.setText(3, "✅ Passed")
+                    item.setText(5, "✅ Passed")
                     color = Qt.darkGreen
                 else:
-                    item.setText(3, "❌ Failed")
+                    item.setText(5, "❌ Failed")
                     color = Qt.red
+                key_data = self.translator_gui.config.get('glossary_keys', [])[index]
+                self._decorate_key_context_status(item, key_data, 'glossary')
                 for col in range(item.columnCount()):
                     item.setForeground(col, color)
                 try:
                     if success:
-                        current = int(item.text(4))
-                        item.setText(4, str(current + 1))
+                        current = int(item.text(6))
+                        item.setText(6, str(current + 1))
                     else:
-                        current = int(item.text(5))
-                        item.setText(5, str(current + 1))
+                        current = int(item.text(7))
+                        item.setText(7, str(current + 1))
                 except Exception:
                     pass
                 try:
-                    current_times = int(item.text(6))
-                    item.setText(6, str(current_times + 1))
+                    current_times = int(item.text(8))
+                    item.setText(8, str(current_times + 1))
                 except Exception:
-                    item.setText(6, "1")
+                    item.setText(8, "1")
 
     @Slot(int) if HAS_GUI else lambda x: x
     def _update_glossary_timeout_status(self, index):
@@ -7282,7 +7311,9 @@ class MultiAPIKeyDialog(QDialog):
         if index < self.glossary_tree.topLevelItemCount():
             item = self.glossary_tree.topLevelItem(index)
             if item:
-                item.setText(3, "⏱️ Timed Out")
+                item.setText(5, "⏱️ Timed Out")
+                key_data = self.translator_gui.config.get('glossary_keys', [])[index]
+                self._decorate_key_context_status(item, key_data, 'glossary')
                 for col in range(item.columnCount()):
                     item.setForeground(col, Qt.darkYellow)
 
@@ -7441,6 +7472,7 @@ class MultiAPIKeyDialog(QDialog):
             index = self.glossary_tree.indexOfTopLevelItem(item)
             if index < len(glossary_keys):
                 glossary_keys[index]['enabled'] = True
+                glossary_keys[index]['disabled_contexts'] = []
         self.translator_gui.config['glossary_keys'] = glossary_keys
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
@@ -7448,18 +7480,18 @@ class MultiAPIKeyDialog(QDialog):
         self._notify_authgpt_visibility()
 
     def _disable_selected_glossary(self):
-        """Disable selected glossary keys"""
         selected = self.glossary_tree.selectedItems()
         if not selected:
             return
-        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        keys = self.translator_gui.config.get('glossary_keys', [])
         for item in selected:
             index = self.glossary_tree.indexOfTopLevelItem(item)
-            if index < len(glossary_keys):
-                glossary_keys[index]['enabled'] = False
-        self.translator_gui.config['glossary_keys'] = glossary_keys
+            if 0 <= index < len(keys):
+                keys[index]['enabled'] = False
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
+        self._refresh_glossary_pool()
+        self._broadcast_key_pool_config_changed('glossary', refresh_keys=True)
         self._show_glossary_status(f"Disabled {len(selected)} glossary key(s)")
         self._notify_authgpt_visibility()
 
@@ -7643,6 +7675,7 @@ class MultiAPIKeyDialog(QDialog):
             clear_temp_callback=self._clear_glossary_key_temperature_for_selected,
             set_delay_callback=self._set_glossary_api_call_delay_for_selected,
             clear_delay_callback=self._clear_glossary_api_call_delay_for_selected,
+            configure_contexts_callback=lambda: self._edit_selected_key_contexts('glossary'),
             test_callback=self._test_selected_glossary,
             enable_callback=self._enable_selected_glossary,
             disable_callback=self._disable_selected_glossary,
@@ -9524,16 +9557,17 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 status = "Active"
 
-            # Update status column (column 3)
-            item.setText(3, status)
+            # Update status column (column 6)
+            item.setText(6, status)
+            self._decorate_key_context_status(item, key, 'main')
 
             # Update success/error counts
-            item.setText(4, str(key.success_count))
-            item.setText(5, str(key.error_count))
+            item.setText(7, str(key.success_count))
+            item.setText(8, str(key.error_count))
 
             # Update times used
             times_used = getattr(key, 'times_used', key.success_count + key.error_count)
-            item.setText(6, str(times_used))
+            item.setText(9, str(times_used))
 
         # Run in main thread
         QTimer.singleShot(0, update)
@@ -9845,19 +9879,161 @@ class MultiAPIKeyDialog(QDialog):
             index = self.tree.indexOfTopLevelItem(item)
             if index < len(self.key_pool.keys):
                 self.key_pool.keys[index].enabled = True
+                self.key_pool.keys[index].disabled_contexts = []
 
+        self._save_keys_to_config()
+        if self._can_emit_live_key_pool_updates():
+            self._apply_rotation_settings_to_runtime_pools()
         self._refresh_key_list()
         self._show_status(f"Enabled {len(selected)} key(s)")
         self._notify_authgpt_visibility()
 
+    def _key_context_tree(self, pool_name):
+        if pool_name == 'main':
+            return self.tree
+        if pool_name == 'fallback':
+            return self.fallback_tree
+        if pool_name == 'glossary':
+            return self.glossary_tree
+        return self._dedicated_widget(pool_name, 'tree')
+
+    def _key_status_clicked(self, pool_name, item, column):
+        if column == (6 if pool_name == 'main' else 5):
+            self._edit_selected_key_contexts(pool_name, items=[item])
+
+    def _decorate_key_context_status(self, item, key, pool_name):
+        column = 6 if pool_name == 'main' else 5
+        routes = POOL_CONTEXTS[pool_name]
+        allowed = [c for c in routes if key_enabled_for_context(key, c)]
+        if allowed and len(allowed) < len(routes):
+            item.setText(column, f"◐ {len(allowed)}/{len(routes)} contexts")
+        elif not allowed:
+            item.setText(column, 'Disabled')
+        tooltip = ['Click to choose which request contexts may use this key.']
+        tooltip.extend(f"{'✅' if c in allowed else '🚫'} {CONTEXT_LABELS[c]}" for c in routes)
+        item.setToolTip(column, '\n'.join(tooltip))
+
+    def _edit_selected_key_contexts(self, pool_name, items=None):
+        tree = self._key_context_tree(pool_name)
+        selected = tree.selectedItems() if items is None else items
+        if pool_name == 'main':
+            keys = self.key_pool.keys
+        elif pool_name in ('fallback', 'glossary'):
+            keys = self.translator_gui.config.get(f'{pool_name}_keys', [])
+        else:
+            keys = self._dedicated_keys(pool_name)
+        indices = [self._fallback_config_index_for_item(item) if pool_name == 'fallback'
+                   else tree.indexOfTopLevelItem(item) for item in selected]
+        entries = [keys[i] for i in indices if 0 <= i < len(keys)]
+        if not entries:
+            return
+        routes = POOL_CONTEXTS[pool_name]
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Key request contexts')
+        layout = QVBoxLayout(dialog)
+        explanation = QLabel(
+            f'Choose the contexts allowed to use {len(entries)} selected key(s).\n'
+            'Unchecked contexts skip these keys during requests and retries.\n'
+            'Mixed checkboxes keep each key’s current setting until changed.'
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        shortcuts = QHBoxLayout()
+        layout.addLayout(shortcuts)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        grid = QGridLayout(content)
+        checkboxes = {}
+        for i, context in enumerate(routes):
+            checkbox = self._create_styled_checkbox(CONTEXT_LABELS[context])
+            checkbox.setToolTip(context)
+            states = [key_enabled_for_context(key, context) for key in entries]
+            if any(states) and not all(states):
+                checkbox.setTristate(True)
+                checkbox.setCheckState(Qt.PartiallyChecked)
+            else:
+                checkbox.setChecked(all(states))
+            grid.addWidget(checkbox, i // 2, i % 2)
+            checkboxes[context] = checkbox
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+
+        def set_routes(allowed):
+            for context, checkbox in checkboxes.items():
+                checkbox.setTristate(False)
+                checkbox.setChecked(context in allowed)
+
+        image_routes = set(POOL_CONTEXTS['qa_scan']) | set(POOL_CONTEXTS['inpainter'])
+        presets = [('Enable all', set(routes)), ('Disable all', set())]
+        if image_routes.intersection(routes):
+            presets.append(('🖼️ Images only', image_routes))
+        for label, allowed in presets:
+            button = QPushButton(label)
+            button.clicked.connect(lambda checked=False, values=allowed: set_routes(values))
+            shortcuts.addWidget(button)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.resize(680, min(650, 230 + 34 * ((len(routes) + 1) // 2)))
+        if dialog.exec() != QDialog.Accepted:
+            return
+        for key in entries:
+            original = key.get('disabled_contexts', []) if isinstance(key, dict) else key.disabled_contexts
+            blocked = set(normalize_disabled_contexts(original))
+            if not (key.get('enabled', True) if isinstance(key, dict) else key.enabled):
+                blocked.update(routes)
+            for context, checkbox in checkboxes.items():
+                state = checkbox.checkState()
+                if state == Qt.PartiallyChecked:
+                    continue
+                if state == Qt.Checked:
+                    blocked.discard(context)
+                else:
+                    blocked.add(context)
+            # Mixed selections retain globally disabled entries unless an allowed
+            # route was explicitly checked for them.
+            originally_enabled = key.get('enabled', True) if isinstance(key, dict) else key.enabled
+            allowed_explicitly = any(cb.checkState() == Qt.Checked for cb in checkboxes.values())
+            enabled = (originally_enabled or allowed_explicitly) and any(c not in blocked for c in routes)
+            if isinstance(key, dict):
+                key.update(enabled=enabled, disabled_contexts=sorted(blocked))
+            else:
+                key.enabled = enabled
+                key.disabled_contexts = sorted(blocked)
+        if pool_name == 'main':
+            self._save_keys_to_config()
+            if self._can_emit_live_key_pool_updates():
+                self._apply_rotation_settings_to_runtime_pools()
+            self._refresh_key_list()
+        elif pool_name == 'fallback':
+            self.translator_gui.save_config(show_message=False)
+            if self._can_emit_live_key_pool_updates():
+                os.environ['FALLBACK_KEYS'] = json.dumps(keys)
+            self._load_fallback_keys()
+            self._broadcast_key_pool_config_changed('fallback', refresh_keys=True)
+        elif pool_name == 'glossary':
+            self.translator_gui.save_config(show_message=False)
+            self._load_glossary_keys()
+            self._refresh_glossary_pool()
+            self._broadcast_key_pool_config_changed('glossary', refresh_keys=True)
+        else:
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+        self._notify_authgpt_visibility()
+
     def _disable_selected(self):
-        """Disable selected keys"""
         selected = self.tree.selectedItems()
+        if not selected:
+            return
         for item in selected:
             index = self.tree.indexOfTopLevelItem(item)
-            if index < len(self.key_pool.keys):
+            if 0 <= index < len(self.key_pool.keys):
                 self.key_pool.keys[index].enabled = False
-
+        self._save_keys_to_config()
+        if self._can_emit_live_key_pool_updates():
+            self._apply_rotation_settings_to_runtime_pools()
         self._refresh_key_list()
         self._show_status(f"Disabled {len(selected)} key(s)")
         self._notify_authgpt_visibility()
@@ -10606,7 +10782,7 @@ class MultiAPIKeyDialog(QDialog):
         tree.setUniformRowHeights(True)
         self._tighten_api_key_tree_first_column(tree)
         tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
-        for col, width in enumerate((self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 100, 42, 42, 80)):
+        for col, width in enumerate((self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 170, 42, 42, 80)):
             tree.setColumnWidth(col, width)
         header = tree.header()
         header_font = QFont()
@@ -10616,7 +10792,7 @@ class MultiAPIKeyDialog(QDialog):
         self._enable_api_key_tree_font_zoom(tree)
         self._enable_api_key_tree_responsive_columns(
             tree,
-            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 100, 42, 42, 80),
+            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 170, 42, 42, 80),
         )
         tree.setContextMenuPolicy(Qt.CustomContextMenu)
         tree.customContextMenuRequested.connect(lambda pos, p=pool_name: self._dedicated_show_context_menu(p, pos))
@@ -10626,6 +10802,7 @@ class MultiAPIKeyDialog(QDialog):
         tree.model().rowsMoved.connect(lambda *args, p=pool_name: self._dedicated_on_rows_moved(p))
         tree.itemSelectionChanged.connect(lambda p=pool_name: self._dedicated_on_selection_change(p))
         tree.itemDoubleClicked.connect(lambda item, column, p=pool_name: self._dedicated_on_click(p, item, column))
+        tree.itemClicked.connect(lambda item, col, p=pool_name: self._key_status_clicked(p, item, col))
         setattr(self, self._dedicated_attr(pool_name, 'tree'), tree)
         setattr(self, f"{pool_name}_tree", tree)
         layout.addWidget(tree)
@@ -10708,6 +10885,7 @@ class MultiAPIKeyDialog(QDialog):
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+            self._decorate_key_context_status(item, key_data, pool_name)
             tree_items.append(item)
         if tree_items:
             tree.addTopLevelItems(tree_items)
@@ -10959,6 +11137,8 @@ class MultiAPIKeyDialog(QDialog):
         for index in indices:
             if 0 <= index < len(keys):
                 keys[index]['enabled'] = enabled
+                if enabled:
+                    keys[index]['disabled_contexts'] = []
         self._dedicated_set_keys(pool_name, keys)
         self._dedicated_load_keys(pool_name)
         self._dedicated_status(pool_name, f"{'Enabled' if enabled else 'Disabled'} {len(indices)} {spec['label']} key(s)")
@@ -11052,6 +11232,7 @@ class MultiAPIKeyDialog(QDialog):
             clear_temp_callback=lambda: self._dedicated_clear_temperature_for_selected(pool_name),
             set_delay_callback=lambda: self._dedicated_set_api_call_delay_for_selected(pool_name),
             clear_delay_callback=lambda: self._dedicated_clear_api_call_delay_for_selected(pool_name),
+            configure_contexts_callback=lambda: self._edit_selected_key_contexts(pool_name),
             test_callback=lambda: self._dedicated_test_selected(pool_name),
             enable_callback=lambda: self._dedicated_enable_selected(pool_name),
             disable_callback=lambda: self._dedicated_disable_selected(pool_name),

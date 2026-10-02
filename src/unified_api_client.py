@@ -137,6 +137,7 @@ from reasoning_compatibility import (
 import json
 from request_parameters import normalize_request_parameters
 import requests
+from key_contexts import key_enabled_for_context, route_key_context, current_key_context
 import contextvars
 from requests.adapters import HTTPAdapter
 try:
@@ -4841,13 +4842,28 @@ class UnifiedClient:
             expected_pool = getattr(self, '_active_key_pool_expected_pool', None)
             if scope and expected_pool is not None and self._api_key_pool is not expected_pool:
                 raise UnifiedClientError(f"{scope} pool boundary violation: refusing to use another key pool", error_type="no_keys")
-            # Check if we need to rotate
+            if not any(key_enabled_for_context(key) for key in self._api_key_pool.keys):
+                raise UnifiedClientError(
+                    f"No API keys enabled for {current_key_context()} in the active pool",
+                    error_type="no_keys",
+                )
+            # A thread can change routes or the pool can be reloaded while idle.
+            # Validate the cached assignment even when periodic rotation is off.
             should_rotate = False
+            assigned_index = getattr(tls, 'key_index', -1)
+            if getattr(tls, 'initialized', False):
+                if not (isinstance(assigned_index, int) and 0 <= assigned_index < len(self._api_key_pool.keys)):
+                    should_rotate = True
+                else:
+                    assigned_key = self._api_key_pool.keys[assigned_index]
+                    should_rotate = (not key_enabled_for_context(assigned_key)
+                                     or assigned_key.api_key != getattr(tls, 'api_key', None)
+                                     or assigned_key.model != getattr(tls, 'model', None))
             
             if not tls.initialized:
                 should_rotate = True
                 #print(f"[Thread-{thread_name}] Initializing with multi-key mode")
-            elif self._force_rotation:
+            elif self._force_rotation and not should_rotate:
                 tls.request_count = getattr(tls, 'request_count', 0) + 1
                 if tls.request_count >= self._rotation_frequency:
                     should_rotate = True
@@ -5257,6 +5273,8 @@ class UnifiedClient:
 
     def _wait_for_available_key(self) -> Optional[Tuple]:
         """Wait for a key to become available (called outside lock)"""
+        if not self._api_key_pool or not any(key_enabled_for_context(k) for k in self._api_key_pool.keys):
+            return None
         thread_name = threading.current_thread().name
         
         # Check if cancelled or globally stopped first
@@ -5337,7 +5355,7 @@ class UnifiedClient:
             
             # Still no keys? Return the first enabled one (last resort)
             for i, key in enumerate(self._api_key_pool.keys):
-                if key.enabled:
+                if key_enabled_for_context(key):
                     print(f"[Thread-{thread_name}] WARNING: Using potentially rate-limited key as last resort")
                     return (key, i)
         
@@ -5476,7 +5494,7 @@ class UnifiedClient:
         count = 0
         pool_cache = self._get_active_pool_rate_limit_cache()
         for i, key in enumerate(pool.keys):
-            if key.enabled:
+            if key_enabled_for_context(key):
                 key_id = f"Key#{i+1} ({key.model})"
                 is_rate_limited = bool(pool_cache and pool_cache.is_rate_limited(key_id))
                 is_cooling = key.is_cooling_down  # Also check the key's own status
@@ -6896,7 +6914,7 @@ class UnifiedClient:
         pool_cache = self._get_active_pool_rate_limit_cache()
         
         for i, key in enumerate(pool.keys):
-            if key.enabled:
+            if key_enabled_for_context(key):
                 key_id = f"Key#{i+1} ({key.model})"
                 
                 cache_cooldown = pool_cache.get_remaining_cooldown(key_id) if pool_cache else 0
@@ -6937,7 +6955,7 @@ class UnifiedClient:
         """Temporarily route this request through a dedicated APIKeyPool."""
         if not pool or not getattr(pool, 'keys', []):
             return None
-        if not any(getattr(k, 'enabled', True) for k in pool.keys):
+        if not any(key_enabled_for_context(k) for k in pool.keys):
             return None
 
         self._refresh_rotation_settings_from_environment()
@@ -7022,6 +7040,7 @@ class UnifiedClient:
             self._restore_dedicated_key_pool_override(state)
             return None
 
+    @route_key_context
     def _send_with_isolated_dedicated_key(
         self,
         pool,
@@ -7394,6 +7413,7 @@ class UnifiedClient:
     def _effective_temperature(self, temperature: Optional[float]) -> Optional[float]:
         return None if self._temperature_parameter_disabled() else temperature
 
+    @route_key_context
     def _send_core(self,
                    messages,
                    temperature: Optional[float] = None,
@@ -7672,7 +7692,7 @@ class UnifiedClient:
                                 pass
 
                     if rolling_summary_pool and getattr(rolling_summary_pool, 'keys', []):
-                        _has_enabled = any(getattr(k, 'enabled', True) for k in rolling_summary_pool.keys)
+                        _has_enabled = any(key_enabled_for_context(k) for k in rolling_summary_pool.keys)
                         if not _has_enabled:
                             rolling_summary_pool = None
                     if not (rolling_summary_pool and getattr(rolling_summary_pool, 'keys', [])):
@@ -7757,7 +7777,7 @@ class UnifiedClient:
                         
                         if qa_scan_pool and getattr(qa_scan_pool, 'keys', []):
                             _has_enabled = any(
-                                getattr(k, 'enabled', True) for k in qa_scan_pool.keys
+                                key_enabled_for_context(k) for k in qa_scan_pool.keys
                             )
                             if not _has_enabled:
                                 qa_scan_pool = None
@@ -8096,7 +8116,7 @@ class UnifiedClient:
                             # Check if at least one glossary key is actually enabled.
                             # If all are disabled, hard-fail instead of leaking to another pool.
                             _has_enabled = any(
-                                getattr(k, 'enabled', True) for k in glossary_pool.keys
+                                key_enabled_for_context(k) for k in glossary_pool.keys
                             )
                             if not _has_enabled:
                                 glossary_pool = None
@@ -9413,6 +9433,7 @@ class UnifiedClient:
             pass
         return getattr(self, "last_actual_key_identifier", None) or getattr(self, "key_identifier", None)
 
+    @route_key_context
     def text_to_speech(self, text: str, output_path: str, voice: Optional[str] = None, audio_format: Optional[str] = None) -> str:
         """Generate speech audio from text and write it to output_path.
 
@@ -9949,6 +9970,7 @@ class UnifiedClient:
         except Exception:
             return None
 
+    @route_key_context
     def _send_internal(self, messages, temperature=None, max_tokens=None, 
                        max_completion_tokens=None, context=None, retry_reason=None,
                        request_id=None, image_data=None) -> Tuple[str, Optional[str]]:
@@ -10628,7 +10650,7 @@ class UnifiedClient:
                                             pass
                                 if not (truncation_pool and getattr(truncation_pool, 'keys', [])):
                                     return None, None
-                                if not any(getattr(k, 'enabled', True) for k in truncation_pool.keys):
+                                if not any(key_enabled_for_context(k) for k in truncation_pool.keys):
                                     return None, None
                                 try:
                                     with self.__class__._in_memory_truncation_retry_keys_lock:
@@ -11606,6 +11628,7 @@ class UnifiedClient:
         except Exception:
             pass
 
+    @route_key_context
     def _retry_with_main_key(self, messages, temperature, max_tokens,
                             max_completion_tokens=None, context=None,
                             request_id=None, image_data=None) -> Optional[Tuple[str, Optional[str]]]: 
@@ -11688,7 +11711,7 @@ class UnifiedClient:
                     print(f"[DEBUG] Loaded {len(configured_fallbacks)} fallback keys from environment")
                     for fb in configured_fallbacks:
                         # Skip disabled fallback keys
-                        if fb.get('enabled') is False:
+                        if not key_enabled_for_context(fb, context):
                             continue
                         fallback_keys.append({
                             'api_key': fb.get('api_key'),
@@ -12051,6 +12074,7 @@ class UnifiedClient:
             if hasattr(tls, 'tried_keys_per_request') and request_id in tls.tried_keys_per_request:
                 del tls.tried_keys_per_request[request_id]
     
+    @route_key_context
     def _try_fallback_keys_direct(self, messages, temperature=None, max_tokens=None, 
                                   max_completion_tokens=None, context=None, 
                                   request_id=None, image_data=None) -> Optional[Tuple[str, str]]:
@@ -12102,7 +12126,7 @@ class UnifiedClient:
             # Filter to only enabled keys with valid data
             raw_fallback_count = len(configured_fallbacks) if isinstance(configured_fallbacks, list) else 0
             def _valid_direct_fallback(fb):
-                if not isinstance(fb, dict) or fb.get('enabled') is False:
+                if not isinstance(fb, dict) or not key_enabled_for_context(fb, context):
                     return False
                 model = fb.get('model')
                 if not model:
@@ -12414,6 +12438,7 @@ class UnifiedClient:
             if hasattr(tls, 'tried_fallback_direct_per_request') and request_id in tls.tried_fallback_direct_per_request:
                 del tls.tried_fallback_direct_per_request[request_id]
     
+    @route_key_context
     def _try_glossary_keys_direct(self, messages, temperature=None, max_tokens=None, 
                                    max_completion_tokens=None, context=None, 
                                    request_id=None, image_data=None) -> Optional[Tuple[str, str]]:
@@ -12475,7 +12500,7 @@ class UnifiedClient:
             # autharena, and authnd.
             configured_glossary_keys = [
                 gk for gk in configured_glossary_keys
-                if self._key_data_is_usable(gk)
+                if self._key_data_is_usable(gk) and key_enabled_for_context(gk, context)
             ]
             if not configured_glossary_keys:
                 raise UnifiedClientError(f"{pool_label.title()} key pool is enabled but has no usable keys; refusing fallback to another pool", error_type="no_keys")
