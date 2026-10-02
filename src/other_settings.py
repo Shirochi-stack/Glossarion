@@ -4228,6 +4228,37 @@ def _create_response_handling_section(self, parent):
     authnd_auto_cb.toggled.connect(_apply_authnd_auto_state)
     _apply_authnd_auto_state(authnd_auto_enabled)
 
+    tor_title = QLabel("search/opera and ocz/ TOR Proxy Rotation")
+    tor_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
+    tor_title.setContentsMargins(12, 8, 0, 0)
+    section_v.addWidget(tor_title)
+    tor_description = QLabel("Use Tor with a new proxy port and circuit identity for each request.")
+    tor_description.setWordWrap(True)
+    tor_description.setStyleSheet("color: gray; font-size: 9pt;")
+    tor_description.setContentsMargins(20, 0, 0, 2)
+    section_v.addWidget(tor_description)
+    tor_row = QWidget()
+    tor_layout = QHBoxLayout(tor_row)
+    tor_layout.setContentsMargins(16, 2, 0, 4)
+    self.tor_proxy_enabled_checkbox = self._create_styled_checkbox("Enable TOR proxy rotation")
+    tor_enabled = str(self.config.get('tor_proxy_enabled', False)).strip().lower() in ('1', 'true', 'yes', 'on')
+    self.tor_proxy_enabled_var = tor_enabled
+    self.tor_proxy_enabled_checkbox.setChecked(tor_enabled)
+    self.tor_proxy_enabled_checkbox.setToolTip(_wrapped_tooltip_html(
+        "Applies to search/opera, search/opera-think, and ocz/. Tor is installed automatically if needed. "
+        "Parallel requests use separate ports and circuit identities. Disabled by default."))
+    os.environ['GLOSSARION_TOR_ENABLED'] = '1' if tor_enabled else '0'
+
+    def _set_tor_enabled(checked):
+        self.tor_proxy_enabled_var = bool(checked)
+        self.config['tor_proxy_enabled'] = bool(checked)
+        os.environ['GLOSSARION_TOR_ENABLED'] = '1' if checked else '0'
+
+    self.tor_proxy_enabled_checkbox.toggled.connect(_set_tor_enabled)
+    tor_layout.addWidget(self.tor_proxy_enabled_checkbox)
+    tor_layout.addStretch()
+    section_v.addWidget(tor_row)
+
     gemini_chunk_title = QLabel("Gemini Free Browser Chunking")
     gemini_chunk_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
     gemini_chunk_title.setContentsMargins(12, 8, 0, 0)

@@ -37,6 +37,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -747,14 +748,36 @@ def _post_chat(token: str, query: str, timeout: int, stream: bool = True,
     payload = {"query": query, "stream": stream, "request_source": "side_panel"}
     if think:
         payload["think_harder"] = True
-    from tor_proxy import TorProxyError, new_proxy_url
+    from tor_proxy import TorProxyError, request_proxy
+    lifetime = ExitStack()
     try:
-        proxy = new_proxy_url(log_fn=log_fn, cancelled=_is_cancelled)
+        proxy = lifetime.enter_context(request_proxy(log_fn=log_fn, cancelled=_is_cancelled))
     except TorProxyError as exc:
+        lifetime.close()
         raise OperaAriaError(f"Opera Aria Tor proxy: {exc}", error_type="config_error") from exc
-    return requests.post(CHAT_ENDPOINT_V2, headers=headers, json=payload,
-                         stream=stream, timeout=timeout,
-                         proxies={"http": proxy, "https": proxy}, allow_redirects=False)
+    options = {}
+    if proxy:
+        proxy_address = urllib.parse.urlsplit(proxy)
+        circuit_label = hashlib.sha256(proxy.encode("utf-8")).hexdigest()[:8]
+        _log(log_fn, f"🧅 Opera Aria: routing chat POST through Tor "
+                     f"({proxy_address.hostname}:{proxy_address.port}, fresh circuit identity {circuit_label})")
+        options = {"proxies": {"http": proxy, "https": proxy}, "allow_redirects": False}
+    try:
+        response = requests.post(CHAT_ENDPOINT_V2, headers=headers, json=payload,
+                                 stream=stream, timeout=timeout, **options)
+    except BaseException:
+        lifetime.close()
+        raise
+    original_close = response.close
+
+    def close():
+        try:
+            original_close()
+        finally:
+            lifetime.close()
+
+    response.close = close
+    return response
 
 
 def _run_chat(messages: Iterable[Dict[str, Any]], *, model: str, timeout: int,

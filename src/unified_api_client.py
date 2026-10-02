@@ -10992,6 +10992,10 @@ class UnifiedClient:
                     print("OpenCode Antigravity setup/authentication error - not retrying")
                     raise
 
+                if self.client_type == "opencode-zen" and e.error_type == "config_error":
+                    print("OpenCode Zen model/setup error - choose an available free model; not retrying")
+                    raise
+
                 if self.client_type == "autharena" and e.error_type == "autharena_verification_error":
                     print("🔐 Arena rejected browser verification; this does not mean the saved login was lost.")
                     raise
@@ -28290,6 +28294,12 @@ class UnifiedClient:
                     "OpenCode Zen: Translation stopped by user",
                     error_type="cancelled",
                 )
+            if any(marker in lower for marker in (
+                "opencode zen model error", "opencode zen model configuration error",
+                "providermodelnotfounderror", "model not found:",
+                "model is unavailable",
+            )):
+                raise UnifiedClientError(text, error_type="config_error")
             raise UnifiedClientError(text, error_type="provider_error")
         except Exception as exc:
             raise UnifiedClientError(str(exc), error_type="provider_error")

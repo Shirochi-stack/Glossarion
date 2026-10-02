@@ -25,6 +25,7 @@ Environment variables:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -2621,6 +2622,32 @@ def send_chat_completion(
 # ---------------------------------------------------------------------------
 
 
+def _zen_error_detail(stderr: str) -> str:
+    """Extract logged error messages without repeating their stack-trace causes."""
+    errors = re.findall(r'\berror=("(?:[^"\\]|\\.)*")', stderr)
+    if errors:
+        try:
+            return "\n".join(dict.fromkeys(str(json.loads(error)) for error in errors))[:4000]
+        except ValueError:
+            pass
+    # Newer OpenCode builds log Effect causes rather than an error= field.
+    # Unwrap the underlying exception, omitting timestamps and subscriber logs.
+    causes = re.findall(r'\bcause=("(?:[^"\\]|\\.)*")', stderr)
+    details = []
+    for cause in causes:
+        try:
+            decoded = str(json.loads(cause))
+        except ValueError:
+            continue
+        match = re.fullmatch(r'Cause\(\[(?:Fail|Die)\((.*)\)\]\)', decoded, re.DOTALL)
+        if match:
+            detail = re.sub(r'^\w*(?:Error|Exception):\s*', '', match.group(1))
+            details.append(detail)
+    if details:
+        return "\n".join(dict.fromkeys(details))[:4000]
+    return _clean_text(stderr)[:4000]
+
+
 def _run_opencode_zen_buffered(
     *,
     exe: str,
@@ -2634,6 +2661,7 @@ def _run_opencode_zen_buffered(
     command = [
         exe,
         "run",
+        "--print-logs", "--log-level", "ERROR",
         "--format", "json",
         "--model", effective_model,
         "--title", "Glossarion translation",
@@ -2687,7 +2715,7 @@ def _run_opencode_zen_buffered(
     event_error = _event_error(events)
     if proc.returncode != 0 or event_error:
         detail = "\n".join(
-            part for part in (event_error, _clean_text(stderr), "\n".join(non_json)) if part
+            part for part in (event_error, _zen_error_detail(stderr), "\n".join(non_json)) if part
         )
         text = _clean_text(detail) or f"opencode exited with code {proc.returncode}"
         lower = text.lower()
@@ -2698,7 +2726,7 @@ def _run_opencode_zen_buffered(
             raise OcAgyError("OpenCode Zen quota/rate limit: " + text)
         if any(
             x in lower
-            for x in ("model not found", "unknown model", "model does not exist", "cannot be resolved")
+            for x in ("model not found", "unknown model", "model does not exist", "cannot be resolved", "model is unavailable")
         ):
             raise OcAgyError("OpenCode Zen model error: " + text)
         raise OcAgyError(f"OpenCode Zen failed (exit {proc.returncode}): {text}")
@@ -2753,7 +2781,8 @@ def _send_via_server_zen(
     """
     port = _loopback_port()
     base_url = f"http://127.0.0.1:{port}"
-    command = [exe, "serve", "--hostname", "127.0.0.1", "--port", str(port), "--pure"]
+    command = [exe, "serve", "--hostname", "127.0.0.1", "--port", str(port), "--pure",
+               "--print-logs", "--log-level", "ERROR"]
     proc = subprocess.Popen(
         command,
         stdin=subprocess.DEVNULL,
@@ -3022,14 +3051,19 @@ def _send_via_server_zen(
             detail = exc.read().decode("utf-8", errors="replace")
         except Exception:
             detail = str(exc)
-        raise OcAgyError(f"OpenCode Zen HTTP error: {detail}")
+        server_detail = _zen_error_detail("\n".join(server_stderr))
+        raise OcAgyError(f"OpenCode Zen HTTP error: {detail}"
+                         + (f"\n{server_detail}" if server_detail else ""))
     except urllib.error.URLError as exc:
         raise OcAgyError(f"OpenCode Zen local streaming connection failed: {exc}")
     except TimeoutError as exc:
         raise OcAgyError(
             f"OpenCode Zen timed out after {timeout_seconds}s."
         ) from exc
-    except OcAgyError:
+    except OcAgyError as exc:
+        server_detail = _zen_error_detail("\n".join(server_stderr))
+        if server_detail and server_detail not in str(exc):
+            raise OcAgyError(f"{exc}\n{server_detail}") from exc
         raise
     except Exception as exc:
         if httpx is not None and isinstance(exc, httpx.TimeoutException):
@@ -3058,6 +3092,23 @@ def _send_via_server_zen(
 
 
 def send_opencode_zen_completion(
+    *, messages: List[Dict[str, Any]], model: str, temperature: float = 0.3,
+    max_tokens: int = 65536, timeout: float = 1800,
+    log_fn: Optional[Callable[[str], None]] = None, log_stream: bool = True,
+) -> Dict[str, Any]:
+    kwargs = dict(messages=messages, model=model, temperature=temperature,
+                  max_tokens=max_tokens, timeout=timeout, log_fn=log_fn, log_stream=log_stream)
+    from tor_proxy import TorProxyError, enabled, request_proxy
+    if str(kwargs.get("model", "")).strip().startswith("ocz/") and enabled():
+        try:
+            with request_proxy(kwargs.get("log_fn"), is_cancelled) as proxy:
+                return _send_opencode_zen_completion_impl(**kwargs, proxy_url=proxy)
+        except TorProxyError as exc:
+            raise OcAgyError(f"OpenCode Zen Tor proxy: {exc}") from exc
+    return _send_opencode_zen_completion_impl(**kwargs)
+
+
+def _send_opencode_zen_completion_impl(
     *,
     messages: List[Dict[str, Any]],
     model: str,
@@ -3066,6 +3117,7 @@ def send_opencode_zen_completion(
     timeout: float = 1800,
     log_fn: Optional[Callable[[str], None]] = None,
     log_stream: bool = True,
+    proxy_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run one request through the OpenCode CLI for free-tier Zen models (ocz/).
 
@@ -3093,12 +3145,14 @@ def send_opencode_zen_completion(
     env = _subprocess_env()
     env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(max(1, int(max_tokens)))
     # Apply only to ocz/; paid OpenCode aliases retain their existing transport.
-    if str(model or "").strip().startswith("ocz/"):
-        from tor_proxy import TorProxyError, new_proxy_url, proxy_environment
-        try:
-            env = proxy_environment(env, new_proxy_url(logger, is_cancelled))
-        except TorProxyError as exc:
-            raise OcAgyError(f"OpenCode Zen Tor proxy: {exc}") from exc
+    if proxy_url:
+        from tor_proxy import proxy_environment
+        proxy = proxy_url
+        env = proxy_environment(env, proxy)
+        proxy_address = urllib.parse.urlsplit(proxy)
+        circuit_label = hashlib.sha256(proxy.encode("utf-8")).hexdigest()[:8]
+        logger(f"🧅 OpenCode Zen: routing request through Tor "
+               f"({proxy_address.hostname}:{proxy_address.port}, fresh circuit identity {circuit_label})")
 
     start = time.time()
 

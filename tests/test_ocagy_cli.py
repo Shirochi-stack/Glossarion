@@ -1,9 +1,11 @@
+import ast
 import json
 import os
 import queue
 import stat
 import sys
 import threading
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,58 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import ocagy_cli
+
+
+def test_zen_error_detail_unwraps_effect_causes_without_duplicate_logs():
+    detail = (
+        'Model not found: opencode/deepseek-v4-flash-free. '
+        'Did you mean: mimo-v2.6-flash-free?'
+    )
+    logs = '\n'.join(
+        'timestamp=2026-10-02T16:29:19Z level=ERROR message="prompt failed" cause='
+        + json.dumps(f'Cause([{kind}(ProviderModelNotFoundError: {detail})])')
+        for kind in ('Fail', 'Die')
+    )
+    assert ocagy_cli._zen_error_detail(logs) == detail
+
+
+def test_zen_error_detail_preserves_unstructured_error():
+    assert ocagy_cli._zen_error_detail('Connection refused') == 'Connection refused'
+
+
+@pytest.mark.parametrize('error_type,expect_traceback', [
+    ('config_error', False), ('cancelled', False), ('api_error', True),
+])
+def test_text_translation_error_handler_limits_expected_tracebacks(monkeypatch, error_type, expect_traceback):
+    # Execute the actual handler without loading the GUI or starting a translation.
+    tree = ast.parse((SRC / 'translator_gui.py').read_text(encoding='utf-8-sig'))
+    handler = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.ExceptHandler)
+        and any(isinstance(child, ast.Name) and child.id == 'is_config_error'
+                for child in ast.walk(node))
+    )
+    function = ast.FunctionDef(
+        name='handle',
+        args=ast.arguments(posonlyargs=[], args=[ast.arg(arg='self'), ast.arg(arg='e')],
+                           kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=handler.body, decorator_list=[],
+    )
+    module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+
+    class ClientError(Exception):
+        def __init__(self, message):
+            super().__init__(message)
+            self.error_type = error_type
+
+    monkeypatch.setitem(sys.modules, 'unified_api_client', SimpleNamespace(UnifiedClientError=ClientError))
+    namespace = {}
+    exec(compile(module, '<text-error-handler>', 'exec'), namespace)
+    messages = []
+    assert namespace['handle'](SimpleNamespace(append_log=messages.append), ClientError('Model not found')) is False
+    assert any('Full error:' in message for message in messages) == expect_traceback
+    if error_type == 'config_error':
+        assert messages == ['❌ Translation error: Model not found']
 
 
 @pytest.fixture(autouse=True)
