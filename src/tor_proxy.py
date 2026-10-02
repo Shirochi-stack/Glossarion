@@ -38,12 +38,21 @@ class TorBootstrapTimeout(TorProxyError):
     """The running Tor process is retained so retries can resume bootstrap."""
 
 
-_LOCK = threading.Lock()
-_PROCESS = None
-_PORT = None
-_RUNTIME = None
-_STARTING_PORT = None
-_BINARY = None
+class _TorInstance:
+    def __init__(self, index):
+        self.index = index
+        self.lock = threading.Lock()
+        self.control_lock = threading.Lock()
+        self.process = self.port = self.runtime = self.starting_port = self.binary = None
+        self.control_port = None
+        self.last_newnym = float('-inf')
+
+
+_INSTANCES = [_TorInstance(index) for index in range(8)]
+_POOL_LOCK = threading.Lock()
+_POOL_NEXT = 0
+_INSTALL_LOCK = threading.Lock()
+_REQUEST_INSTANCES = {}
 _BOOTSTRAP_WAIT_SECONDS = 120
 DOWNLOAD_PAGE = "https://download.torproject.org/tor/"
 _LAST_REQUEST_PORT = None
@@ -106,6 +115,8 @@ def request_proxy(log_fn=None, cancelled=None):
         else:
             raise TorProxyError("Unable to allocate a new request proxy port.")
         _LAST_REQUEST_PORT = port
+    with _RELAY_LOCK:
+        _REQUEST_INSTANCES[port] = next((item for item in _INSTANCES if item.port == address.port), None)
     relay.upstream = (address.hostname, address.port)
     relay.active = set()
     relay.closing = False
@@ -115,6 +126,8 @@ def request_proxy(log_fn=None, cancelled=None):
     try:
         yield address._replace(netloc=f"{address.username}:{address.password}@127.0.0.1:{port}").geturl()
     finally:
+        with _RELAY_LOCK:
+            _REQUEST_INSTANCES.pop(port, None)
         relay.shutdown()
         relay.server_close()
         with relay.active_lock:
@@ -229,23 +242,29 @@ def ensure_tor_installed(log_fn=None, cancelled=None):
     return _find_binary()
 
 
-def _stop():
-    global _PROCESS, _PORT, _RUNTIME, _STARTING_PORT, _BINARY
-    if _PROCESS is not None:
+def _stop(instance=None):
+    if instance is None:
+        for item in _INSTANCES:
+            with item.lock:
+                _stop(item)
+        return
+    if instance.process is not None:
         try:
-            _PROCESS.terminate()
-            _PROCESS.wait(timeout=5)
+            instance.process.terminate()
+            instance.process.wait(timeout=5)
         except Exception:
             try:
-                _PROCESS.kill()
-                _PROCESS.wait(timeout=5)
+                instance.process.kill()
+                instance.process.wait(timeout=5)
             except Exception:
                 pass
-    _PROCESS = _PORT = None
-    _STARTING_PORT = _BINARY = None
-    if _RUNTIME is not None:
-        _RUNTIME.cleanup()
-        _RUNTIME = None
+    instance.process = instance.port = None
+    instance.starting_port = instance.binary = None
+    instance.control_port = None
+    instance.last_newnym = float('-inf')
+    if instance.runtime is not None:
+        instance.runtime.cleanup()
+        instance.runtime = None
 
 
 atexit.register(_stop)
@@ -268,9 +287,9 @@ def _geoip_config(binary):
     return "".join(lines)
 
 
-def _wait_for_bootstrap(log_fn, cancelled):
-    global _PORT
-    log = Path(_RUNTIME.name) / "tor.log"
+def _wait_for_bootstrap(log_fn, cancelled, instance=None):
+    instance = instance or _INSTANCES[0]
+    log = Path(instance.runtime.name) / "tor.log"
     started = time.monotonic()
     deadline = started + _BOOTSTRAP_WAIT_SECONDS
     last_progress = "no bootstrap progress reported"
@@ -296,12 +315,12 @@ def _wait_for_bootstrap(log_fn, cancelled):
                 seen_warnings.add(warning)
                 if log_fn:
                     log_fn(f"Tor warning: {warning}")
-        if _PROCESS.poll() is not None:
+        if instance.process.poll() is not None:
             raise TorProxyError(
-                f"Tor exited during startup (code {_PROCESS.returncode}, binary {_BINARY}): "
+                f"Tor exited during startup (code {instance.process.returncode}, binary {instance.binary}): "
                 + (status[-2500:] or "No console output was produced."))
         if "Bootstrapped 100%" in status:
-            _PORT = _STARTING_PORT
+            instance.port = instance.starting_port
             if log_fn:
                 log_fn("Tor proxy is ready; sending the API request.")
             return
@@ -313,14 +332,13 @@ def _wait_for_bootstrap(log_fn, cancelled):
         f"{status[-2500:] or 'No console output was produced.'}")
 
 
-def new_proxy_url(log_fn=None, cancelled=None):
+def _instance_proxy_url(instance, log_fn=None, cancelled=None):
     """Return a unique authenticated HTTP proxy URL; never fall back to direct."""
-    global _PROCESS, _PORT, _RUNTIME, _STARTING_PORT, _BINARY
     wait_started = time.monotonic()
     wait_reported = False
     try:
         # Waiting callers can still cancel while another thread bootstraps Tor.
-        while not _LOCK.acquire(timeout=0.1):
+        while not instance.lock.acquire(timeout=0.1):
             if cancelled and cancelled():
                 raise TorProxyError("Tor request cancelled while waiting for startup.")
             if log_fn and not wait_reported and time.monotonic() - wait_started >= 2:
@@ -329,52 +347,108 @@ def new_proxy_url(log_fn=None, cancelled=None):
         try:
             if cancelled and cancelled():
                 raise TorProxyError("Tor request cancelled.")
-            if _PROCESS is None or _PROCESS.poll() is not None:
-                _stop()
-                binary = ensure_tor_installed(log_fn, cancelled)
-                _BINARY = binary
-                with socket.socket() as sock:
+            if instance.process is None or instance.process.poll() is not None:
+                _stop(instance)
+                with _INSTALL_LOCK:
+                    binary = ensure_tor_installed(log_fn, cancelled)
+                instance.binary = binary
+                with socket.socket() as sock, socket.socket() as control_sock:
                     sock.bind(("127.0.0.1", 0))
                     port = sock.getsockname()[1]
-                _STARTING_PORT = port
-                _RUNTIME = tempfile.TemporaryDirectory(prefix="glossarion-tor-")
-                runtime = Path(_RUNTIME.name)
+                    control_sock.bind(("127.0.0.1", 0))
+                    instance.control_port = control_sock.getsockname()[1]
+                instance.starting_port = port
+                instance.runtime = tempfile.TemporaryDirectory(prefix="glossarion-tor-")
+                runtime = Path(instance.runtime.name)
                 log = runtime / "tor.log"
                 config = runtime / "torrc"
                 config.write_text(
                     'ClientOnly 1\nSocksPort 0\n'
+                    f'ControlPort 127.0.0.1:{instance.control_port}\nCookieAuthentication 1\n'
                     f'HTTPTunnelPort 127.0.0.1:{port} IsolateSOCKSAuth\n'
                     f'DataDirectory {json.dumps(str(runtime / "data"), ensure_ascii=False)}\n'
                     'Log notice stdout\n' + _geoip_config(binary), encoding="utf-8")
                 if log_fn:
-                    log_fn(f"Starting Tor ({binary}); waiting for network bootstrap (up to 120s)...")
+                    log_fn(f"Starting Tor instance {instance.index + 1} ({binary}); waiting for network bootstrap (up to {_BOOTSTRAP_WAIT_SECONDS}s)...")
                 try:
                     # Capture early configuration errors too. Tor's Log option
                     # does not parse quoted filenames like ordinary path options.
                     with log.open("wb") as console:
-                        _PROCESS = popen_no_window([binary, "-f", str(config)],
+                        instance.process = popen_no_window([binary, "-f", str(config)],
                                                    cwd=str(Path(binary).parent),
                                                    stdout=console, stderr=subprocess.STDOUT)
                 except BaseException:
-                    _stop()
+                    _stop(instance)
                     raise
-            if _PORT is None:
+            if instance.port is None:
                 try:
-                    _wait_for_bootstrap(log_fn, cancelled)
+                    _wait_for_bootstrap(log_fn, cancelled, instance)
                 except TorBootstrapTimeout:
                     # A timeout is a caller's wait limit, not a dead Tor process.
                     raise
                 except BaseException:
-                    _stop()
+                    _stop(instance)
                     raise
             identity = uuid.uuid4().hex
-            return f"http://{identity}:tor@127.0.0.1:{_PORT}"
+            return f"http://{identity}:tor@127.0.0.1:{instance.port}"
         finally:
-            _LOCK.release()
+            instance.lock.release()
     except TorProxyError:
         raise
     except Exception as exc:
         raise TorProxyError(f"Unable to set up Tor: {exc}") from exc
+
+
+def new_proxy_url(log_fn=None, cancelled=None):
+    """Rotate through independent Tor instances, starting each lazily."""
+    global _POOL_NEXT
+    try:
+        size = max(1, min(8, int(os.getenv('GLOSSARION_TOR_INSTANCES', '4'))))
+    except ValueError:
+        size = 4
+    with _POOL_LOCK:
+        instance = _INSTANCES[_POOL_NEXT % size]
+        _POOL_NEXT += 1
+    proxy = _instance_proxy_url(instance, log_fn, cancelled)
+    if log_fn:
+        log_fn(f'Tor instance {instance.index + 1}/{size} selected for this request.')
+    return proxy
+
+
+def notify_block(proxy_url, log_fn=None):
+    """Ask the affected instance for new circuits without disturbing active streams."""
+    if not proxy_url:
+        return
+    port = urlparse(proxy_url).port
+    with _RELAY_LOCK:
+        instance = _REQUEST_INSTANCES.get(port)
+    if instance is None:
+        return
+    with instance.control_lock:
+        if time.monotonic() - instance.last_newnym < 10:
+            if log_fn:
+                log_fn('Tor NEWNYM cooldown active; the next attempt rotates to another instance.')
+            return
+        try:
+            cookie = (Path(instance.runtime.name) / 'data' / 'control_auth_cookie').read_bytes()
+            with socket.create_connection(('127.0.0.1', instance.control_port), timeout=5) as connection:
+                with connection.makefile('rwb') as control:
+                    for command in (f'AUTHENTICATE {cookie.hex()}', 'SIGNAL NEWNYM'):
+                        control.write((command + '\r\n').encode('ascii'))
+                        control.flush()
+                        while True:
+                            reply = control.readline(4096)
+                            if not reply.startswith(b'250'):
+                                raise TorProxyError('Tor control command was rejected.')
+                            if reply[3:4] == b' ':
+                                break
+            instance.last_newnym = time.monotonic()
+            if log_fn:
+                log_fn(f'Tor instance {instance.index + 1}: SIGNAL NEWNYM accepted after blocked request.')
+        except Exception as exc:
+            # Retain the original provider error and allow its normal retry/backoff.
+            if log_fn:
+                log_fn(f'Tor circuit renewal failed: {exc}')
 
 
 def proxy_environment(env, proxy_url):

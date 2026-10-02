@@ -3123,7 +3123,14 @@ def send_opencode_zen_completion(
     if str(kwargs.get("model", "")).strip().startswith("ocz/") and enabled():
         try:
             with request_proxy(kwargs.get("log_fn"), is_cancelled) as proxy:
-                return _send_opencode_zen_completion_impl(**kwargs, proxy_url=proxy)
+                try:
+                    return _send_opencode_zen_completion_impl(**kwargs, proxy_url=proxy)
+                except OcAgyError as exc:
+                    if re.search(r'\b(?:403|429)\b|rate.?limit|too many requests|captcha|cloudflare|access denied',
+                                 str(exc), re.IGNORECASE):
+                        from tor_proxy import notify_block
+                        notify_block(proxy, kwargs.get('log_fn'))
+                    raise
         except TorProxyError as exc:
             raise OcAgyError(f"OpenCode Zen Tor proxy: {exc}") from exc
     return _send_opencode_zen_completion_impl(**kwargs)

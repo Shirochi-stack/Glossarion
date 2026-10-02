@@ -19,11 +19,85 @@ import tor_proxy
 @pytest.fixture(autouse=True)
 def enable_tor_for_existing_route_tests(monkeypatch):
     monkeypatch.setenv("GLOSSARION_TOR_ENABLED", "1")
+    monkeypatch.setenv("GLOSSARION_TOR_INSTANCES", "1")
+
+
+def test_parallel_pool_rotates_between_independent_instances(monkeypatch):
+    monkeypatch.setenv('GLOSSARION_TOR_INSTANCES', '4')
+    instances = [tor_proxy._TorInstance(index) for index in range(4)]
+    for index, instance in enumerate(instances):
+        instance.process = Mock(poll=lambda: None)
+        instance.port = 19050 + index
+    monkeypatch.setattr(tor_proxy, '_INSTANCES', instances)
+    monkeypatch.setattr(tor_proxy, '_POOL_NEXT', 0)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        urls = list(pool.map(lambda _: tor_proxy.new_proxy_url(), range(16)))
+    ports = [urlsplit(url).port for url in urls]
+    assert set(ports) == {19050, 19051, 19052, 19053}
+    assert all(ports.count(port) == 4 for port in set(ports))
+    assert len({urlsplit(url).username for url in urls}) == 16
+
+
+def test_newnym_authenticates_with_cookie_and_observes_cooldown(monkeypatch, tmp_path):
+    commands = []
+    class Control(socketserver.StreamRequestHandler):
+        def handle(self):
+            for _ in range(2):
+                commands.append(self.rfile.readline().decode().strip())
+                self.wfile.write(b'250 OK\r\n')
+                self.wfile.flush()
+    server = socketserver.ThreadingTCPServer(('127.0.0.1', 0), Control)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    instance = tor_proxy._TorInstance(2)
+    instance.runtime = Mock(name=str(tmp_path))
+    instance.runtime.name = str(tmp_path)
+    instance.control_port = server.server_address[1]
+    (tmp_path / 'data').mkdir()
+    (tmp_path / 'data' / 'control_auth_cookie').write_bytes(bytes(range(32)))
+    monkeypatch.setattr(tor_proxy, '_REQUEST_INSTANCES', {12345: instance})
+    logs = []
+    try:
+        tor_proxy.notify_block('http://user:tor@127.0.0.1:12345', logs.append)
+        tor_proxy.notify_block('http://user:tor@127.0.0.1:12345', logs.append)
+        assert commands == ['AUTHENTICATE ' + bytes(range(32)).hex(), 'SIGNAL NEWNYM']
+        assert any('accepted' in log for log in logs)
+        assert any('cooldown' in log for log in logs)
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2)
+
+
+@pytest.mark.parametrize('status', [403, 429])
+def test_opera_block_requests_newnym(monkeypatch, status):
+    monkeypatch.setattr(tor_proxy, 'new_proxy_url', lambda **kw: 'http://user:tor@127.0.0.1:19050')
+    notify = Mock()
+    monkeypatch.setattr(tor_proxy, 'notify_block', notify)
+    monkeypatch.setattr(opera_aria.requests, 'post', Mock(return_value=Mock(status_code=status)))
+    response = opera_aria._post_chat('token', 'Hello', 30)
+    try:
+        notify.assert_called_once()
+        assert urlsplit(notify.call_args.args[0]).port != 19050
+    finally:
+        response.close()
+
+
+@pytest.mark.parametrize('message', ['OpenCode Zen HTTP error: 403', 'OpenCode Zen quota/rate limit: 429'])
+def test_ocz_block_requests_newnym_before_relay_closes(monkeypatch, message):
+    monkeypatch.setattr(ocagy_cli, 'is_cancelled', lambda: False)
+    monkeypatch.setattr(tor_proxy, 'new_proxy_url', lambda **kw: 'http://user:tor@127.0.0.1:19050')
+    monkeypatch.setattr(ocagy_cli, '_send_opencode_zen_completion_impl', Mock(side_effect=ocagy_cli.OcAgyError(message)))
+    notify = Mock()
+    monkeypatch.setattr(tor_proxy, 'notify_block', notify)
+    with pytest.raises(ocagy_cli.OcAgyError, match=message):
+        ocagy_cli.send_opencode_zen_completion(messages=[], model='ocz/example-free')
+    notify.assert_called_once()
 
 
 def test_unique_identities_and_no_environment_mutation(monkeypatch):
-    monkeypatch.setattr(tor_proxy, "_PROCESS", Mock(poll=lambda: None))
-    monkeypatch.setattr(tor_proxy, "_PORT", 19050)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "process", Mock(poll=lambda: None))
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "port", 19050)
     first = tor_proxy.new_proxy_url()
     second = tor_proxy.new_proxy_url()
     assert first != second
@@ -188,9 +262,9 @@ def test_missing_tor_downloads_and_reuses_bundle(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("failure", [False, True])
 def test_bootstrap_waits_for_ready_and_cleans_failed_process(monkeypatch, tmp_path, failure):
-    monkeypatch.setattr(tor_proxy, "_PROCESS", None)
-    monkeypatch.setattr(tor_proxy, "_PORT", None)
-    monkeypatch.setattr(tor_proxy, "_RUNTIME", None)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "process", None)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "port", None)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "runtime", None)
     monkeypatch.setattr(tor_proxy, "ensure_tor_installed", lambda *args: str(tmp_path / "tor"))
     process = Mock()
     process.poll.return_value = 1 if failure else None
@@ -213,19 +287,19 @@ def test_bootstrap_waits_for_ready_and_cleans_failed_process(monkeypatch, tmp_pa
             with pytest.raises(tor_proxy.TorProxyError, match="exited during startup"):
                 tor_proxy.new_proxy_url()
             assert process.terminate.called
-            assert tor_proxy._PROCESS is None
+            assert tor_proxy._INSTANCES[0].process is None
         else:
             assert "@127.0.0.1:" in tor_proxy.new_proxy_url()
-            assert tor_proxy._PROCESS is process
+            assert tor_proxy._INSTANCES[0].process is process
             assert tor_proxy.new_proxy_url()
     finally:
         tor_proxy._stop()
 
 
 def test_parallel_first_requests_start_one_tor_and_use_unique_identities(monkeypatch, tmp_path):
-    monkeypatch.setattr(tor_proxy, "_PROCESS", None)
-    monkeypatch.setattr(tor_proxy, "_PORT", None)
-    monkeypatch.setattr(tor_proxy, "_RUNTIME", None)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "process", None)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "port", None)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "runtime", None)
     install = Mock(return_value=str(tmp_path / "tor"))
     monkeypatch.setattr(tor_proxy, "ensure_tor_installed", install)
     process = Mock(poll=lambda: None)
@@ -262,15 +336,15 @@ def test_parallel_first_requests_start_one_tor_and_use_unique_identities(monkeyp
 
 
 def test_waiting_parallel_request_can_cancel(monkeypatch):
-    with tor_proxy._LOCK:
+    with tor_proxy._INSTANCES[0].lock:
         with pytest.raises(tor_proxy.TorProxyError, match="waiting for startup"):
             tor_proxy.new_proxy_url(cancelled=lambda: True)
 
 
 @pytest.mark.parametrize("streaming", [True, False])
 def test_parallel_ocz_requests_keep_independent_proxy_environments(monkeypatch, streaming):
-    monkeypatch.setattr(tor_proxy, "_PROCESS", Mock(poll=lambda: None))
-    monkeypatch.setattr(tor_proxy, "_PORT", 19050)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "process", Mock(poll=lambda: None))
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "port", 19050)
     monkeypatch.setattr(ocagy_cli, "is_cancelled", lambda: False)
     monkeypatch.setattr(ocagy_cli, "ensure_opencode_installed", lambda **kw: "fake")
     original = {"NO_PROXY": "*", "HTTPS_PROXY": "ambient"}
@@ -296,8 +370,8 @@ def test_parallel_ocz_requests_keep_independent_proxy_environments(monkeypatch, 
 
 
 def test_parallel_opera_posts_have_independent_proxies(monkeypatch):
-    monkeypatch.setattr(tor_proxy, "_PROCESS", Mock(poll=lambda: None))
-    monkeypatch.setattr(tor_proxy, "_PORT", 19050)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "process", Mock(poll=lambda: None))
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "port", 19050)
     monkeypatch.setattr(opera_aria, "_is_cancelled", lambda: False)
     rendezvous = threading.Barrier(8)
 
@@ -320,9 +394,9 @@ def test_parallel_opera_posts_have_independent_proxies(monkeypatch):
 
 
 def test_startup_reports_bootstrap_progress_and_ready(monkeypatch, tmp_path):
-    monkeypatch.setattr(tor_proxy, "_PROCESS", None)
-    monkeypatch.setattr(tor_proxy, "_PORT", None)
-    monkeypatch.setattr(tor_proxy, "_RUNTIME", None)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "process", None)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "port", None)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "runtime", None)
     monkeypatch.setattr(tor_proxy, "ensure_tor_installed", lambda *args: str(tmp_path / "tor"))
     process = Mock(poll=lambda: None)
     logs = []
@@ -350,9 +424,9 @@ def test_startup_reports_bootstrap_progress_and_ready(monkeypatch, tmp_path):
 
 
 def test_timeout_preserves_process_and_next_request_resumes(monkeypatch, tmp_path):
-    monkeypatch.setattr(tor_proxy, "_PROCESS", None)
-    monkeypatch.setattr(tor_proxy, "_PORT", None)
-    monkeypatch.setattr(tor_proxy, "_RUNTIME", None)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "process", None)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "port", None)
+    monkeypatch.setattr(tor_proxy._INSTANCES[0], "runtime", None)
     monkeypatch.setattr(tor_proxy, "_BOOTSTRAP_WAIT_SECONDS", 0.02)
     monkeypatch.setattr(tor_proxy, "ensure_tor_installed", lambda *args: str(tmp_path / "tor"))
     process = Mock(poll=lambda: None)
@@ -368,10 +442,10 @@ def test_timeout_preserves_process_and_next_request_resumes(monkeypatch, tmp_pat
     try:
         with pytest.raises(tor_proxy.TorBootstrapTimeout, match="55%"):
             tor_proxy.new_proxy_url(log_fn=logs.append)
-        assert tor_proxy._PROCESS is process
-        assert tor_proxy._PORT is None  # Never return a not-yet-ready proxy.
+        assert tor_proxy._INSTANCES[0].process is process
+        assert tor_proxy._INSTANCES[0].port is None  # Never return a not-yet-ready proxy.
         process.terminate.assert_not_called()
-        runtime = Path(tor_proxy._RUNTIME.name)
+        runtime = Path(tor_proxy._INSTANCES[0].runtime.name)
         assert runtime.exists()
         with (runtime / "tor.log").open("a") as log:
             log.write("Bootstrapped 100% (done): Done\n")

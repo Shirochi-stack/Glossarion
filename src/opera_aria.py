@@ -765,6 +765,9 @@ def _post_chat(token: str, query: str, timeout: int, stream: bool = True,
     try:
         response = requests.post(CHAT_ENDPOINT_V2, headers=headers, json=payload,
                                  stream=stream, timeout=timeout, **options)
+        if proxy and response.status_code in (403, 429):
+            from tor_proxy import notify_block
+            notify_block(proxy, log_fn)
     except BaseException:
         lifetime.close()
         raise

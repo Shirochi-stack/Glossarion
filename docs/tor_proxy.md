@@ -18,9 +18,9 @@ identity, not the exit IP; proxy credentials and bearer tokens are not logged.
 OCZ also logs the proxy address and fresh circuit identity on every streaming or
 buffered call. Each call uses a new loopback relay port and authentication
 identity, including parallel calls. The relay forwards the connection to the
-shared Tor process while preserving that identity. The port stays open until
-the response stream or CLI call finishes, then closes. The internal Tor listener
-is shared so changing request ports does not require bootstrapping Tor again.
+selected Tor instance while preserving that identity. The port stays open until
+the response stream or CLI call finishes, then closes. Application retries rotate
+ports and instances; requests internal to one CLI invocation retain its proxy.
 
 Tor is discovered on PATH, in the cached expert bundle, or in common Tor Browser
 locations. When absent, the official stable expert bundle for the current
@@ -29,14 +29,21 @@ installed under `~/.glossarion/tor/bundle`. Archive extraction prevents traversa
 outside the installation directory. Downloads rely on HTTPS; detached release
 signatures are not verified. Unsupported architectures produce a setup error.
 
-The app starts its own client-only Tor instance on a random loopback HTTP proxy
-port with `IsolateSOCKSAuth`. Each caller waits up to 120 seconds for full bootstrap,
-reuses that instance for later calls, restarts it if it exits, and terminates it
-at normal app exit. Cancellation is checked during download and bootstrap.
-Callers waiting behind another request's bootstrap can also cancel. Only one
-thread installs or starts Tor; once ready, parallel callers receive independent
-proxy identities and their HTTPS transfers proceed concurrently. Console output
+The app rotates through four client-only Tor instances, starting each on demand.
+Each has its own data directory, HTTP proxy port with `IsolateSOCKSAuth`, and
+cookie-authenticated loopback control port. Each caller waits up to 120 seconds
+for its instance to bootstrap. Instances are reused, restarted if they exit, and
+terminated at normal app exit. Cancellation is checked during installation and
+bootstrap. Installation is serialized; different instances can bootstrap in
+parallel. Requests on a ready instance proceed concurrently. Console output
 is captured directly so early Windows configuration errors remain visible.
+
+On Opera HTTP 403/429 or OCZ rate-limit/access-block errors, the affected instance
+receives `SIGNAL NEWNYM`. Accepted renewal commands have a ten-second cooldown
+per instance. Existing streams continue; normal provider retry/backoff still
+applies, and the next attempt rotates to the next pool instance. Control failures
+are logged without replacing the original API error. Renewal does not guarantee
+a distinct exit IP.
 The application prints bootstrap percentages and stages, reports when startup
 stays at the same stage for ten seconds, and announces when the proxy is ready.
 Timeout errors include the last bootstrap stage and recent Tor console output.
@@ -51,6 +58,7 @@ Optional environment settings:
 - `GLOSSARION_TOR_ENABLED`: `1` enables Tor and per-request ports; default `0`.
 - `GLOSSARION_TOR_BINARY`: explicit path to a Tor executable.
 - `GLOSSARION_TOR_DIR`: override the installation/cache directory.
+- `GLOSSARION_TOR_INSTANCES`: instance pool size (1–8, default 4).
 
 Paid `oc/`, `opencode/`, and `opencode-go/` aliases retain their existing routing.
 Tor installation downloads, Opera browser token minting, and local CLI/CDP
