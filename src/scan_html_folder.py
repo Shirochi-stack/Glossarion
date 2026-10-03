@@ -1150,12 +1150,16 @@ def _repeating_sentence_counts(text, min_repeats=10, min_sentence_length=50,
 
     filtered_text = filter_dash_lines(text)
     # Include CJK sentence terminators so Japanese/Chinese source chapters can
-    # provide the same repetition allowance as an English translation.
+    # provide the same repetition allowance as an English translation. Line
+    # breaks (block boundaries) also end a sentence, so an unterminated line
+    # such as "^^" doesn't merge into the next repeated sentence.
     sentences = []
-    for sentence in re.split(r'[.!?\u3002\uff01\uff1f]+', filtered_text):
+    for sentence in re.split(r'[.!?\u3002\uff01\uff1f]+|\n+', filtered_text):
         normalized = re.sub(r'\s+', ' ', sentence).strip()
         if len(normalized) >= min_sentence_length:
-            sentences.append(normalized)
+            # Count ignoring whitespace: Korean spacing is often inconsistent
+            # ("님," vs " 님,") while translations normalize it.
+            sentences.append(re.sub(r'\s+', '', normalized))
 
     if len(sentences) < min_repeats:
         return []
@@ -1194,13 +1198,17 @@ def has_repeating_sentences(text, min_repeats=10, source_text=None):
     if not source_text:
         return True
 
-    # Source-language sentences, especially CJK sentences, are often much
-    # shorter than their translated equivalents, so keep the historical
-    # 20-character floor for source allowances.
+    # Source-language sentences, especially Korean/CJK sentences, are often
+    # much shorter than their translated equivalents. Scale the translated
+    # 51-character floor by this chapter's source/translation length ratio,
+    # never above the historical 21-character floor and never below 10.
+    source_chars = len(re.sub(r'\s+', '', source_text))
+    translated_chars = max(1, len(re.sub(r'\s+', '', text)))
+    source_min_length = max(10, min(21, int(51 * source_chars / translated_chars)))
     source_counts = _repeating_sentence_counts(
         source_text,
         min_repeats=min_repeats,
-        min_sentence_length=21,
+        min_sentence_length=source_min_length,
     )
     unmatched_source_counts = list(source_counts)
     for translated_count in translated_counts:
@@ -5123,7 +5131,7 @@ def _chunk_issue_matches(issue, chunk_html, chunk_text, source_text, qa_settings
         try:
             source_visible = BeautifulSoup(
                 str(source_text or ""), "html.parser"
-            ).get_text(" ", strip=True)
+            ).get_text("\n", strip=True)
             return has_repeating_sentences(
                 chunk_text,
                 source_text=source_visible or None,

@@ -597,6 +597,25 @@ def test_repetition_check_flags_repetition_beyond_source_count():
     assert has_repeating_sentences(translated_text, source_text=source_text) is True
 
 
+def test_repetition_check_allows_short_korean_source_lines():
+    # Korean donation lines are ~20 chars, under the old fixed 21-char source
+    # floor. One has an author spacing typo, and one follows an unterminated
+    # emoticon line; neither should cost the source its allowance.
+    source_lines = ["#이광상 님, 4코인 후원 감사합니다!"] * 11
+    source_lines[3] = "#이광상님, 4코인 후원 감사합니다!"
+    source_lines.insert(5, "^ㅗ^")
+    translated_lines = ["#Lee Gwangsang-nim, thank you for your 4-Coin donation!"] * 11
+    translated_lines.insert(5, "^ㅗ^")
+
+    source_text = "\n".join(source_lines)
+    translated_text = "\n".join(translated_lines)
+
+    assert has_repeating_sentences(translated_text, source_text=source_text) is False
+    assert has_repeating_sentences(
+        translated_text + "\n" + translated_lines[0], source_text=source_text
+    ) is True
+
+
 def test_qa_scan_uses_standalone_source_html_for_repetition_allowance(tmp_path):
     source_sentence = "これは作者が意図して何度も繰り返している十分に長い原文の一文です。"
     translated_sentence = (
