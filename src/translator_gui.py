@@ -38707,7 +38707,14 @@ Important rules:
             os.environ['BATCH_HEADER_PROMPT'] = batch_header_prompt
             os.environ['BATCH_HEADER_PREPEND_NUMBER_PATTERN'] = str(
                 self.config.get('batch_header_prepend_number_pattern', '') or '')
-            
+
+            # Header, TOC and metadata requests append the glossary from these.
+            for env_key, env_value in self._glossary_env_mappings():
+                os.environ[env_key] = str(env_value)
+            os.environ['GLOSSARY_MATCH_ENGINE'] = self._glossary_match_engine_env_value()
+            os.environ.update(self._strict_matching_env_dict())
+            os.environ.update(self._unified_glossary_env_dict())
+
             # Set metadata translation settings
             os.environ['TRANSLATE_METADATA_FIELDS'] = json.dumps(self.translate_metadata_fields)
             os.environ['METADATA_TRANSLATION_MODE'] = self.config.get('metadata_translation_mode', 'together')
@@ -47296,6 +47303,98 @@ Important rules:
         
         return "\n".join(analysis) if analysis else "Unable to determine specific issues."
 
+    def _glossary_env_mappings(self):
+        """(env key, value) pairs for the glossary settings in ``self.config``.
+
+        save_config exports them, and so does the EPUB converter: its chapter
+        header and TOC requests read the glossary settings from os.environ,
+        where an earlier run may have left them changed (an Input/Output
+        run forces APPEND_GLOSSARY=0).
+        """
+        # Normalize and align glossary prompts
+        prompt_keys = ['manual_glossary_prompt', 'append_glossary_prompt', 'single_pass_glossary_header_prompt', 'unified_auto_glosary_prompt3', 'glossary_refinement_system_prompt', 'glossary_refinement_user_prompt', 'glossary_translation_prompt', 'glossary_format_instructions']
+        for key in prompt_keys:
+            self.config[key] = self.config.get(key, '') or ''
+
+        return [
+            ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
+            ('AUTO_GLOSSARY_PROMPT', self.config.get('unified_auto_glosary_prompt3', '')),
+            ('GLOSSARY_REFINEMENT_ENABLED', '1' if self.config.get('glossary_refinement_enabled', False) else '0'),
+            ('GLOSSARY_REFINEMENT_SYSTEM_PROMPT', self.config.get('glossary_refinement_system_prompt') or getattr(self, 'glossary_refinement_system_prompt', '')),
+            ('GLOSSARY_REFINEMENT_USER_PROMPT', self.config.get('glossary_refinement_user_prompt', '')),
+            ('GLOSSARY_REFINEMENT_TYPE_MODE', self.config.get('glossary_refinement_type_mode', 'all')),
+            ('GLOSSARY_REFINEMENT_SELECTED_TYPES', ','.join(self.config.get('glossary_refinement_selected_types', []))),
+            ('GLOSSARY_REFINEMENT_CHUNKING_MODE', self.config.get('glossary_refinement_chunking_mode', 'all')),
+            ('GLOSSARY_REFINEMENT_SKIP_DEDUPE', '1' if self.config.get('glossary_refinement_skip_dedupe', False) else '0'),
+            ('GLOSSARY_REFINEMENT_WAIT_FOR_COMPLETION', '1' if self.config.get('glossary_refinement_wait_for_completion', False) else '0'),
+            ('GLOSSARY_REFINEMENT_REOPEN_ON_SOURCE_CHANGE', '1' if self.config.get('glossary_refinement_reopen_on_source_change', False) else '0'),
+            ('APPEND_GLOSSARY_PROMPT', self.config.get('append_glossary_prompt', '') or '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'),
+            ('APPEND_GLOSSARY', '0' if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ('1' if self.config.get('append_glossary') else '0')),
+            ('ADD_ADDITIONAL_GLOSSARY', '1' if self.config.get('add_additional_glossary') else '0'),
+            ('ADDITIONAL_GLOSSARY_PATH', self.config.get('additional_glossary_path', '')),
+            ('GLOSSARY_SHARED_DIR', os.path.join(_get_app_dir(), 'Glossary')),
+            ('SAVE_GLOSSARY_IN_OUTPUT', '1' if self.config.get('save_glossary_in_output', False) else '0'),
+            ('VISION_OCR_SOURCE_PREPASS', str(self.config.get('vision_ocr_source_prepass', 'auto') or 'auto')),
+            ('ENABLE_AUTO_GLOSSARY', '1' if self.config.get('auto_glossary_mode', 'off') == 'minimal' else '0'),
+            ('AUTO_GLOSSARY_MODE', self.config.get('auto_glossary_mode', 'off')),
+            ('SINGLE_PASS_GLOSSARY_MODE', '1' if self.config.get('auto_glossary_mode', 'off') == 'single_pass' else ''),
+            ('SINGLE_PASS_GLOSSARY_HEADER_PROMPT', self.config.get('single_pass_glossary_header_prompt', '')),
+            ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
+            ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
+            ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter') else '0'),
+            ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics') else '0'),
+            ('GLOSSARY_FUZZY_THRESHOLD', str(self.config.get('glossary_fuzzy_threshold', 0.90))),
+            ('GLOSSARY_ENTRY_TYPE_FILTER_MODE', self.config.get('glossary_entry_type_filter_mode', 'Loose')),
+            ('GLOSSARY_USE_LEGACY_CSV', '1' if self.config.get('glossary_use_legacy_csv') else '0'),
+            ('GLOSSARY_OUTPUT_LEGACY_JSON', '1' if self.config.get('glossary_output_legacy_json') else '0'),
+            ('GLOSSARY_INCLUDE_ALL_CHARACTERS', '1' if self.config.get('glossary_include_all_characters') else '0'),
+            ('GLOSSARY_SKIP_IDENTICAL_ENTRIES', '1' if self.config.get('glossary_skip_identical_entries', True) else '0'),
+            ('GLOSSARY_CJK_SCRIPT_FILTER', '1' if self.config.get('glossary_cjk_script_filter', False) else '0'),
+            ('GLOSSARY_SKIP_GENDER_TRACKING', '1' if self.config.get('glossary_skip_gender_tracking', False) else '0'),
+            ('GLOSSARY_GENDER_NOISE_THRESHOLD', str(self.config.get('glossary_gender_noise_threshold', 10))),
+            ('GLOSSARY_GENDER_TRACKING_BIAS', str(self.config.get('glossary_gender_tracking_bias', 'none'))),
+            ('GLOSSARY_USE_SMART_FILTER', '1' if self.config.get('glossary_use_smart_filter', True) else '0'),
+            ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 200))),
+            ('COMPRESS_GLOSSARY_PROMPT', '1' if self.config.get('compress_glossary_prompt') else '0'),
+            ('COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN', '1' if getattr(self, 'compress_glossary_consider_translated_column_var', self.config.get('compress_glossary_consider_translated_column', False)) else '0'),
+            ('COMPRESS_GLOSSARY_MULTIPASS_EXCLUDE_MATCHING', '1' if getattr(self, 'compress_glossary_multipass_exclude_matching_var', self.config.get('compress_glossary_multipass_exclude_matching', True)) else '0'),
+            ('GLOSSARY_INCLUDE_GENDER_CONTEXT', '1' if self.config.get('include_gender_context') else '0'),
+            ('GLOSSARY_ENABLE_GENDER_NUANCE', '1' if self.config.get('enable_gender_nuance', True) else '0'),
+            ('GLOSSARY_INCLUDE_DESCRIPTION', '1' if self.config.get('include_description') else '0'),
+            # Add missing environment variables that GlossaryManager.py reads
+            ('GLOSSARY_MIN_FREQUENCY', str(self.config.get('glossary_min_frequency', 2))),
+            ('GLOSSARY_MAX_NAMES', str(self.config.get('glossary_max_names', 50))),
+            ('GLOSSARY_MAX_TITLES', str(self.config.get('glossary_max_titles', 30))),
+            ('CONTEXT_WINDOW_SIZE', str(self.config.get('context_window_size', 5))),
+            ('GLOSSARY_MAX_TEXT_SIZE', str(self.config.get('glossary_max_text_size', 50000))),
+            ('GLOSSARY_CHAPTER_SPLIT_THRESHOLD', str(self.config.get('glossary_chapter_split_threshold', 8192))),
+            ('GLOSSARY_FILTER_MODE', self.config.get('glossary_filter_mode', 'strict')),
+            ('GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '1' if self.config.get('never_consider_in_between_files_as_special', True) else '0'),
+            ('GLOSSARY_DUPLICATE_ALGORITHM', self.config.get('glossary_duplicate_algorithm', 'auto')),
+            ('GLOSSARY_PARTIAL_RATIO_WEIGHT', str(self.config.get('glossary_partial_ratio_weight', 0.45))),
+            ('GLOSSARY_PARTIAL_RATIO_GENDER_ONLY', '1' if self.config.get('glossary_partial_ratio_gender_only', False) else '0'),
+            ('GLOSSARY_ALIAS_AWARE_NAME_MATCHING', '1' if self.config.get('glossary_alias_aware_name_matching', False) else '0'),
+            ('GLOSSARY_ALIAS_AWARE_GENDER_ONLY', '1' if self.config.get('glossary_alias_aware_gender_only', True) else '0'),
+            ('GLOSSARY_TARGET_LANGUAGE', self.config.get('glossary_target_language', 'English')),
+            # Glossary anti-duplicate parameters
+            ('GLOSSARY_ENABLE_ANTI_DUPLICATE', '1' if self.config.get('glossary_enable_anti_duplicate', False) else '0'),
+            ('GLOSSARY_TOP_P', str(self.config.get('glossary_top_p', 1.0))),
+            ('GLOSSARY_MIN_P', str(self.config.get('glossary_min_p', 0.0))),
+            ('GLOSSARY_BYPASS_MIN_P_ALLOWLIST', '1' if self.config.get('glossary_bypass_min_p_allowlist', False) else '0'),
+            ('GLOSSARY_TOP_K', str(self.config.get('glossary_top_k', 0))),
+            ('GLOSSARY_FREQUENCY_PENALTY', str(self.config.get('glossary_frequency_penalty', 0.0))),
+            ('GLOSSARY_PRESENCE_PENALTY', str(self.config.get('glossary_presence_penalty', 0.0))),
+            ('GLOSSARY_REPETITION_PENALTY', str(self.config.get('glossary_repetition_penalty', 1.0))),
+            ('GLOSSARY_CANDIDATE_COUNT', str(self.config.get('glossary_candidate_count', 1))),
+            ('GLOSSARY_CUSTOM_STOP_SEQUENCES', str(self.config.get('glossary_custom_stop_sequences', ''))),
+            ('GLOSSARY_LOGIT_BIAS_ENABLED', '1' if self.config.get('glossary_logit_bias_enabled', False) else '0'),
+            ('GLOSSARY_LOGIT_BIAS_STRENGTH', str(self.config.get('glossary_logit_bias_strength', -0.5))),
+            ('GLOSSARY_BIAS_COMMON_WORDS', '1' if self.config.get('glossary_bias_common_words', False) else '0'),
+            ('GLOSSARY_BIAS_REPETITIVE_PHRASES', '1' if self.config.get('glossary_bias_repetitive_phrases', False) else '0'),
+            ('GLOSSARY_CUSTOM_ENTRY_TYPES', json.dumps(self.config.get('custom_entry_types', {}))),
+            ('GLOSSARY_CUSTOM_FIELDS', json.dumps(self.config.get('custom_glossary_fields', []))),
+        ]
+
     def save_config(self, show_message=True):
         """Persist all settings to config.json."""
         if getattr(self, '_config_restore_pending', False):
@@ -48102,96 +48201,8 @@ Important rules:
             # Glossary-related environment variables
             if show_message and debug_enabled: self.append_log("🔍 [DEBUG] Setting glossary environment variables...")
             try:
-                # Normalize and align glossary prompts
-                prompt_keys = ['manual_glossary_prompt', 'append_glossary_prompt', 'single_pass_glossary_header_prompt', 'unified_auto_glosary_prompt3', 'glossary_refinement_system_prompt', 'glossary_refinement_user_prompt', 'glossary_translation_prompt', 'glossary_format_instructions']
-                for key in prompt_keys:
-                    self.config[key] = self.config.get(key, '') or ''
-
-                glossary_env_mappings = [
-                    ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
-                    ('AUTO_GLOSSARY_PROMPT', self.config.get('unified_auto_glosary_prompt3', '')),
-                    ('GLOSSARY_REFINEMENT_ENABLED', '1' if self.config.get('glossary_refinement_enabled', False) else '0'),
-                    ('GLOSSARY_REFINEMENT_SYSTEM_PROMPT', self.config.get('glossary_refinement_system_prompt') or getattr(self, 'glossary_refinement_system_prompt', '')),
-                    ('GLOSSARY_REFINEMENT_USER_PROMPT', self.config.get('glossary_refinement_user_prompt', '')),
-                    ('GLOSSARY_REFINEMENT_TYPE_MODE', self.config.get('glossary_refinement_type_mode', 'all')),
-                    ('GLOSSARY_REFINEMENT_SELECTED_TYPES', ','.join(self.config.get('glossary_refinement_selected_types', []))),
-                    ('GLOSSARY_REFINEMENT_CHUNKING_MODE', self.config.get('glossary_refinement_chunking_mode', 'all')),
-                    ('GLOSSARY_REFINEMENT_SKIP_DEDUPE', '1' if self.config.get('glossary_refinement_skip_dedupe', False) else '0'),
-                    ('GLOSSARY_REFINEMENT_WAIT_FOR_COMPLETION', '1' if self.config.get('glossary_refinement_wait_for_completion', False) else '0'),
-                    ('GLOSSARY_REFINEMENT_REOPEN_ON_SOURCE_CHANGE', '1' if self.config.get('glossary_refinement_reopen_on_source_change', False) else '0'),
-                    ('APPEND_GLOSSARY_PROMPT', self.config.get('append_glossary_prompt', '') or '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'),
-                    ('APPEND_GLOSSARY', '0' if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ('1' if self.config.get('append_glossary') else '0')),
-                    ('ADD_ADDITIONAL_GLOSSARY', '1' if self.config.get('add_additional_glossary') else '0'),
-                    ('ADDITIONAL_GLOSSARY_PATH', self.config.get('additional_glossary_path', '')),
-                    ('GLOSSARY_SHARED_DIR', os.path.join(_get_app_dir(), 'Glossary')),
-                    ('SAVE_GLOSSARY_IN_OUTPUT', '1' if self.config.get('save_glossary_in_output', False) else '0'),
-                    ('VISION_OCR_SOURCE_PREPASS', str(self.config.get('vision_ocr_source_prepass', 'auto') or 'auto')),
-                    ('ENABLE_AUTO_GLOSSARY', '1' if self.config.get('auto_glossary_mode', 'off') == 'minimal' else '0'),
-                    ('AUTO_GLOSSARY_MODE', self.config.get('auto_glossary_mode', 'off')),
-                    ('SINGLE_PASS_GLOSSARY_MODE', '1' if self.config.get('auto_glossary_mode', 'off') == 'single_pass' else ''),
-                    ('SINGLE_PASS_GLOSSARY_HEADER_PROMPT', self.config.get('single_pass_glossary_header_prompt', '')),
-                    ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
-                    ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
-                    ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter') else '0'),
-                    ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics') else '0'),
-                    ('GLOSSARY_FUZZY_THRESHOLD', str(self.config.get('glossary_fuzzy_threshold', 0.90))),
-                    ('GLOSSARY_ENTRY_TYPE_FILTER_MODE', self.config.get('glossary_entry_type_filter_mode', 'Loose')),
-                    ('GLOSSARY_USE_LEGACY_CSV', '1' if self.config.get('glossary_use_legacy_csv') else '0'),
-                    ('GLOSSARY_OUTPUT_LEGACY_JSON', '1' if self.config.get('glossary_output_legacy_json') else '0'),
-                    ('GLOSSARY_INCLUDE_ALL_CHARACTERS', '1' if self.config.get('glossary_include_all_characters') else '0'),
-                    ('GLOSSARY_SKIP_IDENTICAL_ENTRIES', '1' if self.config.get('glossary_skip_identical_entries', True) else '0'),
-                    ('GLOSSARY_CJK_SCRIPT_FILTER', '1' if self.config.get('glossary_cjk_script_filter', False) else '0'),
-                    ('GLOSSARY_SKIP_GENDER_TRACKING', '1' if self.config.get('glossary_skip_gender_tracking', False) else '0'),
-                    ('GLOSSARY_GENDER_NOISE_THRESHOLD', str(self.config.get('glossary_gender_noise_threshold', 10))),
-                    ('GLOSSARY_GENDER_TRACKING_BIAS', str(self.config.get('glossary_gender_tracking_bias', 'none'))),
-                    ('GLOSSARY_USE_SMART_FILTER', '1' if self.config.get('glossary_use_smart_filter', True) else '0'),
-                    ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 200))),
-                    ('COMPRESS_GLOSSARY_PROMPT', '1' if self.config.get('compress_glossary_prompt') else '0'),
-                    ('COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN', '1' if getattr(self, 'compress_glossary_consider_translated_column_var', self.config.get('compress_glossary_consider_translated_column', False)) else '0'),
-                    ('COMPRESS_GLOSSARY_MULTIPASS_EXCLUDE_MATCHING', '1' if getattr(self, 'compress_glossary_multipass_exclude_matching_var', self.config.get('compress_glossary_multipass_exclude_matching', True)) else '0'),
-                    ('GLOSSARY_INCLUDE_GENDER_CONTEXT', '1' if self.config.get('include_gender_context') else '0'),
-                    ('GLOSSARY_ENABLE_GENDER_NUANCE', '1' if self.config.get('enable_gender_nuance', True) else '0'),
-                    ('GLOSSARY_INCLUDE_DESCRIPTION', '1' if self.config.get('include_description') else '0'),
-                    # Add missing environment variables that GlossaryManager.py reads
-                    ('GLOSSARY_MIN_FREQUENCY', str(self.config.get('glossary_min_frequency', 2))),
-                    ('GLOSSARY_MAX_NAMES', str(self.config.get('glossary_max_names', 50))),
-                    ('GLOSSARY_MAX_TITLES', str(self.config.get('glossary_max_titles', 30))),
-                    ('CONTEXT_WINDOW_SIZE', str(self.config.get('context_window_size', 5))),
-                    ('GLOSSARY_MAX_TEXT_SIZE', str(self.config.get('glossary_max_text_size', 50000))),
-                    ('GLOSSARY_CHAPTER_SPLIT_THRESHOLD', str(self.config.get('glossary_chapter_split_threshold', 8192))),
-                    ('GLOSSARY_FILTER_MODE', self.config.get('glossary_filter_mode', 'strict')),
-                    ('GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL', '1' if self.config.get('never_consider_in_between_files_as_special', True) else '0'),
-                    ('GLOSSARY_DUPLICATE_ALGORITHM', self.config.get('glossary_duplicate_algorithm', 'auto')),
-                    ('GLOSSARY_PARTIAL_RATIO_WEIGHT', str(self.config.get('glossary_partial_ratio_weight', 0.45))),
-                    ('GLOSSARY_PARTIAL_RATIO_GENDER_ONLY', '1' if self.config.get('glossary_partial_ratio_gender_only', False) else '0'),
-                    ('GLOSSARY_ALIAS_AWARE_NAME_MATCHING', '1' if self.config.get('glossary_alias_aware_name_matching', False) else '0'),
-                    ('GLOSSARY_ALIAS_AWARE_GENDER_ONLY', '1' if self.config.get('glossary_alias_aware_gender_only', True) else '0'),
-                    ('GLOSSARY_TARGET_LANGUAGE', self.config.get('glossary_target_language', 'English')),
-                    # Glossary anti-duplicate parameters
-                    ('GLOSSARY_ENABLE_ANTI_DUPLICATE', '1' if self.config.get('glossary_enable_anti_duplicate', False) else '0'),
-                    ('GLOSSARY_TOP_P', str(self.config.get('glossary_top_p', 1.0))),
-                    ('GLOSSARY_MIN_P', str(self.config.get('glossary_min_p', 0.0))),
-                    ('GLOSSARY_BYPASS_MIN_P_ALLOWLIST', '1' if self.config.get('glossary_bypass_min_p_allowlist', False) else '0'),
-                    ('GLOSSARY_TOP_K', str(self.config.get('glossary_top_k', 0))),
-                    ('GLOSSARY_FREQUENCY_PENALTY', str(self.config.get('glossary_frequency_penalty', 0.0))),
-                    ('GLOSSARY_PRESENCE_PENALTY', str(self.config.get('glossary_presence_penalty', 0.0))),
-                    ('GLOSSARY_REPETITION_PENALTY', str(self.config.get('glossary_repetition_penalty', 1.0))),
-                    ('GLOSSARY_CANDIDATE_COUNT', str(self.config.get('glossary_candidate_count', 1))),
-                    ('GLOSSARY_CUSTOM_STOP_SEQUENCES', str(self.config.get('glossary_custom_stop_sequences', ''))),
-                    ('GLOSSARY_LOGIT_BIAS_ENABLED', '1' if self.config.get('glossary_logit_bias_enabled', False) else '0'),
-                    ('GLOSSARY_LOGIT_BIAS_STRENGTH', str(self.config.get('glossary_logit_bias_strength', -0.5))),
-                    ('GLOSSARY_BIAS_COMMON_WORDS', '1' if self.config.get('glossary_bias_common_words', False) else '0'),
-                    ('GLOSSARY_BIAS_REPETITIVE_PHRASES', '1' if self.config.get('glossary_bias_repetitive_phrases', False) else '0'),
-                ]
-                for env_key, env_value in glossary_env_mappings:
-                    if env_key:  # Skip None entries
-                        env_vars_set.append(_update_env(env_key, env_value))
-                
-                # JSON environment variables
-                custom_types_json = json.dumps(self.config.get('custom_entry_types', {}))
-                env_vars_set.append(_update_env('GLOSSARY_CUSTOM_ENTRY_TYPES', custom_types_json))
-                custom_fields_json = json.dumps(self.config.get('custom_glossary_fields', []))
-                env_vars_set.append(_update_env('GLOSSARY_CUSTOM_FIELDS', custom_fields_json))
+                for env_key, env_value in self._glossary_env_mappings():
+                    env_vars_set.append(_update_env(env_key, env_value))
             except Exception as e:
                 if show_message and debug_enabled: self.append_log(f"❌ [DEBUG] Glossary environment variable setup failed: {e}")
 
