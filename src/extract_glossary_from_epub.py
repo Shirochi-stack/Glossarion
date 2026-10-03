@@ -4261,12 +4261,14 @@ def _is_entry_type_accepted(entry_type, enabled_types):
     filter_mode = os.getenv('GLOSSARY_ENTRY_TYPE_FILTER_MODE', 'none').lower()
     if filter_mode == 'none':
         return True
-    normalized = _normalize_entry_type(entry_type, enabled_types)
-    if normalized in enabled_types:
-        return True
-    if filter_mode == 'loose':
-        return True  # Loose accepts anything that was attempted to normalize
-    return False
+    entry_type = str(entry_type or '').strip().lower()
+    enabled = [str(t).strip().lower() for t in enabled_types]
+    if filter_mode == 'strict':
+        return entry_type in enabled
+    # Loose: a plural/variant of an enabled type is accepted, anything else is
+    # not. The model's own reasoning written as CSV lines ("wait but wait,
+    # let's check…") must not become entries under an invented type.
+    return _normalize_entry_type(entry_type, enabled) in enabled
 
 
 def _find_description_field_casing(custom_fields):

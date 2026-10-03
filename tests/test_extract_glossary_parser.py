@@ -714,6 +714,35 @@ def test_no_header_gender_type_description_without_gender_column(monkeypatch):
     assert entries[0]["description"] == "The pinnacle of swordsmanship."
 
 
+@pytest.mark.parametrize("mode, expected", [
+    ("strict", ["Damian"]),
+    ("loose", ["Damian", "Mana Stones"]),
+    ("none", None),
+])
+def test_entry_type_filter_drops_model_reasoning_rows(monkeypatch, mode, expected):
+    # Real lines a model wrote into its glossary answer; split on commas they
+    # look like rows whose type is "wait but wait".
+    _set_glossary_env(monkeypatch)
+    monkeypatch.setenv("GLOSSARY_ENTRY_TYPE_FILTER_MODE", mode)
+    response = "\n".join([
+        "type,raw_name,translated_name,gender,description",
+        "character,다미안,Damian,male,A creator of mana devices.",
+        "items,마정석,Mana Stones,,Crystals.",
+        "wait but wait,let's check if we have any surnames entries. As we said earlier,"
+        "there are no Korean surnames,,and the foreign names are single words",
+        'another thing: the text mentions " gaia sprout union" which is "지구" '
+        "— but since it's a group,and we don't have a group entry type,"
+        "we can't include it,,which is correct",
+    ])
+
+    names = [entry["translated_name"] for entry in parse_api_response(response)]
+
+    if expected is None:  # No Filtering keeps every row, by design
+        assert len(names) == 4
+    else:
+        assert names == expected
+
+
 def test_no_header_gender_type_keeps_real_gender_before_description(monkeypatch):
     _set_glossary_env(monkeypatch)
     response = 'character,\ub2e4\ubbf8\uc548,Damian,male,"A creator of mana devices."'

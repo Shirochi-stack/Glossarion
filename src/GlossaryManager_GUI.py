@@ -3049,7 +3049,7 @@ class GlossaryManagerMixin:
         type_control_layout.addWidget(filter_label)
         filter_desc = QLabel(
             "Strict = exact match only (e.g. 'term' rejected if type is 'terms')  •  "
-            "Loose = normalizes plurals and accepts all  •  "
+            "Loose = accepts enabled types and their plurals, rejects unknown types  •  "
             "No Filtering = accepts any type (still normalizes plurals)"
         )
         filter_desc.setStyleSheet("font-size: 9pt; color: #aaa;")
