@@ -428,8 +428,12 @@ def _get_static_model_options() -> List[str]:
         "antigravity/gemini-2.5-flash-lite",
         "antigravity/gemini-2.5-flash-thinking",
         "antigravity/gemini-2.5-pro",
-        "antigravity/claude-opus-4-6-thinking",
-        "antigravity/claude-sonnet-4-6",
+        "antigravity/claude-sonnet-5-5-low",
+        "antigravity/claude-sonnet-5-5-medium",
+        "antigravity/claude-sonnet-5-5-high",
+        "antigravity/claude-opus-5-5-low",
+        "antigravity/claude-opus-5-5-medium",
+        "antigravity/claude-opus-5-5-high",
         "antigravity/gpt-oss-120b-medium",
 
         # Google Search / Gemini browser-backed route (no API key needed)
