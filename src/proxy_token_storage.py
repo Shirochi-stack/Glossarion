@@ -48,26 +48,65 @@ def load_accounts(path, *, migrate=False):
     return value
 
 
-JS_ADAPTER = r'''// Glossarion token_encryption GLSE1 adapter v1
+JS_ADAPTER = r'''// Glossarion token_encryption GLSE1 adapter v2
 import {spawnSync} from 'node:child_process';
 import {createCipheriv, createDecipheriv, createHmac, randomBytes, timingSafeEqual} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {join} from 'node:path';
 
-const fail = () => { const e = new Error('Credential encryption/decryption failed; account file was not replaced'); e.code = 'GLOSSARION_CREDENTIAL_CRYPTO'; throw e; };
-function dpapi(input, decrypt) {
+const CRYPTO_ERROR = 'GLOSSARION_CREDENTIAL_CRYPTO';
+// The reason never contains credential data; it says which step failed.
+const fail = (reason) => { const e = new Error('Credential encryption/decryption failed; account file was not replaced' + (reason ? ` (${reason})` : '')); e.code = CRYPTO_ERROR; throw e; };
+const rethrow = (error) => error?.code === CRYPTO_ERROR ? (() => { throw error; })() : fail(error?.message);
+
+// Bun calls DPAPI in-process. Starting PowerShell for every account save took
+// ~1s and failed now and then under load; it stays as the fallback for
+// runtimes without bun:ffi.
+let nativeDpapi = null;
+if (process.platform === 'win32') {
+  try {
+    const {dlopen, FFIType, ptr, toArrayBuffer} = await import('bun:ffi');
+    const blobCall = {args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.u32, FFIType.ptr], returns: FFIType.i32};
+    const crypt32 = dlopen('crypt32.dll', {CryptProtectData: blobCall, CryptUnprotectData: blobCall});
+    const kernel32 = dlopen('kernel32.dll', {LocalFree: {args: [FFIType.ptr], returns: FFIType.ptr}});
+    nativeDpapi = (input, decrypt) => {
+      // DATA_BLOB on 64-bit Windows: DWORD cbData (padded to 8 bytes), BYTE* pbData.
+      const inBlob = new BigUint64Array([BigInt(input.length), BigInt(ptr(input))]), outBlob = new BigUint64Array(2);
+      const call = decrypt ? crypt32.symbols.CryptUnprotectData : crypt32.symbols.CryptProtectData;
+      // CRYPTPROTECT_UI_FORBIDDEN, no entropy: same blob as Python's token_encryption.
+      if (!call(ptr(inBlob), null, null, null, null, 1, ptr(outBlob))) fail(`DPAPI ${decrypt ? 'Unprotect' : 'Protect'} failed`);
+      const address = Number(outBlob[1]);
+      try { return Buffer.from(toArrayBuffer(address, 0, Number(outBlob[0] & 0xffffffffn)).slice(0)); }
+      finally { kernel32.symbols.LocalFree(address); }
+    };
+  } catch { nativeDpapi = null; }
+}
+function powershellDpapi(input, decrypt) {
   // Only static code is passed as an argument. Secret bytes travel over stdin.
   const method = decrypt ? 'Unprotect' : 'Protect';
   const script = `Add-Type -AssemblyName System.Security; $d=[Convert]::FromBase64String([Console]::In.ReadToEnd()); $r=[Security.Cryptography.ProtectedData]::${method}($d,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::Out.Write([Convert]::ToBase64String($r))`;
   const systemRoot=process.env.SystemRoot || process.env.SYSTEMROOT || 'C:\\Windows';
   const executable=join(systemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
   const env=Object.fromEntries(Object.entries(process.env).filter(([name])=>['systemroot','windir','temp','tmp','userprofile','localappdata','appdata','homedrive','homepath'].includes(name.toLowerCase())));
-  const result = spawnSync(executable, ['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')], {
-    input: input.toString('base64'), encoding:'utf8', windowsHide:true, env, timeout:30000, maxBuffer:32*1024*1024
-  });
-  if (result.error || result.status !== 0 || !result.stdout.trim()) fail();
-  return Buffer.from(result.stdout.trim(),'base64');
+  let reason = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const result = spawnSync(executable, ['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')], {
+      input: input.toString('base64'), encoding:'utf8', windowsHide:true, env, timeout:30000, maxBuffer:32*1024*1024
+    });
+    const output = (result.stdout || '').trim();
+    if (!result.error && result.status === 0 && output) return Buffer.from(output,'base64');
+    if (!result.error && result.status !== 0) {
+      // PowerShell ran and DPAPI refused the data: retrying will not help.
+      fail(`PowerShell ${method} exit ${result.status}: ${(result.stderr || '').trim().split(/\r?\n/)[0].slice(0, 160)}`);
+    }
+    // Timeout, spawn failure or empty output: transient, so try again.
+    reason = `PowerShell ${method} ${result.error ? (result.error.code || result.error.message) : 'returned no output'}, ${attempt} attempts`;
+  }
+  return fail(reason);
+}
+function dpapi(input, decrypt) {
+  return nativeDpapi ? nativeDpapi(input, decrypt) : powershellDpapi(input, decrypt);
 }
 function symmetricKey() {
   let key;
@@ -101,12 +140,12 @@ function decryptUnix(data) {
 }
 export function encryptSerialized(text) {
   try { const raw=Buffer.from(text,'utf8'); return 'GLSE1:'+(process.platform==='win32'?dpapi(raw,false):encryptUnix(raw)).toString('base64'); }
-  catch { return fail(); }
+  catch (error) { return rethrow(error); }
 }
 export function decryptSerialized(text) {
   if (!text.startsWith('GLSE1:')) return text; // Legacy JSON migration is done before launch.
   try { const raw=Buffer.from(text.slice(6),'base64'); return (process.platform==='win32'?dpapi(raw,true):decryptUnix(raw)).toString('utf8'); }
-  catch { return fail(); }
+  catch (error) { return rethrow(error); }
 }
 '''
 

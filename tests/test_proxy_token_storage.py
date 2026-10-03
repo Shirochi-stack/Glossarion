@@ -44,6 +44,38 @@ def test_python_javascript_encrypted_roundtrip(adapter):
     assert tokens.decrypt_tokens(result.stdout.encode()) == value
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows DPAPI")
+def test_bun_native_dpapi_matches_python_and_powershell(adapter):
+    bun = shutil.which("bun")
+    if not bun:
+        pytest.skip("Bun is unavailable")
+    value = {"accounts": [{"email": "test@example.com", "refreshToken": "synthetic-secret"}]}
+    python_cipher = tokens.encrypt_tokens(value).decode()
+    # Bun encrypts in-process; Node's run of the same adapter uses PowerShell.
+    script = (f"const vault=await import({json.dumps(adapter.as_uri())});\n"
+              "import {readFileSync} from 'node:fs';\n"
+              "const [cipher, plain]=JSON.parse(readFileSync(0,'utf8'));\n"
+              "const started=performance.now(); const own=vault.encryptSerialized(plain);\n"
+              "console.log(JSON.stringify({plain: vault.decryptSerialized(cipher), own,\n"
+              "  ms: performance.now()-started}));")
+    result = subprocess.run([bun, "-e", script], input=json.dumps([python_cipher, json.dumps(value)]),
+                            text=True, capture_output=True, timeout=45)
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    assert json.loads(output["plain"]) == value
+    assert "synthetic-secret" not in output["own"]
+    assert output["ms"] < 250  # in-process, not a PowerShell launch
+    assert tokens.decrypt_tokens(output["own"].encode()) == value
+    decoded = run_js(adapter, "process.stdout.write(vault.decryptSerialized(input));", output["own"])
+    assert decoded.returncode == 0, decoded.stderr
+    assert json.loads(decoded.stdout) == value
+    broken = subprocess.run([bun, "-e", script], input=json.dumps(["GLSE1:broken", "{}"]),
+                            text=True, capture_output=True, timeout=45)
+    assert broken.returncode != 0
+    assert "Credential encryption/decryption failed" in broken.stderr
+    assert "DPAPI Unprotect failed" in broken.stderr
+
+
 def test_unix_fernet_matches_python_format(adapter, tmp_path):
     key = os.urandom(32)
     (tmp_path / ".glossarion").mkdir()
