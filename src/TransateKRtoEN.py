@@ -23819,6 +23819,17 @@ def build_system_prompt(
                     print(f"⚠️ Failed to load {label}: {e}")
                 return system_text
 
+            # A raw name is sent once per request, by the first glossary that
+            # carries it: book glossary, then the extension, then the unified
+            # glossary. Each later one is appended without the raw names the
+            # earlier ones carry.
+            sent_raw_names = frozenset()
+            try:
+                import unified_glossary
+                sent_raw_names = unified_glossary.book_raw_names(actual_glossary_path)
+            except Exception as e:
+                print(f"⚠️ Glossary raw-name lookup failed: {e}")
+
             # Check for glossary extension file (only if ADD_ADDITIONAL_GLOSSARY is enabled)
             add_additional_glossary = str(_request_glossary_setting(
                 settings, "ADD_ADDITIONAL_GLOSSARY", "0"
@@ -23835,13 +23846,20 @@ def build_system_prompt(
 
                 if additional_glossary_path:
                     system = _append_secondary_glossary(
-                        system, additional_glossary_path, "Glossary Extension"
+                        system, additional_glossary_path, "Glossary Extension",
+                        exclude_raw_names=sent_raw_names,
                     )
+                    try:
+                        sent_raw_names = sent_raw_names | unified_glossary.glossary_raw_names(
+                            additional_glossary_path
+                        )
+                    except Exception as e:
+                        print(f"⚠️ Glossary extension raw-name lookup failed: {e}")
 
             # Cross-novel unified glossary (Enable Unified Glossary). One shared
-            # file under Glossary/Unified Glossary/<key>/; the entries this
-            # book's own glossary carries are excluded here, in memory, so no
-            # entry is sent twice and no per-book copy is ever written.
+            # file under Glossary/Unified Glossary/<key>/; the entries the book
+            # glossary and the extension carry are excluded here, in memory, so
+            # no entry is sent twice and no per-book copy is ever written.
             if str(_request_glossary_setting(
                 settings, "ENABLE_UNIFIED_GLOSSARY", "0"
             )) == "1":
@@ -23853,7 +23871,7 @@ def build_system_prompt(
                         actual_glossary_path, settings
                     )
                     if unified_glossary_path:
-                        unified_exclude = unified_glossary.book_raw_names(actual_glossary_path)
+                        unified_exclude = sent_raw_names
                 except Exception as e:
                     print(f"⚠️ Unified glossary lookup failed: {e}")
                 if unified_glossary_path:
@@ -27963,7 +27981,21 @@ def main(log_callback=None, stop_callback=None):
                             with open(additional_glossary, 'r', encoding='utf-8') as f:
                                 add_lines = [ln.strip() for ln in f.readlines() if ln.strip()]
                             add_entry_count = max(0, len(add_lines) - 1) if add_lines and ',' in add_lines[0] else len(add_lines)
-                            print(f"📑 Glossary extension loaded with {add_entry_count} entries")
+                            _ext_note = ""
+                            try:
+                                import unified_glossary as _unified_glossary
+                                _ext_overlap = len(
+                                    _unified_glossary.glossary_raw_names(additional_glossary)
+                                    & _unified_glossary.book_raw_names(glossary_file)
+                                )
+                                if _ext_overlap:
+                                    _ext_note = (
+                                        f"; the {_ext_overlap} raw names also in this book's "
+                                        "glossary are skipped per request"
+                                    )
+                            except Exception:
+                                pass
+                            print(f"📑 Glossary extension loaded with {add_entry_count} entries{_ext_note}")
                             print("📑 Sample glossary extension lines:")
                             for ln in add_lines[1:4]:
                                 print(f"   • {ln}")
@@ -27984,11 +28016,17 @@ def main(log_callback=None, stop_callback=None):
                         _unified_path = _unified_glossary.resolve_prompt_glossary_path(glossary_file)
                         if _unified_path:
                             _unified_total = _unified_glossary.count_entries(_unified_path)
-                            _unified_own = len(_unified_glossary.book_raw_names(glossary_file))
+                            _unified_own = _unified_glossary.book_raw_names(glossary_file)
+                            _unified_skip_from = "this book's glossary"
+                            if add_additional_enabled and additional_glossary:
+                                _unified_own = _unified_own | _unified_glossary.glossary_raw_names(
+                                    additional_glossary
+                                )
+                                _unified_skip_from = "this book's glossary and extension"
                             print(
                                 f"📑 Unified glossary loaded with {_unified_total} entries "
                                 f"({os.path.basename(os.path.dirname(_unified_path))}); "
-                                f"the {_unified_own} names in this book's glossary are skipped per request"
+                                f"the {len(_unified_own)} names in {_unified_skip_from} are skipped per request"
                             )
                         else:
                             print("📑 Unified glossary enabled, but no glossary_unified.csv exists yet")

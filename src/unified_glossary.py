@@ -1099,35 +1099,40 @@ def remove_book_copies(shared_dir, target_dirs, log=print):
     return removed
 
 
-_BOOK_NAMES_CACHE = {}
+_RAW_NAMES_CACHE = {}
 
 
-def book_raw_names(book_glossary_path):
-    """Raw names (NFC, casefolded) the book's own glossary already sends.
+def glossary_raw_names(path):
+    """Raw names (NFC, casefolded) of every entry in one glossary file.
 
-    Passed to the compressor as ``exclude_raw_names`` so the one shared
-    unified file never repeats an entry of the book being translated. Cached
-    on the file's size and mtime: it is asked for on every request, and the
-    book glossary changes a handful of times per run.
+    Passed to the compressor as ``exclude_raw_names`` so a later glossary in
+    the same request never repeats a raw name an earlier one sends. Cached on
+    the file's size and mtime: it is asked for on every request, and the
+    file changes a handful of times per run.
     """
-    on_disk = book_glossary_file(book_glossary_path) if book_glossary_path else None
-    if not on_disk:
+    if not path or not os.path.isfile(path):
         return frozenset()
-    fingerprint = _stat_fingerprint(on_disk)
-    key = _path_key(on_disk)
+    fingerprint = _stat_fingerprint(path)
+    key = _path_key(path)
     with _LOCK:
-        cached = _BOOK_NAMES_CACHE.get(key)
+        cached = _RAW_NAMES_CACHE.get(key)
         if cached and cached[0] == fingerprint:
             return cached[1]
     try:
         names = frozenset(
-            name for name in (_raw_key(entry) for entry in load_entries(on_disk)) if name
+            name for name in (_raw_key(entry) for entry in load_entries(path)) if name
         )
     except Exception:
         names = frozenset()
     with _LOCK:
-        _BOOK_NAMES_CACHE[key] = (fingerprint, names)
+        _RAW_NAMES_CACHE[key] = (fingerprint, names)
     return names
+
+
+def book_raw_names(book_glossary_path):
+    """Raw names the book's own glossary already sends (see glossary_raw_names)."""
+    on_disk = book_glossary_file(book_glossary_path) if book_glossary_path else None
+    return glossary_raw_names(on_disk)
 
 
 def sync_phase(
