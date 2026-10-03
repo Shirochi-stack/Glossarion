@@ -23775,10 +23775,6 @@ def build_system_prompt(
                     if not was_compressed:
                         if max_uncompressed_chars and original_add_length > max_uncompressed_chars:
                             # Never put a multi-megabyte glossary in a prompt.
-                            glossary_log_parts.append(
-                                f"{label}: skipped ({original_add_length:,} chars uncompressed — "
-                                "turn on Compress Glossary Prompt)"
-                            )
                             return system_text
                         if exclude_raw_names:
                             # Sent whole, but still without the entries the
