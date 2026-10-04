@@ -1,0 +1,260 @@
+# Collector policy for the mobile backend bundle.
+# Read by src/mobile/tools/collect_backend.py (see its docstring for the rules).
+#
+#   python tools/collect_backend.py --check            # policy only (CI: mobile-backend-check)
+#   python tools/collect_backend.py --report build/backend_report.md   # + copy to app/backend
+#   python tools/collect_backend.py --verify           # bundle == _bundle_info == src
+#
+# Baselines are ratchets: an entry lists today's unguarded lazy GUI/excluded edges and
+# process-spawn sites with their site counts. A new edge/site, a new API in a listed
+# function or a higher count fails the check. Gating a site (U1, plan §3) lowers the
+# count: update the number (the report prints "lower the count" notes).
+
+[entry]
+# Backend entry points the mobile app drives (plan §2/§3). Everything they import
+# (module-scope, conditional or lazy) is bundled unless excluded or GUI-tainted.
+modules = [
+  "TransateKRtoEN", "extract_glossary_from_epub", "extract_glossary_from_txt", "epub_converter",
+  "scan_html_folder", "qa_scan_runtime", "GlossaryManager", "unified_glossary", "glossary_process_worker",
+  "glossary_refinement", "glossary_compressor", "manga_translator", "ocr_manager", "bubble_detector",
+  "local_inpainter", "image_translator", "txt_processor", "pdf_extractor", "pdf_workspace_compiler",
+  "_pdf_worker", "pdf_generation_manager", "metadata_translation_worker", "metadata_batch_translator",
+  "translate_headers_standalone", "model_options", "multi_api_key_manager", "unified_api_client",
+  "history_manager", "subtitle_processor", "sdlxliff_converter", "sdlxliff_extractor", "image_archive_epub",
+  "api_key_encryption", "token_encryption", "authgpt_auth", "authgem_auth", "authgrok_auth", "authcd_auth",
+  "authnd_auth", "gemini_free", "google_free_translate", "app_version", "language_options",
+  # Desktop runs these as subprocess scripts (chapter_extraction_manager.py:178,
+  # sdlxliff_extraction_manager.py:46); on mobile they run in-process (U1).
+  "chapter_extraction_worker", "sdlxliff_extraction_worker",
+  # JobService interrupted-job resume (restore_in_progress_rows_for_shutdown).
+  "shutdown_utils",
+  # Later milestones: ZIP/HTML -> EPUB input prep (U3), Reader (U5), RPG Maker and the
+  # Review generator (U7), manga OCR import/export (U8).
+  "html_archive_epub", "workspace_reader", "rpgmaker_handler", "review_generator", "manga_ocr_io",
+]
+# New shared modules from the plan that do not exist yet. They become entries automatically
+# once the file exists (the report then asks to move them into `modules`).
+planned = ["mobile_runtime", "pdf_mupdf_html"]
+# Every `import X` of a src/ module inside the mobile app (files or package dirs, relative to
+# src/mobile) becomes an entry too; the app's third-party imports must be pinned as well.
+scan_package = ["app/main.py", "app/glossarion_mobile"]
+# Top-level names that belong to the app itself, not to src/ or PyPI ("main" is app/main.py,
+# not the excluded src/main.py).
+app_local = ["glossarion_mobile", "main", "flet_glossarion_native"]
+extra_modules = []
+
+# Non-literal __import__/importlib.import_module sites: "module:function" = [modules it can load].
+[dynamic_imports]
+"model_options:_authenticated_catalog_has_session" = ["authgpt_auth", "authcd_auth", "authgem_auth", "glm_proxy"]
+"model_options:_fetch_authenticated_catalog" = ["authgpt_auth", "authcd_auth", "authgem_auth"]
+
+# Never bundled (reason required). Every edge into them must be guarded or baselined.
+[exclude]
+antigravity_proxy = "npm/bun proxy (antigravity/ route, excluded on mobile)"
+ocagy_cli = "npm/bun CLI (ocagy/ and ocz/ routes, excluded on mobile)"
+glm_proxy = "bun proxy (authza/ route, excluded on mobile)"
+installer_utils = "npm/bun installer"
+proxy_token_storage = "bun + DPAPI token storage"
+autharena_proxy = "uv + QtWebEngine + CDP (autharena/ route, excluded on mobile)"
+autharena_browser = "QtWebEngine"
+opera_aria = "desktop Opera CDP (search/opera, excluded on mobile)"
+tor_proxy = "Tor binary"
+ollamapull = "local Ollama binary (ollamapull/ route, excluded on mobile)"
+dpi_setup = "Qt DPI side effect (guarded import in metadata_batch_translator)"
+onnx_cpp_backend = "Windows C++ DLL (bubble_detector falls back to Python onnxruntime on mobile, P27)"
+update_manager = "self-installing desktop updater (mobile shows a 'new version' link)"
+discord_bot = "Discord bot front end"
+app = "Gradio web front end"
+splash_utils = "Qt splash screen / desktop warm-up"
+windows_version_info = "PyInstaller version resource"
+pyi_rth_win32_runtime = "PyInstaller runtime hook"
+main = "old Kivy Android entry point (deleted in U2)"
+
+[gui]
+# Importing one of these unguarded at module scope makes a module GUI-tainted (transitively).
+packages = ["PySide6", "shiboken6", "PyQt5", "PyQt6", "tkinter", "ttkbootstrap", "gradio", "discord"]
+roots = ["translator_gui"]
+
+# Import name (longest dotted prefix wins) -> distribution. Unlisted names map to their
+# normalised top-level name.
+[thirdparty.map]
+PIL = "pillow"
+bs4 = "beautifulsoup4"
+cv2 = "opencv-python-headless"
+fitz = "pymupdf"
+pymupdf = "pymupdf"
+yaml = "pyyaml"
+Crypto = "pycryptodome"
+grpc = "grpcio"
+sklearn = "scikit-learn"
+dotenv = "python-dotenv"
+docx = "python-docx"
+"google.genai" = "google-genai"
+"google.auth" = "google-auth"
+"google.oauth2" = "google-auth"
+"google.protobuf" = "protobuf"
+"google.api_core" = "google-api-core"
+"google.cloud.vision" = "google-cloud-vision"
+"google.cloud.translate" = "google-cloud-translate"
+"google.cloud.translate_v2" = "google-cloud-translate"
+"google.cloud.translate_v3" = "google-cloud-translate"
+"google.cloud.texttospeech" = "google-cloud-texttospeech"
+"google.cloud.aiplatform" = "google-cloud-aiplatform"
+"google.ai.generativelanguage" = "google-ai-generativelanguage"
+"google.ai.generativelanguage_v1beta" = "google-ai-generativelanguage"
+"google.generativeai" = "google-generativeai"
+"azure.core" = "azure-core"
+"azure.ai.vision.imageanalysis" = "azure-ai-vision-imageanalysis"
+"azure.ai.formrecognizer" = "azure-ai-formrecognizer"
+"azure.ai.documentintelligence" = "azure-ai-documentintelligence"
+
+# Distributions installed as dependencies of pinned ones, allowed for module-scope imports.
+[thirdparty.transitive]
+
+# Never installed on mobile. A module-scope unguarded import fails; lazy or guarded ones are
+# only reported (the feature shows a disabled row with a reason chip, plan "Excluded").
+[thirdparty.unavailable]
+torch = "no Android/iOS wheel (torch-only manga models disabled)"
+transformers = "torch stack"
+accelerate = "torch stack"
+auto-gptq = "torch stack"
+gptqmodel = "torch stack"
+optimum = "torch stack"
+diffusers = "torch stack"
+safetensors = "torch weight loading (torch-only inpainting/detection paths)"
+sentence-transformers = "torch stack (silent-truncation embeddings disabled)"
+scikit-learn = "only used with sentence-transformers"
+easyocr = "torch OCR"
+paddleocr = "Paddle OCR"
+doctr = "torch OCR"
+ultralytics = "torch YOLO"
+cupy = "CUDA"
+onnx = "model conversion tooling (inference uses onnxruntime)"
+onnxsim = "model conversion tooling"
+onnxconverter-common = "model conversion tooling"
+onnxruntime-tools = "model conversion tooling"
+onnxruntime-extensions = "no mobile wheel"
+huggingface-hub = "needs native hf-xet; urllib fallback for model downloads (P28)"
+weasyprint = "pango; pdf_mupdf_html shim on mobile (P30)"
+xhtml2pdf = "python-bidi has no mobile wheel"
+pdfkit = "wkhtmltopdf binary"
+cairosvg = "cairo native library"
+pdfplumber = "pypdfium2 has no mobile wheel; PyMuPDF path is used"
+pypdf2 = "legacy; pypdf is pinned"
+jellyfish = "no wheel; RapidFuzz Jaro-Winkler fallback (P26)"
+cohere = "fastavro has no wheel; HTTP fallback in unified_api_client"
+mistralai = "httpx2 + opentelemetry; HTTP fallback in unified_api_client"
+vertexai = "gRPC SDK; Vertex via REST + google-auth"
+google-cloud-aiplatform = "gRPC SDK; Vertex via REST + google-auth"
+google-generativeai = "deprecated SDK (google-genai is pinned)"
+google-ai-generativelanguage = "gRPC SDK (Tier B)"
+google-api-core = "Tier B: pinned with grpcio 1.81 when a google-cloud-* route is enabled"
+google-cloud-vision = "Tier B (manga cloud OCR milestone)"
+google-cloud-translate = "Tier B (paid Google Translate route)"
+google-cloud-texttospeech = "Tier B (TTS milestone)"
+grpcio = "Tier B (grpcio==1.81.0 + grpcio-status==1.81.0 resolver trap)"
+azure-ai-formrecognizer = "Tier B (manga cloud OCR milestone)"
+rapidocr-onnxruntime = "Tier B (manga milestone; pyclipper + shapely are on pypi.flet.dev, verify with check_mobile_wheels)"
+argostranslate = "ctranslate2 has no mobile wheel (offline MT disabled)"
+datasketch = "scipy; guarded MinHash fallback"
+poe-api-wrapper = "desktop-only Poe client"
+pycryptodome = "AES fallback only; cryptography (Fernet) is pinned"
+networks = "MAT inpainting repo module, not shipped (guarded)"
+translatekrtoen = "misspelled module name in a guarded dead import (unified_api_client)"
+translate-output-fix = "module not in the repository (guarded dead import)"
+
+# Stdlib (or OS) modules missing on Android/iOS builds.
+[platform.unavailable]
+winreg = "Windows only"
+msvcrt = "Windows only"
+_winapi = "Windows only"
+winsound = "Windows only"
+nt = "Windows only"
+_overlapped = "Windows only"
+win32api = "pywin32 (Windows only)"
+win32con = "pywin32 (Windows only)"
+win32gui = "pywin32 (Windows only)"
+win32process = "pywin32 (Windows only)"
+win32file = "pywin32 (Windows only)"
+win32event = "pywin32 (Windows only)"
+win32com = "pywin32 (Windows only)"
+pywintypes = "pywin32 (Windows only)"
+wmi = "Windows only"
+comtypes = "Windows only"
+curses = "not built for Android/iOS"
+readline = "not built for Android/iOS"
+turtle = "Tk"
+_tkinter = "Tk"
+idlelib = "Tk"
+
+# Extra non-.py files copied next to the modules (globs relative to src/).
+[data]
+files = []
+
+# Functions that wrap subprocess calls; calls to them count as spawn sites.
+[spawn.wrappers]
+"shutdown_utils.popen_no_window" = "subprocess"
+"shutdown_utils.run_no_window" = "subprocess"
+
+# ---------------------------------------------------------------------------
+# Ratchet baselines (generated from the first --report run, reasons by hand).
+# Lazy/main/conditional unguarded edges from bundled modules into GUI or excluded code.
+# count = number of distinct unguarded import lines; it may only go down.
+[baseline.lazy_gui_edges]
+"ai_hunter_enhanced->PySide6" = { count = 2, reason = "AIHunterConfigGUI settings dialog; the detection code is GUI-free" }
+"authnd_auth->PySide6" = { count = 3, reason = "_mint_captcha_token_qt: QtWebEngine hCaptcha (authnd/ via WebViewBridge in U9)" }
+"gemini_free->PySide6" = { count = 10, reason = "QtWebEngine helpers for search/gemini (WebViewBridge in U9)" }
+"metadata_batch_translator->PySide6" = { count = 5, reason = "MetadataBatchTranslatorUI dialogs; mobile uses metadata_defaults (U1)" }
+"multi_api_key_manager->PySide6" = { count = 10, reason = "MultiAPIKeyDialog / RefusalPatternsDialog; mobile uses key_pool_service (U4)" }
+"multi_api_key_manager->ollama_settings_dialog" = { count = 1, reason = "MultiAPIKeyDialog._wrap_model_with_ollama_settings (desktop dialog)" }
+"scan_html_folder->PySide6" = { count = 1, reason = "__main__ custom-detection dialog (never runs on import)" }
+"scan_html_folder->QA_Scanner_GUI" = { count = 1, reason = "__main__ custom-detection dialog (never runs on import)" }
+"translate_headers_standalone->PySide6" = { count = 1, reason = "run_translate_headers_gui desktop entry" }
+
+[baseline.lazy_excluded_edges]
+"model_options->autharena_proxy" = { count = 3, reason = "AuthArena catalog refresh; route excluded on mobile (U1 route gate)" }
+"model_options->glm_proxy" = { count = 2, reason = "AuthZA catalog/session (incl. dynamic __import__ at 1429); route excluded on mobile" }
+"model_options->ocagy_cli" = { count = 3, reason = "OpenCode Zen catalog; ocagy/ocz routes excluded on mobile" }
+"multi_api_key_manager->glm_proxy" = { count = 1, reason = "AuthZA login button in MultiAPIKeyDialog (desktop dialog)" }
+"unified_api_client->autharena_proxy" = { count = 2, reason = "autharena/ route setup/send; route rejected on mobile (U1)" }
+"unified_api_client->ollamapull" = { count = 1, reason = "ollamapull/ route send; route excluded on mobile" }
+
+# Process-spawn sites (module:function) in bundled modules. All are gated in U1 (plan §3,
+# build-ci design §5.2 patch numbers); a gated call that stays (e.g. `if processes_available():`)
+# keeps its entry. apis may not grow; count = distinct (api, line) sites, may only go down.
+[baseline.process_spawn_sites]
+"Chapter_Extractor:_extract_chapters_universal" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 1, reason = "P1: make_pool_executor when >10 chapters" }
+"GlossaryManager:_filter_text_for_glossary" = { apis = ["concurrent.futures.ProcessPoolExecutor", "multiprocessing.get_context"], count = 4, reason = "P5/P6: process pool + spawn Pool gated by processes_available()" }
+"TransateKRtoEN:main" = { apis = ["concurrent.futures.ProcessPoolExecutor", "multiprocessing.Manager"], count = 3, reason = "P2 async PDF extraction (Manager queues) + P3 auto-glossary in-thread" }
+"authcd_auth:_load_claude_code_keychain_json" = { apis = ["subprocess.run"], count = 1, reason = "macOS `security` for Claude Code credential import (excluded on mobile)" }
+"authcd_auth:claude_cli_auth_status" = { apis = ["subprocess.run"], count = 1, reason = "Claude Code CLI status (excluded on mobile)" }
+"authcd_auth:run_claude_cli_login" = { apis = ["subprocess.Popen"], count = 1, reason = "Claude Code CLI login (excluded on mobile)" }
+"authnd_auth:_mint_captcha_token_subprocess" = { apis = ["subprocess.Popen"], count = 1, reason = "QtWebEngine captcha helper process (authnd/ WebViewBridge in U9)" }
+"chapter_extraction_manager:ChapterExtractionManager._run_extraction_subprocess" = { apis = ["subprocess.Popen"], count = 1, reason = "U1: run chapter_extraction_worker in-process" }
+"epub_converter:EPUBCompiler._compress_images" = { apis = ["subprocess.Popen"], count = 1, reason = "P16: `_sp.Popen` alias; compression workers -> sequential in-process" }
+"gemini_free:_run_search_subprocess_once" = { apis = ["subprocess.Popen"], count = 1, reason = "QtWebEngine search helper process (search/gemini WebViewBridge in U9)" }
+"glossary_process_worker:generate_glossary_async" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 1, reason = "critique: line 247 pool -> in-thread (with P3/P4)" }
+"local_inpainter:<module>" = { apis = ["multiprocessing.Process"], count = 1, reason = "class _LocalInpainterWorker(mp.Process); P17 disables the worker process" }
+"local_inpainter:LocalInpainter._start_worker" = { apis = ["multiprocessing.get_context"], count = 1, reason = "P17: _mp_enabled gated by processes_available()" }
+"pdf_extractor:_extract_with_pdf2htmlex" = { apis = ["subprocess.run"], count = 1, reason = "critique: pdf2htmlEX binary (OSError on device); gate in U1" }
+"pdf_extractor:extract_pdf_with_formatting" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 1, reason = "P9: workers=1 sends this to the sequential branch" }
+"pdf_extractor:extract_text_from_pdf" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 1, reason = "P10: make_pool_executor" }
+"pdf_fast_extractor:_extract_pdf_fast_impl" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 1, reason = "P9: resolve_pdf_extraction_workers -> 1" }
+"pdf_generation_manager:PdfGenerationManager._run_pdf_subprocess" = { apis = ["subprocess.Popen"], count = 1, reason = "P14: in-process _pdf_worker when not subprocesses_available()" }
+"pdf_workspace_compiler:render_workspace_bookmarks_rapid" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 1, reason = "P11/P13: rapid compiler off + make_pool_executor" }
+"scan_html_folder:enhance_duplicate_detection" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 3, reason = "P7: thread-pool toggle" }
+"scan_html_folder:parallel_ai_hunter_check" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 1, reason = "P8: make_pool_executor" }
+"scan_html_folder:perform_deep_similarity_check" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 1, reason = "P8: make_pool_executor" }
+"scan_html_folder:scan_html_folder" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 2, reason = "P7: thread-pool toggle" }
+"sdlxliff_extraction_manager:SdlxliffExtractionManager._run_subprocess" = { apis = ["subprocess.Popen"], count = 1, reason = "U1: run sdlxliff_extraction_worker in-process" }
+"shutdown_utils:force_shutdown" = { apis = ["subprocess.Popen"], count = 1, reason = "desktop force-exit helper; not called on mobile" }
+"shutdown_utils:popen_no_window" = { apis = ["subprocess.Popen"], count = 1, reason = "wrapper (callers are excluded modules); listed in [spawn].wrappers" }
+"shutdown_utils:run_no_window" = { apis = ["subprocess.run"], count = 1, reason = "wrapper (callers are excluded modules); listed in [spawn].wrappers" }
+"token_encryption:_keychain_delete_key" = { apis = ["subprocess.run"], count = 1, reason = "macOS `security` keychain; P25 env/file key on mobile" }
+"token_encryption:_keychain_load_key" = { apis = ["subprocess.run"], count = 1, reason = "macOS `security` keychain; P25 env/file key on mobile" }
+"token_encryption:_keychain_store_key" = { apis = ["subprocess.run"], count = 2, reason = "macOS `security` keychain; P25 env/file key on mobile" }
+"unified_api_client:UnifiedClient._probe_video_metadata" = { apis = ["subprocess.run"], count = 1, reason = "ffprobe; OSError falls back to the MP4 box parser (no edit)" }
+"unified_glossary:_run_dedupe_in_subprocess" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 1, reason = "P12: in-process dedupe when not processes_available()" }
+
+# String literals naming GUI/excluded module files inside calls ("translator_gui.py").
+[baseline.gui_file_refs]

@@ -1,0 +1,11 @@
+# Python packaging output (pip/flet build an in-tree wheel from this project)
+*.egg-info/
+build/
+dist/
+__pycache__/
+
+# Flutter/Dart tooling output for the Dart package
+src/flutter/flet_glossarion_native/.dart_tool/
+src/flutter/flet_glossarion_native/pubspec.lock
+src/flutter/flet_glossarion_native/.flutter-plugins
+src/flutter/flet_glossarion_native/.flutter-plugins-dependencies

@@ -1,0 +1,1097 @@
+# Glossarion Mobile (Android + iOS): Flet 1.0.3 build, device smoke tests and release.
+#
+#   prepare --+-- android -- android-smoke --+
+#             +-- ios -----------------------+-- release (tags v* only)
+#             +-- ios-signed (Apple secrets) +
+#             +-- ios-simulator-smoke (optional, non-blocking)
+#
+# Optional secrets:
+#   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS (default "upload"),
+#   ANDROID_KEY_PASSWORD (default: the keystore password)
+#       -> release-signed APKs + AAB. Without them the APKs are debug-signed (file suffix _debugsigned)
+#          and no AAB is built.
+#   IOS_DIST_CERT_P12_BASE64, IOS_DIST_CERT_PASSWORD, IOS_PROVISIONING_PROFILE_BASE64, IOS_TEAM_ID
+#       -> an additional signed IPA (ios-signed). The unsigned IPA (AltStore/SideStore) is always built.
+# Optional repository variables: IOS_EXPORT_METHOD (default release-testing), IOS_SIGNING_CERTIFICATE
+# (default "Apple Distribution", or "Apple Development" for the debugging/development export method).
+#
+# Artifacts: Z_Glossarion-Android-APK, Z_Glossarion-Android-AAB, Z_Glossarion-iOS-Unsigned,
+# Z_Glossarion-iOS-Signed, Z_Glossarion-iOS-Simulator; internal: mobile-prepared,
+# mobile-backend-report, mobile-smoke-logs-android, mobile-smoke-logs-ios.
+
+name: Build Mobile (Android + iOS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: Platforms to build
+        type: choice
+        options: [all, android, ios]
+        default: all
+      emulator_smoke:
+        description: Android emulator smoke test (launch markers + on-device self-test)
+        type: boolean
+        default: true
+      ios_simulator_smoke:
+        description: iOS simulator smoke test (optional, non-blocking)
+        type: boolean
+        default: false
+  push:
+    tags: ['v*']
+  workflow_call:
+    inputs:
+      targets:
+        description: all, android or ios
+        type: string
+        required: false
+        default: all
+      emulator_smoke:
+        description: Android emulator smoke test
+        type: boolean
+        required: false
+        default: true
+      ios_simulator_smoke:
+        description: iOS simulator smoke test (non-blocking)
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
+      ANDROID_KEY_PASSWORD:
+        required: false
+      IOS_DIST_CERT_P12_BASE64:
+        required: false
+      IOS_DIST_CERT_PASSWORD:
+        required: false
+      IOS_PROVISIONING_PROFILE_BASE64:
+        required: false
+      IOS_TEAM_ID:
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # github.workflow is the caller's name under workflow_call, so a build-all run and a direct
+  # dispatch of this workflow on the same ref do not cancel each other. Tag builds never cancel.
+  group: build-mobile-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
+  FLET_CLI_NO_RICH_OUTPUT: '1'
+  BUNDLED_PY: '3.13'
+  APP_PACKAGE: com.glossarion.app
+
+jobs:
+  # ==========================================================================
+  # prepare: version, secret probe, wheel check, backend closure, assets, host tests
+  # ==========================================================================
+  prepare:
+    name: Prepare (version, backend bundle, host tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      build_version: ${{ steps.meta.outputs.build_version }}
+      build_number: ${{ steps.meta.outputs.build_number }}
+      artifact_prefix: ${{ steps.meta.outputs.artifact_prefix }}
+      is_release: ${{ steps.meta.outputs.is_release }}
+      tag: ${{ steps.meta.outputs.tag }}
+      run_android: ${{ steps.opts.outputs.run_android }}
+      run_ios: ${{ steps.opts.outputs.run_ios }}
+      emulator_smoke: ${{ steps.opts.outputs.emulator_smoke }}
+      ios_simulator_smoke: ${{ steps.opts.outputs.ios_simulator_smoke }}
+      has_android_keystore: ${{ steps.probe.outputs.has_android_keystore }}
+      has_ios_signing: ${{ steps.probe.outputs.has_ios_signing }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve run options
+        id: opts
+        env:
+          # Empty on tag pushes (no inputs), so every option falls back to its default.
+          IN_TARGETS: ${{ inputs.targets }}
+          IN_EMULATOR_SMOKE: ${{ inputs.emulator_smoke }}
+          IN_IOS_SIMULATOR_SMOKE: ${{ inputs.ios_simulator_smoke }}
+        run: |
+          targets="${IN_TARGETS:-all}"
+          case "$targets" in
+            all|android|ios) ;;
+            *) echo "::error title=Invalid input::targets must be all, android or ios (got '$targets')"; exit 1 ;;
+          esac
+          run_android=false
+          run_ios=false
+          if [ "$targets" = all ] || [ "$targets" = android ]; then run_android=true; fi
+          if [ "$targets" = all ] || [ "$targets" = ios ]; then run_ios=true; fi
+          emulator_smoke=true
+          if [ "${IN_EMULATOR_SMOKE:-true}" = false ]; then emulator_smoke=false; fi
+          if [ "$run_android" = false ]; then emulator_smoke=false; fi
+          ios_simulator_smoke=false
+          if [ "${IN_IOS_SIMULATOR_SMOKE:-false}" = true ] && [ "$run_ios" = true ]; then ios_simulator_smoke=true; fi
+          {
+            echo "run_android=$run_android"
+            echo "run_ios=$run_ios"
+            echo "emulator_smoke=$emulator_smoke"
+            echo "ios_simulator_smoke=$ios_simulator_smoke"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Set up uv (Python 3.13)
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: '3.13'
+          enable-cache: true
+          cache-dependency-glob: |
+            src/mobile/pyproject.toml
+            src/mobile/uv.lock
+          cache-suffix: mobile-prepare
+
+      - name: Configure uv lock mode and bytecode cache
+        run: |
+          # The lockfile is enforced (--locked) only when it is committed. UV_LOCKED is not set
+          # globally because it would break every `uv run` while src/mobile/uv.lock does not exist.
+          if [ -f src/mobile/uv.lock ]; then
+            echo "UV_LOCK_ARG=--locked" >> "$GITHUB_ENV"
+            echo "Using src/mobile/uv.lock (--locked)."
+          else
+            echo "::warning title=uv.lock missing::src/mobile/uv.lock is not committed, so dependencies are resolved fresh from the pins in src/mobile/pyproject.toml. Run 'uv lock' in src/mobile and commit uv.lock for reproducible builds."
+          fi
+          # Keep __pycache__ out of the uploaded bundle (and out of the --verify hash).
+          echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/pycache" >> "$GITHUB_ENV"
+
+      - name: Read version (src/app_version.py)
+        id: version
+        run: uv run --no-project python src/mobile/tools/version_info.py --github-output
+
+      - name: Release metadata
+        id: meta
+        env:
+          VI_BUILD_VERSION: ${{ steps.version.outputs.build_version }}
+          VI_BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
+          VI_ARTIFACT_PREFIX: ${{ steps.version.outputs.artifact_prefix }}
+          VI_IS_RELEASE: ${{ steps.version.outputs.is_release }}
+          VI_REF_TAG: ${{ steps.version.outputs.ref_tag }}
+        run: |
+          if [ -z "$VI_BUILD_VERSION" ] || [ -z "$VI_BUILD_NUMBER" ]; then
+            echo "::error::version_info.py --github-output did not write build_version and build_number."
+            exit 1
+          fi
+          case "$VI_BUILD_NUMBER" in
+            *[!0-9]*) echo "::error::build_number '$VI_BUILD_NUMBER' is not an integer."; exit 1 ;;
+          esac
+          prefix="${VI_ARTIFACT_PREFIX:-Glossarion_v${VI_BUILD_VERSION}}"
+          # version_info.py decides (pushed refs/tags/v* tag); fall back to the ref when it is silent.
+          is_release="${VI_IS_RELEASE:-false}"
+          tag="${VI_REF_TAG:-}"
+          if [ -z "$VI_IS_RELEASE" ] && [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            is_release=true
+            tag="$GITHUB_REF_NAME"
+          fi
+          if [ "$is_release" = true ] && [ -z "$tag" ]; then
+            tag="$GITHUB_REF_NAME"
+          fi
+          if [ "$is_release" = true ] && [ "$tag" != "v$VI_BUILD_VERSION" ]; then
+            echo "::warning title=Tag and version differ::Tag $tag does not match APP_VERSION $VI_BUILD_VERSION in src/app_version.py; the mobile builds are versioned $VI_BUILD_VERSION."
+          fi
+          {
+            echo "build_version=$VI_BUILD_VERSION"
+            echo "build_number=$VI_BUILD_NUMBER"
+            echo "artifact_prefix=$prefix"
+            echo "is_release=$is_release"
+            echo "tag=$tag"
+          } | tee -a "$GITHUB_OUTPUT"
+          {
+            echo "## Glossarion Mobile $VI_BUILD_VERSION"
+            echo
+            echo "| Key | Value |"
+            echo "|---|---|"
+            echo "| Build version | \`$VI_BUILD_VERSION\` |"
+            echo "| Build number (versionCode / CFBundleVersion) | \`$VI_BUILD_NUMBER\` |"
+            echo "| Artifact prefix | \`$prefix\` |"
+            echo "| Release | \`$is_release\` ${tag:+(\`$tag\`)} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Probe optional signing secrets
+        id: probe
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
+          IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          # Secrets cannot be referenced in job-level if: conditions, so expose booleans instead.
+          has_android=false
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ]; then
+            has_android=true
+          elif [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "::warning title=Android signing::ANDROID_KEYSTORE_BASE64 is set but ANDROID_KEYSTORE_PASSWORD is empty; the APKs will be debug-signed."
+          fi
+          has_ios=false
+          if [ -n "$IOS_DIST_CERT_P12_BASE64" ] && [ -n "$IOS_PROVISIONING_PROFILE_BASE64" ] && [ -n "$IOS_TEAM_ID" ]; then
+            has_ios=true
+          elif [ -n "$IOS_DIST_CERT_P12_BASE64$IOS_PROVISIONING_PROFILE_BASE64$IOS_TEAM_ID" ]; then
+            echo "::warning title=iOS signing::Only some of IOS_DIST_CERT_P12_BASE64, IOS_PROVISIONING_PROFILE_BASE64 and IOS_TEAM_ID are set; only the unsigned IPA will be built."
+          fi
+          {
+            echo "has_android_keystore=$has_android"
+            echo "has_ios_signing=$has_ios"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Check mobile wheels (pypi.flet.dev / PyPI)
+        working-directory: src/mobile
+        run: uv run --no-project python tools/check_mobile_wheels.py --report build/wheels_report.md
+
+      - name: Collect backend closure
+        working-directory: src/mobile
+        run: |
+          rc=0
+          uv run --no-project python tools/collect_backend.py --out app/backend --report build/backend_report.md || rc=$?
+          # Show the report in the job summary unless the collector already wrote one.
+          if [ ! -s "$GITHUB_STEP_SUMMARY" ] && [ -f build/backend_report.md ]; then
+            { echo "## Mobile backend bundle"; echo; head -c 900000 build/backend_report.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
+
+      - name: Verify collected bundle
+        working-directory: src/mobile
+        run: uv run --no-project python tools/collect_backend.py --verify
+
+      - name: Prepare assets (tiktoken cache, self-test EPUB)
+        working-directory: src/mobile
+        run: uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} python tools/prepare_assets.py
+
+      - name: Compile app, tools and CI scripts (Python 3.13 syntax)
+        working-directory: src/mobile
+        run: uv run --no-project python -m compileall -q app tools ci tests_host extensions/flet_glossarion_native/src extensions/flet_glossarion_native/tests
+
+      - name: Host import smoke (Android and iOS simulation)
+        working-directory: src/mobile
+        run: |
+          if [ ! -f tools/host_smoke.py ]; then
+            echo "::notice title=host_smoke::tools/host_smoke.py is not in this tree yet; skipping the read-only bundle import smoke."
+            exit 0
+          fi
+          uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} python tools/host_smoke.py --bundle app/backend --simulate android
+          uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} python tools/host_smoke.py --bundle app/backend --simulate ios
+
+      - name: Host tests (offline)
+        run: uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} --directory src/mobile pytest tests_host extensions/flet_glossarion_native/tests -q -m "not online"
+
+      - name: Host tests (online, keyless; non-blocking)
+        continue-on-error: true
+        run: |
+          rc=0
+          uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} --directory src/mobile pytest tests_host -q -m online || rc=$?
+          if [ "$rc" -eq 5 ]; then
+            echo "No online tests are collected yet."
+            exit 0
+          fi
+          exit "$rc"
+
+      - name: Upload backend report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mobile-backend-report
+          path: |
+            src/mobile/build/backend_report.md
+            src/mobile/build/wheels_report.md
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload prepared bundle
+        uses: actions/upload-artifact@v7
+        with:
+          # Root is src/mobile/app (the common ancestor), so later jobs download into src/mobile/app.
+          name: mobile-prepared
+          path: |
+            src/mobile/app/backend
+            src/mobile/app/assets/tiktoken
+            src/mobile/app/assets/selftest
+            !src/mobile/app/**/__pycache__/**
+          if-no-files-found: error
+          retention-days: 1
+
+  # ==========================================================================
+  # android: APKs split per ABI (+ AAB when the upload keystore exists)
+  # ==========================================================================
+  android:
+    name: Android build
+    needs: prepare
+    if: needs.prepare.outputs.run_android == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      BUILD_VERSION: ${{ needs.prepare.outputs.build_version }}
+      BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      ARTIFACT_PREFIX: ${{ needs.prepare.outputs.artifact_prefix }}
+      HAS_KEYSTORE: ${{ needs.prepare.outputs.has_android_keystore }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Download prepared bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: mobile-prepared
+          path: src/mobile/app
+
+      - name: Set up uv (Python 3.13)
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: '3.13'
+          enable-cache: false
+
+      - name: Verify the bundle is the host-tested one
+        working-directory: src/mobile
+        run: uv run --no-project python tools/collect_backend.py --verify
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('src/mobile/pyproject.toml', 'src/mobile/extensions/**/build.gradle*', 'src/mobile/extensions/**/pubspec.yaml') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Configure release signing
+        if: env.HAS_KEYSTORE == 'true'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          keystore="$RUNNER_TEMP/upload.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          alias_name="${ANDROID_KEY_ALIAS:-upload}"
+          # Fail early with a clear message instead of deep inside Gradle.
+          if ! keytool -list -keystore "$keystore" -storepass:env ANDROID_KEYSTORE_PASSWORD -alias "$alias_name" > /dev/null; then
+            echo "::error title=Android signing::The keystore does not open with ANDROID_KEYSTORE_PASSWORD or has no alias '$alias_name'."
+            exit 1
+          fi
+          # Flet reads these (build_base.py: FLET_ANDROID_SIGNING_*) and switches the template to release signing.
+          {
+            echo "FLET_ANDROID_SIGNING_KEY_STORE=$keystore"
+            echo "FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+            echo "FLET_ANDROID_SIGNING_KEY_PASSWORD=${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+            echo "FLET_ANDROID_SIGNING_KEY_ALIAS=$alias_name"
+          } >> "$GITHUB_ENV"
+
+      - name: Build APKs (split per ABI)
+        id: apk
+        uses: flet-dev/flet-build-action@v1
+        with:
+          target: apk
+          working-directory: src/mobile
+          runner-python-version: ${{ env.BUNDLED_PY }}
+          bundled-python-version: ${{ env.BUNDLED_PY }}
+          build-number: ${{ env.BUILD_NUMBER }}
+          build-version: ${{ env.BUILD_VERSION }}
+          extra-args: --split-per-abi
+          archive-output: 'false'
+
+      - name: Collect APKs
+        env:
+          APK_OUT: ${{ steps.apk.outputs.output-path }}
+        run: |
+          shopt -s nullglob
+          mkdir -p dist
+          suffix=""
+          if [ "$HAS_KEYSTORE" != true ]; then suffix="_debugsigned"; fi
+          ls -la "$APK_OUT"
+          for abi in arm64-v8a x86_64; do
+            matches=("$APK_OUT"/*"$abi"*.apk)
+            if [ "${#matches[@]}" -ne 1 ]; then
+              echo "::error title=APK output::Expected exactly one $abi APK in $APK_OUT, found ${#matches[@]}."
+              exit 1
+            fi
+            cp "${matches[0]}" "dist/${ARTIFACT_PREFIX}_Android_${abi}${suffix}.apk"
+          done
+          ls -la dist
+
+      - name: Build AAB
+        id: aab
+        if: env.HAS_KEYSTORE == 'true'
+        uses: flet-dev/flet-build-action@v1
+        with:
+          target: aab
+          working-directory: src/mobile
+          runner-python-version: ${{ env.BUNDLED_PY }}
+          bundled-python-version: ${{ env.BUNDLED_PY }}
+          build-number: ${{ env.BUILD_NUMBER }}
+          build-version: ${{ env.BUILD_VERSION }}
+          archive-output: 'false'
+
+      - name: Collect AAB
+        if: env.HAS_KEYSTORE == 'true'
+        env:
+          AAB_OUT: ${{ steps.aab.outputs.output-path }}
+        run: |
+          shopt -s nullglob
+          matches=("$AAB_OUT"/*.aab)
+          if [ "${#matches[@]}" -ne 1 ]; then
+            echo "::error title=AAB output::Expected exactly one .aab in $AAB_OUT, found ${#matches[@]}."
+            exit 1
+          fi
+          cp "${matches[0]}" "dist/${ARTIFACT_PREFIX}_Android.aab"
+
+      - name: Verify APK/AAB (package, versions, permissions, FGS, ABIs, signature)
+        run: |
+          shopt -s nullglob
+          args=(--package "$APP_PACKAGE" --version-code "$BUILD_NUMBER" --version-name "$BUILD_VERSION"
+                --min-sdk 26 --pyproject src/mobile/pyproject.toml)
+          if [ "$HAS_KEYSTORE" = true ]; then args+=(--expect-release); fi
+          uv run --no-project python src/mobile/ci/verify_apk.py "${args[@]}" dist/*.apk dist/*.aab
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v7
+        with:
+          name: Z_Glossarion-Android-APK
+          path: dist/*.apk
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload AAB
+        if: env.HAS_KEYSTORE == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: Z_Glossarion-Android-AAB
+          path: dist/*.aab
+          if-no-files-found: error
+          compression-level: 0
+
+  # ==========================================================================
+  # android-smoke: x86_64 API 35 emulator; launch markers + deep-link self-test (blocking)
+  # ==========================================================================
+  android-smoke:
+    name: Android emulator smoke (API 35, x86_64)
+    needs: [prepare, android]
+    if: needs.prepare.outputs.emulator_smoke == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download APKs
+        uses: actions/download-artifact@v8
+        with:
+          name: Z_Glossarion-Android-APK
+          path: apk
+
+      - name: Select the x86_64 APK
+        run: |
+          shopt -s nullglob
+          matches=(apk/*_Android_x86_64*.apk)
+          if [ "${#matches[@]}" -ne 1 ]; then
+            echo "::error::Expected one x86_64 APK in the artifact, found ${#matches[@]}."
+            ls -la apk
+            exit 1
+          fi
+          echo "SMOKE_APK=$GITHUB_WORKSPACE/${matches[0]}" >> "$GITHUB_ENV"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        id: avd-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-api35-x86_64-google_apis-ram4096-disk6144-v1
+
+      - name: Create AVD and snapshot for the cache
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          ram-size: 4096M
+          disk-size: 6144M
+          force-avd-creation: false
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: false
+          script: echo "Generated AVD snapshot for caching."
+
+      - name: Smoke test (READY markers, then glossarion://app/__selftest__?suite=smoke)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          ram-size: 4096M
+          disk-size: 6144M
+          force-avd-creation: false
+          emulator-boot-timeout: 900
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: true
+          # The runner executes each script line separately with sh -c, so keep it to one line.
+          script: bash src/mobile/ci/android_smoke.sh "$SMOKE_APK" "$GITHUB_WORKSPACE/mobile-smoke-logs"
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mobile-smoke-logs-android
+          path: mobile-smoke-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ==========================================================================
+  # ios: unsigned xcarchive -> Payload IPA (AltStore / SideStore)
+  # ==========================================================================
+  ios:
+    name: iOS build (unsigned IPA)
+    needs: prepare
+    if: needs.prepare.outputs.run_ios == 'true'
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      BUILD_VERSION: ${{ needs.prepare.outputs.build_version }}
+      BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      ARTIFACT_PREFIX: ${{ needs.prepare.outputs.artifact_prefix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download prepared bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: mobile-prepared
+          path: src/mobile/app
+
+      - name: Set up uv (Python 3.13)
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: '3.13'
+          enable-cache: false
+
+      - name: Verify the bundle is the host-tested one
+        working-directory: src/mobile
+        run: uv run --no-project python tools/collect_backend.py --verify
+
+      - name: Install Rosetta
+        run: softwareupdate --install-rosetta --agree-to-license || true
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Build iOS archive (no code signing)
+        id: build
+        uses: flet-dev/flet-build-action@v1
+        with:
+          # No provisioning profile -> Flet runs `flutter build ipa --no-codesign` and outputs an .xcarchive.
+          target: ipa
+          working-directory: src/mobile
+          runner-python-version: ${{ env.BUNDLED_PY }}
+          bundled-python-version: ${{ env.BUNDLED_PY }}
+          build-number: ${{ env.BUILD_NUMBER }}
+          build-version: ${{ env.BUILD_VERSION }}
+          archive-output: 'false'
+
+      - name: Package unsigned IPA
+        env:
+          IOS_OUT: ${{ steps.build.outputs.output-path }}
+        run: bash src/mobile/ci/package_unsigned_ipa.sh "$IOS_OUT" "dist/${ARTIFACT_PREFIX}_iOS_unsigned.ipa"
+
+      - name: Verify IPA (bundle id, versions, document types, background ids, URL scheme)
+        run: >-
+          uv run --no-project python src/mobile/ci/verify_ipa.py
+          "dist/${ARTIFACT_PREFIX}_iOS_unsigned.ipa"
+          --bundle-id "$APP_PACKAGE" --version "$BUILD_VERSION" --build-number "$BUILD_NUMBER"
+          --pyproject src/mobile/pyproject.toml --expect-unsigned
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v7
+        with:
+          name: Z_Glossarion-iOS-Unsigned
+          path: dist/*.ipa
+          if-no-files-found: error
+          compression-level: 0
+
+  # ==========================================================================
+  # ios-signed: temporary keychain + provisioning profile (only when the Apple secrets exist)
+  # ==========================================================================
+  ios-signed:
+    name: iOS build (signed IPA)
+    needs: prepare
+    if: needs.prepare.outputs.run_ios == 'true' && needs.prepare.outputs.has_ios_signing == 'true'
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      BUILD_VERSION: ${{ needs.prepare.outputs.build_version }}
+      BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      ARTIFACT_PREFIX: ${{ needs.prepare.outputs.artifact_prefix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download prepared bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: mobile-prepared
+          path: src/mobile/app
+
+      - name: Set up uv (Python 3.13)
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: '3.13'
+          enable-cache: false
+
+      - name: Verify the bundle is the host-tested one
+        working-directory: src/mobile
+        run: uv run --no-project python tools/collect_backend.py --verify
+
+      - name: Install Rosetta
+        run: softwareupdate --install-rosetta --agree-to-license || true
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Import the distribution certificate into a temporary keychain
+        env:
+          IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
+          IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/glossarion-signing.keychain-db"
+          keychain_password="$(openssl rand -base64 24)"
+          echo "::add-mask::$keychain_password"
+          cert="$RUNNER_TEMP/dist_cert.p12"
+          printf '%s' "$IOS_DIST_CERT_P12_BASE64" | base64 --decode > "$cert"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$cert" -P "$IOS_DIST_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" > /dev/null
+          # Prepend the temporary keychain to the user search list.
+          existing=()
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line//\"/}"
+            [ -n "$line" ] && existing+=("$line")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain" "${existing[@]}"
+          rm -f "$cert"
+          echo "KEYCHAIN_PATH=$keychain" >> "$GITHUB_ENV"
+          security find-identity -v -p codesigning "$keychain"
+
+      - name: Install the provisioning profile
+        id: profile
+        env:
+          IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          profile="$RUNNER_TEMP/glossarion.mobileprovision"
+          printf '%s' "$IOS_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$profile"
+          security cms -D -i "$profile" > "$RUNNER_TEMP/profile.plist"
+          uuid="$(plutil -extract UUID raw -o - "$RUNNER_TEMP/profile.plist")"
+          app_id="$(plutil -extract Entitlements.application-identifier raw -o - "$RUNNER_TEMP/profile.plist" || true)"
+          if [ -n "$app_id" ] && [ "$app_id" != "$IOS_TEAM_ID.$APP_PACKAGE" ] && [ "$app_id" != "$IOS_TEAM_ID.*" ]; then
+            echo "::warning title=Provisioning profile::The profile's application-identifier ($app_id) is not $IOS_TEAM_ID.$APP_PACKAGE."
+          fi
+          for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
+            mkdir -p "$dir"
+            cp "$profile" "$dir/$uuid.mobileprovision"
+          done
+          rm -f "$profile"
+          echo "PROFILE_UUID=$uuid" >> "$GITHUB_ENV"
+          echo "uuid=$uuid" >> "$GITHUB_OUTPUT"
+
+      - name: Choose export method and signing certificate
+        id: signing
+        env:
+          IOS_EXPORT_METHOD: ${{ vars.IOS_EXPORT_METHOD }}
+          IOS_SIGNING_CERTIFICATE: ${{ vars.IOS_SIGNING_CERTIFICATE }}
+        run: |
+          method="${IOS_EXPORT_METHOD:-release-testing}"
+          case "$method" in
+            debugging|development) certificate="Apple Development" ;;
+            *) certificate="Apple Distribution" ;;
+          esac
+          certificate="${IOS_SIGNING_CERTIFICATE:-$certificate}"
+          {
+            echo "export_method=$method"
+            echo "certificate=$certificate"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Build signed IPA
+        id: build
+        uses: flet-dev/flet-build-action@v1
+        with:
+          target: ipa
+          working-directory: src/mobile
+          runner-python-version: ${{ env.BUNDLED_PY }}
+          bundled-python-version: ${{ env.BUNDLED_PY }}
+          build-number: ${{ env.BUILD_NUMBER }}
+          build-version: ${{ env.BUILD_VERSION }}
+          # extra-args is split shell-like but never shell-evaluated, so only ${{ }} values work here.
+          extra-args: >-
+            --ios-team-id ${{ secrets.IOS_TEAM_ID }}
+            --ios-signing-certificate "${{ steps.signing.outputs.certificate }}"
+            --ios-provisioning-profile ${{ steps.profile.outputs.uuid }}
+            --ios-export-method ${{ steps.signing.outputs.export_method }}
+          archive-output: 'false'
+
+      - name: Collect signed IPA
+        env:
+          IOS_OUT: ${{ steps.build.outputs.output-path }}
+        run: |
+          mkdir -p dist
+          ipas=()
+          while IFS= read -r -d '' file; do ipas+=("$file"); done < <(find "$IOS_OUT" -name '*.ipa' -type f -print0)
+          if [ "${#ipas[@]}" -ne 1 ]; then
+            echo "::error title=IPA output::Expected exactly one .ipa in $IOS_OUT, found ${#ipas[@]}."
+            exit 1
+          fi
+          cp "${ipas[0]}" "dist/${ARTIFACT_PREFIX}_iOS.ipa"
+
+      - name: Verify signed IPA
+        run: >-
+          uv run --no-project python src/mobile/ci/verify_ipa.py
+          "dist/${ARTIFACT_PREFIX}_iOS.ipa"
+          --bundle-id "$APP_PACKAGE" --version "$BUILD_VERSION" --build-number "$BUILD_NUMBER"
+          --pyproject src/mobile/pyproject.toml --expect-signed
+
+      - name: Upload signed IPA
+        uses: actions/upload-artifact@v7
+        with:
+          name: Z_Glossarion-iOS-Signed
+          path: dist/*.ipa
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Remove keychain and provisioning profile
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN_PATH:-}" ]; then security delete-keychain "$KEYCHAIN_PATH" || true; fi
+          if [ -n "${PROFILE_UUID:-}" ]; then
+            rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision" \
+                  "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          fi
+
+  # ==========================================================================
+  # ios-simulator-smoke: optional and non-blocking until it is stable
+  # ==========================================================================
+  ios-simulator-smoke:
+    name: iOS simulator smoke (optional)
+    needs: prepare
+    if: needs.prepare.outputs.ios_simulator_smoke == 'true'
+    continue-on-error: true
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      BUILD_VERSION: ${{ needs.prepare.outputs.build_version }}
+      BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      ARTIFACT_PREFIX: ${{ needs.prepare.outputs.artifact_prefix }}
+      READY_TIMEOUT: '600'
+      SELFTEST_TIMEOUT: '900'
+      SELFTEST_URL: glossarion://app/__selftest__?suite=smoke
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download prepared bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: mobile-prepared
+          path: src/mobile/app
+
+      - name: Set up uv (Python 3.13)
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: '3.13'
+          enable-cache: false
+
+      - name: Verify the bundle is the host-tested one
+        working-directory: src/mobile
+        run: uv run --no-project python tools/collect_backend.py --verify
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Build for the iOS simulator
+        id: build
+        uses: flet-dev/flet-build-action@v1
+        with:
+          target: ios-simulator
+          working-directory: src/mobile
+          runner-python-version: ${{ env.BUNDLED_PY }}
+          bundled-python-version: ${{ env.BUNDLED_PY }}
+          build-number: ${{ env.BUILD_NUMBER }}
+          build-version: ${{ env.BUILD_VERSION }}
+          archive-output: 'false'
+
+      - name: Package simulator app
+        env:
+          SIM_OUT: ${{ steps.build.outputs.output-path }}
+        run: |
+          app="$(find "$SIM_OUT" -maxdepth 3 -type d -name '*.app' | head -n 1)"
+          if [ -z "$app" ]; then
+            echo "::error::No .app bundle in $SIM_OUT."
+            exit 1
+          fi
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent "$app" "dist/${ARTIFACT_PREFIX}_iOS_simulator.zip"
+          echo "SIM_APP=$app" >> "$GITHUB_ENV"
+
+      - name: Upload simulator app
+        uses: actions/upload-artifact@v7
+        with:
+          name: Z_Glossarion-iOS-Simulator
+          path: dist/*_iOS_simulator.zip
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Smoke test on the simulator
+        run: |
+          logs="$GITHUB_WORKSPACE/mobile-smoke-logs"
+          mkdir -p "$logs"
+          xcrun simctl list devices available --json > "$logs/simctl_devices.json"
+          udid="$(python3 - "$logs/simctl_devices.json" <<'PY'
+          import json, re, sys
+          devices = json.load(open(sys.argv[1], encoding="utf-8"))["devices"]
+          best = None
+          for runtime, entries in devices.items():
+              match = re.search(r"iOS-(\d+)-(\d+)", runtime)
+              if not match:
+                  continue
+              version = (int(match.group(1)), int(match.group(2)))
+              for device in entries:
+                  if not device.get("isAvailable", True) or not device["name"].startswith("iPhone"):
+                      continue
+                  rank = (device["name"] == "iPhone 17", version)
+                  if best is None or rank > best[0]:
+                      best = (rank, device["udid"], device["name"], runtime)
+          if best is None:
+              sys.exit("No available iPhone simulator")
+          print(f"Using {best[2]} ({best[3]})", file=sys.stderr)
+          print(best[1])
+          PY
+          )"
+          echo "SIM_UDID=$udid" >> "$GITHUB_ENV"
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$SIM_APP/Info.plist")"
+          xcrun simctl boot "$udid" 2>/dev/null || true
+          xcrun simctl bootstatus "$udid" -b
+          xcrun simctl install "$udid" "$SIM_APP"
+          xcrun simctl spawn "$udid" log stream --style compact --level debug \
+            --predicate "process == \"$executable\"" > "$logs/oslog_stream.txt" 2>&1 &
+          # --console-pty captures the process's own stdout/stderr (fd 1/2).
+          xcrun simctl launch --console-pty --terminate-running-process "$udid" "$APP_PACKAGE" \
+            > "$logs/console_pty.txt" 2>&1 &
+
+          console_log() {
+            local container
+            container="$(xcrun simctl get_app_container "$udid" "$APP_PACKAGE" data 2>/dev/null)" || return 0
+            cat "$container/Library/Caches/console.log" 2>/dev/null || true
+          }
+          has_marker() {
+            # Scan a snapshot file: grep -q on a pipe can SIGPIPE the writer, which pipefail reports.
+            { cat "$logs/console_pty.txt" "$logs/oslog_stream.txt" 2>/dev/null || true; console_log; } > "$logs/.scan.txt"
+            grep -a -q -E "(^|[^A-Z_])$1([^A-Z_]|\$)" "$logs/.scan.txt"
+          }
+          wait_for() {
+            local marker="$1" timeout="$2" start=$SECONDS
+            until has_marker "$marker"; do
+              if has_marker 'GLOSSARION_SELFTEST FAIL'; then
+                echo "::error title=iOS smoke::GLOSSARION_SELFTEST FAIL reported."
+                return 1
+              fi
+              if has_marker GLOSSARION_BACKEND_FAIL; then
+                echo "::error title=iOS smoke::GLOSSARION_BACKEND_FAIL reported (warm backend import failed)."
+                return 1
+              fi
+              if [ $((SECONDS - start)) -ge "$timeout" ]; then
+                echo "::error title=iOS smoke::Timed out after ${timeout}s waiting for $marker."
+                return 1
+              fi
+              sleep 5
+            done
+            echo "Found $marker after $((SECONDS - start))s."
+          }
+
+          wait_for GLOSSARION_READY "$READY_TIMEOUT"
+          wait_for GLOSSARION_BACKEND_READY "$READY_TIMEOUT"
+          xcrun simctl openurl "$udid" "$SELFTEST_URL"
+          wait_for 'GLOSSARION_SELFTEST PASS' "$SELFTEST_TIMEOUT"
+
+      - name: Collect simulator logs
+        if: always()
+        run: |
+          logs="$GITHUB_WORKSPACE/mobile-smoke-logs"
+          mkdir -p "$logs"
+          if [ -n "${SIM_UDID:-}" ]; then
+            container="$(xcrun simctl get_app_container "$SIM_UDID" "$APP_PACKAGE" data 2>/dev/null || true)"
+            if [ -n "$container" ]; then
+              cp "$container/Library/Caches/console.log" "$logs/console.log" 2>/dev/null || true
+              cp -R "$container/Library/Application Support/data/logs" "$logs/app_logs" 2>/dev/null || true
+            fi
+            xcrun simctl io "$SIM_UDID" screenshot "$logs/screen.png" 2>/dev/null || true
+          fi
+          grep -a -h -o -E 'GLOSSARION_[A-Z_]+( (PASS|FAIL))?' "$logs"/*.txt "$logs"/console.log 2>/dev/null | sort | uniq -c > "$logs/markers.txt" || true
+
+      - name: Upload simulator smoke logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mobile-smoke-logs-ios
+          path: mobile-smoke-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ==========================================================================
+  # release: tags only. Appends the mobile assets to the tag's GitHub release, like the desktop
+  # build-*.yml workflows do (softprops/action-gh-release, files + fail_on_unmatched_files).
+  # ==========================================================================
+  release:
+    name: Publish mobile assets to the GitHub release
+    needs: [prepare, android, android-smoke, ios, ios-signed]
+    if: >-
+      !cancelled()
+      && needs.prepare.result == 'success'
+      && needs.prepare.outputs.is_release == 'true'
+      && needs.android.result == 'success'
+      && needs.ios.result == 'success'
+      && (needs.android-smoke.result == 'success' || needs.android-smoke.result == 'skipped')
+      && (needs.ios-signed.result == 'success' || needs.ios-signed.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    # Serialises mobile publishes for a tag. The desktop tag workflows (build-linux.yml,
+    # build-macos.yml) publish to the same release; softprops/action-gh-release v3 resolves
+    # the shared-tag create race and existing-asset races across workflows.
+    concurrency:
+      group: github-release-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      BUILD_VERSION: ${{ needs.prepare.outputs.build_version }}
+      BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      ARTIFACT_PREFIX: ${{ needs.prepare.outputs.artifact_prefix }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - name: Download Android artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: Z_Glossarion-Android-*
+          merge-multiple: true
+          path: dist
+
+      - name: Download unsigned IPA
+        uses: actions/download-artifact@v8
+        with:
+          name: Z_Glossarion-iOS-Unsigned
+          path: dist
+
+      - name: Download signed IPA
+        if: needs.ios-signed.result == 'success'
+        uses: actions/download-artifact@v8
+        with:
+          name: Z_Glossarion-iOS-Signed
+          path: dist
+
+      - name: Write AltStore source and checksums
+        run: |
+          python3 - <<'PY'
+          import datetime, json, os, pathlib, plistlib, zipfile
+
+          dist = pathlib.Path("dist")
+          prefix = os.environ["ARTIFACT_PREFIX"]
+          tag = os.environ["RELEASE_TAG"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          ipa = dist / f"{prefix}_iOS_unsigned.ipa"
+          with zipfile.ZipFile(ipa) as archive:
+              plist_name = next(
+                  name for name in archive.namelist()
+                  if name.startswith("Payload/") and name.endswith(".app/Info.plist") and name.count("/") == 2
+              )
+              info = plistlib.loads(archive.read(plist_name))
+          releases = f"https://github.com/{repo}/releases"
+          privacy = {key: value for key, value in info.items()
+                     if key.startswith("NS") and key.endswith("UsageDescription")}
+          source = {
+              "name": "Glossarion",
+              "identifier": f"{info['CFBundleIdentifier']}.source",
+              "sourceURL": f"{releases}/latest/download/altstore-source.json",
+              "website": f"https://github.com/{repo}",
+              "apps": [{
+                  "name": "Glossarion",
+                  "bundleIdentifier": info["CFBundleIdentifier"],
+                  "developerName": "Glossarion contributors",
+                  "subtitle": "AI novel and manga translator",
+                  "localizedDescription": "Translate novels, EPUBs, PDFs and manga with your own AI models.",
+                  "iconURL": f"https://raw.githubusercontent.com/{repo}/{tag}/src/mobile/app/assets/icon.png",
+                  "tintColor": "E18F98",
+                  "category": "utilities",
+                  "appPermissions": {"entitlements": [], "privacy": privacy},
+                  "versions": [{
+                      "version": info["CFBundleShortVersionString"],
+                      "buildVersion": str(info["CFBundleVersion"]),
+                      "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      "localizedDescription": f"Glossarion {tag}",
+                      "downloadURL": f"{releases}/download/{tag}/{ipa.name}",
+                      "size": ipa.stat().st_size,
+                      "minOSVersion": str(info.get("MinimumOSVersion", "13.0")),
+                  }],
+              }],
+              "news": [],
+          }
+          (dist / "altstore-source.json").write_text(json.dumps(source, indent=2) + "\n", encoding="utf-8")
+          PY
+          cd dist
+          files=(*)
+          sha256sum -- "${files[@]}" > "${ARTIFACT_PREFIX}_mobile_SHA256SUMS.txt"
+          cat "${ARTIFACT_PREFIX}_mobile_SHA256SUMS.txt"
+          {
+            echo "## Mobile release assets ($RELEASE_TAG)"
+            echo
+            echo '```'
+            ls -la
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

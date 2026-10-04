@@ -3,6 +3,7 @@
 
 # Allow specific root files
 !.gitignore
+!.gitattributes
 !README.md
 !LICENSE
 !requirements.txt
@@ -41,14 +42,21 @@ src/**
 # Explicitly include application icon in src
 !src/Halgakos.ico
 
-# Allow android subfolder (Kivy/KivyMD Android entry point)
-!src/android/
-!src/android/**
-!src/android/launch_pyside_gui.bat
-!src/android/pyside_launcher/
-!src/android/pyside_launcher/*.py
-!src/android/pyside_launcher/*.spec
-!src/android/pyside_launcher/*.md
+# Mobile app (Flet, Android + iOS). Generated build inputs stay ignored.
+!src/mobile/
+!src/mobile/**
+src/mobile/app/backend/
+src/mobile/app/assets/tiktoken/
+src/mobile/app/assets/selftest/
+src/mobile/build/
+src/mobile/dist/
+src/mobile/.flet/
+src/mobile/.venv/
+src/mobile/storage/
+src/mobile/extensions/**/.dart_tool/
+src/mobile/extensions/**/build/
+src/mobile/extensions/**/.flutter-plugins*
+src/mobile/extensions/**/pubspec.lock
 
 # Never commit secrets and configs anywhere
 **/config.json
@@ -150,5 +158,10 @@ tests/**
 !tests/test_pdf_fast_extractor.py
 !tests/test_output_workspace_routing.py
 !tests/test_pdf_workspace_compiler.py
+# Desktop parity oracle (U0+): tooling + recorded baseline are tracked so extraction
+# worktrees have them; legacy/ and golden/ are regenerated per step (machine-local).
+!tests/parity/
+!tests/parity/*.py
+!tests/parity/BASELINE_FAILURES.txt
 junktests/
 warp.md

@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Merged into the Flet app's manifest (no template fork needed).
+
+  * flutter_foreground_task does not declare its service; apps must. Glossarion
+    runs jobs under the dataSync type (Android 15+: 6 h per 24 h, ending with
+    TaskHandler.onDestroy(isTimeout=true) -> on_foreground(type="timeout")).
+    stopWithTask="true": swiping the app away stops the job service; jobs stay
+    resumable from translation_progress.json.
+  * ShareReceiverActivity is the exported entry point for "Open with"
+    (ACTION_VIEW) and "Share" (ACTION_SEND / ACTION_SEND_MULTIPLE). It forwards
+    to MainActivity with Intent.data == null, so Flutter never turns a
+    content:// URI into a route (FlutterActivityAndFragmentDelegate pushes
+    intent.getData().toString() as a route on onNewIntent).
+  * The pyproject [tool.flet.android.permission] table already requests these
+    permissions; they are repeated here so the plugin is self-contained.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application>
+
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="true" />
+
+        <!-- Small icon for the job-service notification (flutter_foreground_task
+             NotificationIcon.metaDataName) and for show_notification(). -->
+        <meta-data
+            android:name="com.glossarion.native.notification_icon"
+            android:resource="@drawable/glossarion_native_ic_notification" />
+
+        <activity
+            android:name="com.glossarion.flet_glossarion_native.ShareReceiverActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.NoDisplay">
+
+            <!-- "Open with": documents, archives, subtitles, glossaries. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/epub+zip" />
+                <data android:mimeType="application/pdf" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/markdown" />
+                <data android:mimeType="text/html" />
+                <data android:mimeType="application/xhtml+xml" />
+                <data android:mimeType="application/zip" />
+                <data android:mimeType="application/x-zip-compressed" />
+                <data android:mimeType="application/x-cbz" />
+                <data android:mimeType="application/vnd.comicbook+zip" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="text/csv" />
+                <data android:mimeType="text/comma-separated-values" />
+                <data android:mimeType="application/x-subrip" />
+                <data android:mimeType="text/vtt" />
+                <data android:mimeType="application/xliff+xml" />
+                <data android:mimeType="application/x-xliff+xml" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+
+            <!-- "Share": the same types, plus images (manga pages) and shared text. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/epub+zip" />
+                <data android:mimeType="application/pdf" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/markdown" />
+                <data android:mimeType="text/html" />
+                <data android:mimeType="application/xhtml+xml" />
+                <data android:mimeType="application/zip" />
+                <data android:mimeType="application/x-zip-compressed" />
+                <data android:mimeType="application/x-cbz" />
+                <data android:mimeType="application/vnd.comicbook+zip" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="text/csv" />
+                <data android:mimeType="text/comma-separated-values" />
+                <data android:mimeType="application/x-subrip" />
+                <data android:mimeType="text/vtt" />
+                <data android:mimeType="application/xliff+xml" />
+                <data android:mimeType="application/x-xliff+xml" />
+                <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/epub+zip" />
+                <data android:mimeType="application/pdf" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/markdown" />
+                <data android:mimeType="text/html" />
+                <data android:mimeType="application/xhtml+xml" />
+                <data android:mimeType="application/zip" />
+                <data android:mimeType="application/x-zip-compressed" />
+                <data android:mimeType="application/x-cbz" />
+                <data android:mimeType="application/vnd.comicbook+zip" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="text/csv" />
+                <data android:mimeType="text/comma-separated-values" />
+                <data android:mimeType="application/x-subrip" />
+                <data android:mimeType="text/vtt" />
+                <data android:mimeType="application/xliff+xml" />
+                <data android:mimeType="application/x-xliff+xml" />
+                <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

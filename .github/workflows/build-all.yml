@@ -838,3 +838,17 @@ jobs:
           path: src/dist/*.zip
           if-no-files-found: error
           compression-level: 0
+
+  # ============================================================================
+  # Mobile (Android + iOS): reusable workflow build-mobile.yml
+  # ============================================================================
+  build-mobile:
+    uses: ./.github/workflows/build-mobile.yml
+    with:
+      targets: all
+      emulator_smoke: true
+      ios_simulator_smoke: false
+    secrets: inherit
+    # Must cover the nested release job's request at validation time (it only runs on tags).
+    permissions:
+      contents: write

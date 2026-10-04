@@ -55,3 +55,30 @@ jobs:
         # This will at least check if imports work correctly
         python -c "import sys; sys.path.insert(0, 'src'); import unified_api_client"
         echo "Basic import test passed!"
+
+  mobile-backend-check:
+    # Mobile backend closure: GUI-taint, excluded-module edges, process-spawn ratchet and pinned
+    # third-party imports (src/mobile/tools/collect_backend.py --check), plus a Python 3.13
+    # syntax check of the mobile app, tools and CI scripts.
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up uv (Python 3.13)
+      uses: astral-sh/setup-uv@v10.2.0
+      with:
+        python-version: '3.13'
+        enable-cache: false
+
+    - name: Collector check
+      working-directory: src/mobile
+      env:
+        PYTHONUTF8: '1'
+      run: uv run --no-project python tools/collect_backend.py --check
+
+    - name: Compile mobile app, tools and CI scripts (Python 3.13)
+      working-directory: src/mobile
+      env:
+        PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+      run: uv run --no-project python -m compileall -q app tools ci tests_host

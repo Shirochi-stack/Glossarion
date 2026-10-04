@@ -1,0 +1,351 @@
+# Glossarion desktop test baseline (pre-mobile-rewrite safety net)
+BASE_SHA: 486ef693f36455a3969e2c31e385ca9e4450d9ca
+Date: 2026-10-05T00:46:32+04:00
+Python: Python 3.12.9  (C:\Users\ADMIN\AppData\Local\Programs\Python\Python312\python.exe)
+pytest: pytest 8.4.2
+Command (per file, cwd=repo root, PYTHONIOENCODING=utf-8, stdin=NUL, timeout 600 s):
+  python -m pytest -p no:cacheprovider -W ignore -o console_output_style=classic -q -rfE --junitxml=<scratch>.xml <file>
+  (-rfE and --junitxml only add reporting; counts come from the junit XML because pyproject addopts '-q' + '-q' suppresses the summary line)
+Excluded files: tests/test_containers.py, tests/test_diff.py, tests/test_real_lock.py (break collection / wait for input)
+Files run: 134 (4-way process pool; files with failures/timeouts re-run serially, serial result is authoritative)
+TOTALS: passed=3742 failed=84 errors=76 skipped=9 timeouts=1
+Failing node ids: 165 (KNOWN pre-existing per memory: 19, NEW vs memory list: 146)
+KNOWN = listed as pre-existing in memory/glossarion-windows-editing-quirks.md (whole of test_metadata_subjects.py treated as known: memory says 'most of' it).
+NEW = failing on BASE_SHA but not in that memory list (still pre-existing at BASE_SHA; not caused by the mobile rewrite).
+
+## Failing node ids (status kind node)
+NEW   FAILED  tests/test_api_key_encryption.py::TestAPIKeyEncryption::test_init_creates_new_cipher
+NEW   FAILED  tests/test_api_key_encryption.py::TestAPIKeyEncryption::test_unix_file_permissions
+NEW   FAILED  tests/test_api_key_encryption.py::TestAPIKeyEncryption::test_windows_file_hiding
+NEW   ERROR   tests/test_api_key_encryption.py::TestConfigMigration::test_migrate_config_with_fallback_keys
+NEW   ERROR   tests/test_api_key_encryption.py::TestConfigMigration::test_migrate_config_with_unencrypted_keys
+NEW   FAILED  tests/test_async_reload.py::test_async_reload
+NEW   FAILED  tests/test_auth_pool_dropdowns.py::test_multi_key_ollamapull_button_follows_model_field
+NEW   FAILED  tests/test_auth_pool_dropdowns.py::test_ollama_install_error_is_reported_when_server_is_stopped
+NEW   FAILED  tests/test_auth_pool_dropdowns.py::test_ollamapull_advanced_fields_validate_input
+NEW   FAILED  tests/test_auth_pool_dropdowns.py::test_ollamapull_button_rechecks_then_installs_or_opens_settings
+NEW   FAILED  tests/test_auth_pool_dropdowns.py::test_ollamapull_button_status_runs_in_background
+NEW   FAILED  tests/test_auth_pool_dropdowns.py::test_ollamapull_settings_persist_native_options
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_429_reaches_multi_key_rotation_handler
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_429_reaches_normal_single_key_retry_budget
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_arena_status_survives_provider_wrapper[400-invalid_request_error]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_arena_status_survives_provider_wrapper[401-auth_error]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_arena_status_survives_provider_wrapper[403-auth_error]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_arena_status_survives_provider_wrapper[404-invalid_request_error]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_arena_status_survives_provider_wrapper[422-invalid_request_error]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_arena_status_survives_provider_wrapper[429-rate_limit]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_arena_status_survives_provider_wrapper[500-api_error]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_arena_status_survives_provider_wrapper[502-api_error]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_arena_status_survives_provider_wrapper[503-api_error]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_arena_status_survives_provider_wrapper[504-api_error]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_authentication_failures_request_login_without_replaying[401]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_authentication_failures_request_login_without_replaying[403]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_bad_request_does_not_become_prohibited_content
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_captcha_rejection_is_not_reported_as_lost_login
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_partial_response_is_neither_retried_nor_rate_limit_rotated[429]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_partial_response_is_neither_retried_nor_rate_limit_rotated[503]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_partial_response_is_neither_retried_nor_rate_limit_rotated[None]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_server_failures_use_normal_retry_budget[500]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_server_failures_use_normal_retry_budget[502]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_server_failures_use_normal_retry_budget[503]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_server_failures_use_normal_retry_budget[504]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_translation_queue_preserves_structured_errors[api_error-503]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_translation_queue_preserves_structured_errors[autharena_stream_error-None]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_translation_queue_preserves_structured_errors[rate_limit-429]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_translation_retry_handler_preserves_no_replay_errors[Arena HTTP 429]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_translation_retry_handler_preserves_no_replay_errors[Arena stream cancelled before completion]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_translation_retry_handler_preserves_no_replay_errors[Arena stream timed out]
+NEW   ERROR   tests/test_autharena_unified_errors.py::test_uncertain_stream_error_cannot_rotate_based_on_message_alone
+NEW   FAILED  tests/test_authcd_temperature_retry.py::test_deprecated_temperature_is_retried_without_it_and_remembered
+NEW   FAILED  tests/test_authcd_temperature_retry.py::test_outdated_client_version_is_upgraded_retried_and_remembered
+NEW   FAILED  tests/test_enhanced_text_extractor.py::TestEnhancedTextExtractor::test_configure_html2text_structure_preserved
+NEW   FAILED  tests/test_enhanced_text_extractor.py::TestEnhancedTextExtractorEdgeCases::test_detect_encoding_all_encodings_fail
+NEW   FAILED  tests/test_enhanced_text_extractor.py::TestEnhancedTextExtractorEdgeCases::test_language_detection_boundary_conditions
+NEW   FAILED  tests/test_enhanced_text_extractor.py::TestEnhancedTextExtractorEdgeCases::test_unicode_edge_cases
+NEW   FAILED  tests/test_enhanced_text_extractor.py::TestEnhancedTextExtractorEdgeCases::test_very_long_text_processing
+NEW   FAILED  tests/test_enhanced_text_extractor.py::TestEnhancedTextExtractorIntegration::test_encoding_detection_integration_various_encodings
+NEW   FAILED  tests/test_enhanced_text_extractor.py::TestEnhancedTextExtractorIntegration::test_language_detection_integration_multiple_languages
+NEW   FAILED  tests/test_enhanced_text_extractor.py::test_encoding_detection_parametrized[Hello-expected_in0]
+KNOWN FAILED  tests/test_epub_utils.py::test_qa_failure_removes_existing_refinement_status
+NEW   FAILED  tests/test_epub_utils.py::test_stopped_partial_toc_reuse_preserves_recycled_model
+NEW   FAILED  tests/test_epub_utils.py::test_stopped_toc_retry_reuse_replaces_failed_api_model
+NEW   FAILED  tests/test_glm_proxy.py::test_other_settings_exposes_billable_authza_general_api_toggle
+NEW   FAILED  tests/test_glossary_general_tab.py::test_tab_is_built_after_the_minimal_tab_but_shown_first
+KNOWN FAILED  tests/test_glossary_usage.py::test_ui_hooks_are_wired
+NEW   FAILED  tests/test_image_translator_chunk_ranges.py::test_chunk_ranges_use_default_three_percent_overlap
+NEW   TIMEOUT tests/test_memory_usage_reporter.py
+NEW   FAILED  tests/test_memory_usage_reporter.py::TestEnsureLogsDir::test_ensure_logs_dir_development_fallback
+NEW   FAILED  tests/test_memory_usage_reporter.py::TestEnsureLogsDir::test_ensure_logs_dir_cwd_fallback
+NEW   FAILED  tests/test_memory_usage_reporter.py::TestFormatBytes::test_format_bytes_with_exception
+NEW   HANG    tests/test_memory_usage_reporter.py::TestWorkerFunction::test_worker_basic_functionality
+KNOWN FAILED  tests/test_metadata_subjects.py::test_header_and_toc_requests_use_compressed_tracked_glossary_in_all_batch_modes[header-0]
+KNOWN FAILED  tests/test_metadata_subjects.py::test_header_and_toc_requests_use_compressed_tracked_glossary_in_all_batch_modes[header-1]
+KNOWN FAILED  tests/test_metadata_subjects.py::test_header_and_toc_requests_use_compressed_tracked_glossary_in_all_batch_modes[toc-0]
+KNOWN FAILED  tests/test_metadata_subjects.py::test_header_and_toc_requests_use_compressed_tracked_glossary_in_all_batch_modes[toc-1]
+KNOWN FAILED  tests/test_metadata_subjects.py::test_metadata_auto_gender_uses_the_stable_stored_winner[False]
+KNOWN FAILED  tests/test_metadata_subjects.py::test_metadata_auto_gender_uses_the_stable_stored_winner[True]
+KNOWN FAILED  tests/test_metadata_subjects.py::test_metadata_requests_use_compliance_and_manual_gender_decision[parallel]
+KNOWN FAILED  tests/test_metadata_subjects.py::test_metadata_requests_use_compliance_and_manual_gender_decision[together]
+KNOWN FAILED  tests/test_metadata_subjects.py::test_metadata_worker_title_request_uses_same_glossary_pipeline
+KNOWN FAILED  tests/test_metadata_subjects.py::test_primary_book_title_request_uses_same_glossary_pipeline
+KNOWN FAILED  tests/test_pdf_toc_extraction.py::test_progress_manager_labels_pdf_api_chunks_like_epub
+KNOWN FAILED  tests/test_pdf_toc_extraction.py::test_progress_manager_seeds_bookmark_rows_and_hides_source_sidecar
+KNOWN FAILED  tests/test_progress_model_metadata.py::test_progress_managers_use_event_driven_differential_refresh
+KNOWN ERROR   tests/test_retranslation_epub_source_lookup.py
+KNOWN FAILED  tests/test_sdlxliff_support.py::test_progress_manager_shell_uses_slightly_wider_default
+KNOWN FAILED  tests/test_sdlxliff_support.py::test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted
+KNOWN FAILED  tests/test_sdlxliff_support.py::test_translation_chunk_prompt_can_include_previous_chunk_memory
+NEW   FAILED  tests/test_stream_lifetime.py::test_hard_cancel_all_closes_all_streams
+NEW   FAILED  tests/test_stream_lifetime.py::test_temporary_client_garbage_collection_does_not_affect_other_clients
+NEW   ERROR   tests/test_streaming_log.py
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestPatternManager::test_chapter_patterns_exist
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestPatternManager::test_cjk_honorifics_exist
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestPatternManager::test_filename_extract_patterns_exist
+NEW   FAILED  tests/test_transate_kr_to_en.py::TestPerformance::test_config_initialization_performance
+NEW   FAILED  tests/test_transate_kr_to_en.py::TestPerformance::test_pattern_compilation_performance
+NEW   FAILED  tests/test_transate_kr_to_en.py::TestTransateKRtoENIntegration::test_boolean_environment_parsing
+NEW   FAILED  tests/test_transate_kr_to_en.py::TestTransateKRtoENIntegration::test_config_and_pattern_integration
+NEW   FAILED  tests/test_transate_kr_to_en.py::TestTransateKRtoENIntegration::test_environment_integration
+NEW   FAILED  tests/test_transate_kr_to_en.py::TestTransateKRtoENIntegration::test_multi_api_keys_integration
+NEW   FAILED  tests/test_transate_kr_to_en.py::TestTransateKRtoENIntegration::test_numeric_environment_parsing
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestTranslationConfig::test_translation_config_api_key_priority
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestTranslationConfig::test_translation_config_defaults
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestTranslationConfig::test_translation_config_from_env
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestTranslationConfig::test_translation_config_invalid_multi_keys
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestUtilityFunctions::test_cover_html_passthrough_marks_completed
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestUtilityFunctions::test_get_chapter_terminology_chunk_data
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestUtilityFunctions::test_get_chapter_terminology_epub_file
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestUtilityFunctions::test_get_chapter_terminology_text_file
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestUtilityFunctions::test_get_chapter_terminology_txt_filename
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestUtilityFunctions::test_is_traditional_translation_api_deepl
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestUtilityFunctions::test_is_traditional_translation_api_google
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestUtilityFunctions::test_is_traditional_translation_api_other
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestUtilityFunctions::test_numbered_special_files_keep_chapter_zero
+NEW   ERROR   tests/test_transate_kr_to_en.py::TestUtilityFunctions::test_translate_special_files_legacy_cover_alias
+NEW   FAILED  tests/test_transate_kr_to_en.py::test_retranslation_model_info_prefers_current_progress_over_previous_entry
+NEW   FAILED  tests/test_txt_processor.py::test_detects_chapters_and_sections
+NEW   FAILED  tests/test_txt_processor.py::test_extract_chapters_splits_to_html
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_extract_first_image_base64_with_no_images
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_extract_first_image_base64_with_none_message
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_extract_first_image_base64_with_none_messages
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_extract_first_image_base64_with_valid_image
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_get_send_interval_default
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_get_send_interval_from_env
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_get_send_interval_invalid_env
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_get_timeout_config_default
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_get_timeout_config_enabled
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_model_lock_context_manager
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_model_lock_fallback
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_safe_len_with_none
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_safe_len_with_type_error
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_safe_len_with_valid_object
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_unified_client_stats_initialization
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_with_attempt_suffix
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientCore::test_with_attempt_suffix_image
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedClientError::test_basic_error_initialization
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedClientError::test_error_inheritance
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedClientError::test_full_error_initialization
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientHelperMethods::test_detect_safety_filter_empty_content_suspicious_reason
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientHelperMethods::test_detect_safety_filter_no_indicators
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientHelperMethods::test_detect_safety_filter_safety_indicators_in_response
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientHelperMethods::test_maybe_retry_main_key_missing_original_key
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientHelperMethods::test_maybe_retry_main_key_no_multi_key_mode
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientIntegration::test_environment_variable_integration
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientIntegration::test_stats_tracking
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientIntegration::test_thread_safety_model_lock
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientMultiKey::test_multi_key_mode_disabled_by_default
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientMultiKey::test_multi_key_mode_empty_keys
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientMultiKey::test_multi_key_mode_enabled
+NEW   FAILED  tests/test_unified_api_client_core.py::TestUnifiedClientMultiKey::test_multi_key_mode_invalid_json
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_complete_property[None-True]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_complete_property[complete-True]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_complete_property[end_turn-True]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_complete_property[error-False]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_complete_property[finished-True]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_complete_property[length-False]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_complete_property[max_tokens-False]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_complete_property[stop-True]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_error_property_no_error
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_error_property_with_error_details
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_error_property_with_error_finish_reason
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_truncated_property[None-False]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_truncated_property[complete-False]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_truncated_property[error-False]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_truncated_property[incomplete-True]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_truncated_property[length-True]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_truncated_property[max_tokens-True]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_truncated_property[stop-False]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_truncated_property[stop_sequence_limit-True]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_is_truncated_property[truncated-True]
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_unified_response_full_initialization
+NEW   ERROR   tests/test_unified_api_client_core.py::TestUnifiedResponse::test_unified_response_initialization
+
+## Root-cause hints (most common exception lines per failing file)
+tests/test_api_key_encryption.py: 1x OSError: [WinError 145] The directory is not empty: 'C:\\Users\\ADMIN\\AppData\\Local\\Temp\\tmpx3zvh3cv'; 1x OSError: [WinError 145] The directory is not empty: 'C:\\Users\\ADMIN\\AppData\\Local\\Temp\\tmpgmp4jp12'
+tests/test_async_reload.py: 1x TypeError: MangaTranslator.__init__() missing 2 required positional arguments: 'unified_client' and 'main_gui'
+tests/test_auth_pool_dropdowns.py: 4x AssertionError: assert '🦙 Load Ollama' == '🦙 Download Ollama'; 2x AttributeError: '_OptionEditor' object has no attribute 'setText'
+tests/test_autharena_unified_errors.py: 30x NameError: name 'route_key_context' is not defined
+tests/test_authcd_temperature_retry.py: 1x AttributeError: '_FakeStream' object has no attribute 'headers'; 1x RuntimeError: AuthCD: 400 – Claude Code 2.1.119 does not support this model; version 2.1.999 or newer is required. Run 'claude update', or update the 
+tests/test_enhanced_text_extractor.py: 3x AssertionError: assert 'unknown' == 'korean'; 2x AssertionError: assert 'ascii' in ['utf-8', 'gb2312', 'gbk', 'gb18030', 'big5', 'shift_jis', ...]
+tests/test_epub_utils.py: 1x AssertionError: assert 'refinement_status' not in {'actual_num': 9, 'duplicate_confidence': 0, 'output_file': 'chapter0009.xhtml', 'previous_progress_; 1x KeyError: 'model_name'
+tests/test_glossary_general_tab.py: 1x ValueError: substring not found
+tests/test_metadata_subjects.py: 4x AssertionError: assert 'character,루나,Luna,male,Hero' in 'You are a professional translator specializing in novel chapter titles. Translate to English.; 2x AssertionError: assert 'character,루나,Luna,male,Hero' in 'Translate metadata to English; return JSON.\n\nGLOSSARY_REFERENCE\ntype,raw_name,translated_n
+tests/test_pdf_toc_extraction.py: 1x AssertionError: assert 5 == 4; 1x AssertionError: assert 4 == 3
+tests/test_retranslation_epub_source_lookup.py: 1x ImportError: cannot import name '_extract_epub_html_for_progress_item' from 'Retranslation_GUI' (C:\Users\ADMIN\Dev\Glossarion\src\Retranslation_GUI.p
+tests/test_sdlxliff_support.py: 1x AssertionError: assert '<p>One</p><p>Two</p><p>Three</p><p>Four</p>' in '[MEMORY - PREVIOUS CHUNK CONTEXT]\n<p>One</p>\n<p>Two</p>\n<p>Three</p>\n<p>F
+tests/test_stream_lifetime.py: 2x ValueError: Unsupported model: model-1. Supported prefixes: ['vertex/', '@', 'gpt', 'chatgpt', 'o1', 'o3', 'o4', 'gemini', 'veo', 'lyria', 'gemma', 'c
+tests/test_streaming_log.py: 1x ModuleNotFoundError: No module named 'streaming_log'
+tests/test_transate_kr_to_en.py: 24x AssertionError: category must be a class; 1x NameError: name '_progress_entry_is_completed_image_only_for_display' is not defined
+tests/test_txt_processor.py: 1x AttributeError: 'TextFileProcessor' object has no attribute '_detect_chapters'. Did you mean: 'extract_chapters'?; 1x AssertionError: assert '<html>' in 'Chapter 1: Beginnings\nThis is the first chapter.\n\nChapter 2: Middles\nThis is the second chapter.\n\n***\nA sce
+tests/test_unified_api_client_core.py: 37x ModuleNotFoundError: No module named 'requests.adapters'; 'requests' is not a package; 17x ValueError: Unsupported model: test-model. Did you mean to use one of these prefixes? ['chutes', 'chutes/']. Supported prefixes: ['vertex/', '@', 'gpt
+
+## Timeouts
+tests/test_memory_usage_reporter.py: killed at 600 s with no junit report. Diagnostic -vv run (diag_memory_usage_reporter.log): 19 passed, 3 failed before tests/test_memory_usage_reporter.py::TestWorkerFunction::test_worker_basic_functionality hung (faulthandler stack: src\memory_usage_reporter.py", line 200 in _worker); remaining tests of the file never ran.
+
+## Files that collect no tests (pytest rc=5; manual scripts, not failures)
+NO-TESTS tests/test_azure.py
+NO-TESTS tests/test_cross.py
+NO-TESTS tests/test_large_env.py
+NO-TESTS tests/test_locked_file.py
+NO-TESTS tests/test_malformed_tags.py
+NO-TESTS tests/test_real.py
+
+## Per-file summary
+file                                                        pass  fail  err  skip  tmo  rc    secs rerun
+--------------------------------------------------------------------------------------------------------
+tests/test_antigravity_proxy.py                               92     0    0     0    -   0    31.2 -
+tests/test_antigravity_token_limits.py                         8     0    0     0    -   0    29.3 -
+tests/test_api_key_encryption.py                              20     3    2     0    -   1     1.5 serial
+tests/test_app.py                                              1     0    0     0    -   0     1.7 -
+tests/test_arena_manager_visibility.py                         9     0    0     0    -   0    24.3 -
+tests/test_assistant_prompt_profiles.py                       40     0    0     0    -   0     6.9 -
+tests/test_async_reload.py                                     0     1    0     0    -   1    26.0 serial
+tests/test_auth_pool_dropdowns.py                             37     6    0     0    -   1     6.1 serial
+tests/test_autharena_browser.py                               14     0    0     0    -   0     6.7 -
+tests/test_autharena_proxy.py                                 82     0    0     0    -   0     8.0 -
+tests/test_autharena_timeouts.py                               6     0    0     0    -   0     3.1 -
+tests/test_autharena_unified_errors.py                         0     0   30     0    -   1    97.3 serial
+tests/test_autharena_upstream_transport.py                    12     0    0     0    -   0    12.7 -
+tests/test_autharena_worker.py                                 9     0    0     0    -   0    65.3 -
+tests/test_authcd_account_email.py                             3     0    0     0    -   0     1.7 -
+tests/test_authcd_claude_code_credentials.py                  17     0    0     0    -   0     6.1 -
+tests/test_authcd_temperature_retry.py                         5     2    0     0    -   1     1.9 serial
+tests/test_authgpt_relogin.py                                  2     0    0     0    -   0     1.6 -
+tests/test_authgpt_request.py                                 44     0    0     0    -   0    26.9 -
+tests/test_authgrok_auth.py                                   39     0    0     0    -   0    27.6 -
+tests/test_authnd_captcha_navigation.py                       94     0    0     0    -   0     1.9 -
+tests/test_authnd_stop.py                                      5     0    0     0    -   0     1.8 -
+tests/test_azure.py                                            0     0    0     0    -   5     3.8 -
+tests/test_chapter_splitter.py                                 6     0    0     0    -   0     1.6 -
+tests/test_cjk_name_matching.py                               52     0    0     0    -   0    24.8 -
+tests/test_config_backup_restore.py                           10     0    0     0    -   0     5.3 -
+tests/test_cross.py                                            0     0    0     0    -   5    24.7 -
+tests/test_enhanced_text_extractor.py                         52     8    0     0    -   1     1.6 serial
+tests/test_epub_converter_shutdown_cleanup.py                  2     0    0     0    -   0    26.1 -
+tests/test_epub_converter_stop_signals.py                      7     0    0     0    -   0    26.6 -
+tests/test_epub_library_layout.py                             87     0    0     0    -   0    18.2 -
+tests/test_epub_library_search.py                             12     0    0     0    -   0     1.6 -
+tests/test_epub_utils.py                                     194     3    0     0    -   1    25.1 serial
+tests/test_escape_invalid_html_tags.py                         6     0    0     0    -   0    31.8 -
+tests/test_extract_glossary_parser.py                         69     0    0     0    -   0    31.2 -
+tests/test_gemini_free_budget.py                              34     0    0     0    -   0    31.2 -
+tests/test_gemini_openai_thinking.py                           8     0    0     0    -   0    30.3 -
+tests/test_gender_capitalisation.py                           24     0    0     0    -   0    29.8 -
+tests/test_gender_description_columns.py                      26     0    0     0    -   0    28.9 -
+tests/test_gender_tracking.py                                 23     0    0     0    -   0    35.4 -
+tests/test_glm_proxy.py                                       47     1    0     0    -   1    21.1 serial
+tests/test_glossary_compression_integration.py                32     0    0     0    -   0    33.7 -
+tests/test_glossary_dedup_logging.py                           3     0    0     0    -   0    32.9 -
+tests/test_glossary_entry_types_preserved.py                  45     0    0     0    -   0    33.6 -
+tests/test_glossary_general_tab.py                             6     1    0     0    -   1     1.4 serial
+tests/test_glossary_interior_special_files.py                 23     0    0     0    -   0    33.5 -
+tests/test_glossary_log_numbering.py                          14     0    0     0    -   0    32.6 -
+tests/test_glossary_match_toggle_wiring.py                    15     0    0     0    -   0     1.3 -
+tests/test_glossary_matching.py                              240     0    0     0    -   0    30.7 -
+tests/test_glossary_minimal_pass.py                           54     0    0     0    -   0    33.1 -
+tests/test_glossary_minimal_pass_row.py                       23     0    0     0    -   0     1.6 -
+tests/test_glossary_progress_status_precedence.py             12     0    0     0    -   0     1.5 -
+tests/test_glossary_prompt_dedup.py                            4     0    0     0    -   0    32.9 -
+tests/test_glossary_qa_retry_gate.py                           2     0    0     0    -   0     1.4 -
+tests/test_glossary_refinement_cancellation.py                12     0    0     0    -   0    31.6 -
+tests/test_glossary_refinement_resume.py                      37     0    0     0    -   0    31.6 -
+tests/test_glossary_refinement_status_display.py              13     0    0     0    -   0    34.2 -
+tests/test_glossary_source_preparation.py                     29     0    0     0    -   0    33.2 -
+tests/test_glossary_translation_gate.py                        2     0    0     0    -   0    32.2 -
+tests/test_glossary_translation_gate_refinement.py             2     0    0     0    -   0     1.5 -
+tests/test_glossary_translit.py                              102     0    0     0    -   0     1.5 -
+tests/test_glossary_usage.py                                   5     1    0     0    -   1     1.6 serial
+tests/test_google_free_translate.py                           46     0    0     0    -   0    28.8 -
+tests/test_graceful_stop_progress_saves.py                     2     0    0     0    -   0    27.3 -
+tests/test_history_manager.py                                  5     0    0     0    -   0     1.4 -
+tests/test_html_archive_epub.py                               19     0    0     0    -   0     1.8 -
+tests/test_html_duplicate_cleanup.py                           4     0    0     0    -   0     1.6 -
+tests/test_html_file_selection.py                             10     0    0     0    -   0     1.9 -
+tests/test_http_logger.py                                      5     0    0     0    -   0     7.5 -
+tests/test_image_translator_chunk_ranges.py                    2     1    0     0    -   1    21.1 serial
+tests/test_key_context_routes.py                              50     0    0     0    -   0    37.1 -
+tests/test_large_env.py                                        0     0    0     0    -   5     1.3 -
+tests/test_locked_file.py                                      0     0    0     0    -   5     1.3 -
+tests/test_malformed_tags.py                                   0     0    0     0    -   5     1.3 -
+tests/test_manga_drag_drop.py                                 56     0    0     0    -   0    51.8 -
+tests/test_manga_ocr_io.py                                     7     0    0     0    -   0    33.7 -
+tests/test_memory_usage_reporter.py                            0     0    0     0  YES   1   600.1 serial
+tests/test_metadata_multibook_translation.py                   6     0    0     0    -   0    26.3 -
+tests/test_metadata_progress.py                                4     0    0     0    -   0     1.4 -
+tests/test_metadata_subjects.py                               14    10    0     0    -   1    22.7 serial
+tests/test_minimal_pass_model_stamp.py                         2     0    0     0    -   0    27.1 -
+tests/test_model_options_catalog.py                          128     0    0     0    -   0    27.3 -
+tests/test_multi_api_key_manager.py                           43     0    0     0    -   0    26.6 -
+tests/test_multi_key_conflict_fix.py                           1     0    0     0    -   0    31.1 -
+tests/test_multipass_chunk_aware.py                            8     0    0     0    -   0    26.2 -
+tests/test_multipass_glossary_compression.py                  12     0    0     0    -   0    25.5 -
+tests/test_ocagy_cli.py                                       63     0    0     0    -   0    38.4 -
+tests/test_openai_token_compatibility.py                     116     0    0     0    -   0    28.2 -
+tests/test_openrouter_thinking.py                              9     0    0     0    -   0    26.5 -
+tests/test_output_workspace_routing.py                        13     0    0     0    -   0     2.0 -
+tests/test_parallel_epub_visibility.py                        13     0    0     0    -   0    27.2 -
+tests/test_partial_b2_batching.py                             10     0    0     0    -   0    27.4 -
+tests/test_pdf_fast_extractor.py                              35     0    0     0    -   0    28.0 -
+tests/test_pdf_toc_extraction.py                              19     2    0     0    -   1    26.4 serial
+tests/test_pdf_workspace_compiler.py                          22     0    0     0    -   0    27.9 -
+tests/test_progress_model_metadata.py                        197     1    0     0    -   1    27.4 serial
+tests/test_prompt_profile_renaming.py                         24     0    0     0    -   0     7.7 -
+tests/test_proxy_token_storage.py                              7     0    0     9    -   0     5.8 -
+tests/test_qa_ruby_exclusion.py                                3     0    0     0    -   0    28.7 -
+tests/test_reader_overlay.py                                  16     0    0     0    -   0     1.5 -
+tests/test_real.py                                             0     0    0     0    -   5    28.5 -
+tests/test_refinement_prompt_profiles.py                      18     0    0     0    -   0     8.7 -
+tests/test_retranslation_epub_source_lookup.py                 0     0    1     0    -   2     1.4 serial
+tests/test_retranslation_qa_mark_clear.py                      3     0    0     0    -   0     1.4 -
+tests/test_review_volume_mode.py                               8     0    0     0    -   0    26.8 -
+tests/test_save_fix.py                                         1     0    0     0    -   0     1.4 -
+tests/test_scan_chunk_qa_localization.py                       5     0    0     0    -   0     3.3 -
+tests/test_scanner_detailed.py                                 3     0    0     0    -   0     2.9 -
+tests/test_sdlxliff_json_batch.py                              7     0    0     0    -   0     1.8 -
+tests/test_sdlxliff_support.py                               177     3    0     0    -   1    42.3 serial
+tests/test_service_tier.py                                    70     0    0     0    -   0    29.2 -
+tests/test_shutdown_utils_cleanup.py                          16     0    0     0    -   0     1.9 -
+tests/test_stop_does_not_block.py                             10     0    0     0    -   0    31.7 -
+tests/test_stream_lifetime.py                                  0     2    0     0    -   1    39.4 serial
+tests/test_streaming_log.py                                    0     0    1     0    -   2     1.4 serial
+tests/test_subtitle_processor.py                              81     0    0     0    -   0    27.6 -
+tests/test_toc_recycled_completion.py                          2     0    0     0    -   0    25.5 -
+tests/test_token_storage_logging.py                           15     0    0     0    -   0     1.7 -
+tests/test_tor_proxy.py                                       35     0    0     0    -   0    29.5 -
+tests/test_transate_kr_to_en.py                                8     8   17     0    -   1   110.7 serial
+tests/test_translation_artifacts.py                          196     0    0     0    -   0    28.3 -
+tests/test_tts_key_pool.py                                     5     0    0     0    -   0    28.5 -
+tests/test_txt_processor.py                                    1     2    0     0    -   1     1.9 serial
+tests/test_unified_api_client_core.py                          7    29   25     0    -   1   463.9 serial
+tests/test_unified_api_client_simple.py                       28     0    0     0    -   0    24.8 -
+tests/test_unified_glossary.py                                59     0    0     0    -   0    49.3 -
+tests/test_unified_glossary_gender_exclusion.py               17     0    0     0    -   0    26.6 -
+tests/test_unified_glossary_matching.py                        8     0    0     0    -   0    26.8 -
+tests/test_unified_glossary_wiring.py                         36     0    0     0    -   0     1.6 -
+tests/test_unified_response.py                                 3     0    0     0    -   0    25.4 -
+tests/test_update_manager_notes.py                             5     0    0     0    -   0     2.5 -
+tests/test_vision_image_finish_reason.py                       2     0    0     0    -   0    26.5 -
+tests/test_whole_term_scope.py                                54     0    0     0    -   0    50.5 -
+tests/test_zip_input_routing.py                               18     0    0     0    -   0     2.1 -
+--------------------------------------------------------------------------------------------------------
+TOTAL                                                       3742    84   76     9    1

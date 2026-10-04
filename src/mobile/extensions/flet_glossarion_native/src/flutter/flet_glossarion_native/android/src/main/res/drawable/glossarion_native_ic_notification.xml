@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Monochrome status-bar icon: a page with three text lines (the lines are
+     holes via evenOdd fill). Android tints status-bar icons; only alpha counts. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M6,2L18,2A2,2 0,0 1,20 4L20,20A2,2 0,0 1,18 22L6,22A2,2 0,0 1,4 20L4,4A2,2 0,0 1,6 2Z M8,6L8,8L16,8L16,6Z M8,11L8,13L16,13L16,11Z M8,16L8,18L13,18L13,16Z" />
+</vector>

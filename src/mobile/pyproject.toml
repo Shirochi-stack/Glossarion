@@ -1,0 +1,179 @@
+# Glossarion Mobile (Android + iOS), built with Flet 1.0.3.
+# Build config lives under [tool.flet]; see src/mobile/README.md for commands.
+# The real version is always injected from src/app_version.py by tools/build.py
+# or CI (--build-version / --build-number), never edited here.
+
+[project]
+name = "glossarion"
+version = "0.0.0"
+description = "Glossarion - AI novel & manga translator"
+requires-python = ">=3.13,<3.14"   # Flet bundles CPython 3.13 on device
+dependencies = [
+  "flet==1.0.3",
+  "flet-secure-storage==1.0.3",
+  "flet-permission-handler==1.0.3",
+  "flet-glossarion-native==0.1.0",   # in-repo extension (see dev_packages / tool.uv.sources)
+
+  # EPUB / HTML
+  "beautifulsoup4==4.12.3",
+  "soupsieve>=2.5",
+  "lxml==6.1.1",
+  "html5lib==1.1",
+  "ebooklib==0.18",
+  "six==1.17.0",
+
+  # Text / tokens
+  "tiktoken==0.13.0",
+  "regex==2026.5.9",
+  "rapidfuzz==3.14.5",
+  "langdetect==1.0.9",
+  "chardet==5.2.0",
+  "charset-normalizer==3.5.2",
+  "tqdm==4.66.6",
+  "html2text==2025.4.15",
+  "markdown==3.10.2",
+  "markdown2==2.5.5",
+
+  # HTTP
+  "requests==2.32.5",
+  "urllib3==2.6.3",
+  "certifi==2026.2.25",
+  "httpx==0.28.1",
+  "httpcore==1.0.9",
+  "anyio==4.13.0",
+
+  # LLM SDKs: the httpx-based majors the desktop is tested with
+  "openai>=2.32,<3",
+  "anthropic>=0.92,<1",
+  "google-genai>=1.73.1,<2",
+  "pydantic==2.13.4",
+  "pydantic-core==2.46.4",
+  "jiter==0.15.0",
+  "websockets>=13,<17",
+  "deepl==1.29.0",
+  "deep-translator==1.11.4",
+
+  # Auth / crypto
+  "google-auth==2.49.1",
+  "cryptography==43.0.1",
+  "cffi==2.0.0",
+
+  # Cloud OCR
+  "azure-ai-vision-imageanalysis==1.0.0",
+  "azure-core>=1.30",
+  "isodate",
+
+  # PDF
+  "pymupdf==1.27.2.3",
+  "pypdf==6.4.1",
+
+  # Images / on-device ONNX
+  "pillow==12.2.0",
+  "numpy==2.4.6",
+  "opencv-python-headless==5.0.0.93",
+  "onnxruntime==1.27.0",
+  "protobuf==7.35.0",
+  "flatbuffers",
+  "packaging",
+]
+# Tier B (added in the milestone that enables the route; check_mobile_wheels.py must pass):
+#   "grpcio==1.81.0", "grpcio-status==1.81.0", "google-cloud-translate", "google-cloud-vision",
+#   "google-cloud-texttospeech", "azure-ai-documentintelligence", "flet-webview==1.0.3",
+#   "flet-audio==1.0.3", "flet-video==1.0.3"
+
+[dependency-groups]
+dev = ["flet[all]==1.0.3", "pytest>=8", "pytest-asyncio>=0.24"]
+
+[tool.uv.sources]
+flet-glossarion-native = { path = "extensions/flet_glossarion_native", editable = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests_host"]
+
+[tool.flet]
+org = "com.glossarion"
+product = "Glossarion"
+company = "Glossarion"
+copyright = "Copyright (C) 2026 Glossarion contributors"
+bundle_id = "com.glossarion.app"
+# ebooklib 0.18 ships only an sdist; langdetect 1.0.9 ships only a py2 wheel.
+source_packages = ["langdetect", "ebooklib"]
+dev_packages = { "flet-glossarion-native" = "extensions/flet_glossarion_native" }
+
+[tool.flet.app]
+path = "app"
+module = "main"
+
+[tool.flet.compile]
+app = true
+packages = true
+
+[tool.flet.cleanup]
+package_files = ["**/tests/**", "**/test/**", "**/*.pyi", "cv2/data/**"]
+
+[tool.flet.deep_linking]
+scheme = "glossarion"
+host = "app"
+
+# app/assets/splash.png and icon.png are opaque on #121826; match the splash
+# background (flet defaults: #ffffff light / #222222 dark; build_base._resolve_splash).
+[tool.flet.splash]
+color = "#121826"
+dark_color = "#121826"
+
+[tool.flet.boot_screen.flet]
+spinner_size = 28
+prepare_message = "Unpacking Glossarion…"
+startup_message = "Starting translation engine…"
+
+[tool.flet.android]
+min_sdk_version = 26
+target_arch = ["arm64-v8a", "x86_64"]          # onnxruntime has no armeabi-v7a wheel
+extract_packages = ["langdetect", "certifi", "cv2", "tiktoken_ext"]
+dependencies = ["psutil==7.2.2"]               # Android only; every use is guarded
+
+[tool.flet.android.permission]
+"android.permission.INTERNET" = true
+"android.permission.ACCESS_NETWORK_STATE" = true
+"android.permission.POST_NOTIFICATIONS" = true
+"android.permission.FOREGROUND_SERVICE" = true
+"android.permission.FOREGROUND_SERVICE_DATA_SYNC" = true
+"android.permission.WAKE_LOCK" = true
+"android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" = true
+"android.permission.READ_EXTERNAL_STORAGE" = false
+"android.permission.WRITE_EXTERNAL_STORAGE" = false
+"android.permission.MANAGE_EXTERNAL_STORAGE" = false
+"android.permission.READ_MEDIA_IMAGES" = false
+"android.permission.READ_MEDIA_VIDEO" = false
+"android.permission.READ_MEDIA_AUDIO" = false
+
+[tool.flet.ios]
+export_method = "release-testing"   # used only when CI passes signing flags
+
+[tool.flet.ios.info]
+# CFBundleDisplayName comes from [tool.flet].product (flet v1.0.3 ios/Runner/Info.plist template);
+# repeating it here would emit the key twice.
+UIFileSharingEnabled = true
+LSSupportsOpeningDocumentsInPlace = true
+ITSAppUsesNonExemptEncryption = false
+NSLocalNetworkUsageDescription = "Glossarion connects to model servers on your local network (Ollama, LM Studio) and receives sign-in callbacks on this device."
+UIBackgroundModes = ["processing"]
+BGTaskSchedulerPermittedIdentifiers = ["com.glossarion.app.job.*"]
+CFBundleDocumentTypes = [
+  { CFBundleTypeName = "EPUB", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["org.idpf.epub-container", "org.idpf.epub-folder"] },
+  { CFBundleTypeName = "Text", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["public.plain-text", "net.daringfireball.markdown", "public.html"] },
+  { CFBundleTypeName = "PDF", CFBundleTypeRole = "Viewer", LSHandlerRank = "Alternate", LSItemContentTypes = ["com.adobe.pdf"] },
+  { CFBundleTypeName = "Archive", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["public.zip-archive", "com.glossarion.app.cbz"] },
+  { CFBundleTypeName = "Subtitles", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["com.glossarion.app.srt", "com.glossarion.app.vtt", "com.glossarion.app.ass"] },
+  { CFBundleTypeName = "XLIFF", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["com.glossarion.app.sdlxliff", "com.glossarion.app.xliff"] },
+  { CFBundleTypeName = "Glossary", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["public.json", "public.comma-separated-values-text"] },
+]
+UTImportedTypeDeclarations = [
+  { UTTypeIdentifier = "com.glossarion.app.cbz", UTTypeConformsTo = ["public.zip-archive"], UTTypeDescription = "Comic Book Archive", UTTypeTagSpecification = { "public.filename-extension" = ["cbz"] } },
+  { UTTypeIdentifier = "com.glossarion.app.srt", UTTypeConformsTo = ["public.plain-text"], UTTypeDescription = "SubRip", UTTypeTagSpecification = { "public.filename-extension" = ["srt"] } },
+  { UTTypeIdentifier = "com.glossarion.app.vtt", UTTypeConformsTo = ["public.plain-text"], UTTypeDescription = "WebVTT", UTTypeTagSpecification = { "public.filename-extension" = ["vtt"] } },
+  { UTTypeIdentifier = "com.glossarion.app.ass", UTTypeConformsTo = ["public.plain-text"], UTTypeDescription = "ASS/SSA", UTTypeTagSpecification = { "public.filename-extension" = ["ass", "ssa"] } },
+  { UTTypeIdentifier = "com.glossarion.app.sdlxliff", UTTypeConformsTo = ["public.xml"], UTTypeDescription = "SDLXLIFF", UTTypeTagSpecification = { "public.filename-extension" = ["sdlxliff"] } },
+  { UTTypeIdentifier = "com.glossarion.app.xliff", UTTypeConformsTo = ["public.xml"], UTTypeDescription = "XLIFF", UTTypeTagSpecification = { "public.filename-extension" = ["xliff", "xlf"] } },
+]
