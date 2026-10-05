@@ -127,7 +127,11 @@ def test_trace_oracle_closes_over_the_pipeline(session):
               "_auto_load_glossary_after_extraction", "_await_direct_text_glossary_approval",
               "_lazy_load_modules"}
     assert not manifest["missing"], manifest["missing"]
-    assert wanted <= frozen | set(manifest.get("moved_to_mixins") or ()), sorted(wanted - frozen)
+    # an oracle frozen after the U3 move carries the pipeline in its frozen mixin copies
+    provided = frozen | set(manifest.get("moved_to_mixins") or ())
+    for names in (manifest.get("mixin_methods") or {}).values():
+        provided |= set(names)
+    assert wanted <= provided, sorted(wanted - provided)
     gui_only = freeze_legacy.TG_RECORDED_METHODS | th.TRACE_RECORDED_METHODS
     assert set(manifest["recorded_methods"]) <= gui_only, sorted(set(manifest["recorded_methods"]) - gui_only)
 
@@ -213,11 +217,17 @@ def test_stop_latch_follows_the_env_mode_flags(session):
 def test_trace_detects_a_stop_latch_reordering(session):
     """Harness self-test: latching stop_requested before the env flags must be caught by both
     projections (the race the desktop comment at stop_translation warns about)."""
-    mutant = th.mutant_legacy_class(
-        session, "stop_translation",
-        "os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'",
-        "self.stop_requested = True; os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'",
-    )
+    import inspect
+
+    stop_source = inspect.getsource(getattr(session.bundle.methods, "stop_translation"))
+    if "os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'" in stop_source:
+        anchor = ("os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'",
+                  "self.stop_requested = True; os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'")
+    else:
+        # oracle frozen after the U3 move: stop_control.request_stop publishes the env mode
+        # flags, so the reordered latch goes in front of that call
+        anchor = ("    request_stop(\n", "    self.stop_requested = True\n    request_stop(\n")
+    mutant = th.mutant_legacy_class(session, "stop_translation", *anchor)
     legacy, changed = th.run_mutant("graceful_stop", "legacy", mutant, session)
     assert th.compare(legacy, changed, "full"), "full projection missed the latch reordering"
     mobile = th.compare(legacy, changed, "mobile")

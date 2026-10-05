@@ -290,7 +290,7 @@ def test_public_api():
 
 
 # --------------------------------------------------------------------------
-# Desktop packaging: every PyInstaller spec ships the U1, U2 and U3 shared modules
+# Desktop packaging: every PyInstaller spec ships the U1-U4 shared modules
 # --------------------------------------------------------------------------
 
 # Imported by core desktop modules (TransateKRtoEN, translator_gui, epub_converter, the PDF
@@ -316,6 +316,13 @@ U3_SHARED_MODULES = (
     "direct_text_store", "direct_text_stream",
 )
 
+# U4: translator_gui (model catalog, route controls), other_settings (prompt profiles, locks),
+# GlossaryManager_GUI (mode locks), multi_api_key_manager / unified_api_client (key pools,
+# refusal defaults) and authgem/authcd/authgrok (the shared OAuth session) import these.
+U4_SHARED_MODULES = (
+    "settings_rules", "model_catalog_core", "prompt_profiles", "key_pool_service", "oauth_session",
+)
+
 
 def _spec_list(source, name):
     lines = source.splitlines()
@@ -331,7 +338,7 @@ def test_u1_shared_modules_are_packaged_in_every_spec():
         source = spec.read_text(encoding="utf-8")
         files = [Path(entry[0]).stem for entry in _spec_list(source, "app_files")]
         modules = _spec_list(source, "app_modules")
-        for name in U1_SHARED_MODULES + U2_SHARED_MODULES + U3_SHARED_MODULES:
+        for name in U1_SHARED_MODULES + U2_SHARED_MODULES + U3_SHARED_MODULES + U4_SHARED_MODULES:
             assert (SRC_DIR / f"{name}.py").is_file(), name
             assert files.count(name) == 1, (spec.name, name, "app_files")
             assert modules.count(name) == 1, (spec.name, name, "app_modules")

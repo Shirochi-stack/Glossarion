@@ -22,7 +22,14 @@ Rules (plan section 2 / design critique):
 Public API: ``SettingSpec``, ``Section``, ``EnvBinding``, ``MISSING``,
 ``all_specs()``, ``spec(key)``, ``sections()``, ``section(id)``, ``effective_default(key)``,
 ``coerce(key, value)``, ``apply_converter(conv, value)``, ``search(query)``,
-``is_available(key, platform='mobile')``, ``env_names(key)``.
+``is_available(key, platform='mobile')``, ``env_names(key)``, ``choice_values(key)``,
+``evaluate_rule(rule_id, config)``.
+
+``visible_if`` / ``locked_if`` (U4) are rule ids that ``settings_rules.evaluate`` answers:
+``lock:<key>`` gives the lock reason from ``settings_rules.evaluate_locks`` ('' when the
+setting is free); the visibility ids (``thinking:*``, ``output_mode:*``, ``glossary:*``) are
+False when the desktop disables or hides the control for the current configuration. Choices
+are plain values or ``(value, label)`` pairs (desktop combos whose items show other text).
 """
 from __future__ import annotations
 
@@ -37,7 +44,8 @@ from typing import Any, NamedTuple, Optional, Tuple
 __all__ = [
     "MISSING", "EnvBinding", "SettingSpec", "Section", "all_specs", "spec", "has_spec",
     "sections", "section", "section_of", "effective_default", "coerce", "apply_converter",
-    "search", "is_available", "env_names", "keys",
+    "search", "is_available", "env_names", "keys", "choice_values", "evaluate_rule",
+    "LOCKED_IF", "VISIBLE_IF",
 ]
 
 
@@ -464,15 +472,51 @@ COMPUTED_DEFAULTS = {
     "ai_hunter_config.ai_hunter_max_workers": "max(1, cpu_count // 2)",
 }
 
-# Allowed values the desktop code checks without a settings_map choice converter
-# (translator_gui / owner_state source noted). Display only; coerce() falls back to the
-# default for other values only for keys without a settings_map converter.
+# Allowed values the desktop code checks without a settings_map choice converter or a
+# combo box the generator reads choices from (translator_gui / owner_state source noted).
+# Display only; coerce() falls back to the default for other values only for keys without
+# a settings_map converter. (REMOVE_AI_ARTIFACTS and auto_glossary_mode now come from their
+# desktop combos, with labels: settings_schema_data.)
 CHOICES_OVERRIDES = {
-    "REMOVE_AI_ARTIFACTS": ("off", "low", "medium", "high"),            # _init_variables backward-compat block
-    "auto_glossary_mode": ("off", "off_fuzzy_automap", "off_no_automap", "no_glossary",
-                           "minimal", "balanced", "full", "single_pass"),  # glossary shortcut combo
     "translation_chunk_prompt_role": ("system", "assistant", "user"),     # _init_variables
     "rolling_summary_mode": ("replace", "append"),                         # _on_context_mode_changed
+}
+
+# Rule ids evaluated by settings_rules.evaluate (U4). locked_if: the keys a registered
+# settings_rules lock rule covers (context batching, disable temperature, the stream-thinking
+# lock of Enable thoughts, the Glossary Manager mode locks). visible_if: the control is
+# disabled / hidden on desktop unless the rule holds (it stays visible on mobile, disabled).
+LOCKED_IF = {key: "lock:" + key for key in (
+    "batching_mode", "translation_temperature", "enable_thoughts",
+    "append_glossary", "append_glossary_auto_load", "fuzzy_auto_mapping", "fuzzy_auto_mapping_threshold",
+)}
+VISIBLE_IF = {
+    # Other Settings > Response Handling: thinking controls follow their enable toggles
+    "thinking_budget": "thinking:gemini",
+    "thinking_level": "thinking:gemini",
+    "gpt_effort": "thinking:gpt",
+    "openrouter_use_reasoning_tokens": "thinking:gpt",
+    "gpt_reasoning_tokens": "thinking:gpt_budget",
+    "anthropic_effort": "thinking:anthropic",
+    "anthropic_force_adaptive": "thinking:anthropic",
+    "anthropic_thinking_budget": "thinking:anthropic_budget",
+    # Image Translation & Vision API: the output mode's sub-settings
+    "image_output_resolution": "output_mode:image",
+    "nanogpt_video_duration": "output_mode:video",
+    "nanogpt_video_resolution": "output_mode:video",
+    "vision_ocr_batch_translation": "output_mode:vision_request",
+    "vision_ocr_batch_size": "output_mode:vision_request",
+    "vision_ocr_skip_translation": "output_mode:vision",
+    "vision_ocr_keep_images": "output_mode:vision",
+    # Glossary Manager: the extraction prompt (modes with extraction), the append format
+    # (Append Glossary on) and the Minimal tab's Targeted Extraction Settings (Minimal mode)
+    "unified_auto_glosary_prompt3": "glossary:extraction_prompt",
+    "append_glossary_prompt": "glossary:append_prompt",
+    **{key: "glossary:targeted_extraction" for key in (
+        "glossary_min_frequency", "glossary_max_names", "glossary_max_titles", "glossary_context_window",
+        "glossary_max_text_size", "glossary_max_sentences", "glossary_include_all_characters",
+        "glossary_chapter_split_threshold", "glossary_filter_mode", "strip_honorifics",
+    )},
 }
 
 # Labels for settings the generator found no widget text for (curated, short).
@@ -566,8 +610,8 @@ def _build_spec(key: str, entry: dict) -> SettingSpec:
     label = label.strip().rstrip(":").strip()
     choices = CHOICES_OVERRIDES.get(key) or (tuple(entry["choices"]) if entry.get("choices") else None)
     setting_type = entry.get("type", "str")
-    if choices and setting_type == "str":
-        setting_type = "choice"
+    if choices and setting_type == "str" and "editable_choices" not in entry.get("flags", ()):
+        setting_type = "choice"     # editable desktop combos keep free text (the items are suggestions)
     return SettingSpec(
         key=key,
         type=setting_type,
@@ -583,6 +627,8 @@ def _build_spec(key: str, entry: dict) -> SettingSpec:
         choices=choices,
         minimum=entry.get("minimum"),
         maximum=entry.get("maximum"),
+        visible_if=VISIBLE_IF.get(key),
+        locked_if=LOCKED_IF.get(key),
         platforms=platforms,
         discrepancies=discrepancies,
         default_source=default_source,
@@ -766,14 +812,29 @@ def coerce(key: str, value):
             number = min(cast(item.maximum), number)
         return number
     if item.type == "choice" and item.choices:
+        allowed = choice_values(key)
         text = str(value if value is not None else "").strip()
-        if text in item.choices:
+        if text in allowed:
             return text
         lowered = text.lower()
-        if lowered in item.choices:
+        if lowered in allowed:
             return lowered
         return default if default is not None else value
     return value
+
+
+def choice_values(key: str):
+    """The stored values of a setting's choices (labels dropped), or None."""
+    choices = spec(key).choices
+    if not choices:
+        return None
+    return tuple(c[0] if isinstance(c, tuple) and len(c) == 2 else c for c in choices)
+
+
+def evaluate_rule(rule_id: str, config):
+    """Evaluate a ``visible_if`` / ``locked_if`` rule id (settings_rules.evaluate, lazy import)."""
+    import settings_rules
+    return settings_rules.evaluate(rule_id, config)
 
 
 def is_available(key: str, platform: str = "mobile"):

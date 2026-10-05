@@ -452,6 +452,93 @@ def test_tier_d_catches_a_difference_injected_into_a_real_moved_method(session, 
 
 
 # ===========================================================================
+# Tier D for REWIRED desktop handlers (U4+): the method stays in TranslatorGUI (widget work)
+# but its decisions / data steps come from settings_rules / model_catalog_core
+# ===========================================================================
+
+
+@pytest.mark.parametrize("name", [m.name for m in mf.REWIRED_FUZZED])
+def test_rewired_desktop_method_matches_legacy(session, name):
+    spec = mf.get(name)
+    try:
+        fm.check_available(spec, session)
+    except fm.Unavailable as exc:
+        pytest.skip(str(exc))
+    report = fm.fuzz_moved(spec, session, check=False)
+    assert report.ok, report.failure_text()
+    wanted = min(fm.DEFAULT_STATES, fm.requested_states())
+    assert report.states >= wanted, f"only {report.states} states ran (wanted {wanted})"
+    assert report.clean_fraction >= 0.25, (
+        f"{name}: only {report.clean_fraction:.0%} of the states ran without an exception "
+        "(the fuzz would miss the late branches)")
+
+
+def test_rewired_methods_stay_desktop_handlers_over_shared_code(desktop_class):
+    import inspect
+
+    rewired = {m.name for m in mf.REWIRED}
+    problems = []
+    for spec in mf.REWIRED:
+        fn = vars(desktop_class).get(spec.name)
+        if fn is None:
+            problems.append(f"{spec.name}: not a TranslatorGUI method any more")
+            continue
+        source = inspect.getsource(getattr(fn, "__func__", fn))
+        uses_shared = any(f"from {m} import" in source or f"{m}." in source for m in spec.shared)
+        uses_rewired = any(f"self.{n}(" in source for n in rewired - {spec.name})
+        if not (uses_shared or uses_rewired):
+            problems.append(f"{spec.name}: calls neither {spec.shared} nor another rewired method")
+    assert not problems, "\n".join(problems)
+
+
+def _flip_vertex4(original):
+    def injected(model, *args, **kwargs):
+        needs_authgem, needs_vertex = original(model, *args, **kwargs)
+        if "vertex4" in str(model):
+            needs_vertex = not needs_vertex
+        return needs_authgem, needs_vertex
+    return injected
+
+
+def _extra_tombstone(original):
+    def injected(new_order, previous_models, removed_models):
+        keys = original(new_order, previous_models, removed_models)
+        return keys | {"injected/tombstone"} if len(new_order) == 3 else keys
+    return injected
+
+
+def _rename_skip_count(original):
+    def injected(*args, **kwargs):
+        return original(*args, **kwargs).replace("need credentials", "need creds")
+    return injected
+
+
+#: shared function patched -> the rewired handler tier D must flag (rare-branch changes)
+REWIRED_INJECTIONS = {
+    "on_model_change": ("settings_rules", "authgem_login_needed", _flip_vertex4),
+    "_save_model_order": ("model_catalog_core", "model_order_removed_keys", _extra_tombstone),
+    "_apply_provider_model_catalog_refresh": ("model_catalog_core", "poll_status_text", _rename_skip_count),
+}
+
+
+@pytest.mark.parametrize("name", sorted(REWIRED_INJECTIONS))
+def test_tier_d_catches_a_difference_injected_into_shared_rules(session, monkeypatch, name):
+    """Harness self-test: a rare-branch change in the shared module a rewired handler calls."""
+    import importlib
+
+    spec = mf.get(name)
+    try:
+        fm.check_available(spec, session)
+    except fm.Unavailable as exc:
+        pytest.skip(str(exc))
+    module_name, attr, wrap = REWIRED_INJECTIONS[name]
+    module = importlib.import_module(module_name)
+    monkeypatch.setattr(module, attr, wrap(getattr(module, attr)))
+    report = fm.fuzz_moved(spec, session, check=False, stop_after=1)
+    assert report.mismatches, f"injected difference in {module_name}.{attr} not detected via {name}"
+
+
+# ===========================================================================
 # MRO / duplicates / class attributes
 # ===========================================================================
 

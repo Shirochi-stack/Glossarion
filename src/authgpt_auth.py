@@ -37,6 +37,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 from typing import Optional, Dict, List, Tuple, Any
 
 import requests
+import oauth_session
 from app_version import APP_VERSION
 from reasoning_compatibility import normalize_none_effort, call_with_reasoning_retry
 
@@ -83,7 +84,8 @@ CHATGPT_BASE_URL = "https://chatgpt.com/backend-api"
 RESPONSES_ENDPOINT = "/codex/responses"
 ACCOUNT_MODELS_URL = "https://api.openai.com/v1/models"
 
-_DEFAULT_TOKEN_DIR = os.path.join(os.path.expanduser("~"), ".glossarion")
+# ~/.glossarion, or GLOSSARION_TOKEN_DIR (set only by Glossarion Mobile before any backend import)
+_DEFAULT_TOKEN_DIR = oauth_session.default_token_dir()
 _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authgpt_tokens.json")
 
 

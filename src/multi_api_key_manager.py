@@ -9,6 +9,7 @@ import sys
 from request_parameters import normalize_request_parameters
 from key_contexts import (CONTEXT_LABELS, POOL_CONTEXTS, key_enabled_for_context,
                           normalize_disabled_contexts)
+import key_pool_service
 
 # GUI imports - optional for Discord bot
 _HEADLESS_IMPORT = (
@@ -489,22 +490,16 @@ def create_preview_pool_button(parent, translator_gui, pool_name: str, text: str
 # Models/prefixes that don't require an API key - delegates to UnifiedClient's authoritative list
 def _model_needs_api_key(model: str) -> bool:
     """Return False for models that authenticate without an API key."""
-    try:
-        from unified_api_client import UnifiedClient
-        return UnifiedClient._model_needs_api_key(model)
-    except Exception:
-        return True
+    return key_pool_service.model_needs_api_key(model)
 
 
-_DEFAULT_KEY_TEST_TIMEOUT_SECONDS = 30
-_OPTIONAL_API_KEY_TEST_TIMEOUT_SECONDS = 60
+_DEFAULT_KEY_TEST_TIMEOUT_SECONDS = key_pool_service.DEFAULT_KEY_TEST_TIMEOUT_SECONDS
+_OPTIONAL_API_KEY_TEST_TIMEOUT_SECONDS = key_pool_service.OPTIONAL_API_KEY_TEST_TIMEOUT_SECONDS
 
 
 def _api_key_test_timeout_seconds(model: str) -> int:
     """Give models with optional API keys more time to finish their test request."""
-    if not _model_needs_api_key(model):
-        return _OPTIONAL_API_KEY_TEST_TIMEOUT_SECONDS
-    return _DEFAULT_KEY_TEST_TIMEOUT_SECONDS
+    return key_pool_service.api_key_test_timeout_seconds(model, _model_needs_api_key)
 
 class RateLimitCache:
     """Thread-safe rate limit cache"""
@@ -1196,37 +1191,18 @@ class RefusalPatternsDialog(QDialog):
     def _load_patterns(self):
         """Load refusal patterns from config"""
         if hasattr(self.translator_gui, 'config'):
-            return self.translator_gui.config.get('refusal_patterns', self._get_default_patterns())
+            return key_pool_service.load_refusal_patterns(self.translator_gui.config)
         return self._get_default_patterns()
 
     def _get_default_patterns(self):
         """Get default refusal patterns"""
-        return [
-            "i cannot assist", "i can't assist", "i'm not able to assist",
-            "i cannot help", "i can't help", "i'm unable to help",
-            "i'm afraid i cannot help with that", "designed to ensure appropriate use",
-            "as an ai", "as a language model", "as an ai language model",
-            "i don't feel comfortable", "i apologize, but i cannot",
-            "i'm sorry, but i can't assist", "i'm sorry, but i cannot assist",
-            "against my programming", "against my guidelines",
-            "violates content policy", "i'm not programmed to",
-            "cannot provide that kind", "unable to provide that",
-            "i cannot assist with this request",
-            "that's not within my capabilities to appropriately assist with",
-            "is there something different i can help you with",
-            "careful ethical considerations",
-            "i could help you with a different question or task",
-            "what other topics or questions can i help you explore",
-            "i cannot and will not translate",
-            "i cannot translate this content",
-            "i can't translate this content",
-        ]
+        return key_pool_service.default_refusal_patterns()
 
     def _load_disable_refusal_checks(self):
         """Load refusal check disable toggle from config"""
         try:
             if hasattr(self.translator_gui, 'config'):
-                return bool(self.translator_gui.config.get('disable_refusal_checks', True))
+                return key_pool_service.load_disable_refusal_checks(self.translator_gui.config)
         except Exception:
             pass
         return True
@@ -1235,7 +1211,7 @@ class RefusalPatternsDialog(QDialog):
         """Load refusal length limit from config"""
         try:
             if hasattr(self.translator_gui, 'config'):
-                return int(self.translator_gui.config.get('refusal_pattern_length_limit', 1000))
+                return key_pool_service.load_refusal_length_limit(self.translator_gui.config)
         except Exception:
             pass
         return 1000
@@ -1849,17 +1825,7 @@ class RefusalPatternsDialog(QDialog):
             with open(filename, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
 
-            added = 0
-            skipped = 0
-            for line in lines:
-                pattern = line.strip().lower()
-                if not pattern or pattern.startswith('#'):
-                    continue
-                if pattern in self.patterns:
-                    skipped += 1
-                else:
-                    self.patterns.append(pattern)
-                    added += 1
+            added, skipped = key_pool_service.merge_refusal_pattern_lines(self.patterns, lines)
 
             self._refresh_tree()
 
@@ -1907,10 +1873,7 @@ class RefusalPatternsDialog(QDialog):
             except Exception:
                 pass
             try:
-                raw_limit = self.refusal_length_limit_entry.text().strip()
-                limit_val = int(raw_limit) if raw_limit.isdigit() else 1000
-                if limit_val <= 0:
-                    limit_val = 1000
+                limit_val = key_pool_service.parse_refusal_length_limit(self.refusal_length_limit_entry.text())
                 self.translator_gui.config['refusal_pattern_length_limit'] = limit_val
                 if hasattr(self.translator_gui, 'refusal_pattern_length_limit_var'):
                     self.translator_gui.refusal_pattern_length_limit_var = limit_val
@@ -3744,10 +3707,7 @@ class MultiAPIKeyDialog(QDialog):
         translation_pool_layout.setContentsMargins(15, 15, 15, 15)
         translation_pool_layout.setSpacing(10)
 
-        translation_pool_desc = QLabel(
-            "Configure the main translation key rotation pool used by normal translation requests.\n"
-            "Dedicated pools below, such as fallback, glossary, metadata, vision, and image keys, are not restricted by this toggle."
-        )
+        translation_pool_desc = QLabel(key_pool_service.POOL_SPECS['main']['description'])
         translation_pool_desc.setStyleSheet("color: gray;")
         translation_pool_desc.setWordWrap(True)
         translation_pool_layout.addWidget(translation_pool_desc)
@@ -3834,11 +3794,7 @@ class MultiAPIKeyDialog(QDialog):
         fallback_frame_layout.setContentsMargins(15, 15, 15, 15)
 
         # Description
-        desc_label = QLabel(
-                "Configure fallback keys that will be used when content is blocked.\n"
-                "These should use different API keys or models that are less restrictive.\n"
-                "With Translation Keys enabled: tried when the main rotation encounters prohibited content.\n"
-                "In Single-Key Mode: tried directly when main key fails, bypassing main key retry.")
+        desc_label = QLabel(key_pool_service.POOL_SPECS['fallback']['description'])
         desc_label.setStyleSheet("color: gray;")
         desc_label.setWordWrap(True)
         fallback_frame_layout.addWidget(desc_label)
@@ -4421,35 +4377,24 @@ class MultiAPIKeyDialog(QDialog):
         azure_endpoint = self.fallback_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
         azure_api_version = self.fallback_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
 
-        if not model:
-            QMessageBox.critical(self, "Error", "Please enter a model name")
+        model_error = key_pool_service.missing_model_error(model)
+        if model_error:
+            QMessageBox.critical(self, "Error", model_error)
             return
-
-
 
         # Get current fallback keys
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
 
-        # Per-key output token limit and temperature default to None (global)
-        # Users can set these later via the right-click context menu
-        individual_output_token_limit = None
-        individual_key_temperature = None
-
         # Add new key with additional fields
-        fallback_keys.append({
-            'api_key': api_key,
-            'model': model,
-            'google_credentials': google_credentials,
-            'azure_endpoint': azure_endpoint,
-            'google_region': google_region,
-            'azure_api_version': azure_api_version,
-            'use_individual_endpoint': use_individual_endpoint,
-            'individual_output_token_limit': individual_output_token_limit,
-            'individual_key_temperature': individual_key_temperature,
-            'api_call_delay': 0.0,
-            'enabled': True,
-            'times_used': 0
-        })
+        fallback_keys.append(key_pool_service.new_key_entry(
+            api_key,
+            model,
+            google_credentials=google_credentials,
+            azure_endpoint=azure_endpoint,
+            google_region=google_region,
+            azure_api_version=azure_api_version,
+            use_individual_endpoint=use_individual_endpoint,
+        ))
 
         # Save to config
         self.translator_gui.config['fallback_keys'] = fallback_keys
@@ -4470,13 +4415,7 @@ class MultiAPIKeyDialog(QDialog):
         self._load_fallback_keys()
 
         # Show success
-        extras = []
-        if google_credentials:
-            extras.append(f"Google: {os.path.basename(google_credentials)}")
-        if azure_endpoint:
-            extras.append(f"Azure: {azure_endpoint[:30]}...")
-
-        extra_info = f" ({', '.join(extras)})" if extras else ""
+        extra_info = key_pool_service.added_key_extra_info(google_credentials, azure_endpoint)
         self._show_fallback_status(f"Added fallback key for model: {model}{extra_info}")
 
         # Re-evaluate AuthGPT login button visibility
@@ -4640,68 +4579,24 @@ class MultiAPIKeyDialog(QDialog):
 
         def run_api_test():
             try:
-                client = UnifiedClient(
-                    api_key=api_key,
-                    model=model,
-                    output_dir=None
-                )
-                client_ref[0] = client  # expose to timeout wrapper
-
-                # Force 1 retries for testing to speed up failure detection
-                try:
-                    tls = client._get_thread_local_client()
-                    tls.max_retries_override = 1
-                    print(f"[DEBUG] Set max_retries_override=1 for fallback key test")
-                except Exception:
-                    pass
-
-
-                # Set Google credentials and other key-specific settings
-                google_credentials = key_data.get('google_credentials')
-                if google_credentials:
-                    client.current_key_google_creds = google_credentials
-                    client.google_creds_path = google_credentials
-                    print(f"[DEBUG] Set Google credentials for fallback test: {os.path.basename(google_credentials)}")
-
-                google_region = key_data.get('google_region')
-                if google_region:
-                    client.current_key_google_region = google_region
-                    print(f"[DEBUG] Set Google region for fallback test: {google_region}")
-
-                # Set Azure endpoint settings if configured
-                use_individual_endpoint = key_data.get('use_individual_endpoint', False)
-                if use_individual_endpoint:
-                    azure_endpoint = key_data.get('azure_endpoint')
-                    if azure_endpoint:
-                        client.current_key_azure_endpoint = azure_endpoint
-                        client.current_key_use_individual_endpoint = True
-                        print(f"[DEBUG] Set Azure endpoint for fallback test: {azure_endpoint[:50]}...")
-
-                    azure_api_version = key_data.get('azure_api_version')
-                    if azure_api_version:
-                        client.current_key_azure_api_version = azure_api_version
-
-                messages = [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
-                ]
-
-                response = client.send(
-                    messages,
-                    temperature=0.7,
-                    max_tokens=1000
+                # Client setup (Google creds/region, individual endpoint) and the probe
+                # come from the shared key-test request (key_pool_service).
+                request = key_pool_service.build_test_request(key_data, 'fallback', api_key=api_key, model=model)
+                _client, response = key_pool_service.send_test_request(
+                    request,
+                    client_cls=UnifiedClient,
+                    on_client=lambda c: client_ref.__setitem__(0, c),  # expose to timeout wrapper
+                    log=print,
                 )
 
-                if response and isinstance(response, tuple):
-                    content, _ = response
-                    if content and "test successful" in content.lower():
-                        print(f"[DEBUG] Fallback key test completed for {model}: PASSED")
-                        if not timed_out[0]:
-                            if HAS_GUI:
-                                QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
-                            else:
-                                self._update_fallback_test_result(index, True)
-                        return
+                if key_pool_service.test_response_passed(response, request):
+                    print(f"[DEBUG] Fallback key test completed for {model}: PASSED")
+                    if not timed_out[0]:
+                        if HAS_GUI:
+                            QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
+                        else:
+                            self._update_fallback_test_result(index, True)
+                    return
 
                 # Failed
                 print(f"[DEBUG] Fallback key test completed for {model}: FAILED")
@@ -4728,23 +4623,9 @@ class MultiAPIKeyDialog(QDialog):
                 except FuturesTimeout:
                     timed_out[0] = True  # suppress stale results from run_api_test
                     print(f"[DEBUG] Fallback key test TIMED OUT for {model} ({timeout_seconds}s)")
-                    _client = client_ref[0]
-                    if _client:
-                        try:
-                            _client._cancelled = True  # signal internal retry loops to stop
-                            oc = getattr(_client, 'openai_client', None)
-                            if oc and hasattr(oc, 'close'):
-                                oc.close()
-                            elif oc and hasattr(oc, '_client') and hasattr(oc._client, 'close'):
-                                oc._client.close()
-                        except Exception:
-                            pass
+                    key_pool_service.cancel_test_client(client_ref[0])
                     # Clear watchdog so progress bar stops showing in-flight
-                    try:
-                        from unified_api_client import _api_watchdog_reset
-                        _api_watchdog_reset()
-                    except Exception:
-                        pass
+                    key_pool_service.reset_api_watchdog()
                     # Set timeout status directly on tree item (distinct from generic failure)
                     if HAS_GUI:
                         QMetaObject.invokeMethod(self, "_update_fallback_timeout_status", Qt.QueuedConnection, Q_ARG(int, index))
@@ -6683,10 +6564,7 @@ class MultiAPIKeyDialog(QDialog):
         glossary_frame_layout.setContentsMargins(15, 15, 15, 15)
 
         # Description
-        desc_label = QLabel(
-                "Configure dedicated keys for glossary-context API calls.\n"
-                "These keys will be used exclusively when the translation context is 'Glossary'.\n"
-                "Normal rate-limit retries rotate within this pool; prohibited-content handling may still use configured fallback paths.")
+        desc_label = QLabel(key_pool_service.POOL_SPECS['glossary']['description'])
         desc_label.setStyleSheet("color: gray;")
         desc_label.setWordWrap(True)
         glossary_frame_layout.addWidget(desc_label)
@@ -7116,33 +6994,22 @@ class MultiAPIKeyDialog(QDialog):
         azure_endpoint = self.glossary_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
         azure_api_version = self.glossary_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
 
-        if not model:
-            QMessageBox.critical(self, "Error", "Please enter a model name")
+        model_error = key_pool_service.missing_model_error(model)
+        if model_error:
+            QMessageBox.critical(self, "Error", model_error)
             return
-
-
 
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
 
-        # Per-key output token limit and temperature default to None (global)
-        # Users can set these later via the right-click context menu
-        individual_output_token_limit = None
-        individual_key_temperature = None
-
-        glossary_keys.append({
-            'api_key': api_key,
-            'model': model,
-            'google_credentials': google_credentials,
-            'azure_endpoint': azure_endpoint,
-            'google_region': google_region,
-            'azure_api_version': azure_api_version,
-            'use_individual_endpoint': use_individual_endpoint,
-            'individual_output_token_limit': individual_output_token_limit,
-            'individual_key_temperature': individual_key_temperature,
-            'api_call_delay': 0.0,
-            'enabled': True,
-            'times_used': 0
-        })
+        glossary_keys.append(key_pool_service.new_key_entry(
+            api_key,
+            model,
+            google_credentials=google_credentials,
+            azure_endpoint=azure_endpoint,
+            google_region=google_region,
+            azure_api_version=azure_api_version,
+            use_individual_endpoint=use_individual_endpoint,
+        ))
 
         self.translator_gui.config['glossary_keys'] = glossary_keys
 
@@ -7159,12 +7026,7 @@ class MultiAPIKeyDialog(QDialog):
 
         self._load_glossary_keys()
 
-        extras = []
-        if google_credentials:
-            extras.append(f"Google: {os.path.basename(google_credentials)}")
-        if azure_endpoint:
-            extras.append(f"Azure: {azure_endpoint[:30]}...")
-        extra_info = f" ({', '.join(extras)})" if extras else ""
+        extra_info = key_pool_service.added_key_extra_info(google_credentials, azure_endpoint)
         self._show_glossary_status(f"Added glossary key for model: {model}{extra_info}")
 
         self._schedule_key_pool_config_flush(
@@ -7337,55 +7199,21 @@ class MultiAPIKeyDialog(QDialog):
 
         def run_api_test():
             try:
-                client = UnifiedClient(
-                    api_key=api_key,
-                    model=model,
-                    output_dir=None
+                request = key_pool_service.build_test_request(key_data, 'glossary', api_key=api_key, model=model)
+                _client, response = key_pool_service.send_test_request(
+                    request,
+                    client_cls=UnifiedClient,
+                    on_client=lambda c: client_ref.__setitem__(0, c),
                 )
-                client_ref[0] = client
 
-                try:
-                    tls = client._get_thread_local_client()
-                    tls.max_retries_override = 1
-                except Exception:
-                    pass
-
-                google_credentials = key_data.get('google_credentials')
-                if google_credentials:
-                    client.current_key_google_creds = google_credentials
-                    client.google_creds_path = google_credentials
-
-                google_region = key_data.get('google_region')
-                if google_region:
-                    client.current_key_google_region = google_region
-
-                use_individual_endpoint = key_data.get('use_individual_endpoint', False)
-                if use_individual_endpoint:
-                    azure_endpoint = key_data.get('azure_endpoint')
-                    if azure_endpoint:
-                        client.current_key_azure_endpoint = azure_endpoint
-                        client.current_key_use_individual_endpoint = True
-                    azure_api_version = key_data.get('azure_api_version')
-                    if azure_api_version:
-                        client.current_key_azure_api_version = azure_api_version
-
-                messages = [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
-                ]
-
-                response = client.send(messages, temperature=0.7, max_tokens=1000)
-
-                if response and isinstance(response, tuple):
-                    content, _ = response
-                    if content and "test successful" in content.lower():
-                        print(f"[DEBUG] Glossary key test completed for {model}: PASSED")
-                        if not timed_out[0]:
-                            if HAS_GUI:
-                                QMetaObject.invokeMethod(self, "_update_glossary_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
-                            else:
-                                self._update_glossary_test_result(index, True)
-                        return
+                if key_pool_service.test_response_passed(response, request):
+                    print(f"[DEBUG] Glossary key test completed for {model}: PASSED")
+                    if not timed_out[0]:
+                        if HAS_GUI:
+                            QMetaObject.invokeMethod(self, "_update_glossary_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
+                        else:
+                            self._update_glossary_test_result(index, True)
+                    return
 
                 print(f"[DEBUG] Glossary key test completed for {model}: FAILED")
                 if not timed_out[0]:
@@ -7410,22 +7238,8 @@ class MultiAPIKeyDialog(QDialog):
                 except FuturesTimeout:
                     timed_out[0] = True
                     print(f"[DEBUG] Glossary key test TIMED OUT for {model} ({timeout_seconds}s)")
-                    _client = client_ref[0]
-                    if _client:
-                        try:
-                            _client._cancelled = True
-                            oc = getattr(_client, 'openai_client', None)
-                            if oc and hasattr(oc, 'close'):
-                                oc.close()
-                            elif oc and hasattr(oc, '_client') and hasattr(oc._client, 'close'):
-                                oc._client.close()
-                        except Exception:
-                            pass
-                    try:
-                        from unified_api_client import _api_watchdog_reset
-                        _api_watchdog_reset()
-                    except Exception:
-                        pass
+                    key_pool_service.cancel_test_client(client_ref[0])
+                    key_pool_service.reset_api_watchdog()
                     if HAS_GUI:
                         QMetaObject.invokeMethod(self, "_update_glossary_timeout_status", Qt.QueuedConnection, Q_ARG(int, index))
                     else:
@@ -9079,30 +8893,22 @@ class MultiAPIKeyDialog(QDialog):
         azure_endpoint = self.azure_endpoint_entry.text().strip() if use_individual_endpoint else None
         azure_api_version = self.azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
 
-        if not model:
-            QMessageBox.critical(self, "Error", "Please enter a model name")
+        model_error = key_pool_service.missing_model_error(model)
+        if model_error:
+            QMessageBox.critical(self, "Error", model_error)
             return
 
-
-
-        # Per-key output token limit and temperature default to None (global)
-        # Users can set these later via the right-click context menu
-        individual_output_token_limit = None
-        individual_key_temperature = None
-
         # Add to pool with new fields
-        key_entry = APIKeyEntry(
+        key_entry = key_pool_service.new_main_key_entry(
             api_key,
             model,
             cooldown,
-            enabled=True,
             google_credentials=google_credentials,
             azure_endpoint=azure_endpoint,
             google_region=google_region,
             azure_api_version=azure_api_version,
             use_individual_endpoint=use_individual_endpoint,
-            individual_output_token_limit=individual_output_token_limit,
-            individual_key_temperature=individual_key_temperature,
+            entry_cls=APIKeyEntry,
         )
         self.key_pool.add_key(key_entry)
         self.translator_gui.config['multi_api_keys'] = [key.to_dict() for key in self.key_pool.get_all_keys()]
@@ -9124,13 +8930,7 @@ class MultiAPIKeyDialog(QDialog):
         self._refresh_key_list()
 
         # Show success
-        extras = []
-        if google_credentials:
-            extras.append(f"Google: {os.path.basename(google_credentials)}")
-        if azure_endpoint:
-            extras.append(f"Azure: {azure_endpoint[:30]}...")
-
-        extra_info = f" ({', '.join(extras)})" if extras else ""
+        extra_info = key_pool_service.added_key_extra_info(google_credentials, azure_endpoint)
         self._show_status(f"Added key for model: {model}{extra_info}")
 
         # Re-evaluate AuthGPT login button visibility
@@ -9251,63 +9051,24 @@ class MultiAPIKeyDialog(QDialog):
 
         def run_api_test():
             try:
-                client = UnifiedClient(
-                    api_key=key.api_key,
-                    model=key.model,
-                    output_dir=None
-                )
-                client_ref[0] = client  # expose to timeout wrapper
-
-                # Force 1 retries for testing to speed up failure detection
-                try:
-                    tls = client._get_thread_local_client()
-                    tls.max_retries_override = 1
-                    print(f"[DEBUG] Set max_retries_override=1 for key test")
-                except Exception:
-                    pass
-
-
-                # Set Google credentials and other key-specific settings
-                if hasattr(key, 'google_credentials') and key.google_credentials:
-                    client.current_key_google_creds = key.google_credentials
-                    client.google_creds_path = key.google_credentials
-                    print(f"[DEBUG] Set Google credentials for test: {os.path.basename(key.google_credentials)}")
-
-                if hasattr(key, 'google_region') and key.google_region:
-                    client.current_key_google_region = key.google_region
-                    print(f"[DEBUG] Set Google region for test: {key.google_region}")
-
-                # Set Azure endpoint settings if configured
-                if hasattr(key, 'use_individual_endpoint') and key.use_individual_endpoint:
-                    if hasattr(key, 'azure_endpoint') and key.azure_endpoint:
-                        client.current_key_azure_endpoint = key.azure_endpoint
-                        client.current_key_use_individual_endpoint = True
-                        print(f"[DEBUG] Set Azure endpoint for test: {key.azure_endpoint[:50]}...")
-
-                    if hasattr(key, 'azure_api_version') and key.azure_api_version:
-                        client.current_key_azure_api_version = key.azure_api_version
-
-                messages = [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
-                ]
-
-                response = client.send(
-                    messages,
-                    temperature=0.7,
-                    max_tokens=1000
+                # Client setup (Google creds/region, individual endpoint) and the probe
+                # come from the shared key-test request (key_pool_service).
+                request = key_pool_service.build_test_request(key, 'main')
+                _client, response = key_pool_service.send_test_request(
+                    request,
+                    client_cls=UnifiedClient,
+                    on_client=lambda c: client_ref.__setitem__(0, c),  # expose to timeout wrapper
+                    log=print,
                 )
 
-                if response and isinstance(response, tuple):
-                    content, _ = response
-                    if content and "test successful" in content.lower():
-                        # Success - update via signal/slot for thread safety
-                        if not timed_out[0]:
-                            if HAS_GUI:
-                                QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True), Q_ARG(str, "Test passed"))
-                            else:
-                                self._handle_test_result(index, True, "Test passed")
-                        return
+                if key_pool_service.test_response_passed(response, request):
+                    # Success - update via signal/slot for thread safety
+                    if not timed_out[0]:
+                        if HAS_GUI:
+                            QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True), Q_ARG(str, "Test passed"))
+                        else:
+                            self._handle_test_result(index, True, "Test passed")
+                    return
 
                 # Failed - update via signal/slot
                 if not timed_out[0]:
@@ -9335,24 +9096,9 @@ class MultiAPIKeyDialog(QDialog):
                     # The model-aware deadline elapsed; cancel the HTTP session and mark a timeout.
                     timed_out[0] = True  # suppress stale results from run_api_test
                     print(f"[DEBUG] Key test TIMED OUT for {key.model} ({timeout_seconds}s)")
-                    _client = client_ref[0]
-                    if _client:
-                        try:
-                            _client._cancelled = True  # signal internal retry loops to stop
-                            # Close OpenAI SDK client (kills underlying httpx transport)
-                            oc = getattr(_client, 'openai_client', None)
-                            if oc and hasattr(oc, 'close'):
-                                oc.close()
-                            elif oc and hasattr(oc, '_client') and hasattr(oc._client, 'close'):
-                                oc._client.close()
-                        except Exception:
-                            pass
+                    key_pool_service.cancel_test_client(client_ref[0])
                     # Clear watchdog so progress bar stops showing in-flight
-                    try:
-                        from unified_api_client import _api_watchdog_reset
-                        _api_watchdog_reset()
-                    except Exception:
-                        pass
+                    key_pool_service.reset_api_watchdog()
                     if HAS_GUI:
                         QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, f"Timed out ({timeout_seconds}s)"))
                     else:
@@ -9751,7 +9497,7 @@ class MultiAPIKeyDialog(QDialog):
                 error_msg = str(e)
                 error_code = None
 
-                if "429" in error_msg or "rate limit" in error_msg.lower():
+                if key_pool_service.is_rate_limit_error(error_msg):
                     error_code = 429
                     key.set_test_result('rate_limited', error_msg[:30])
                 else:
@@ -10098,32 +9844,13 @@ class MultiAPIKeyDialog(QDialog):
 
     def _export_pool_order(self):
         """Logical pool order: main, fallback, then the dedicated pools."""
-        order = ['main', 'fallback']
-        try:
-            order.extend(sorted(self._dedicated_pool_specs().keys()))
-        except Exception:
-            pass
-        return order
+        return key_pool_service.export_pool_order(self._dedicated_pool_specs)
 
     def _pool_title(self, pool_name: str) -> str:
-        if pool_name == 'main':
-            return 'Translation Keys'
-        if pool_name == 'fallback':
-            return 'Fallback Keys'
-        try:
-            return self._dedicated_pool_spec(pool_name).get('title', pool_name)
-        except Exception:
-            return pool_name
+        return key_pool_service.pool_title(pool_name, self._dedicated_pool_spec)
 
     def _pool_toggle_key(self, pool_name: str):
-        if pool_name == 'main':
-            return 'use_multi_api_keys'
-        if pool_name == 'fallback':
-            return 'use_fallback_keys'
-        try:
-            return self._dedicated_pool_spec(pool_name).get('toggle_key')
-        except Exception:
-            return None
+        return key_pool_service.pool_toggle_key(pool_name, self._dedicated_pool_spec)
 
     def _read_pool_keys(self, pool_name: str):
         """Return the current list of key dicts for a pool."""
@@ -10135,26 +9862,23 @@ class MultiAPIKeyDialog(QDialog):
             except Exception:
                 keys = []
             if not keys:
-                keys = list(cfg.get('multi_api_keys', []) or [])
+                keys = key_pool_service.read_pool_keys(cfg, 'main')
             return keys
         if pool_name == 'fallback':
-            return list(cfg.get('fallback_keys', []) or [])
+            return key_pool_service.read_pool_keys(cfg, 'fallback')
         try:
             return list(self._dedicated_keys(pool_name) or [])
         except Exception:
             return []
 
     def _collect_pools_for_export(self):
-        cfg = self.translator_gui.config
-        pools = {}
-        for pool_name in self._export_pool_order():
-            toggle_key = self._pool_toggle_key(pool_name)
-            pools[pool_name] = {
-                'title': self._pool_title(pool_name),
-                'enabled': bool(cfg.get(toggle_key, False)) if toggle_key else False,
-                'keys': self._read_pool_keys(pool_name),
-            }
-        return pools
+        return key_pool_service.collect_pools_for_export(
+            self.translator_gui.config,
+            self._read_pool_keys,
+            self._export_pool_order(),
+            title=self._pool_title,
+            toggle_key=self._pool_toggle_key,
+        )
 
     @staticmethod
     def _set_checkbox_silent(checkbox, value):
@@ -10178,15 +9902,7 @@ class MultiAPIKeyDialog(QDialog):
 
         Returns (clean_keys, skipped_count).
         """
-        clean, skipped = [], 0
-        if not isinstance(raw_keys, list):
-            return clean, skipped
-        for kd in raw_keys:
-            if isinstance(kd, dict) and 'api_key' in kd and 'model' in kd:
-                clean.append(kd)
-            else:
-                skipped += 1
-        return clean, skipped
+        return key_pool_service.sanitize_imported_keys(raw_keys)
 
     def _import_keys(self):
         """Import keys from a JSON file.
@@ -10214,15 +9930,13 @@ class MultiAPIKeyDialog(QDialog):
             return
 
         try:
-            if isinstance(data, dict) and isinstance(data.get('pools'), dict):
-                self._import_pool_aware(data['pools'])
-            elif isinstance(data, list):
-                self._import_legacy_list(data)
-            elif isinstance(data, dict) and 'api_key' in data and 'model' in data:
-                # A single bare key object
-                self._import_legacy_list([data])
+            kind, payload = key_pool_service.classify_key_import(data)
+            if kind == 'pools':
+                self._import_pool_aware(payload)
+            elif kind == 'legacy':
+                self._import_legacy_list(payload)
             else:
-                QMessageBox.critical(self, "Error", "Invalid or unrecognized key file format")
+                QMessageBox.critical(self, "Error", key_pool_service.INVALID_IMPORT_MESSAGE)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to import: {str(e)}")
 
@@ -10230,16 +9944,14 @@ class MultiAPIKeyDialog(QDialog):
         """Append a flat list of keys to the Translation pool (legacy format)."""
         valid, skipped = self._sanitize_imported_keys(data)
         if not valid:
-            QMessageBox.critical(self, "Error", "No valid keys found in file")
+            QMessageBox.critical(self, "Error", key_pool_service.NO_VALID_KEYS_MESSAGE)
             return
 
-        imported = 0
-        for kd in valid:
-            try:
-                self.key_pool.add_key(APIKeyEntry.from_dict(kd))
-                imported += 1
-            except Exception:
-                skipped += 1
+        entries, failed = key_pool_service.legacy_key_entries(valid, APIKeyEntry)
+        for entry in entries:
+            self.key_pool.add_key(entry)
+        imported = len(entries)
+        skipped += failed
 
         # Persist the appended state so it survives even before pressing Save.
         try:
@@ -10258,9 +9970,7 @@ class MultiAPIKeyDialog(QDialog):
         except Exception:
             pass
 
-        msg = f"Imported {imported} API key(s) into the Translation pool"
-        if skipped:
-            msg += f" ({skipped} skipped)"
+        msg = key_pool_service.legacy_import_result_message(imported, skipped)
         QMessageBox.information(self, "Success", msg)
 
     def _apply_imported_pool(self, pool_name: str, keys, enabled=None):
@@ -10305,35 +10015,15 @@ class MultiAPIKeyDialog(QDialog):
 
     def _import_pool_aware(self, pools_obj):
         """Restore every recognized pool found in a structured export file."""
-        known = set(self._export_pool_order())
-        plan = []            # list of (pool_name, clean_keys, enabled)
-        total_skipped = 0
-        unknown_pools = []
-
-        for pool_name, value in pools_obj.items():
-            if pool_name not in known:
-                unknown_pools.append(str(pool_name))
-                continue
-            if isinstance(value, dict):
-                raw_keys = value.get('keys', [])
-                enabled = value.get('enabled', None)
-            elif isinstance(value, list):
-                raw_keys = value
-                enabled = None
-            else:
-                continue
-            clean, skipped = self._sanitize_imported_keys(raw_keys)
-            total_skipped += skipped
-            plan.append((pool_name, clean, enabled))
+        plan, total_skipped, unknown_pools = key_pool_service.plan_pool_aware_import(
+            pools_obj, self._export_pool_order())
 
         if not plan:
-            QMessageBox.critical(self, "Error", "No recognizable pools found in file")
+            QMessageBox.critical(self, "Error", key_pool_service.NO_POOLS_MESSAGE)
             return
 
         # Confirm — a structured import REPLACES the contents of listed pools.
-        summary = "\n".join(
-            f"  • {self._pool_title(pn)}: {len(keys)} key(s)" for pn, keys, _en in plan
-        )
+        summary = key_pool_service.pool_import_summary(plan, self._pool_title)
         confirm = QMessageBox.question(
             self,
             "Import key pools",
@@ -10364,20 +10054,14 @@ class MultiAPIKeyDialog(QDialog):
         except Exception:
             pass
 
-        msg = f"Imported {applied_keys} key(s) across {len(plan)} pool(s)"
-        extras = []
-        if total_skipped:
-            extras.append(f"{total_skipped} invalid key(s) skipped")
-        if unknown_pools:
-            extras.append("ignored unknown pool(s): " + ", ".join(unknown_pools))
-        if extras:
-            msg += "\n" + "; ".join(extras)
+        msg = key_pool_service.pool_import_result_message(
+            applied_keys, len(plan), total_skipped, unknown_pools)
         QMessageBox.information(self, "Success", msg)
 
     def _export_keys(self):
         """Export every key pool to a single pool-aware JSON file."""
         pools = self._collect_pools_for_export()
-        total_keys = sum(len(p['keys']) for p in pools.values())
+        total_keys = key_pool_service.count_pool_keys(pools)
         if total_keys == 0:
             QMessageBox.warning(self, "Warning", "No keys to export in any pool")
             return
@@ -10393,16 +10077,11 @@ class MultiAPIKeyDialog(QDialog):
         if not filename.lower().endswith('.json'):
             filename += '.json'
 
-        payload = {
-            'format': 'glossarion-key-pools',
-            'version': 1,
-            'exported_at': datetime.now().isoformat(timespec='seconds'),
-            'pools': pools,
-        }
+        payload = key_pool_service.build_export_payload(pools)
         try:
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(payload, f, indent=2, ensure_ascii=False)
-            non_empty = sum(1 for p in pools.values() if p['keys'])
+            non_empty = key_pool_service.count_nonempty_pools(pools)
             QMessageBox.information(
                 self, "Success",
                 f"Exported {total_keys} API key(s) across {non_empty} pool(s)"
@@ -10422,127 +10101,10 @@ class MultiAPIKeyDialog(QDialog):
         standard key shape: api key, model, per-key limits, temp, delay, Google
         creds, individual endpoint, test/reorder/enable/disable.
         """
-        return {
-            'glossary_refinement': {
-                'title': 'Refinement Keys',
-                'label': 'Refinement',
-                'config_key': 'glossary_refinement_keys',
-                'toggle_key': 'use_glossary_refinement_keys',
-                'set_method': 'set_in_memory_glossary_refinement_keys',
-                'clear_method': 'clear_in_memory_glossary_refinement_keys',
-                'use_envs': ['USE_GLOSSARY_REFINEMENT_KEYS'],
-                'keys_envs': ['GLOSSARY_REFINEMENT_API_KEYS'],
-                'description': (
-                    "Configure dedicated keys for translation and glossary refinement API calls.\n"
-                    "This pool is preferred when the request context is 'refinement' or 'glossary_refinement'; eligible glossary/fallback paths may still apply for some errors."
-                ),
-            },
-            'qa_scan': {
-                'title': 'Vision Keys',
-                'label': 'Vision',
-                'config_key': 'qa_scan_keys',
-                'toggle_key': 'use_qa_scan_keys',
-                'set_method': 'set_in_memory_vision_keys',
-                'clear_method': 'clear_in_memory_vision_keys',
-                'use_envs': ['USE_VISION_KEYS', 'USE_QA_SCAN_KEYS'],
-                'keys_envs': ['VISION_API_KEYS', 'QA_SCAN_API_KEYS'],
-                'description': (
-                    "Configure dedicated keys for vision OCR and image scan calls.\n"
-                    "Normal rate-limit retries rotate within this pool; prohibited-content handling may still use configured fallback paths."
-                ),
-            },
-            'metadata': {
-                'title': 'Metadata Keys',
-                'label': 'metadata',
-                'config_key': 'metadata_keys',
-                'toggle_key': 'use_metadata_keys',
-                'set_method': '_unused_metadata_pool_set',
-                'clear_method': '_unused_metadata_pool_clear',
-                'use_envs': ['USE_METADATA_KEYS'],
-                'keys_envs': ['METADATA_API_KEYS'],
-                'description': (
-                    "Configure dedicated keys for book title, metadata, TOC, and header translation.\n"
-                    "Normal rate-limit retries rotate within this pool; prohibited-content handling may still use configured fallback paths."
-                ),
-            },
-            'ai_truncation_detection': {
-                'title': 'QA Scan Keys (for AI Truncation detection)',
-                'label': 'QA scan',
-                'config_key': 'ai_truncation_detection_keys',
-                'toggle_key': 'use_ai_truncation_detection_keys',
-                'set_method': '_unused_ai_truncation_detection_pool_set',
-                'clear_method': '_unused_ai_truncation_detection_pool_clear',
-                'use_envs': ['USE_AI_TRUNCATION_DETECTION_KEYS'],
-                'keys_envs': ['AI_TRUNCATION_DETECTION_API_KEYS'],
-                'description': (
-                    "Configure dedicated QA scan keys for qa_truncation AI checks.\n"
-                    "Normal rate-limit retries rotate within this pool; prohibited-content handling may still use configured fallback paths."
-                ),
-            },
-            'rolling_summary': {
-                'title': 'Rolling Summary Keys',
-                'label': 'Rolling summary',
-                'config_key': 'rolling_summary_keys',
-                'toggle_key': 'use_rolling_summary_keys',
-                'set_method': 'set_in_memory_rolling_summary_keys',
-                'clear_method': 'clear_in_memory_rolling_summary_keys',
-                'use_envs': ['USE_ROLLING_SUMMARY_KEYS'],
-                'keys_envs': ['ROLLING_SUMMARY_API_KEYS'],
-                'description': (
-                    "Configure dedicated keys for rolling-summary memory generation calls.\n"
-                    "Normal rate-limit retries rotate within this pool; prohibited-content handling may still use configured fallback paths."
-                ),
-            },
-            'truncation_retry': {
-                'title': 'Truncation Retry Keys',
-                'label': 'Truncation retry',
-                'config_key': 'truncation_retry_keys',
-                'toggle_key': 'use_truncation_retry_keys',
-                'set_method': 'set_in_memory_truncation_retry_keys',
-                'clear_method': 'clear_in_memory_truncation_retry_keys',
-                'use_envs': ['USE_TRUNCATION_RETRY_KEYS'],
-                'keys_envs': ['TRUNCATION_RETRY_API_KEYS'],
-                'description': (
-                    "Configure dedicated keys used only when RETRY_TRUNCATED schedules a retry.\n"
-                    "These keys are separate from Vision/QA truncation scan keys.\n"
-                    "If available, this pool is preferred for truncation retries; otherwise the retry may use the current request pool."
-                ),
-            },
-            'inpainter': {
-                'title': 'Image Gen / Edit Keys',
-                'label': 'Image gen/edit',
-                'config_key': 'inpainter_keys',
-                'toggle_key': 'use_inpainter_keys',
-                'set_method': 'set_in_memory_inpainter_keys',
-                'clear_method': 'clear_in_memory_inpainter_keys',
-                'use_envs': ['USE_INPAINTER_KEYS'],
-                'keys_envs': ['INPAINTER_API_KEYS'],
-                'description': (
-                    "Configure dedicated keys for image output and custom image-edit calls.\n"
-                    "Normal rate-limit retries rotate within this pool; prohibited-content handling may still use configured fallback paths."
-                ),
-            },
-            'tts': {
-                'title': 'Audio / TTS Keys',
-                'label': 'Audio/TTS',
-                'config_key': 'tts_keys',
-                'toggle_key': 'use_tts_keys',
-                'set_method': 'set_in_memory_tts_keys',
-                'clear_method': 'clear_in_memory_tts_keys',
-                'use_envs': ['USE_TTS_KEYS'],
-                'keys_envs': ['TTS_API_KEYS'],
-                'description': (
-                    "Configure dedicated keys for Audio output mode text-to-speech calls (request context 'tts').\n"
-                    "The key's model is the TTS model; an AIza key routes to Gemini TTS, others to the OpenAI-compatible speech endpoint or the key's individual endpoint."
-                ),
-            },
-        }
+        return key_pool_service.dedicated_pool_specs()
 
     def _dedicated_pool_spec(self, pool_name: str):
-        try:
-            return self._dedicated_pool_specs()[pool_name]
-        except KeyError:
-            raise ValueError(f"Unknown dedicated key pool: {pool_name}")
+        return key_pool_service.dedicated_pool_spec(pool_name, self._dedicated_pool_specs)
 
     def _dedicated_attr(self, pool_name: str, suffix: str) -> str:
         return f"{pool_name}_{suffix}"
@@ -10909,8 +10471,9 @@ class MultiAPIKeyDialog(QDialog):
         model_combo = self._dedicated_widget(pool_name, 'model_combo')
         api_key = key_entry.text().strip()
         model = model_combo.currentText().strip()
-        if not model:
-            QMessageBox.critical(self, "Error", "Please enter a model name")
+        model_error = key_pool_service.missing_model_error(model)
+        if model_error:
+            QMessageBox.critical(self, "Error", model_error)
             return
         google_credentials = self._dedicated_widget(pool_name, 'google_creds_entry').text().strip() or None
         if google_credentials:
@@ -10920,20 +10483,15 @@ class MultiAPIKeyDialog(QDialog):
         azure_endpoint = self._dedicated_widget(pool_name, 'azure_endpoint_entry').text().strip() if use_endpoint else None
         azure_api_version = self._dedicated_widget(pool_name, 'azure_api_version_combo').currentText().strip() if use_endpoint else None
         keys = self._dedicated_keys(pool_name)
-        keys.append({
-            'api_key': api_key,
-            'model': model,
-            'google_credentials': google_credentials,
-            'azure_endpoint': azure_endpoint,
-            'google_region': google_region,
-            'azure_api_version': azure_api_version,
-            'use_individual_endpoint': use_endpoint,
-            'individual_output_token_limit': None,
-            'individual_key_temperature': None,
-            'api_call_delay': 0.0,
-            'enabled': True,
-            'times_used': 0,
-        })
+        keys.append(key_pool_service.new_key_entry(
+            api_key,
+            model,
+            google_credentials=google_credentials,
+            azure_endpoint=azure_endpoint,
+            google_region=google_region,
+            azure_api_version=azure_api_version,
+            use_individual_endpoint=use_endpoint,
+        ))
         self._dedicated_set_keys(pool_name, keys, save_config=False, broadcast=False)
         key_entry.clear()
         self._set_combo_text_silently(model_combo, "")
@@ -11023,32 +10581,11 @@ class MultiAPIKeyDialog(QDialog):
                     self._dedicated_update_test_result(pool_name, index, bool(success))
 
         def run_api_test():
-            client_ref = None
             try:
                 from unified_api_client import UnifiedClient
-                client_ref = UnifiedClient(api_key=api_key, model=model, output_dir=None)
-                try:
-                    tls = client_ref._get_thread_local_client()
-                    tls.max_retries_override = 1
-                except Exception:
-                    pass
-                for source, target in (
-                    ('google_credentials', 'current_key_google_creds'),
-                    ('google_region', 'current_key_google_region'),
-                    ('azure_endpoint', 'current_key_azure_endpoint'),
-                    ('azure_api_version', 'current_key_azure_api_version'),
-                ):
-                    value = key_data.get(source)
-                    if value:
-                        setattr(client_ref, target, value)
-                if key_data.get('use_individual_endpoint'):
-                    client_ref.current_key_use_individual_endpoint = True
-                response = client_ref.send([
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Say 'API test successful' and nothing else."},
-                ], temperature=0.7, max_tokens=1000)
-                content = response[0] if isinstance(response, tuple) else response
-                finish(success=bool(content and "test successful" in str(content).lower()))
+                request = key_pool_service.build_test_request(key_data, pool_name, api_key=api_key, model=model)
+                _client, response = key_pool_service.send_test_request(request, client_cls=UnifiedClient)
+                finish(success=key_pool_service.test_response_passed(response, request))
             except Exception as exc:
                 print(f"[DEBUG] {spec['label']} key test error for {model}: {exc}")
                 finish(success=False)
@@ -11061,11 +10598,7 @@ class MultiAPIKeyDialog(QDialog):
                     future.result(timeout=timeout_seconds)
                 except FuturesTimeout:
                     finish(timeout=True)
-                    try:
-                        from unified_api_client import _api_watchdog_reset
-                        _api_watchdog_reset()
-                    except Exception:
-                        pass
+                    key_pool_service.reset_api_watchdog()
 
         executor = getattr(self.translator_gui, 'executor', None)
         if hasattr(self.translator_gui, '_ensure_executor'):

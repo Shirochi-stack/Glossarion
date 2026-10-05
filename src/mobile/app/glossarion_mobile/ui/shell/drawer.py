@@ -24,7 +24,6 @@ import flet as ft
 from glossarion_mobile.state.app_state import AppState
 from glossarion_mobile.state.chat_index import ChatSummary
 from glossarion_mobile.ui import tokens
-from glossarion_mobile.ui.chat.send_state import requires_chatgpt_sign_in
 from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
 
@@ -53,7 +52,7 @@ def drawer_status(state: AppState) -> tuple[str, bool]:
         return f"{model} · Preparing engine…", False
     if not state.engine_ready:
         return f"{model} · Engine failed to load", True
-    if requires_chatgpt_sign_in(model) and "authgpt" not in state.signed_in.value:
+    if state.needs_chatgpt_sign_in(model):
         return f"{model} · Sign in with ChatGPT", True
     return f"{model} · Ready", False
 

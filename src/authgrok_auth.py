@@ -12,6 +12,11 @@ so both the default and numbered slots receive a fresh account selection.
 
 The wire contract follows the public, MIT-licensed pi-xai-oauth reference:
 https://github.com/BlockedPath/pi-xai-oauth
+
+run_device_oauth_flow() runs the device login end to end. begin_device_login()
+/ poll_device_login() split it for callers that open the browser themselves
+(Glossarion Mobile shows the user code and opens the page; there the module
+never opens a browser and never imports an official Grok CLI login).
 """
 
 from __future__ import annotations
@@ -34,6 +39,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
+
+import oauth_session
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +110,8 @@ XAI_CLIENT_IDENTIFIER = "glossarion"
 XAI_CLIENT_VERSION = str(_APP_VERSION)
 XAI_USER_AGENT = f"Glossarion/{XAI_CLIENT_VERSION}"
 
-_DEFAULT_TOKEN_DIR = os.path.join(os.path.expanduser("~"), ".glossarion")
+# ~/.glossarion; GLOSSARION_TOKEN_DIR when set (Glossarion Mobile: <data>/home/.glossarion)
+_DEFAULT_TOKEN_DIR = oauth_session.default_token_dir()
 _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authgrok_tokens.json")
 _OFFICIAL_GROK_AUTH_FILE = os.path.join(os.path.expanduser("~"), ".grok", "auth.json")
 _OFFICIAL_GROK_SCOPE_KEY = f"{XAI_OAUTH_ISSUER}::{XAI_OAUTH_CLIENT_ID}"
@@ -303,8 +311,19 @@ def build_auth_url(
     return f"{authorization_endpoint}?{urlencode(params)}"
 
 
+_MOBILE_SIGN_IN_MESSAGE = (
+    "AuthGrok: sign in to Grok from Glossarion's Accounts screen "
+    "(the app shows the code and opens the xAI page itself)."
+)
+
+
 def _open_oauth_browser(auth_url: str) -> None:
-    """Open xAI OAuth in the user's normal default browser."""
+    """Open xAI OAuth in the user's normal default browser.
+
+    Never on Glossarion Mobile, where the app opens begin_device_login()'s page.
+    """
+    if oauth_session.is_mobile():
+        raise RuntimeError(_MOBILE_SIGN_IN_MESSAGE)
     if not webbrowser.open(auth_url):
         raise RuntimeError("Could not open the default browser for xAI login")
 
@@ -524,11 +543,26 @@ def request_device_code(timeout: int = 30) -> Dict[str, Any]:
     return result
 
 
+def _sleep_until_stopped(seconds: float, should_stop) -> None:
+    """Sleep *seconds*, waking every 0.2 s to return early once should_stop() is true."""
+    end = time.monotonic() + seconds
+    while not should_stop():
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(0.2, left))
+
+
 def poll_device_code_tokens(
     device_code: Dict[str, Any],
     timeout: int = 300,
+    should_stop=None,
 ) -> Dict[str, Any]:
-    """Poll xAI until the browser device authorization completes."""
+    """Poll xAI until the browser device authorization completes.
+
+    *should_stop* (optional, no arguments) ends the poll with RuntimeError
+    once it returns True; it is checked about every 0.2 s while waiting.
+    """
     interval = max(1.0, float(device_code.get("interval", DEVICE_CODE_DEFAULT_POLL_SECONDS)))
     expires_in = max(1.0, float(device_code.get("expires_in", timeout)))
     deadline = time.monotonic() + min(float(timeout), expires_in)
@@ -537,7 +571,12 @@ def poll_device_code_tokens(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise RuntimeError("xAI device authorization timed out; try the Grok login again")
-        time.sleep(min(interval, remaining))
+        if should_stop is None:
+            time.sleep(min(interval, remaining))
+        else:
+            _sleep_until_stopped(min(interval, remaining), should_stop)
+            if should_stop():
+                raise RuntimeError("xAI device authorization was cancelled")
 
         response = requests.post(
             XAI_OAUTH_TOKEN_URL,
@@ -600,8 +639,100 @@ def build_signed_out_device_url(verification_url: str) -> str:
     return f"{XAI_ACCOUNTS_SIGN_OUT_URL}?{sign_out_query}"
 
 
-def run_device_oauth_flow(timeout: int = 300) -> Dict[str, Any]:
-    """Authorize an account and receive its tokens without code pasting."""
+class DeviceSession:
+    """An xAI device login (RFC 8628) started by :func:`begin_device_login`.
+
+    The user approves ``user_code`` at ``verification_uri`` (prefilled at
+    ``verification_uri_complete``). ``open_url`` is the page to open: it signs
+    the xAI website out first, then continues to that verification page, so
+    the account can be chosen. ``interval`` is the poll interval in seconds and
+    ``expires_at`` (alias ``expires``) the time.time() at which the code stops
+    working. :func:`poll_device_login` waits for the approval; :meth:`close`
+    ends a poll that was given ``should_stop``.
+    """
+
+    provider = "authgrok"
+
+    def __init__(
+        self,
+        device_code: Dict[str, Any],
+        discovery: Dict[str, Any],
+        open_url: str,
+        store: Optional["AuthGrokTokenStore"] = None,
+        account_id: Optional[int] = None,
+        timeout: int = 300,
+        created_at: Optional[float] = None,
+    ):
+        self.device_code = dict(device_code)
+        self.discovery = dict(discovery or {})
+        self.open_url = open_url
+        self.user_code = str(self.device_code.get("user_code") or "")
+        self.verification_uri = str(self.device_code.get("verification_uri") or "")
+        self.verification_uri_complete = self.device_code.get("verification_uri_complete") or None
+        self.interval = float(self.device_code.get("interval", DEVICE_CODE_DEFAULT_POLL_SECONDS))
+        self.expires_in = float(self.device_code.get("expires_in", 600))
+        self.created_at = time.time() if created_at is None else float(created_at)
+        self.expires_at = self.created_at + self.expires_in
+        self.store = store
+        self.account_id = account_id
+        self.timeout = timeout
+        self._stop = threading.Event()
+
+    @property
+    def expires(self) -> float:
+        return self.expires_at
+
+    @property
+    def signed_out_url(self) -> str:
+        return self.open_url
+
+    @property
+    def closed(self) -> bool:
+        return self._stop.is_set()
+
+    def close(self) -> None:
+        """End a :func:`poll_device_login` that was given ``should_stop``."""
+        self._stop.set()
+
+    def pending_state(self) -> Dict[str, Any]:
+        """What :func:`resume_device_login` needs (saved encrypted; it holds the device code)."""
+        return {
+            "provider": "authgrok",
+            "flow": "device",
+            "device_code": dict(self.device_code),
+            "open_url": self.open_url,
+            "account_id": self.account_id,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+        }
+
+    def _remaining_device_code(self) -> Dict[str, Any]:
+        device_code = dict(self.device_code)
+        device_code["expires_in"] = max(1.0, self.expires_at - time.time())
+        return device_code
+
+
+def begin_device_login(
+    store: Optional["AuthGrokTokenStore"] = None,
+    account_id: Optional[int] = None,
+    timeout: int = 300,
+    persist: bool = True,
+    warm_jwks: bool = True,
+) -> DeviceSession:
+    """Start an xAI device login without opening a browser.
+
+    Requests the device code and returns a :class:`DeviceSession`; the caller
+    shows ``user_code``, opens ``session.open_url`` itself and then calls
+    :func:`poll_device_login`. *store* (or ``get_store(account_id)`` when only
+    *account_id* is given) receives the tokens. With *persist*, the device code
+    is saved encrypted next to the store's token file, so
+    :func:`resume_device_login` can keep polling after the app was killed.
+    """
+    if store is None and account_id is not None:
+        store = get_store(account_id)
+    if account_id is None and store is not None:
+        account_id = getattr(store, "account_id", None)
+
     discovery = _load_oidc_discovery()
     device_code = request_device_code(timeout=min(30, timeout))
     verification_url = (
@@ -610,28 +741,114 @@ def run_device_oauth_flow(timeout: int = 300) -> Dict[str, Any]:
     )
 
     signed_out_url = build_signed_out_device_url(str(verification_url))
+    session = DeviceSession(
+        device_code, discovery, signed_out_url,
+        store=store, account_id=account_id, timeout=timeout,
+    )
+    if warm_jwks:
+        threading.Thread(
+            target=_warm_jwks_cache,
+            args=(discovery,),
+            daemon=True,
+        ).start()
+    if persist and store is not None and hasattr(store, "save_pending_oauth"):
+        store.save_pending_oauth(session.pending_state())
+    return session
+
+
+def resume_device_login(
+    store: Optional["AuthGrokTokenStore"] = None,
+    account_id: Optional[int] = None,
+    timeout: int = 300,
+) -> Optional[DeviceSession]:
+    """The device login :func:`begin_device_login` saved for this slot, or None.
+
+    None when nothing is saved, it expired or it is not a device login.
+    """
+    if store is None:
+        store = get_store(account_id)
+    if account_id is None:
+        account_id = getattr(store, "account_id", None)
+    pending = store.load_pending_oauth() if hasattr(store, "load_pending_oauth") else None
+    if not pending or pending.get("provider") != "authgrok" or pending.get("flow") != "device":
+        return None
+    device_code = pending.get("device_code")
+    if not isinstance(device_code, dict) or not device_code.get("device_code"):
+        return None
+    return DeviceSession(
+        device_code, _load_oidc_discovery(), str(pending.get("open_url") or ""),
+        store=store, account_id=account_id, timeout=timeout, created_at=pending.get("created_at"),
+    )
+
+
+def poll_device_login(
+    session: DeviceSession,
+    should_stop=None,
+    timeout: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Wait until the user approves *session*'s code; return the validated tokens.
+
+    *should_stop* (no arguments) is checked about every 0.2 s; once it returns
+    True, or after ``session.close()``, the poll ends with RuntimeError. Without
+    it the poll is the desktop one. The ID token is verified and the account's
+    email/name/subject are kept in ``tokens["account"]``. With a store
+    (``session.store``), the tokens are checked against the other saved slots
+    (:func:`validate_account_slot_tokens`) and saved; the saved device code is
+    cleared whatever the outcome.
+    """
+    if timeout is None:
+        timeout = session.timeout
+    store = session.store
+    try:
+        if should_stop is None:
+            tokens = poll_device_code_tokens(session.device_code, timeout=timeout)
+        else:
+            def stop() -> bool:
+                return session.closed or bool(should_stop())
+
+            tokens = poll_device_code_tokens(
+                session._remaining_device_code(), timeout=timeout, should_stop=stop,
+            )
+        claims = _validate_id_token(tokens["id_token"], None, session.discovery)
+        tokens["account"] = {
+            "email": str(claims.get("email", "") or ""),
+            "name": str(claims.get("name", "") or ""),
+            "subject": str(claims.get("sub", "") or ""),
+        }
+        print("Grok device authorization successful.")
+        if tokens["account"]["email"]:
+            print(f"Account: {tokens['account']['email']}")
+        if store is not None:
+            validate_account_slot_tokens(int(session.account_id or 0), tokens)
+            store.save_tokens(tokens)
+    finally:
+        if store is not None and hasattr(store, "clear_pending_oauth"):
+            store.clear_pending_oauth()
+    return tokens
+
+
+def run_device_oauth_flow(timeout: int = 300) -> Dict[str, Any]:
+    """Authorize an account and receive its tokens without code pasting.
+
+    Composes :func:`begin_device_login` (nothing persisted) and
+    :func:`poll_device_login` (tokens returned, not saved). Not on Glossarion
+    Mobile, which runs those two itself.
+    """
+    if oauth_session.is_mobile():
+        raise RuntimeError(_MOBILE_SIGN_IN_MESSAGE)
+    session = begin_device_login(timeout=timeout, persist=False, warm_jwks=False)
     print(
         "Opening the regular browser for this Grok account. "
         "Glossarion will sign out the previous xAI website session first, then finish "
         "automatically after you approve the new account."
     )
-    _open_oauth_browser(signed_out_url)
+    _open_oauth_browser(session.open_url)
     threading.Thread(
         target=_warm_jwks_cache,
-        args=(discovery,),
+        args=(session.discovery,),
         daemon=True,
     ).start()
-    tokens = poll_device_code_tokens(device_code, timeout=timeout)
-    claims = _validate_id_token(tokens["id_token"], None, discovery)
-    tokens["account"] = {
-        "email": str(claims.get("email", "") or ""),
-        "name": str(claims.get("name", "") or ""),
-        "subject": str(claims.get("sub", "") or ""),
-    }
-    print("Grok device authorization successful.")
-    if tokens["account"]["email"]:
-        print(f"Account: {tokens['account']['email']}")
-    return tokens
+    return poll_device_login(session)
 
 
 # ---------------------------------------------------------------------------
@@ -693,7 +910,11 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
         if self.server._error:
             html = "<html><body><h1>xAI authorization failed.</h1>You can close this tab.</body></html>"
         else:
-            html = "<html><body><h1>Grok authorization received.</h1>You can close this tab and return to Glossarion.</body></html>"
+            html = oauth_session.oauth_success_html(
+                "authgrok",
+                "<html><body><h1>Grok authorization received.</h1>You can close this tab and return to Glossarion.</body></html>",
+                "&#10004; Grok authorization received.",
+            )
         self.wfile.write(html.encode("utf-8"))
         threading.Thread(target=self.server.shutdown, daemon=True).start()
 
@@ -714,7 +935,13 @@ def run_oauth_flow(
     timeout: int = 300,
     force_account_selection: bool = True,
 ) -> Dict[str, Any]:
-    """Open xAI login in the browser and return validated OAuth tokens."""
+    """Open xAI login in the browser and return validated OAuth tokens.
+
+    Not on Glossarion Mobile, which signs in with begin_device_login() /
+    poll_device_login() and opens the page itself.
+    """
+    if oauth_session.is_mobile():
+        raise RuntimeError(_MOBILE_SIGN_IN_MESSAGE)
     if force_account_selection:
         # xAI may render an out-of-band Grok Build code instead of redirecting
         # to localhost. Its device grant is designed for exactly this case:
@@ -791,7 +1018,13 @@ def _parse_expiry(value: Any) -> Optional[float]:
 
 
 def load_grok_cli_credentials(auth_file: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Read, but never modify, credentials created by the official Grok CLI."""
+    """Read, but never modify, credentials created by the official Grok CLI.
+
+    Glossarion Mobile never imports a Grok CLI login: None there unless an
+    *auth_file* is given.
+    """
+    if not auth_file and oauth_session.is_mobile():
+        return None
     path = auth_file or _OFFICIAL_GROK_AUTH_FILE
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -843,8 +1076,14 @@ def load_grok_cli_credentials(auth_file: Optional[str] = None) -> Optional[Dict[
 # ---------------------------------------------------------------------------
 
 
-class AuthGrokTokenStore:
-    """Thread-safe AuthGrok token store backed by an encrypted JSON file."""
+class AuthGrokTokenStore(oauth_session.PendingOAuthMixin):
+    """Thread-safe AuthGrok token store backed by an encrypted JSON file.
+
+    Also keeps the encrypted pending device login of begin_device_login()
+    (``pending_oauth_file``, ``save/load/clear_pending_oauth``).
+    """
+
+    _pending_label = "AuthGrok"
 
     def __init__(self, token_file: Optional[str] = None, account_id: int = 0):
         self._token_file = token_file or os.environ.get("AUTHGROK_TOKEN_FILE") or _DEFAULT_TOKEN_FILE

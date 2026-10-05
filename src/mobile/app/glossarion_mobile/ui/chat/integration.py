@@ -276,14 +276,33 @@ class ChatFeature:
             return None
 
     async def refresh_sign_in(self) -> dict:
+        """Re-read ChatGPT slot #0 and the slot(s) the current model uses (``authgptN/`` -> #N, the
+        ``authgpt0/`` pool -> every saved slot) into ``AppState.signed_in`` (slot keys). Returns
+        slot #0's status."""
+        from glossarion_mobile.services.oauth import pool_route_provider, provider_for_model, slot_key
+
         status = await self.oauth.refresh_status(0)
+        found = {"authgpt": bool(status.get("signed_in"))}
         state = getattr(self.app, "state", None)
+        model = state.chat_context.value.model if state is not None else None
+        route = provider_for_model(model)
+        try:
+            if route is not None and route[0] == "authgpt":
+                if pool_route_provider(model) == "authgpt" and hasattr(self.oauth, "statuses"):
+                    for item in await self._run_io(self.oauth.statuses, "authgpt"):
+                        found[slot_key("authgpt", int(item.get("account_id", 0) or 0))] = bool(item.get("signed_in"))
+                elif route[1]:
+                    other = await self.oauth.refresh_status(route[1])
+                    found[slot_key("authgpt", route[1])] = bool(other.get("signed_in"))
+        except Exception:
+            log.debug("refreshing the model's ChatGPT slot failed", exc_info=True)
         if state is not None:
             signed = set(state.signed_in.value)
-            if status.get("signed_in"):
-                signed.add("authgpt")
-            else:
-                signed.discard("authgpt")
+            for key, value in found.items():
+                if value:
+                    signed.add(key)
+                else:
+                    signed.discard(key)
             if frozenset(signed) != state.signed_in.value:
                 state.signed_in.set(frozenset(signed))
         return status
@@ -341,10 +360,14 @@ class ChatFeature:
             signed_in="authgpt" in (state.signed_in.value if state is not None else ()),
         )
 
-        def choose_model() -> None:
+        def choose_model(query: Optional[str] = None) -> Any:
             chat_view = getattr(self.app, "chat_view", None)
-            if chat_view is not None:
-                chat_view.open_model_sheet("model")
+            if chat_view is None:
+                return None
+            sheet = chat_view.open_model_sheet("model")
+            if query and hasattr(sheet, "set_query"):
+                sheet.set_query(query)  # step 2 after a sign-in: that provider's models
+            return sheet
 
         def done(updates: dict) -> None:
             if env is not None:
@@ -376,11 +399,13 @@ class ChatFeature:
         return WelcomeScreen(
             match,
             flow=flow,
-            login_panel_factory=lambda on_done: LoginPanel(self.oauth, on_done=on_done),
+            login_panel_factory=lambda on_done: LoginPanel(self.oauth, provider="authgpt", account_id=0,
+                                                           on_done=on_done),
             languages=env.languages if env else ("English",),
             on_finish=done,
             on_skip=done,
             on_choose_model=choose_model,
+            on_use_provider=choose_model,
             on_api_key=save_key,
             on_try=try_action,
             is_android=self.is_android,
@@ -533,8 +558,8 @@ class ChatFeature:
                 ActionItem("Unpin" if chat.pinned else "Pin", lambda: self.chats.set_pinned(chat.cid, not chat.pinned),
                            icon="PUSH_PIN"),
                 ActionItem(f"Attachments ({chat.attachments})", disabled_reason="Arrives in U7", icon="ATTACH_FILE"),
-                ActionItem("Export chat", disabled_reason="Arrives in U4", icon="IOS_SHARE"),
-                ActionItem("Duplicate as scratch", disabled_reason="Arrives in U4", icon="CONTENT_COPY"),
+                ActionItem("Export chat", disabled_reason="Arrives in U7", icon="IOS_SHARE"),
+                ActionItem("Duplicate as scratch", disabled_reason="Arrives in U7", icon="CONTENT_COPY"),
                 ActionItem("Delete", delete, icon="DELETE_OUTLINE", destructive=True,
                            disabled_reason=None if self.chats.can_delete(chat.cid) else "Nothing to delete"),
             ],

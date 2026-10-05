@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from glossarion_mobile.services.oauth import sign_in_satisfied
 from glossarion_mobile.state.chat_index import InMemoryChatIndex
 from glossarion_mobile.state.store import LoopGuard, Signal
 from glossarion_mobile.ui.chat.output_modes import OutputModeState
@@ -83,7 +84,7 @@ class AppState:
         self.text_scale = sig(1.0, "text_scale")
         self.backend = sig(None, "backend")  # warm-import result dict; None while warming up
         self.chat_context = sig(ChatContext(), "chat_context")
-        self.signed_in = sig(frozenset(), "signed_in")  # providers with a usable login, e.g. "authgpt"
+        self.signed_in = sig(frozenset(), "signed_in")  # signed-in slot keys: "authgpt", "authgpt2", "authgem"…
         self.output_mode = sig(OutputModeState(), "output_mode")
         self.job_strip = sig(None, "job_strip")  # Optional[JobStripModel]
         self.jobs_badge = sig(JobsBadge(), "jobs_badge")
@@ -105,6 +106,12 @@ class AppState:
         if not result.get("ok"):
             return BLOCK_ENGINE_FAILED
         model = self.chat_context.value.model
-        if requires_chatgpt_sign_in(model) and "authgpt" not in self.signed_in.value:
+        if self.needs_chatgpt_sign_in(model):
             return chatgpt_sign_in_reason(model)
         return None
+
+    def needs_chatgpt_sign_in(self, model: Optional[str] = None) -> bool:
+        """A ChatGPT route whose account is not signed in (``signed_in`` holds slot keys:
+        ``authgptN/`` needs ``authgptN``; the ``authgpt0/`` pool any ChatGPT slot)."""
+        model = self.chat_context.value.model if model is None else model
+        return requires_chatgpt_sign_in(model) and not sign_in_satisfied(model, self.signed_in.value)

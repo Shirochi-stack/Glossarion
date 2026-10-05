@@ -37,6 +37,13 @@ d. Labels and tooltips: widgets created with a text (``QCheckBox("...")``,
    ``setChecked`` / ``setText`` / ``setValue`` arguments (strong) and the handlers
    connected to its signals (weak). Keys passed as class constants
    (``self.API_KEY_TREE_FONT_SIZE_CONFIG``) are resolved.
+   Choices come from the combo box construction: ``addItems([...])`` (literal, local or
+   module constant lists), ``addItem(label, data)`` (also in a loop over a literal list of
+   pairs) and the value -> index map of ``setCurrentIndex({...}.get(value))``. A combo is tied
+   to its key strongly (settings_map widget source, ``setCurrentIndex`` / ``setCurrentText``
+   arguments, ``findText`` / ``findData`` lookups), never through its change handler alone.
+   Items shown with other text become ``(value, label)`` pairs; index-coded combos (the key
+   stores the item index as '0', '1', ...) are ints; editable combos flag ``editable_choices``.
 e. Nested dict settings: ``qa_scanner_settings.*`` (``qa_scan_runtime`` defaults, the
    ``save_config`` setdefault block, ``apply_qa_scan_env_from_settings`` env),
    ``manga_settings.*`` (``MangaSettingsDialog.default_settings``), ``ai_hunter_config.*``
@@ -63,6 +70,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import os
 import pprint
 import re
@@ -71,7 +79,7 @@ import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
 
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 2   # 2: widget choices; typed defaults settle the type before name heuristics
 
 TOOLS_DIR = Path(__file__).resolve().parent
 DEFAULT_SRC = TOOLS_DIR.parents[1]
@@ -87,6 +95,9 @@ OWNER_MODULES = (
     "translation_pipeline.py",
     "text_jobs.py",
     "input_preparation.py",
+    # U4: GUI-free rules / catalog steps the TranslatorGUI handlers call (moved bodies)
+    "settings_rules.py",
+    "model_catalog_core.py",
     "translator_gui.py",
 )
 OWNER_CLASSES = ("TranslatorGUI",)          # plus every *Mixin class in OWNER_MODULES
@@ -104,6 +115,14 @@ DIALOG_MODULES = (                           # label / tooltip / UI-site priorit
     "multi_api_key_manager.py",
 )
 EXTRA_MODULES = ("qa_scan_runtime.py", "ai_hunter_enhanced.py", "metadata_defaults.py")
+# (module, function, widget) -> config keys the widget shows although the dialog no longer
+# names them in an expression bound to it: the U4 review fixes moved the "Assistant Prompt"
+# dialog's drafts into prompt_profiles.PrefillState, so its profile combo reads
+# ``state.active_name`` (the generator cannot follow that object to the config read).
+# The label / tooltip texts still come from the dialog source.
+WIDGET_KEY_PINS = {
+    ("translator_gui.py", "show_assistant_prompt_dialog", "profile_combo"): ("active_assistant_prompt_profile",),
+}
 # GUI-free helpers that TranslatorGUI.__init__ runs on self.config (startup writes).
 EXTRA_INIT_FUNCS = (
     ("metadata_defaults.py", "ensure_metadata_prompt_defaults"),   # via MetadataBatchTranslatorUI / _hook_metadata_defaults
@@ -239,9 +258,11 @@ ENV_SETTER_FUNCS = {"_update_env", "set_env", "putenv", "setdefault", "_set_env"
 WIDGET_FACTORIES = {"_create_styled_checkbox", "_create_preview_pool_button"}
 # Widgets whose text names the setting they edit (buttons and radios name actions / choices).
 INPUT_FACTORIES = {"_create_styled_checkbox"}
-INPUT_SUFFIXES = ("ComboBox", "LineEdit", "SpinBox", "CheckBox", "TextEdit", "Slider")
-WIDGET_SUFFIXES = ("ComboBox", "LineEdit", "SpinBox", "CheckBox", "TextEdit", "Slider",
+INPUT_SUFFIXES = ("ComboBox", "LineEdit", "SpinBox", "CheckBox", "TextEdit", "Slider", "Combo")
+WIDGET_SUFFIXES = ("ComboBox", "LineEdit", "SpinBox", "CheckBox", "TextEdit", "Slider", "Combo",
                    "RadioButton", "Button", "Label")
+COMBO_SUFFIXES = ("ComboBox", "Combo")       # widgets whose items are choices
+CHOICE_TIE_METHODS = {"findText", "findData"}  # combo lookups of the stored value
 BIND_METHODS = {"setChecked", "setText", "setValue", "setCurrentText", "setCurrentIndex",
                 "setPlainText", "setEditText"}
 SIGNALS = {"toggled", "stateChanged", "textChanged", "valueChanged", "currentIndexChanged",
@@ -1097,6 +1118,7 @@ class KeyInfo:
     ui_sites: dict = field(default_factory=dict)      # site -> best distance
     choices: set = field(default_factory=set)
     bounds: set = field(default_factory=set)          # (lo, hi)
+    widget_choices: set = field(default_factory=set)  # (priority, fn, ((value, label), ...), editable, index_coded)
 
 
 class Collector:
@@ -1545,9 +1567,11 @@ class Collector:
                         best = info.ui_sites.get(site)
                         if best is None or dist < best:
                             info.ui_sites[site] = dist
-                labels, bind_defaults = widget_labels(fn.module, fn, ctx, widget_key)
+                labels, bind_defaults, choice_records = widget_labels(fn.module, fn, ctx, widget_key)
                 for key, strength, nkeys, label, tooltip, group, tab in labels:
                     self.info(key).labels.append((priority, strength, nkeys, fn.name, label, tooltip, group, tab))
+                for key, pairs, editable, index_coded in choice_records:
+                    self.info(key).widget_choices.add((priority, fn.name, pairs, editable, index_coded))
                 if name != "translator_gui.py":
                     for key, default in bind_defaults:
                         self.info(key).dialog.add((_hashable(default),))
@@ -1754,15 +1778,174 @@ def _reachability(mod: Module, funcs, roots):
     return result
 
 
+def _str_items(value):
+    if isinstance(value, (list, tuple)) and value and all(isinstance(v, str) for v in value):
+        return list(value)
+    return None
+
+
+def _pair_items(value):
+    if (isinstance(value, (list, tuple)) and value
+            and all(isinstance(v, tuple) and len(v) == 2 and all(isinstance(x, str) for x in v) for v in value)):
+        return [tuple(v) for v in value]
+    return None
+
+
+def _local_literals(func_node):
+    """NAME -> literal value of the function's (and its closures') literal assignments."""
+    out = {}
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            ok, value = literal(node.value)
+            if ok:
+                out.setdefault(node.targets[0].id, value)
+    return out
+
+
+def _items_value(node, mod: Module, local_lits: dict):
+    """The literal list behind an addItems argument: a literal, a local / module constant,
+    or list(...) / tuple(...) of one."""
+    if isinstance(node, ast.Call) and _call_name(node) in ("list", "tuple") and len(node.args) == 1:
+        node = node.args[0]
+    ok, value = literal(node)
+    if ok:
+        return value
+    if isinstance(node, ast.Name):
+        if node.id in local_lits:
+            return local_lits[node.id]
+        if node.id in mod.consts:
+            return mod.consts[node.id]
+    return None
+
+
+def _loop_item_pairs(func_node, mod: Module, local_lits: dict):
+    """widget id -> [(data, label)] from ``for label, data in <pairs>: w.addItem(label, data)``."""
+    out = {}
+    for node in ast.walk(func_node):
+        if not (isinstance(node, ast.For) and isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2
+                and all(isinstance(e, ast.Name) for e in node.target.elts)):
+            continue
+        pairs = _pair_items(_items_value(node.iter, mod, local_lits))
+        if not pairs:
+            continue
+        names = [e.id for e in node.target.elts]
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute) and sub.func.attr == "addItem"
+                    and len(sub.args) == 2 and all(isinstance(a, ast.Name) and a.id in names for a in sub.args)):
+                wid = _widget_id(sub.func.value)
+                if wid:
+                    li, di = names.index(sub.args[0].id), names.index(sub.args[1].id)
+                    out.setdefault(wid, []).extend((p[di], p[li]) for p in pairs)
+    return out
+
+
+def _statement_depths(body, depth=0, out=None):
+    """id(statement) -> nesting depth, over the statements _linear_statements yields."""
+    out = {} if out is None else out
+    for stmt in body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        out[id(stmt)] = depth
+        for attr in ("body", "orelse", "finalbody"):
+            inner = getattr(stmt, attr, None)
+            if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
+                _statement_depths(inner, depth + 1, out)
+        for handler in getattr(stmt, "handlers", []) or []:
+            _statement_depths(handler.body, depth + 1, out)
+    return out
+
+
+def _record_assign(last_assign: dict, name: str, value, depth: int):
+    """Reaching assignments of a local: an assignment replaces those at its depth or deeper
+    (``idx = ...`` reused per combo) and adds to shallower ones (``if x is None: x = ...``)."""
+    kept = [(d, v) for d, v in last_assign.get(name, ()) if d < depth]
+    kept.append((depth, value))
+    last_assign[name] = kept
+
+
+def _resolve_local(node, last_assign: dict, depth=0):
+    """A local name -> the value of its latest reaching assignment."""
+    while isinstance(node, ast.Name) and node.id in last_assign and depth < 4:
+        node = last_assign[node.id][-1][1]
+        depth += 1
+    return node
+
+
+def _index_kind(node, last_assign: dict, depth=0):
+    """How ``setCurrentIndex(node)`` picks the item: ('map', {value: index}) for a literal
+    ``{...}.get(value)``, ('lookup', None) for a ``findText`` / ``findData`` result, else
+    ('unknown', None) (an index from a method or arithmetic: the items are not the values)."""
+    if isinstance(node, ast.Name) and node.id in last_assign and depth < 4:
+        kinds = [_index_kind(value, last_assign, depth + 1) for _d, value in last_assign[node.id]]
+        for kind in kinds:
+            if kind[0] == "map":
+                return kind
+        return kinds[-1]
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Dict)):
+        ok, mapping = literal(node.func.value)
+        if ok and mapping and all(isinstance(k, str) for k in mapping) and all(
+                isinstance(v, int) and not isinstance(v, bool) for v in mapping.values()):
+            return "map", mapping
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in CHOICE_TIE_METHODS:
+        return "lookup", None
+    if isinstance(node, ast.Call) and _call_name(node) in ("max", "min", "int") and node.args:
+        # setCurrentIndex(max(0, combo.findData(value))): still a lookup of the stored value
+        for arg in node.args:
+            kind = _index_kind(arg, last_assign, depth + 1)
+            if kind[0] != "unknown":
+                return kind
+    return "unknown", None
+
+
+def _precise_refs(node, ctx: RefContext, last_assign: dict):
+    """Config keys an expression reads, resolving local names through their reaching
+    assignments only (a function reusing ``idx`` for several combos must not tie them all)."""
+    pctx = copy.copy(ctx)
+    pctx.locals = {name: [value for _d, value in values] for name, values in last_assign.items()}
+    pctx._busy = set()
+    return [key for key, _default in pctx.refs(node)]
+
+
+def _combo_choices(info):
+    """``(((value, label), ...), index_coded)`` of one combo, or None."""
+    items = info["items"]
+    if not items or info["dynamic"]:
+        return None
+    index_map = info["index_map"]
+    if info["index_unknown"] and not index_map:
+        return None                     # positioned by a computed index: items are not the values
+    if index_map:
+        by_index = {}
+        for value, index in index_map.items():
+            by_index.setdefault(index, value)
+        if not all(i in by_index for i in range(len(items))):
+            return None
+        pairs = [(by_index[i], items[i][1]) for i in range(len(items))]
+        index_coded = all(isinstance(v, str) and v.isdigit() and int(v) == i for i, (v, _l) in enumerate(pairs))
+    else:
+        pairs = list(items)
+        index_coded = False
+    seen, unique = set(), []
+    for value, label in pairs:
+        if value not in seen:
+            seen.add(value)
+            unique.append((value, label))
+    return tuple(unique), index_coded
+
+
 def widget_labels(mod: Module, fn: Func, ctx: RefContext, widget_key: dict):
-    """([(key, label, tooltip, group, tab)], [(key, default)]) for widgets created in one
-    function; the defaults come from the expressions that fill the widgets."""
+    """([(key, label, tooltip, group, tab)], [(key, default)], [(key, pairs, editable,
+    index_coded)]) for widgets created in one function; the defaults come from the
+    expressions that fill the widgets, the choices from the combo boxes' items."""
     local_defs = {}
     nested = []
     for node in ast.walk(fn.node):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node is not fn.node:
             local_defs.setdefault(node.name, node)
             nested.append(node)
+    local_lits = _local_literals(fn.node)
+    loop_pairs = _loop_item_pairs(fn.node, mod, local_lits)
     # the function body, then every nested def (dialogs are often built in closures);
     # None separates the segments and resets the label / group / tab context
     stmts = [None] + list(_linear_statements(fn.node.body))
@@ -1777,10 +1960,17 @@ def widget_labels(mod: Module, fn: Func, ctx: RefContext, widget_key: dict):
     pending_tab = []
     current_tab = None
     containers = {}            # container widget id -> statement index it was created at
+    depths = _statement_depths(fn.node.body)
+    for node in nested:
+        _statement_depths(node.body, 0, depths)
+    last_assign = {}          # local name -> [(depth, value)] reaching assignments (choice ties)
     for idx, stmt in enumerate(stmts):
         if stmt is None:
             last_label, group, current_tab, pending_tab = None, None, None, []
+            last_assign = {}
             continue
+        if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)):
+            _record_assign(last_assign, stmt.targets[0].id, stmt.value, depths.get(id(stmt), 0))
         if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.value, ast.Call):
             target = stmt.targets[0]
             wid = _widget_id(target)
@@ -1805,10 +1995,15 @@ def widget_labels(mod: Module, fn: Func, ctx: RefContext, widget_key: dict):
                 if not text and last_label and idx - last_label[1] <= LABEL_WINDOW:
                     near = last_label[0]
                 info = {"text": (text or "").strip() or None, "near": near, "tooltip": None,
-                        "keys": set(), "handler_keys": set(), "group": group, "tab": current_tab}
+                        "keys": set(), "handler_keys": set(), "group": group, "tab": current_tab,
+                        "combo": (cname or "").endswith(COMBO_SUFFIXES), "items": [], "dynamic": False,
+                        "index_map": None, "index_unknown": False, "editable": False, "choice_keys": set(),
+                        "source_keys": set()}
                 attr = wid[5:] if wid.startswith("self.") else None
                 if attr and attr in widget_key:
                     info["keys"].update(widget_key[attr])
+                    info["source_keys"].update(widget_key[attr])
+                info["keys"].update(WIDGET_KEY_PINS.get((mod.name, fn.name, wid), ()))
                 widgets[wid] = info
                 pending_tab.append(wid)
                 continue
@@ -1848,6 +2043,36 @@ def widget_labels(mod: Module, fn: Func, ctx: RefContext, widget_key: dict):
                     widgets[owner]["keys"].add(key)
                     if default != NONE:
                         bind_defaults.add((key, _hashable(default)))
+                if widgets[owner]["combo"] and func.attr in ("setCurrentIndex", "setCurrentText", "setEditText"):
+                    target = _resolve_local(call.args[0], last_assign)
+                    if func.attr == "setCurrentIndex":
+                        kind, mapping = _index_kind(call.args[0], last_assign)
+                        if kind == "map":
+                            widgets[owner]["index_map"] = mapping
+                        elif kind == "unknown":
+                            widgets[owner]["index_unknown"] = True
+                        if kind == "lookup":
+                            target = call.args[0]       # the lookup's argument is in its refs
+                    widgets[owner]["choice_keys"].update(_precise_refs(target, ctx, last_assign))
+            elif func.attr == "addItems" and owner in widgets and call.args and widgets[owner]["combo"]:
+                items = _str_items(_items_value(call.args[0], mod, local_lits))
+                if items is None:
+                    widgets[owner]["dynamic"] = True
+                else:
+                    widgets[owner]["items"].extend((s, s) for s in items)
+            elif func.attr == "addItem" and owner in widgets and call.args and widgets[owner]["combo"]:
+                label = const_str(call.args[0])
+                data = const_str(call.args[1]) if len(call.args) > 1 else label
+                if label is not None and data is not None:
+                    widgets[owner]["items"].append((data, label))
+                elif owner not in loop_pairs:
+                    widgets[owner]["dynamic"] = True
+            elif func.attr in CHOICE_TIE_METHODS and owner in widgets and call.args:
+                widgets[owner]["choice_keys"].update(_precise_refs(call.args[0], ctx, last_assign))
+            elif func.attr == "setEditable" and owner in widgets and call.args:
+                ok, value = literal(call.args[0])
+                if ok and value:
+                    widgets[owner]["editable"] = True
             elif func.attr == "connect" and isinstance(func.value, ast.Attribute) and func.value.attr in SIGNALS:
                 owner = _widget_id(func.value.value)
                 if owner in widgets and call.args:
@@ -1867,6 +2092,18 @@ def widget_labels(mod: Module, fn: Func, ctx: RefContext, widget_key: dict):
                                 widgets[wid]["tab"] = title
                         current_tab = None
                     pending_tab = []
+    choice_records = []
+    for wid, info in widgets.items():
+        if not info["combo"]:
+            continue
+        if wid in loop_pairs and not info["items"]:
+            info["items"].extend(loop_pairs[wid])
+        found = _combo_choices(info)
+        if found is None:
+            continue
+        pairs, index_coded = found
+        for key in sorted(info["source_keys"] | info["choice_keys"]):
+            choice_records.append((key, pairs, info["editable"], index_coded))
     labels = list(helper_labels)
     for wid, info in widgets.items():
         label = info["text"] or info["near"]
@@ -1880,7 +2117,7 @@ def widget_labels(mod: Module, fn: Func, ctx: RefContext, widget_key: dict):
             labels.append((key, 0, len(direct), label, info["tooltip"], info["group"], info["tab"]))
         for key in sorted(indirect):
             labels.append((key, 1, len(indirect), label, info["tooltip"], info["group"], info["tab"]))
-    return labels, [(k, _unhash(d)) for k, d in sorted(bind_defaults)]
+    return labels, [(k, _unhash(d)) for k, d in sorted(bind_defaults)], choice_records
 
 
 def _widget_id(node):
@@ -2089,16 +2326,36 @@ def build_entry(info: KeyInfo, collector):
     if disc:
         entry["discrepancies"] = tuple(disc)
 
-    types = infer_type(info.key, entry)
-    entry["type"] = types
     choices = set()
     for c in info.choices:
         choices.update(c)
     conv = entry.get("converter")
+    # combo choices: the dialog module priority, then the function name (never positions)
+    widget = sorted(info.widget_choices, key=lambda t: (t[0], t[1], repr(t[2])))
     if conv and conv[0] == "choice":
         entry["choices"] = tuple(conv[1])
+        for _priority, _fn, pairs, _editable, _coded in widget:
+            if {v for v, _l in pairs} == set(conv[1]) and any(v != label for v, label in pairs):
+                entry["choices"] = pairs             # the same values, shown with their labels
+                break
+    elif widget and not isinstance(entry.get("default"), bool):
+        # (a bool setting is never a combo value: a combo tied to it through a fallback read
+        # such as the old enable_auto_glossary migration only names its sibling's values)
+        _priority, _fn, pairs, editable, index_coded = widget[0]
+        if index_coded:
+            pairs = tuple((int(v), label) for v, label in pairs)
+            flags.append("index_coded_choices")
+        if any(v != label for v, label in pairs):
+            entry["choices"] = pairs
+        else:
+            entry["choices"] = tuple(v for v, _l in pairs)
+        if editable:
+            flags.append("editable_choices")
     elif choices:
         entry["choices"] = tuple(sorted(choices))
+    entry["type"] = infer_type(info.key, entry)
+    if entry["type"] == "choice" and "editable_choices" in flags:
+        entry["type"] = "str"                        # any text is allowed; the items are suggestions
     lo, hi = _bounds(info, conv)
     if lo is not None:
         entry["minimum"] = lo
@@ -2253,19 +2510,13 @@ def infer_type(key: str, entry) -> str:
             base = mapping[kind]
             if base != "str":
                 return base
-    lowered = key.lower().rsplit(".", 1)[-1]
-    if (re.search(r"(^|_)(api_key|secret|password|token)s?($|_)", lowered)
-            and not re.search(r"token(s)?_(limit|budget|count|threshold|concurrency|timeout)|max_tokens|_tokens$|token_limit", lowered)):
-        return "secret"
-    if lowered in ("api_key",) or lowered.endswith("_api_key") or lowered.endswith("_api_keys"):
-        return "secret"
-    if re.search(r"(_path|_dir|_directory|_folder|_file)$", lowered) or lowered == "google_cloud_credentials":
-        return "path"
+    # A typed default or an index-coded combo settles the type before the name heuristics
+    # (use_multi_api_keys is a bool, multi_api_keys a list of key dicts, the number spacing
+    # "token fix" an index code; none of them is a secret).
     default = entry.get("default", entry.get("save_default"))
-    if isinstance(default, dict) and default.get("as") in ("list", "tuple"):
-        return "list"
-    if "choices" in entry:
-        return "choice"
+    choices = entry.get("choices")
+    if choices and all(isinstance(c, tuple) and isinstance(c[0], int) for c in choices):
+        return "int"
     if isinstance(default, bool):
         return "bool"
     if isinstance(default, int):
@@ -2274,8 +2525,20 @@ def infer_type(key: str, entry) -> str:
         return "float"
     if isinstance(default, list):
         return "list"
+    if isinstance(default, dict) and default.get("as") in ("list", "tuple"):
+        return "list"
     if isinstance(default, dict) and not _is_marker(default):
         return "dict"
+    lowered = key.lower().rsplit(".", 1)[-1]
+    if (re.search(r"(^|_)(api_key|secret|password|token)s?($|_)", lowered)
+            and not re.search(r"token(s)?_(limit|budget|count|threshold|concurrency|timeout|fix)|max_tokens|_tokens$|token_limit", lowered)):
+        return "secret"
+    if lowered in ("api_key",) or lowered.endswith("_api_key") or lowered.endswith("_api_keys"):
+        return "secret"
+    if re.search(r"(_path|_dir|_directory|_folder|_file)$", lowered) or lowered == "google_cloud_credentials":
+        return "path"
+    if choices:
+        return "choice"
     return "str"
 
 

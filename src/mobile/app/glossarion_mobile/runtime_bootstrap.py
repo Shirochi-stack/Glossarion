@@ -221,10 +221,38 @@ class AppPaths:
             # Bookkeeping (not read by the backend):
             "GLOSSARION_PLATFORM": self.platform,
         }
+        env.update(self.token_env())
         if ca_bundle:
             env["SSL_CERT_FILE"] = ca_bundle
             env["REQUESTS_CA_BUNDLE"] = ca_bundle
         return env
+
+    @property
+    def token_dir(self) -> Path:
+        """``<home>/.glossarion``: every auth token store, pending sign-in and login cache."""
+        return self.home / ".glossarion"
+
+    def token_env(self) -> dict[str, str]:
+        """Token-file overrides the auth modules honour, all under ``token_dir``.
+
+        The auth modules resolve ``~`` when they are imported. Android/iOS
+        ``expanduser`` follows the ``HOME`` override, but Windows ignores ``HOME``
+        (it reads ``USERPROFILE``), so a Windows dev run would otherwise share the
+        desktop app's token files and "Sign out" would delete the desktop login.
+        ``GLOSSARION_TOKEN_DIR`` covers the numbered slots and the login caches
+        of authgem/authgrok/authcd; the ``*_TOKEN_FILE`` / data-dir variables are
+        the overrides each module already reads.
+        """
+        tokens = self.token_dir
+        return {
+            "GLOSSARION_TOKEN_DIR": str(tokens),
+            "AUTHGPT_TOKEN_FILE": str(tokens / "authgpt_tokens.json"),
+            "AUTHGEM_TOKEN_FILE": str(tokens / "authgem_tokens.json"),
+            "AUTHGROK_TOKEN_FILE": str(tokens / "authgrok_tokens.json"),
+            "AUTHCD_TOKEN_FILE": str(tokens / "authcd_tokens.json"),
+            "OPERA_ARIA_TOKEN_FILE": str(tokens / "opera_aria_token.json"),
+            "AUTHARENA_PROXY_DATA_DIR": str(tokens / "autharena_proxy"),
+        }
 
 
 def _abspath(value: str | os.PathLike[str]) -> Path:

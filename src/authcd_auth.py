@@ -13,6 +13,12 @@ Flow:
   4. User logs in via browser -> callback receives auth code
   5. Exchange auth code for access + refresh tokens
   6. Store tokens locally (~/.glossarion/authcd_tokens.json)
+
+run_automatic_oauth_login() runs the localhost flow end to end.
+begin_oauth() / complete_from_redirect() split it for callers that open the
+browser themselves (Glossarion Mobile) and add a paste fallback: the
+localhost redirect URL, or the code#state that Anthropic's code page shows.
+Glossarion Mobile never runs the Claude Code CLI and never imports its login.
 """
 import os
 import sys
@@ -30,6 +36,8 @@ from urllib.parse import urlencode, urlparse, parse_qs, quote
 from typing import Optional, Dict, List, Tuple, Any
 
 import requests
+
+import oauth_session
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +98,8 @@ _CLAUDE_CODE_BETA_FLAGS = (
     "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
 )
 
-_DEFAULT_TOKEN_DIR = os.path.join(os.path.expanduser("~"), ".glossarion")
+# ~/.glossarion; GLOSSARION_TOKEN_DIR when set (Glossarion Mobile: <data>/home/.glossarion)
+_DEFAULT_TOKEN_DIR = oauth_session.default_token_dir()
 _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authcd_tokens.json")
 _CLIENT_VERSION_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authcd_client_version.json")
 _client_version_lock = threading.Lock()
@@ -111,6 +120,8 @@ def _newest_version(*versions: Optional[str]) -> str:
 
 def _installed_claude_code_version() -> Optional[str]:
     """Version of the npm-installed Claude Code CLI, read from its package.json."""
+    if oauth_session.is_mobile():
+        return None  # Glossarion Mobile has no Claude Code CLI
     import shutil
     shim = shutil.which("claude")
     if not shim:
@@ -220,17 +231,13 @@ def generate_pkce() -> Tuple[str, str]:
 
 
 def build_auth_url(code_challenge: str, state: str) -> str:
-    """Build the full authorization URL using the official redirect_uri."""
-    params = {
-        "client_id": CLAUDE_CLIENT_ID,
-        "response_type": "code",
-        "redirect_uri": CLAUDE_REDIRECT_URI,
-        "scope": SCOPES,
-        "state": state,
-        "code_challenge": code_challenge,
-        "code_challenge_method": "S256",
-    }
-    return f"{CLAUDE_AUTH_URL}?{urlencode(params)}"
+    """Build the full authorization URL using the official redirect_uri.
+
+    This is Claude Code's manual ("paste the code") URL: the same query as
+    its automatic login (``code=true``, the current CLI scopes) with Anthropic's
+    code page as redirect_uri, which shows ``code#state`` to copy.
+    """
+    return f"{CLAUDE_AUTH_URL}?{_authorize_query(code_challenge, state, CLAUDE_REDIRECT_URI)}"
 
 
 # ===========================================================================
@@ -350,6 +357,11 @@ CLAUDE_CODE_LOGIN_SCOPES = (
 )
 
 
+#: A Claude sign-in started by begin_oauth(), waiting for its redirect (shared
+#: loopback session: auth_url, manual_auth_url, state, wait_for_callback(), close(), ...).
+OAuthSession = oauth_session.LoopbackOAuthSession
+
+
 def _bind_oauth_callback_server(handler_cls):
     """Bind 127.0.0.1 on a free port in Claude Code's callback port range."""
     low, high = (39152, 49151) if os.name == "nt" else (49152, 65535)
@@ -362,58 +374,8 @@ def _bind_oauth_callback_server(handler_cls):
     return HTTPServer(("127.0.0.1", 0), handler_cls)
 
 
-def run_automatic_oauth_login(timeout: int = 180, open_browser=None,
-                              sign_out_first: bool = True,
-                              sign_out_wait: float = CLAUDE_AI_SIGN_OUT_WAIT_SECONDS) -> Dict:
-    """Sign in through the browser and return tokens, with no pasting.
-
-    ``open_browser(url)`` defaults to ``webbrowser.open``. With
-    ``sign_out_first`` the browser is first signed out of claude.ai, so the
-    authorize page asks for an account instead of reusing the one already
-    signed in. The browser then redirects to http://localhost:<port>/callback,
-    which this function answers, and is sent on to Anthropic's success page.
-    """
-    code_verifier, code_challenge = generate_pkce()
-    state = secrets.token_urlsafe(32)
-    result: Dict[str, Optional[str]] = {"code": None, "error": None}
-    received = threading.Event()
-
-    class _CallbackHandler(BaseHTTPRequestHandler):
-        def log_message(self, *_args):
-            return
-
-        def do_GET(self):
-            parsed = urlparse(self.path)
-            if parsed.path != "/callback":
-                self.send_response(404)
-                self.end_headers()
-                return
-            query = parse_qs(parsed.query)
-            if query.get("state", [None])[0] != state:
-                result["error"] = "state mismatch in the sign-in callback"
-            elif query.get("error"):
-                result["error"] = query.get("error_description", query["error"])[0]
-            elif query.get("code"):
-                result["code"] = query["code"][0]
-            else:
-                result["error"] = "no authorization code in the sign-in callback"
-            if result["code"]:
-                self.send_response(302)
-                self.send_header("Location", CLAUDE_AI_SUCCESS_URL)
-                self.end_headers()
-            else:
-                body = f"Claude sign-in failed: {result['error']}".encode("utf-8")
-                self.send_response(400)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-            received.set()
-
-    server = _bind_oauth_callback_server(_CallbackHandler)
-    server.timeout = 0.5
-    port = server.server_address[1]
-    redirect_uri = f"http://localhost:{port}/callback"
+def _authorize_query(code_challenge: str, state: str, redirect_uri: str) -> str:
+    """The authorize query of `claude auth login` (``code=true``, PKCE S256, the CLI scopes)."""
     params = {
         "code": "true",
         "client_id": CLAUDE_CLIENT_ID,
@@ -424,34 +386,237 @@ def run_automatic_oauth_login(timeout: int = 180, open_browser=None,
         "code_challenge_method": "S256",
         "state": state,
     }
-    query = urlencode(params)
+    return urlencode(params)
+
+
+def _authorize_url(query: str, sign_out_first: bool) -> str:
     if sign_out_first:
         # One tab: sign out, then claude.ai goes on to the authorize page,
         # which asks for the account (login?selectAccount=true).
         return_to = quote(f"{CLAUDE_AI_AUTHORIZE_PATH}?{query}", safe="")
-        auth_url = f"{CLAUDE_AI_LOGOUT_URL}?returnTo={return_to}"
+        return f"{CLAUDE_AI_LOGOUT_URL}?returnTo={return_to}"
+    return f"{CLAUDE_AI_AUTHORIZE_URL}?{query}"
+
+
+class _AutomaticLoginCallbackHandler(BaseHTTPRequestHandler):
+    """Answers http://localhost:<port>/callback of the automatic sign-in.
+
+    A code with the right state is sent on to Anthropic's success page (or,
+    with GLOSSARION_OAUTH_RETURN_URL set, to a page that returns to the app);
+    anything else gets a plain-text error. Either way the session records the
+    callback, which ends the sign-in.
+    """
+
+    def log_message(self, *_args):
+        return
+
+    def do_GET(self):
+        session = oauth_session.session_of(self.server)
+        parsed = urlparse(self.path)
+        if parsed.path != "/callback" or session is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+        query = parse_qs(parsed.query)
+        code = error = None
+        if query.get("state", [None])[0] != session.state:
+            error = "state mismatch in the sign-in callback"
+        elif query.get("error"):
+            error = query.get("error_description", query["error"])[0]
+        elif query.get("code"):
+            code = query["code"][0]
+        else:
+            error = "no authorization code in the sign-in callback"
+        if code:
+            return_url = oauth_session.oauth_return_url()
+            if return_url:
+                body = oauth_session.oauth_return_page(return_url, "authcd", "&#10004; Claude signed in!").encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(302)
+                self.send_header("Location", CLAUDE_AI_SUCCESS_URL)
+                self.end_headers()
+        else:
+            body = f"Claude sign-in failed: {error}".encode("utf-8")
+            self.send_response(400)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        session._record_callback(code, query.get("state", [None])[0], error)
+        if session.server_running:
+            # Listeners serving on their own threads (begin_oauth): one callback ends the sign-in.
+            threading.Thread(target=session.close, daemon=True).start()
+
+
+def begin_oauth(
+    store: Optional["AuthCDTokenStore"] = None,
+    account_id: Optional[int] = None,
+    timeout: int = 180,
+    persist: bool = True,
+    sign_out_first: bool = True,
+    dual_stack: bool = True,
+    auto_close: bool = True,
+    serve: bool = True,
+) -> OAuthSession:
+    """Start the automatic Claude sign-in without opening a browser.
+
+    Generates the PKCE verifier/challenge and state, binds the localhost
+    callback server (127.0.0.1 on a random port in Claude Code's range, plus
+    [::1] on the same port when *dual_stack* and IPv6 are available) and returns
+    an :class:`OAuthSession`. The caller opens ``session.auth_url`` itself
+    (Glossarion Mobile: Custom Tabs / SFSafariViewController); with
+    *sign_out_first* that page signs claude.ai out first so the account can be
+    chosen. ``session.manual_auth_url`` is the same sign-in with Anthropic's
+    code page as redirect: it shows ``code#state`` to paste. Finish with
+    :func:`complete_from_redirect`.
+
+    *store* (or ``get_store(account_id)`` when only *account_id* is given)
+    receives the tokens on completion. With *persist*, the pending verifier and
+    state are saved encrypted next to the store's token file, so a paste still
+    completes the sign-in after the loopback server or the app was killed.
+    With *serve* the listeners run on their own threads (*auto_close* stops them
+    after *timeout* seconds); without it the caller drives them with
+    ``session.handle_request()``.
+    """
+    if store is None and account_id is not None:
+        store = get_store(account_id)
+    if account_id is None and store is not None:
+        account_id = getattr(store, "_account_id", None)
+
+    code_verifier, code_challenge = generate_pkce()
+    state = secrets.token_urlsafe(32)
+    server = _bind_oauth_callback_server(_AutomaticLoginCallbackHandler)
+    server.timeout = 0.5
+    port = server.server_address[1]
+    redirect_uri = f"http://localhost:{port}/callback"
+    auth_url = _authorize_url(_authorize_query(code_challenge, state, redirect_uri), sign_out_first)
+    manual_auth_url = _authorize_url(_authorize_query(code_challenge, state, CLAUDE_REDIRECT_URI), sign_out_first)
+    session = OAuthSession(
+        auth_url, code_verifier, state, redirect_uri,
+        store=store, account_id=account_id, timeout=timeout, provider="authcd",
+        extra={"manual_auth_url": manual_auth_url, "manual_redirect_uri": CLAUDE_REDIRECT_URI},
+    )
+    session.manual_auth_url = manual_auth_url
+    session.manual_redirect_uri = CLAUDE_REDIRECT_URI
+
+    try:
+        session._add_server(server)
+        if dual_stack:
+            server_v6 = oauth_session.make_ipv6_loopback_server(port, _AutomaticLoginCallbackHandler, 0.5)
+            if server_v6 is not None:
+                session._add_server(server_v6)
+        if serve:
+            session._start(auto_close)
+    except BaseException:
+        session.close()
+        raise
+
+    if persist and store is not None and hasattr(store, "save_pending_oauth"):
+        store.save_pending_oauth(session.pending_state())
+    return session
+
+
+def _is_loopback_redirect(value: Optional[str]) -> bool:
+    """True for a pasted http://localhost:<port>/callback?... URL (not the code page's code#state)."""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    try:
+        host = urlparse(text if "://" in text else f"http://{text}").hostname
+    except ValueError:
+        return False
+    return host in ("localhost", "127.0.0.1", "::1")
+
+
+def complete_from_redirect(
+    session_or_saved_state: Any = None,
+    redirect_url_or_code: Optional[str] = None,
+    store: Optional["AuthCDTokenStore"] = None,
+) -> Dict:
+    """Finish a sign-in started by :func:`begin_oauth`: check, exchange, save.
+
+    *session_or_saved_state* is the :class:`OAuthSession`, a saved pending
+    dict (``OAuthSession.pending_state()`` / ``store.load_pending_oauth()``),
+    or a token store whose persisted pending sign-in is used.
+
+    *redirect_url_or_code* is None to use what the localhost callback captured
+    (session only), else the pasted value: the localhost redirect URL
+    (``http://localhost:<port>/callback?code=...&state=...``), or what
+    Anthropic's code page shows for ``manual_auth_url`` (``code#state``, or the
+    bare code). The redirect_uri sent with the code follows what was pasted. A
+    state that is present must match; the PKCE verifier binds a bare code.
+
+    Tokens get ``_source = "glossarion_oauth"`` and are saved to *store*
+    (default: the session's store) with the pending state cleared; with no
+    store they are only returned (run_automatic_oauth_login's callers save
+    them). Raises RuntimeError on an OAuth error, a missing code, a state
+    mismatch or when nothing is pending.
+    """
+    done = oauth_session.resolve_completion(
+        session_or_saved_state, redirect_url_or_code, store, provider="authcd", label="Claude",
+    )
+    if done.use_loopback:
+        if not done.code:
+            if done.error:
+                raise RuntimeError(f"AuthCD: {done.error}")
+            raise RuntimeError("AuthCD: Login timed out waiting for the browser sign-in.")
+        redirect_uri = done.pending["redirect_uri"]
     else:
-        auth_url = f"{CLAUDE_AI_AUTHORIZE_URL}?{query}"
+        if done.error:
+            raise RuntimeError(f"AuthCD: {done.error}")
+        if not done.code:
+            raise RuntimeError("AuthCD: the pasted text has no authorization code.")
+        if _is_loopback_redirect(done.pasted):
+            redirect_uri = done.pending["redirect_uri"]
+        else:
+            redirect_uri = done.pending.get("manual_redirect_uri") or CLAUDE_REDIRECT_URI
+    if done.state_mismatch:
+        raise RuntimeError("AuthCD: state mismatch in the sign-in code – start the sign-in again.")
+    tokens = exchange_code_for_tokens(
+        done.code, done.pending["code_verifier"], redirect_uri=redirect_uri, state=done.expected_state,
+    )
+    tokens["_source"] = "glossarion_oauth"
+    return oauth_session.finish_completion(done, tokens)
+
+
+def run_automatic_oauth_login(timeout: int = 180, open_browser=None,
+                              sign_out_first: bool = True,
+                              sign_out_wait: float = CLAUDE_AI_SIGN_OUT_WAIT_SECONDS) -> Dict:
+    """Sign in through the browser and return tokens, with no pasting.
+
+    ``open_browser(url)`` defaults to ``webbrowser.open``. With
+    ``sign_out_first`` the browser is first signed out of claude.ai, so the
+    authorize page asks for an account instead of reusing the one already
+    signed in. The browser then redirects to http://localhost:<port>/callback,
+    which this function answers, and is sent on to Anthropic's success page.
+
+    Composes :func:`begin_oauth` (one IPv4 listener served here, so a stop
+    request is seen every 0.5 s; nothing persisted) and
+    :func:`complete_from_redirect` (tokens are returned, not saved).
+    """
+    session = begin_oauth(
+        timeout=timeout, persist=False, sign_out_first=sign_out_first,
+        dual_stack=False, auto_close=False, serve=False,
+    )
     del sign_out_wait  # kept for callers; the redirect replaces the wait
     open_url = open_browser or webbrowser.open
     try:
-        open_url(auth_url)
+        open_url(session.auth_url)
         deadline = time.time() + timeout
-        while not received.is_set():
+        while not session.callback_received:
             if is_cancelled():
                 raise RuntimeError("AuthCD: Login cancelled.")
             if time.time() > deadline:
                 raise TimeoutError("AuthCD: Login timed out waiting for the browser sign-in.")
-            server.handle_request()
+            session.handle_request()
     finally:
-        server.server_close()
-    if not result["code"]:
-        raise RuntimeError(f"AuthCD: {result['error']}")
-    tokens = exchange_code_for_tokens(
-        result["code"], code_verifier, redirect_uri=redirect_uri, state=state,
-    )
-    tokens["_source"] = "glossarion_oauth"
-    return tokens
+        session.close()
+    return complete_from_redirect(session)
 
 
 def login_automatically(store, claude_bin: Optional[str] = None, timeout: int = 180,
@@ -494,18 +659,25 @@ def start_oauth_flow() -> Dict:
     }
 
 
-def complete_oauth_exchange(auth_code: str, code_verifier: str) -> Dict:
+def complete_oauth_exchange(auth_code: str, code_verifier: str, state: Optional[str] = None) -> Dict:
     """Complete the OAuth flow by exchanging the code for tokens.
 
     Args:
-        auth_code: The authorization code copied from Anthropic's callback page.
+        auth_code: What Anthropic's callback page shows: ``code#state`` (split
+            here, as Claude Code does) or the bare authorization code.
         code_verifier: The PKCE code_verifier from start_oauth_flow().
+        state: The state from start_oauth_flow(). A pasted state must match it;
+            the state (pasted, else this one) is sent with the code.
 
     Returns:
         Token dict with access_token, refresh_token, expires_at, etc.
     """
+    code, _, pasted_state = str(auth_code or "").strip().partition("#")
+    code, pasted_state = code.strip(), pasted_state.strip()
+    if state and pasted_state and pasted_state != state:
+        raise RuntimeError("OAuth state mismatch – possible CSRF attack.")
     print("🔑 Exchanging authorization code for tokens…")
-    tokens = exchange_code_for_tokens(auth_code, code_verifier)
+    tokens = exchange_code_for_tokens(code, code_verifier, state=pasted_state or state)
     print("✅ Claude OAuth authentication successful!")
     return tokens
 
@@ -524,7 +696,7 @@ def run_oauth_flow(timeout: int = 300) -> Dict:
     if not auth_code:
         raise RuntimeError("No auth code provided.")
 
-    return complete_oauth_exchange(auth_code, flow["code_verifier"])
+    return complete_oauth_exchange(auth_code, flow["code_verifier"], flow["state"])
 
 
 # ===========================================================================
@@ -746,7 +918,14 @@ def run_claude_cli_login(claude_bin: str, timeout: int = 180) -> Tuple[Optional[
     No console window: the CLI opens the browser and receives the OAuth
     callback on its own. Its output goes to a log file so a failure can be
     reported with the CLI's own message instead of a vanished window.
+
+    Never on Glossarion Mobile (no CLI, no processes): RuntimeError there.
     """
+    if oauth_session.is_mobile():
+        raise RuntimeError(
+            "AuthCD: the Claude Code CLI is not available on Glossarion Mobile; "
+            "sign in to Claude from the Accounts screen."
+        )
     import subprocess
     log_path = os.path.join(GLOSSARION_CLAUDE_CONFIG_DIR, "last_login.log")
     env = claude_cli_environment()
@@ -780,7 +959,9 @@ def run_claude_cli_login(claude_bin: str, timeout: int = 180) -> Tuple[Optional[
 
 
 def claude_cli_auth_status(claude_bin: str) -> Optional[Dict]:
-    """`claude auth status` as a dict, or None when it cannot be read."""
+    """`claude auth status` as a dict, or None when it cannot be read (always on mobile)."""
+    if oauth_session.is_mobile():
+        return None
     import subprocess
     try:
         result = subprocess.run(
@@ -817,7 +998,11 @@ def _load_claude_code_credentials() -> Optional[Dict]:
 
     Checks ~/.claude/.credentials.json first, then Windows Credential
     Manager, where current Claude Code builds keep them on Windows.
+
+    Glossarion Mobile never imports a Claude Code CLI login (None there).
     """
+    if oauth_session.is_mobile():
+        return None
     try:
         def _has_token(value):
             return isinstance(value, dict) and bool(
@@ -908,8 +1093,14 @@ def import_claude_code_login(store) -> Optional[Dict]:
 # Token store (persistent, thread-safe)
 # ===========================================================================
 
-class AuthCDTokenStore:
-    """Thread-safe token store backed by a JSON file."""
+class AuthCDTokenStore(oauth_session.PendingOAuthMixin):
+    """Thread-safe token store backed by a JSON file.
+
+    Also keeps the encrypted pending sign-in of begin_oauth()
+    (``pending_oauth_file``, ``save/load/clear_pending_oauth``).
+    """
+
+    _pending_label = "AuthCD"
 
     def __init__(self, token_file: Optional[str] = None, account_id: int = 0):
         self._token_file = (

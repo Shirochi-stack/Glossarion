@@ -1263,6 +1263,27 @@ def test_chat_feature_on_the_app_shell(app_env, desktop_store_cls, tmp_path):
             await tf._wait(lambda: view.composer.token_hint.visible, timeout=5)
             assert view.composer.token_hint.value.startswith("≈")
             view.composer.set_text("")
+            # long-press Send -> "Translate once with another model…" (UI_SPEC §2.2 one-shot): the choice
+            # overrides only this send, never the chat override or the global model
+            assert view.open_model_once() is None  # nothing to send yet
+            view.composer.set_text("한 번만")
+            sheet = view.open_model_once()
+            assert sheet is not None and sheet.one_shot and sheet.heading == "Use once"
+            submitted = len(jobs.submitted)
+            sheet.select("model", "gpt-6-mini")
+            await tf._wait(lambda: len(jobs.submitted) > submitted)
+            assert jobs.submitted[-1].params["config_overrides"]["model"] == "gpt-6-mini"
+            assert "model" not in adapter.overrides("2") and app.config_store.get("model") != "gpt-6-mini"
+            jobs.publish("CANCELLED")
+            await tf._wait(lambda: not feature.runs.run_for("2").live, timeout=10)
+            # Vision / Refine mode options: the shared settings tiles of their schema keys (global keys)
+            vision = view.open_mode_options("vision")
+            assert {"vision_ocr_skip_translation", "process_webnovel_images", "vision_ocr_keep_images"} <= set(vision.tiles)
+            assert vision.tiles["vision_ocr_skip_translation"].apply(True)
+            assert app.config_store.get("vision_ocr_skip_translation") is True
+            refine = view.open_mode_options("refinement")
+            assert "multipass_refinement_mode" in refine.tiles
+            assert not view.open_mode_options("image").tiles  # Image / Video / Audio options arrive in U7
             # sheets and screens
             settings_sheet = view.open_chat_settings()
             settings_sheet.set_value("glossary_override_mode", "manual")

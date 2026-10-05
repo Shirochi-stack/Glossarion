@@ -942,6 +942,37 @@ def test_app_state_send_block_progression():
     assert state.send_block() is None
 
 
+def test_app_state_send_block_uses_the_models_chatgpt_slot():
+    """``signed_in`` holds slot keys (U4): ``authgptN/`` needs slot #N, the ``authgpt0/`` pool any slot."""
+    state = AppState(guard=LoopGuard())
+    state.backend.set({"ok": True})
+
+    def block(model, signed):
+        state.chat_context.set(ChatContext(model=model))
+        state.signed_in.set(frozenset(signed))
+        return state.send_block()
+
+    assert block("authgpt2/gpt-6-luna", {"authgpt2"}) is None
+    assert block("authgpt2/gpt-6-luna", {"authgpt"}).fix_action == "sign_in_chatgpt"
+    assert block("authgpt0/gpt-6-luna", set()).code == "chatgpt_sign_in"
+    assert block("authgpt0/gpt-6-luna", {"authgpt3"}) is None
+    assert block("authgpt/gpt-6-luna", {"authgpt2"}).code == "chatgpt_sign_in"
+    assert block("authgem2/gemini-3.5-pro", set()) is None  # only ChatGPT routes gate Send
+
+
+@needs_flet
+def test_drawer_status_uses_the_models_chatgpt_slot():
+    from glossarion_mobile.ui.shell.drawer import drawer_status
+
+    state = AppState(guard=LoopGuard())
+    state.backend.set({"ok": True})
+    state.chat_context.set(ChatContext(model="authgpt2/gpt-6-luna"))
+    state.signed_in.set(frozenset({"authgpt2"}))
+    assert drawer_status(state) == ("authgpt2/gpt-6-luna · Ready", False)
+    state.signed_in.set(frozenset({"authgpt"}))
+    assert drawer_status(state) == ("authgpt2/gpt-6-luna · Sign in with ChatGPT", True)
+
+
 # ==========================================================================
 # Flet-backed parts (theme, components, chat, shell, app)
 # ==========================================================================

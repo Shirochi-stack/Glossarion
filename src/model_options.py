@@ -1666,7 +1666,10 @@ def due_provider_catalog_for_model(
     # prefix must not spend the 24-hour attempt TTL while that proxy is offline;
     # its dedicated proxy-start hook polls once the service is healthy instead.
     if provider == "autharena":
-        from autharena_proxy import list_accounts
+        try:
+            from autharena_proxy import list_accounts
+        except ImportError:  # not bundled: Glossarion Mobile excludes the autharena/ route
+            return None
         # The background catalog worker checks health; avoid HTTP on the Qt thread.
         if not list_accounts():
             return None
@@ -1740,7 +1743,11 @@ def refresh_provider_model_catalogs(
     eligible: List[Tuple[ProviderCatalogSpec, str]] = []
     for spec in specs:
         if spec.name == "autharena":
-            from autharena_proxy import list_accounts
+            try:
+                from autharena_proxy import list_accounts
+            except ImportError:  # not bundled: Glossarion Mobile excludes the autharena/ route
+                statuses[spec.name] = "unavailable in this build"
+                continue
             if not list_accounts():
                 statuses[spec.name] = "waiting for Arena Login"
                 continue

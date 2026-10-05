@@ -200,6 +200,57 @@ def test_scoped_process_state_isolates_unifiedclient_key_pools(clean_process, mo
     assert not hasattr(UnifiedClient, "_in_memory_glossary_keys")
 
 
+def test_key_pool_isolation_keeps_the_pool_methods(clean_process, monkeypatch):
+    """``setup_multi_key_pool`` / ``get_key_pool`` / ``_get_active_key_pool`` match the ``*_key_pool``
+    names but are code: a job scope must not detach them (it did, so on mobile no pool ever loaded
+    inside a job and multi-key runs fell back to the single key)."""
+    class UnifiedClient:
+        _api_key_pool = None
+        _glossary_key_pool = "old glossary pool"
+
+        @classmethod
+        def setup_multi_key_pool(cls, keys):
+            cls._api_key_pool = list(keys)
+
+        @staticmethod
+        def get_key_pool():
+            return "static"
+
+        def _get_active_key_pool(self):
+            return self._api_key_pool
+
+        @property
+        def current_key_pool(self):
+            return "prop"
+
+    members = {n: vars(UnifiedClient)[n] for n in ("setup_multi_key_pool", "get_key_pool", "_get_active_key_pool",
+                                                    "current_key_pool")}
+    module = types.ModuleType("unified_api_client")
+    module.UnifiedClient = UnifiedClient
+    monkeypatch.setitem(sys.modules, "unified_api_client", module)
+    with job_runner.job_process_state():
+        assert {n: vars(UnifiedClient)[n] for n in members} == members
+        assert UnifiedClient._glossary_key_pool is None  # data: detached for the job
+        UnifiedClient.setup_multi_key_pool(["job-a", "job-b"])
+        assert UnifiedClient()._get_active_key_pool() == ["job-a", "job-b"] and UnifiedClient.get_key_pool() == "static"
+    assert {n: vars(UnifiedClient)[n] for n in members} == members
+    assert UnifiedClient._api_key_pool is None and UnifiedClient._glossary_key_pool == "old glossary pool"
+
+
+def test_job_scope_loads_the_real_translation_pool(clean_process, monkeypatch):
+    unified = pytest.importorskip("unified_api_client")
+    import key_pools
+
+    monkeypatch.setenv("CONFIG_FILE", os.path.join(os.path.dirname(__file__), "no-such-config.json"))
+    pool = [{"api_key": "sk-POOL-A", "model": "gpt-4o-mini", "enabled": True},
+            {"api_key": "sk-POOL-B", "model": "gpt-4o-mini", "enabled": True}]
+    with job_runner.job_process_state():
+        key_pools.apply_key_pools_to_runtime({"use_multi_api_keys": True, "multi_api_keys": pool})
+        os.environ["USE_MULTI_API_KEYS"] = "1"
+        client = unified.UnifiedClient(api_key="sk-main", model="gpt-4o-mini", output_dir=None)
+        assert client._multi_key_mode and unified.UnifiedClient._api_key_pool is not None
+
+
 def test_scoped_process_state_captures_stdout_lines(clean_process):
     lines = []
     real_out = sys.stdout

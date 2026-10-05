@@ -161,6 +161,12 @@ from output_naming import (
 # Moved to the shared GUI-free owner_state module (U2); re-exported for existing callers.
 from owner_state import initialize_extraction_variables  # noqa: E402,F401
 
+# Prompt profile semantics shared with the mobile app (U4); the profile handlers below
+# are thin wrappers that keep the Qt message boxes, combobox and editor work.
+import prompt_profiles  # noqa: E402
+# Thinking lock and output-mode rules shared with the mobile app (U4).
+import settings_rules  # noqa: E402
+
 def setup_other_settings_methods(gui_instance):
     """Inject all other settings methods into the GUI instance"""
     import types
@@ -914,10 +920,11 @@ def _sync_thoughts_lock_state(self, stream_thinking_on):
                     child.setGeometry(2, 1, 14, 14)
                     child.show()
                     break
-            # Sync var + env + config
-            self.enable_thoughts_var = True
-            self.config['enable_thoughts'] = True
-            os.environ['ENABLE_THOUGHTS'] = '1'
+            # Sync var + env + config (settings_rules.thoughts_lock_state: forced on)
+            enabled, env_value, _locked = settings_rules.thoughts_lock_state(stream_thinking_on)
+            self.enable_thoughts_var = enabled
+            self.config['enable_thoughts'] = enabled
+            os.environ['ENABLE_THOUGHTS'] = env_value
             # Purple lock styling — include full indicator overrides so the
             # parent container's QCheckBox::indicator styles are not lost
             if not hasattr(cb, '_original_text'):
@@ -962,9 +969,11 @@ def _sync_thoughts_lock_state(self, stream_thinking_on):
                 if child.text() == "✓":
                     child.hide()
                     break
-            self.enable_thoughts_var = False
-            self.config['enable_thoughts'] = False
-            os.environ['ENABLE_THOUGHTS'] = '0'
+            # settings_rules.thoughts_lock_state: released and unchecked
+            enabled, env_value, _locked = settings_rules.thoughts_lock_state(stream_thinking_on)
+            self.enable_thoughts_var = enabled
+            self.config['enable_thoughts'] = enabled
+            os.environ['ENABLE_THOUGHTS'] = env_value
     except Exception:
         pass
 
@@ -2154,116 +2163,19 @@ def _create_danger_zone_section(self, parent):
     
     def _reset_config_to_defaults():
         try:
-            # Preservation logic
-            keys_to_preserve = {}
+            # Preservation logic: the shared config_store.reset_preserved_keys (API keys and
+            # key pools, their toggles, credentials, model, prompt profiles, QA exclusions)
+            from config_store import RESET_PRESERVED_TEXT, reset_preserved_keys
             current_config = self.config
-            
-            # 1. Main API Key
-            if 'api_key' in current_config:
-                keys_to_preserve['api_key'] = current_config['api_key']
-                
-            # 2. Multi API Keys
-            if 'multi_api_keys' in current_config:
-                keys_to_preserve['multi_api_keys'] = current_config['multi_api_keys']
-                
-            # 3. Fallback Keys
-            if 'fallback_keys' in current_config:
-                keys_to_preserve['fallback_keys'] = current_config['fallback_keys']
+            keys_to_preserve = reset_preserved_keys(current_config)
 
-            # 3b. Dedicated key pools managed by the Multi API Key Manager
-            for _pool_key in (
-                'glossary_keys',
-                'glossary_refinement_keys',
-                'metadata_keys',
-                'qa_scan_keys',
-                'ai_truncation_detection_keys',
-                'rolling_summary_keys',
-                'truncation_retry_keys',
-                'inpainter_keys',
-                'tts_keys',
-            ):
-                if _pool_key in current_config:
-                    keys_to_preserve[_pool_key] = current_config[_pool_key]
-                
-            # 4. Replicate API Key
-            if 'replicate_api_key' in current_config:
-                keys_to_preserve['replicate_api_key'] = current_config['replicate_api_key']
-
-            # 5. Model Name
-            if 'model' in current_config:
-                keys_to_preserve['model'] = current_config['model']
-
-            # 6. Azure Computer Vision credentials
-            if 'azure_vision_key' in current_config:
-                keys_to_preserve['azure_vision_key'] = current_config['azure_vision_key']
-            if 'azure_vision_endpoint' in current_config:
-                keys_to_preserve['azure_vision_endpoint'] = current_config['azure_vision_endpoint']
-
-            # 7. Azure Document Intelligence credentials
-            if 'azure_document_intelligence_key' in current_config:
-                keys_to_preserve['azure_document_intelligence_key'] = current_config['azure_document_intelligence_key']
-            if 'azure_document_intelligence_endpoint' in current_config:
-                keys_to_preserve['azure_document_intelligence_endpoint'] = current_config['azure_document_intelligence_endpoint']
-
-            # 8. Google Vision credentials path
-            if 'google_vision_credentials' in current_config:
-                keys_to_preserve['google_vision_credentials'] = current_config['google_vision_credentials']
-            if 'google_cloud_credentials' in current_config:
-                keys_to_preserve['google_cloud_credentials'] = current_config['google_cloud_credentials']
-            
-            # 9. Prompt Profiles
-            if 'prompt_profiles' in current_config:
-                keys_to_preserve['prompt_profiles'] = current_config['prompt_profiles']
-            if 'active_profile' in current_config:
-                keys_to_preserve['active_profile'] = current_config['active_profile']
-            
-            # 10. Multi-Key and Fallback Key Toggle States
-            if 'use_multi_api_keys' in current_config:
-                keys_to_preserve['use_multi_api_keys'] = current_config['use_multi_api_keys']
-            if 'use_fallback_keys' in current_config:
-                keys_to_preserve['use_fallback_keys'] = current_config['use_fallback_keys']
-            for _toggle_key in (
-                'use_glossary_keys',
-                'use_glossary_refinement_keys',
-                'use_metadata_keys',
-                'use_qa_scan_keys',
-                'use_ai_truncation_detection_keys',
-                'use_rolling_summary_keys',
-                'use_truncation_retry_keys',
-                'use_inpainter_keys',
-                'use_tts_keys',
-            ):
-                if _toggle_key in current_config:
-                    keys_to_preserve[_toggle_key] = current_config[_toggle_key]
-            
-            # 11. QA Scanner Excluded Characters
-            if 'qa_scanner_settings' in current_config:
-                qa_settings = current_config['qa_scanner_settings']
-                if isinstance(qa_settings, dict) and 'excluded_characters' in qa_settings:
-                    # Preserve only the excluded_characters field from QA settings
-                    if 'qa_scanner_settings' not in keys_to_preserve:
-                        keys_to_preserve['qa_scanner_settings'] = {}
-                    keys_to_preserve['qa_scanner_settings']['excluded_characters'] = qa_settings['excluded_characters']
-            
             # Show warning dialog
             msg = QMessageBox(getattr(self, '_other_settings_dialog', self))
             msg.setWindowTitle("Reset to Defaults")
             msg.setText("Are you sure you want to reset ALL settings to default values?")
             msg.setInformativeText(
                 "This will restart the application.\n\n"
-                "The following will be PRESERVED:\n"
-                "• Main API Key\n"
-                "• Multi-API Keys\n"
-                "• Fallback Keys\n"
-                "• Replicate API Key\n"
-                "• Azure Vision Key & Endpoint\n"
-                "• Azure Document Intelligence Key & Endpoint\n"
-                "• Google Vision Credentials Path\n"
-                "• Selected Model\n"
-                "• Prompt Profiles & Active Profile\n"
-                "• Multi-Key & Fallback Key Mode Toggles\n"
-                "• QA Scanner Excluded Characters\n\n"
-                "All other settings (history limits, custom endpoints, etc.) will be lost."
+                + RESET_PRESERVED_TEXT
             )
             msg.setIcon(QMessageBox.Warning)
             msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
@@ -12321,35 +12233,21 @@ def _set_output_mode(self, mode: str):
     Updates legacy boolean vars, config, syncs radio buttons and GUI dropdown.
     """
     try:
-        mode = mode.lower().strip()
-        if mode == 'refine':
-            mode = 'refinement'
-        if mode not in ('text', 'vision', 'image', 'video', 'audio', 'refinement'):
-            mode = 'text'
+        # Normalised mode + the legacy flags it implies (settings_rules, shared with mobile)
+        flags = settings_rules.output_mode_flags(mode)
+        mode = flags.mode
 
         # --- set legacy booleans ---
-        self.enable_image_output_mode_var = (mode == 'image')
-        self.enable_video_output_mode_var = (mode == 'video')
-        self.enable_audio_output_mode_var = (mode == 'audio')
-        self.enable_refinement_output_mode_var = (mode == 'refinement')
-        self.enable_image_translation_var = mode in ('vision', 'image', 'video')
-        self.output_mode_var = mode
+        for attr, value in flags.var_values.items():
+            setattr(self, attr, value)
 
-        self.config['enable_image_output_mode'] = self.enable_image_output_mode_var
-        self.config['enable_video_output_mode'] = self.enable_video_output_mode_var
-        self.config['enable_audio_output_mode'] = self.enable_audio_output_mode_var
-        self.config['enable_refinement_output_mode'] = self.enable_refinement_output_mode_var
-        self.config['enable_image_translation'] = self.enable_image_translation_var
-        self.config['output_mode'] = mode
+        for key, value in flags.config_values.items():
+            self.config[key] = value
 
         # --- immediately sync env vars so they never stay stale ---
         import os as _os
-        _os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = '1' if self.enable_image_output_mode_var else '0'
-        _os.environ['ENABLE_VIDEO_OUTPUT_MODE'] = '1' if self.enable_video_output_mode_var else '0'
-        _os.environ['ENABLE_AUDIO_OUTPUT_MODE'] = '1' if self.enable_audio_output_mode_var else '0'
-        _os.environ['ENABLE_REFINEMENT_OUTPUT_MODE'] = '1' if self.enable_refinement_output_mode_var else '0'
-        _os.environ['ENABLE_IMAGE_TRANSLATION'] = '1' if self.enable_image_translation_var else '0'
-        _os.environ['OUTPUT_MODE'] = mode
+        for name, value in flags.env.items():
+            _os.environ[name] = value
 
         # Toggle visibility of the image-translation sub-section
         try:
@@ -12832,13 +12730,14 @@ def _create_image_translation_section(self, parent):
                 mode = 'vision'
             else:
                 mode = 'text'
-        img_sub.setVisible(mode == 'image')
-        vid_sub.setVisible(mode == 'video')
-        vision_sub.setVisible(mode in ('vision', 'image'))
+        visible = settings_rules.output_mode_sub_settings(mode)
+        img_sub.setVisible(visible['image'])
+        vid_sub.setVisible(visible['video'])
+        vision_sub.setVisible(visible['vision_request'])
         for widget in vision_only_widgets:
-            widget.setVisible(mode == 'vision')
-        vision_batch_row.setVisible(mode in ('vision', 'image'))
-        vision_batch_desc.setVisible(mode in ('vision', 'image'))
+            widget.setVisible(visible['vision_only'])
+        vision_batch_row.setVisible(visible['vision_request'])
+        vision_batch_desc.setVisible(visible['vision_request'])
     self._update_output_mode_sub_settings = _update_output_mode_sub_settings
 
     def _on_mode_radio_toggled(btn):
@@ -15989,6 +15888,30 @@ def delete_toc_txt_file(self):
         _center_messagebox_buttons(msg_box)
         msg_box.exec()
 
+# Prompt profile actions. The profile semantics live in the shared GUI-free prompt_profiles
+# module (the mobile app runs the same functions); these handlers supply the combobox name,
+# the message boxes and the editor / combobox / radio updates, which run as hooks at the
+# points of the original sequence (their Qt signals re-enter on_profile_select and the
+# prompt autosave).
+
+def _open_profile_file(*args, **kwargs):
+    # Profile files are opened through this module's namespace, as before the move.
+    return open(*args, **kwargs)
+
+def _replace_profile_prompt_text(self, prompt):
+    # PySide6: Clear and set QTextEdit content
+    self.prompt_text.clear()
+    self.prompt_text.setPlainText(prompt)
+
+def _sync_extraction_method_radios(self, method):
+    # Update radio button state if Other Settings dialog is open
+    if method == 'standard':
+        if hasattr(self, 'standard_extraction_radio') and hasattr(self, 'enhanced_extraction_radio'):
+            self.standard_extraction_radio.setChecked(True)
+    elif method == 'enhanced':
+        if hasattr(self, 'enhanced_extraction_radio') and hasattr(self, 'standard_extraction_radio'):
+            self.enhanced_extraction_radio.setChecked(True)
+
 def on_profile_select(self, event=None):
     """Load the selected profile's prompt into the text area."""
     # Get the current profile name from the combobox
@@ -16000,143 +15923,68 @@ def on_profile_select(self, event=None):
             update_profile_action(name)
     except Exception:
         pass
-    
-    # Skip if the name is empty or whitespace only
-    if not name or not name.strip():
-        return
-    
-    # Only update if the profile actually exists in prompt_profiles
-    # This prevents switching to non-existent profiles while typing
-    if name in self.prompt_profiles:
-        # When switching profiles, revert any unsaved changes by loading from original content
-        if not hasattr(self, '_original_profile_content'):
-            self._original_profile_content = {}
-        
-        # If this profile hasn't been saved yet, store its original content
-        if name not in self._original_profile_content:
-            self._original_profile_content[name] = self.prompt_profiles.get(name, "")
-        
-        # Load the original (last saved) content, not the in-memory staged edits
-        prompt = self._original_profile_content.get(name, "")
-        current_text = self.prompt_text.toPlainText().strip()
-        if current_text != prompt.strip():
-            # PySide6: Clear and set QTextEdit content
-            self.prompt_text.clear()
-            self.prompt_text.setPlainText(prompt)
-        
-        # Also revert the in-memory profile to original content
-        self.prompt_profiles[name] = prompt
-        
-        # Update profile_var to match only when profile exists
-        self.profile_var = name
-        self.config['active_profile'] = name
-        
-        # Set this as the active profile for autosave
-        self._active_profile_for_autosave = name
-        
-        # AUTO-SWITCH EXTRACTION METHOD BASED ON PROFILE NAME
-        # Update both the variable AND the config so it persists
-        profile_lower = name.lower()
-        
-        # Check if profile indicates an extraction mode
-        if 'beautifulsoup' in profile_lower:
-            # Switch to BeautifulSoup extraction mode
-            self.text_extraction_method_var = 'standard'
-            self.config['text_extraction_method'] = 'standard'
-            # Update radio button state if Other Settings dialog is open
-            if hasattr(self, 'standard_extraction_radio') and hasattr(self, 'enhanced_extraction_radio'):
-                self.standard_extraction_radio.setChecked(True)
-        elif 'html2text' in profile_lower:
-            # Switch to html2text extraction mode
-            self.text_extraction_method_var = 'enhanced'
-            self.config['text_extraction_method'] = 'enhanced'
-            # Update radio button state if Other Settings dialog is open
-            if hasattr(self, 'enhanced_extraction_radio') and hasattr(self, 'standard_extraction_radio'):
-                self.enhanced_extraction_radio.setChecked(True)
 
-        try:
-            refresh_review_button = getattr(self, '_refresh_progress_text_analysis_button', None)
-            if callable(refresh_review_button):
-                refresh_review_button()
-        except Exception:
-            pass
-
-def save_profile(self):
-    """Save the current prompt, renaming the selected custom profile if needed."""
-    from PySide6.QtWidgets import QMessageBox
-    
-    # Get name from combobox or profile_var
-    name = self.profile_menu.currentText().strip() if hasattr(self, 'profile_menu') else self.profile_var.strip()
-    
-    if not name:
-        QMessageBox.critical(None, "Error", "Profile cannot be empty.")
+    # Skips blank / unknown names; loads the last saved content and switches the
+    # extraction method for *_BeautifulSoup / *_html2text profiles.
+    outcome = prompt_profiles.select_profile(
+        self, name,
+        editor_text=lambda: self.prompt_text.toPlainText(),
+        replace_editor_text=lambda prompt: _replace_profile_prompt_text(self, prompt),
+        extraction_method_changed=lambda method: _sync_extraction_method_radios(self, method),
+    )
+    if outcome is None:
         return
 
-    source_name = getattr(self, '_active_profile_for_autosave', None) or self.profile_var
-    if name in self.prompt_profiles and name != source_name:
-        QMessageBox.warning(None, "Profile Name Exists", "A profile with this name already exists. Choose another name.")
-        return
-    get_protected = getattr(self, '_get_protected_prompt_profiles', None)
-    protected = set(get_protected() if callable(get_protected) else getattr(self, 'default_prompts', {}))
-    renaming = source_name in self.prompt_profiles and name != source_name and source_name not in protected
-    previous_profiles = dict(self.prompt_profiles)
-    previous_originals = dict(getattr(self, '_original_profile_content', {}))
-    previous_profile_var = self.profile_var
-    previous_autosave = getattr(self, '_active_profile_for_autosave', None)
-    previous_active = self.config.get('active_profile', previous_profile_var)
-    
-    # PySide6: Get text from QTextEdit
-    content = self.prompt_text.toPlainText().strip()
-    
-    if renaming:
-        self.prompt_profiles = {
-            (name if key == source_name else key): (content if key == source_name else value)
-            for key, value in self.prompt_profiles.items()
-        }
-    else:
-        # Built-in profiles retain their required names; saving one under a new
-        # name creates a custom copy, as it does for the glossary Default.
-        if name != source_name and source_name in previous_originals:
-            self.prompt_profiles[source_name] = previous_originals[source_name]
-        self.prompt_profiles[name] = content
-    self.config['prompt_profiles'] = self.prompt_profiles
-    self.config['active_profile'] = name
-    self.profile_var = name
-    self._active_profile_for_autosave = name
-    
-    # Update the original content to match the saved content
-    if not hasattr(self, '_original_profile_content'):
-        self._original_profile_content = {}
-    if renaming:
-        self._original_profile_content.pop(source_name, None)
-    self._original_profile_content[name] = content
-    
+    try:
+        refresh_review_button = getattr(self, '_refresh_progress_text_analysis_button', None)
+        if callable(refresh_review_button):
+            refresh_review_button()
+    except Exception:
+        pass
+
+def _rebuild_profile_menu(self, names, current):
     # Rebuild without selection callbacks loading old saved content mid-rename.
     if hasattr(self, 'profile_menu'):
         self.profile_menu.blockSignals(True)
         try:
             self.profile_menu.clear()
-            self.profile_menu.addItems(list(self.prompt_profiles))
-            self.profile_menu.setCurrentIndex(self.profile_menu.findText(name))
+            self.profile_menu.addItems(names)
+            self.profile_menu.setCurrentIndex(self.profile_menu.findText(current))
         finally:
             self.profile_menu.blockSignals(False)
 
-    if self.save_profiles() is False:
-        self.prompt_profiles = previous_profiles
-        self.config['prompt_profiles'] = previous_profiles
-        self.config['active_profile'] = previous_active
-        self._original_profile_content = previous_originals
-        self.profile_var = previous_profile_var
-        self._active_profile_for_autosave = previous_autosave
-        if hasattr(self, 'profile_menu'):
-            self.profile_menu.blockSignals(True)
-            try:
-                self.profile_menu.clear()
-                self.profile_menu.addItems(list(previous_profiles))
-                self.profile_menu.setCurrentIndex(self.profile_menu.findText(source_name))
-                self.profile_menu.setEditText(name)
-            finally:
-                self.profile_menu.blockSignals(False)
+def _restore_profile_menu(self, names, source_name, edit_text):
+    if hasattr(self, 'profile_menu'):
+        self.profile_menu.blockSignals(True)
+        try:
+            self.profile_menu.clear()
+            self.profile_menu.addItems(names)
+            self.profile_menu.setCurrentIndex(self.profile_menu.findText(source_name))
+            self.profile_menu.setEditText(edit_text)
+        finally:
+            self.profile_menu.blockSignals(False)
+
+def save_profile(self):
+    """Save the current prompt, renaming the selected custom profile if needed."""
+    from PySide6.QtWidgets import QMessageBox
+
+    # Get name from combobox or profile_var
+    name = self.profile_menu.currentText().strip() if hasattr(self, 'profile_menu') else self.profile_var.strip()
+
+    # PySide6: the prompt is read from the QTextEdit after the name checks
+    outcome = prompt_profiles.save_profile(
+        self, name, lambda: self.prompt_text.toPlainText(),
+        persist=lambda: self.save_profiles(),
+        rebuild_menu=lambda names, current: _rebuild_profile_menu(self, names, current),
+        restore_menu=lambda names, source_name, edit_text: _restore_profile_menu(self, names, source_name, edit_text),
+    )
+    if outcome.error:
+        if outcome.level == 'critical':
+            QMessageBox.critical(None, outcome.title, outcome.error)
+        else:
+            QMessageBox.warning(None, outcome.title, outcome.error)
+        return
+    if not outcome.ok:
         return
 
     try:
@@ -16145,24 +15993,24 @@ def save_profile(self):
             update_profile_action(name)
     except Exception:
         pass
-    
+
     # Log the save
     if hasattr(self, 'append_log'):
         self.append_log(f"✅ Profile '{name}' saved")
-    
+
     # Animate the save button to show confirmation
     if hasattr(self, '_save_profile_btn'):
         from PySide6.QtCore import QTimer
         btn = self._save_profile_btn
         original_text = btn.text()
-        
+
         # Play Windows notification sound
         try:
             import winsound
             winsound.MessageBeep(winsound.MB_OK)
         except:
             pass
-        
+
         # Change to "Saved!" with green background
         btn.setText("✓ Saved!")
         btn.setStyleSheet(
@@ -16175,11 +16023,11 @@ def save_profile(self):
             "QPushButton:hover { background-color: #28a745; }"
         )
         btn.setEnabled(False)  # Disable button during animation
-        
+
         # Use a more robust approach with QTimer parent
         timer = QTimer(self)
         timer.setSingleShot(True)
-        
+
         def restore_button():
             try:
                 btn.setText(original_text)
@@ -16197,86 +16045,24 @@ def save_profile(self):
                 btn.style().polish(btn)
                 btn.update()
                 btn.setEnabled(True)
-        
+
         timer.timeout.connect(restore_button)
         timer.start(1000)
-        
+
         # Store timer reference to prevent garbage collection
         self._save_profile_timer = timer
 
-def delete_profile(self):
-    """Delete the selected profile (or reset built-in profiles to defaults)."""
+def _confirm_profile_delete(self, kind, name):
+    """The Yes/No box of delete_profile: reset a built-in profile or delete a custom one."""
     from PySide6.QtWidgets import QMessageBox
-
-    # Get name from combobox or profile_var
-    name = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var
-
-    if name not in self.prompt_profiles:
-        QMessageBox.critical(None, "Error", f"Profile '{name}' not found.")
-        return
-
-    # Built-in/required profiles: treat delete as reset-to-default.
-    try:
-        protected = set(self._get_protected_prompt_profiles())
-    except Exception:
-        protected = {
-            "Universal",
-            "Korean_BeautifulSoup",
-            "Japanese_BeautifulSoup",
-            "Chinese_BeautifulSoup",
-            "Korean_html2text",
-            "Japanese_html2text",
-            "Chinese_html2text",
-            "Subtitle Translation",
-        }
-
-    if name in protected:
-        from PySide6.QtGui import QIcon
-        msg_box = QMessageBox()
-        msg_box.setWindowTitle("Reset Profile")
-        msg_box.setText(f"Reset built-in profile '{name}' to the latest default prompt?")
-        msg_box.setIcon(QMessageBox.Question)
-        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        msg_box.setDefaultButton(QMessageBox.No)
-        try:
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-            if os.path.exists(icon_path):
-                msg_box.setWindowIcon(QIcon(icon_path))
-        except Exception:
-            pass
-        _center_messagebox_buttons(msg_box)
-        result = msg_box.exec()
-
-        if result == QMessageBox.Yes:
-            ok = False
-            try:
-                ok = bool(self._reset_prompt_profile_to_default(name))
-            except Exception:
-                ok = False
-
-            if not ok:
-                QMessageBox.warning(None, "Reset Failed", f"Could not reset '{name}' (default prompt not found).")
-                return
-
-            # Refresh editor selection
-            try:
-                if hasattr(self, 'profile_menu'):
-                    self.profile_menu.setCurrentText(name)
-            except Exception:
-                pass
-            try:
-                self.on_profile_select()
-            except Exception:
-                pass
-
-            self.save_profiles()
-        return
-
-    # Custom profiles: delete as before
     from PySide6.QtGui import QIcon
     msg_box = QMessageBox()
-    msg_box.setWindowTitle("Delete")
-    msg_box.setText(f"Are you sure you want to delete profile '{name}'?")
+    if kind == 'reset':
+        msg_box.setWindowTitle("Reset Profile")
+        msg_box.setText(f"Reset built-in profile '{name}' to the latest default prompt?")
+    else:
+        msg_box.setWindowTitle("Delete")
+        msg_box.setText(f"Are you sure you want to delete profile '{name}'?")
     msg_box.setIcon(QMessageBox.Question)
     msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
     msg_box.setDefaultButton(QMessageBox.No)
@@ -16288,29 +16074,56 @@ def delete_profile(self):
         pass
     _center_messagebox_buttons(msg_box)
     result = msg_box.exec()
+    return result == QMessageBox.Yes
 
-    if result == QMessageBox.Yes:
-        del self.prompt_profiles[name]
-        self.config['prompt_profiles'] = self.prompt_profiles
+def _after_profile_reset(self, name):
+    # Refresh editor selection
+    try:
+        if hasattr(self, 'profile_menu'):
+            self.profile_menu.setCurrentText(name)
+    except Exception:
+        pass
+    try:
+        self.on_profile_select()
+    except Exception:
+        pass
 
-        if self.prompt_profiles:
-            new = next(iter(self.prompt_profiles))
-            self.profile_var = new
+def _after_profile_delete(self, new):
+    if new is not None:
+        # Update combobox
+        self.profile_menu.clear()
+        self.profile_menu.addItems(list(self.prompt_profiles.keys()))
+        self.profile_menu.setCurrentText(new)
 
-            # Update combobox
-            self.profile_menu.clear()
-            self.profile_menu.addItems(list(self.prompt_profiles.keys()))
-            self.profile_menu.setCurrentText(new)
+        self.on_profile_select()
+    else:
+        # Clear combobox and text
+        self.profile_menu.clear()
+        self.prompt_text.clear()
 
-            self.on_profile_select()
+def delete_profile(self):
+    """Delete the selected profile (or reset built-in profiles to defaults)."""
+    from PySide6.QtWidgets import QMessageBox
+
+    # Get name from combobox or profile_var
+    name = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var
+
+    # Built-in/required profiles: treat delete as reset-to-default.
+    outcome = prompt_profiles.delete_or_reset_profile(
+        self, name,
+        confirm=lambda kind, profile: _confirm_profile_delete(self, kind, profile),
+        after_reset=lambda profile: _after_profile_reset(self, profile),
+        after_delete=lambda new: _after_profile_delete(self, new),
+        persist=lambda: self.save_profiles(),
+    )
+    if outcome.error:
+        if outcome.level == 'critical':
+            QMessageBox.critical(None, outcome.title, outcome.error)
         else:
-            self.profile_var = ""
+            QMessageBox.warning(None, outcome.title, outcome.error)
+        return
 
-            # Clear combobox and text
-            self.profile_menu.clear()
-            self.prompt_text.clear()
-
-        self.save_profiles()
+    if outcome.kind == 'deleted':
         try:
             update_profile_action = getattr(self, '_update_profile_delete_button_label', None)
             if callable(update_profile_action):
@@ -16324,20 +16137,14 @@ def save_profiles(self):
         return False
     from PySide6.QtWidgets import QMessageBox
     try:
-        data = {}
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        data['prompt_profiles'] = self.prompt_profiles
-        data['profile_name_autofill'] = bool(self.config.get('profile_name_autofill', True))
-        data['profile_mousewheel_locked'] = bool(self.config.get('profile_mousewheel_locked', True))
-        
         # Get current profile from combobox or profile_var
-        data['active_profile'] = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var
-        
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        return True
+        return prompt_profiles.write_profiles_to_config_file(
+            CONFIG_FILE,
+            lambda: self.prompt_profiles,
+            lambda: self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var,
+            lambda: self.config,
+            opener=_open_profile_file,
+        )
     except Exception as e:
         QMessageBox.critical(None, "Error", f"Failed to save profiles: {e}")
         return False
@@ -16345,28 +16152,26 @@ def save_profiles(self):
 def import_profiles(self):
     """Import profiles from a JSON file, merging into existing ones."""
     from PySide6.QtWidgets import QMessageBox, QFileDialog
-    
+
     path, _ = QFileDialog.getOpenFileName(
-        None, 
-        "Import Profiles", 
-        "", 
+        None,
+        "Import Profiles",
+        "",
         "JSON files (*.json);;All files (*.*)"
     )
-    
+
     if not path:
         return
-    
+
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
-        self.prompt_profiles.update(data)
-        self.config['prompt_profiles'] = self.prompt_profiles
-        
+        data = prompt_profiles.read_profiles_file(path, opener=_open_profile_file)
+
+        prompt_profiles.merge_imported_profiles(self, data)
+
         # Update combobox
         self.profile_menu.clear()
         self.profile_menu.addItems(list(self.prompt_profiles.keys()))
-        
+
         QMessageBox.information(None, "Imported", f"Imported {len(data)} profiles.")
     except Exception as e:
         QMessageBox.critical(None, "Error", f"Failed to import profiles: {e}")
@@ -16374,24 +16179,22 @@ def import_profiles(self):
 def export_profiles(self):
     """Export all profiles to a JSON file."""
     from PySide6.QtWidgets import QMessageBox, QFileDialog
-    
+
     path, _ = QFileDialog.getSaveFileName(
-        None, 
-        "Export Profiles", 
-        "", 
+        None,
+        "Export Profiles",
+        "",
         "JSON files (*.json);;All files (*.*)"
     )
-    
+
     if not path:
         return
-    
+
     # Add .json extension if not present
-    if not path.endswith('.json'):
-        path += '.json'
-    
+    path = prompt_profiles.json_export_path(path)
+
     try:
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(self.prompt_profiles, f, ensure_ascii=False, indent=2)
+        prompt_profiles.write_profiles_json(path, lambda: self.prompt_profiles, opener=_open_profile_file)
         QMessageBox.information(None, "Exported", f"Profiles exported to {path}.")
     except Exception as e:
         QMessageBox.critical(None, "Error", f"Failed to export profiles: {e}")

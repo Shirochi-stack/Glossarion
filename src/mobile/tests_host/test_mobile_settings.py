@@ -954,7 +954,8 @@ def test_nested_lazy_default_and_key_pool_tiles(tmp_path):
         schema = _fake_schema()
         store = _memory_store(tmp_path, {"multi_api_keys": [{"api_key": "sk-pool-1234567890abcdef", "model": "x"}],
                                          "qa_scanner_settings": {"report_format": "summary"}}, schema)
-        ctx = _ctx(store, schema, page)
+        navigated: list = []
+        ctx = _ctx(store, schema, page, navigated=navigated)
         qa = SectionPage(_match("/settings/s/qa.settings"), ctx)
         page.views[0].controls.append(qa.get_body())
         page.update()
@@ -980,7 +981,10 @@ def test_nested_lazy_default_and_key_pool_tiles(tmp_path):
         pool = t["multi_api_keys"]
         assert isinstance(pool, JsonTile) and not pool.editable and pool.activate() is None
         assert pool.value_text.value == "1 key" and "sk-pool" not in pool.value_text.value
-        assert isinstance(pool.badges.controls[0], ReasonChip) and pool.badges.controls[0].reason == "Edited in API keys (U4)"
+        assert isinstance(pool.badges.controls[0], ReasonChip) and pool.badges.controls[0].reason == "Edited in API keys"
+        # tapping it opens that pool in Settings › API keys (key_pool_service.POOL_SPECS: multi_api_keys = Translation)
+        if pool.pool_slug() is not None:  # key_pool_service importable (backend on sys.path)
+            assert pool._on_tap() == "/settings/keys/translation" and navigated[-1] == "/settings/keys/translation"
         assert isinstance(t["use_multi_api_keys"], SwitchTile)
         assert t["use_multi_api_keys"].activate() and store.get("use_multi_api_keys") is True
         page.update()

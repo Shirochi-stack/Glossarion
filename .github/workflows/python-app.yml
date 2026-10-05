@@ -83,7 +83,12 @@ jobs:
           tests/test_job_runner.py \
           tests/test_text_jobs.py \
           tests/test_translation_pipeline.py \
-          tests/test_direct_text_core.py
+          tests/test_direct_text_core.py \
+          tests/test_settings_rules.py \
+          tests/test_model_catalog_core.py \
+          tests/test_prompt_profiles.py \
+          tests/test_key_pool_service.py \
+          tests/test_mobile_auth_splits.py
 
     - name: Import hygiene of the shared GUI-free modules (PySide6 blocked)
       run: |
@@ -104,6 +109,8 @@ jobs:
             # U3: stop protocol, job scope, text jobs, input preparation, pipelines, Direct Text chat
             "stop_control", "job_runner", "text_jobs", "input_preparation", "translation_pipeline",
             "direct_text_store", "direct_text_stream",
+            # U4: settings rules, model catalog, prompt profiles, key pools, shared OAuth helpers
+            "settings_rules", "model_catalog_core", "prompt_profiles", "key_pool_service", "oauth_session",
         )
         failed = []
         for name in SHARED:

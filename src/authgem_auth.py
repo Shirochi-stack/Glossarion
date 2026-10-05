@@ -21,6 +21,10 @@ OAuth Flow:
   4. Exchange auth code for access + refresh tokens
   5. Store tokens locally (~/.glossarion/authgem_tokens.json)
   6. Use access token as Bearer auth
+
+run_oauth_flow() runs all of it. begin_oauth() / complete_from_redirect()
+split it for callers that open the browser themselves (Glossarion Mobile)
+and add a paste-the-redirect-URL fallback.
 """
 import os
 import json
@@ -37,6 +41,8 @@ from urllib.parse import urlencode, urlparse, parse_qs
 from typing import Optional, Dict, List, Tuple, Any
 
 import requests
+
+import oauth_session
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +247,8 @@ TOKEN_REFRESH_MARGIN_SECONDS = 300  # refresh when <5 min remaining
 VERTEX_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
 VERTEX_LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
 
-_DEFAULT_TOKEN_DIR = os.path.join(os.path.expanduser("~"), ".glossarion")
+# ~/.glossarion; GLOSSARION_TOKEN_DIR when set (Glossarion Mobile: <data>/home/.glossarion)
+_DEFAULT_TOKEN_DIR = oauth_session.default_token_dir()
 _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authgem_tokens.json")
 
 # Success/failure redirect URLs after OAuth (same as gemini-cli)
@@ -405,6 +412,89 @@ def detect_gcp_project(access_token: str, account_id: int = 0) -> Optional[str]:
     return None
 
 
+def list_gcp_projects(access_token: str, *, on_listed=None, http=None):
+    """List the user's active GCP projects and check their billing (GCP project picker).
+
+    Moved from the worker of the desktop ``TranslatorGUI._fetch_authgem_projects``; the
+    desktop picker and the mobile Accounts screen both call it.
+
+    1. Lists the active projects with the Resource Manager API (fast). Returns None when
+       that request fails or finds no project.
+    2. Calls ``on_listed(billed, unbilled, unknown)`` with every project still unknown
+       (the desktop shows them at once as ❔).
+    3. Checks billing for each project in parallel (Cloud Billing API, else a Vertex AI
+       probe) and returns ``(billed, unbilled, unknown)`` project-id lists (completion order).
+
+    *http* is the ``requests`` module to use (default: this module's). Errors other than a
+    failed billing check propagate (the desktop logs and drops them).
+    """
+    _req = requests if http is None else http
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    # 1. List active projects (fast)
+    resp = _req.get(
+        "https://cloudresourcemanager.googleapis.com/v1/projects",
+        headers=headers,
+        params={"filter": "lifecycleState:ACTIVE", "pageSize": 50},
+        timeout=15,
+    )
+    if not resp.ok:
+        return None
+    projects = resp.json().get("projects", [])
+    if not projects:
+        return None
+
+    all_pids = [p.get("projectId", "") for p in projects if p.get("projectId")]
+
+    # Phase 1: Show all projects immediately as unknown (❔)
+    # This ensures the dropdown appears fast
+    if on_listed is not None:
+        on_listed([], [], list(all_pids))
+
+    # Phase 2: Check billing in parallel, then update
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _check_billing(pid):
+        """Return (pid, 'billed'|'unbilled'|'unknown')."""
+        try:
+            # Try Cloud Billing API first (fast, works with ADC client)
+            br = _req.get(
+                f"https://cloudbilling.googleapis.com/v1/projects/{pid}/billingInfo",
+                headers=headers, timeout=8,
+            )
+            if br.ok:
+                if br.json().get("billingEnabled", False):
+                    return (pid, "billed")
+                return (pid, "unbilled")
+            # Billing API returned 403 — probe Vertex AI directly
+            vr = _req.get(
+                f"https://us-central1-aiplatform.googleapis.com/v1/projects/{pid}/locations/us-central1",
+                headers=headers, timeout=8,
+            )
+            if vr.ok:
+                return (pid, "billed")
+            return (pid, "unbilled")
+        except Exception:
+            return (pid, "unknown")
+
+    billed = []
+    unbilled = []
+    unknown = []
+    with ThreadPoolExecutor(max_workers=min(6, len(all_pids))) as pool:
+        futures = {pool.submit(_check_billing, pid): pid for pid in all_pids}
+        for future in as_completed(futures):
+            pid, status = future.result()
+            if status == "billed":
+                billed.append(pid)
+            elif status == "unbilled":
+                unbilled.append(pid)
+            else:
+                unknown.append(pid)
+
+    # Phase 2 complete: billing info for every project
+    return billed, unbilled, unknown
+
+
 def reset_cached_project(account_id: int = 0):
     """Clear the cached GCP project ID for a specific account.
 
@@ -449,6 +539,26 @@ def extract_account_info(tokens: Dict) -> Dict:
 # Local callback server
 # ===========================================================================
 
+def _oauth_success_html() -> str:
+    """HTML of the loopback /success page.
+
+    When GLOSSARION_OAUTH_RETURN_URL is set (Glossarion Mobile) the page sends
+    the user back to the app ('<return_url>?p=authgem'). Desktop leaves it
+    unset and gets the original page.
+    """
+    return oauth_session.oauth_success_html(
+        "authgem",
+        (
+            "<html><body style='font-family:sans-serif;text-align:center;padding-top:60px;"
+            "background:#1a1a2e;color:#e0e0e0'>"
+            "<h1 style='color:#4db8ff'>&#10004; Gemini Authenticated!</h1>"
+            "<p>You can close this tab and return to Glossarion.</p>"
+            "</body></html>"
+        ),
+        "&#10004; Gemini Authenticated!",
+    )
+
+
 class _OAuthCallbackHandler(BaseHTTPRequestHandler):
     """HTTP request handler that captures the Google OAuth callback."""
 
@@ -465,6 +575,9 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
 
             if error:
                 self.server._error = error
+                session = oauth_session.session_of(self.server)
+                if session is not None:
+                    session._record_callback(self.server._auth_code, self.server._returned_state, error)
                 self.send_response(302)
                 self.send_header("Location", SIGN_IN_FAILURE_URL)
                 self.end_headers()
@@ -473,6 +586,9 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
                 state = qs.get("state", [None])[0]
                 self.server._auth_code = code
                 self.server._returned_state = state
+                session = oauth_session.session_of(self.server)
+                if session is not None:
+                    session._record_callback(code, state, self.server._error)
 
                 # Show a success page, then redirect
                 self.send_response(302)
@@ -483,16 +599,12 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            html = (
-                "<html><body style='font-family:sans-serif;text-align:center;padding-top:60px;"
-                "background:#1a1a2e;color:#e0e0e0'>"
-                "<h1 style='color:#4db8ff'>&#10004; Gemini Authenticated!</h1>"
-                "<p>You can close this tab and return to Glossarion.</p>"
-                "</body></html>"
-            )
+            html = _oauth_success_html()
             self.wfile.write(html.encode("utf-8"))
             # Signal the server to stop
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            session = oauth_session.session_of(self.server)
+            stop = session.close if session is not None else self.server.shutdown
+            threading.Thread(target=stop, daemon=True).start()
 
         else:
             self.send_response(404)
@@ -503,26 +615,13 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
 # OAuth flow orchestrator
 # ===========================================================================
 
-def run_oauth_flow(timeout: int = 300) -> Dict:
-    """Run the full Google OAuth login flow for Gemini.
+#: A Gemini sign-in started by begin_oauth(), waiting for its redirect (shared
+#: loopback session: auth_url, state, redirect_uri, wait_for_callback(), close(), ...).
+OAuthSession = oauth_session.LoopbackOAuthSession
 
-    1. Opens a browser for the user to authenticate with Google.
-    2. Captures the callback on a local server.
-    3. Exchanges the code for tokens.
-    4. Fetches user info (email, etc.).
 
-    Returns the token dict (access_token, refresh_token, expires_at, …).
-    Raises RuntimeError on failure or timeout.
-
-    Parameters
-    ----------
-    timeout : int
-        Maximum seconds to wait for the user to complete the browser login.
-    """
-    port = _find_available_port()
-    redirect_uri = f"http://{CALLBACK_HOST}:{port}{CALLBACK_PATH}"
-    state = secrets.token_urlsafe(32)
-
+def _build_auth_url(redirect_uri: str, state: str) -> str:
+    """The Google consent URL of the Gemini CLI client (no PKCE: installed-app secret)."""
     params = {
         "client_id": GOOGLE_CLIENT_ID,
         "response_type": "code",
@@ -532,37 +631,109 @@ def run_oauth_flow(timeout: int = 300) -> Dict:
         "access_type": "offline",
         "prompt": "consent",  # Always show consent to get refresh_token
     }
-    auth_url = f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
+    return f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
 
-    # Start local callback server
-    server = HTTPServer((CALLBACK_HOST, port), _OAuthCallbackHandler)
-    server._auth_code = None
-    server._returned_state = None
-    server._error = None
-    server.timeout = timeout
 
-    print(f"🔐 Opening browser for Gemini (Google) login…")
-    print(f"   If the browser doesn't open, visit:\n   {auth_url}")
-    webbrowser.open(auth_url)
+def begin_oauth(
+    store: Optional["AuthGemTokenStore"] = None,
+    account_id: Optional[int] = None,
+    timeout: int = 300,
+    persist: bool = True,
+    auto_close: bool = True,
+) -> OAuthSession:
+    """Start a Gemini (Google) sign-in without opening a browser.
 
-    # Serve until callback is received or timeout
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-    server_thread.join(timeout=timeout)
+    Generates the state, starts the loopback callback server on a random
+    127.0.0.1 port (``/oauth2callback``) and returns an :class:`OAuthSession`.
+    The caller opens ``session.auth_url`` itself (Glossarion Mobile: Custom
+    Tabs / SFSafariViewController) and then calls :func:`complete_from_redirect`.
 
-    # Cleanup
-    server.shutdown()
+    *store* (or ``get_store(account_id)`` when only *account_id* is given)
+    receives the tokens on completion. With *persist*, the pending state and
+    redirect URI are saved encrypted next to the store's token file, so a pasted
+    redirect URL still completes the sign-in after the loopback server or the
+    app was killed. *auto_close* stops the listener after *timeout* seconds.
 
-    if server._error:
-        raise RuntimeError(f"Google OAuth error: {server._error}")
-    if not server._auth_code:
-        raise RuntimeError("Google OAuth login timed out – no callback received.")
-    if server._returned_state != state:
+    The GCP project selection (``_cached_project_id`` / ``detect_gcp_project``)
+    is untouched: it stays per account, as with the desktop login.
+    """
+    if store is None and account_id is not None:
+        store = get_store(account_id)
+    if account_id is None and store is not None:
+        account_id = getattr(store, "_account_id", None)
+
+    port = _find_available_port()
+    redirect_uri = f"http://{CALLBACK_HOST}:{port}{CALLBACK_PATH}"
+    state = secrets.token_urlsafe(32)
+
+    auth_url = _build_auth_url(redirect_uri, state)
+    session = OAuthSession(
+        auth_url, None, state, redirect_uri,
+        store=store, account_id=account_id, timeout=timeout, provider="authgem",
+    )
+
+    try:
+        # Start local callback server
+        server = HTTPServer((CALLBACK_HOST, port), _OAuthCallbackHandler)
+        server._auth_code = None
+        server._returned_state = None
+        server._error = None
+        server.timeout = timeout
+        session._add_server(server)
+        session._start(auto_close)
+    except BaseException:
+        session.close()
+        raise
+
+    if persist and store is not None and hasattr(store, "save_pending_oauth"):
+        store.save_pending_oauth(session.pending_state())
+    return session
+
+
+def complete_from_redirect(
+    session_or_saved_state: Any = None,
+    redirect_url_or_code: Optional[str] = None,
+    store: Optional["AuthGemTokenStore"] = None,
+) -> Dict:
+    """Finish a sign-in started by :func:`begin_oauth`: check, exchange, save.
+
+    *session_or_saved_state* is the :class:`OAuthSession`, a saved pending
+    dict (``OAuthSession.pending_state()`` / ``store.load_pending_oauth()``),
+    or a token store whose persisted pending sign-in is used (paste fallback
+    after the loopback server or the app was killed).
+
+    *redirect_url_or_code* is None to use what the loopback server captured
+    (session only), else the pasted redirect URL
+    (``http://127.0.0.1:<port>/oauth2callback?state=...&code=...``) or its
+    query string. Google sign-ins have no PKCE verifier, so the state must be
+    present and match.
+
+    The code is exchanged, the account's email/name are fetched, and the tokens
+    are saved to *store* (default: the session's store) with the pending state
+    cleared; with no store they are only returned (run_oauth_flow's callers
+    save them). Raises RuntimeError on an OAuth error, a missing code or
+    state, a state mismatch or when nothing is pending.
+    """
+    done = oauth_session.resolve_completion(
+        session_or_saved_state, redirect_url_or_code, store,
+        provider="authgem", label="Gemini", require_verifier=False,
+    )
+    if done.error:
+        raise RuntimeError(f"Google OAuth error: {done.error}")
+    if not done.code:
+        if done.use_loopback:
+            raise RuntimeError("Google OAuth login timed out – no callback received.")
+        raise RuntimeError("OAuth redirect did not contain an authorization code.")
+    if not done.use_loopback and done.returned_state is None:
+        raise RuntimeError(
+            "Paste the whole redirect URL (it carries the sign-in state) to finish the Gemini sign-in."
+        )
+    if done.state_mismatch:
         raise RuntimeError("OAuth state mismatch – possible CSRF attack.")
 
     # Exchange code for tokens
     print("🔑 Exchanging authorization code for tokens…")
-    tokens = exchange_code_for_tokens(server._auth_code, redirect_uri)
+    tokens = exchange_code_for_tokens(done.code, done.pending["redirect_uri"])
     print("✅ Gemini OAuth authentication successful!")
 
     # Fetch and cache user info
@@ -579,15 +750,57 @@ def run_oauth_flow(timeout: int = 300) -> Dict:
             if email:
                 print(f"   Account: {email}")
 
-    return tokens
+    return oauth_session.finish_completion(done, tokens)
+
+
+def run_oauth_flow(timeout: int = 300) -> Dict:
+    """Run the full Google OAuth login flow for Gemini.
+
+    1. Opens a browser for the user to authenticate with Google.
+    2. Captures the callback on a local server.
+    3. Exchanges the code for tokens.
+    4. Fetches user info (email, etc.).
+
+    Returns the token dict (access_token, refresh_token, expires_at, …).
+    Raises RuntimeError on failure or timeout.
+
+    Parameters
+    ----------
+    timeout : int
+        Maximum seconds to wait for the user to complete the browser login.
+
+    Composes :func:`begin_oauth` (nothing persisted, no watchdog) and
+    :func:`complete_from_redirect` (tokens are returned, not saved).
+    """
+    session = begin_oauth(timeout=timeout, persist=False, auto_close=False)
+    auth_url = session.auth_url
+
+    try:
+        print(f"🔐 Opening browser for Gemini (Google) login…")
+        print(f"   If the browser doesn't open, visit:\n   {auth_url}")
+        webbrowser.open(auth_url)
+
+        # Serve until callback is received or timeout
+        session.wait(timeout)
+    finally:
+        # Cleanup
+        session.close()
+
+    return complete_from_redirect(session)
 
 
 # ===========================================================================
 # Token store (persistent, thread-safe) – mirrors AuthGPTTokenStore API
 # ===========================================================================
 
-class AuthGemTokenStore:
-    """Thread-safe token store backed by a JSON file."""
+class AuthGemTokenStore(oauth_session.PendingOAuthMixin):
+    """Thread-safe token store backed by a JSON file.
+
+    Also keeps the encrypted pending sign-in of begin_oauth()
+    (``pending_oauth_file``, ``save/load/clear_pending_oauth``).
+    """
+
+    _pending_label = "AuthGem"
 
     def __init__(self, token_file: Optional[str] = None, account_id: int = 0):
         self._token_file = (

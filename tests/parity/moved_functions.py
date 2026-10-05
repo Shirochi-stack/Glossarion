@@ -37,6 +37,13 @@ Fields:
 ``kind``      ``'method'`` or ``'attr'`` (class attributes: value equality only).
 ``stubs``     ``(module, attribute)`` pairs replaced by call recorders while the entry
               is fuzzed (backend work the moved code hands off, e.g. the metadata worker).
+``shared``    (``REWIRED`` entries) the shared GUI-free modules the desktop method now calls.
+
+``REWIRED`` (U4+) lists TranslatorGUI methods that stay desktop handlers (they keep their
+widget work) but take their decisions / data steps from shared modules (settings_rules,
+model_catalog_core). Tier D fuzzes them the same way: the frozen legacy method vs the
+working-tree TranslatorGUI method (``mixin == REWIRED_OWNER``). ``setup["@preset"]``
+names a ``fuzz_moved.SETUP_PRESETS`` entry (widgets + base variants for the entry).
 """
 
 from __future__ import annotations
@@ -46,6 +53,10 @@ from dataclasses import dataclass, field
 U1 = "U1"
 U2 = "U2"
 U3 = "U3"
+U4 = "U4"
+
+#: ``Moved.mixin`` of REWIRED entries: the name stays a TranslatorGUI method.
+REWIRED_OWNER = "TranslatorGUI"
 
 
 @dataclass(frozen=True)
@@ -63,6 +74,7 @@ class Moved:
     optional: bool = False
     kind: str = "method"
     stubs: tuple = ()
+    shared: tuple = ()
 
     @property
     def legacy_names(self) -> tuple:
@@ -152,6 +164,11 @@ SHARED_MODULES = (
     # U3 step 3: the Direct Text dialog's mixins (tests/test_direct_text_core.py pins the moves)
     "direct_text_store",
     "direct_text_stream",
+    # U4 (settings_rules is listed with U2 above)
+    "model_catalog_core",
+    "prompt_profiles",          # other_settings profile actions + the assistant prefill dialog
+    "key_pool_service",         # MultiAPIKeyDialog / RefusalPatternsDialog / unified_api_client refusal defaults
+    "oauth_session",            # authgem / authcd / authgrok begin/complete sign-in helpers
 )
 
 _RUN_ENV = ("run_env", "RunEnvMixin")
@@ -411,7 +428,54 @@ MOVED = (
     _pipeline("_normalize_windows_input_filenames"),
 )
 
+_RULES = ("settings_rules",)
+_CATALOG = ("model_catalog_core",)
+
+
+def _rewired(name: str, shared: tuple, **kw) -> Moved:
+    return Moved(name, "translator_gui", REWIRED_OWNER, milestone=U4, shared=shared, **kw)
+
+
+_ROUTE = {"@preset": "model_route"}
+_CATALOG_SETUP = {"@preset": "model_catalog"}
+
+#: U4: desktop handlers rewired onto settings_rules / model_catalog_core (frozen as
+#: freeze_legacy.TG_ENTRY_METHODS_U4; tier D: legacy oracle vs working-tree TranslatorGUI).
+REWIRED = (
+    # ---- model-route controls (settings_rules) ----------------------------------------------
+    _rewired("on_model_change", _RULES, setup=_ROUTE),
+    _rewired("_model_needs_google_creds", _RULES, setup=_ROUTE),
+    _rewired("_iter_enabled_key_pool_models", _RULES, args="none", setup=_ROUTE),
+    _rewired("_has_google_creds_model_in_key_pools", _RULES, args="none", setup=_ROUTE),
+    _rewired("_has_vertex_model_in_key_pools", _RULES, args="none", setup=_ROUTE),
+    _rewired("_has_authgpt_in_key_pools", _RULES, args="none", setup=_ROUTE),
+    _rewired("_has_authgrok_in_key_pools", _RULES, args="none", setup=_ROUTE),
+    _rewired("_authgpt_pool_route_requested", _RULES, setup=_ROUTE),
+    _rewired("_authgrok_pool_route_requested", _RULES, setup=_ROUTE),
+    _rewired("_has_authgem_in_key_pools", _RULES, args="none", setup=_ROUTE),
+    _rewired("_has_authgem_vertex_in_key_pools", _RULES, args="none", setup=_ROUTE),
+    _rewired("_has_authcd_in_key_pools", _RULES, args="none", setup=_ROUTE),
+    _rewired("_collect_auth_account_ids_from_pools", _RULES, args="none", setup=_ROUTE),
+    _rewired("_authgem_vertex_control_model", _RULES, args="none", setup=_ROUTE),
+    # ---- main-window Chunk Size (settings_rules) --------------------------------------------
+    _rewired("_on_chunk_size_edited", _RULES, args="none", setup={"@preset": "chunk_size"}),
+    _rewired("_apply_chunk_size", _RULES, args="chunk_size", setup={"@preset": "chunk_size"}),
+    _rewired("_remember_manual_chunk_size", _RULES, args="none", setup={"@preset": "chunk_size"}),
+    _rewired("_hold_manual_chunk_size", _RULES, args="none", setup={"@preset": "chunk_size"}),
+    # ---- model catalog / Model Manager (model_catalog_core) ----------------------------------
+    _rewired("_restore_removed_model_choices", _CATALOG, args="model_values", setup=_CATALOG_SETUP),
+    _rewired("_ensure_polled_model_marker_state", _CATALOG, args="none", setup=_CATALOG_SETUP),
+    _rewired("_expire_polled_model_markers", _CATALOG, args="none", setup=_CATALOG_SETUP),
+    _rewired("_apply_polled_model_icons", _CATALOG, args="polled_icons"),
+    _rewired("_apply_provider_model_catalog_refresh", _CATALOG, args="catalog_result", setup=_CATALOG_SETUP),
+    _rewired("_save_model_order", _CATALOG, args="model_order", setup=_CATALOG_SETUP),
+    _rewired("_collect_custom_prefix_routes_from_table", _CATALOG, args="prefix_table"),
+    _rewired("_save_model_manager_state", _CATALOG, args="manager_state", setup=_CATALOG_SETUP),
+)
+
 MOVED_BY_NAME = {m.name: m for m in MOVED}
+REWIRED_BY_NAME = {m.name: m for m in REWIRED}
+REWIRED_FUZZED = tuple(m for m in REWIRED if m.fuzz)
 FUZZED = tuple(m for m in MOVED if m.kind == "method" and m.fuzz)
 CLASS_ATTRS = tuple(m for m in MOVED if m.kind == "attr")
 METHODS = tuple(m for m in MOVED if m.kind == "method")
@@ -422,7 +486,9 @@ def by_module(module: str) -> tuple:
 
 
 def get(name: str) -> Moved:
-    return MOVED_BY_NAME[name]
+    if name in MOVED_BY_NAME:
+        return MOVED_BY_NAME[name]
+    return REWIRED_BY_NAME[name]
 
 
 def _check_registry() -> None:
@@ -439,11 +505,24 @@ def _check_registry() -> None:
             raise ValueError(f"{m.name}: bad kind {m.kind!r}")
         if not m.fuzz and not m.reason:
             raise ValueError(f"{m.name}: fuzz disabled without a reason")
+    rewired = [m.name for m in REWIRED]
+    dup = sorted({n for n in rewired if rewired.count(n) > 1} | (set(rewired) & set(names)))
+    if dup:
+        raise ValueError(f"duplicate rewired names: {dup}")
+    for m in REWIRED:
+        if m.mixin != REWIRED_OWNER or not m.shared:
+            raise ValueError(f"{m.name}: a REWIRED entry names the shared modules it calls")
+        if not set(m.shared) <= set(SHARED_MODULES):
+            raise ValueError(f"{m.name}: shared {m.shared} not in SHARED_MODULES")
 
 
 _check_registry()
 
 __all__ = [
+    "REWIRED",
+    "REWIRED_BY_NAME",
+    "REWIRED_FUZZED",
+    "REWIRED_OWNER",
     "CLASS_ATTRS",
     "FUZZED",
     "HOOK_NAMES",

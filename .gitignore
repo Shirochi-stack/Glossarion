@@ -185,5 +185,12 @@ tests/**
 !tests/test_text_jobs.py
 !tests/test_translation_pipeline.py
 !tests/test_direct_text_core.py
+# Mobile rewrite (U4+): settings rules, the model catalog, prompt profiles, the key-pool service and
+# the Gemini/Claude/Grok OAuth begin/complete splits (verbatim moves + git-show parity oracles).
+!tests/test_settings_rules.py
+!tests/test_model_catalog_core.py
+!tests/test_prompt_profiles.py
+!tests/test_key_pool_service.py
+!tests/test_mobile_auth_splits.py
 junktests/
 warp.md

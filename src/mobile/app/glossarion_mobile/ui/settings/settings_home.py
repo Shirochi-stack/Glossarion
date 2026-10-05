@@ -73,9 +73,11 @@ _ROUTE_ICONS = {
     "settings.about": "INFO_OUTLINE",
     "settings.danger": "WARNING_AMBER",
 }
-PROFILES_REASON = "Arrives in U4"
-_PROFILES_DETAIL = ("Importing and exporting prompt profiles arrives in U4 with Profiles & prompts "
-                    "(shared prompt_profiles core). Your profiles in config.json are kept untouched.")
+PROFILES_REASON = "Unavailable in this session"
+# Shown only when Profiles & prompts (AccountsProfilesFeature, U4) did not install; once it does,
+# the chip opens Settings › Profiles & prompts instead.
+_PROFILES_DETAIL = ("Importing and exporting prompt profiles happens in Settings › Profiles & prompts, which "
+                    "could not start in this session. Your profiles in config.json are kept untouched.")
 
 
 class SettingsHome(HubScreen):
@@ -293,7 +295,9 @@ class SettingsHome(HubScreen):
             self.ctx.say("Nothing to back up yet: config.json has not been written")
         return path
 
-    def _on_profiles(self, e: Any = None) -> InfoSheet:
+    def _on_profiles(self, e: Any = None) -> Any:
+        if "settings.profiles" in self.implemented:
+            return self.ctx.go("settings.profiles")
         sheet = InfoSheet(title="Import / Export profiles", body=_PROFILES_DETAIL)
         if self.ctx.page is not None:
             sheet.show(self.ctx.page)

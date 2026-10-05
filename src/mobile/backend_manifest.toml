@@ -48,10 +48,16 @@ modules = [
   # Text chat store (direct_text_chats.json v2) + log-stream model the chat uses (plan §2).
   "stop_control", "job_runner", "text_jobs", "input_preparation", "translation_pipeline",
   "direct_text_store", "direct_text_stream",
+  # U4 shared core: settings rules (route controls, locks, chunk/compression, output and
+  # glossary modes), the Model Manager catalog (tombstones, polled markers, provider refresh,
+  # save order), prompt + assistant-prefill profiles, the key pools (specs, import/export
+  # glossarion-key-pools v1, key tests, refusal defaults) and the OAuth begin/complete helpers
+  # authgem/authcd/authgrok share. The profile screens load prompt_profiles via importlib.
+  "settings_rules", "model_catalog_core", "prompt_profiles", "key_pool_service", "oauth_session",
 ]
 # New shared modules from the plan that do not exist yet. They become entries automatically
 # once the file exists (the report then asks to move them into `modules`).
-planned = ["settings_rules"]
+planned = []
 # Every `import X` of a src/ module inside the mobile app (files or package dirs, relative to
 # src/mobile) becomes an entry too; the app's third-party imports must be pinned as well.
 scan_package = ["app/main.py", "app/glossarion_mobile"]
@@ -234,7 +240,7 @@ files = []
 "translate_headers_standalone->PySide6" = { count = 1, reason = "run_translate_headers_gui desktop entry" }
 
 [baseline.lazy_excluded_edges]
-"model_options->autharena_proxy" = { count = 3, reason = "AuthArena catalog refresh; route excluded on mobile (U1 route gate)" }
+"model_options->autharena_proxy" = { count = 1, reason = "AuthArena catalog fetch (_fetch_provider_catalog); only reached after the guarded list_accounts() import (U4), route excluded on mobile" }
 "model_options->glm_proxy" = { count = 2, reason = "AuthZA catalog/session (incl. dynamic __import__ at 1429); route excluded on mobile" }
 "model_options->ocagy_cli" = { count = 3, reason = "OpenCode Zen catalog; ocagy/ocz routes excluded on mobile" }
 "multi_api_key_manager->glm_proxy" = { count = 1, reason = "AuthZA login button in MultiAPIKeyDialog (desktop dialog)" }

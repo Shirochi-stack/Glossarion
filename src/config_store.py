@@ -218,3 +218,127 @@ def restore_config_backup_file(path, backup_path, *, safety_backup=None):
     finally:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+# ---------------------------------------------------------------------------
+# Reset Settings to Defaults (Other Settings > Danger Zone)
+# ---------------------------------------------------------------------------
+
+#: What the reset keeps: the list of the desktop confirmation (other_settings
+#: prefixes "This will restart the application." and a blank line).
+RESET_PRESERVED_TEXT = (
+    "The following will be PRESERVED:\n"
+    "• Main API Key\n"
+    "• Multi-API Keys\n"
+    "• Fallback Keys\n"
+    "• Replicate API Key\n"
+    "• Azure Vision Key & Endpoint\n"
+    "• Azure Document Intelligence Key & Endpoint\n"
+    "• Google Vision Credentials Path\n"
+    "• Selected Model\n"
+    "• Prompt Profiles & Active Profile\n"
+    "• Multi-Key & Fallback Key Mode Toggles\n"
+    "• QA Scanner Excluded Characters\n\n"
+    "All other settings (history limits, custom endpoints, etc.) will be lost."
+)
+
+
+def reset_preserved_keys(current_config):
+    """The config keys "Reset Settings to Defaults" keeps (``keys_to_preserve``).
+
+    Moved from other_settings ``_reset_config_to_defaults``: API keys and every key pool,
+    their toggles, Replicate / Azure / Google credentials, the model, the prompt profiles
+    and the active profile, and only ``excluded_characters`` of the QA scanner settings.
+    Values are the config's own objects (not copies). The desktop writes the result as the
+    new config.json and restarts; the mobile Danger zone writes it through its config store.
+    """
+    # Preservation logic
+    keys_to_preserve = {}
+
+    # 1. Main API Key
+    if 'api_key' in current_config:
+        keys_to_preserve['api_key'] = current_config['api_key']
+
+    # 2. Multi API Keys
+    if 'multi_api_keys' in current_config:
+        keys_to_preserve['multi_api_keys'] = current_config['multi_api_keys']
+
+    # 3. Fallback Keys
+    if 'fallback_keys' in current_config:
+        keys_to_preserve['fallback_keys'] = current_config['fallback_keys']
+
+    # 3b. Dedicated key pools managed by the Multi API Key Manager
+    for _pool_key in (
+        'glossary_keys',
+        'glossary_refinement_keys',
+        'metadata_keys',
+        'qa_scan_keys',
+        'ai_truncation_detection_keys',
+        'rolling_summary_keys',
+        'truncation_retry_keys',
+        'inpainter_keys',
+        'tts_keys',
+    ):
+        if _pool_key in current_config:
+            keys_to_preserve[_pool_key] = current_config[_pool_key]
+
+    # 4. Replicate API Key
+    if 'replicate_api_key' in current_config:
+        keys_to_preserve['replicate_api_key'] = current_config['replicate_api_key']
+
+    # 5. Model Name
+    if 'model' in current_config:
+        keys_to_preserve['model'] = current_config['model']
+
+    # 6. Azure Computer Vision credentials
+    if 'azure_vision_key' in current_config:
+        keys_to_preserve['azure_vision_key'] = current_config['azure_vision_key']
+    if 'azure_vision_endpoint' in current_config:
+        keys_to_preserve['azure_vision_endpoint'] = current_config['azure_vision_endpoint']
+
+    # 7. Azure Document Intelligence credentials
+    if 'azure_document_intelligence_key' in current_config:
+        keys_to_preserve['azure_document_intelligence_key'] = current_config['azure_document_intelligence_key']
+    if 'azure_document_intelligence_endpoint' in current_config:
+        keys_to_preserve['azure_document_intelligence_endpoint'] = current_config['azure_document_intelligence_endpoint']
+
+    # 8. Google Vision credentials path
+    if 'google_vision_credentials' in current_config:
+        keys_to_preserve['google_vision_credentials'] = current_config['google_vision_credentials']
+    if 'google_cloud_credentials' in current_config:
+        keys_to_preserve['google_cloud_credentials'] = current_config['google_cloud_credentials']
+
+    # 9. Prompt Profiles
+    if 'prompt_profiles' in current_config:
+        keys_to_preserve['prompt_profiles'] = current_config['prompt_profiles']
+    if 'active_profile' in current_config:
+        keys_to_preserve['active_profile'] = current_config['active_profile']
+
+    # 10. Multi-Key and Fallback Key Toggle States
+    if 'use_multi_api_keys' in current_config:
+        keys_to_preserve['use_multi_api_keys'] = current_config['use_multi_api_keys']
+    if 'use_fallback_keys' in current_config:
+        keys_to_preserve['use_fallback_keys'] = current_config['use_fallback_keys']
+    for _toggle_key in (
+        'use_glossary_keys',
+        'use_glossary_refinement_keys',
+        'use_metadata_keys',
+        'use_qa_scan_keys',
+        'use_ai_truncation_detection_keys',
+        'use_rolling_summary_keys',
+        'use_truncation_retry_keys',
+        'use_inpainter_keys',
+        'use_tts_keys',
+    ):
+        if _toggle_key in current_config:
+            keys_to_preserve[_toggle_key] = current_config[_toggle_key]
+
+    # 11. QA Scanner Excluded Characters
+    if 'qa_scanner_settings' in current_config:
+        qa_settings = current_config['qa_scanner_settings']
+        if isinstance(qa_settings, dict) and 'excluded_characters' in qa_settings:
+            # Preserve only the excluded_characters field from QA settings
+            if 'qa_scanner_settings' not in keys_to_preserve:
+                keys_to_preserve['qa_scanner_settings'] = {}
+            keys_to_preserve['qa_scanner_settings']['excluded_characters'] = qa_settings['excluded_characters']
+    return keys_to_preserve

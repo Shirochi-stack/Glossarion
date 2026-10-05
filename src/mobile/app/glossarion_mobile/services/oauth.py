@@ -1,59 +1,133 @@
-"""OAuthBridge: ChatGPT (AuthGPT) sign-in on the phone (plan §4, UI_SPEC §4.13, §4.17).
+"""OAuthBridge: account sign-in on the phone (plan §4, UI_SPEC §4.13, §4.17).
 
-The default model is ``authgpt/gpt-6-luna`` (desktop default), so sign-in ships in the
-MVP. Nothing here re-implements OAuth: it drives the shared ``authgpt_auth`` split
-added in U1,
+Nothing here re-implements OAuth. The bridge drives the shared ``begin`` /
+``complete`` split of each backend auth module (U1 for ChatGPT, U4 for the rest):
 
-* ``begin_oauth(store=..., account_id=...)`` - PKCE + state, loopback server on
-  ``localhost:1455`` (IPv4 + IPv6), pending state persisted encrypted next to the
-  token file for the paste fallback;
-* ``complete_from_redirect(session_or_store, url_or_code)`` - state check, code
-  exchange, tokens saved to the token store (``HOME/.glossarion``, encrypted with
-  the SecureStorage key installed at boot).
+* **Loopback providers** (ChatGPT ``authgpt_auth``, Claude ``authcd_auth``, Gemini
+  ``authgem_auth``): ``begin_oauth(store=..., account_id=..., timeout=...)`` starts
+  PKCE + state and the loopback callback server and persists the pending state
+  encrypted next to the token file (paste fallback); ``complete_from_redirect(
+  session_or_store, url_or_code)`` checks the state, exchanges the code and saves
+  the tokens to the slot's token store (``HOME/.glossarion``, encrypted with the
+  SecureStorage key installed at boot).
+* **Device code** (Grok ``authgrok_auth``, RFC 8628): ``begin_device_login(store,
+  account_id)`` returns the verification URI + user code; ``poll_device_login(
+  session, should_stop)`` polls until the browser approves (it checks the other slots
+  and saves the tokens). The app shows the code (copy) and opens the verification page
+  itself. A device login the app was killed in the middle of is picked up again with
+  ``resume_device_login`` (same code, while it is valid).
+* Claude's session also carries ``manual_auth_url``: the same sign-in with Anthropic's
+  code page as redirect, which shows ``code#state`` to paste (``open_manual_page``).
 
 Flow (``LoginSheet`` steps Opening browser -> Waiting for sign-in -> Exchanging token
 -> Done):
 
-1. ``begin_oauth`` on a worker thread; ``webbrowser.open(auth_url)``, which the
+1. ``begin_*`` on a worker thread; ``opener(url)`` = ``webbrowser.open``, which the
    bootstrap routes to ``UrlLauncher.launch_url(mode=IN_APP_BROWSER_VIEW)`` (Custom
    Tabs / SFSafariViewController);
 2. on Android a short "Signing in…" foreground service keeps the process (and the
    loopback server) alive while the browser is in front - only when no job service
    is already running;
-3. the loopback success page redirects to ``glossarion://app/oauth/return?p=authgpt``
+3. the loopback success page redirects to ``glossarion://app/oauth/return?p=<provider>``
    (``GLOSSARION_OAUTH_RETURN_URL``); the app routes it to ``on_return_link`` which
    closes the iOS in-app browser;
 4. the waiter sees the callback and exchanges the code; or the user taps **Paste
    redirect URL / code** and ``complete_with_paste`` finishes from the saved pending
    state (works after the app or the loopback server was killed).
 
+Account slots are the desktop's: slot 0 is ``<provider>_tokens.json``, slot N is
+``<provider>_tokens_N.json`` (``get_store(N)``) and the routes ``authgptN/``,
+``authgrokN/``, ``authcdN/``, ``authgemN/`` / ``authgem-vertexN/``; the pool routes
+``authgpt0/``, ``authgrok0/`` and ``authgem-vertex0/`` use every saved slot.
+``account_slots`` lists the slots the Accounts screen shows: slot 0, every slot with
+a token file, the slot of the selected model, slots referenced by enabled key-pool
+entries and slots added with "+ Add account" in this session.
+
+Sign-out never deletes a token file outside the app's own data folder
+(``safe_root``): a Windows dev run whose auth modules resolved ``~`` to the real
+user profile must not log the desktop out.
+
 ``state`` is a ``SignInState`` (observable; listeners are marshalled with ``post``).
-Pure Python (3.10); no Flet import. ``auth_module`` and ``opener`` are injectable.
+Pure Python (3.10); no Flet import. ``auth_module`` / ``auth_modules`` and
+``opener`` are injectable.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
+import inspect
 import logging
+import os
+import re
 import threading
 import time
 import webbrowser
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
-__all__ = ["OAuthBridge", "PROVIDERS", "SignInState", "STEP_LABELS", "provider_for_model"]
+__all__ = [
+    "OAuthBridge",
+    "PROVIDERS",
+    "PROVIDER_INFO",
+    "ProviderInfo",
+    "SignInState",
+    "STEP_LABELS",
+    "pool_route_provider",
+    "provider_for_model",
+    "sign_in_satisfied",
+    "sign_in_slot",
+    "slot_key",
+]
 
 log = logging.getLogger("glossarion.oauth")
 
 DEFAULT_TIMEOUT = 300  # seconds (authgpt run_oauth_flow default)
+_AUTO = object()
 
-#: Providers on the Accounts screen. Only ChatGPT signs in from U3; the rest arrive in U4.
-PROVIDERS = (
-    ("authgpt", "ChatGPT", None),
-    ("authgem", "Gemini", "Coming in U4"),
-    ("authcd", "Claude", "Coming in U4"),
-    ("authgrok", "Grok", "Coming in U4"),
-)
+
+@dataclass(frozen=True)
+class ProviderInfo:
+    id: str  # route stem and token-file prefix: authgpt / authgrok / authcd / authgem
+    label: str
+    module: str  # backend auth module
+    flow: str  # "loopback" | "device"
+    pool_route: Optional[str]  # route that rotates through every saved slot
+    rotation_note: str
+    blurb: str
+    paste_hint: str = ""
+    icon: str = "ACCOUNT_CIRCLE"
+
+
+#: UI_SPEC §4.13 provider cards, in card order (ChatGPT · Grok · Claude · Gemini).
+PROVIDER_INFO: dict[str, ProviderInfo] = {
+    "authgpt": ProviderInfo(
+        "authgpt", "ChatGPT", "authgpt_auth", "loopback", "authgpt0/",
+        "authgpt0/ uses every signed-in ChatGPT slot in turn; authgptN/ uses slot #N only.",
+        "Your ChatGPT Plus/Pro subscription powers GPT-6 Luna, the default model.",
+        "http://localhost:1455/auth/callback?code=…&state=…",
+    ),
+    "authgrok": ProviderInfo(
+        "authgrok", "Grok", "authgrok_auth", "device", "authgrok0/",
+        "authgrok0/ rotates through every saved Grok account; authgrokN/ uses slot #N only.",
+        "Log in to xAI in the browser (Google sign-in works). No API key is needed.",
+    ),
+    "authcd": ProviderInfo(
+        "authcd", "Claude", "authcd_auth", "loopback", None,
+        "authcdN/ uses Claude slot #N; authcd/ uses slot #0.",
+        "Log in with your Claude Pro/Max subscription in the browser. No API key is needed.",
+        "Paste the redirect URL, or the code#state the page shows",
+    ),
+    "authgem": ProviderInfo(
+        "authgem", "Gemini", "authgem_auth", "loopback", "authgem-vertex0/",
+        "authgem-vertex0/ uses every Gemini slot (Vertex AI); authgemN/ and authgem-vertexN/ use slot #N.",
+        "Log in with your Google account in the browser. No API key is needed.",
+        "http://127.0.0.1:<port>/…?code=…&state=…",
+    ),
+}
+
+#: ``(provider, label, reason)``: every provider signs in from U4 (reason None).
+PROVIDERS = tuple((info.id, info.label, None) for info in PROVIDER_INFO.values())
 
 STEP_LABELS = {
     "idle": "",
@@ -65,17 +139,112 @@ STEP_LABELS = {
     "cancelled": "Sign-in cancelled",
 }
 
+_MODEL_PATTERNS = (
+    ("authgpt", re.compile(r"^authgpt(\d{0,4})$")),
+    ("authgrok", re.compile(r"^authgrok(\d{0,4})$")),
+    ("authcd", re.compile(r"^authcd(\d{0,4})$")),
+    ("authgem", re.compile(r"^authgem(?:-vertex)?(\d{0,4})$")),
+)
 
 def provider_for_model(model: Optional[str]) -> Optional[tuple]:
-    """``("authgpt", account_id)`` for ``authgpt/…`` / ``authgpt2/…`` models, else None."""
-    prefix = str(model or "").split("/", 1)[0].lower()
-    if prefix.startswith("authgpt"):
-        rest = prefix[7:]
-        if rest == "":
-            return ("authgpt", 0)
-        if rest.isdigit():
-            return ("authgpt", int(rest))
+    """``(provider, account_id)`` for an auth route (``authgpt/…`` -> ``("authgpt", 0)``,
+    ``authgrok2/…`` -> ``("authgrok", 2)``, ``authgem-vertex3/…`` -> ``("authgem", 3)``), else None.
+
+    ``authgem-key/`` uses an API key, not a sign-in, so it is not an account route.
+    """
+    prefix = str(model or "").split("/", 1)[0].strip().lower()
+    for provider, pattern in _MODEL_PATTERNS:
+        match = pattern.match(prefix)
+        if match:
+            return (provider, int(match.group(1)) if match.group(1) else 0)
     return None
+
+
+def slot_key(provider: str, account_id: int = 0) -> str:
+    """``"authgpt"`` for slot 0, ``"authgpt2"`` for slot 2 (``OAuthBridge.signed_in`` keys)."""
+    return provider if not account_id else f"{provider}{int(account_id)}"
+
+
+def pool_route_provider(model: Optional[str]) -> Optional[str]:
+    """The provider whose every saved slot a pool route uses (``authgpt0/…`` -> ``"authgpt"``,
+    ``authgrok0/…`` -> ``"authgrok"``, ``authgem-vertex0/…`` -> ``"authgem"``), else None."""
+    text = str(model or "").strip().lower()
+    for info in PROVIDER_INFO.values():
+        if info.pool_route and text.startswith(info.pool_route):
+            return info.id
+    return None
+
+
+def _key_slot(key: str, provider: str) -> Optional[int]:
+    """Slot of a ``signed_in`` key of ``provider`` (``"authgpt"`` -> 0, ``"authgpt2"`` -> 2), else None."""
+    if key == provider:
+        return 0
+    rest = key[len(provider):] if key.startswith(provider) else ""
+    return int(rest) if rest.isdigit() else None
+
+
+def sign_in_satisfied(model: Optional[str], signed_keys: Iterable[str]) -> bool:
+    """Whether the account a sign-in route uses is signed in (True for models without one).
+
+    ``authgptN/…`` needs slot #N (``slot_key``); the pool routes (``authgpt0/``,
+    ``authgrok0/``, ``authgem-vertex0/``) rotate through every saved slot, so any signed-in
+    slot of that provider will do.
+    """
+    route = provider_for_model(model)
+    if route is None:
+        return True
+    provider, account_id = route
+    keys = set(signed_keys or ())
+    if pool_route_provider(model) == provider:
+        return any(_key_slot(str(k), provider) is not None for k in keys)
+    return slot_key(provider, account_id) in keys
+
+
+def sign_in_slot(model: Optional[str], provider: str) -> int:
+    """The slot a sign-in for ``model`` should target: the route's own slot (``authgpt2/`` -> 2),
+    slot #0 for a pool route or a model of another provider."""
+    route = provider_for_model(model)
+    if route is None or route[0] != provider:
+        return 0
+    return int(route[1] or 0)
+
+
+def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Call ``fn`` with only the keyword arguments its signature accepts."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return fn(*args, **kwargs)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return fn(*args, **kwargs)
+    return fn(*args, **{k: v for k, v in kwargs.items() if k in params})
+
+
+def _first_attr(obj: Any, names: Iterable[str], default: Any = None) -> Any:
+    for name in names:
+        value = obj.get(name) if isinstance(obj, Mapping) else getattr(obj, name, None)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+class _ConfigView:
+    """``config.get`` over a ``MobileConfigStore.get``-style reader (what the shared rules read)."""
+
+    def __init__(self, get: Callable[[str, Any], Any]) -> None:
+        self._get = get
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._get(key, default)
+
+
+def _under(path: str, root: str) -> bool:
+    try:
+        path = os.path.normcase(os.path.realpath(path))
+        root = os.path.normcase(os.path.realpath(root))
+    except (OSError, ValueError):
+        return False
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
 @dataclass(frozen=True)
@@ -87,6 +256,9 @@ class SignInState:
     auth_url: str = ""
     email: str = ""
     plan: str = ""
+    user_code: str = ""  # device-code flow (Grok)
+    verification_uri: str = ""
+    manual_url: str = ""  # Claude: the code page (code#state to paste)
 
     @property
     def busy(self) -> bool:
@@ -96,12 +268,17 @@ class SignInState:
     def label(self) -> str:
         return STEP_LABELS.get(self.step, self.step)
 
+    @property
+    def device(self) -> bool:
+        return bool(self.user_code)
+
 
 class OAuthBridge:
     def __init__(
         self,
         *,
         auth_module: Any = None,
+        auth_modules: Optional[Mapping[str, Any]] = None,
         opener: Optional[Callable[[str], Any]] = None,
         close_browser: Optional[Callable[[], Any]] = None,
         native: Any = None,
@@ -109,8 +286,12 @@ class OAuthBridge:
         run_io: Optional[Callable[..., Any]] = None,
         timeout: int = DEFAULT_TIMEOUT,
         is_android: bool = False,
+        config_get: Optional[Callable[[str, Any], Any]] = None,
+        safe_root: Any = _AUTO,
     ) -> None:
-        self._auth = auth_module
+        self._modules: dict[str, Any] = dict(auth_modules or {})
+        if auth_module is not None:
+            self._modules["authgpt"] = auth_module
         self.opener = opener or webbrowser.open
         self.close_browser = close_browser
         self.native = native
@@ -118,6 +299,8 @@ class OAuthBridge:
         self.run_io = run_io
         self.timeout = timeout
         self.is_android = is_android
+        self.config_get = config_get  # MobileConfigStore.get (slots from the model / key pools)
+        self._safe_root = safe_root
         self.state = SignInState()
         self._listeners: list = []
         self._session: Any = None
@@ -127,16 +310,28 @@ class OAuthBridge:
         self._pasting = False
         self._paste_claimed = False
         self.signed_in: set = set()
+        self.pending_slots: dict[str, set] = {}  # "+ Add account" slots not signed in yet
 
     # ---- plumbing ------------------------------------------------------------------------
 
+    @staticmethod
+    def info(provider: str) -> ProviderInfo:
+        try:
+            return PROVIDER_INFO[provider]
+        except KeyError:
+            raise RuntimeError(f"Unknown sign-in provider {provider!r}") from None
+
+    def module(self, provider: str = "authgpt") -> Any:
+        module = self._modules.get(provider)
+        if module is None:
+            module = importlib.import_module(self.info(provider).module)  # backend (on sys.path after bootstrap)
+            self._modules[provider] = module
+        return module
+
     @property
     def auth(self) -> Any:
-        if self._auth is None:
-            import authgpt_auth  # backend module (on sys.path after bootstrap)
-
-            self._auth = authgpt_auth
-        return self._auth
+        """The ChatGPT auth module (U3 API)."""
+        return self.module("authgpt")
 
     def subscribe(self, callback: Callable[[SignInState], Any]) -> Callable[[], None]:
         self._listeners.append(callback)
@@ -168,73 +363,196 @@ class OAuthBridge:
             return await self.run_io(fn, *args)
         return await asyncio.to_thread(fn, *args)
 
-    def store(self, account_id: int = 0) -> Any:
-        return self.auth.get_store(account_id or None)
+    def store(self, account_id: int = 0, provider: str = "authgpt") -> Any:
+        return self.module(provider).get_store(int(account_id or 0) or None)
+
+    @property
+    def safe_root(self) -> Optional[str]:
+        """Folder sign-out may delete token files in (the mobile HOME); None = no restriction."""
+        root = self._safe_root
+        if root is _AUTO:
+            root = None
+            try:
+                from glossarion_mobile import runtime_bootstrap as rb
+
+                paths = rb.get_paths() if rb.get_state() is not None else None
+                if paths is not None:
+                    root = str(paths.home)
+            except Exception:
+                root = None
+        return str(root) if root else None
 
     # ---- status -------------------------------------------------------------------------------
 
-    def status(self, account_id: int = 0) -> dict:
-        """Blocking (decrypts the token file): ``{signed_in, email, plan, expires_at}``."""
+    def status(self, account_id: int = 0, provider: str = "authgpt") -> dict:
+        """Blocking (decrypts the token file): ``{signed_in, email, plan, name, source, expires_at}``."""
+        account_id = int(account_id or 0)
+        base = {"provider": provider, "account_id": account_id}
         try:
-            store = self.store(account_id)
+            store = self.store(account_id, provider)
             tokens = store.load_tokens() or {}
-            info = store.account_info if tokens.get("id_token") else {}
+            if provider == "authgpt":
+                info = store.account_info if tokens.get("id_token") else {}
+            else:
+                info = store.account_info if tokens else {}
         except Exception as exc:
-            log.warning("reading the ChatGPT token store failed: %s", exc)
-            return {"signed_in": False, "email": "", "plan": "", "expires_at": None, "error": str(exc)}
+            log.warning("reading the %s token store failed: %s", provider, exc)
+            return {**base, "signed_in": False, "email": "", "plan": "", "name": "", "source": "",
+                    "expires_at": None, "error": str(exc)}
         signed = bool(tokens.get("access_token") or tokens.get("refresh_token"))
         with self._lock:
-            key = "authgpt" if not account_id else f"authgpt{account_id}"
+            key = slot_key(provider, account_id)
             if signed:
                 self.signed_in.add(key)
+                self.pending_slots.get(provider, set()).discard(account_id)
             else:
                 self.signed_in.discard(key)
+        info = info if isinstance(info, Mapping) else {}
         return {
+            **base,
             "signed_in": signed,
             "email": str(info.get("email") or ""),
-            "plan": str(info.get("plan_type") or ""),
+            "plan": str(info.get("plan_type") or info.get("plan") or ""),
+            "name": str(info.get("name") or ""),
+            "source": str(info.get("source") or ""),
             "expires_at": tokens.get("expires_at"),
         }
 
-    async def refresh_status(self, account_id: int = 0) -> dict:
-        return await self._io(self.status, account_id)
+    async def refresh_status(self, account_id: int = 0, provider: str = "authgpt") -> dict:
+        return await self._io(self.status, account_id, provider)
 
-    def has_pending(self, account_id: int = 0) -> bool:
-        if self._session is not None:
+    def statuses(self, provider: str, slots: Optional[Iterable[int]] = None) -> list:
+        """Blocking: ``status`` of every slot (``account_slots`` when ``slots`` is None)."""
+        ids = list(slots) if slots is not None else self.account_slots(provider)
+        return [self.status(account_id, provider) for account_id in ids]
+
+    def has_pending(self, account_id: int = 0, provider: str = "authgpt") -> bool:
+        """Blocking: a sign-in of this slot can still be finished by a paste - the live session
+        of this process, or the encrypted pending state saved next to the slot's token file
+        (kept for an hour, also after the app or its loopback listener was killed)."""
+        account_id = int(account_id or 0)
+        with self._lock:
+            live = (self._session is not None and self.state.provider == provider
+                    and int(self.state.account_id or 0) == account_id)
+        if live:
             return True
         try:
-            return bool(self.store(account_id).load_pending_oauth())
+            store = self.store(account_id, provider)
+            loader = getattr(store, "load_pending_oauth", None)
+            return bool(loader()) if callable(loader) else False
         except Exception:
             return False
+
+    async def pending_sign_in(self, account_id: int = 0, provider: str = "authgpt") -> bool:
+        """``has_pending`` off the UI loop (decrypts the pending file)."""
+        return bool(await self._io(self.has_pending, account_id, provider))
+
+    # ---- account slots ------------------------------------------------------------------------
+
+    def _token_dir(self, provider: str) -> Optional[str]:
+        module = self.module(provider)
+        directory = getattr(module, "_DEFAULT_TOKEN_DIR", None)
+        if directory:
+            return str(directory)
+        try:
+            return os.path.dirname(str(self.store(0, provider)._token_file))
+        except Exception:
+            return None
+
+    def saved_slots(self, provider: str) -> set:
+        """Numbered slots with a token file on disk (``<provider>_tokens_N.json``)."""
+        found: set = set()
+        module = self.module(provider)
+        numbered = getattr(module, "_numbered_account_ids", None)  # authgrok's own helper
+        if callable(numbered):
+            try:
+                found.update(int(i) for i in numbered())
+            except Exception:
+                pass
+        directory = self._token_dir(provider)
+        if directory:
+            pattern = re.compile(rf"{re.escape(provider)}_tokens_(\d{{1,4}})\.json")
+            try:
+                for name in os.listdir(directory):
+                    match = pattern.fullmatch(name)
+                    if match:
+                        found.add(int(match.group(1)))
+            except OSError:
+                pass
+        found.discard(0)
+        return found
+
+    def configured_slots(self, provider: str, config_get: Optional[Callable[[str, Any], Any]] = None) -> set:
+        """Slots named by the selected model and by enabled key-pool entries: the shared
+        ``settings_rules.model_account_ids`` (desktop ``_collect_auth_account_ids_from_pools``
+        + the model's own slot, as ``_refresh_auth_account_arrows`` adds it)."""
+        get = config_get or self.config_get
+        if get is None:
+            return set()
+        model = get("model", None)
+        try:
+            import settings_rules  # shared core (U4)
+
+            ids = settings_rules.model_account_ids(model, _ConfigView(get))
+            return set(int(i) for i in ids.get(provider, ()))
+        except Exception:
+            log.debug("settings_rules.model_account_ids unavailable", exc_info=True)
+        route = provider_for_model(str(model or ""))
+        return {route[1]} if route is not None and route[0] == provider else set()
+
+    def account_slots(self, provider: str, config_get: Optional[Callable[[str, Any], Any]] = None) -> list:
+        """Blocking (lists the token folder): the slots the Accounts screen shows, sorted."""
+        slots = {0}
+        slots.update(self.saved_slots(provider))
+        slots.update(self.configured_slots(provider, config_get))
+        with self._lock:
+            slots.update(self.pending_slots.get(provider, set()))
+        return sorted(slots)
+
+    def next_slot(self, provider: str, slots: Optional[Iterable[int]] = None) -> int:
+        """The next free slot for "+ Add account" (Grok asks ``get_next_account_id``, like desktop)."""
+        known = set(int(s) for s in (slots if slots is not None else self.account_slots(provider)))
+        if provider == "authgrok":
+            allocate = getattr(self.module(provider), "get_next_account_id", None)
+            if callable(allocate):
+                return int(allocate(sorted(known)))
+        return max(known | {0}) + 1
+
+    def add_slot(self, provider: str, account_id: int) -> None:
+        with self._lock:
+            self.pending_slots.setdefault(provider, set()).add(int(account_id))
 
     # ---- sign in ------------------------------------------------------------------------------
 
     async def sign_in(self, provider: str = "authgpt", account_id: int = 0) -> dict:
         """Run the browser sign-in; returns the account status ({} when cancelled or
         finished by a paste). Raises on failure (the state then reads ``error``)."""
-        if provider != "authgpt":
-            raise RuntimeError(f"{provider} sign-in arrives in U4")
+        info = self.info(provider)
         if self.state.busy:
             raise RuntimeError("A sign-in is already in progress")
+        account_id = int(account_id or 0)
         self._cancel.clear()
         self._pasting = False
         self._paste_claimed = False
-        self._set(provider=provider, step="opening", message="", account_id=int(account_id or 0), auth_url="")
+        self._set(provider=provider, step="opening", message="", account_id=account_id, auth_url="",
+                  email="", plan="", user_code="", verification_uri="", manual_url="")
+        if info.flow == "device":
+            return await self._sign_in_device(provider, account_id)
         try:
-            # A previous sign-in finished by a failed paste keeps its loopback server on
-            # localhost:1455 until its watchdog fires; free the port before listening again.
-            # (The pending state stays in the token store, so pasting still works after this.)
+            # A previous sign-in finished by a failed paste keeps its loopback server
+            # until its watchdog fires; free the port before listening again. (The pending
+            # state stays in the token store, so pasting still works after this.)
             await self._io(self._close_session)
-            store = self.store(account_id)
-            session = await self._io(lambda: self.auth.begin_oauth(store=store, account_id=account_id or None, timeout=self.timeout))
+            module, session = await self._io(self._begin_loopback, provider, account_id)
         except Exception as exc:
             self._set(step="error", message=str(exc))
             raise
         with self._lock:
             self._session = session
-        await self._start_fgs()
-        self._set(step="waiting", auth_url=session.auth_url)
-        self._open(session.auth_url)
+        await self._start_fgs(info)
+        self._set(step="waiting", auth_url=str(getattr(session, "auth_url", "") or ""),
+                  manual_url=str(getattr(session, "manual_auth_url", "") or ""))
+        self._open(self.state.auth_url)
         try:
             received = await self._io(self._wait_for_callback, session)
             if self._cancel.is_set():
@@ -247,13 +565,88 @@ class OAuthBridge:
             if not received:
                 raise RuntimeError("OAuth login timed out – no callback received.")
             self._set(step="exchanging")
-            await self._io(self.auth.complete_from_redirect, session)
+            await self._io(module.complete_from_redirect, session)
         except Exception as exc:
             self._close_session()
             self._set(step="error", message=str(exc))
             await self._stop_fgs()
             raise
-        return await self._finished(account_id)
+        return await self._finished(account_id, provider)
+
+    def _begin_loopback(self, provider: str, account_id: int) -> tuple:
+        """Worker thread: import the auth module, open the slot's store, ``begin_oauth``."""
+        module = self.module(provider)
+        store = self.store(account_id, provider)
+        clear_flag = getattr(store, "clear_logout_flag", None)  # authcd: an explicit login ends the logout block
+        if callable(clear_flag):
+            clear_flag()
+        return module, _call(module.begin_oauth, store=store, account_id=account_id or None, timeout=self.timeout)
+
+    async def _sign_in_device(self, provider: str, account_id: int) -> dict:
+        """Grok: RFC 8628 device code - show the code, open the verification page, poll."""
+        info = self.info(provider)
+        try:
+            module, session = await self._io(self._begin_or_resume_device, provider, account_id)
+        except Exception as exc:
+            self._set(step="error", message=str(exc))
+            raise
+        with self._lock:
+            self._session = session
+        verification = str(_first_attr(session, ("verification_uri", "verification_url")) or "")
+        open_url = str(_first_attr(session, ("open_url", "signed_out_url", "browser_url", "verification_uri_complete",
+                                             "verification_url_complete")) or verification)
+        await self._start_fgs(info)
+        self._set(step="waiting", auth_url=open_url, verification_uri=verification or open_url,
+                  user_code=str(_first_attr(session, ("user_code",)) or ""))
+        self._open(open_url)
+        try:
+            tokens = await self._io(lambda: _call(module.poll_device_login, session, should_stop=self._cancel.is_set))
+            if self._cancel.is_set():
+                self._close_session()
+                self._set(step="cancelled", message="")
+                await self._stop_fgs()
+                return {}
+            self._set(step="exchanging")
+            await self._io(self._save_device_tokens, provider, account_id, tokens)
+        except Exception as exc:
+            self._close_session()
+            if self._cancel.is_set():
+                self._set(step="cancelled", message="")
+                await self._stop_fgs()
+                return {}
+            self._set(step="error", message=str(exc))
+            await self._stop_fgs()
+            raise
+        return await self._finished(account_id, provider)
+
+    def _begin_or_resume_device(self, provider: str, account_id: int) -> tuple:
+        """Worker thread: the device login saved for this slot (app killed mid-poll), else a new one."""
+        module = self.module(provider)
+        store = self.store(account_id, provider)
+        resume = getattr(module, "resume_device_login", None)
+        if callable(resume):
+            try:
+                session = _call(resume, store=store, account_id=account_id, timeout=self.timeout)
+            except Exception as exc:
+                log.info("resuming the saved device login failed: %s", exc)
+                session = None
+            if session is not None:
+                return module, session
+        return module, _call(module.begin_device_login, store=store, account_id=account_id, timeout=self.timeout)
+
+    def _save_device_tokens(self, provider: str, account_id: int, tokens: Any) -> None:
+        """Desktop ``_authgrok_login_clicked``: ``validate_account_slot_tokens`` then ``save_tokens``
+        (skipped when ``poll_device_login`` already saved these tokens to the slot)."""
+        if not isinstance(tokens, Mapping) or not tokens.get("access_token"):
+            return
+        store = self.store(account_id, provider)
+        saved = store.load_tokens() or {}
+        if saved.get("access_token") == tokens.get("access_token"):
+            return
+        validate = getattr(self.module(provider), "validate_account_slot_tokens", None)
+        if callable(validate):
+            validate(account_id, dict(tokens))
+        store.save_tokens(dict(tokens))
 
     def _wait_for_callback(self, session: Any) -> bool:
         deadline = time.monotonic() + self.timeout
@@ -267,14 +660,17 @@ class OAuthBridge:
                 return bool(getattr(session, "callback_received", False))
         return False
 
-    async def _finished(self, account_id: int) -> dict:
+    async def _finished(self, account_id: int, provider: str = "authgpt") -> dict:
         self._close_session()
-        status = await self._io(self.status, account_id)
-        self._set(step="done", message="", email=status.get("email", ""), plan=status.get("plan", ""))
+        status = await self._io(self.status, account_id, provider)
+        self._set(step="done", message="", email=status.get("email", "") or status.get("name", ""),
+                  plan=status.get("plan", ""))
         await self._stop_fgs()
         return status
 
     def _open(self, url: str) -> None:
+        if not url:
+            return
         try:
             self.opener(url)
         except Exception as exc:
@@ -287,29 +683,49 @@ class OAuthBridge:
         self._open(url)
         return True
 
-    async def complete_with_paste(self, text: str, account_id: Optional[int] = None) -> dict:
-        """Finish from a pasted redirect URL, ``code#state`` or bare code."""
+    def open_manual_page(self) -> bool:
+        """Claude: open the code page (shows ``code#state``) of the sign-in in progress."""
+        return self.open_url(self.state.manual_url)
+
+    def open_url(self, url: str) -> bool:
+        """Open a page in the in-app browser (Gemini verification URL, Grok verification page)."""
+        if not url:
+            return False
+        self._open(url)
+        return True
+
+    async def complete_with_paste(self, text: str, account_id: Optional[int] = None,
+                                  provider: Optional[str] = None) -> dict:
+        """Finish from a pasted redirect URL, ``code#state`` or bare code (loopback providers)."""
+        provider = provider or self.state.provider or "authgpt"
+        info = self.info(provider)
+        if info.flow != "loopback":
+            raise RuntimeError(f"{info.label} signs in with a device code; there is nothing to paste.")
         value = str(text or "").strip()
         if not value:
-            raise RuntimeError("Paste the redirect URL (or the code) to finish the ChatGPT sign-in.")
+            raise RuntimeError(f"Paste the redirect URL (or the code) to finish the {info.label} sign-in.")
         if account_id is None:
-            account_id = self.state.account_id
+            account_id = self.state.account_id if self.state.provider == provider else 0
         with self._lock:
-            session = self._session
+            session = self._session if self.state.provider == provider else None
             self._pasting = True
             self._paste_claimed = True
         self._cancel.set()  # stop the loopback waiter; the paste wins
-        self._set(step="exchanging", message="")
-        target = session if session is not None else self.store(account_id)
+        self._set(provider=provider, account_id=int(account_id or 0), step="exchanging", message="")
         try:
-            await self._io(self.auth.complete_from_redirect, target, value)
+            await self._io(self._complete_paste, provider, session, int(account_id or 0), value)
         except Exception as exc:
             self._pasting = False
             self._set(step="error", message=str(exc))
             await self._stop_fgs()
             raise
         self._pasting = False
-        return await self._finished(account_id)
+        return await self._finished(int(account_id or 0), provider)
+
+    def _complete_paste(self, provider: str, session: Any, account_id: int, value: str) -> Any:
+        """Worker thread: finish from the live session, else from the slot's saved pending state."""
+        target = session if session is not None else self.store(account_id, provider)
+        return self.module(provider).complete_from_redirect(target, value)
 
     def cancel(self) -> None:
         self._cancel.set()
@@ -321,13 +737,15 @@ class OAuthBridge:
         with self._lock:
             session, self._session = self._session, None
         if session is not None:
-            try:
-                session.close()
-            except Exception:
-                pass
+            close = getattr(session, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
     def on_return_link(self, provider: Optional[str] = None) -> None:
-        """``glossarion://app/oauth/return?p=authgpt``: close the iOS in-app browser.
+        """``glossarion://app/oauth/return?p=<provider>``: close the iOS in-app browser.
 
         The waiter finishes on its own once the loopback server recorded the callback.
         """
@@ -339,27 +757,108 @@ class OAuthBridge:
             except Exception:
                 log.debug("closing the in-app browser failed", exc_info=True)
 
-    async def sign_out(self, account_id: int = 0) -> None:
-        def clear() -> None:
-            store = self.store(account_id)
-            store.clear_tokens()
-            if hasattr(store, "clear_pending_oauth"):
-                store.clear_pending_oauth()
+    # ---- sign out -----------------------------------------------------------------------------
 
-        await self._io(clear)
+    def _clear(self, provider: str, account_id: int) -> None:
+        store = self.store(account_id, provider)
+        root = self.safe_root
+        token_file = getattr(store, "_token_file", None)
+        if root and token_file and not _under(str(token_file), root):
+            raise RuntimeError(
+                f"Not signing out: the {self.info(provider).label} token file is outside the app's data folder "
+                f"({token_file}). Set the token-file overrides before importing the backend."
+            )
+        store.clear_tokens()
+        clear_pending = getattr(store, "clear_pending_oauth", None)
+        if callable(clear_pending):
+            clear_pending()
+
+    async def sign_out(self, account_id: int = 0, provider: str = "authgpt") -> None:
+        account_id = int(account_id or 0)
+        await self._io(self._clear, provider, account_id)
         with self._lock:
-            self.signed_in.discard("authgpt" if not account_id else f"authgpt{account_id}")
-        self._set(step="idle", message="", email="", plan="")
+            self.signed_in.discard(slot_key(provider, account_id))
+        if self.state.provider == provider and self.state.account_id == account_id:
+            self._set(step="idle", message="", email="", plan="", user_code="", verification_uri="", manual_url="")
+
+    def sign_out_everywhere(self, config_get: Optional[Callable[[str, Any], Any]] = None) -> list:
+        """Blocking: sign every slot of every provider out; returns the slot keys cleared."""
+        cleared: list = []
+        errors: list = []
+        for provider in PROVIDER_INFO:
+            try:
+                slots = self.account_slots(provider, config_get)
+            except Exception as exc:
+                errors.append(f"{provider}: {exc}")
+                continue
+            for account_id in slots:
+                try:
+                    status = self.status(account_id, provider)
+                    if not status.get("signed_in"):
+                        continue
+                    self._clear(provider, account_id)
+                    cleared.append(slot_key(provider, account_id))
+                except Exception as exc:
+                    errors.append(f"{slot_key(provider, account_id)}: {exc}")
+        with self._lock:
+            for key in cleared:
+                self.signed_in.discard(key)
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        return cleared
+
+    # ---- Gemini extras ---------------------------------------------------------------------------
+
+    def gemini_status(self, account_id: int = 0) -> dict:
+        """Blocking: desktop 📊 (``authgem_auth.check_account_status``) for a signed-in slot."""
+        module = self.module("authgem")
+        store = self.store(account_id, "authgem")
+        if not store.has_tokens:
+            raise RuntimeError("Not logged in — sign in to Gemini first.")
+        token = store.get_valid_access_token(auto_login=False)
+        return dict(module.check_account_status(token, int(account_id or 0)) or {})
+
+    def gemini_projects(self, account_id: int = 0) -> list:
+        """Blocking: ``[(project_id, "billed"|"unknown"|"unbilled")]`` for the GCP project picker.
+
+        The shared ``authgem_auth.list_gcp_projects`` (the desktop picker's listing: every
+        active project, billing checked in parallel), in the desktop picker's order: billed,
+        then unknown, then unbilled. ``[]`` when nothing was listed.
+        """
+        module = self.module("authgem")
+        store = self.store(account_id, "authgem")
+        token = store.get_valid_access_token(auto_login=False)
+        result = module.list_gcp_projects(token)
+        if not result:
+            return []
+        billed, unbilled, unknown = result
+        return ([(str(pid), "billed") for pid in billed] + [(str(pid), "unknown") for pid in unknown]
+                + [(str(pid), "unbilled") for pid in unbilled])
+
+    def set_gemini_project(self, project_id: str, account_id: int = 0) -> None:
+        """Desktop ``_authgem_project_changed`` minus the env write: the job's HeadlessOwner sets
+        ``GOOGLE_CLOUD_PROJECT`` from ``authgem_project`` at job start (``_restore_authgem_project_selection``)."""
+        project_id = str(project_id or "").strip()
+        if not project_id:
+            return
+        module = self.module("authgem")
+        account = int(account_id or 0)
+        try:
+            module._cached_project_id[account] = project_id
+            module._project_set_by_gui[account] = True
+        except Exception:
+            log.debug("seeding the AuthGem project cache failed", exc_info=True)
 
     # ---- Android short sign-in FGS -------------------------------------------------------------
 
-    async def _start_fgs(self) -> None:
+    async def _start_fgs(self, info: Optional[ProviderInfo] = None) -> None:
         if not self.is_android or self.native is None:
             return
+        label = info.label if info is not None else "ChatGPT"
         try:
             if await self.native.is_job_service_running():
                 return  # a translation already holds the foreground service
-            self._fgs_started = bool(await self.native.start_job_service("Signing in to ChatGPT", "Waiting for sign-in…"))
+            self._fgs_started = bool(await self.native.start_job_service(f"Signing in to {label}", "Waiting for sign-in…"))
         except Exception as exc:
             log.info("sign-in foreground service unavailable: %s", exc)
 

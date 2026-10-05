@@ -70,6 +70,22 @@ _ENV_INPUTS = (
 )
 
 
+# Blocking helpers the app runs on UiDispatcher.run_in_thread threads (sign-in status reads, folder
+# sizes, config/chat I/O). They may still be running when a test's app stops.
+_APP_IO_THREADS = ("gl-settings-io", "gl-chat-io", "gl-models-io", "gl-files", "gl-worker")
+
+
+def _join_app_io_threads(timeout: float = 15.0) -> None:
+    """Let in-flight app I/O threads finish before the test's env is undone: a status read that ran
+    after ``rb.reset(restore_env=True)`` would resolve the auth token stores (``AUTH*_TOKEN_FILE``,
+    ``GLOSSARION_TOKEN_DIR``) to the developer's real ~/.glossarion."""
+    deadline = time.monotonic() + timeout
+    for thread in list(threading.enumerate()):
+        if thread is threading.current_thread() or thread.name not in _APP_IO_THREADS:
+            continue
+        thread.join(max(0.0, deadline - time.monotonic()))
+
+
 @pytest.fixture
 def storage(tmp_path, monkeypatch):
     """Temp FLET_APP_STORAGE_* dirs; bootstrap() (and any installed encryption keys) undone after the test."""
@@ -84,6 +100,7 @@ def storage(tmp_path, monkeypatch):
     for key in _ENV_INPUTS:
         monkeypatch.delenv(key, raising=False)
     yield dirs
+    _join_app_io_threads()
     secure_keys.reset()
     rb.reset(restore_env=True)
 
@@ -616,21 +633,30 @@ def app_env(storage, monkeypatch):
                 "strict": False, "checks": [{"name": "fake", "status": "pass", "secs": 0.0}]}
 
     monkeypatch.setattr(selftest, "run_selftest", fake_selftest)
-    # Hermetic ChatGPT token store for the app's sign-in status (U3 ChatFeature): authgpt_auth
-    # resolves ``~`` once at import, and on Windows expanduser ignores the HOME override, so it
-    # would read the developer's real ~/.glossarion tokens.
-    try:
-        import authgpt_auth
-    except Exception:  # pragma: no cover - backend not importable
-        authgpt_auth = None
-    if authgpt_auth is not None:
-        token_dir = os.path.join(str(storage["data"]), "home", ".glossarion")
-        token_file = os.path.join(token_dir, "authgpt_tokens.json")
-        monkeypatch.setattr(authgpt_auth, "_DEFAULT_TOKEN_DIR", token_dir)
-        monkeypatch.setattr(authgpt_auth, "_DEFAULT_TOKEN_FILE", token_file)
-        monkeypatch.setattr(authgpt_auth, "_default_store", None)
-        monkeypatch.setattr(authgpt_auth, "_account_stores", {})
-        monkeypatch.setenv("AUTHGPT_TOKEN_FILE", token_file)
+    # Hermetic token stores for the app's sign-in status (U3 ChatFeature: ChatGPT; U4 Accounts: every
+    # provider slot): the auth modules resolve their token folder once at import, so a module imported
+    # earlier in this process (before any bootstrap, or by a previous test) would still point at the
+    # developer's real ~/.glossarion (on Windows expanduser ignores the HOME override).
+    token_dir = os.path.join(str(storage["data"]), "home", ".glossarion")
+    for name in ("authgpt_auth", "authgem_auth", "authgrok_auth", "authcd_auth"):
+        try:
+            module = __import__(name)
+        except Exception:  # pragma: no cover - backend not importable
+            continue
+        token_file = os.path.join(token_dir, name.replace("_auth", "_tokens.json"))
+        monkeypatch.setattr(module, "_DEFAULT_TOKEN_DIR", token_dir)
+        if hasattr(module, "_DEFAULT_TOKEN_FILE"):
+            monkeypatch.setattr(module, "_DEFAULT_TOKEN_FILE", token_file)
+        if hasattr(module, "_default_store"):
+            monkeypatch.setattr(module, "_default_store", None)
+        if hasattr(module, "_account_stores"):
+            monkeypatch.setattr(module, "_account_stores", {})
+        if hasattr(module, "_CLIENT_VERSION_FILE"):  # authcd: adopted Claude Code client version
+            monkeypatch.setattr(module, "_CLIENT_VERSION_FILE", os.path.join(token_dir, "authcd_client_version.json"))
+        if hasattr(module, "_OFFICIAL_GROK_AUTH_FILE"):  # authgrok: the Grok CLI login (slot 0 import)
+            monkeypatch.setattr(module, "_OFFICIAL_GROK_AUTH_FILE",
+                                os.path.join(str(storage["data"]), "home", ".grok", "auth.json"))
+        monkeypatch.setenv(name.replace("_auth", "_TOKEN_FILE").upper(), token_file)
     # A returning user: the first-run Welcome flow (U3) is done, so it does not cover the chat home.
     # (test_ui_foundations._start(first_run=True) removes this for the first-run tests.)
     (storage["data"] / "mobile_state.json").write_text(json.dumps({"welcome_completed": True}), encoding="utf-8")

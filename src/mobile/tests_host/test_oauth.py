@@ -174,6 +174,7 @@ async def _wait_for(predicate, timeout=TIMEOUT):
 
 
 def _bridge(env, browser, **kwargs) -> OAuthBridge:
+    kwargs.setdefault("safe_root", None)  # temp token stores (sign-out guard: tests_host/test_accounts_profiles.py)
     return OAuthBridge(auth_module=env.module, opener=browser.open, **kwargs)
 
 
@@ -290,8 +291,8 @@ def test_timeout_cancel_sign_out_and_existing_job_service(oauth_env):
     assert bridge.status()["signed_in"] and "authgpt" in bridge.signed_in
     asyncio.run(bridge.sign_out())
     assert not bridge.status()["signed_in"] and "authgpt" not in bridge.signed_in
-    with pytest.raises(RuntimeError, match="arrives in U4"):
-        asyncio.run(bridge.sign_in("authgem"))
+    with pytest.raises(RuntimeError, match="Unknown sign-in provider"):  # U4: every listed provider signs in
+        asyncio.run(bridge.sign_in("bogus"))
     assert provider_for_model("authgpt/gpt-6-luna") == ("authgpt", 0)
     assert provider_for_model("authgpt2/gpt-5") == ("authgpt", 2)
     assert provider_for_model("gemini/x") is None and provider_for_model("authgptx/y") is None
@@ -304,6 +305,8 @@ def test_timeout_cancel_sign_out_and_existing_job_service(oauth_env):
 
 @pytest.mark.skipif(importlib.util.find_spec("flet") is None, reason="flet not installed")
 def test_login_panel_and_accounts_screen(oauth_env):
+    import flet as ft
+
     from glossarion_mobile.ui.router import parse_route
     from glossarion_mobile.ui.screens.accounts import UNAVAILABLE_ACCOUNTS, AccountsScreen, LoginPanel, LoginSheet
 
@@ -332,14 +335,15 @@ def test_login_panel_and_accounts_screen(oauth_env):
     screen = AccountsScreen(parse_route("/settings/accounts"), oauth=bridge)
     body = screen.get_body()
     keys = [getattr(c, "key", None) for c in body.controls]
-    assert keys[:4] == ["account-authgpt", "account-authgem", "account-authcd", "account-authgrok"]
-    assert all(c.disabled for c in body.controls[1:4])  # other sign-ins arrive in U4, visible but disabled
+    assert keys[:4] == ["account-authgpt", "account-authgrok", "account-authcd", "account-authgem"]  # U4: all sign in
     assert body.controls[-1].title == f"Unavailable on mobile ({len(UNAVAILABLE_ACCOUNTS)})"
-    status = asyncio.run(screen.refresh())
-    assert status["signed_in"] and screen.sign_out_button.visible and not screen.login_panel.visible
-    assert screen.status_text.value.startswith("Signed in · reader@example.com")
-    asyncio.run(screen._sign_out())
-    assert screen.status_text.value == "Not signed in" and screen.login_panel.visible
+    asyncio.run(screen.refresh("authgpt"))
+    assert screen.status["signed_in"] and screen.slots["authgpt"] == [0]
+    row = screen.slot_rows[("authgpt", 0)]
+    assert row.subtitle.value.startswith("✓ Signed in · reader@example.com") and row.trailing.icon == ft.Icons.MORE_VERT
+    assert asyncio.run(screen.sign_out("authgpt", 0))
+    assert screen.slot_rows[("authgpt", 0)].subtitle.value == "Not signed in"
+    assert screen.slot_rows[("authgpt", 0)].trailing.content == "Sign in"
     sheet = LoginSheet(bridge, autostart=False)
     assert sheet.panel in sheet.dialog.content.content.controls
 

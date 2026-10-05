@@ -555,7 +555,8 @@ def harvest_call_sites(sources, method_name: str, limit: int = 40) -> list:
 # ---------------------------------------------------------------------------
 
 _IMMUTABLE_TYPES = frozenset({str, int, float, bool, type(None), bytes, complex, _Missing})
-_WIDGET_TYPES = (fakes.FakeWidget, fakes.FakeLineEdit, fakes.FakeCheck, fakes.FakeTextEdit, fakes.FakeCombo)
+_WIDGET_TYPES = (fakes.FakeWidget, fakes.FakeLineEdit, fakes.FakeCheck, fakes.FakeTextEdit, fakes.FakeCombo,
+                 *fakes.FAKE_U4_TYPES)
 
 
 def fast_copy(value):
@@ -571,6 +572,9 @@ def fast_copy(value):
         return tuple(fast_copy(v) for v in value)
     if t is set:
         return {fast_copy(v) for v in value}
+    parity_copy = getattr(value, "parity_copy", None)
+    if parity_copy is not None and not isinstance(value, type):
+        return parity_copy()  # U4 fakes holding nested mutable fakes (lists, tables)
     if isinstance(value, _WIDGET_TYPES):
         clone = copy.copy(value)
         if isinstance(clone, fakes.FakeCombo):
@@ -605,6 +609,9 @@ def map_strings(value, fn):
         return tuple(map_strings(v, fn) for v in value)
     if t in (set, frozenset):
         return t(map_strings(v, fn) for v in value)
+    parity_copy = getattr(value, "parity_copy", None)
+    if parity_copy is not None and not isinstance(value, type):
+        return parity_copy()
     if isinstance(value, _WIDGET_TYPES):
         clone = copy.copy(value)
         for k, v in list(vars(clone).items()):
@@ -732,6 +739,10 @@ class QtStub:
 
     def __bool__(self):
         return True
+
+    def __instancecheck__(self, instance):
+        # ``isinstance(owner, QObject)``: fuzz owners are never Qt objects
+        return False
 
     def __iter__(self):
         return iter(())
@@ -907,6 +918,9 @@ FUZZ_FILES = {
     "inputs/fuzz.txt": "첫 번째 문단.\n\n두 번째 문단.\n",
     "inputs/Fuzz Doc.pdf": "%PDF-1.4\n",
     "inputs/ep01.srt": "1\n00:00:01,000 --> 00:00:02,000\n안녕\n",
+    # U4 (on_model_change): Google Cloud service-account JSON, a readable and a broken one
+    "inputs/service_account.json": '{"type": "service_account", "project_id": "fuzz-project"}',
+    "inputs/broken_creds.json": "{not json",
     "inputs/fuzz_glossary.csv": _GLOSSARY_CSV,
     "outputs/Fuzz Novel/response_0001_chapter.html": "<html><body><p>x</p></body></html>",
 }
@@ -1564,11 +1578,262 @@ def _archive_path_args(gen, rng):
     return (rng.choice((None, "", "abc", 5, "x.ZIP", "page.HTM")),), {}
 
 
+# ---- U4: model routes, chunk size, model catalog / Model Manager -------------------------------
+
+#: catalog model ids (case / blank / duplicate variants included)
+U4_CATALOG_MODELS = ("gpt-4o", "gemini-3.7-flash", "provider/kept", "provider/deleted", "Provider/Deleted",
+                     "authgpt/gpt-6-luna", " spaced/model ", "", "grok-4", "provider/new", "custom/mine")
+_U4_PROVIDERS = ("gemini", "openai", "xai", "openrouter")
+_U4_STATUSES = ("online (3 models)", "online", "static fallback (no provider credential)",
+                "static fallback (timeout)", "error: boom", "")
+
+
+def _catalog_result_args(gen, rng):
+    """``(result,)``: a model_options CatalogRefreshResult-like namespace (or junk)."""
+    if rng.random() < 0.08:
+        return (rng.choice((None, 5, "abc", types.SimpleNamespace())),), {}
+    statuses, provider_models = {}, {}
+    for provider in rng.sample(_U4_PROVIDERS, rng.randint(0, len(_U4_PROVIDERS))):
+        statuses[provider] = rng.choice(_U4_STATUSES)
+        if rng.random() < 0.8:
+            provider_models[provider] = rng.sample(U4_CATALOG_MODELS, rng.randint(0, 4))
+    if rng.random() < 0.1:
+        provider_models[rng.choice(_U4_PROVIDERS)] = None
+    result = types.SimpleNamespace(
+        models=rng.sample(U4_CATALOG_MODELS, rng.randint(0, len(U4_CATALOG_MODELS))),
+        statuses=statuses,
+        provider_models=provider_models,
+        requested_provider=rng.choice((None, None, None, *_U4_PROVIDERS, "missing")),
+        restore_removed_models=rng.random() < 0.4,
+    )
+    if rng.random() < 0.1:
+        delattr(result, rng.choice(("models", "statuses", "provider_models", "requested_provider",
+                                    "restore_removed_models")))
+    return (result,), {}
+
+
+def _model_values_args(gen, rng):
+    """``(model_values,)`` + add_to_saved / refresh for _restore_removed_model_choices."""
+    if rng.random() < 0.12:
+        values = rng.choice((None, 5, "abc", [], ()))
+    else:
+        values = [rng.choice(U4_CATALOG_MODELS + (None, 3)) for _ in range(rng.randint(0, 4))]
+    kwargs = {}
+    if rng.random() < 0.7:
+        kwargs["add_to_saved"] = rng.choice((True, False))
+    if rng.random() < 0.7:
+        kwargs["refresh"] = rng.choice((True, False))
+    return (values,), kwargs
+
+
+def _u4_dialog(rng, **extra):
+    attrs = {}
+    if rng.random() < 0.7:
+        attrs["_model_manager_original_models"] = rng.sample(U4_CATALOG_MODELS, rng.randint(0, 6))
+    if rng.random() < 0.6:
+        attrs["_model_mousewheel_lock_toggle"] = fakes.FakeCheck(rng.random() < 0.5)
+    if rng.random() < 0.5:
+        attrs["_hide_unpolled_models_toggle"] = fakes.FakeCheck(rng.random() < 0.5)
+    attrs.update(extra)
+    return fakes.FakeModelManager(**attrs)
+
+
+def _model_order_args(gen, rng):
+    """``(list_widget, dialog)`` for _save_model_order."""
+    order = rng.sample(U4_CATALOG_MODELS, rng.randint(0, 6))
+    return (fakes.FakeListWidget(order), _u4_dialog(rng)), {}
+
+
+_U4_PREFIXES = ("", "lan", "lan/", "/img", "bad prefix", "LAN/", "a\\b", "anth")
+_U4_BASE_URLS = ("", "http://192.168.1.20:11434/v1/", "https://images.example.test", "ftp://x.test",
+                 "x.test", "HTTPS://Upper.example.test//")
+_U4_ENDPOINTS = ("/chat/completions", "openai_chat", "", "abc", "{base_url}/v1/messages", "/v1/ocr", "/v1 x",
+                 None, "/{model_id}")
+
+
+def _u4_cell(rng, text):
+    kind = rng.random()
+    if kind < 0.45:
+        return fakes.FakeLineEdit(text if text is not None else "")
+    if kind < 0.6:
+        return fakes.FakeCombo([(str(text), text)]) if text is not None else fakes.FakeCombo()
+    if kind < 0.7:
+        return fakes.FakeDataCell(text)
+    if kind < 0.9:
+        return fakes.FakeTableItem("" if text is None else text)
+    return None
+
+
+def _u4_table(rng):
+    rows = []
+    for _ in range(rng.randint(0, 4)):
+        rows.append((_u4_cell(rng, rng.choice(_U4_PREFIXES)), _u4_cell(rng, rng.choice(_U4_BASE_URLS)),
+                     _u4_cell(rng, rng.choice(_U4_ENDPOINTS))))
+    return fakes.FakeTable(rows)
+
+
+def _prefix_table_args(gen, rng):
+    """``(table, dialog)`` for _collect_custom_prefix_routes_from_table."""
+    return (_u4_table(rng), _u4_dialog(rng)), {}
+
+
+def _manager_state_args(gen, rng):
+    """``(list_widget, prefix_table, dialog)`` for _save_model_manager_state."""
+    order = rng.sample(U4_CATALOG_MODELS, rng.randint(0, 6))
+    return (fakes.FakeListWidget(order), _u4_table(rng), _u4_dialog(rng)), {}
+
+
+def _polled_icons_args(gen, rng):
+    """``(manager, polled_model_keys)`` for the static _apply_polled_model_icons."""
+    r = rng.random()
+    if r < 0.1:
+        manager = rng.choice((None, "abc", fakes.FakeModelManager()))
+    else:
+        manager = _u4_dialog(rng, _model_list_widget=fakes.FakeListWidget(
+            rng.sample(U4_CATALOG_MODELS, rng.randint(0, 6))))
+    keys = rng.choice((None, set(), "abc", {"GPT-4o", "provider/kept", " provider/new"},
+                       ["gemini-3.7-flash", "custom/mine"], frozenset({"provider/deleted"})))
+    return (manager, keys), {}
+
+
+def _chunk_size_args(gen, rng):
+    """``(chunk_size,)`` for _apply_chunk_size."""
+    return (rng.choice((0, -5, 1, 1000, 20000, 64000, 200000, "abc", None, "12000", 3.7, True, "1e3")),), {}
+
+
 ARG_PROFILES = {
     "none": lambda gen, rng: ((), {}),
     "save_config": lambda gen, rng: ((), {"show_message": rng.choice((False, True))}),
     "unique_files": _unique_files_args,
     "archive_path": _archive_path_args,
+    # U4
+    "catalog_result": _catalog_result_args,
+    "model_values": _model_values_args,
+    "model_order": _model_order_args,
+    "prefix_table": _prefix_table_args,
+    "manager_state": _manager_state_args,
+    "polled_icons": _polled_icons_args,
+    "chunk_size": _chunk_size_args,
+}
+
+
+#: U4 route models: every rule of on_model_change / settings_rules (prefix digits, case, blanks)
+U4_ROUTE_MODELS = (
+    "authgpt/gpt-6-luna", "authgpt0/gpt-5", "authgpt2/gpt-5", "AuthGPT/x", "authgrok/grok-4",
+    "authgrok0/grok-4", "authgrok3/x", "authcd/claude", "authcd2/claude", "authgem/gemini-3",
+    "authgem-vertex/gemini", "authgem-vertex0/gemini", "authgem-vertex4/gemini", "vertex/gemini-2.5-pro",
+    "vertex_ai/x", "gemini-2.5-pro@001", "google-translate", "Google-Translate", "google-translate-free",
+    "ocagy/x", "antigravity/claude", "authza/glm", "autharena/x", "gpt-4o", "", " authgpt/x ",
+)
+_U4_POOL_CONFIGS = (
+    {},
+    {"use_multi_api_keys": True, "multi_api_keys": [
+        {"model": "authgpt0/gpt-5", "api_key": "k"}, {"model": "vertex/gemini-2.5-pro", "enabled": False},
+        {"model": "authgem-vertex2/gemini"}]},
+    {"use_glossary_keys": True, "glossary_keys": [
+        {"model": "google-translate"}, {"model": "authcd1/claude"}, {"model": "authgrok0/grok-4"}],
+     "use_tts_keys": True, "tts_keys": [{"model": "gemini-tts@001"}]},
+    {"use_fallback_keys": True, "fallback_keys": [
+        {"model": "authgem/gemini-3"}, {"model": "AUTHGPT2/x"}, {"model": 5}, "junk", None],
+     "use_rolling_summary_keys": True, "rolling_summary_keys": [{"model": "authgrok3/x", "enabled": True}]},
+    {"use_metadata_keys": True, "metadata_keys": [{"model": "vertex_ai/x"}],
+     "use_qa_scan_keys": True, "qa_scan_keys": [{"model": "authgpt0/y"}, {"model": "ocagy/z"}]},
+    {"google_cloud_credentials": "<SANDBOX>/inputs/service_account.json"},
+    {"google_cloud_credentials": "<SANDBOX>/inputs/broken_creds.json",
+     "use_multi_api_keys": True, "multi_api_keys": [{"model": "authgem-vertex0/x"}, {"model": "antigravity/y"}]},
+    {"google_cloud_credentials": "<SANDBOX>/inputs/missing.json", "use_truncation_retry_keys": True,
+     "truncation_retry_keys": "not-a-list"},
+)
+_U4_ROUTE_HINTS = (
+    {}, {"_multi_key_manager_needs_google_creds_hint": True}, {"_multi_key_manager_authgpt_pool_hint": True},
+    {"_multi_key_manager_authgrok_pool_hint": True}, {"_multi_key_manager_authgem_vertex_model_hint": "authgem-vertex1/x"},
+    {"_multi_key_manager_ocagy_hint": True, "_multi_key_manager_antigravity_hint": "yes"},
+)
+
+
+def _u4_route_preset():
+    widget = fakes.FakeStatefulWidget
+    common = {name: widget(name=name) for name in (
+        "vertex_location_entry", "gcloud_button", "gcloud_status_label", "authgpt_login_btn",
+        "authgrok_login_btn", "authcd_login_btn", "authgem_login_btn", "authgem_status_btn",
+        "authgem_project_combo", "ocagy_login_btn", "ocagy_status_btn", "antigravity_login_btn",
+        "antigravity_status_btn")}
+    common.update(gcloud_button_enabled_style="enabled-style", gcloud_button_disabled_style="disabled-style")
+    variants = []
+    for i, model in enumerate(U4_ROUTE_MODELS):
+        attrs = {"model_var": model}
+        attrs.update(_U4_ROUTE_HINTS[i % len(_U4_ROUTE_HINTS)])
+        variants.append((attrs, _U4_POOL_CONFIGS[i % len(_U4_POOL_CONFIGS)]))
+    return common, variants
+
+
+_U4_CATALOG_CONFIGS = (
+    {},
+    {"custom_model_list": ["provider/kept", "gpt-4o"], "model_manager_removed_models": ["provider/deleted",
+                                                                                         "gemini-3.7-flash"]},
+    {"model_manager_removed_models": ["Provider/Deleted", " ", "grok-4"], "custom_model_list": "not-a-list"},
+    {"model_manager_removed_models": None, "model_mousewheel_locked": False},
+    {"custom_model_list": [], "model_manager_removed_models": ["provider/new", "custom/mine"],
+     "model_manager_hide_unpolled_models": True},
+)
+
+
+def _u4_manager(pending, draft, hide, with_list=True):
+    return fakes.FakeModelManager(
+        _model_list_widget=(fakes.FakeListWidget(["provider/kept", "provider/deleted", "custom/mine"], current=1)
+                            if with_list else None),
+        _catalog_poll_pending=pending,
+        _model_manager_draft_active=draft,
+        _known_catalog_models={"provider/kept", "provider/deleted", "gpt-4o"},
+        _model_poll_button=fakes.FakeStatefulWidget(name="poll_button"),
+        _model_poll_status=fakes.FakeStatefulWidget(name="poll_status"),
+        _save_model_list_state=fakes.FakeCallCounter("save_model_list_state"),
+        _hide_unpolled_models_toggle=fakes.FakeCheck(hide),
+    )
+
+
+def _u4_catalog_preset():
+    common = {
+        "model_combo": fakes.FakeCombo([(m, None) for m in ("provider/kept", "gpt-4o", "grok-4")]),
+        "_model_all_values": ["provider/kept", "gpt-4o", "provider/deleted"],
+    }
+    attr_variants = (
+        {"_model_manager_dialog": None},
+        {"_model_manager_dialog": _u4_manager(True, False, False), "_provider_model_catalog_poll_active": True},
+        {"_model_manager_dialog": _u4_manager(False, True, True), "_model_catalog_feedback_requested": True},
+        {"_model_manager_dialog": _u4_manager(True, True, False, with_list=False),
+         "_provider_model_catalog_full_refresh_pending": True},
+        {"_multi_api_key_dialog": fakes.FakeModelManager(
+            _set_all_model_poll_borders_active=fakes.FakeCallCounter("poll_borders")),
+         "_provider_model_catalog_poll_active": True},
+    )
+    variants = [(attr_variants[i % len(attr_variants)], config) for i, config in enumerate(_U4_CATALOG_CONFIGS)]
+    variants += [(attrs, _U4_CATALOG_CONFIGS[(i + 2) % len(_U4_CATALOG_CONFIGS)])
+                 for i, attrs in enumerate(attr_variants)]
+    return common, variants
+
+
+def _u4_chunk_preset():
+    variants = []
+    texts = ("Auto", "auto", "", "20,000", "12000", "0", "-5", "abc", "999999", " 4096 ", "1e4", "inf")
+    for i, text in enumerate(texts):
+        attrs = {"chunk_size_entry": fakes.FakeLineEdit(text),
+                 "max_output_tokens": (65536, 128000, 400, "abc", 16000)[i % 5]}
+        if i % 2:
+            attrs["_auto_compression_cb"] = fakes.FakeCheck(i % 3 == 0)
+        if i % 3:
+            attrs["_compression_factor_edit"] = fakes.FakeLineEdit("3.0")
+        config = {"auto_compression_factor": bool(i % 2), "manual_chunk_size": (None, 20000, "abc")[i % 3]}
+        variants.append((attrs, config))
+    return {}, variants
+
+
+#: ``Moved.setup["@preset"]``: (attributes for every non-empty base, [(attrs, config) variants]);
+#: each variant adds a copy of every non-empty base (golden scenario owners) with those values.
+SETUP_PRESETS = {
+    "model_route": _u4_route_preset,
+    "model_catalog": _u4_catalog_preset,
+    "chunk_size": _u4_chunk_preset,
 }
 
 
@@ -1598,7 +1863,11 @@ class Side:
             for i, name in enumerate(call):
                 result = getattr(owner, name)(*args, **kwargs) if i == 0 else getattr(owner, name)()
             return result
-        return getattr(owner, call)(*args, **kwargs)
+        result = getattr(owner, call)(*args, **kwargs)
+        if inspect.isgenerator(result):
+            # a generator method's behaviour is what it yields (and raises while yielding)
+            result = list(result)
+        return result
 
 
 @dataclass
@@ -2134,12 +2403,25 @@ def _stub_recorder(recorder, name):
 
 
 def _resolve_bases(ctx, bases, setup) -> list:
+    setup = dict(setup or {})
+    preset = setup.pop("@preset", None)
+    common, variants = SETUP_PRESETS[preset]() if preset else ({}, [])
     out = []
     for base in bases:
         attrs = ctx.resolve(base.attrs)
+        config = ctx.resolve(base.config)
         if base.name != "empty":
-            attrs.update(ctx.resolve(dict(setup or {})))
-        out.append(Base(base.name, attrs, ctx.resolve(base.config)))
+            attrs.update(ctx.resolve(setup))
+            attrs.update(ctx.resolve(common))
+        out.append(Base(base.name, attrs, config))
+        if base.name == "empty":
+            continue
+        for i, (variant_attrs, variant_config) in enumerate(variants):
+            v_attrs = dict(attrs)
+            v_attrs.update(ctx.resolve(variant_attrs))
+            v_config = dict(config)
+            v_config.update(ctx.resolve(variant_config))
+            out.append(Base(f"{base.name}~{preset}{i}", v_attrs, v_config))
     return out
 
 
@@ -2192,6 +2474,20 @@ def check_available(spec, sess: FuzzSession, mode: str = "desktop") -> None:
         raise Unavailable(f"src/{spec.module}.py does not exist yet ({spec.milestone} move pending)")
     if not spec.fuzz:
         raise Unavailable(f"tier D disabled for {spec.name}: {spec.reason}")
+    if spec.mixin == moved_functions.REWIRED_OWNER:
+        # U4+: a TranslatorGUI method that stays a desktop handler but calls shared modules
+        missing_shared = [m for m in spec.shared if not module_exists(m)]
+        if missing_shared:
+            raise Unavailable(f"{spec.name}: shared module(s) {missing_shared} do not exist yet")
+        missing = [n for n in spec.legacy_names if n not in sess.legacy_names()]
+        if missing:
+            raise Unavailable(f"legacy oracle @ {sess.bundle.sha[:12]} has no {missing}; re-run freeze_legacy.py")
+        if mode == "desktop":
+            tg = sess.translator_gui_class()
+            if spec.name not in vars(tg):
+                raise LookupError(f"{spec.name} is listed in moved_functions.REWIRED but TranslatorGUI "
+                                  "no longer defines it")
+        return
     mixins = sess.mixin_classes()
     cls = mixins.get(spec.module)
     if cls is None:

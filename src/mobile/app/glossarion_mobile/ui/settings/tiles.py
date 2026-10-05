@@ -643,7 +643,7 @@ class JsonTile(SettingTile):
     def readonly(self) -> Optional[str]:
         # Key-pool lists (typed "secret") hold API keys: never shown or edited as raw JSON here.
         if spec_type(self.spec) in ("secret", "password"):
-            return "Edited in API keys (U4)"
+            return "Edited in API keys"
         return None
 
     def summary(self) -> str:
@@ -652,6 +652,26 @@ class JsonTile(SettingTile):
             count = len(value) if isinstance(value, (list, dict)) else 0
             return f"{count} key{'s' if count != 1 else ''}" if count else "No keys"
         return super().summary()
+
+    def pool_slug(self) -> Optional[str]:
+        """Route slug of the API-key pool stored under this key (``key_pool_service.POOL_SPECS``)."""
+        if spec_type(self.spec) not in ("secret", "password"):
+            return None
+        try:
+            from glossarion_mobile.ui.screens.keys import KeyBackend
+
+            for spec in KeyBackend().pool_specs():
+                if spec.config_key == self.key:
+                    return spec.slug
+        except Exception:
+            log.debug("key pool lookup for %s failed", self.key, exc_info=True)
+        return None
+
+    def _on_tap(self, e: Any = None) -> Any:
+        slug = self.pool_slug()
+        if slug:  # a key pool opens its page in Settings › API keys (KeyPoolTile, UI_SPEC §5.7)
+            return self.ctx.go("settings.keys.pool", {"pool": slug})
+        return super()._on_tap(e)
 
     def activate(self) -> Optional[JsonEditor]:
         if self.readonly_reason:

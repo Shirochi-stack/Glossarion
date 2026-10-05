@@ -4,8 +4,10 @@
    (desktop default), so the primary action signs in (OAuthBridge LoginPanel);
    "Use an API key or another provider" goes to step 2; "Skip for now" moves on
    (Send then stays blocked with the "Sign in with ChatGPT" fix action).
-2. **Other providers** - choose another model (ModelSheet) or paste an API key
-   (the desktop main key field, ``api_key``); other sign-ins arrive in U4.
+2. **Other providers** - choose another model (ModelSheet), paste an API key (the
+   desktop main key field, ``api_key``), sign in with Claude / Gemini / Grok
+   (LoginSheet through the same OAuthBridge; Grok shows its device code), or set up
+   a local Ollama / LM Studio host (Settings › Endpoints).
 3. **Target language and glossary mode** - the desktop first-run "Choose Your
    Glossary Mode" cards (same eight modes, copy and ``balanced`` preselected) and
    the target language (``output_language``).
@@ -29,6 +31,7 @@ from typing import Any, Callable, Optional, Sequence
 
 import flet as ft
 
+from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.screens.base import Screen
@@ -44,9 +47,17 @@ from glossarion_mobile.ui.screens.welcome_flow import (
     welcome_glossary_updates,
 )
 
+#: Step 2 sign-ins (ChatGPT is step 1): (provider, button label).
+OTHER_SIGN_INS = (("authcd", "Sign in with Claude"), ("authgem", "Sign in with Gemini"), ("authgrok", "Sign in with Grok"))
+#: ModelSheet search that lists a provider's sign-in models (step 2, after signing in): the default
+#: model stays ``authgpt/gpt-6-luna`` until another model is chosen.
+PROVIDER_MODEL_QUERY = {"authcd": "authcd/", "authgem": "authgem", "authgrok": "authgrok/"}
+
 __all__ = [
     "GLOSSARY_MODE_CARDS",
+    "OTHER_SIGN_INS",
     "OFF_GLOSSARY_MODES",
+    "PROVIDER_MODEL_QUERY",
     "STEPS",
     "WelcomeFlow",
     "WelcomeScreen",
@@ -67,12 +78,17 @@ class WelcomeScreen(Screen):
         on_finish: Optional[Callable[[dict], Any]] = None,  # config updates
         on_skip: Optional[Callable[[dict], Any]] = None,
         on_choose_model: Optional[Callable[[], Any]] = None,
+        on_use_provider: Optional[Callable[[str], Any]] = None,  # ModelSheet search query
         on_api_key: Optional[Callable[[str], Any]] = None,
         on_request_notifications: Optional[Callable[[], Any]] = None,
         on_request_battery: Optional[Callable[[], Any]] = None,
         on_try: Optional[Callable[[str], Any]] = None,
         is_android: bool = False,
         is_ios: bool = False,
+        oauth: Any = None,
+        navigate: Optional[Callable[..., Any]] = None,
+        copy_text: Optional[Callable[[str], Any]] = None,
+        page: Any = None,
     ) -> None:
         super().__init__(match)
         self.flow = flow or WelcomeFlow()
@@ -81,12 +97,19 @@ class WelcomeScreen(Screen):
         self.on_finish = on_finish
         self.on_skip = on_skip
         self.on_choose_model = on_choose_model
+        self.on_use_provider = on_use_provider
         self.on_api_key = on_api_key
         self.on_request_notifications = on_request_notifications
         self.on_request_battery = on_request_battery
         self.on_try = on_try
         self.is_android = is_android
         self.is_ios = is_ios
+        self.oauth = oauth  # OAuthBridge; else taken from the step-1 LoginPanel
+        self.navigate = navigate  # app.navigate_to(route_name)
+        self.copy_text = copy_text
+        self.page = page
+        self.login_sheet: Any = None
+        self.provider_status: dict = {}
         self.page_area = ft.Container(expand=True)
         self.dots = ft.Row([], alignment=ft.MainAxisAlignment.CENTER, spacing=6)
         self.back_button = ft.TextButton(content="Back", on_click=lambda e: self.back())
@@ -101,6 +124,8 @@ class WelcomeScreen(Screen):
         login: ft.Control
         if self.login_panel_factory is not None:
             login = self.login_panel_factory(self._signed_in)
+            if self.oauth is None:
+                self.oauth = getattr(login, "oauth", None)
         else:
             login = ReasonChip(reason="Sign-in is unavailable in this build")
         return ft.Column(
@@ -120,7 +145,33 @@ class WelcomeScreen(Screen):
             scroll=ft.ScrollMode.AUTO,
         )
 
+    def _sign_in_row(self, provider: str, label: str) -> ft.Control:
+        done = self.provider_status.get(provider)
+        if done:
+            who = done.get("email") or done.get("name") or ""
+            name = label.replace("Sign in with ", "")
+            row: list[ft.Control] = [ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.PRIMARY),
+                                     ft.Text(f"{name} signed in" + (f" · {who}" if who else ""))]
+            if self.on_use_provider is not None or self.on_choose_model is not None:
+                # The model is still GPT-6 Luna (ChatGPT): Send stays blocked until a model is chosen.
+                row.append(ft.FilledTonalButton(content=f"Use a {name} model", key=f"welcome-use-{provider}",
+                                                on_click=lambda e, p=provider: self.use_provider(p)))
+            return ft.Row(row, wrap=True, key=f"welcome-signed-{provider}")
+        if self.oauth is None:
+            return ft.Row([ft.Text(label), ReasonChip(reason="Sign-in unavailable in this build")], wrap=True)
+        return ft.OutlinedButton(content=label, on_click=lambda e, p=provider: self.open_sign_in(p),
+                                 key=f"welcome-signin-{provider}")
+
     def _page_providers(self) -> ft.Control:
+        if self.oauth is None and self.login_panel_factory is not None:
+            self.oauth = getattr(self.login_panel_factory(self._signed_in), "oauth", None)
+        local: ft.Control
+        if self.navigate is not None:
+            local = ft.OutlinedButton(content="Set up Ollama / LM Studio on your network",
+                                      on_click=lambda e: self._go("settings.endpoints"), key="welcome-local")
+        else:
+            local = ft.Row([ft.Text("Ollama / LM Studio on your network"),
+                            ReasonChip(reason="Settings › Endpoints")], wrap=True)
         return ft.Column(
             [
                 ft.Text(STEP_TITLES["providers"], theme_style=ft.TextThemeStyle.HEADLINE_SMALL),
@@ -129,8 +180,10 @@ class WelcomeScreen(Screen):
                 ft.FilledTonalButton(content="Choose another model", on_click=lambda e: self._choose_model()),
                 self.api_key_field,
                 ft.TextButton(content="Save API key", on_click=lambda e: self._save_key()),
-                ft.Row([ft.Text("Claude · Gemini · Grok sign-in"), ReasonChip(reason="Arrives in U4")], wrap=True),
-                ft.Row([ft.Text("Ollama / LM Studio on your network"), ReasonChip(reason="Arrives in U4")], wrap=True),
+                ft.Text("Subscriptions (no API key needed)", theme_style=ft.TextThemeStyle.TITLE_SMALL),
+                *[self._sign_in_row(provider, label) for provider, label in OTHER_SIGN_INS],
+                ft.Text("Local", theme_style=ft.TextThemeStyle.TITLE_SMALL),
+                local,
             ],
             spacing=10,
             scroll=ft.ScrollMode.AUTO,
@@ -289,8 +342,45 @@ class WelcomeScreen(Screen):
         self.flow.mark_signed_in()
         self.render()
 
+    def open_sign_in(self, provider: str) -> Any:
+        """Step 2: the LoginSheet for Claude / Gemini / Grok (slot #0)."""
+        if self.oauth is None:
+            return None
+        from glossarion_mobile.ui.screens.accounts import LoginSheet
+
+        sheet = LoginSheet(self.oauth, provider=provider, account_id=0, copy_text=self.copy_text,
+                           on_done=lambda status, p=provider: self._provider_signed_in(p, status))
+        self.login_sheet = sheet
+        page = self.page
+        if page is None and self.body is not None:
+            try:
+                page = self.body.page  # raises while the body is not on a page
+            except Exception:
+                page = None
+        if page is not None:
+            sheet.show(page)
+        return sheet
+
+    def _provider_signed_in(self, provider: str, status: dict) -> None:
+        self.provider_status[provider] = dict(status or {})
+        self.flow.signed_in = True
+        self.render()
+        self.use_provider(provider)  # offer that provider's models right away
+
+    def _go(self, route_name: str) -> None:
+        if self.navigate is not None:
+            self.navigate(route_name)
+
     def _choose_model(self) -> None:
         self._call(self.on_choose_model)
+
+    def use_provider(self, provider: str) -> None:
+        """After a step-2 sign-in: the ModelSheet searching that provider's models (the default
+        model stays ``authgpt/gpt-6-luna``, which needs ChatGPT, until another one is chosen)."""
+        if self.on_use_provider is not None:
+            call_handler(self.on_use_provider, PROVIDER_MODEL_QUERY.get(provider, provider))
+        else:
+            self._choose_model()
 
     def _save_key(self) -> None:
         value = (self.api_key_field.value or "").strip()
@@ -305,5 +395,4 @@ class WelcomeScreen(Screen):
 
     @staticmethod
     def _call(handler: Optional[Callable[[], Any]]) -> None:
-        if handler is not None:
-            handler()
+        call_handler(handler)  # sync or async (permission requests are coroutines)

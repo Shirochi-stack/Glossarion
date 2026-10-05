@@ -264,7 +264,212 @@ class FakeSignal:
         return {"__fake__": "FakeSignal", "name": self._name}
 
 
+# ---------------------------------------------------------------------------
+# U4: login buttons / status labels, the Model Manager dialog, its model list and
+# custom-prefix table. Their state is part of ``describe()`` (owner attributes are
+# compared through it) and every mutation is also printed, because the dialog, list and
+# table often arrive as call *arguments*, which tier D does not snapshot (stdout is).
+# ``parity_copy()`` gives each side its own deep copy.
+# ---------------------------------------------------------------------------
+
+
+def describe_value(value):
+    """Order-independent literal view of a fake's attribute value."""
+    describe = getattr(value, "describe", None)
+    if callable(describe) and not isinstance(value, type):
+        return describe()
+    if isinstance(value, dict):
+        return {str(k): describe_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [describe_value(v) for v in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((describe_value(v) for v in value), key=repr)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if callable(value):
+        return f"<callable {getattr(value, '__name__', type(value).__name__)}>"
+    return f"<{type(value).__name__}>"
+
+
+class _ParityCopy:
+    def parity_copy(self):
+        import copy
+
+        return copy.deepcopy(self)
+
+
+class FakeStatefulWidget(_ParityCopy, _FakeWidgetBase):
+    """Button / label / combo whose visibility, enabled state, text and style are compared."""
+
+    def __init__(self, text="", name="widget"):
+        super().__init__()
+        self._text = _qt_text(text)
+        self._style = ""
+        self._name = name
+
+    def text(self):
+        return self._text
+
+    def setText(self, text):
+        self._text = _qt_text(text)
+        print(f"[fake {self._name}] setText {self._text!r}")
+
+    def setStyleSheet(self, text):
+        self._style = str(text)
+
+    def count(self):
+        return 0
+
+    def describe(self):
+        return {"__fake__": "FakeStatefulWidget", "name": self._name, "text": self._text,
+                "visible": self._visible, "enabled": self._enabled, "style": self._style}
+
+
+class FakeCallCounter(_ParityCopy):
+    """A callable attribute (e.g. the Model Manager's ``_save_model_list_state``)."""
+
+    def __init__(self, name="callback"):
+        self.name = name
+        self.calls = 0
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        print(f"[fake {self.name}] called {describe_value(list(args))} {describe_value(kwargs)}")
+
+    def describe(self):
+        return {"__fake__": "FakeCallCounter", "name": self.name, "calls": self.calls}
+
+
+class FakeListItem(_ParityCopy):
+    """QListWidgetItem: text, icon, hidden flag, tooltip."""
+
+    def __init__(self, text):
+        self._text = str(text)
+        self.icon = None
+        self.hidden = False
+        self.tooltip = ""
+
+    def text(self):
+        return self._text
+
+    def setIcon(self, icon):
+        self.icon = describe_value(icon)
+        print(f"[fake item {self._text!r}] icon {self.icon!r}")
+
+    def setHidden(self, hidden):
+        self.hidden = hidden
+        print(f"[fake item {self._text!r}] hidden {hidden!r}")
+
+    def setToolTip(self, text):
+        self.tooltip = text
+        print(f"[fake item {self._text!r}] tooltip {text!r}")
+
+    def describe(self):
+        return {"text": self._text, "icon": self.icon, "hidden": self.hidden, "tooltip": self.tooltip}
+
+
+class FakeListWidget(_ParityCopy, _FakeWidgetBase):
+    """QListWidget of text items (Model Manager list)."""
+
+    def __init__(self, texts=(), current=-1):
+        super().__init__()
+        self._items = [FakeListItem(t) for t in texts]
+        self._current = current
+
+    def count(self):
+        return len(self._items)
+
+    def item(self, index):
+        return self._items[index]
+
+    def clear(self):
+        self._items = []
+        self._current = -1
+        print("[fake list] clear")
+
+    def addItems(self, texts):
+        texts = list(texts)
+        self._items.extend(FakeListItem(t) for t in texts)
+        print(f"[fake list] addItems {texts!r}")
+
+    def currentItem(self):
+        return self._items[self._current] if 0 <= self._current < len(self._items) else None
+
+    def setCurrentRow(self, row):
+        self._current = int(row)
+        print(f"[fake list] setCurrentRow {row!r}")
+
+    def describe(self):
+        return {"__fake__": "FakeListWidget", "items": [i.describe() for i in self._items],
+                "current": self._current}
+
+
+class FakeModelManager(_ParityCopy, _FakeWidgetBase):
+    """The Model Manager dialog: plain attributes (printed when set after init) + accept()."""
+
+    def __init__(self, **attrs):
+        object.__setattr__(self, "_init_done", False)
+        super().__init__()
+        for key, value in attrs.items():
+            setattr(self, key, value)
+        self.accepted = 0
+        object.__setattr__(self, "_init_done", True)
+
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        if self.__dict__.get("_init_done"):
+            print(f"[fake dialog] {name} = {describe_value(value)!r}")
+
+    def accept(self):
+        self.accepted += 1
+
+    def describe(self):
+        return {"__fake__": "FakeModelManager",
+                **{k: describe_value(v) for k, v in sorted(vars(self).items())
+                   if k not in ("_init_done", "_signals_blocked")}}
+
+
+class FakeTableItem(_ParityCopy):
+    """QTableWidgetItem (text only)."""
+
+    def __init__(self, text):
+        self._text = str(text)
+
+    def text(self):
+        return self._text
+
+
+class FakeDataCell(_ParityCopy):
+    """A cell widget answering only currentData() (no text / currentText)."""
+
+    def __init__(self, data):
+        self._data = data
+
+    def currentData(self):
+        return self._data
+
+
+class FakeTable(_ParityCopy):
+    """QTableWidget rows of (prefix, base URL, endpoint type) cells: a widget or an item."""
+
+    def __init__(self, rows=()):
+        self._rows = [tuple(r) for r in rows]
+
+    def rowCount(self):
+        return len(self._rows)
+
+    def cellWidget(self, row, col):
+        cell = self._rows[row][col]
+        return None if isinstance(cell, FakeTableItem) else cell
+
+    def item(self, row, col):
+        cell = self._rows[row][col]
+        return cell if isinstance(cell, FakeTableItem) else None
+
+
 FAKE_WIDGET_TYPES = (FakeWidget, FakeLineEdit, FakeCheck, FakeTextEdit, FakeCombo)
+#: U4 fakes (compared through describe(), copied with parity_copy())
+FAKE_U4_TYPES = (FakeStatefulWidget, FakeCallCounter, FakeListWidget, FakeModelManager)
 
 #: Signal class attributes of TranslatorGUI @ BASE_SHA (instances get FakeSignal recorders).
 DESKTOP_SIGNALS = (

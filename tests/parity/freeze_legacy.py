@@ -144,6 +144,44 @@ TG_ENTRY_METHODS = (
     "save_config",
 )
 
+#: U4: TranslatorGUI methods that stay desktop handlers but now call the shared GUI-free
+#: rules (settings_rules: model-route control visibility, chunk-size / compression helpers)
+#: and model catalog core (model_catalog_core: tombstones, poll markers, provider refresh,
+#: Model Manager save order and custom prefix validation). Tier D fuzzes each of them
+#: (moved_functions.REWIRED): frozen legacy vs the working-tree TranslatorGUI method.
+TG_ENTRY_METHODS_U4 = (
+    # model-route-driven login / key / Google-credential controls (settings_rules.route_*)
+    "on_model_change",
+    "_model_needs_google_creds",
+    "_iter_enabled_key_pool_models",
+    "_has_google_creds_model_in_key_pools",
+    "_has_vertex_model_in_key_pools",
+    "_has_authgpt_in_key_pools",
+    "_has_authgrok_in_key_pools",
+    "_authgpt_pool_route_requested",
+    "_authgrok_pool_route_requested",
+    "_has_authgem_in_key_pools",
+    "_has_authgem_vertex_in_key_pools",
+    "_has_authcd_in_key_pools",
+    "_collect_auth_account_ids_from_pools",
+    "_authgem_vertex_control_model",
+    # main-window Chunk Size field (settings_rules compression helpers)
+    "_on_chunk_size_edited",
+    "_apply_chunk_size",
+    "_remember_manual_chunk_size",
+    "_hold_manual_chunk_size",
+    # model catalog (model_catalog_core)
+    "_restore_removed_model_choices",
+    "_ensure_polled_model_marker_state",
+    "_expire_polled_model_markers",
+    "_apply_polled_model_icons",
+    "_apply_provider_model_catalog_refresh",
+    "_save_model_order",
+    "_collect_custom_prefix_routes_from_table",
+    "_save_model_manager_state",
+)
+TG_ENTRY_METHODS = TG_ENTRY_METHODS + TG_ENTRY_METHODS_U4
+
 #: Frozen verbatim for later steps (U3 trace tier) but NOT closed over or exercised in U0.
 TG_FREEZE_ONLY_METHODS = (
     "run_translation_thread",
@@ -180,6 +218,27 @@ TG_RECORDED_METHODS = frozenset({
     "update_run_button",
     "_update_manual_glossary_status",
     "_update_compression_token_budget_label",
+    # U4: GUI-only callees of the TG_ENTRY_METHODS_U4 handlers (login buttons and their
+    # token-store snapshots, account-slot combos, model combo / completer / poll border,
+    # the mouse-wheel guard, the consolidated poll log and the queued full refresh)
+    "_update_target_lang_state",
+    "_update_authgpt_login_status",
+    "_update_authgrok_login_status",
+    "_update_authcd_login_status",
+    "_update_authgem_login_status",
+    "_update_ocagy_login_status",
+    "_update_authza_login_status",
+    "_update_antigravity_login_status",
+    "_auth_status_snapshot",
+    "_fetch_authgem_projects",
+    "_reposition_authgem_project_combo",
+    "_refresh_auth_account_arrows",
+    "_set_model_poll_border_active",
+    "_refresh_model_combo_catalog",
+    "_refresh_model_search_poll_state",
+    "_apply_combobox_mousewheel_lock",
+    "_log_provider_model_catalog_feedback",
+    "_launch_pending_full_provider_catalog_refresh",
 })
 
 #: Shared GUI-free mixin modules (U2+). When they exist at the frozen SHA the

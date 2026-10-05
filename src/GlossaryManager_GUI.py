@@ -4,6 +4,7 @@ Comprehensive glossary management for automatic and manual glossary extraction
 """
 
 import os
+import settings_rules  # glossary-mode lock rules shared with the mobile app (U4)
 import sys
 import json
 import threading
@@ -5228,21 +5229,13 @@ Do not stop after the glossary."""
         # Update states function with proper error handling - converted to use signals
         def update_auto_glossary_state(*_args):
             mode_raw = self.auto_glossary_mode_combo.currentText() if hasattr(self, 'auto_glossary_mode_combo') else 'Off'
-            # Map display text to internal mode key
-            # (Old label "Off (No Auto-Mapping)" still accepted for backward
+            # Map display text to internal mode key (settings_rules, shared with the mobile app;
+            # the old label "Off (No Auto-Mapping)" is still accepted for backward
             # compatibility with saved configs / older builds.)
-            _display_to_mode = {
-                'Off': 'off', 'Off (Fuzzy Mapping)': 'off_fuzzy_automap',
-                'Manual Glossary Only': 'off_no_automap',
-                'Off (No Auto-Mapping)': 'off_no_automap',
-                'No Glossary': 'no_glossary', 'Minimal': 'minimal',
-                'Balanced': 'balanced', 'Full': 'full',
-                'Single Pass': 'single_pass',
-            }
-            mode = _display_to_mode.get(mode_raw, mode_raw.lower().replace(' ', '_'))
-            enabled = mode not in ('off', 'off_no_automap', 'no_glossary')
+            mode = settings_rules.glossary_mode_from_display(mode_raw)
+            enabled = settings_rules.glossary_mode_extracts(mode)
             # Targeted Extraction Settings only apply to Minimal mode
-            extraction_enabled = mode == 'minimal'
+            extraction_enabled = settings_rules.glossary_mode_targeted_extraction(mode)
             
             # Enable/disable the entire Targeted Extraction Settings group box
             settings_label_frame.setEnabled(extraction_enabled)
@@ -5300,129 +5293,94 @@ Do not stop after the glossary."""
             # Get the append glossary description label
             _append_desc_label = getattr(self, '_append_glossary_desc_label', None)
 
-            # Auto-enable & lock append glossary when off/minimal/balanced/full is selected
-            if mode not in ('no_glossary',) and hasattr(self, 'append_glossary_checkbox'):
-                if not self.append_glossary_checkbox.isChecked():
-                    self.append_glossary_checkbox.setChecked(True)
-                _lock_toggle(self.append_glossary_checkbox, _append_desc_label)
-                if _append_desc_label:
-                    _append_desc_label.mousePressEvent = lambda _: None
-            elif hasattr(self, 'append_glossary_checkbox'):
-                _unlock_toggle(self.append_glossary_checkbox, _append_desc_label)
-                if _append_desc_label:
-                    _append_desc_label.mousePressEvent = lambda _: self.append_glossary_checkbox.toggle()
-
-            # Auto-enable & lock auto-map when off/off_fuzzy_automap/balanced/full is selected
-            if mode in ('off', 'off_fuzzy_automap', 'balanced', 'full', 'single_pass') and hasattr(self, 'append_glossary_auto_load_checkbox'):
-                if not self.append_glossary_auto_load_checkbox.isChecked():
-                    self.append_glossary_auto_load_checkbox.setChecked(True)
-                _lock_toggle(self.append_glossary_auto_load_checkbox, _auto_load_desc_label)
-                # Block label click when locked
-                if _auto_load_desc_label:
-                    _auto_load_desc_label.mousePressEvent = lambda _: None
-            elif mode not in ('off_no_automap', 'minimal', 'no_glossary') and hasattr(self, 'append_glossary_auto_load_checkbox'):
-                _unlock_toggle(self.append_glossary_auto_load_checkbox, _auto_load_desc_label)
-                # Restore label click
-                if _auto_load_desc_label:
-                    _auto_load_desc_label.mousePressEvent = lambda _: self.append_glossary_auto_load_checkbox.toggle()
-
-            # Fuzzy auto-mapping lock logic
-            _fuzzy_desc_label = None
-            try:
-                if hasattr(self, 'fuzzy_auto_mapping_checkbox'):
-                    parent_widget = self.fuzzy_auto_mapping_checkbox.parentWidget()
-                    if parent_widget:
-                        for child in parent_widget.findChildren(QLabel):
-                            if 'similar' in (child.text() or '').lower():
-                                _fuzzy_desc_label = child
-                                break
-            except Exception:
-                pass
-
-            if mode == 'off_fuzzy_automap' and hasattr(self, 'fuzzy_auto_mapping_checkbox'):
-                if not self.fuzzy_auto_mapping_checkbox.isChecked():
-                    self.fuzzy_auto_mapping_checkbox.setChecked(True)
-                _lock_toggle(self.fuzzy_auto_mapping_checkbox, _fuzzy_desc_label)
-                if _fuzzy_desc_label:
-                    _fuzzy_desc_label.mousePressEvent = lambda _: None
-                self.config['fuzzy_auto_mapping'] = True
-                if hasattr(self, 'fuzzy_auto_mapping_var'):
-                    self.fuzzy_auto_mapping_var = True
-                # Keep slider interactive (user can adjust threshold)
-                if hasattr(self, 'fuzzy_mapping_slider'):
-                    self.fuzzy_mapping_slider.setEnabled(True)
-                    self.fuzzy_mapping_slider.setStyleSheet("")
-                    self.fuzzy_mapping_slider._mode_locked = False
-                if hasattr(self, 'fuzzy_mapping_value_label'):
-                    self.fuzzy_mapping_value_label.setStyleSheet("color: white; font-size: 9pt; min-width: 30px;")
+            def _find_fuzzy_desc_label():
+                _fuzzy_desc_label = None
                 try:
-                    if hasattr(self, 'fuzzy_mapping_slider'):
-                        _slider_parent = self.fuzzy_mapping_slider.parentWidget()
-                        if _slider_parent:
-                            for child in _slider_parent.findChildren(QLabel):
-                                if 'similarity' in (child.text() or '').lower():
-                                    child.setStyleSheet("color: #aaa; font-size: 9pt;")
-                                    child._mode_locked = False
+                    if hasattr(self, 'fuzzy_auto_mapping_checkbox'):
+                        parent_widget = self.fuzzy_auto_mapping_checkbox.parentWidget()
+                        if parent_widget:
+                            for child in parent_widget.findChildren(QLabel):
+                                if 'similar' in (child.text() or '').lower():
+                                    _fuzzy_desc_label = child
                                     break
                 except Exception:
                     pass
-            elif hasattr(self, 'fuzzy_auto_mapping_checkbox'):
-                # All other modes: lock fuzzy OFF
-                if self.fuzzy_auto_mapping_checkbox.isChecked():
-                    self.fuzzy_auto_mapping_checkbox.setChecked(False)
-                _lock_toggle(self.fuzzy_auto_mapping_checkbox, _fuzzy_desc_label)
-                if _fuzzy_desc_label:
-                    _fuzzy_desc_label.mousePressEvent = lambda _: None
-                self.config['fuzzy_auto_mapping'] = False
-                if hasattr(self, 'fuzzy_auto_mapping_var'):
-                    self.fuzzy_auto_mapping_var = False
-                # Lock slider with purple styling
-                if hasattr(self, 'fuzzy_mapping_slider'):
-                    self.fuzzy_mapping_slider.setEnabled(False)
-                    self.fuzzy_mapping_slider.setStyleSheet("QSlider { color: #b388ff; }")
-                    self.fuzzy_mapping_slider._mode_locked = True
-                if hasattr(self, 'fuzzy_mapping_value_label'):
-                    self.fuzzy_mapping_value_label.setStyleSheet("color: #b388ff; font-size: 9pt; min-width: 30px;")
-                try:
+                return _fuzzy_desc_label
+
+            def _set_fuzzy_slider_locked(locked):
+                if not locked:
+                    # Keep slider interactive (user can adjust threshold)
                     if hasattr(self, 'fuzzy_mapping_slider'):
-                        _slider_parent = self.fuzzy_mapping_slider.parentWidget()
-                        if _slider_parent:
-                            for child in _slider_parent.findChildren(QLabel):
-                                if 'similarity' in (child.text() or '').lower():
-                                    child.setStyleSheet("color: #b388ff; font-size: 9pt;")
-                                    child._mode_locked = True
-                                    break
-                except Exception:
-                    pass
+                        self.fuzzy_mapping_slider.setEnabled(True)
+                        self.fuzzy_mapping_slider.setStyleSheet("")
+                        self.fuzzy_mapping_slider._mode_locked = False
+                    if hasattr(self, 'fuzzy_mapping_value_label'):
+                        self.fuzzy_mapping_value_label.setStyleSheet("color: white; font-size: 9pt; min-width: 30px;")
+                    try:
+                        if hasattr(self, 'fuzzy_mapping_slider'):
+                            _slider_parent = self.fuzzy_mapping_slider.parentWidget()
+                            if _slider_parent:
+                                for child in _slider_parent.findChildren(QLabel):
+                                    if 'similarity' in (child.text() or '').lower():
+                                        child.setStyleSheet("color: #aaa; font-size: 9pt;")
+                                        child._mode_locked = False
+                                        break
+                    except Exception:
+                        pass
+                else:
+                    # Lock slider with purple styling
+                    if hasattr(self, 'fuzzy_mapping_slider'):
+                        self.fuzzy_mapping_slider.setEnabled(False)
+                        self.fuzzy_mapping_slider.setStyleSheet("QSlider { color: #b388ff; }")
+                        self.fuzzy_mapping_slider._mode_locked = True
+                    if hasattr(self, 'fuzzy_mapping_value_label'):
+                        self.fuzzy_mapping_value_label.setStyleSheet("color: #b388ff; font-size: 9pt; min-width: 30px;")
+                    try:
+                        if hasattr(self, 'fuzzy_mapping_slider'):
+                            _slider_parent = self.fuzzy_mapping_slider.parentWidget()
+                            if _slider_parent:
+                                for child in _slider_parent.findChildren(QLabel):
+                                    if 'similarity' in (child.text() or '').lower():
+                                        child.setStyleSheet("color: #b388ff; font-size: 9pt;")
+                                        child._mode_locked = True
+                                        break
+                    except Exception:
+                        pass
 
-            # "No Glossary" - lock all three toggles OFF
-            if mode == 'no_glossary':
-                if hasattr(self, 'append_glossary_checkbox'):
-                    if self.append_glossary_checkbox.isChecked():
-                        self.append_glossary_checkbox.setChecked(False)
-                    _lock_toggle(self.append_glossary_checkbox, _append_desc_label)
-                    if _append_desc_label:
-                        _append_desc_label.mousePressEvent = lambda _: None
-                if hasattr(self, 'append_glossary_auto_load_checkbox'):
-                    if self.append_glossary_auto_load_checkbox.isChecked():
-                        self.append_glossary_auto_load_checkbox.setChecked(False)
-                    _lock_toggle(self.append_glossary_auto_load_checkbox, _auto_load_desc_label)
-                    if _auto_load_desc_label:
-                        _auto_load_desc_label.mousePressEvent = lambda _: None
-                    self.config['append_glossary_auto_load'] = False
-                    if hasattr(self, 'append_glossary_auto_load_var'):
-                        self.append_glossary_auto_load_var = False
-
-            # "Manual Glossary Only" / "Minimal" - lock auto-mapping OFF
-            if mode in ('off_no_automap', 'minimal') and hasattr(self, 'append_glossary_auto_load_checkbox'):
-                if self.append_glossary_auto_load_checkbox.isChecked():
-                    self.append_glossary_auto_load_checkbox.setChecked(False)
-                _lock_toggle(self.append_glossary_auto_load_checkbox, _auto_load_desc_label)
-                if _auto_load_desc_label:
-                    _auto_load_desc_label.mousePressEvent = lambda _: None
-                self.config['append_glossary_auto_load'] = False
-                if hasattr(self, 'append_glossary_auto_load_var'):
-                    self.append_glossary_auto_load_var = False
+            # Mode-controlled toggles (Append Glossary, Auto-Mapping, Fuzzy Auto-Mapping): the
+            # force + lock / unlock steps for this mode come from settings_rules (shared with
+            # the mobile app); a later step for the same toggle wins.
+            _desc_labels = {
+                'append_glossary': _append_desc_label,
+                'append_glossary_auto_load': _auto_load_desc_label,
+            }
+            for _step in settings_rules.glossary_mode_toggle_steps(mode):
+                _checkbox_attr, _var_attr = settings_rules.GLOSSARY_MODE_TOGGLES[_step.key]
+                if not hasattr(self, _checkbox_attr):
+                    continue
+                _checkbox = getattr(self, _checkbox_attr)
+                if _step.key not in _desc_labels:
+                    # Fuzzy auto-mapping: its hint label sits next to the checkbox
+                    _desc_labels[_step.key] = _find_fuzzy_desc_label()
+                _desc_label = _desc_labels[_step.key]
+                if _step.locked:
+                    # Auto-enable / disable & lock (block label clicks when locked)
+                    if _checkbox.isChecked() != _step.value:
+                        _checkbox.setChecked(_step.value)
+                    _lock_toggle(_checkbox, _desc_label)
+                    if _desc_label:
+                        _desc_label.mousePressEvent = lambda _: None
+                    if _step.write_config:
+                        self.config[_step.key] = _step.value
+                        if hasattr(self, _var_attr):
+                            setattr(self, _var_attr, _step.value)
+                else:
+                    _unlock_toggle(_checkbox, _desc_label)
+                    # Restore label click
+                    if _desc_label:
+                        _desc_label.mousePressEvent = lambda _, _attr=_checkbox_attr: getattr(self, _attr).toggle()
+                if _step.key == 'fuzzy_auto_mapping':
+                    _set_fuzzy_slider_locked(not _step.value)
 
             # Real-time glossary path switching when mode changes
             try:

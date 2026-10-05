@@ -479,6 +479,13 @@ app_files = [
     ('translation_pipeline.py', '.'),
     ('direct_text_store.py', '.'),
     ('direct_text_stream.py', '.'),
+    # Mobile rewrite U4: settings rules, model catalog, prompt profiles, key pools and the shared
+    # OAuth helpers (translator_gui, other_settings, the key manager and the auth modules import them)
+    ('settings_rules.py', '.'),
+    ('model_catalog_core.py', '.'),
+    ('prompt_profiles.py', '.'),
+    ('key_pool_service.py', '.'),
+    ('oauth_session.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -681,6 +688,13 @@ app_modules = [
     'translation_pipeline',
     'direct_text_store',
     'direct_text_stream',
+    # Mobile rewrite U4: settings rules, model catalog, prompt profiles, key pools and the shared
+    # OAuth helpers (translator_gui, other_settings, the key manager and the auth modules import them)
+    'settings_rules',
+    'model_catalog_core',
+    'prompt_profiles',
+    'key_pool_service',
+    'oauth_session',
 ]
 
 # GUI Framework

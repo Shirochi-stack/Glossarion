@@ -138,6 +138,11 @@ class GlossarionApp:
         self.files: Any = None
         self.intents: Any = None
         self.chat_feature: Any = None
+        # U4: ModelsKeysFeature.install sets models_keys (catalog, ModelSheet env, Models / Keys /
+        # Endpoints); AccountsProfilesFeature.install sets pages_feature (Accounts, Profiles,
+        # Prefill, Appearance, Storage, Backup, Import, About, Danger zone).
+        self.models_keys: Any = None
+        self.pages_feature: Any = None
 
     @staticmethod
     def _make_secure_storage() -> Any:
@@ -178,7 +183,7 @@ class GlossarionApp:
             on_open_chat=self._open_chat,
             on_chat_long_press=self._chat_actions,
             on_new_chat=lambda e: self.chat_view._on_new_chat(e),
-            on_new_scratch=lambda e: self.notify("Scratch chats arrive in U4"),
+            on_new_scratch=lambda e: self.notify("Scratch chats arrive in U7"),
             on_status=self._on_status_chip,
             on_settings=lambda e: self._drawer_navigate("settings"),
             on_help=self._on_help,
@@ -216,6 +221,8 @@ class GlossarionApp:
         rb.start_warm_import(on_done=lambda result: self.dispatcher.post(self._on_backend_ready, result))
         await self._install_jobs()  # JobService + files + intents; the chat submits through it
         await self._install_chat()  # chat history (decrypted keys), runs, sign-in, welcome
+        await self._install_models_keys()  # model catalog + ModelSheet services, keys, endpoints
+        await self._install_pages()  # accounts (all providers), profiles, prefill, data pages
         self.dispatcher.spawn(self._after_ready())
         match = await self.dispatch_route(page.route, source="initial")
         await self._maybe_welcome(match)
@@ -269,6 +276,26 @@ class GlossarionApp:
                 intents.handlers[ACTION_TRANSLATE_NEW_CHAT] = self._translate_in_new_chat
             except Exception:
                 log.exception("registering the Translate-in-new-chat action failed")
+
+    async def _install_models_keys(self) -> None:
+        """Model catalog service, the full ModelSheet's services, Model Manager, Multi-Key Manager
+        and Endpoints (U4). Without it the chat header keeps the plain model sheet."""
+        try:
+            from glossarion_mobile.ui.screens.model_manager import ModelsKeysFeature
+
+            await ModelsKeysFeature.install(self)  # sets self.models_keys; wraps shell.screen_factory
+        except Exception:
+            log.exception("models & keys feature unavailable; those settings pages show placeholders")
+
+    async def _install_pages(self) -> None:
+        """Accounts for every sign-in provider, Profiles & prompts, Assistant prefill and the
+        Appearance / Storage / Backup / Import / About / Danger zone pages (U4)."""
+        try:
+            from glossarion_mobile.ui.screens.pages_feature import AccountsProfilesFeature
+
+            await AccountsProfilesFeature.install(self)  # sets self.pages_feature; wraps shell.screen_factory
+        except Exception:
+            log.exception("accounts & profiles feature unavailable; those settings pages show placeholders")
 
     async def _maybe_welcome(self, match: Optional[RouteMatch]) -> None:
         """First run (the desktop first-run glossary-mode choice is not made yet): the Welcome

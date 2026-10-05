@@ -10768,12 +10768,15 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
     def _on_chunk_size_edited(self):
         """Chunk Size edited: "Auto"/blank enables auto compression, a number sets the factor to match."""
+        from settings_rules import parse_chunk_size_text
         entry = self.chunk_size_entry
-        text = entry.text().strip().replace(',', '')
+        text = entry.text()
         auto_cb = self._live_other_settings_widget('_auto_compression_cb')
         factor_edit = self._live_other_settings_widget('_compression_factor_edit')
+        # Parsed after the widget lookups, as before ('inf' / '1e400' raise OverflowError here).
+        chunk_size = parse_chunk_size_text(text)
 
-        if not text or text.lower() == 'auto':
+        if chunk_size is None:  # "Auto" or blank
             self.config['auto_compression_factor'] = True
             type(self)._update_auto_compression_factor(self)
             if auto_cb is not None and not auto_cb.isChecked():
@@ -10781,10 +10784,6 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             self._sync_chunk_size_entry()
             return
 
-        try:
-            chunk_size = int(float(text))
-        except (TypeError, ValueError):
-            chunk_size = 0
         if not self._apply_chunk_size(chunk_size):
             self._sync_chunk_size_entry()
             return
@@ -10796,20 +10795,19 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
     def _apply_chunk_size(self, chunk_size):
         """Set the compression factor so the max input chunk budget equals chunk_size."""
+        from settings_rules import factor_for_chunk_size, record_chunk_size
         try:
             output_tokens = int(getattr(self, 'max_output_tokens', self.config.get('max_output_tokens', 65536)))
             chunk_size = int(chunk_size)
         except (TypeError, ValueError):
             return False
-        available = output_tokens - self._CHUNK_BUDGET_SAFETY_MARGIN
-        if chunk_size <= 0 or available <= 0:
+        # Round the factor down so int(available / factor) lands on the chunk size.
+        factor = factor_for_chunk_size(output_tokens, chunk_size, self._CHUNK_BUDGET_SAFETY_MARGIN)
+        if factor is None:
             return False
 
-        # Round the factor down so int(available / factor) lands on the chunk size.
-        factor = max(0.000001, math.floor(available / chunk_size * 1_000_000) / 1_000_000)
         self.compression_factor_var = str(factor)
-        self.config['compression_factor'] = factor
-        self.config['manual_chunk_size'] = chunk_size
+        record_chunk_size(self.config, chunk_size, factor)
         factor_edit = self._live_other_settings_widget('_compression_factor_edit')
         if factor_edit is not None:
             factor_edit.setText(self.compression_factor_var)
@@ -10817,17 +10815,13 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
     def _remember_manual_chunk_size(self):
         """Record the current budget as the chunk size to hold when the output limit changes."""
-        if self.config.get('auto_compression_factor', True):
-            return
-        budget = self._compression_chunk_budget()
-        if budget is not None:
-            self.config['manual_chunk_size'] = budget
+        from settings_rules import remember_manual_chunk_size
+        remember_manual_chunk_size(self.config, lambda: self._compression_chunk_budget())
 
     def _hold_manual_chunk_size(self):
         """Output limit changed: keep the manual chunk size by recomputing the compression factor."""
-        if self.config.get('auto_compression_factor', True):
-            return
-        chunk_size = self.config.get('manual_chunk_size')
+        from settings_rules import held_manual_chunk_size
+        chunk_size = held_manual_chunk_size(self.config)
         if chunk_size is not None:
             self._apply_chunk_size(chunk_size)
 
@@ -12033,17 +12027,17 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
         # Keep drafts local so Cancel discards edits since the last explicit save.
         # Seed Default from the existing prefill when upgrading an older config.
+        # The drafts (profiles, Default text, active name) and their rules are the shared
+        # prompt_profiles.PrefillState / prefill_* functions; this dialog keeps the widgets.
+        import prompt_profiles
         current_prompt = str(getattr(self, 'assistant_prompt', '') or '')
-        stored_profiles = self.config.get('assistant_prompt_profiles', {})
-        profiles = {
-            name: text for name, text in stored_profiles.items()
-            if isinstance(name, str) and name.strip()
-            and name.strip().casefold() != 'default' and isinstance(text, str)
-        } if isinstance(stored_profiles, dict) else {}
-        default_prompt = str(self.config.get('assistant_prompt_profile_default', current_prompt) or '')
-        active_name = self.config.get('active_assistant_prompt_profile', '')
-        if not isinstance(active_name, str) or active_name not in profiles:
-            active_name = ''
+        state = prompt_profiles.PrefillState()
+        prompt_profiles.prefill_load(
+            state,
+            self.config.get('assistant_prompt_profiles', {}),
+            self.config.get('assistant_prompt_profile_default', current_prompt),
+            self.config.get('active_assistant_prompt_profile', ''),
+        )
 
         # Match the glossary manager's editable combo, mascot, and button styles.
         profile_layout = QHBoxLayout()
@@ -12102,37 +12096,24 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             try:
                 profile_combo.clear()
                 profile_combo.addItem("Default")
-                profile_combo.addItems(list(profiles))
-                profile_combo.setCurrentIndex(profile_combo.findText(active_name or "Default"))
+                profile_combo.addItems(list(state.profiles))
+                profile_combo.setCurrentIndex(profile_combo.findText(state.active_name or "Default"))
                 self._apply_halgakos_combo_icons(profile_combo)
             finally:
                 profile_combo.blockSignals(False)
 
         def stage_prompt():
-            nonlocal default_prompt
-            name = profile_combo.currentText().strip()
-            text = prompt_edit.toPlainText().strip()
-            if active_name in profiles:
-                # Editing the name does not change which profile owns this draft.
-                profiles[active_name] = text
-            elif not name or name.casefold() == 'default':
-                default_prompt = text
+            # Editing the name does not change which profile owns this draft.
+            prompt_profiles.prefill_stage(state, profile_combo.currentText(), prompt_edit.toPlainText())
 
         def select_profile(name=None):
-            nonlocal active_name
-            name = (profile_combo.currentText() if name is None else name).strip()
-            if name.casefold() == 'default':
-                active_name = ''
-                text = default_prompt
-            elif name in profiles:
-                active_name = name
-                text = profiles[name]
-            else:
+            text = prompt_profiles.prefill_select(state, profile_combo.currentText() if name is None else name)
+            if text is None:
                 return
             # A typed name can resolve to a profile without Qt changing its
             # current index. Keep the editor, selected row, and displayed name
             # together, without rebuilding the popup during a mouse selection.
-            selected_name = active_name or "Default"
+            selected_name = state.active_name or "Default"
             profile_combo.blockSignals(True)
             try:
                 profile_combo.setCurrentIndex(profile_combo.findText(selected_name))
@@ -12148,12 +12129,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             update_token_count()
 
         def persist_profiles():
-            updates = {
-                'assistant_prompt_profiles': dict(profiles),
-                'assistant_prompt_profile_default': default_prompt,
-                'active_assistant_prompt_profile': active_name,
-                'assistant_prompt': prompt_edit.toPlainText().strip(),
-            }
+            updates = prompt_profiles.prefill_config_updates(state, prompt_edit.toPlainText())
             previous = {key: self.config[key] for key in updates if key in self.config}
             previous_prompt = self.assistant_prompt
             self.config.update(updates)
@@ -12175,58 +12151,25 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             return True
 
         def new_profile():
-            nonlocal active_name
-            n = 1
-            while f"New Profile #{n}" in profiles:
-                n += 1
-            active_name = f"New Profile #{n}"
-            profiles[active_name] = ''
+            prompt_profiles.prefill_new(state)
             refresh_profiles()
             select_profile()
             if persist_profiles():
-                self.append_log(f"✅ Created assistant prompt profile: '{active_name}'")
+                self.append_log(f"✅ Created assistant prompt profile: '{state.active_name}'")
 
         def save_profile():
-            nonlocal active_name, default_prompt, profiles
-            name = profile_combo.currentText().strip()
-            if not name:
-                QMessageBox.warning(dialog, "Profile Name Required", "Enter a profile name before saving.")
+            # Renaming replaces the key in place, preserving the dropdown order.
+            outcome = prompt_profiles.prefill_save(state, profile_combo.currentText(), prompt_edit.toPlainText())
+            if not outcome.ok:
+                QMessageBox.warning(dialog, outcome.title, outcome.error)
                 return False
-            if name.casefold() == 'default' and active_name:
-                QMessageBox.warning(dialog, "Default Profile", "Default is reserved. Choose another profile name.")
-                return False
-            if name in profiles and name != active_name:
-                QMessageBox.warning(dialog, "Profile Name Exists", "A profile with this name already exists. Choose another name.")
-                return False
-            text = prompt_edit.toPlainText().strip()
-            if name.casefold() == 'default':
-                default_prompt = text
-                active_name = ''
-            else:
-                if active_name in profiles and name != active_name:
-                    # Replace the key in place, preserving the dropdown order.
-                    profiles = {
-                        (name if key == active_name else key): (text if key == active_name else value)
-                        for key, value in profiles.items()
-                    }
-                else:
-                    profiles[name] = text
-                active_name = name
             refresh_profiles()
             if not persist_profiles():
                 return False
-            self.append_log(f"✅ Saved assistant prompt profile: '{active_name or 'Default'}'")
+            self.append_log(f"✅ Saved assistant prompt profile: '{state.active_name or 'Default'}'")
             return True
 
-        def delete_profile():
-            nonlocal active_name
-            name = profile_combo.currentText().strip()
-            if name.casefold() == 'default':
-                QMessageBox.warning(dialog, "Default Profile", "The Default assistant prompt profile cannot be deleted.")
-                return
-            if not name or name not in profiles:
-                QMessageBox.warning(dialog, "Profile Not Found", "Select an existing profile to delete.")
-                return
+        def confirm_delete(name):
             confirmation = QMessageBox(dialog)
             confirmation.setWindowTitle("Delete Profile")
             confirmation.setIcon(QMessageBox.Question)
@@ -12239,14 +12182,18 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 for button in button_box.buttons():
                     button.setMinimumWidth(button.sizeHint().width() + 12)
             reply = confirmation.exec()
-            if reply != QMessageBox.Yes:
+            return reply == QMessageBox.Yes
+
+        def delete_profile():
+            outcome = prompt_profiles.prefill_delete(state, profile_combo.currentText(), confirm=confirm_delete)
+            if not outcome.ok:
+                if outcome.error:
+                    QMessageBox.warning(dialog, outcome.title, outcome.error)
                 return
-            del profiles[name]
-            active_name = next(iter(profiles), '')
             refresh_profiles()
             select_profile()
             if persist_profiles():
-                self.append_log(f"🗑️ Deleted assistant prompt profile: '{name}'")
+                self.append_log(f"🗑️ Deleted assistant prompt profile: '{outcome.name}'")
 
         profile_buttons = (
             ("+ New Profile", "Create a new empty assistant prompt profile", new_profile, None,
@@ -12400,66 +12347,59 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
     def on_model_change(self, index=None):
         """Handle model selection change from dropdown or manual input"""
-        # Get the current model value (from dropdown or manually typed)
-        model = self.model_var
-        
-        # Update target language dropdown state
-        self._update_target_lang_state()
-        
-        # Show Google Cloud Credentials button for Vertex AI models AND Google Translate (paid)
-        needs_google_creds = (
-            self._model_needs_google_creds(model)
-            or self._has_google_creds_model_in_key_pools()
-            or bool(getattr(self, '_multi_key_manager_needs_google_creds_hint', False))
+        # The route decisions are shared with the mobile app (settings_rules); this
+        # handler applies them to the main-window widgets.
+        from settings_rules import (
+            GOOGLE_CREDS_FILE_MISSING,
+            GOOGLE_CREDS_READ_ERROR,
+            authcd_login_needed,
+            authgem_login_needed,
+            authgpt_login_needed,
+            authgrok_login_needed,
+            google_credentials_route,
+            google_creds_missing_text,
+            google_creds_ready_text,
         )
 
-        if (
-            '@' in model
-            or model.startswith('vertex/')
-            or model.startswith('vertex_ai/')
-            or self._has_vertex_model_in_key_pools()
-            or bool(getattr(self, '_multi_key_manager_needs_google_creds_hint', False))
-        ):
-            needs_google_creds = True
+        # Get the current model value (from dropdown or manually typed)
+        model = self.model_var
+
+        # Update target language dropdown state
+        self._update_target_lang_state()
+
+        # Show Google Cloud Credentials button for Vertex AI models AND Google Translate (paid)
+        needs_google_creds, vertex_location = google_credentials_route(
+            model,
+            pools_need_creds=lambda: self._has_google_creds_model_in_key_pools(),
+            pools_have_vertex=lambda: self._has_vertex_model_in_key_pools(),
+            hint=getattr(self, '_multi_key_manager_needs_google_creds_hint', False),
+        )
+        if vertex_location is True:
             self.vertex_location_entry.show()  # Show location selector for Vertex
-        elif model.lower() == 'google-translate':  # Exact match for paid Google Translate (not google-translate-free)
-            needs_google_creds = True
+        elif vertex_location is False:
             self.vertex_location_entry.hide()  # Hide location selector for Google Translate
-        
+
         if needs_google_creds:
             self.gcloud_button.setEnabled(True)
             self.gcloud_button.setStyleSheet(self.gcloud_button_enabled_style)  # Apply enabled style
-            
+
             # Check if credentials are already loaded
             if self.config.get('google_cloud_credentials'):
                 creds_path = self.config['google_cloud_credentials']
                 if os.path.exists(creds_path):
                     try:
-                        with open(creds_path, 'r') as f:
-                            creds_data = json.load(f)
-                            project_id = creds_data.get('project_id', 'Unknown')
-                            
-                            # Different status messages for different services
-                            if model == 'google-translate':
-                                status_text = f"✓ Google Translate ready\n(Project: {project_id})"
-                            else:
-                                status_text = f"✓ Credentials: {os.path.basename(creds_path)} (Project: {project_id})"
-                            
-                            self.gcloud_status_label.setText(status_text)
-                            self.gcloud_status_label.setStyleSheet("color: green; font-size: 8pt;")
+                        status_text = google_creds_ready_text(model, creds_path)
+                        self.gcloud_status_label.setText(status_text)
+                        self.gcloud_status_label.setStyleSheet("color: green; font-size: 8pt;")
                     except:
-                        self.gcloud_status_label.setText("⚠ Error reading credentials")
+                        self.gcloud_status_label.setText(GOOGLE_CREDS_READ_ERROR)
                         self.gcloud_status_label.setStyleSheet("color: red; font-size: 8pt;")
                 else:
-                    self.gcloud_status_label.setText("⚠ Credentials file not found")
+                    self.gcloud_status_label.setText(GOOGLE_CREDS_FILE_MISSING)
                     self.gcloud_status_label.setStyleSheet("color: red; font-size: 8pt;")
             else:
                 # Different prompts for different services
-                if model == 'google-translate':
-                    warning_text = "⚠ Google Cloud credentials needed for Translate API"
-                else:
-                    warning_text = "⚠ No Google Cloud credentials selected"
-                
+                warning_text = google_creds_missing_text(model)
                 self.gcloud_status_label.setText(warning_text)
                 self.gcloud_status_label.setStyleSheet("color: orange; font-size: 9pt;")
         else:
@@ -12471,14 +12411,13 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         
         # Show/hide AuthGPT login button
         if hasattr(self, 'authgpt_login_btn'):
-            import re as _re
-            _gpt_match = _re.match(r'^authgpt\d{0,4}/', model)
-            needs_authgpt = _gpt_match is not None or self._authgpt_pool_route_requested(model)
-            
-            # Also check enabled key pools for authgpt models
-            if not needs_authgpt:
-                needs_authgpt = self._has_authgpt_in_key_pools()
-            
+            # authgpt/ routes, an authgpt0/ pool request, or enabled pool entries
+            needs_authgpt = authgpt_login_needed(
+                model,
+                pool_route_requested=lambda route: self._authgpt_pool_route_requested(route),
+                in_key_pools=lambda: self._has_authgpt_in_key_pools(),
+            )
+
             if needs_authgpt:
                 self.authgpt_login_btn.show()
                 self._update_authgpt_login_status()
@@ -12487,14 +12426,11 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
         # Show/hide AuthGrok login button
         if hasattr(self, 'authgrok_login_btn'):
-            import re as _re
-            needs_authgrok = _re.match(r'^authgrok\d{0,4}/', model) is not None
-            if not needs_authgrok:
-                needs_authgrok = self._has_authgrok_in_key_pools()
-            if not needs_authgrok:
-                needs_authgrok = bool(
-                    getattr(self, '_multi_key_manager_authgrok_pool_hint', False)
-                )
+            needs_authgrok = authgrok_login_needed(
+                model,
+                in_key_pools=lambda: self._has_authgrok_in_key_pools(),
+                hint=getattr(self, '_multi_key_manager_authgrok_pool_hint', False),
+            )
             if needs_authgrok:
                 self.authgrok_login_btn.show()
                 self._update_authgrok_login_status()
@@ -12503,13 +12439,11 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
         # Show/hide AuthCD login button
         if hasattr(self, 'authcd_login_btn'):
-            import re as _re
-            _cd_match = _re.match(r'^authcd\d{0,4}/', model)
-            needs_authcd = _cd_match is not None
-            
-            if not needs_authcd:
-                needs_authcd = self._has_authcd_in_key_pools()
-            
+            needs_authcd = authcd_login_needed(
+                model,
+                in_key_pools=lambda: self._has_authcd_in_key_pools(),
+            )
+
             if needs_authcd:
                 self.authcd_login_btn.show()
                 self._update_authcd_login_status()
@@ -12518,20 +12452,14 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
         # Show/hide AuthGem login button + project dropdown
         if hasattr(self, 'authgem_login_btn'):
-            import re as _re
-            _ag_match = _re.match(r'^authgem(?:-vertex)?\d{0,4}/', model)
-            vertex_model = self._authgem_vertex_control_model()
-            needs_authgem = _ag_match is not None or bool(vertex_model)
-            
-            # Also check enabled key pools for authgem models
-            if not needs_authgem:
-                needs_authgem = self._has_authgem_in_key_pools()
-            
             # GCP project dropdown is ONLY needed for authgem-vertex/ (Vertex AI)
             # authgem/ uses AI Studio which doesn't require a GCP project
-            _vx_match = _re.match(r'^authgem-vertex\d{0,4}/', model)
-            needs_vertex = bool(vertex_model)
-            
+            needs_authgem, needs_vertex = authgem_login_needed(
+                model,
+                vertex_model=lambda: self._authgem_vertex_control_model(),
+                in_key_pools=lambda: self._has_authgem_in_key_pools(),
+            )
+
             if needs_authgem:
                 self.authgem_login_btn.show()
                 if hasattr(self, 'authgem_status_btn'):
@@ -12616,201 +12544,74 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         # Show/hide ◀▶ arrows for cycling between numbered auth account slots
         self._refresh_auth_account_arrows()
 
+    # Model-route helpers: the logic lives in settings_rules (shared with the mobile app's
+    # route_controls); these wrappers keep the desktop names and the live editor hints.
+
     def _model_needs_google_creds(self, model: str) -> bool:
         """Return True when a model route requires Google Cloud service-account creds."""
-        model = (model or '').strip().lower()
-        return (
-            '@' in model
-            or model.startswith('vertex/')
-            or model.startswith('vertex_ai/')
-            or model == 'google-translate'
-        )
+        from settings_rules import model_needs_google_creds
+        return model_needs_google_creds(model)
 
     def _iter_enabled_key_pool_models(self):
         """Yield model names from enabled key pools."""
-        pool_map = {
-            'multi_api_keys': 'use_multi_api_keys',
-            'fallback_keys': 'use_fallback_keys',
-            'glossary_keys': 'use_glossary_keys',
-            'glossary_refinement_keys': 'use_glossary_refinement_keys',
-            'metadata_keys': 'use_metadata_keys',
-            'qa_scan_keys': 'use_qa_scan_keys',
-            'rolling_summary_keys': 'use_rolling_summary_keys',
-            'truncation_retry_keys': 'use_truncation_retry_keys',
-            'inpainter_keys': 'use_inpainter_keys',
-            'tts_keys': 'use_tts_keys',
-        }
-        for pool_key, toggle_key in pool_map.items():
-            if not self.config.get(toggle_key, False):
-                continue
-            for key_data in self.config.get(pool_key, []):
-                if isinstance(key_data, dict):
-                    if not key_data.get('enabled', True):
-                        continue
-                    model = key_data.get('model', '')
-                else:
-                    if not getattr(key_data, 'enabled', True):
-                        continue
-                    model = getattr(key_data, 'model', '')
-                yield pool_key, toggle_key, model
+        from settings_rules import iter_enabled_key_pool_models
+        yield from iter_enabled_key_pool_models(self.config)
 
     def _has_google_creds_model_in_key_pools(self):
         """Check enabled key pools for models that require Google Cloud credentials."""
-        try:
-            for _pool_key, _toggle_key, model in self._iter_enabled_key_pool_models():
-                if self._model_needs_google_creds(model):
-                    return True
-        except Exception:
-            pass
-        return False
+        from settings_rules import has_google_creds_model_in_key_pools
+        return has_google_creds_model_in_key_pools(
+            pool_models=lambda: self._iter_enabled_key_pool_models(),
+        )
 
     def _has_vertex_model_in_key_pools(self):
         """Check enabled key pools for Vertex-style models that need the location field."""
-        try:
-            for _pool_key, _toggle_key, model in self._iter_enabled_key_pool_models():
-                model = (model or '').strip().lower()
-                if '@' in model or model.startswith('vertex/') or model.startswith('vertex_ai/'):
-                    return True
-        except Exception:
-            pass
-        return False
+        from settings_rules import has_vertex_model_in_key_pools
+        return has_vertex_model_in_key_pools(
+            pool_models=lambda: self._iter_enabled_key_pool_models(),
+        )
 
     def _has_authgpt_in_key_pools(self):
         """Check if any enabled key pool contains an enabled authgpt model."""
-        try:
-            pool_map = {
-                'multi_api_keys': 'use_multi_api_keys',
-                'fallback_keys': 'use_fallback_keys',
-                'glossary_keys': 'use_glossary_keys',
-                'glossary_refinement_keys': 'use_glossary_refinement_keys',
-                'rolling_summary_keys': 'use_rolling_summary_keys',
-                'truncation_retry_keys': 'use_truncation_retry_keys',
-            }
-            for pool_key, toggle_key in pool_map.items():
-                if self.config.get(toggle_key, False):
-                    for key_data in self.config.get(pool_key, []):
-                        if isinstance(key_data, dict):
-                            if not key_data.get('enabled', True):
-                                continue
-                            m = key_data.get('model', '')
-                        else:
-                            m = getattr(key_data, 'model', '')
-                        import re as _re
-                        if _re.match(r'^authgpt\d{0,4}/', m):
-                            return True
-        except Exception:
-            pass
-        return False
+        from settings_rules import has_authgpt_in_key_pools
+        return has_authgpt_in_key_pools(getattr(self, 'config', None))
 
     def _has_authgrok_in_key_pools(self):
         """Check if any enabled key pool contains an AuthGrok model."""
-        try:
-            for _pool_key, _toggle_key, model in self._iter_enabled_key_pool_models():
-                import re as _re
-                if _re.match(r'^authgrok\d{0,4}/', str(model or '').strip().lower()):
-                    return True
-        except Exception:
-            pass
-        return False
+        from settings_rules import has_authgrok_in_key_pools
+        return has_authgrok_in_key_pools(
+            pool_models=lambda: self._iter_enabled_key_pool_models(),
+        )
 
     def _authgpt_pool_route_requested(self, model=None):
         """Return whether authgpt0/ is active in the GUI or a key manager pool."""
-        import re as _re
-
-        active_model = str(
+        from settings_rules import authgpt_pool_route_requested
+        return authgpt_pool_route_requested(
             model if model is not None
-            else (getattr(self, 'model_var', '') or self.config.get('model', ''))
-        ).strip().lower()
-        if _re.match(r'^authgpt0(?:/|$)', active_model):
-            return True
-        if bool(getattr(self, '_multi_key_manager_authgpt_pool_hint', False)):
-            return True
-        try:
-            for _pool_key, _toggle_key, pool_model in self._iter_enabled_key_pool_models():
-                if _re.match(
-                    r'^authgpt0(?:/|$)',
-                    str(pool_model or '').strip().lower(),
-                ):
-                    return True
-        except Exception:
-            pass
-        return False
+            else (getattr(self, 'model_var', '') or self.config.get('model', '')),
+            hint=getattr(self, '_multi_key_manager_authgpt_pool_hint', False),
+            pool_models=lambda: self._iter_enabled_key_pool_models(),
+        )
 
     def _authgrok_pool_route_requested(self, model=None):
         """Return whether authgrok0/ is active in the GUI or a key manager pool."""
-        import re as _re
-
-        active_model = str(
+        from settings_rules import authgrok_pool_route_requested
+        return authgrok_pool_route_requested(
             model if model is not None
-            else (getattr(self, 'model_var', '') or self.config.get('model', ''))
-        ).strip().lower()
-        if _re.match(r'^authgrok0(?:/|$)', active_model):
-            return True
-        if bool(getattr(self, '_multi_key_manager_authgrok_pool_hint', False)):
-            return True
-        try:
-            for _pool_key, _toggle_key, pool_model in self._iter_enabled_key_pool_models():
-                if _re.match(
-                    r'^authgrok0(?:/|$)',
-                    str(pool_model or '').strip().lower(),
-                ):
-                    return True
-        except Exception:
-            pass
-        return False
+            else (getattr(self, 'model_var', '') or self.config.get('model', '')),
+            hint=getattr(self, '_multi_key_manager_authgrok_pool_hint', False),
+            pool_models=lambda: self._iter_enabled_key_pool_models(),
+        )
 
     def _has_authgem_in_key_pools(self):
         """Check if any enabled key pool contains an enabled authgem model."""
-        try:
-            pool_map = {
-                'multi_api_keys': 'use_multi_api_keys',
-                'fallback_keys': 'use_fallback_keys',
-                'glossary_keys': 'use_glossary_keys',
-                'glossary_refinement_keys': 'use_glossary_refinement_keys',
-                'rolling_summary_keys': 'use_rolling_summary_keys',
-                'truncation_retry_keys': 'use_truncation_retry_keys',
-            }
-            for pool_key, toggle_key in pool_map.items():
-                if self.config.get(toggle_key, False):
-                    for key_data in self.config.get(pool_key, []):
-                        if isinstance(key_data, dict):
-                            if not key_data.get('enabled', True):
-                                continue
-                            m = key_data.get('model', '')
-                        else:
-                            m = getattr(key_data, 'model', '')
-                        if m.startswith('authgem') and ('/' in m):
-                            return True
-        except Exception:
-            pass
-        return False
+        from settings_rules import has_authgem_in_key_pools
+        return has_authgem_in_key_pools(getattr(self, 'config', None))
 
     def _has_authgem_vertex_in_key_pools(self):
         """Check if any enabled key pool contains an enabled authgem-vertex model."""
-        try:
-            pool_map = {
-                'multi_api_keys': 'use_multi_api_keys',
-                'fallback_keys': 'use_fallback_keys',
-                'glossary_keys': 'use_glossary_keys',
-                'glossary_refinement_keys': 'use_glossary_refinement_keys',
-                'rolling_summary_keys': 'use_rolling_summary_keys',
-                'truncation_retry_keys': 'use_truncation_retry_keys',
-            }
-            for pool_key, toggle_key in pool_map.items():
-                if self.config.get(toggle_key, False):
-                    for key_data in self.config.get(pool_key, []):
-                        if isinstance(key_data, dict):
-                            if not key_data.get('enabled', True):
-                                continue
-                            m = key_data.get('model', '')
-                        else:
-                            m = getattr(key_data, 'model', '')
-                        import re as _re
-                        if _re.match(r'^authgem-vertex\d{0,4}/', m):
-                            return True
-        except Exception:
-            pass
-        return False
+        from settings_rules import has_authgem_vertex_in_key_pools
+        return has_authgem_vertex_in_key_pools(getattr(self, 'config', None))
 
     def _has_ocagy_in_key_pools(self):
         """Check if any enabled key pool contains an OpenCode Antigravity model."""
@@ -12859,30 +12660,8 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
     def _has_authcd_in_key_pools(self):
         """Check if any enabled key pool contains an enabled authcd model."""
-        try:
-            pool_map = {
-                'multi_api_keys': 'use_multi_api_keys',
-                'fallback_keys': 'use_fallback_keys',
-                'glossary_keys': 'use_glossary_keys',
-                'glossary_refinement_keys': 'use_glossary_refinement_keys',
-                'rolling_summary_keys': 'use_rolling_summary_keys',
-                'truncation_retry_keys': 'use_truncation_retry_keys',
-            }
-            for pool_key, toggle_key in pool_map.items():
-                if self.config.get(toggle_key, False):
-                    for key_data in self.config.get(pool_key, []):
-                        if isinstance(key_data, dict):
-                            if not key_data.get('enabled', True):
-                                continue
-                            m = key_data.get('model', '')
-                        else:
-                            m = getattr(key_data, 'model', '')
-                        import re as _re
-                        if _re.match(r'^authcd\d{0,4}/', m):
-                            return True
-        except Exception:
-            pass
-        return False
+        from settings_rules import has_authcd_in_key_pools
+        return has_authcd_in_key_pools(getattr(self, 'config', None))
 
     # ==================================================================
     # Auth Account Arrow Switcher for numbered account slots
@@ -12893,41 +12672,8 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
         Returns dict: {'authgpt': {0, 2}, 'authgrok': {0}, 'authcd': {1}, 'authgem': {0, 3}}.
         """
-        import re as _re
-        result = {'authgpt': set(), 'authgrok': set(), 'authcd': set(), 'authgem': set()}
-        patterns = {
-            'authgpt': _re.compile(r'^authgpt(\d{0,4})/'),
-            'authgrok': _re.compile(r'^authgrok(\d{0,4})/'),
-            'authcd':  _re.compile(r'^authcd(\d{0,4})/'),
-            'authgem': _re.compile(r'^authgem(?:-vertex)?(\d{0,4})/'),
-        }
-        try:
-            pool_map = {
-                'multi_api_keys': 'use_multi_api_keys',
-                'fallback_keys': 'use_fallback_keys',
-                'glossary_keys': 'use_glossary_keys',
-                'glossary_refinement_keys': 'use_glossary_refinement_keys',
-                'rolling_summary_keys': 'use_rolling_summary_keys',
-                'truncation_retry_keys': 'use_truncation_retry_keys',
-            }
-            for pool_key, toggle_key in pool_map.items():
-                if self.config.get(toggle_key, False):
-                    for key_data in self.config.get(pool_key, []):
-                        if isinstance(key_data, dict):
-                            if not key_data.get('enabled', True):
-                                continue
-                            m = key_data.get('model', '')
-                        else:
-                            m = getattr(key_data, 'model', '')
-                        m = str(m or '').strip().lower()
-                        for provider, pat in patterns.items():
-                            match = pat.match(m)
-                            if match:
-                                acct_id = int(match.group(1)) if match.group(1) else 0
-                                result[provider].add(acct_id)
-        except Exception:
-            pass
-        return result
+        from settings_rules import collect_auth_account_ids_from_pools
+        return collect_auth_account_ids_from_pools(getattr(self, 'config', None))
 
     def _refresh_auth_account_arrows(self):
         """Update account-slot dropdown visibility and items for each auth provider.
@@ -13751,19 +13497,12 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
     def _authgem_vertex_control_model(self):
         """Resolve the Vertex route from the main field, live editor, or enabled pools."""
-        import re
-        primary = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
-        pattern = r'^authgem-vertex\d{0,4}(?:/|$)'
-        if re.match(pattern, primary):
-            return primary
-        hint = str(getattr(self, '_multi_key_manager_authgem_vertex_model_hint', '') or '').strip().lower()
-        if re.match(pattern, hint):
-            return hint
-        for _, _, route in self._iter_enabled_key_pool_models():
-            route = str(route or '').strip().lower()
-            if re.match(pattern, route):
-                return route
-        return ''
+        from settings_rules import authgem_vertex_control_model
+        return authgem_vertex_control_model(
+            getattr(self, 'model_var', '') or self.config.get('model', '') or '',
+            getattr(self, '_multi_key_manager_authgem_vertex_model_hint', ''),
+            pool_models=lambda: self._iter_enabled_key_pool_models(),
+        )
 
     def _get_authgem_account_id(self) -> int:
         """Return the numeric account ID for the AuthGem provider.
@@ -13876,81 +13615,24 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 import requests as _req
                 store = self._get_authgem_store_for_current_model()
                 token = store.get_valid_access_token(auto_login=False)
-                headers = {"Authorization": f"Bearer {token}"}
-                
-                # 1. List active projects (fast)
-                resp = _req.get(
-                    "https://cloudresourcemanager.googleapis.com/v1/projects",
-                    headers=headers,
-                    params={"filter": "lifecycleState:ACTIVE", "pageSize": 50},
-                    timeout=15,
-                )
-                if not resp.ok:
-                    return
-                projects = resp.json().get("projects", [])
-                if not projects:
-                    return
-                
-                all_pids = [p.get("projectId", "") for p in projects if p.get("projectId")]
-                
-                # Phase 1: Show all projects immediately as unknown (❔)
-                # This ensures the dropdown appears fast
-                self._authgem_billed_projects = []
-                self._authgem_unbilled_projects = []
-                self._authgem_unknown_projects = list(all_pids)
-                QMetaObject.invokeMethod(
-                    self, "_authgem_projects_loaded",
-                    Qt.QueuedConnection,
-                )
-                
-                # Phase 2: Check billing in parallel, then update
-                from concurrent.futures import ThreadPoolExecutor, as_completed
-                
-                def _check_billing(pid):
-                    """Return (pid, 'billed'|'unbilled'|'unknown')."""
-                    try:
-                        # Try Cloud Billing API first (fast, works with ADC client)
-                        br = _req.get(
-                            f"https://cloudbilling.googleapis.com/v1/projects/{pid}/billingInfo",
-                            headers=headers, timeout=8,
-                        )
-                        if br.ok:
-                            if br.json().get("billingEnabled", False):
-                                return (pid, "billed")
-                            return (pid, "unbilled")
-                        # Billing API returned 403 — probe Vertex AI directly
-                        vr = _req.get(
-                            f"https://us-central1-aiplatform.googleapis.com/v1/projects/{pid}/locations/us-central1",
-                            headers=headers, timeout=8,
-                        )
-                        if vr.ok:
-                            return (pid, "billed")
-                        return (pid, "unbilled")
-                    except Exception:
-                        return (pid, "unknown")
-                
-                billed = []
-                unbilled = []
-                unknown = []
-                with ThreadPoolExecutor(max_workers=min(6, len(all_pids))) as pool:
-                    futures = {pool.submit(_check_billing, pid): pid for pid in all_pids}
-                    for future in as_completed(futures):
-                        pid, status = future.result()
-                        if status == "billed":
-                            billed.append(pid)
-                        elif status == "unbilled":
-                            unbilled.append(pid)
-                        else:
-                            unknown.append(pid)
-                
-                # Phase 2 complete: Update dropdown with billing info
-                self._authgem_billed_projects = billed
-                self._authgem_unbilled_projects = unbilled
-                self._authgem_unknown_projects = unknown
-                QMetaObject.invokeMethod(
-                    self, "_authgem_projects_loaded",
-                    Qt.QueuedConnection,
-                )
+
+                def _publish(billed, unbilled, unknown):
+                    self._authgem_billed_projects = billed
+                    self._authgem_unbilled_projects = unbilled
+                    self._authgem_unknown_projects = unknown
+                    QMetaObject.invokeMethod(
+                        self, "_authgem_projects_loaded",
+                        Qt.QueuedConnection,
+                    )
+
+                # The listing and the billing check are the shared authgem_auth.list_gcp_projects:
+                # phase 1 shows every project at once as unknown (❔) through _publish,
+                # phase 2 returns them checked for billing (None: no project listed).
+                import authgem_auth
+                result = authgem_auth.list_gcp_projects(token, on_listed=_publish, http=_req)
+                if result is not None:
+                    # Phase 2 complete: Update dropdown with billing info
+                    _publish(*result)
             except Exception as exc:
                 import logging
                 logging.getLogger(__name__).debug("Failed to fetch GCP projects: %s", exc)
@@ -15914,77 +15596,21 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
         Passive cache/startup merges still honor ``model_manager_removed_models``.
         Only a manual entry or a user-triggered successful poll calls this path.
+        The config update, save and rollback are model_catalog_core's (shared with
+        the mobile app); this method refreshes the model pickers afterwards.
         """
-        values = []
-        seen_values = set()
-        for model in model_values or ():
-            value = str(model or '').strip()
-            key = value.casefold()
-            if not value or key in seen_values:
-                continue
-            values.append(value)
-            seen_values.add(key)
-        if not values:
-            return False
-
+        from model_catalog_core import restore_removed_models
         config = getattr(self, 'config', None)
-        if not isinstance(config, dict):
-            return False
-        old_removed = config.get('model_manager_removed_models')
-        removed = [
-            str(model).strip()
-            for model in (old_removed if isinstance(old_removed, list) else [])
-            if str(model).strip()
-        ]
-        restored_keys = {
-            model.casefold() for model in removed
-            if model.casefold() in seen_values
-        }
-        if not restored_keys:
-            return False
-
-        remaining_removed = [
-            model for model in removed if model.casefold() not in restored_keys
-        ]
-        had_custom = 'custom_model_list' in config
-        old_custom = config.get('custom_model_list')
-        custom_models = list(old_custom) if isinstance(old_custom, list) else []
-        if add_to_saved:
-            custom_keys = {
-                str(model).strip().casefold()
-                for model in custom_models
-                if str(model).strip()
-            }
-            for value in values:
-                if (
-                    value.casefold() in restored_keys
-                    and value.casefold() not in custom_keys
-                ):
-                    custom_models.append(value)
-                    custom_keys.add(value.casefold())
-
-        config['model_manager_removed_models'] = remaining_removed
-        if add_to_saved:
-            config['custom_model_list'] = custom_models
-
         save_config = getattr(self, 'save_config', None)
-        try:
-            saved = save_config(show_message=False) if callable(save_config) else True
-        except Exception:
-            saved = False
-        if saved is False:
-            if old_removed is None:
-                config.pop('model_manager_removed_models', None)
-            else:
-                config['model_manager_removed_models'] = old_removed
-            if add_to_saved:
-                if had_custom:
-                    config['custom_model_list'] = old_custom
-                else:
-                    config.pop('custom_model_list', None)
-            append_log = getattr(self, 'append_log', None)
-            if callable(append_log):
-                append_log("❌ Explicit model re-add was not saved; config.json write failed")
+        append_log = getattr(self, 'append_log', None)
+        remaining_removed = restore_removed_models(
+            config,
+            model_values,
+            add_to_saved=add_to_saved,
+            save=(lambda: save_config(show_message=False)) if callable(save_config) else None,
+            log=append_log if callable(append_log) else None,
+        )
+        if remaining_removed is None or remaining_removed is False:
             return False
 
         if refresh:
@@ -16038,45 +15664,33 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
     @staticmethod
     def _apply_polled_model_icons(manager, polled_model_keys):
         """Mark confirmed models and apply the optional testing filter."""
+        from model_catalog_core import casefold_model_keys, model_poll_marker
         list_widget = getattr(manager, '_model_list_widget', None)
         if list_widget is None:
             return
 
         checked_icon = getattr(manager, '_polled_model_icon', QIcon())
         empty_icon = QIcon()
-        polled_model_keys = {
-            str(model).casefold() for model in (polled_model_keys or set())
-        }
+        polled_model_keys = casefold_model_keys(polled_model_keys)
         hide_toggle = getattr(manager, '_hide_unpolled_models_toggle', None)
         hide_unpolled = bool(hide_toggle is not None and hide_toggle.isChecked())
         for index in range(list_widget.count()):
             item = list_widget.item(index)
-            is_polled = item.text().casefold() in polled_model_keys
+            is_polled, hidden, tooltip = model_poll_marker(item.text(), polled_model_keys, hide_unpolled)
             item.setIcon(checked_icon if is_polled else empty_icon)
-            item.setHidden(hide_unpolled and not is_polled)
-            item.setToolTip(
-                "✓ Confirmed by a successful provider poll within the past 7 days"
-                if is_polled else ""
-            )
+            item.setHidden(hidden)
+            item.setToolTip(tooltip)
 
     def _ensure_polled_model_marker_state(self):
         """Reload seven-day confirmation state, including expiry while open."""
+        from model_catalog_core import polled_model_keys, polled_models_by_provider
         try:
             catalogs = get_current_polled_provider_models()
         except Exception:
             catalogs = {}
-        by_provider = {
-            str(provider): {
-                str(model).casefold() for model in (models or [])
-            }
-            for provider, models in catalogs.items()
-        }
+        by_provider = polled_models_by_provider(catalogs)
         self._polled_online_models_by_provider = by_provider
-        self._polled_online_model_ids = PolledModelKeys(
-            model
-            for models in by_provider.values()
-            for model in models
-        )
+        self._polled_online_model_ids = polled_model_keys(by_provider)
         if isinstance(self, QObject) and not hasattr(self, '_model_poll_marker_expiry_timer'):
             self._model_poll_marker_expiry_timer = QTimer(self)
             self._model_poll_marker_expiry_timer.setInterval(60_000)
@@ -16219,7 +15833,23 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                         pass
 
     def _apply_provider_model_catalog_refresh(self, result):
-        """Apply a completed catalog refresh on Qt's GUI thread."""
+        """Apply a completed catalog refresh on Qt's GUI thread.
+
+        The catalog data steps (tombstones, picker list, poll markers, counts and
+        messages) are model_catalog_core's, shared with the mobile app.
+        """
+        from model_catalog_core import (
+            auto_poll_message,
+            catalog_display_models,
+            catalog_skip_counts,
+            confirmed_catalog_models,
+            known_catalog_keys,
+            manager_poll_models,
+            merge_polled_provider_models,
+            online_catalog_summary,
+            poll_status_text,
+            polled_key_set,
+        )
         catalog_poll_finished = bool(
             getattr(self, '_provider_model_catalog_poll_active', False)
         )
@@ -16260,16 +15890,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         }
 
         provider_models = dict(getattr(result, 'provider_models', {}) or {})
-        confirmed_models = [
-            model
-            for models in provider_models.values()
-            for model in (models or [])
-        ]
-        confirmed_model_keys = {
-            str(model).strip().casefold()
-            for model in confirmed_models
-            if str(model).strip()
-        }
+        confirmed_models, confirmed_model_keys = confirmed_catalog_models(provider_models)
         manager = getattr(self, '_model_manager_dialog', None)
         explicit_poll = explicit_poll or bool(
             manager is not None
@@ -16282,13 +15903,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 refresh=False,
             )
 
-        custom_models = self.config.get('custom_model_list')
-        removed_models = self.config.get('model_manager_removed_models', [])
-        display_models = merge_saved_model_options(
-            custom_models if isinstance(custom_models, list) else None,
-            online_models,
-            removed_models,
-        )
+        display_models = catalog_display_models(self.config, online_models)
 
         manager_list = getattr(manager, '_model_list_widget', None)
         if (
@@ -16306,38 +15921,20 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         self._refresh_model_combo_catalog(display_models)
 
         statuses = dict(getattr(result, 'statuses', {}) or {})
-        online = [name for name, status in statuses.items() if str(status).startswith('online')]
-        online_model_count = sum(
-            len(provider_models.get(name, []) or []) for name in online
-        )
+        online, online_model_count = online_catalog_summary(statuses, provider_models)
         requested_provider = getattr(result, 'requested_provider', None)
-        polled_by_provider = dict(self._ensure_polled_model_marker_state())
         # Failures retain unexpired confirmations. A successful catalog fully
         # replaces that provider's confirmations, removing omitted model IDs.
-        for name in online:
-            polled_by_provider[name] = {
-                str(model).casefold()
-                for model in (provider_models.get(name, []) or [])
-            }
+        polled_by_provider = merge_polled_provider_models(
+            self._ensure_polled_model_marker_state(), provider_models, online,
+        )
         self._polled_online_models_by_provider = polled_by_provider
-        polled_model_keys = {
-            model
-            for models in polled_by_provider.values()
-            for model in models
-        }
+        polled_model_keys = polled_key_set(polled_by_provider)
         self._polled_online_model_ids = PolledModelKeys(polled_model_keys)
         refresh_search_markers = getattr(self, '_refresh_model_search_poll_state', None)
         if callable(refresh_search_markers):
             refresh_search_markers()
-        credential_skip_count = sum(
-            1 for status in statuses.values()
-            if 'no provider credential' in str(status)
-        )
-        unavailable_count = sum(
-            1 for status in statuses.values()
-            if str(status).startswith('static fallback')
-            and 'no provider credential' not in str(status)
-        )
+        credential_skip_count, unavailable_count = catalog_skip_counts(statuses)
 
         # If the user explicitly polled from Manage Models, refresh that
         # dialog too. Automatic background refreshes must not disturb unsaved
@@ -16357,34 +15954,15 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                     for index in range(manager_list.count())
                 ]
                 known_models = set(getattr(manager, '_known_catalog_models', set()) or set())
-                custom_models = [
-                    model for model in previous_models
-                    if str(model).casefold() not in known_models
-                ]
-                previous_keys = {
-                    str(model).casefold() for model in previous_models
-                }
-                removed_keys = {
-                    str(model).casefold()
-                    for model in self.config.get('model_manager_removed_models', [])
-                }
                 # Retain draft deletions that the current poll did not confirm.
                 # Confirmed models are explicit re-adds when this is a manual poll.
-                removed_keys.update(known_models - previous_keys)
-                if explicit_poll:
-                    removed_keys.difference_update(confirmed_model_keys)
-                refreshed_models = merge_saved_model_options(
-                    None,
+                refreshed_models = manager_poll_models(
+                    previous_models,
+                    known_models,
+                    self.config.get('model_manager_removed_models', []),
                     online_models,
-                    removed_keys,
-                )
-                refreshed_keys = {str(model).casefold() for model in refreshed_models}
-                refreshed_models.extend(
-                    model for model in custom_models
-                    if (
-                        str(model).casefold() not in refreshed_keys
-                        and str(model).casefold() not in removed_keys
-                    )
+                    explicit_poll=explicit_poll,
+                    confirmed_model_keys=confirmed_model_keys,
                 )
 
                 selected_model = manager_list.currentItem().text() if manager_list.currentItem() else ''
@@ -16394,9 +15972,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                     if manager_list.item(index).text() == selected_model:
                         manager_list.setCurrentRow(index)
                         break
-                manager._known_catalog_models = {
-                    str(model).casefold() for model in online_models
-                }
+                manager._known_catalog_models = known_catalog_keys(online_models)
                 save_manager_state = getattr(manager, '_save_model_list_state', None)
                 if callable(save_manager_state):
                     save_manager_state()
@@ -16405,15 +15981,13 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 poll_button.setEnabled(True)
                 poll_button.setText("🌐 Poll Providers")
             if poll_status is not None:
+                poll_status.setText(poll_status_text(
+                    online, online_model_count, len(online_models),
+                    credential_skip_count, unavailable_count,
+                ))
                 if online:
-                    poll_status.setText(
-                        f"✓ {online_model_count} online · {', '.join(sorted(online))}\n"
-                        f"{len(online_models)} total incl. fallbacks\n"
-                        f"{credential_skip_count} need credentials · {unavailable_count} unavailable"
-                    )
                     poll_status.setStyleSheet("color: #78d69a; font-size: 8pt;")
                 else:
-                    poll_status.setText("No online catalog responded; using static fallbacks.")
                     poll_status.setStyleSheet("color: #e3b65b; font-size: 8pt;")
 
         # Icons are safe to update after both automatic and explicit polls:
@@ -16423,30 +15997,9 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             self._apply_polled_model_icons(manager, polled_model_keys)
 
         if requested_provider:
-            status = str(statuses.get(requested_provider, "static fallback (no result)"))
-            if status.startswith('online'):
-                refreshed_provider_models = list(
-                    provider_models.get(requested_provider, []) or []
-                )
-                new_model_keys = set()
-                for model in refreshed_provider_models:
-                    key = str(model).casefold()
-                    if key not in previous_model_keys:
-                        new_model_keys.add(key)
-                new_model_count = len(new_model_keys)
-                new_model_label = (
-                    "1 new model found"
-                    if new_model_count == 1
-                    else f"{new_model_count} new models found"
-                )
-                self.append_log(
-                    f"✅ Auto-poll complete: {requested_provider} — "
-                    f"{len(refreshed_provider_models)} models · {new_model_label}"
-                )
-            else:
-                self.append_log(
-                    f"⚠️ Auto-poll failed: {requested_provider} — {status}"
-                )
+            self.append_log(auto_poll_message(
+                requested_provider, statuses, provider_models, previous_model_keys,
+            ))
 
         # An explicit full refresh writes one detailed, consolidated log entry.
         if (
@@ -17474,36 +17027,28 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
     
     def _quick_new_profile(self):
         """Create a new empty profile with auto-incrementing name."""
-        existing = set(self.prompt_profiles.keys())
+        # The name, profile and config steps are the shared prompt_profiles.new_profile;
+        # the combo box / editor updates run as its hook at their original point.
+        from prompt_profiles import new_profile
+        existing_names = []
         if hasattr(self, 'profile_menu'):
             for i in range(self.profile_menu.count()):
-                existing.add(self.profile_menu.itemText(i))
-        
-        n = 1
-        while f"New Profile #{n}" in existing:
-            n += 1
-        name = f"New Profile #{n}"
-        
-        self.prompt_profiles[name] = ""
-        self.config['prompt_profiles'] = self.prompt_profiles
-        self.config['active_profile'] = name
-        
-        if hasattr(self, 'profile_menu'):
-            self.profile_menu.addItem(name)
-            self.profile_menu.setCurrentText(name)
-        
-        if hasattr(self, 'prompt_text'):
-            self.prompt_text.setPlainText("")
-        
-        self.profile_var = name
-        if not hasattr(self, '_original_profile_content'):
-            self._original_profile_content = {}
-        self._original_profile_content[name] = ""
-        self._active_profile_for_autosave = name
-        
-        if hasattr(self, 'save_profiles'):
-            self.save_profiles()
-        
+                existing_names.append(self.profile_menu.itemText(i))
+
+        def update_widgets(name):
+            if hasattr(self, 'profile_menu'):
+                self.profile_menu.addItem(name)
+                self.profile_menu.setCurrentText(name)
+
+            if hasattr(self, 'prompt_text'):
+                self.prompt_text.setPlainText("")
+
+        def persist():
+            if hasattr(self, 'save_profiles'):
+                self.save_profiles()
+
+        name = new_profile(self, existing_names=existing_names, update_widgets=update_widgets, persist=persist)
+
         if hasattr(self, 'append_log'):
             self.append_log(f"✅ Created new profile: '{name}'")
         self._update_profile_delete_button_label(name)
@@ -18858,12 +18403,19 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
 
     def _save_model_order(self, list_widget, dialog):
         """Save the new model order from the list widget."""
+        from model_catalog_core import (
+            EMPTY_MODEL_LIST,
+            MODEL_LIST_NOT_SAVED,
+            MODEL_LIST_NOT_SAVED_LOG,
+            MODEL_LIST_SAVED_LOG,
+            apply_model_order,
+            model_order_removed_keys,
+        )
         new_order = [list_widget.item(i).text() for i in range(list_widget.count())]
 
         if not new_order:
             from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(dialog, "Empty List",
-                                "The model list cannot be empty. Add at least one model.")
+            QMessageBox.warning(dialog, *EMPTY_MODEL_LIST)
             return
 
         # Remember explicit removals so startup/default/online catalog merges
@@ -18878,31 +18430,18 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 self.model_combo.itemText(index)
                 for index in range(self.model_combo.count())
             ]
-        new_keys = {str(model).strip().casefold() for model in new_order}
-        removed_keys = {
-            str(model).strip().casefold()
-            for model in self.config.get('model_manager_removed_models', [])
-            if str(model).strip()
-        }
-        removed_keys.update(
-            str(model).strip().casefold()
-            for model in previous_models
-            if str(model).strip() and str(model).strip().casefold() not in new_keys
+        removed_keys = model_order_removed_keys(
+            new_order, previous_models, self.config.get('model_manager_removed_models', []),
         )
-        removed_keys.difference_update(new_keys)
 
-        # Persist to config
-        had_custom_models = 'custom_model_list' in self.config
-        old_custom_models = self.config.get('custom_model_list')
-        had_removed_models = 'model_manager_removed_models' in self.config
-        old_removed_models = self.config.get('model_manager_removed_models')
+        # Persist to config (model_catalog_core keeps the rollback snapshot)
         wheel_lock_toggle = getattr(dialog, '_model_mousewheel_lock_toggle', None)
-        had_wheel_lock_setting = 'model_mousewheel_locked' in self.config
-        previous_wheel_lock = self.config.get('model_mousewheel_locked')
         if wheel_lock_toggle is not None:
-            self.config['model_mousewheel_locked'] = wheel_lock_toggle.isChecked()
-        self.config['custom_model_list'] = new_order
-        self.config['model_manager_removed_models'] = sorted(removed_keys)
+            snapshot = apply_model_order(
+                self.config, new_order, removed_keys, wheel_locked=wheel_lock_toggle.isChecked(),
+            )
+        else:
+            snapshot = apply_model_order(self.config, new_order, removed_keys)
         self._model_all_values = list(new_order)
 
         # Refresh the combo and completer immediately; a Manage Models save
@@ -18916,31 +18455,15 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         # write failed; that made deletions appear to work until restart.
         saved = self.save_config(show_message=False)
         if saved is False:
-            if had_custom_models:
-                self.config['custom_model_list'] = old_custom_models
-            else:
-                self.config.pop('custom_model_list', None)
-            if had_removed_models:
-                self.config['model_manager_removed_models'] = old_removed_models
-            else:
-                self.config.pop('model_manager_removed_models', None)
-            if had_wheel_lock_setting:
-                self.config['model_mousewheel_locked'] = previous_wheel_lock
-            else:
-                self.config.pop('model_mousewheel_locked', None)
+            snapshot.restore(self.config)
             from PySide6.QtWidgets import QMessageBox
-            QMessageBox.critical(
-                dialog,
-                "Model List Not Saved",
-                "Glossarion could not write the model list to config.json. "
-                "The manager will remain open so you can retry.",
-            )
-            self.append_log("❌ Model list was not saved; config.json write failed")
+            QMessageBox.critical(dialog, *MODEL_LIST_NOT_SAVED)
+            self.append_log(MODEL_LIST_NOT_SAVED_LOG)
             return
 
         if wheel_lock_toggle is not None:
             self._apply_combobox_mousewheel_lock(self.model_combo, 'model_mousewheel_locked', True)
-        self.append_log("✓ Model list updated")
+        self.append_log(MODEL_LIST_SAVED_LOG)
         dialog._model_manager_saved = True
         dialog._model_manager_draft_active = False
         dialog.accept()
@@ -18948,6 +18471,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
     def _collect_custom_prefix_routes_from_table(self, table, dialog):
         """Validate and collect custom prefix routes from the model manager table."""
         from PySide6.QtWidgets import QMessageBox
+        from model_catalog_core import custom_prefix_route_from_row
 
         routes = []
         seen = set()
@@ -18967,49 +18491,23 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 endpoint_type = type_widget.currentData()
             else:
                 endpoint_type = type_item.text().strip() if type_item else '/chat/completions'
-            if not self._is_valid_custom_prefix_endpoint_type(endpoint_type):
-                QMessageBox.warning(
-                    dialog,
-                    "Invalid Endpoint Type",
-                    f"Endpoint Type on row {row + 1} must be an absolute path like "
-                    "/chat/completions, /v1/ocr, or /v1/custom."
-                )
-                return None
-            endpoint_type = self._normalize_custom_prefix_endpoint_type(endpoint_type)
-            routing = routing_widget.text().strip() if routing_widget and hasattr(routing_widget, 'text') else (routing_item.text().strip() if routing_item else '')
 
-            if not prefix and not routing:
+            def read_routing(routing_widget=routing_widget, routing_item=routing_item):
+                return routing_widget.text().strip() if routing_widget and hasattr(routing_widget, 'text') else (routing_item.text().strip() if routing_item else '')
+
+            # The checks and warnings are model_catalog_core's (shared with the mobile app);
+            # the Base URL cell is read only once the endpoint type passed, as before.
+            route, problem = custom_prefix_route_from_row(
+                row + 1, prefix, endpoint_type, read_routing, seen,
+                is_valid=self._is_valid_custom_prefix_endpoint_type,
+                normalize=self._normalize_custom_prefix_endpoint_type,
+            )
+            if problem is not None:
+                QMessageBox.warning(dialog, *problem)
+                return None
+            if route is None:
                 continue
-            if not prefix or not routing:
-                QMessageBox.warning(dialog, "Incomplete Prefix Route",
-                                    f"Row {row + 1} needs both a prefix and Base URL.")
-                return None
-
-            prefix = prefix.replace('\\', '/').lstrip('/')
-            if any(ch.isspace() for ch in prefix):
-                QMessageBox.warning(dialog, "Invalid Prefix",
-                                    f"Prefix on row {row + 1} cannot contain spaces.")
-                return None
-            if not prefix.endswith('/'):
-                prefix = f"{prefix}/"
-
-            routing = routing.rstrip('/')
-            if not routing.lower().startswith(('http://', 'https://')):
-                QMessageBox.warning(dialog, "Invalid Base URL",
-                                    f"Base URL on row {row + 1} must start with http:// or https://.")
-                return None
-
-            key = prefix.lower()
-            if key in seen:
-                QMessageBox.warning(dialog, "Duplicate Prefix",
-                                    f"'{prefix}' is already listed.")
-                return None
-            seen.add(key)
-            routes.append({
-                'prefix': prefix,
-                'routing': routing,
-                'endpoint_type': endpoint_type,
-            })
+            routes.append(route)
 
         return routes
 

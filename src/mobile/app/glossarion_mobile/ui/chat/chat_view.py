@@ -108,9 +108,10 @@ _NOT_YET = {
     "retranslate": "Retranslating chapters arrives in U7",
 }
 _LATER = {
-    SendAction.SEND_ONCE_WITH_MODEL: "One-shot model choice arrives in U4",
-    SendAction.SEND_AS_SCRATCH: "Scratch chats arrive in U4",
+    SendAction.SEND_AS_SCRATCH: "Scratch chats arrive in U7",
 }
+# ModelSheet field -> chat override key (run_request.OVERRIDE_CONFIG_KEYS maps them to config keys)
+_SHEET_OVERRIDE_KEYS = {"model": "model", "profile": "profile", "language": "target_language"}
 _ATTACH_EXTENSIONS = [
     "txt", "epub", "pdf", "md", "markdown", "html", "htm", "xhtml", "xml", "json", "csv", "tsv", "srt", "ass",
     "lrc", "vtt", "log", "sdlxliff", "zip", "cbz", "mp4", "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif",
@@ -758,6 +759,9 @@ class ChatView:
         if action is SendAction.ADD_WITHOUT_TRANSLATING:
             self.add_without_translating()
             return
+        if action is SendAction.SEND_ONCE_WITH_MODEL:
+            self.open_model_once()
+            return
         if action is SendAction.STOP_CURRENT_AND_SEND:
             self.confirm_stop_current_and_send()
             return
@@ -786,8 +790,11 @@ class ChatView:
         dialog.show(self.page)
         return dialog
 
-    def begin_send(self) -> None:
-        """``_on_enter_clicked`` -> ``_start_translation`` (asks the manual glossary first when required)."""
+    def begin_send(self, once: Optional[dict] = None) -> None:
+        """``_on_enter_clicked`` -> ``_start_translation`` (asks the manual glossary first when required).
+
+        ``once``: chat override keys (model / profile / target_language) for this send only, from
+        long-press Send -> "Translate once with another model…" (UI_SPEC §2.2 one-shot)."""
         text = self.composer.send_text()
         record = self.composer.attachment
         if record and not os.path.isfile(str(record.get("path") or "")):
@@ -798,12 +805,12 @@ class ChatView:
             return
         settings = self.settings()
         if settings.glossary_override_mode == "manual":
-            self.open_manual_glossary(lambda source: self._send(text, record, settings, source))
+            self.open_manual_glossary(lambda source: self._send(text, record, settings, source, once))
             return
-        self._send(text, record, settings, None)
+        self._send(text, record, settings, None, once)
 
     def _send(self, text: str, record: Optional[dict], settings: DirectTextSettings,
-              manual: Optional[ManualGlossarySource]) -> None:
+              manual: Optional[ManualGlossarySource], once: Optional[dict] = None) -> None:
         env = self.env
         cid = self.cid
         output_mode = self.state.output_mode.value.mode
@@ -816,12 +823,13 @@ class ChatView:
             env.chats.set_meta(cid, "pending_plan", {
                 "user_index": index, "text": text, "attachment": dict(record), "output_mode": output_mode,
                 "manual_glossary": manual.as_dict() if manual else None, "created": time.time(),
+                "once": dict(once) if once else None,
             })
             self._after_send_ui(output_mode)
             return
         self._after_send_ui(output_mode)
         self.sent.append((cid, text, dict(record) if record else None))
-        self._spawn(self._submit(cid, text, record, settings, output_mode, manual, None))
+        self._spawn(self._submit(cid, text, record, settings, output_mode, manual, None, once))
 
     def _after_send_ui(self, output_mode: str) -> None:
         """Clear the composer and restore the mode non-automatically (desktop after recording the turn)."""
@@ -832,8 +840,11 @@ class ChatView:
         self.refresh_send()
 
     async def _submit(self, cid: str, text: str, record: Optional[dict], settings: DirectTextSettings,
-                      output_mode: str, manual: Optional[ManualGlossarySource], user_index: Optional[int]) -> Any:
+                      output_mode: str, manual: Optional[ManualGlossarySource], user_index: Optional[int],
+                      once: Optional[dict] = None) -> Any:
         overrides = self.env.chats.overrides(cid)
+        if once:
+            overrides = {**overrides, **{k: v for k, v in once.items() if v}}
         try:
             run = await self.env.runs.send(
                 cid, text=text, attachment=record, settings=settings, output_mode=output_mode,
@@ -921,8 +932,10 @@ class ChatView:
             )
         record = plan.get("attachment") or None
         self.sent.append((cid, plan.get("text") or "", record))
+        once = plan.get("once") if isinstance(plan.get("once"), dict) else None
         self._spawn(self._submit(cid, str(plan.get("text") or ""), record, self.settings(cid),
-                                 str(plan.get("output_mode") or "text"), manual, int(plan.get("user_index") or 0)))
+                                 str(plan.get("output_mode") or "text"), manual, int(plan.get("user_index") or 0),
+                                 once))
 
     def cancel_plan(self) -> None:
         """Cancel removes the plan and the unsent user_file turn (§2.12.1)."""
@@ -1260,7 +1273,7 @@ class ChatView:
             self.load_chat(cid)
 
     def _on_new_scratch(self, e: Any = None) -> None:
-        self.notify("Scratch chats arrive in U4")
+        self.notify("Scratch chats arrive in U7")
 
     def _on_menu_action(self, action: str) -> None:
         cid = self.state.current_chat.value
@@ -1276,7 +1289,7 @@ class ChatView:
         elif action == "text_size":
             self.open_chat_settings()
         else:
-            self.notify("This chat action arrives in U4")
+            self.notify("This chat action arrives in U7")
 
     def _on_suggestion(self, suggestion: str) -> None:
         if suggestion == "open_library":
@@ -1400,7 +1413,7 @@ class ChatView:
                        and self.env.open_output is not None) else None, icon="FOLDER_OPEN",
                        disabled_reason=None if folder else "No output folder for this response"),
             ActionItem("Add term to glossary", disabled_reason="Arrives in U6", icon="BOOKMARK_ADD"),
-            ActionItem("Delete message", disabled_reason="Arrives in U4", icon="DELETE_OUTLINE", destructive=True),
+            ActionItem("Delete message", disabled_reason="Arrives in U7", icon="DELETE_OUTLINE", destructive=True),
         ]
         sheet = ActionSheet(items, title=card.request_label or "Response", tablet=bool(self.layout.persistent_sidebar))
         sheet.show(self.page)
@@ -1412,7 +1425,7 @@ class ChatView:
                 ActionItem("Copy", lambda: self._spawn_copy(bubble.text), icon="CONTENT_COPY"),
                 ActionItem("Translate again", lambda: (self.composer.set_text(bubble.text),
                                                        self.on_send_action(SendAction.SEND)), icon="REFRESH"),
-                ActionItem("Edit & resend", disabled_reason="Arrives in U4", icon="EDIT"),
+                ActionItem("Edit & resend", disabled_reason="Arrives in U7", icon="EDIT"),
             ],
             title="Message",
         )
@@ -1501,7 +1514,9 @@ class ChatView:
                 self.navigate("chat.settings", {"cid": self.state.current_chat.value})
 
     def open_mode_options(self, mode_id: str) -> ModeOptionsSheet:
-        self.mode_sheet = ModeOptionsSheet(mode_id)
+        from glossarion_mobile.ui.sheets.model_sheet import sheet_env
+
+        self.mode_sheet = ModeOptionsSheet(mode_id, ctx=sheet_env().ctx)  # ctx: the settings tiles (U4)
         self.mode_sheet.show(self.page)
         return self.mode_sheet
 
@@ -1532,8 +1547,20 @@ class ChatView:
         self.settings_sheet.show(self.page)
         return self.settings_sheet
 
-    def open_model_sheet(self, tab: str = "model", chat_scope: bool = False) -> Any:
-        """Minimal ModelSheet (U3): catalog search, current model, sign-in status."""
+    def open_model_once(self) -> Any:
+        """Long-press Send -> "Translate once with another model…": the ModelSheet in one-shot mode
+        ("Use once"); the choice overrides only this send, never the global key or the chat."""
+        if not self.bound or self.env is None or self.env.runs is None:
+            self.notify("Translating needs the job service, which is not running in this build.")
+            return None
+        text = self.composer.send_text()
+        if not text and not self.composer.attachment:
+            self.notify("Enter text or attach a TXT, EPUB, PDF, CBZ, or image file to translate.")
+            return None
+        return self.open_model_sheet("model", one_shot=True)
+
+    def open_model_sheet(self, tab: str = "model", chat_scope: bool = False, one_shot: bool = False) -> Any:
+        """The ModelSheet (UI_SPEC §2.2): catalog search, favourites, provider groups, route row."""
         context = self.state.chat_context.value
         if self.env is None:
             titles = {
@@ -1544,7 +1571,7 @@ class ChatView:
             title, value = titles.get(tab, titles["model"])
             self.model_sheet = InfoSheet(
                 title=title,
-                body=f"Current: {value}\n\nSearch, favourites, provider groups and online refresh arrive with the model picker in U4.",
+                body=f"Current: {value}\n\nThe model picker needs the chat services, which are not running in this build.",
                 actions=[
                     ft.TextButton(content="Manage models", on_click=lambda e: self._sheet_nav("settings.models")),
                     ft.TextButton(content="Accounts", on_click=lambda e: self._sheet_nav("settings.accounts")),
@@ -1552,6 +1579,7 @@ class ChatView:
             )
             self.model_sheet.show(self.page)
             return self.model_sheet
+        from glossarion_mobile.services.oauth import sign_in_satisfied
         from glossarion_mobile.ui.sheets.model_sheet_min import ModelSheetMin, load_model_catalog
 
         signed = self.state.signed_in.value
@@ -1561,10 +1589,11 @@ class ChatView:
             current_language=context.target_language,
             profiles=self._profiles(),
             languages=self.env.languages,
-            signed_in=lambda model: "authgpt" in signed,
+            signed_in=lambda model: sign_in_satisfied(model, signed),
             tab=tab,
-            chat_scope=chat_scope,
-            on_select=self._on_model_sheet_select,
+            chat_scope=chat_scope and not one_shot,
+            one_shot=one_shot,
+            on_select=self._on_model_once_select if one_shot else self._on_model_sheet_select,
             on_sign_in=self.open_login_sheet,
             on_accounts=lambda: self.navigate("settings.accounts"),
         )
@@ -1581,6 +1610,12 @@ class ChatView:
 
         self._spawn(load())
         return sheet
+
+    def _on_model_once_select(self, field_name: str, value: str, this_chat_only: bool = False) -> None:
+        """One-shot choice: send now with ``{override key: value}`` for this run only."""
+        key = _SHEET_OVERRIDE_KEYS.get(field_name)
+        if key and value:
+            self.begin_send(once={key: value})
 
     def _on_model_sheet_select(self, field_name: str, value: str, this_chat_only: bool) -> None:
         key = {"model": "model", "profile": "active_profile", "language": "output_language"}[field_name]
@@ -1620,11 +1655,16 @@ class ChatView:
         return self.glossary_sheet
 
     def open_login_sheet(self) -> Any:
+        """"Sign in with ChatGPT" (blocked Send, status caption): the LoginSheet of the ChatGPT slot
+        the current model uses (``authgpt2/`` -> #2; ``authgpt/`` and the ``authgpt0/`` pool -> #0)."""
         if self.env is None or self.env.oauth is None:
             self.navigate("settings.accounts")
             return None
+        from glossarion_mobile.services.oauth import sign_in_slot
         from glossarion_mobile.ui.screens.accounts import LoginSheet
 
-        self.login_sheet = LoginSheet(self.env.oauth, on_done=lambda status: self._on_signin_changed())
+        account_id = sign_in_slot(self.state.chat_context.value.model, "authgpt")
+        self.login_sheet = LoginSheet(self.env.oauth, provider="authgpt", account_id=account_id,
+                                      on_done=lambda status: self._on_signin_changed())
         self.login_sheet.show(self.page)
         return self.login_sheet

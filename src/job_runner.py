@@ -137,6 +137,17 @@ def _is_pool_state_attr(name):
             or name in _POOL_EXTRA_ATTRS)
 
 
+#: Class-body members that are code, not pool state: ``setup_multi_key_pool``, ``get_key_pool``,
+#: ``_get_active_key_pool`` ... match the ``*_key_pool`` names but must never be detached.
+_CODE_MEMBER_TYPES = (classmethod, staticmethod, property, type(_is_pool_state_attr))
+
+
+def _pool_state_items(cls):
+    """``{name: value}`` of the pool state attributes in ``vars(cls)`` (methods excluded)."""
+    return {n: v for n, v in vars(cls).items()
+            if _is_pool_state_attr(n) and not isinstance(v, _CODE_MEMBER_TYPES)}
+
+
 @contextlib.contextmanager
 def isolated_key_pools():
     """Give the body fresh ``UnifiedClient`` key pools and put the previous pool state back afterwards.
@@ -149,7 +160,7 @@ def isolated_key_pools():
     ``unified_api_client`` is already imported."""
     module = sys.modules.get("unified_api_client")
     cls = getattr(module, "UnifiedClient", None) if module is not None else None
-    saved = {n: v for n, v in vars(cls).items() if _is_pool_state_attr(n)} if cls is not None else {}
+    saved = _pool_state_items(cls) if cls is not None else {}
     if cls is not None:
         for name, value in saved.items():
             if name.endswith("_key_pool") and value is not None:
@@ -159,7 +170,7 @@ def isolated_key_pools():
     finally:
         if cls is not None:
             missing = object()
-            for name in [n for n in list(vars(cls)) if _is_pool_state_attr(n) and n not in saved]:
+            for name in [n for n in _pool_state_items(cls) if n not in saved]:
                 try:
                     delattr(cls, name)
                 except AttributeError:

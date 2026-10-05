@@ -1551,7 +1551,11 @@ def mutant_legacy_class(sess: TraceSession, method: str, old: str, new: str):
     import textwrap
 
     base = sess.owner_class("legacy")
-    original = getattr(sess.bundle.methods, method)
+    # resolved like the legacy owner does: the frozen TranslatorGUI body, then (oracles frozen
+    # after a move, e.g. U3's _process_text_file) the frozen shared mixin copies
+    original = fm.resolve_python_mro(base, method)
+    if original is fm.MISSING:
+        original = getattr(sess.bundle.methods, method)
     source = textwrap.dedent(inspect.getsource(original))
     if source.count(old) != 1:
         raise ValueError(f"{method}: edit anchor found {source.count(old)} times")
