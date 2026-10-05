@@ -440,6 +440,11 @@ class WriteAudit:
             if ("__pycache__" in full.split(os.sep) or _under(full, self.allowed)
                     or (self.pycache_prefix and _under(full, self.pycache_prefix))):
                 return
+            try:  # same folder via a symlinked prefix (Android /data/data -> /data/user/0)
+                if _under(os.path.normcase(os.path.realpath(text)), self.allowed):
+                    return
+            except (OSError, ValueError):
+                pass
             with self._lock:
                 if len(self.violations) < 200:
                     self.violations.append({"event": event, "path": text, "thread": threading.current_thread().name,
@@ -1058,7 +1063,11 @@ class E2ESession:
         _check(not inline, f"assistant cards without a body or Chat Messages/ file: {inline[:3]}")
         _check(sum(1 for m in assistant if len(m) > 6 and isinstance(m[6], dict) and m[6].get("content_path")) >= CHAPTERS,
                "chapter bodies were not externalised to Chat Messages/")
-        _check(str(session.get("output_folder") or "").startswith(str(self.root / "Output" / "Direct Text")),
+        # Compare resolved paths: on Android the same folder is reachable as
+        # /data/data/<pkg> and /data/user/0/<pkg> (symlink).
+        _out = os.path.realpath(str(session.get("output_folder") or ""))
+        _expected = os.path.realpath(str(self.root / "Output" / "Direct Text"))
+        _check(bool(session.get("output_folder")) and (_out == _expected or _out.startswith(_expected + os.sep)),
                f"chat output folder {session.get('output_folder')!r}")
         sidecar = Path(history).with_name("direct_text_chats.mobile.json")
         _check(sidecar.is_file(), "the mobile sidecar was not written")

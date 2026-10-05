@@ -940,6 +940,7 @@ def bootstrap(
             tiktoken_report = {"errors": [f"{type(exc).__name__}: {exc}"]}
 
         _install_webbrowser()
+        _prime_platform_processor()
 
         state = BootState(
             paths=paths,
@@ -966,6 +967,26 @@ def bootstrap(
         )
         emit_marker(MARKER_BOOT, _boot_payload(state))
         return paths
+
+
+def _prime_platform_processor() -> None:
+    """Pre-fill platform.uname().processor so nothing ever runs ``uname -p``.
+
+    CPython computes ``uname_result.processor`` lazily (a cached_property) and on
+    Linux-like systems (Android) does it by spawning ``uname -p``. SDKs reach it
+    through ``platform.platform()`` when they build user-agent headers (e.g. the
+    openai client on its first request), which would spawn a process on a worker
+    thread. The value is cosmetic there, so seed the cache with the same blank
+    result ``uname -p`` gives on Android; leave an already computed value alone.
+    """
+    try:
+        import platform as _platform
+
+        result = _platform.uname()
+        if "processor" not in getattr(result, "__dict__", {}):
+            result.__dict__["processor"] = ""
+    except Exception:
+        pass
 
 
 def _flet_version() -> Optional[str]:
