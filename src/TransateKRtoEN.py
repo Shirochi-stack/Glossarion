@@ -28,6 +28,7 @@ from chapter_display_numbering import (
     filename_chapter_number,
     nonreset_chapter_display_numbers,
 )
+import mobile_runtime
 from epub_package import find_epub_opf_member, find_opf_path
 from title_tag_translation import (
     DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
@@ -19125,7 +19126,9 @@ def sync_loaded_css_and_fonts_to_output(output_dir: str):
     if not font_names:
         return
 
-    app_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+    app_dir = mobile_runtime.data_dir(
+        os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+    )
     custom_fonts_dir = os.path.join(app_dir, "custom_fonts")
     try:
         available = {name.lower(): name for name in os.listdir(custom_fonts_dir)} if os.path.isdir(custom_fonts_dir) else {}
@@ -19482,6 +19485,7 @@ def _postprocess_output_candidates(input_path: str, file_base: str, current_out:
             runtime_dir = os.path.dirname(os.path.abspath(sys.executable))
         else:
             runtime_dir = os.path.dirname(os.path.abspath(__file__))
+        runtime_dir = mobile_runtime.data_dir(runtime_dir)
         if file_base:
             _add(os.path.join(runtime_dir, file_base))
     except Exception:
@@ -25791,6 +25795,7 @@ def main(log_callback=None, stop_callback=None):
             
             _pdf_render_mode = os.getenv("PDF_RENDER_MODE", "fast_semantic").lower()
             use_async = (os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1"
+                        and mobile_runtime.processes_available()
                         and log_callback
                         and _pdf_page_count >= _pdf_page_threshold)
 
@@ -26134,7 +26139,11 @@ def main(log_callback=None, stop_callback=None):
             except Exception:
                 pass
             extraction_result = None
-            use_async = os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1" and log_callback
+            use_async = (
+                os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1"
+                and mobile_runtime.processes_available()
+                and log_callback
+            )
             if use_async:
                 from sdlxliff_extraction_manager import SdlxliffExtractionManager
 
@@ -26205,7 +26214,10 @@ def main(log_callback=None, stop_callback=None):
             return
     else:
         # Check if we should use async extraction (for GUI mode)
-        use_async_extraction = os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1"
+        use_async_extraction = (
+            os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1"
+            and mobile_runtime.processes_available()
+        )
 
         # Single-chapter mode (Library / Reader "Translate" on one entry):
         # always use the in-process extractor — it honors
@@ -27306,47 +27318,76 @@ def main(log_callback=None, stop_callback=None):
                     # NOTE: Avoid multiprocessing.Manager() here.
                     # Instead, have the subprocess append logs to a file and tail it from the parent.
                     log_queue = None
-                    # Write subprocess logs to a central logs folder (not the output book folder)
-                    try:
-                        _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-                    except Exception:
-                        _project_root = os.path.abspath(".")
-                    logs_dir = os.path.join(_project_root, "logs")
-                    try:
-                        os.makedirs(logs_dir, exist_ok=True)
-                    except Exception:
-                        pass
-                    glossary_log_fp = os.path.join(
-                        logs_dir,
-                        f"glossary_subprocess_{int(time.time() * 1000)}_{os.getpid()}.log"
-                    )
-                    try:
-                        # Ensure file exists (fresh per run)
-                        with open(glossary_log_fp, "w", encoding="utf-8") as _f:
-                            _f.write("")
-                    except Exception:
-                        pass
-                    
-                    # Use ProcessPoolExecutor for true parallelism (completely bypasses GIL)
-                    print("📑 Starting glossary generation in separate process...")
-                    with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
-                        # Submit to separate process WITH log queue
-                        future = executor.submit(
-                            generate_glossary_in_process,
-                            out,
-                            worker_chapters,
-                            instructions,
-                            env_vars,
-                            log_queue,  # Queue disabled (None)
-                            glossary_log_fp  # log_file_path for parent tailing
+                    # Glossarion Mobile cannot start worker processes. There the
+                    # same worker runs in a thread of this process and prints to
+                    # this process's stdout, so no log file is written or tailed.
+                    _glossary_in_thread = not mobile_runtime.processes_available()
+                    if _glossary_in_thread:
+                        glossary_log_fp = None
+                    else:
+                        # Write subprocess logs to a central logs folder (not the output book folder)
+                        try:
+                            _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+                        except Exception:
+                            _project_root = os.path.abspath(".")
+                        logs_dir = os.path.join(_project_root, "logs")
+                        try:
+                            os.makedirs(logs_dir, exist_ok=True)
+                        except Exception:
+                            pass
+                        glossary_log_fp = os.path.join(
+                            logs_dir,
+                            f"glossary_subprocess_{int(time.time() * 1000)}_{os.getpid()}.log"
                         )
+                        try:
+                            # Ensure file exists (fresh per run)
+                            with open(glossary_log_fp, "w", encoding="utf-8") as _f:
+                                _f.write("")
+                        except Exception:
+                            pass
+                    
+                    if _glossary_in_thread:
+                        print("📑 Starting glossary generation in a background thread (worker processes unavailable)...")
+                        _glossary_executor = mobile_runtime.make_pool_executor(1, thread_name_prefix="glossary-worker")
+                    else:
+                        # Use ProcessPoolExecutor for true parallelism (completely bypasses GIL)
+                        print("📑 Starting glossary generation in separate process...")
+                        _glossary_executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
+                    with _glossary_executor as executor:
+                        if _glossary_in_thread:
+                            # In-thread: leave this process's stdout/logging alone and
+                            # restore the env keys the worker changes (e.g. EPUB_PATH).
+                            future = executor.submit(
+                                generate_glossary_in_process,
+                                out,
+                                worker_chapters,
+                                instructions,
+                                env_vars,
+                                None,
+                                None,
+                                capture_stdio=False,
+                                isolate_env=True,
+                            )
+                        else:
+                            # Submit to separate process WITH log queue
+                            future = executor.submit(
+                                generate_glossary_in_process,
+                                out,
+                                worker_chapters,
+                                instructions,
+                                env_vars,
+                                log_queue,  # Queue disabled (None)
+                                glossary_log_fp  # log_file_path for parent tailing
+                            )
                         
                         # Poll for completion and stream logs in real-time
                         poll_count = 0
                         graceful_stop_notice_shown = False
                         # Tail the subprocess log file for visibility
                         _log_pos = 0
-                        _seen_worker_output = False
+                        # In-thread output reaches stdout directly; skip the
+                        # "waiting for glossary subprocess to start" notices.
+                        _seen_worker_output = _glossary_in_thread
                         _submit_ts = time.time()
                         # Start wait logging after 5s (avoid a noisy "0s" line)
                         _last_wait_log_ts = _submit_ts

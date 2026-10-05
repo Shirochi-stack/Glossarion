@@ -247,6 +247,16 @@ app_files = [
     ('html_output_utils.py', '.'),
     ('onnx_cpp_backend.py', '.'),
     ('unified_glossary.py', '.'),
+    # Mobile rewrite U1: GUI-free shared core + runtime gates
+    ('mobile_runtime.py', '.'),
+    ('app_paths.py', '.'),
+    ('config_store.py', '.'),
+    ('prompt_defaults.py', '.'),
+    ('metadata_defaults.py', '.'),
+    ('ollama_settings.py', '.'),
+    ('key_pools.py', '.'),
+    ('output_naming.py', '.'),
+    ('pdf_mupdf_html.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -391,6 +401,16 @@ app_modules = [
     'tqdm_safety',
     'unified_glossary',
     'vision_ocr_source_epub',
+    # Mobile rewrite U1: GUI-free shared core + runtime gates
+    'mobile_runtime',
+    'app_paths',
+    'config_store',
+    'prompt_defaults',
+    'metadata_defaults',
+    'ollama_settings',
+    'key_pools',
+    'output_naming',
+    'pdf_mupdf_html',
 ]
 # GUI Framework
 gui_modules = [

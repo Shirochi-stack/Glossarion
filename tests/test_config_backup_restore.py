@@ -13,19 +13,21 @@ import pytest
 from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QMessageBox, QPushButton
 
+import app_paths
 import shutdown_utils
 
 
 @pytest.fixture
 def backup_module(monkeypatch, tmp_path):
+    # config_backup reads the config path at call time from app_paths (via
+    # config_store), so point app_paths at a temporary config.
+    monkeypatch.setattr(app_paths, 'CONFIG_FILE', str(tmp_path / 'config.json'))
     path = Path(__file__).resolve().parents[1] / 'src' / 'config_backup.py'
     spec = importlib.util.spec_from_file_location('_config_backup_under_test', path)
     module = importlib.util.module_from_spec(spec)
-    # Omit the unrelated full application startup imported for these constants.
+    # Loading it must not start the full application (no translator_gui import).
     with monkeypatch.context() as patch:
-        patch.setitem(sys.modules, 'translator_gui', types.SimpleNamespace(
-            CONFIG_FILE=str(tmp_path / 'config.json'), decrypt_config=lambda value: value,
-        ))
+        patch.setitem(sys.modules, 'translator_gui', None)
         spec.loader.exec_module(module)
     return module
 
@@ -37,7 +39,7 @@ def qapp():
 
 @pytest.mark.parametrize('frozen', [False, True])
 def test_restore_is_atomic_preserves_bytes_and_builds_restart_command(backup_module, tmp_path, monkeypatch, frozen):
-    config = Path(backup_module.CONFIG_FILE)
+    config = Path(app_paths.CONFIG_FILE)
     config.write_text('{"current": true}', encoding='utf-8')
     backup = tmp_path / 'backup.json.bak'
     restored = b'{"restored": true, "encrypted_key": "unchanged"}'
@@ -61,7 +63,7 @@ def test_restore_is_atomic_preserves_bytes_and_builds_restart_command(backup_mod
 
 @pytest.mark.parametrize('failure', ['invalid_json', 'invalid_shape', 'replace_error'])
 def test_failed_restore_leaves_current_config_intact(backup_module, tmp_path, monkeypatch, failure):
-    config = Path(backup_module.CONFIG_FILE)
+    config = Path(app_paths.CONFIG_FILE)
     config.write_bytes(b'{"current": true}')
     backup = tmp_path / 'backup.json.bak'
     backup.write_bytes({'invalid_json': b'{', 'invalid_shape': b'[]'}.get(failure, b'{}'))
@@ -78,7 +80,7 @@ def test_failed_restore_leaves_current_config_intact(backup_module, tmp_path, mo
 
 
 def test_restore_dialog_and_callbacks_stay_on_gui_thread(backup_module, tmp_path, monkeypatch, qapp):
-    config = Path(backup_module.CONFIG_FILE)
+    config = Path(app_paths.CONFIG_FILE)
     config.write_text('{}', encoding='utf-8')
     backups = tmp_path / 'config_backups'
     backups.mkdir()

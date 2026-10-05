@@ -24,6 +24,64 @@ class _NullCipher:
         return base64.b64decode(token)
 
 
+# Process-local key material. Glossarion Mobile keeps the Fernet key in the
+# platform secure storage (Android Keystore / iOS Keychain) and passes it in
+# with set_key_material() before any backend import: on Android the app dir
+# next to __file__ is replaced on every update, and the iOS bundle is
+# read-only. The key never goes into os.environ on a device.
+# GLOSSARION_API_KEY_FERNET is a fallback for host tests only. When neither
+# is set, the desktop key-file logic in APIKeyEncryption runs unchanged.
+_key_material = None
+
+
+def _normalize_key_material(key):
+    """Return *key* as a url-safe base64 Fernet key (bytes) or raise ValueError.
+
+    Accepts a Fernet key (``Fernet.generate_key()``, bytes or str) or the
+    32 raw key bytes.
+    """
+    if isinstance(key, str):
+        key = key.strip().encode("ascii", "replace")
+    if not isinstance(key, (bytes, bytearray)):
+        raise ValueError("API key encryption key must be bytes")
+    key = bytes(key)
+    if len(key) == 32:
+        return base64.urlsafe_b64encode(key)
+    key = key.strip()
+    try:
+        raw = base64.urlsafe_b64decode(key)
+    except Exception:
+        raise ValueError("API key encryption key is not a Fernet key")
+    if len(raw) != 32:
+        raise ValueError("API key encryption key must decode to 32 bytes")
+    return key
+
+
+def set_key_material(key: bytes) -> None:
+    """Encrypt API keys with *key* in this process instead of the key file.
+
+    *key* is a Fernet key or its 32 raw bytes; ``None`` clears it. The shared
+    handler is rebuilt on its next use, so call this before the first
+    encrypt/decrypt. Desktop never calls it.
+    """
+    global _key_material, _handler
+    _key_material = None if key is None else _normalize_key_material(key)
+    _handler = None
+
+
+def _active_key_material():
+    """The set_key_material() key, else GLOSSARION_API_KEY_FERNET, else None."""
+    if _key_material is not None:
+        return _key_material
+    env_key = os.environ.get("GLOSSARION_API_KEY_FERNET", "").strip()
+    if env_key:
+        try:
+            return _normalize_key_material(env_key)
+        except ValueError:
+            print("Warning: GLOSSARION_API_KEY_FERNET is not a valid Fernet key; ignored")
+    return None
+
+
 class APIKeyEncryption:
     """Simple encryption handler for API keys"""
     
@@ -50,6 +108,12 @@ class APIKeyEncryption:
     
     def _init_cipher(self, sys):
         """Initialize cipher with proper error handling."""
+        key_material = _active_key_material()
+        if key_material is not None and _HAS_CRYPTOGRAPHY:
+            # Process-local key (mobile secure storage / host tests): no key file.
+            self.key_file = None
+            self.cipher = Fernet(key_material)
+            return
         # Determine writable directory for the encryption key file
         if sys.platform == 'darwin' and getattr(sys, 'frozen', False):
             # macOS .app bundles: Contents/MacOS/ is read-only on DMGs

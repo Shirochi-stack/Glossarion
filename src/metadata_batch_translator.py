@@ -35,6 +35,7 @@ from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from language_options import TARGET_LANGUAGES
 from translation_artifacts import update_translation_artifact_progress
 from epub_package import find_epub_opf_member
+from metadata_defaults import ensure_metadata_prompt_defaults
 import re
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
@@ -207,55 +208,8 @@ class MetadataBatchTranslatorUI:
     
     def _initialize_default_prompts(self):
         """Initialize all default prompts in config if not present"""
-        # Book title system prompt
-        if 'book_title_system_prompt' not in self.gui.config:
-            self.gui.config['book_title_system_prompt'] = (
-                "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."
-            )
-        
-        # Book title user prompt
-        if 'book_title_prompt' not in self.gui.config:
-            self.gui.config['book_title_prompt'] = (
-                ""
-            )
-        
-        # Batch header system prompt
-        if 'batch_header_system_prompt' not in self.gui.config:
-            self.gui.config['batch_header_system_prompt'] = (
-                "You are a professional translator specializing in novel chapter titles. "
-                "You must translate the chapter titles to {target_lang}. "
-                "Respond with only the translated JSON, nothing else. "
-                "Maintain the original tone and style while making titles natural in the target language."
-            )
-        
-        # Batch header user prompt (existing)
-        if 'batch_header_prompt' not in self.gui.config:
-            self.gui.config['batch_header_prompt'] = (
-                "Translate these chapter titles to {target_lang}.\n"
-                "- For titles with parenthetical text, translate both the main title and the parenthetical content.\n"
-                "- Translate the meaning accurately - don't use overly dramatic words unless the original implies them.\n"
-                "- Preserve the chapter number format exactly as shown.\n"
-                "Return ONLY a JSON object with chapter numbers as keys.\n"
-                "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}"
-            )
-        
-        # Metadata batch prompt
-        if 'metadata_batch_prompt' not in self.gui.config:
-            self.gui.config['metadata_batch_prompt'] = (
-                "Translate the following metadata fields to {target_lang}.\n"
-                "Output ONLY a JSON object with the same field names as keys."
-            )
-        
-        # Field-specific prompts
-        if 'metadata_field_prompts' not in self.gui.config:
-            self.gui.config['metadata_field_prompts'] = {
-                'creator': "Romanize this author name. Do not output anything other than the romanized text.",
-                'publisher': "Romanize this publisher name. Do not output anything other than the romanized text.",
-                'subject': "Translate this book genre/subject to {target_lang}. Do not output anything other than the translated text.",
-                'description': "Translate this book description to {target_lang}. Do not output anything other than the translated text.",
-                'series': "Translate this series name to {target_lang}. Do not output anything other than the translated text.",
-                '_default': "Translate this text to {target_lang}. Do not output anything other than the translated text."
-            }
+        # Defaults live in metadata_defaults (GUI-free, shared with mobile)
+        ensure_metadata_prompt_defaults(self.gui.config)
 
             
     def configure_metadata_fields(self):

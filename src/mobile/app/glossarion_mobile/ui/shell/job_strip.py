@@ -1,0 +1,114 @@
+"""JobStrip (UI_SPEC §1.7, §5.1): the 44 dp "mini-player" for the running job.
+
+Leading ``ProgressRing(28)`` with the job-kind icon in its centre
+(indeterminate until a total is known) · title (labelLarge) over subtitle
+(labelSmall; warning colour for "Waiting for your glossary decision") · "+N"
+queued badge · Stop (same state vocabulary as Send). Tap opens job detail.
+``Semantics(live_region=True)`` so screen readers announce progress.
+
+U1 renders ``JobStripModel`` placeholder data (``AppState.job_strip``); it is
+hidden while no job runs. JobService feeds it from U3.
+"""
+
+from __future__ import annotations
+
+from dataclasses import field
+from typing import Any, Callable, Optional
+
+import flet as ft
+
+from glossarion_mobile.state.app_state import JobStripModel
+from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, semantic
+
+__all__ = ["JobStrip"]
+
+
+@ft.control
+class JobStrip(ft.Container):
+    model: Optional[JobStripModel] = field(default=None, metadata={"skip": True})
+    on_open: Optional[Callable[[], Any]] = field(default=None, metadata={"skip": True})
+    on_stop: Optional[Callable[[], Any]] = field(default=None, metadata={"skip": True})
+    dark: bool = field(default=False, metadata={"skip": True})
+
+    def init(self) -> None:
+        super().init()
+        self.ring = ft.ProgressRing(width=28, height=28, stroke_width=3)
+        self.kind_icon = ft.Icon(ft.Icons.TRANSLATE, size=14)
+        self.title_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_LARGE, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+        self.subtitle_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+        self.stop_button = ft.IconButton(
+            icon=ft.Icons.STOP_CIRCLE,
+            tooltip="Stop",
+            on_click=self._stop,
+            size_constraints=HIT_TARGET,
+        )
+        self.semantics = ft.Semantics(
+            live_region=True,
+            content=ft.Row(
+                [
+                    ft.Stack(
+                        [
+                            self.ring,
+                            ft.Container(width=28, height=28, alignment=ft.Alignment.CENTER, content=self.kind_icon),
+                        ],
+                        width=28,
+                        height=28,
+                    ),
+                    ft.Column([self.title_text, self.subtitle_text], spacing=0, tight=True, expand=True),
+                    self.stop_button,
+                ],
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+        self.content = self.semantics
+        self.height = tokens.SIZES["job_strip"]
+        self.bgcolor = ft.Colors.SURFACE_CONTAINER_HIGHEST
+        self.border_radius = tokens.RADII["job_strip"]
+        self.margin = ft.Margin.symmetric(horizontal=8, vertical=4)
+        self.padding = ft.Padding.only(left=8)
+        self.on_click = self._open
+        self.ink = True
+        self._sync()
+
+    def before_update(self) -> None:
+        super().before_update()
+        self._sync()
+
+    def _sync(self) -> None:
+        model = self.model
+        self.visible = model is not None and model.state not in ("hidden",)
+        if model is None:
+            return
+        self.ring.value = None if model.progress is None else max(0.0, min(1.0, model.progress))
+        self.kind_icon.icon = icon_data(model.kind_icon)
+        self.title_text.value = model.title
+        self.subtitle_text.value = model.subtitle
+        self.subtitle_text.color = semantic("warning", self.dark) if model.warning else None
+        self.stop_button.badge = ft.Badge(label=f"+{model.queued}") if model.queued else None
+        running = model.state in ("running", "finishing")
+        self.stop_button.visible = running or model.state == "stopping"
+        self.stop_button.disabled = model.state == "stopping"
+        self.stop_button.icon = ft.Icons.HOURGLASS_BOTTOM if model.state == "finishing" else ft.Icons.STOP_CIRCLE
+        self.stop_button.tooltip = {
+            "finishing": "Graceful stop requested. Tap again to force stop.",
+            "stopping": "Force stop requested",
+        }.get(model.state, "Stop")
+        self.semantics.label = f"{model.title}. {model.subtitle}".strip()
+
+    def set_model(self, model: Optional[JobStripModel]) -> None:
+        self.model = model
+        self._sync()
+        try:
+            self.update()
+        except Exception:
+            pass
+
+    def _open(self, e: Any = None) -> None:
+        if self.on_open is not None:
+            self.on_open()
+
+    def _stop(self, e: Any = None) -> None:
+        if self.on_stop is not None:
+            self.on_stop()

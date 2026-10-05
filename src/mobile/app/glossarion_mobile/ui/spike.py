@@ -8,9 +8,16 @@ Stop button reaching Python, notifications, Open-with/Share without touching
 the iOS background-task APIs. Each card shows its result text; long-running
 results are also printed as ``GLOSSARION_SPIKE`` lines (logcat ``flet.python``).
 
+Since U1 the screen is reached from Settings > Logs & diagnostics > "Open device
+checks": the app builds ``SpikeApp(page, embedded=True, ...)`` with its own
+NativeBridge, UiDispatcher, Router and in-app browser opener, and pushes
+``build_view()`` as a non-routable View. The app forwards ``/oauth/return?p=spike``
+and lifecycle events to it. ``main(page)`` still runs the screen standalone
+(it then owns the page, its routes and the ``GLOSSARION_READY`` marker).
+
 Threading rules (Flet 1.0 runs sync handlers on the asyncio loop):
 * every handler here is ``async`` and never blocks; blocking work runs on a
-  dedicated thread (16 MiB stack) through ``_in_thread``;
+  dedicated thread (16 MiB stack) through ``_in_thread`` (UiDispatcher.run_in_thread);
 * worker threads touch controls only through ``post()`` (``call_soon_threadsafe``)
   and native calls only through ``submit()`` (``run_coroutine_threadsafe``).
 """
@@ -34,8 +41,10 @@ import flet as ft
 
 from glossarion_mobile import JOB_TASK_ID_PREFIX, OAUTH_RETURN_URL, SELFTEST_ROUTE
 from glossarion_mobile import runtime_bootstrap as rb
+from glossarion_mobile.services.browser import InAppUrlOpener
+from glossarion_mobile.services.dispatcher import UiDispatcher
 from glossarion_mobile.services.native import NativeBridge
-from glossarion_mobile.ui.router import RouteMatch, Router, parse_route
+from glossarion_mobile.ui.router import RouteMatch, Router, launch_links, parse_route
 
 log = logging.getLogger("glossarion.spike")
 
@@ -44,6 +53,8 @@ FGS_DURATION_S = 25 * 60
 CONTINUED_PROCESSING_S = 60
 OAUTH_TIMEOUT_S = 300
 MARKER_SPIKE = "GLOSSARION_SPIKE"
+# Route string of the embedded View: identifies it for page.on_view_pop; never routed to.
+DEVICE_CHECKS_VIEW_ROUTE = "/settings/logs/device-checks"
 
 _STATUS_STYLE = {
     "idle": (ft.Icons.RADIO_BUTTON_UNCHECKED, ft.Colors.OUTLINE),
@@ -206,18 +217,34 @@ def stack_probe() -> dict[str, Any]:
 
 
 class SpikeApp:
-    def __init__(self, page: ft.Page) -> None:
+    def __init__(
+        self,
+        page: ft.Page,
+        *,
+        native: Optional[NativeBridge] = None,
+        dispatcher: Optional[UiDispatcher] = None,
+        router: Optional[Router] = None,
+        opener: Optional[InAppUrlOpener] = None,
+        embedded: bool = False,
+    ) -> None:
         self.page = page
-        self.loop = asyncio.get_running_loop()
-        self.router = Router()
+        self.embedded = embedded
+        self.dispatcher = dispatcher if dispatcher is not None else UiDispatcher(page).bind()
+        self.loop = self.dispatcher.loop or asyncio.get_running_loop()
+        self.router = router if router is not None else Router()
         self.state = rb.get_state()
         self.paths = rb.get_paths()
-        self._tasks: set[asyncio.Task] = set()
         self.is_mobile = getattr(page.platform, "value", None) in ("android", "ios") and not page.web
 
         # Services: keep strong references (Flet unregisters unreferenced services).
-        self.url_launcher = ft.UrlLauncher()
-        self.native = NativeBridge(page)  # GlossarionNative on Android/iOS, stub elsewhere
+        if opener is not None:
+            self.opener = opener
+            self.url_launcher = opener.url_launcher
+        else:
+            self.url_launcher = ft.UrlLauncher()
+            self.opener = InAppUrlOpener(self.dispatcher, self.url_launcher, is_mobile=self.is_mobile)
+        # GlossarionNative on Android/iOS, stub elsewhere (shared with the app when embedded)
+        self.native = native if native is not None else NativeBridge(page)
         self._secure_storage: Any = None
         self._permissions: Any = None
 
@@ -239,65 +266,28 @@ class SpikeApp:
         self._cp_thread: Optional[threading.Thread] = None
         self._cp_stop = threading.Event()
         self.cards: dict[str, CheckCard] = {}
+        self._build_cards()
 
-    # ---- plumbing -----------------------------------------------------------
+    # ---- plumbing (UiDispatcher) ----------------------------------------------
 
     def post(self, fn: Callable[..., Any], *args: Any) -> None:
         """Run ``fn(*args)`` on the Flet loop (callable from any thread)."""
-
-        def run() -> None:
-            try:
-                fn(*args)
-            except Exception:
-                log.exception("posted UI callback failed")
-
-        try:
-            self.loop.call_soon_threadsafe(run)
-        except RuntimeError:  # loop closed (app shutting down)
-            pass
+        self.dispatcher.post(fn, *args)
 
     def submit(self, coro_fn: Callable[..., Any], *args: Any):
         """Schedule ``coro_fn(*args)`` on the Flet loop from any thread."""
-        try:
-            future = asyncio.run_coroutine_threadsafe(coro_fn(*args), self.loop)
-        except RuntimeError:
-            return None
+        return self.dispatcher.submit(coro_fn, *args)
 
-        def done(f) -> None:
-            if not f.cancelled() and f.exception() is not None:
-                log.warning("native call %s failed: %s", getattr(coro_fn, "__name__", coro_fn), f.exception())
+    def spawn(self, coro) -> asyncio.Future:
+        return self.dispatcher.spawn(coro)
 
-        future.add_done_callback(done)
-        return future
-
-    def spawn(self, coro) -> asyncio.Task:
-        task = asyncio.ensure_future(coro)
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        return task
+    @property
+    def _tasks(self) -> set:
+        return self.dispatcher._tasks
 
     async def _in_thread(self, fn: Callable[..., Any], *args: Any, name: str = "gl-spike-worker") -> Any:
         """Run blocking ``fn`` on a fresh thread (16 MiB stack) and await its result."""
-        future = self.loop.create_future()
-
-        def resolve(value: Any, error: Optional[BaseException]) -> None:
-            if future.done():
-                return
-            if error is not None:
-                future.set_exception(error)
-            else:
-                future.set_result(value)
-
-        def run() -> None:
-            try:
-                value = fn(*args)
-            except BaseException as exc:  # noqa: BLE001 - forwarded to the awaiting handler
-                self.loop.call_soon_threadsafe(resolve, None, exc)
-            else:
-                self.loop.call_soon_threadsafe(resolve, value, None)
-
-        threading.Thread(target=run, name=name, daemon=True).start()
-        return await future
+        return await self.dispatcher.run_in_thread(fn, *args, name=name)
 
     def _card(self, key: str) -> CheckCard:
         return self.cards[key]
@@ -320,41 +310,56 @@ class SpikeApp:
         page.on_route_change = self.on_route_change
         page.on_app_lifecycle_state_change = self.on_lifecycle
 
-        version = (self.state.version if self.state else {}) or {}
-        subtitle = f"U0 device spike · v{version.get('version') or '?'} · {self.paths.platform if self.paths else '?'}"
-        page.appbar = ft.AppBar(
-            title=ft.Column(
-                tight=True,
-                spacing=0,
-                controls=[
-                    ft.Text("Glossarion", weight=ft.FontWeight.BOLD, size=18),
-                    ft.Text(subtitle, size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                ],
-            ),
-            center_title=False,
-        )
-        self._build_cards()
-        page.add(
-            ft.SafeArea(
-                expand=True,
-                content=ft.ListView(
-                    expand=True,
-                    padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-                    spacing=8,
-                    controls=[card.control for card in self.cards.values()],
-                ),
-            )
-        )
+        page.appbar = ft.AppBar(title=self._title(), center_title=False)
+        page.add(self._cards_list())
         self._refresh_info()
         page.update()
 
-        rb.set_url_opener(self._open_url_threadsafe)
+        rb.set_url_opener(self.opener.open_threadsafe)
         self.initial_route = page.route
         rb.emit_marker(rb.MARKER_READY)
 
         rb.start_warm_import(on_done=lambda result: self.post(self._on_backend_ready, result))
         self.spawn(self._after_ready())
         await self._dispatch_route(page.route, source="initial")
+
+    def _title(self) -> ft.Control:
+        version = (self.state.version if self.state else {}) or {}
+        subtitle = f"U0 device spike · v{version.get('version') or '?'} · {self.paths.platform if self.paths else '?'}"
+        return ft.Column(
+            tight=True,
+            spacing=0,
+            controls=[
+                ft.Text("Device checks" if self.embedded else "Glossarion", weight=ft.FontWeight.BOLD, size=18),
+                ft.Text(subtitle, size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+            ],
+        )
+
+    def _cards_list(self) -> ft.Control:
+        return ft.SafeArea(
+            expand=True,
+            content=ft.ListView(
+                expand=True,
+                padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+                spacing=8,
+                controls=[card.control for card in self.cards.values()],
+            ),
+        )
+
+    def build_view(self) -> ft.View:
+        """The embedded View (pushed by the app; the implied back arrow pops it)."""
+        self._refresh_info()
+        self._refresh_routes()
+        return ft.View(
+            route=DEVICE_CHECKS_VIEW_ROUTE,
+            appbar=ft.AppBar(title=self._title(), center_title=False),
+            padding=0,
+            controls=[self._cards_list()],
+        )
+
+    async def after_open(self) -> None:
+        """Embedded: native probes once the View is on screen."""
+        await self._after_ready()
 
     def _build_cards(self) -> None:
         cards = [
@@ -535,8 +540,8 @@ class SpikeApp:
     async def on_lifecycle(self, e: Any) -> None:
         state = getattr(e, "state", None)
         name = getattr(state, "value", str(state))
-        if name in ("inactive", "hide", "pause", "detach"):
-            rb.flush_logs()
+        if name in ("inactive", "hide", "pause", "detach") and not self.embedded:
+            rb.flush_logs()  # embedded: the app already flushed
         self.lifecycle.append(f"{time.strftime('%H:%M:%S')} {name}")
         del self.lifecycle[:-12]
         log.info("lifecycle: %s", name)
@@ -752,7 +757,8 @@ class SpikeApp:
             card.set("fail", f"get_initial_shared failed: {type(exc).__name__}: {exc}")
             return
         self.initial_shared = items
-        await self._route_launch_links(items)
+        if not self.embedded:  # the app routes launch links itself
+            await self._route_launch_links(items)
         route_ok = (self.initial_route or "/").split("?", 1)[0] in ("/", SELFTEST_ROUTE, "/oauth/return")
         if not items:
             card.set("n/a" if self.native.is_stub else "idle", f"No initial items. Initial route {self.initial_route!r}.")
@@ -765,20 +771,8 @@ class SpikeApp:
 
     @staticmethod
     def _launch_links(items: Any) -> list[tuple[str, str]]:
-        """(id, glossarion:// URI) of iOS cold-start deep links delivered as shared items.
-
-        receive_sharing_intent claims every UIScene connection, so Flutter skips a
-        cold-start ``glossarion://app/...`` link; the extension re-delivers it as
-        ``SharedItem(kind="url", source="launch")``.
-        """
-        links = []
-        for item in items or []:
-            if not isinstance(item, dict) or item.get("kind") != "url" or item.get("source") != "launch":
-                continue
-            text = str(item.get("text") or item.get("uri") or "")
-            if text.lower().startswith("glossarion:"):
-                links.append((str(item.get("id") or text), text))
-        return links
+        """(id, glossarion:// URI) of iOS cold-start deep links delivered as shared items."""
+        return launch_links(items)
 
     async def _route_launch_links(self, items: Any) -> bool:
         routed = False
@@ -800,7 +794,8 @@ class SpikeApp:
         route_before = self.page.route
         rb.emit_marker(MARKER_SPIKE, {"share_event": event})
         if self._launch_links(event.get("items")):
-            self.spawn(self._route_launch_links(event.get("items")))
+            if not self.embedded:  # the app routes launch links itself
+                self.spawn(self._route_launch_links(event.get("items")))
             return
         self._card("share").set("running", f"share event: {_json(event, 600)}\nchecking page.route…")
         self.spawn(self._verify_route_untouched(since, route_before, event))
@@ -817,18 +812,10 @@ class SpikeApp:
 
     def _open_url_threadsafe(self, url: str) -> None:
         """webbrowser.open() target (any thread) -> UrlLauncher on the loop."""
-        self.submit(self._launch_url, url)
+        self.opener.open_threadsafe(url)
 
     async def _launch_url(self, url: str) -> None:
-        mode = ft.LaunchMode.IN_APP_BROWSER_VIEW if self.is_mobile else ft.LaunchMode.PLATFORM_DEFAULT
-        try:
-            await asyncio.wait_for(self.url_launcher.launch_url(url, mode=mode), 20)
-        except Exception as exc:
-            log.warning("launch_url(%s, %s) failed: %s; retrying with the platform default", url, mode, exc)
-            try:
-                await asyncio.wait_for(self.url_launcher.launch_url(url), 20)
-            except Exception as exc2:
-                log.error("launch_url fallback failed: %s", exc2)
+        await self.opener.launch(url)
 
     def _close_oauth(self) -> None:
         if self._oauth is not None:
@@ -875,12 +862,8 @@ class SpikeApp:
         self.spawn(self._close_in_app_browser())
 
     async def _close_in_app_browser(self) -> None:
-        if not self.is_mobile:
-            return
-        try:  # SFSafariViewController on iOS; Android Custom Tabs cannot be closed (no-op)
-            await asyncio.wait_for(self.url_launcher.close_in_app_web_view(), 5)
-        except Exception as exc:
-            log.info("close_in_app_web_view: %s", exc)
+        # SFSafariViewController on iOS; Android Custom Tabs cannot be closed (no-op)
+        await self.opener.close_in_app_view()
 
     async def _oauth_timeout(self, nonce: str) -> None:
         await asyncio.sleep(OAUTH_TIMEOUT_S)

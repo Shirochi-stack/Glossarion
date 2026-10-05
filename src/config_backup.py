@@ -23,79 +23,30 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon, QFont
 
-# Import required from translator_gui
-from translator_gui import CONFIG_FILE, decrypt_config
+# Config path and backup/restore core (GUI-free, shared with mobile)
+from app_paths import config_file_path
+from config_store import (
+    backup_config_file,
+    config_backup_dir,
+    list_config_backups,
+    load_config,
+    restore_config_backup_file,
+    restore_latest_backup,
+)
 
 
 def _backup_config_file(self):
     """Create backup of the existing config file before saving."""
-    try:
-        # Skip if config file doesn't exist yet
-        if not os.path.exists(CONFIG_FILE):
-            return
-            
-        # Get base directory that works in both development and frozen environments
-        base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-        
-        # Resolve config file path for backup directory
-        if os.path.isabs(CONFIG_FILE):
-            config_dir = os.path.dirname(CONFIG_FILE)
-        else:
-            config_dir = os.path.dirname(os.path.abspath(CONFIG_FILE))
-        
-        # Create backup directory
-        backup_dir = os.path.join(config_dir, "config_backups")
-        os.makedirs(backup_dir, exist_ok=True)
-        
-        # Create timestamped backup name
-        backup_name = f"config_{time.strftime('%Y%m%d_%H%M%S')}.json.bak"
-        backup_path = os.path.join(backup_dir, backup_name)
-        
-        # Copy the file
-        shutil.copy2(CONFIG_FILE, backup_path)
-        
-        # Clean backups older than 72 hours
-        cutoff_time = time.time() - (72 * 60 * 60)  # 72 hours in seconds
-        backups = [os.path.join(backup_dir, f) for f in os.listdir(backup_dir) 
-                   if f.startswith("config_") and f.endswith(".json.bak")]
-        
-        # Remove backups older than 72 hours
-        for backup_file in backups:
-            try:
-                if os.path.getmtime(backup_file) <= cutoff_time:
-                    os.remove(backup_file)
-            except Exception:
-                pass  # Ignore errors when cleaning old backups
-    
-    except Exception as e:
-        # Silent exception - don't interrupt normal operation if backup fails
-        print(f"Warning: Could not create config backup: {e}")
+    # Skips a missing config; failures are printed, never raised (config_store).
+    backup_config_file(config_file_path())
 
 def _restore_config_from_backup(self):
     """Attempt to restore config from the most recent backup."""
     try:
-        # Locate backups directory
-        if os.path.isabs(CONFIG_FILE):
-            config_dir = os.path.dirname(CONFIG_FILE)
-        else:
-            config_dir = os.path.dirname(os.path.abspath(CONFIG_FILE))
-        backup_dir = os.path.join(config_dir, "config_backups")
-        
-        if not os.path.exists(backup_dir):
+        # Copy the most recent backup over the config file (config_store)
+        latest_backup = restore_latest_backup(config_file_path())
+        if not latest_backup:
             return
-        
-        # Find most recent backup
-        backups = [os.path.join(backup_dir, f) for f in os.listdir(backup_dir) 
-                  if f.startswith("config_") and f.endswith(".json.bak")]
-        
-        if not backups:
-            return
-            
-        backups.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-        latest_backup = backups[0]
-        
-        # Copy backup to config file
-        shutil.copy2(latest_backup, CONFIG_FILE)
         from PySide6.QtWidgets import QMessageBox
         from PySide6.QtGui import QIcon
         
@@ -112,9 +63,7 @@ def _restore_config_from_backup(self):
         
         # Reload config
         try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                self.config = json.load(f)
-                self.config = decrypt_config(self.config)
+            self.config = load_config(config_file_path())
         except Exception as e:
             msg_box = QMessageBox()
             msg_box.setIcon(QMessageBox.Critical)
@@ -178,11 +127,7 @@ def _open_backup_folder(self):
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
         icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
         
-        if os.path.isabs(CONFIG_FILE):
-            config_dir = os.path.dirname(CONFIG_FILE)
-        else:
-            config_dir = os.path.dirname(os.path.abspath(CONFIG_FILE))
-        backup_dir = os.path.join(config_dir, "config_backups")
+        backup_dir = config_backup_dir(config_file_path())
         
         if not os.path.exists(backup_dir):
             os.makedirs(backup_dir, exist_ok=True)
@@ -222,26 +167,11 @@ def _open_backup_folder(self):
 
 def _restore_config_backup_file(self, backup_path):
     """Validate and atomically restore a backup before requesting a restart."""
-    # Read first: creating a safety backup may prune the selected old backup.
-    with open(backup_path, 'rb') as source:
-        contents = source.read()
-    if not isinstance(json.loads(contents), dict):
-        raise ValueError("The backup must contain a configuration object.")
-    self._backup_config_file()
-    temp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            dir=os.path.dirname(os.path.abspath(CONFIG_FILE)), delete=False,
-            prefix='.config_restore_', suffix='.tmp',
-        ) as target:
-            temp_path = target.name
-            target.write(contents)
-            target.flush()
-            os.fsync(target.fileno())
-        os.replace(temp_path, CONFIG_FILE)
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+    # Read first, then a safety backup of the current config, then an atomic
+    # replace (config_store); raises and leaves the config intact on failure.
+    restore_config_backup_file(
+        config_file_path(), backup_path, safety_backup=self._backup_config_file,
+    )
     # Modal messages process timers too; prevent pending saves from overwriting
     # the restored file while the user acknowledges the restart message.
     self._config_restore_pending = True
@@ -269,11 +199,7 @@ def _manual_restore_config(self):
                 pass
             app = QApplication(sys.argv)
         
-        if os.path.isabs(CONFIG_FILE):
-            config_dir = os.path.dirname(CONFIG_FILE)
-        else:
-            config_dir = os.path.dirname(os.path.abspath(CONFIG_FILE))
-        backup_dir = os.path.join(config_dir, "config_backups")
+        backup_dir = config_backup_dir(config_file_path())
         
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
         icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
@@ -287,9 +213,8 @@ def _manual_restore_config(self):
             msg_box.exec()
             return
         
-        # Get list of available backups
-        backups = [f for f in os.listdir(backup_dir) 
-                  if f.startswith("config_") and f.endswith(".json.bak")]
+        # Get list of available backups (newest first, config_store)
+        backups = [entry['name'] for entry in list_config_backups(config_file_path())]
         
         if not backups:
             msg_box = QMessageBox()
@@ -299,9 +224,6 @@ def _manual_restore_config(self):
             msg_box.setWindowIcon(icon)
             msg_box.exec()
             return
-        
-        # Sort by creation time (newest first)
-        backups.sort(key=lambda x: os.path.getmtime(os.path.join(backup_dir, x)), reverse=True)
         
         # Create PySide6 dialog
         dialog = QDialog(self)

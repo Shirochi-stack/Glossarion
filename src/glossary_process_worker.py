@@ -10,7 +10,10 @@ import sys
 import json
 import time
 
-def generate_glossary_in_process(output_dir, chapters_data, instructions, env_vars, log_queue=None, log_file_path=None):
+import mobile_runtime
+
+def generate_glossary_in_process(output_dir, chapters_data, instructions, env_vars, log_queue=None, log_file_path=None,
+                                 capture_stdio=True, isolate_env=False):
     """
     Generate glossary in a separate process to avoid GIL blocking.
     
@@ -21,6 +24,15 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
         env_vars: Environment variables to set
         log_queue: Queue to send logs back to main process (optional)
         log_file_path: File path to append logs for the parent process to tail (optional)
+        capture_stdio: Redirect stdout/stderr and logging into the log capture
+            (default; the worker owns its process). Pass False when running in a
+            thread of the caller's process (Glossarion Mobile has no worker
+            processes): the process-wide streams and logging handlers are then
+            left alone, and GlossaryManager gets no log callback, because its
+            set_output_redirect() would replace the process-wide sys.stdout.
+        isolate_env: Restore, when this call returns, every os.environ key that
+            env_vars changed. Default False keeps env_vars applied, as in a
+            worker process. In-thread callers pass True.
     
     Returns:
         Dictionary with glossary results or error info
@@ -75,13 +87,16 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
                         pass
                 self.buffer = ""
     
+    # isolate_env: previous value (None = unset) of every env key this call changed
+    saved_env = {}
     try:
         # Redirect BOTH stdout and stderr to capture ALL output
         log_capture = LogCapture(log_queue, log_file_path=log_file_path)
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
-        sys.stdout = log_capture
-        sys.stderr = log_capture
+        if capture_stdio:
+            old_stdout = sys.stdout
+            old_stderr = sys.stderr
+            sys.stdout = log_capture
+            sys.stderr = log_capture
         
         # Emit a boot marker early so the parent knows the worker started
         try:
@@ -92,40 +107,43 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
         # ALSO capture logging module output
         import logging
         
-        # Create a custom logging handler that writes to our log_capture
-        class QueueLogHandler(logging.Handler):
-            def __init__(self, log_capture):
-                super().__init__()
-                self.log_capture = log_capture
+        if capture_stdio:
+            # Create a custom logging handler that writes to our log_capture
+            class QueueLogHandler(logging.Handler):
+                def __init__(self, log_capture):
+                    super().__init__()
+                    self.log_capture = log_capture
                 
-            def emit(self, record):
-                try:
-                    msg = self.format(record)
-                    self.log_capture.write(msg + '\n')
-                except Exception:
-                    pass
+                def emit(self, record):
+                    try:
+                        msg = self.format(record)
+                        self.log_capture.write(msg + '\n')
+                    except Exception:
+                        pass
         
-        # Add our handler to the root logger and all existing loggers
-        queue_handler = QueueLogHandler(log_capture)
-        queue_handler.setLevel(logging.DEBUG)
+            # Add our handler to the root logger and all existing loggers
+            queue_handler = QueueLogHandler(log_capture)
+            queue_handler.setLevel(logging.DEBUG)
         
-        # Store original handlers so we can restore them later
-        original_handlers = {}
+            # Store original handlers so we can restore them later
+            original_handlers = {}
         
-        # Redirect root logger
-        root_logger = logging.getLogger()
-        original_handlers['root'] = root_logger.handlers[:]
-        root_logger.handlers = [queue_handler]
+            # Redirect root logger
+            root_logger = logging.getLogger()
+            original_handlers['root'] = root_logger.handlers[:]
+            root_logger.handlers = [queue_handler]
         
-        # Redirect unified_api_client logger specifically
-        api_logger = logging.getLogger('unified_api_client')
-        original_handlers['unified_api_client'] = api_logger.handlers[:]
-        api_logger.handlers = [queue_handler]
-        api_logger.setLevel(logging.DEBUG)
-        api_logger.propagate = False  # Prevent propagation to root logger (avoid duplicates)
+            # Redirect unified_api_client logger specifically
+            api_logger = logging.getLogger('unified_api_client')
+            original_handlers['unified_api_client'] = api_logger.handlers[:]
+            api_logger.handlers = [queue_handler]
+            api_logger.setLevel(logging.DEBUG)
+            api_logger.propagate = False  # Prevent propagation to root logger (avoid duplicates)
         
         # Set environment variables from parent process
         for key, value in env_vars.items():
+            if isolate_env and os.environ.get(key) != str(value):
+                saved_env[key] = os.environ.get(key)
             os.environ[key] = str(value)
             if key == 'GLOSSARY_MAX_SENTENCES':
                 print(f"🔍 [DEBUG] Worker process setting GLOSSARY_MAX_SENTENCES to: '{value}'")
@@ -145,7 +163,8 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
         
         # Generate glossary using module function (not a class)
         print(f"📑 Starting glossary generation in subprocess...")
-        result = GlossaryManager.save_glossary(output_dir, chapters_data, instructions, log_callback=queue_log_callback)
+        result = GlossaryManager.save_glossary(output_dir, chapters_data, instructions,
+                                               log_callback=queue_log_callback if capture_stdio else None)
         
         print(f"📑 Glossary generation completed")
         
@@ -153,8 +172,9 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
         log_capture.flush()
         
         # Restore stdout and stderr
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
+        if capture_stdio:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
         
         # Restore logging handlers
         if 'original_handlers' in locals():
@@ -190,6 +210,13 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
             'pid': os.getpid(),
             'logs': captured_logs
         }
+    finally:
+        # isolate_env: give the caller back the values env_vars replaced
+        for key, previous in saved_env.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
 
 def generate_glossary_async(output_dir, chapters, instructions, extraction_workers=None):
     """
@@ -243,6 +270,21 @@ def generate_glossary_async(output_dir, chapters, instructions, extraction_worke
         if var in os.environ:
             env_vars[var] = os.environ[var]
     
+    if not mobile_runtime.processes_available():
+        # Glossarion Mobile: no worker processes, so run the same worker in a
+        # thread that leaves this process's stdout/logging and env alone.
+        with mobile_runtime.make_pool_executor(1, thread_name_prefix="glossary-worker") as executor:
+            future = executor.submit(
+                generate_glossary_in_process,
+                output_dir,
+                chapters,
+                instructions,
+                env_vars,
+                capture_stdio=False,
+                isolate_env=True,
+            )
+            return future
+
     # Use ProcessPoolExecutor for true parallelism
     with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
         # Submit the task

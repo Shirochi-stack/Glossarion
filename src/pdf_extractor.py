@@ -18,6 +18,8 @@ import hashlib
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 
+import mobile_runtime
+
 
 def _pdf_extraction_worker_count() -> int:
     """Return the dedicated PDF input worker limit."""
@@ -343,7 +345,7 @@ def extract_text_from_pdf(pdf_path):
             all_parts = []
             completed_pages = 0
             
-            with concurrent.futures.ProcessPoolExecutor(max_workers=len(ranges)) as executor:
+            with mobile_runtime.make_pool_executor(len(ranges)) as executor:
                 # Submit all tasks
                 futures = [executor.submit(_extract_chunk, r) for r in ranges]
                 
@@ -1368,6 +1370,8 @@ def _extract_with_pdf2htmlex(pdf_path: str, output_dir: str, page_by_page: bool 
     Returns (html or list[(page_num, html)], images_by_page). Images are external files.
     """
     # Determine executable name
+    if not mobile_runtime.subprocesses_available():
+        raise FileNotFoundError('pdf2htmlEX unavailable: this platform cannot launch subprocesses')
     exe = shutil.which('pdf2htmlEX') or shutil.which('pdf2htmlex')
     if not exe:
         raise FileNotFoundError('pdf2htmlEX executable not found')
@@ -2386,10 +2390,16 @@ def create_pdf_from_html(html_content: str, output_path: str, css_path: Optional
                             print(f"   • Auto-detected MSYS2 DLLs: {msys_path}")
                             break
             
-            from weasyprint import HTML, CSS
-            from weasyprint.text.fonts import FontConfiguration
-            
-            print("📄 Using WeasyPrint for PDF generation...")
+            import pdf_mupdf_html
+            if pdf_mupdf_html.is_selected():
+                from pdf_mupdf_html import HTML, CSS, FontConfiguration
+
+                print(f"📄 Using {pdf_mupdf_html.ENGINE_NAME} (PyMuPDF Story, WeasyPrint subset) for PDF generation...")
+            else:
+                from weasyprint import HTML, CSS
+                from weasyprint.text.fonts import FontConfiguration
+
+                print("📄 Using WeasyPrint for PDF generation...")
             
             # Create font configuration for proper font handling
             font_config = FontConfiguration()

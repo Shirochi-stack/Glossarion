@@ -17,6 +17,7 @@ host (non-strict) checks whose packages are missing are reported as skipped.
 
 from __future__ import annotations
 
+import base64
 import importlib
 import json
 import os
@@ -251,6 +252,60 @@ def check_fernet(ctx: Context) -> dict[str, Any]:
     return {"version": getattr(cryptography, "__version__", None), "token_len": len(token)}
 
 
+_KEY_FILE_NAMES = (".glossarion_key", "glossarion_key.txt")  # api_key_encryption's desktop key files
+
+
+def check_encryption_keys(ctx: Context) -> dict[str, Any]:
+    """The backend encrypts with the SecureStorage keys (``services.secure_keys``), not a key file."""
+    from glossarion_mobile.services import secure_keys
+
+    paths = ctx.require_bootstrap()
+    status = secure_keys.current_status()
+    if status is None:
+        message = "encryption keys were never installed (SecureStorage -> set_key_material/set_symmetric_key)"
+        if ctx.strict:
+            raise AssertionError(message)
+        raise CheckSkipped(message)
+    if not status.installed:
+        raise AssertionError(f"key setters failed: {status.errors}")
+    if status.degraded and ctx.strict:
+        raise AssertionError(f"SecureStorage unusable, keys from {status.source}: {status.notes}")
+    ctx.need("cryptography.fernet")
+    aek = importlib.import_module("api_key_encryption")
+    handler = aek.get_handler()
+    key_file = getattr(handler, "key_file", "<missing attribute>")
+    if key_file is not None:
+        raise AssertionError(f"api_key_encryption uses the key file {key_file!r}, not the SecureStorage key")
+    secret = "sk-selftest-🔑-값"
+    token = handler.encrypt_value(secret)
+    if not isinstance(token, str) or not token.startswith("ENC:"):
+        raise AssertionError(f"encrypt_value did not encrypt (got {str(token)[:16]!r})")
+    if handler.decrypt_value(token) != secret:
+        raise AssertionError("decrypt_value(encrypt_value(x)) != x")
+    try:
+        injected = secure_keys.decrypt_with_installed_api_key(base64.b64decode(token[4:])).decode("utf-8")
+    except Exception as exc:
+        raise AssertionError(f"the API-key handler does not use the installed key: {type(exc).__name__}: {exc}")
+    if injected != secret:
+        raise AssertionError("the installed key decrypted a different value")
+    tok = importlib.import_module("token_encryption")
+    active_token_key = getattr(tok, "_get_symmetric_key")()
+    if secure_keys.fingerprint(active_token_key) != status.token_key_fingerprint:
+        raise AssertionError("token_encryption does not use the installed key")
+    # The desktop branch writes its key file next to the backend (or under HOME).
+    # On the host the backend dir may be the repo src/, where a desktop key file is normal.
+    must_be_clean = [paths.home, paths.data] + ([Path(aek.__file__).resolve().parent] if ctx.strict else [])
+    stray = [str(d / name) for d in must_be_clean for name in _KEY_FILE_NAMES if (d / name).exists()]
+    if stray:
+        raise AssertionError(f"key file(s) exist although the SecureStorage keys are in use: {stray}")
+    return {
+        "source": status.source,
+        "degraded": status.degraded,
+        "api_key": status.api_key_fingerprint,
+        "token_key": status.token_key_fingerprint,
+    }
+
+
 def check_openai_pydantic(ctx: Context) -> dict[str, Any]:
     openai = ctx.need("openai")
     pydantic = ctx.need("pydantic")
@@ -361,6 +416,7 @@ SUITES: dict[str, tuple[tuple[str, Callable[[Context], dict[str, Any]]], ...]] =
         ("tiktoken_offline", check_tiktoken_offline),
         ("epub_lxml", check_epub_lxml),
         ("fernet", check_fernet),
+        ("encryption_keys", check_encryption_keys),
         ("openai_pydantic_jiter", check_openai_pydantic),
         ("pymupdf", check_pymupdf),
         ("cv2", check_cv2),

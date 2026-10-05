@@ -6,16 +6,20 @@ import json
 import os
 import sys
 import traceback
-
-try:
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-except Exception:
-    pass
-
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+import mobile_runtime
+
+# Skipped where subprocesses are unavailable: there this module runs in-process
+# and must not replace the host's streams.
+if mobile_runtime.subprocesses_available():
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 
 def run_sdlxliff_extraction(sdlxliff_path, output_dir):

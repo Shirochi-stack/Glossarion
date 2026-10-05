@@ -25,6 +25,7 @@ from Chapter_Extractor import _is_configured_special_file
 from chapter_splitter import ChapterSplitter
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import List, Dict, Tuple
+import mobile_runtime
 from unified_api_client import (
     UnifiedClient,
     UnifiedClientError,
@@ -7335,7 +7336,10 @@ def _extract_pdf_chapters_for_glossary(pdf_path, check_stop=None):
 
 def _extract_sdlxliff_chapters_for_glossary(sdlxliff_path, check_stop=None):
     """Extract eligible SDLXLIFF source segment text for glossary generation."""
-    use_async = os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1"
+    use_async = (
+        os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1"
+        and mobile_runtime.processes_available()
+    )
     if not use_async:
         from sdlxliff_extractor import extract_sdlxliff_texts
         chapters = extract_sdlxliff_texts(sdlxliff_path)

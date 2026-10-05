@@ -112,7 +112,17 @@ packages = true
 [tool.flet.cleanup]
 package_files = ["**/tests/**", "**/test/**", "**/*.pyi", "cv2/data/**"]
 
-[tool.flet.deep_linking]
+[tool.flet.deep_linking]          # desktop/web targets only
+scheme = "glossarion"
+host = "app"
+
+# flet 1.0.3 build_base.py reads ONLY the platform-specific tables for Android/iOS
+# (no fallback to [tool.flet.deep_linking]), so all three must be set.
+[tool.flet.android.deep_linking]
+scheme = "glossarion"
+host = "app"
+
+[tool.flet.ios.deep_linking]
 scheme = "glossarion"
 host = "app"
 

@@ -25,6 +25,97 @@ except ImportError:
     QDialog = object
     QWidget = object
 
+def default_ai_hunter_config():
+    """Default AI Hunter settings structure (a new dict on every call).
+
+    Moved verbatim from AIHunterConfigGUI.__init__ so GUI-free callers (mobile
+    settings, tests) share it. Built per call: the worker default depends on
+    os.cpu_count() at call time and callers mutate the nested dicts.
+    """
+    # Default workers: half the CPU cores — good speed without
+    # starving the rest of the system.
+    return {
+        'enabled': True,
+        'ai_hunter_max_workers': max(1, (os.cpu_count() or 4) // 2),
+        'retry_attempts': 6,
+        'disable_temperature_change': False,
+        'sample_size': 3000,
+        'thresholds': {
+            'exact': 90,
+            'text': 35,
+            'semantic': 85,
+            'structural': 85,
+            'character': 90,
+            'pattern': 80
+        },
+        'weights': {
+            'exact': 1.5,
+            'text': 1.2,
+            'semantic': 1.0,
+            'structural': 1.0,
+            'character': 0.8,
+            'pattern': 0.8
+        },
+        'detection_mode': 'weighted_average',
+        'multi_method_requirements': {
+            'methods_required': 3,
+            'min_methods': ['semantic', 'structural']
+        },
+        'preprocessing': {
+            'remove_html_spacing': True,
+            'normalize_unicode': True,
+            'ignore_case': True,
+            'remove_extra_whitespace': True
+        },
+        'edge_filters': {
+            'min_text_length': 500,
+            'max_length_ratio': 1.3,
+            'min_length_ratio': 0.7
+        },
+        'language_detection': {
+            'enabled': False,
+            'target_language': 'english',
+            'threshold_characters': 500,
+            'languages': {
+                'english': ['en'],
+                'japanese': ['ja', 'jp'],
+                'korean': ['ko', 'kr'],
+                'chinese': ['zh', 'zh-cn', 'zh-tw'],
+                'spanish': ['es'],
+                'french': ['fr'],
+                'german': ['de'],
+                'russian': ['ru'],
+                'arabic': ['ar'],
+                'hindi': ['hi'],
+                'portuguese': ['pt'],
+                'italian': ['it'],
+                'dutch': ['nl'],
+                'thai': ['th'],
+                'vietnamese': ['vi'],
+                'turkish': ['tr'],
+                'polish': ['pl'],
+                'swedish': ['sv'],
+                'danish': ['da'],
+                'norwegian': ['no'],
+                'finnish': ['fi']
+            }
+        }
+    }
+
+
+def merge_ai_hunter_config(existing, default=None):
+    """Recursively merge existing config with defaults (default_ai_hunter_config() when None)."""
+    if default is None:
+        default = default_ai_hunter_config()
+    result = default.copy()
+    for key, value in existing.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = merge_ai_hunter_config(value, result[key])
+        else:
+            result[key] = value
+    return result
+
+
 class AIHunterConfigGUI:
     """GUI for configuring AI Hunter detection parameters"""
     def __init__(self, parent, config_dict, callback=None):
@@ -41,76 +132,8 @@ class AIHunterConfigGUI:
         self.callback = callback
         self.window = None
         
-        # Default AI Hunter settings structure
-        # Default workers: half the CPU cores — good speed without
-        # starving the rest of the system.
-        self.default_ai_hunter = {
-            'enabled': True,
-            'ai_hunter_max_workers': max(1, (os.cpu_count() or 4) // 2),
-            'retry_attempts': 6,
-            'disable_temperature_change': False,
-            'sample_size': 3000,
-            'thresholds': {
-                'exact': 90,
-                'text': 35,
-                'semantic': 85,
-                'structural': 85,
-                'character': 90,
-                'pattern': 80
-            },
-            'weights': {
-                'exact': 1.5,
-                'text': 1.2,
-                'semantic': 1.0,
-                'structural': 1.0,
-                'character': 0.8,
-                'pattern': 0.8
-            },
-            'detection_mode': 'weighted_average',
-            'multi_method_requirements': {
-                'methods_required': 3,
-                'min_methods': ['semantic', 'structural']
-            },
-            'preprocessing': {
-                'remove_html_spacing': True,
-                'normalize_unicode': True,
-                'ignore_case': True,
-                'remove_extra_whitespace': True
-            },
-            'edge_filters': {
-                'min_text_length': 500,
-                'max_length_ratio': 1.3,
-                'min_length_ratio': 0.7
-            },
-            'language_detection': {
-                'enabled': False,
-                'target_language': 'english',
-                'threshold_characters': 500,
-                'languages': {
-                    'english': ['en'],
-                    'japanese': ['ja', 'jp'],
-                    'korean': ['ko', 'kr'],
-                    'chinese': ['zh', 'zh-cn', 'zh-tw'],
-                    'spanish': ['es'],
-                    'french': ['fr'],
-                    'german': ['de'],
-                    'russian': ['ru'],
-                    'arabic': ['ar'],
-                    'hindi': ['hi'],
-                    'portuguese': ['pt'],
-                    'italian': ['it'],
-                    'dutch': ['nl'],
-                    'thai': ['th'],
-                    'vietnamese': ['vi'],
-                    'turkish': ['tr'],
-                    'polish': ['pl'],
-                    'swedish': ['sv'],
-                    'danish': ['da'],
-                    'norwegian': ['no'],
-                    'finnish': ['fi']
-                }
-            }
-        }
+        # Default AI Hunter settings structure (module-level default_ai_hunter_config)
+        self.default_ai_hunter = default_ai_hunter_config()
         
         # Initialize AI Hunter config in main config if not present
         if 'ai_hunter_config' not in self.config:
@@ -124,13 +147,7 @@ class AIHunterConfigGUI:
     
     def _merge_configs(self, default, existing):
         """Recursively merge existing config with defaults"""
-        result = default.copy()
-        for key, value in existing.items():
-            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-                result[key] = self._merge_configs(result[key], value)
-            else:
-                result[key] = value
-        return result
+        return merge_ai_hunter_config(existing, default)
     
     def get_ai_config(self):
         """Get AI Hunter configuration from main config"""

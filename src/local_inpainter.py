@@ -18,6 +18,7 @@ import threading
 import time
 import multiprocessing as mp
 from queue import Queue, Empty
+import mobile_runtime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -92,6 +93,16 @@ try:
 except ImportError:
     ONNX_AVAILABLE = False
     logger.warning("ONNX Runtime not available")
+# Glossarion Mobile bundles onnxruntime without the 'onnx' package. This module
+# uses 'onnx' only for optional conversion/quantization/validation (each use is
+# guarded), so inference needs onnxruntime alone. Desktop still requires both.
+if not ONNX_AVAILABLE and mobile_runtime.is_mobile():
+    try:
+        import onnxruntime as ort
+        ONNX_AVAILABLE = True
+        logger.info("✓ ONNX Runtime available for inference (no 'onnx' package: conversion/quantization off)")
+    except Exception as _ort_err:
+        logger.warning(f"ONNX Runtime not available on mobile: {_ort_err}")
 
 # C++ ONNX Backend - loaded lazily to avoid DLL load at module import time.
 # Previously, is_cpp_backend_available() was called here which loaded the DLL
@@ -256,6 +267,13 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
             return cache_path
             
         except Exception as hf_error:
+            if isinstance(hf_error, ImportError) and mobile_runtime.is_mobile():
+                # P28 (mobile): no huggingface_hub wheel; fetch the public resolve
+                # URL into the same cache path (.part file + size check).
+                from bubble_detector import hf_urllib_download
+                return hf_urllib_download(repo_id=repo_id, filename=filename,
+                                          local_dir=os.path.dirname(cache_path),
+                                          progress_callback=progress_callback)
             logger.error(f"❌ HuggingFace Hub download failed: {hf_error}")
             # If we have a fallback URL, try that
             if url:
@@ -709,7 +727,8 @@ class LocalInpainter:
                 enable_worker_process = (os.name == 'nt' or sys.platform.startswith('win'))
         except Exception:
             enable_worker_process = False
-        self._mp_enabled = bool(enable_worker_process)
+        # P17: no worker process where processes are unavailable (Glossarion Mobile)
+        self._mp_enabled = bool(enable_worker_process) and mobile_runtime.processes_available()
         self._mp_ctx = None
         self._mp_task_q = None
         self._mp_result_q = None
@@ -2422,6 +2441,26 @@ class LocalInpainter:
     def _is_custom_image_edit_method(self, method: str) -> bool:
         return str(method or '').lower() in CUSTOM_IMAGE_EDIT_METHODS
 
+    def _onnx_inpaint_without_torch(self, method: str, model_path) -> bool:
+        """P29: may load_model() continue without PyTorch because the model is ONNX?
+
+        Mobile only (desktop keeps its torch-less refusal): true when onnxruntime
+        is usable and the method is a *_onnx method or the file is ONNX by
+        extension or header (same b'\\x08' check load_model uses).
+        """
+        if not (ONNX_AVAILABLE and mobile_runtime.is_mobile()):
+            return False
+        if str(method or '').lower().endswith('_onnx'):
+            return True
+        path = str(model_path or '')
+        if path.lower().endswith('.onnx'):
+            return True
+        try:
+            with open(path, 'rb') as fh:
+                return fh.read(1) == b'\x08'
+        except Exception:
+            return False
+
     def _get_qwen_torch_dtype(self):
         dtype_name = os.environ.get('QWEN_IMAGE_EDIT_DTYPE', 'bf16' if self.use_gpu else 'fp32').lower()
         if dtype_name in ('fp16', 'float16', 'half'):
@@ -3843,7 +3882,15 @@ class LocalInpainter:
             if self._is_custom_image_edit_method(method):
                 return self._load_custom_image_edit_model(model_path, force_reload=force_reload)
 
-            if not TORCH_AVAILABLE:
+            # P29 (mobile): ONNX inpainting needs only onnxruntime, so a torch-less
+            # mobile build continues to the ONNX loader below. Torch-only formats
+            # are still refused (after ONNX detection).
+            onnx_without_torch = (
+                (not TORCH_AVAILABLE or torch is None or nn is None)
+                and self._onnx_inpaint_without_torch(method, model_path)
+            )
+
+            if not TORCH_AVAILABLE and not onnx_without_torch:
                 logger.warning("PyTorch not available in this build")
                 logger.info("Inpainting features will be disabled - this is normal for lightweight builds")
                 logger.info("The application will continue to work without local inpainting")
@@ -3851,7 +3898,7 @@ class LocalInpainter:
                 return False
             
             # Additional safety check for torch being None
-            if torch is None or nn is None:
+            if (torch is None or nn is None) and not onnx_without_torch:
                 logger.warning("PyTorch modules not properly loaded")
                 logger.info("Inpainting features will be disabled - this is normal for lightweight builds")
                 self.model_loaded = False
@@ -4036,6 +4083,12 @@ class LocalInpainter:
                     logger.debug(traceback.format_exc())
                     self.model_loaded = False
                     return False
+            
+            # P29: every loader below needs PyTorch
+            if onnx_without_torch:
+                logger.warning(f"PyTorch not available in this build; {method} model is not ONNX: {model_path}")
+                self.model_loaded = False
+                return False
             
             # Check if it's a safetensors file
             is_safetensors = model_path.endswith('.safetensors')

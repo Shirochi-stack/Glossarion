@@ -589,8 +589,15 @@ def get_library_dir() -> str:
     The library is organized into two subfolders:
       * ``Raw/``        — curated raw source EPUBs the user has imported.
       * ``Translated/`` — curated compiled EPUBs (finished translations).
+
+    ``GLOSSARION_LIBRARY_DIR`` overrides the location (set only by Glossarion
+    Mobile, whose HOME is redirected into app storage); desktop never sets it.
     """
-    docs = Path.home() / "Documents" / "Glossarion" / "Library"
+    _library_override = os.environ.get("GLOSSARION_LIBRARY_DIR", "").strip()
+    if _library_override:
+        docs = Path(_library_override)
+    else:
+        docs = Path.home() / "Documents" / "Glossarion" / "Library"
     try:
         docs.mkdir(parents=True, exist_ok=True)
     except OSError:

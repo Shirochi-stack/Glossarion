@@ -376,6 +376,132 @@ def test_spawn_ratchet(tmp_path):
     assert not res.errors and find(res, "stale-baseline")
 
 
+GATED_MODULE = '''
+import subprocess
+import mobile_runtime
+from mobile_runtime import subprocesses_available as can_spawn
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+
+def direct():
+    if mobile_runtime.processes_available():
+        ProcessPoolExecutor(2)                                        # G
+    else:
+        ThreadPoolExecutor(2)
+
+def negated(n):
+    if n < 3 or not mobile_runtime.processes_available():
+        pass
+    else:
+        ProcessPoolExecutor(n)                                        # G
+
+def early_raise(cmd):
+    if not can_spawn():
+        raise FileNotFoundError(cmd)
+    subprocess.run(cmd)                                               # G
+
+def early_return_in_with():
+    if not mobile_runtime.processes_available():
+        with ThreadPoolExecutor(1) as ex:
+            return ex
+    return ProcessPoolExecutor(1)                                     # G
+
+def flag(n):
+    use_pool = n > 10 and mobile_runtime.processes_available()
+    if n > 99:
+        use_pool = False
+    if use_pool:
+        ProcessPoolExecutor(n)                                        # G
+    return ProcessPoolExecutor if use_pool else ThreadPoolExecutor    # G
+
+def alias(n):
+    threads = bool(n == 1 or not mobile_runtime.processes_available())
+    if threads:
+        Exec = ThreadPoolExecutor
+    else:
+        Exec = ProcessPoolExecutor                                    # G
+    with Exec(n) as ex:                                               # G
+        return ex
+
+def ungated(n, use_pool):
+    if mobile_runtime.processes_available() or n > 1:
+        ProcessPoolExecutor(n)                                        # U: `or`
+    if use_pool:
+        ProcessPoolExecutor(n)                                        # U: parameter
+    again = mobile_runtime.processes_available()
+    again = True
+    if again:
+        subprocess.Popen(["x"])                                       # U: rebound
+    if mobile_runtime.processes_available:
+        subprocess.call(["y"])                                        # U: not called
+    if mobile_runtime.processes_available():
+        def later():
+            subprocess.check_call(["z"])                              # U: nested def
+    if not mobile_runtime.processes_available():
+        with open("f") as fh:
+            raise RuntimeError(fh)
+    subprocess.check_output(["w"])                                    # U: with may swallow a raise
+    if mobile_runtime.processes_available():
+        Exec2 = ProcessPoolExecutor                                   # G
+    else:
+        Exec2 = ProcessPoolExecutor                                   # U
+    Exec2(1)                                                          # U: one assignment is ungated
+
+def loop_target(items):
+    ok = mobile_runtime.processes_available()
+    for ok in items:
+        pass
+    if ok:
+        ProcessPoolExecutor(1)                                        # U: loop rebinding
+'''
+
+
+def test_spawn_gates_follow_mobile_runtime():
+    mi = cb.analyze_source("g", "g.py", GATED_MODULE.encode(), frozenset({"mobile_runtime"}))
+    src_lines = GATED_MODULE.splitlines()
+    expected = {}
+    for no, line in enumerate(src_lines, start=1):
+        mark = line.rsplit("#", 1)[-1].strip() if "#" in line else ""
+        if mark[:1] in ("G", "U"):
+            expected[no] = mark[0] == "G"
+    got = {}
+    for s in mi.spawns:
+        got[s.lineno] = got.get(s.lineno, True) and s.gated
+    assert set(got) == set(expected), (sorted(got), sorted(expected))
+    wrong = {n: (src_lines[n - 1].strip(), got[n]) for n in got if got[n] != expected[n]}
+    assert not wrong, wrong
+
+
+def test_gated_spawn_sites_need_no_baseline(tmp_path):
+    runtime = (
+        "from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor\n"
+        "def processes_available():\n    return True\n"
+        "def make_pool_executor(n):\n"
+        "    if processes_available():\n        return ProcessPoolExecutor(n)\n"
+        "    return ThreadPoolExecutor(n)\n")
+    entry = ("import subprocess\nimport mobile_runtime\n"
+             "def go():\n"
+             "    if not mobile_runtime.subprocesses_available():\n        return None\n"
+             "    return subprocess.Popen(['x'])\n"
+             "def pool():\n    return mobile_runtime.make_pool_executor(2)\n")
+    files = {"helpers": "", "mobile_runtime": runtime, "entry": entry}
+    res = collect(tmp_path, files, entries=("entry", "mobile_runtime"))
+    assert not res.errors, [f.message for f in res.errors]
+    assert res.spawn_sites["entry:go"]["status"] == "gated" and res.spawn_sites["entry:go"]["gated"] == 1
+    assert res.spawn_sites["mobile_runtime:make_pool_executor"]["status"] == "gated"
+    assert "entry:pool" not in res.spawn_sites, "make_pool_executor is not a spawn API for its callers"
+
+    extra = ('[baseline.process_spawn_sites]\n'
+             '"entry:go" = { apis = ["subprocess.Popen"], count = 1, reason = "was ungated" }\n')
+    res = collect(tmp_path / "stale", files, entries=("entry", "mobile_runtime"), extra=extra)
+    stale = find(res, "stale-baseline", "entry")
+    assert not res.errors and stale and "gated" in stale[0].message
+
+    # The same call without the early exit is a new ungated site again.
+    ungated = dict(files, entry=entry.replace("        return None\n", "        print('no')\n"))
+    res = collect(tmp_path / "open", ungated, entries=("entry", "mobile_runtime"))
+    assert codes(res) == ["spawn-new"] and res.spawn_sites["entry:go"]["count"] == 1
+
+
 # ============================================================================ third-party, platform, dynamic, file refs
 def test_thirdparty_mapping_and_pins(tmp_path):
     entry = textwrap.dedent('''

@@ -6,18 +6,23 @@ Chapter Extraction Worker - Runs chapter extraction in a separate process to pre
 import sys
 import os
 import io
+from pathlib import Path
+
+# Add parent directory to path for imports (before the first project import)
+sys.path.insert(0, str(Path(__file__).parent))
+
+import mobile_runtime
 
 # Force UTF-8 encoding for stdout/stderr on Windows
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+# (skipped where subprocesses are unavailable: there this module runs in-process
+# and must not replace the host's streams)
+if mobile_runtime.subprocesses_available():
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 import json
 import zipfile
 import time
 import traceback
-from pathlib import Path
-
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
 from epub_package import find_opf_path
 
 def run_chapter_extraction(epub_path, output_dir, extraction_mode="smart", progress_callback=None):

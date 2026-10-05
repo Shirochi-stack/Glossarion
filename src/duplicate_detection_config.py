@@ -25,6 +25,23 @@ except (ImportError, OSError):
     _jellyfish = None
     _HAS_JELLYFISH = False
 
+# Glossarion Mobile only: Jaro-Winkler through RapidFuzz, because jellyfish
+# has no Android/iOS wheel. RapidFuzz's JaroWinkler uses the same prefix
+# weight (0.1), 4-char prefix cap and 0.7 boost threshold; jellyfish stays
+# preferred when present. Desktop keeps jellyfish as the only Jaro-Winkler
+# source (without it the algorithm is dropped, as before).
+_rf_jaro_winkler = None
+try:
+    import mobile_runtime as _mobile_runtime
+    if _mobile_runtime.is_mobile():
+        from rapidfuzz.distance import JaroWinkler as _rf_jaro_winkler  # type: ignore
+except (ImportError, OSError):
+    _rf_jaro_winkler = None
+
+
+def _jaro_winkler_available():
+    return _HAS_JELLYFISH or _rf_jaro_winkler is not None
+
 
 def get_duplicate_detection_config():
     """
@@ -84,7 +101,7 @@ def get_duplicate_detection_config():
         algorithms = [a for a in algorithms if a != 'partial']
     if not _HAS_RAPIDFUZZ:
         algorithms = [a for a in algorithms if a not in ('token_sort', 'partial')]
-    if not _HAS_JELLYFISH:
+    if not _jaro_winkler_available():
         algorithms = [a for a in algorithms if a != 'jaro_winkler']
     if not algorithms:
         algorithms = ['basic']
@@ -149,6 +166,8 @@ def calculate_similarity_with_config(name1, name2, config=None):
     # Jaro-Winkler (designed for names)
     if 'jaro_winkler' in algorithms and _HAS_JELLYFISH:
         best = max(best, _jellyfish.jaro_winkler_similarity(n1, n2))
+    elif 'jaro_winkler' in algorithms and _rf_jaro_winkler is not None:
+        best = max(best, _rf_jaro_winkler.similarity(n1, n2))
 
     return best
 
@@ -164,6 +183,8 @@ def get_algorithm_display_info():
 
     if _HAS_JELLYFISH:
         available.append("Jaro-Winkler")
+    elif _rf_jaro_winkler is not None:
+        available.append("Jaro-Winkler (RapidFuzz)")
 
     return available
 

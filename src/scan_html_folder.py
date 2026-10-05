@@ -45,6 +45,7 @@ from functools import lru_cache
 import concurrent.futures
 import multiprocessing
 from threading import Lock
+import mobile_runtime
 from translation_artifacts import (
     QA_TRANSLATION_ARTIFACT_FILENAMES,
     translation_artifact_qa_text,
@@ -460,10 +461,21 @@ DEFAULT_REFUSAL_PATTERNS = [
     "i can't translate this content",
 ]
 
+def _config_json_in(base_dir):
+    """``<base_dir>/config.json``; Glossarion Mobile resolves it through mobile_runtime.
+
+    Only the mobile app honours ``CONFIG_FILE`` / ``GLOSSARION_DATA_DIR`` here;
+    desktop always reads the config.json in ``base_dir``.
+    """
+    if mobile_runtime.is_mobile():
+        return mobile_runtime.config_file(base_dir)
+    return os.path.join(base_dir, 'config.json')
+
+
 def _get_refusal_patterns_for_scan():
     """Load refusal patterns from config.json or return defaults."""
     try:
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+        config_path = _config_json_in(os.path.dirname(os.path.abspath(__file__)))
         if os.path.exists(config_path):
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
@@ -1625,7 +1637,7 @@ def detect_ai_artifacts(
     try:
         refusal_limit = 900  # Match default refusal length limit
         try:
-            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+            config_path = _config_json_in(os.path.dirname(os.path.abspath(__file__)))
             if os.path.exists(config_path):
                 with open(config_path, 'r', encoding='utf-8') as f:
                     _cfg = json.load(f)
@@ -3505,13 +3517,14 @@ def _scan_config_json_path():
     """Path to the REAL config.json: next to the frozen exe, or this script.
 
     ``__file__`` alone is wrong in frozen builds (PyInstaller temp dir).
+    Glossarion Mobile resolves it through mobile_runtime (``CONFIG_FILE``).
     """
     import sys as _sys
     if getattr(_sys, 'frozen', False):
         base_dir = os.path.dirname(os.path.abspath(_sys.executable))
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_dir, 'config.json')
+    return _config_json_in(base_dir)
 
 
 def _resolve_scan_max_workers_config(extra_sections=()):
@@ -3583,6 +3596,7 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
         _cfg_use_threads = False
     _use_thread_pool_enh = bool(
         _cfg_use_threads or os.environ.get('QA_USE_THREAD_EXECUTOR', '0') == '1'
+        or not mobile_runtime.processes_available()
     )
     if _use_thread_pool_enh:
         _ExecCls = concurrent.futures.ThreadPoolExecutor
@@ -4406,7 +4420,7 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
         
         try:
             # Process with ProcessPoolExecutor
-            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            with mobile_runtime.make_pool_executor(max_workers) as executor:
                 # Submit all batches
                 futures = []
                 for args in batch_args:
@@ -11185,6 +11199,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     _use_thread_pool = bool(
         qa_settings.get('use_thread_executor', False)
         or os.environ.get('QA_USE_THREAD_EXECUTOR', '0') == '1'
+        or not mobile_runtime.processes_available()
     )
     if _use_thread_pool:
         _ExecutorCls = concurrent.futures.ThreadPoolExecutor
@@ -12776,7 +12791,7 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
     batch_args = [(batch, worker_data) for batch in batches]
     
     # Process with ProcessPoolExecutor
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker_process) as executor:
+    with mobile_runtime.make_pool_executor(max_workers, initializer=_init_worker_process) as executor:
         # Submit all batches
         futures = []
         for args in batch_args:

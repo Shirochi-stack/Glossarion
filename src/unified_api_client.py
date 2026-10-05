@@ -1011,6 +1011,23 @@ _PAYLOADS_DISABLED = False  # Set True when even fallback fails
 
 _payloads_lock = threading.Lock()
 
+try:
+    import mobile_runtime as _mobile_runtime
+except Exception:
+    _mobile_runtime = None
+
+
+def _is_mobile_runtime() -> bool:
+    """True inside Glossarion Mobile (mobile_runtime.is_mobile()); always False on desktop."""
+    return _mobile_runtime is not None and _mobile_runtime.is_mobile()
+
+
+def _mobile_data_dir(default_dir: str) -> str:
+    """mobile_runtime.data_dir(default_dir): GLOSSARION_DATA_DIR on mobile, else default_dir."""
+    if _mobile_runtime is None:
+        return default_dir
+    return _mobile_runtime.data_dir(default_dir)
+
 def _payloads_dir() -> str:
     global _payloads_resolved_dir, _PAYLOADS_DISABLED
     if _payloads_resolved_dir is not None:
@@ -1026,6 +1043,9 @@ def _payloads_dir() -> str:
             _base = os.path.dirname(os.path.abspath(sys.executable))
         else:
             _base = os.path.dirname(os.path.abspath(__file__))
+        # Glossarion Mobile: the app dir is read-only (iOS) or replaced on
+        # every update (Android); desktop never sets GLOSSARION_DATA_DIR.
+        _base = _mobile_data_dir(_base)
         _candidate = os.path.join(_base, "Payloads")
         try:
             os.makedirs(_candidate, exist_ok=True)
@@ -1292,17 +1312,24 @@ def _gui_print(*args, **kwargs):
 # Shadow builtins print in this module
 print = _gui_print
 
+# Optional SDK / provider-route imports below catch ImportError, so on desktop
+# a broken install still fails loudly. Glossarion Mobile also tolerates other
+# import-time failures (e.g. OSError from a native library that cannot load)
+# so one unusable optional dependency cannot take the whole client down.
+# On desktop the extra class is ImportError again, i.e. nothing extra.
+_MOBILE_IMPORT_FAILURE = Exception if _is_mobile_runtime() else ImportError
+
 # OpenAI SDK
 try:
     import openai
     from openai import OpenAIError
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     openai = None
     class OpenAIError(Exception): pass
 try:
     import httpx
     from httpx import HTTPStatusError
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     httpx = None
     class HTTPStatusError(Exception): pass
     
@@ -1311,7 +1338,7 @@ try:
     from google import genai
     from google.genai import types
     GENAI_AVAILABLE = True
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     genai = None
     types = None
     GENAI_AVAILABLE = False
@@ -1319,7 +1346,7 @@ except ImportError:
 # Gemini gRPC client (optional - raw gRPC transport for maximum performance)
 try:
     from grpc_gemini_client import GrpcGeminiClient, GrpcGeminiError, GrpcGeminiResponse, GRPC_AVAILABLE as GEMINI_GRPC_AVAILABLE
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     GrpcGeminiClient = None
     GrpcGeminiError = None
     GrpcGeminiResponse = None
@@ -1328,13 +1355,13 @@ except ImportError:
 # Anthropic SDK (optional - can use requests if not installed)
 try:
     import anthropic
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     anthropic = None
 
 # Cohere SDK (optional)
 try:
     import cohere
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     cohere = None
 
 # Mistral SDK (optional)
@@ -1343,12 +1370,12 @@ try:
     from mistralai.client import MistralClient
     from mistralai.models.chat_completion import ChatMessage
     MistralSDKStyle = "legacy"
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     try:
         from mistralai.client import Mistral as MistralClient
         ChatMessage = None
         MistralSDKStyle = "modern"
-    except ImportError:
+    except (ImportError, _MOBILE_IMPORT_FAILURE):
         MistralClient = None
         ChatMessage = None
     
@@ -1370,14 +1397,14 @@ except Exception:
 try:
     import deepl
     DEEPL_AVAILABLE = True
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     deepl = None
     DEEPL_AVAILABLE = False
 
 try:
     from google.cloud import translate_v2 as google_translate
     GOOGLE_TRANSLATE_AVAILABLE = True
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     google_translate = None
     GOOGLE_TRANSLATE_AVAILABLE = False
 
@@ -1389,7 +1416,7 @@ try:
     from authgpt_auth import cancel_stream as _authgpt_cancel_stream
     from authgpt_auth import reset_cancel as _authgpt_reset_cancel
     AUTHGPT_AVAILABLE = True
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     _authgpt_get_store = None
     _authgpt_get_store_by_id = None
     _authgpt_send = None
@@ -1407,7 +1434,7 @@ try:
     from authgrok_auth import cancel_stream as _authgrok_cancel_stream
     from authgrok_auth import reset_cancel as _authgrok_reset_cancel
     AUTHGROK_AVAILABLE = True
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     _AuthGrokHTTPError = None
     _authgrok_get_store = None
     _authgrok_get_store_by_id = None
@@ -1430,7 +1457,7 @@ try:
     from authgem_auth import _reset_code_assist_setup
     from authgem_auth import reset_verification as _authgem_reset_verification
     AUTHGEM_AVAILABLE = True
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     _authgem_get_store = None
     _authgem_get_store_by_id = None
     _authgem_send_aistudio = None
@@ -1450,7 +1477,7 @@ try:
     from ocagy_cli import reset_cancel as _ocagy_reset_cancel
     from ocagy_cli import is_cancelled as _ocagy_is_cancelled
     OCAGY_AVAILABLE = True
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     _ocagy_send = None
     _ocagy_cancel_stream = None
     _ocagy_reset_cancel = None
@@ -1461,7 +1488,7 @@ except ImportError:
 try:
     from ocagy_cli import send_opencode_zen_completion as _opencode_zen_send
     OPENCODE_ZEN_AVAILABLE = True
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     _opencode_zen_send = None
     OPENCODE_ZEN_AVAILABLE = False
 
@@ -1479,7 +1506,7 @@ try:
     from antigravity_proxy import CLAUDE_MAX_OUTPUT_TOKENS as _ANTIGRAVITY_CLAUDE_MAX_OUTPUT_TOKENS
     from antigravity_proxy import GEMINI_MAX_OUTPUT_TOKENS as _ANTIGRAVITY_GEMINI_MAX_OUTPUT_TOKENS
     ANTIGRAVITY_AVAILABLE = True
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     _antigravity_send = None
     _antigravity_send_stream = None
     _antigravity_cancel_stream = None
@@ -1506,7 +1533,7 @@ try:
     from glm_proxy import get_local_chat_endpoint as _authza_get_local_chat_endpoint
     from glm_proxy import get_upstream_chat_endpoint as _authza_get_upstream_chat_endpoint
     AUTHZA_AVAILABLE = True
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     _authza_send = None
     _authza_cancel_stream = None
     _authza_reset_cancel = None
@@ -1526,7 +1553,7 @@ try:
     from authnd_auth import reset_cancel as _authnd_reset_cancel
     from authnd_auth import reasoning_status_label as _authnd_reasoning_status_label
     AUTHND_AVAILABLE = True
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     _authnd_send = None
     _authnd_cancel_stream = None
     _authnd_reset_cancel = None
@@ -1539,7 +1566,7 @@ try:
     from gemini_free import cancel_stream as _search_gemini_cancel_stream
     from gemini_free import reset_cancel as _search_gemini_reset_cancel
     SEARCH_GEMINI_AVAILABLE = True
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     _search_gemini_send = None
     _search_gemini_cancel_stream = None
     _search_gemini_reset_cancel = None
@@ -1551,7 +1578,7 @@ try:
     from opera_aria import cancel_stream as _search_opera_cancel_stream
     from opera_aria import reset_cancel as _search_opera_reset_cancel
     SEARCH_OPERA_AVAILABLE = True
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     _search_opera_send = None
     _search_opera_cancel_stream = None
     _search_opera_reset_cancel = None
@@ -1565,7 +1592,7 @@ try:
     from authcd_auth import cancel_stream as _authcd_cancel_stream
     from authcd_auth import reset_cancel as _authcd_reset_cancel
     AUTHCD_AVAILABLE = True
-except ImportError:
+except (ImportError, _MOBILE_IMPORT_FAILURE):
     _authcd_get_store = None
     _authcd_get_store_by_id = None
     _authcd_send = None
@@ -3373,6 +3400,8 @@ class UnifiedClient:
         """Best-effort fallback for helper clients that missed GUI pool hydration."""
         try:
             config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+            if _is_mobile_runtime():
+                config_path = _mobile_runtime.config_file(os.path.dirname(__file__))
             if not os.path.exists(config_path):
                 return []
             with open(config_path, 'r', encoding='utf-8') as f:

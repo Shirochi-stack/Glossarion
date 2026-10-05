@@ -192,6 +192,70 @@ def _file_load_key() -> Optional[bytes]:
 
 
 # ===========================================================================
+# Process-local key (Glossarion Mobile)
+# ===========================================================================
+# The mobile app creates the 32-byte key in the platform secure storage
+# (Android Keystore / iOS Keychain) and passes it in with
+# set_symmetric_key() before any backend import, so it never lives in
+# os.environ on a device. GLOSSARION_TOKEN_KEY_B64 is a fallback for host
+# tests only. Desktop sets neither, so the Keychain/file logic below runs
+# unchanged. Windows always uses DPAPI and ignores this key.
+
+_symmetric_key_override: Optional[bytes] = None
+
+
+def _coerce_symmetric_key(key, allow_raw: bool = True) -> bytes:
+    """Return the 32 key bytes from raw bytes or their (url-safe) base64."""
+    if isinstance(key, str):
+        key = key.strip().encode("ascii", "replace")
+    if not isinstance(key, (bytes, bytearray)):
+        raise ValueError("token encryption key must be bytes")
+    key = bytes(key)
+    if allow_raw and len(key) == 32:
+        return key
+    for altchars in (None, b"-_"):
+        try:
+            raw = base64.b64decode(key.strip(), altchars=altchars, validate=True)
+        except Exception:
+            continue
+        if len(raw) == 32:
+            return raw
+    raise ValueError("token encryption key must be 32 bytes (raw or base64)")
+
+
+def set_symmetric_key(key: bytes) -> None:
+    """Use *key* (32 bytes, or their base64) for token encryption in this process.
+
+    It is used before any Keychain/file key; ``None`` clears it. Desktop
+    never calls it.
+    """
+    global _symmetric_key_override
+    _symmetric_key_override = None if key is None else _coerce_symmetric_key(key)
+
+
+def _env_symmetric_key() -> Optional[bytes]:
+    value = os.environ.get("GLOSSARION_TOKEN_KEY_B64", "").strip()
+    if not value:
+        return None
+    try:
+        return _coerce_symmetric_key(value, allow_raw=False)
+    except ValueError:
+        logger.warning("GLOSSARION_TOKEN_KEY_B64 is not a base64 32-byte key; ignored")
+        return None
+
+
+def _is_mobile_platform() -> bool:
+    """iOS/Android (or Glossarion Mobile): never shell out to the `security` CLI."""
+    if sys.platform in ("ios", "android"):
+        return True
+    try:
+        import mobile_runtime
+        return mobile_runtime.is_mobile()
+    except Exception:
+        return False
+
+
+# ===========================================================================
 # Pure-Python AES-256-CBC + HMAC-SHA256 (no external dependencies)
 # ===========================================================================
 # Used when the `cryptography` package is not available.
@@ -201,11 +265,17 @@ def _file_load_key() -> Optional[bytes]:
 def _get_symmetric_key() -> bytes:
     """Get or create the 32-byte symmetric encryption key.
 
+    - set_symmetric_key() / GLOSSARION_TOKEN_KEY_B64: used first (mobile, host tests)
     - macOS: stored in Keychain
-    - Linux: stored in restricted file
+    - Linux, iOS, Android: stored in restricted file under ~/.glossarion
     - Windows: not used (DPAPI handles everything)
     """
-    if sys.platform == "darwin":
+    if _symmetric_key_override is not None:
+        return _symmetric_key_override
+    env_key = _env_symmetric_key()
+    if env_key is not None:
+        return env_key
+    if sys.platform == "darwin" and not _is_mobile_platform():
         key = _keychain_load_key()
         if key and len(key) == 32:
             return key
@@ -486,7 +556,7 @@ def load_encrypted_tokens(file_path: str) -> Optional[Dict]:
 
 def clear_encryption_keys() -> None:
     """Remove stored encryption keys (called during full logout/reset)."""
-    if sys.platform == "darwin":
+    if sys.platform == "darwin" and not _is_mobile_platform():
         try:
             _keychain_delete_key()
         except Exception:

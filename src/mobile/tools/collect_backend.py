@@ -53,6 +53,24 @@ What it does
       ``[spawn].wrappers`` (e.g. ``shutdown_utils.popen_no_window``) and count as spawn
       APIs too. Every ``module:function`` site must be in
       ``[baseline.process_spawn_sites]`` with the same APIs and no more call sites.
+
+      **Gated sites** do not count. A site is gated when it can only run on a branch where
+      ``mobile_runtime.processes_available()`` / ``subprocesses_available()`` is true, in
+      the same function:
+
+      * the body of ``if <gate>:`` or the ``else`` of ``if not <gate>:``, and the two arms
+        of ``x if <gate> else y``;
+      * statements after ``if not <gate>: return/raise`` (early exit);
+      * a test that is a local name whose every assignment in that scope implies the gate
+        (``use_pool = n > 5000 and mobile_runtime.processes_available()``; a literal
+        ``False`` keeps the implication; any other binding, a parameter or a loop target
+        breaks it). ``and``/``or``/``not`` and ``bool(...)`` are followed;
+      * a call through a local alias (``cls = ProcessPoolExecutor``) whose every
+        spawn-valued assignment is gated.
+
+      Gates do not cross function boundaries: a helper called only from a gated branch,
+      or a pool sized to one worker, stays baselined with a reason. A function whose
+      sites are all gated needs no baseline entry (its entry is then reported stale).
    c. ``compile()`` of the AST must succeed on the running interpreter (3.13 in CI).
    d. **Pinned third-party imports.** Every unguarded ``module``-kind third-party
       import must map to a pinned dependency. Mapping comes from ``[thirdparty.map]``,
@@ -100,7 +118,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
     sys.stderr.write("collect_backend.py needs Python 3.11+ (tomllib)\n")
     raise SystemExit(2)
 
-COLLECTOR_VERSION = "2"
+COLLECTOR_VERSION = "3"
 BUNDLE_INFO_NAME = "_bundle_info.py"
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -151,6 +169,9 @@ for _n in ("Queue", "JoinableQueue", "SimpleQueue", "Event", "Lock", "RLock", "S
     SPAWN_APIS[f"multiprocessing.{_n}"] = "multiprocessing-sync"
 
 DYNAMIC_IMPORT_FUNCS = frozenset({"__import__", "importlib.import_module", "importlib.__import__"})
+# Calls that are true only when the backend may start processes (src/mobile_runtime.py).
+GATE_FUNCS = frozenset({"mobile_runtime.processes_available", "mobile_runtime.subprocesses_available"})
+_NO_GATE = (False, False)  # (truthy test implies the gate, falsy test implies the gate)
 # Module-valued aliases worth tracking through plain assignments (``sp = subprocess``).
 ALIAS_MODULES = frozenset({"subprocess", "multiprocessing", "multiprocessing.pool", "os", "concurrent.futures",
                            "importlib", "asyncio", "pty"})
@@ -177,6 +198,7 @@ class SpawnRef:
     lineno: int
     func: str
     how: str  # call | reference
+    gated: bool = False  # only reachable on a branch where mobile_runtime says processes exist
 
 
 @dataclass
@@ -276,6 +298,27 @@ def _is_type_checking_test(test: ast.AST) -> bool:
 _TRY_TYPES = (ast.Try,) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())
 
 
+def _terminates(stmts: list, raise_ok: bool = True) -> bool:
+    """True when a statement list always leaves the function (return/raise) when it completes."""
+    if not stmts:
+        return False
+    last = stmts[-1]
+    if isinstance(last, ast.Return):
+        return True
+    if isinstance(last, ast.Raise):
+        return raise_ok
+    if isinstance(last, (ast.With, ast.AsyncWith)):
+        return _terminates(last.body, raise_ok=False)  # __exit__ may swallow a raise, never a return
+    if isinstance(last, ast.If):
+        return _terminates(last.body, raise_ok) and _terminates(last.orelse, raise_ok)
+    if isinstance(last, _TRY_TYPES):
+        if _terminates(last.finalbody, raise_ok):
+            return True
+        normal = last.orelse if last.orelse else last.body
+        return _terminates(normal, raise_ok) and all(_terminates(h.body, raise_ok) for h in last.handlers)
+    return False
+
+
 # --------------------------------------------------------------------------- per-module analysis
 @dataclass(frozen=True)
 class _Ctx:
@@ -287,6 +330,8 @@ class _Ctx:
     conditional: bool = False
     main: bool = False
     type_checking: bool = False
+    # Enclosing branch conditions in this function: (test expr, branch taken, scope chain).
+    gates: tuple = ()
 
     def kind(self) -> str:
         if self.type_checking:
@@ -308,6 +353,9 @@ class _Ctx:
         # Class scopes are not visible from nested functions (Python scoping rules).
         return tuple(k for k in self.chain if not k.startswith("class:"))
 
+    def gate(self, test: ast.AST, branch: bool) -> "_Ctx":
+        return self.but(gates=self.gates + ((test, branch, self.chain),))
+
 
 class _Analyzer:
     """One AST pass that records imports, alias bindings, spawn/dynamic calls and string refs."""
@@ -320,10 +368,88 @@ class _Analyzer:
         self.pending: list[tuple[ast.AST, _Ctx, str]] = []  # (expr, ctx, how)
         self._refs_seen: set[tuple[int, str]] = set()
         self._imports_seen: set[tuple] = set()
+        # (scope key, name) -> [(assigned expr or None, scope chain)]; None = any other binding.
+        self.name_assigns: dict[tuple, list] = {}
+        # (scope key, alias name) -> every spawn-valued assignment of the alias is gated.
+        self.alias_gate: dict[tuple, bool] = {}
 
     # -- name binding / resolution
     def _bind(self, ctx: _Ctx, name: str, qualified: str) -> None:
         self.bindings.setdefault(ctx.chain[-1], {})[name] = qualified
+
+    # -- mobile_runtime gates
+    def _note_binding(self, ctx: _Ctx, name: str, value: ast.AST | None) -> None:
+        self.name_assigns.setdefault((ctx.chain[-1], name), []).append((value, ctx.chain))
+
+    def _poison_targets(self, ctx: _Ctx, target: ast.AST) -> None:
+        for sub in ast.walk(target):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+                self._note_binding(ctx, sub.id, None)
+
+    def _gate_tf(self, expr: ast.AST, chain: tuple, seen: frozenset = frozenset()) -> tuple:
+        """(truthy => processes available, falsy => processes available) for a branch test."""
+        if isinstance(expr, ast.Call):
+            q = self.resolve(expr.func, chain)
+            if q in GATE_FUNCS or (self.info.name == "mobile_runtime" and q is not None
+                                   and f"mobile_runtime.{q[len('<def>.'):]}" in GATE_FUNCS
+                                   and q.startswith("<def>.")):
+                return (True, False)
+            if (q is None and isinstance(expr.func, ast.Name) and expr.func.id == "bool"
+                    and len(expr.args) == 1 and not expr.keywords):
+                return self._gate_tf(expr.args[0], chain, seen)
+            return _NO_GATE
+        if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
+            t, f = self._gate_tf(expr.operand, chain, seen)
+            return (f, t)
+        if isinstance(expr, ast.BoolOp):
+            parts = [self._gate_tf(v, chain, seen) for v in expr.values]
+            if isinstance(expr.op, ast.And):
+                return (any(t for t, _ in parts), all(f for _, f in parts))
+            return (all(t for t, _ in parts), any(f for _, f in parts))
+        if isinstance(expr, ast.Constant):
+            return (False, True) if expr.value else (True, False)
+        if isinstance(expr, ast.Name):
+            for key in reversed(chain):
+                assigns = self.name_assigns.get((key, expr.id))
+                if assigns is None:
+                    continue
+                if (key, expr.id) in seen:
+                    return _NO_GATE
+                inner = seen | {(key, expr.id)}
+                tf = [self._gate_tf(v, c, inner) if v is not None else _NO_GATE for v, c in assigns]
+                return (all(t for t, _ in tf), all(f for _, f in tf))
+        return _NO_GATE
+
+    def _gated(self, ctx: _Ctx) -> bool:
+        for test, branch, chain in ctx.gates:
+            t, f = self._gate_tf(test, chain)
+            if (t if branch else f):
+                return True
+        return False
+
+    def _alias_gated(self, expr: ast.AST, chain: tuple) -> bool:
+        if not isinstance(expr, ast.Name):
+            return False
+        for key in reversed(chain):
+            if expr.id in self.bindings.get(key, {}):
+                return self.alias_gate.get((key, expr.id), False)
+        return False
+
+    def _poison_params(self, args: ast.arguments, ctx: _Ctx) -> None:
+        for a in list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs) + [args.vararg, args.kwarg]:
+            if a is not None:
+                self._note_binding(ctx, a.arg, None)
+
+    def _walk_block(self, stmts: list, ctx: _Ctx) -> None:
+        """Walk a statement list; `if not <gate>: return` gates the statements after it."""
+        for stmt in stmts:
+            self.walk(stmt, ctx)
+            if isinstance(stmt, ast.If) and not (_is_main_test(stmt.test) or _is_type_checking_test(stmt.test)):
+                body_exits, else_exits = _terminates(stmt.body), _terminates(stmt.orelse)
+                if body_exits and not else_exits:
+                    ctx = ctx.gate(stmt.test, False)
+                elif else_exits and not body_exits:
+                    ctx = ctx.gate(stmt.test, True)
 
     def resolve(self, expr: ast.AST, chain: tuple) -> str | None:
         if isinstance(expr, ast.Name):
@@ -383,13 +509,14 @@ class _Analyzer:
             inner = _Ctx(chain=ctx.fn_chain() + (qual,), func=qual, qual=f"{qual}.<locals>.",
                          in_function=True, main=ctx.main, type_checking=ctx.type_checking)
             self._bind(ctx, node.name, f"<def>.{node.name}")  # shadows imported names
-            for stmt in node.body:
-                self.walk(stmt, inner)
+            self._poison_params(node.args, inner)
+            self._walk_block(node.body, inner)
             return
         if isinstance(node, ast.Lambda):
             self._walk_defaults(node.args, ctx)
             inner = _Ctx(chain=ctx.fn_chain() + (f"{ctx.qual}<lambda>@{node.lineno}",), func=ctx.func,
                          qual=ctx.qual, in_function=True, main=ctx.main, type_checking=ctx.type_checking)
+            self._poison_params(node.args, inner)
             self.walk(node.body, inner)
             return
         if isinstance(node, ast.ClassDef):
@@ -400,38 +527,40 @@ class _Analyzer:
             for k in node.keywords:
                 self.walk(k.value, ctx)
             qual = f"{ctx.qual}{node.name}"
-            inner = ctx.but(chain=ctx.chain + (f"class:{qual}",), qual=f"{qual}.")
+            inner = ctx.but(chain=ctx.chain + (f"class:{qual}",), qual=f"{qual}.", gates=())
             self._bind(ctx, node.name, f"<def>.{node.name}")
-            for stmt in node.body:
-                self.walk(stmt, inner)
+            self._walk_block(node.body, inner)
             return
         if isinstance(node, _TRY_TYPES):
             guard = any(_handler_catches_import(h) for h in node.handlers)
             body_ctx = ctx.but(guarded=True) if guard else ctx
-            for stmt in node.body:
-                self.walk(stmt, body_ctx)
+            self._walk_block(node.body, body_ctx)
             for h in node.handlers:
                 if h.type is not None:
                     self.walk(h.type, ctx)
-                for stmt in h.body:
-                    self.walk(stmt, ctx.but(conditional=True))
-            for stmt in node.orelse:
-                self.walk(stmt, ctx.but(conditional=True))
-            for stmt in node.finalbody:
-                self.walk(stmt, ctx)
+                if h.name:
+                    self._note_binding(ctx, h.name, None)
+                self._walk_block(h.body, ctx.but(conditional=True))
+            self._walk_block(node.orelse, ctx.but(conditional=True))
+            self._walk_block(node.finalbody, ctx)
             return
         if isinstance(node, ast.If):
             self.walk(node.test, ctx)
+            else_ctx = ctx.but(conditional=True)
             if _is_main_test(node.test):
                 body_ctx = ctx.but(main=True)
             elif _is_type_checking_test(node.test):
                 body_ctx = ctx.but(type_checking=True)
             else:
-                body_ctx = ctx.but(conditional=True)
-            for stmt in node.body:
-                self.walk(stmt, body_ctx)
-            for stmt in node.orelse:
-                self.walk(stmt, ctx.but(conditional=True))
+                body_ctx = ctx.but(conditional=True).gate(node.test, True)
+                else_ctx = else_ctx.gate(node.test, False)
+            self._walk_block(node.body, body_ctx)
+            self._walk_block(node.orelse, else_ctx)
+            return
+        if isinstance(node, ast.IfExp):
+            self.walk(node.test, ctx)
+            self.walk(node.body, ctx.gate(node.test, True))
+            self.walk(node.orelse, ctx.gate(node.test, False))
             return
         if isinstance(node, (ast.With, ast.AsyncWith)):
             guard = False
@@ -439,12 +568,12 @@ class _Analyzer:
                 self.walk(item.context_expr, ctx)
                 if item.optional_vars is not None:
                     self.walk(item.optional_vars, ctx)
+                    self._poison_targets(ctx, item.optional_vars)
                 ce = item.context_expr
                 if isinstance(ce, ast.Call) and (_dotted(ce.func) or "").split(".")[-1] == "suppress":
                     guard = guard or any(_exc_name(a) in GUARD_EXCEPTIONS for a in ce.args)
             body_ctx = ctx.but(guarded=True) if guard else ctx
-            for stmt in node.body:
-                self.walk(stmt, body_ctx)
+            self._walk_block(node.body, body_ctx)
             return
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             self._record_import(node, ctx)
@@ -454,11 +583,27 @@ class _Analyzer:
             if (len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
                     and isinstance(node.value, (ast.Name, ast.Attribute))):
                 self.pending.append((node.value, ctx, "alias:" + node.targets[0].id))
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self._note_binding(ctx, target.id, node.value)
+                else:
+                    self._poison_targets(ctx, target)
             return
         if isinstance(node, ast.AnnAssign):
             if node.value is not None:
                 self.walk(node.value, ctx)
+            if isinstance(node.target, ast.Name):
+                self._note_binding(ctx, node.target.id, node.value)
             return
+        if isinstance(node, (ast.AugAssign, ast.For, ast.AsyncFor, ast.comprehension, ast.NamedExpr)):
+            self._poison_targets(ctx, node.target)
+        elif isinstance(node, ast.Global):
+            for n in node.names:
+                self.name_assigns.setdefault(("<module>", n), []).append((None, ("<module>",)))
+        elif isinstance(node, ast.Nonlocal):
+            for key in ctx.chain[:-1]:
+                for n in node.names:
+                    self.name_assigns.setdefault((key, n), []).append((None, ctx.chain))
         if isinstance(node, ast.Call):
             self._visit_call(node, ctx)
             return
@@ -530,7 +675,12 @@ class _Analyzer:
                     q = self.resolve(expr, ctx.chain)
                     if q and (q in self.spawn_apis or q in DYNAMIC_IMPORT_FUNCS or q in ALIAS_MODULES):
                         self.bindings.setdefault(ctx.chain[-1], {})[how[6:]] = q
-        seen: set[tuple] = set()
+        # An alias of a spawn API is gated when every assignment that gives it that value is gated.
+        for expr, ctx, how in self.pending:
+            if how.startswith("alias:") and self.resolve(expr, ctx.chain) in self.spawn_apis:
+                akey = (ctx.chain[-1], how[6:])
+                self.alias_gate[akey] = self.alias_gate.get(akey, True) and self._gated(ctx)
+        seen: dict[tuple, SpawnRef] = {}
         for expr, ctx, how in self.pending:
             if how.startswith("alias:"):
                 continue
@@ -548,11 +698,19 @@ class _Analyzer:
             q = self.resolve(expr, ctx.chain)
             if q in self.spawn_apis:
                 key = (q, expr.lineno, ctx.func, how)
-                if key not in seen:
-                    seen.add(key)
-                    self.info.spawns.append(SpawnRef(q, self.spawn_apis[q], expr.lineno, ctx.func,
-                                                     "call" if how == "call" else "reference"))
-        calls = {(s.api, s.lineno, s.func) for s in self.info.spawns if s.how == "call"}
+                gated = self._gated(ctx) or self._alias_gated(expr, ctx.chain)
+                prev = seen.get(key)
+                if prev is None:
+                    seen[key] = ref = SpawnRef(q, self.spawn_apis[q], expr.lineno, ctx.func,
+                                               "call" if how == "call" else "reference", gated)
+                    self.info.spawns.append(ref)
+                elif prev.gated and not gated:
+                    prev.gated = False  # the same site reached ungated anywhere counts as ungated
+        calls = {(s.api, s.lineno, s.func): s for s in self.info.spawns if s.how == "call"}
+        for s in self.info.spawns:
+            call = calls.get((s.api, s.lineno, s.func))
+            if s.how != "call" and call is not None and not s.gated:
+                call.gated = False
         self.info.spawns = sorted((s for s in self.info.spawns
                                    if s.how == "call" or (s.api, s.lineno, s.func) not in calls),
                                   key=lambda s: (s.lineno, s.api))
@@ -1130,18 +1288,25 @@ class Collector:
                     F.append(Finding("warning", "script-ref-outside-bundle", name,
                                      f"string literal {ref['literal']!r} in {ref['func']} names {target}.py, "
                                      f"which is not bundled", [ref["lineno"]]))
-            # (b) process-spawn ratchet
+            # (b) process-spawn ratchet (gated sites are reported but never counted)
             by_func: dict[str, list] = {}
             for s in mi.spawns:
                 by_func.setdefault(s.func, []).append(s)
-            for func, sites in sorted(by_func.items()):
+            for func, all_sites in sorted(by_func.items()):
                 key = f"{name}:{func}"
+                sites = [s for s in all_sites if not s.gated]
+                gated = [s for s in all_sites if s.gated]
                 apis = sorted({s.api for s in sites})
                 lines = sorted({s.lineno for s in sites})
                 count = len({(s.api, s.lineno) for s in sites})
-                rec = {"apis": apis, "count": count, "lines": lines,
-                       "categories": sorted({s.category for s in sites}), "status": ""}
+                rec = {"apis": sorted({s.api for s in all_sites}), "open_apis": apis, "count": count,
+                       "lines": lines, "gated": len({(s.api, s.lineno) for s in gated}),
+                       "gated_lines": sorted({s.lineno for s in gated}),
+                       "categories": sorted({s.category for s in all_sites}), "status": ""}
                 res.spawn_sites[key] = rec
+                if not sites:
+                    rec["status"] = "gated"
+                    continue
                 base = self.m.spawn_sites.get(key)
                 if base is None:
                     rec["status"] = "FAIL (new)"
@@ -1170,8 +1335,12 @@ class Collector:
                                      f"{key}: {count} spawn call sites, baseline allows {b_count}; lower the count"))
                 rec["status"] = "baselined"
         for key in sorted(set(self.m.spawn_sites) - used_spawn):
+            if res.spawn_sites.get(key, {}).get("status") == "gated":
+                why = "has only mobile_runtime-gated spawn sites now"
+            else:
+                why = "no longer matches a spawn site"
             F.append(Finding("warning", "stale-baseline", key.split(":")[0],
-                             f"[baseline.process_spawn_sites] \"{key}\" no longer matches a spawn site; remove it"))
+                             f"[baseline.process_spawn_sites] \"{key}\" {why}; remove it"))
         for key in sorted(set(self.m.gui_file_refs) - used_refs):
             F.append(Finding("warning", "stale-baseline", key.split("->")[0],
                              f"[baseline.gui_file_refs] \"{key}\" no longer matches; remove it"))
@@ -1284,7 +1453,8 @@ def write_bundle(res: Result, out: Path, src: Path, manifest: Manifest) -> dict:
         "EXCLUDED": dict(sorted(manifest.excluded.items())),
         "GUI_TAINTED": dict(sorted(res.tainted.items())),
         "BLOCKED_EDGES": dict(sorted(res.edge_status.items())),
-        "SPAWN_SITES": {k: {"apis": v["apis"], "count": v["count"], "lines": v["lines"]}
+        "SPAWN_SITES": {k: {"apis": v["apis"], "count": v["count"], "lines": v["lines"],
+                            "gated": v.get("gated", 0), "gated_lines": v.get("gated_lines", [])}
                         for k, v in sorted(res.spawn_sites.items())},
         "FILES": dict(sorted(files.items())),
     }
@@ -1355,7 +1525,8 @@ def render_report(res: Result, manifest: Manifest) -> str:
     w(f"- Edges into GUI/excluded code: {len(res.edge_status)} ({status_counts['guarded']} guarded, "
       f"{status_counts['baselined']} baselined, {status_counts['FAIL']} failing)")
     w(f"- Process-spawn sites: {len(res.spawn_sites)} functions, "
-      f"{sum(v['count'] for v in res.spawn_sites.values())} call/reference sites")
+      f"{sum(v['count'] for v in res.spawn_sites.values())} ungated call/reference sites, "
+      f"{sum(v.get('gated', 0) for v in res.spawn_sites.values())} gated by mobile_runtime")
     w(f"- Result: **{'FAIL' if errs else 'PASS'}** with {len(errs)} errors and {len(warns)} warnings")
     w("")
     if errs or warns:
@@ -1392,11 +1563,15 @@ def render_report(res: Result, manifest: Manifest) -> str:
 
     w("## Process-spawn sites (ratchet)")
     w("")
-    w("| site | APIs | sites | lines | status | baseline note |")
-    w("|---|---|---|---|---|---|")
+    w("Gated sites sit on a branch where `mobile_runtime.processes_available()` (or")
+    w("`subprocesses_available()`) is true; they need no baseline entry.")
+    w("")
+    w("| site | APIs | ungated | lines | gated | gated lines | status | baseline note |")
+    w("|---|---|---|---|---|---|---|---|")
     for key, rec in sorted(res.spawn_sites.items()):
         note = manifest.spawn_sites.get(key, {}).get("reason", "")
         w(f"| `{key}` | {', '.join(rec['apis'])} | {rec['count']} | {', '.join(map(str, rec['lines'][:12]))} | "
+          f"{rec.get('gated', 0)} | {', '.join(map(str, rec.get('gated_lines', [])[:12]))} | "
           f"{rec['status']} | {_md(note)} |")
     w("")
 

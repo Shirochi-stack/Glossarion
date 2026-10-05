@@ -18,6 +18,8 @@ from urllib.parse import unquote, urlsplit
 
 from bs4 import BeautifulSoup
 
+import mobile_runtime
+
 
 LogCallback = Callable[[str], None]
 
@@ -291,7 +293,11 @@ def _render_workspace_pdf_shard(job: tuple) -> dict:
         write_kwargs,
     ) = job
     started = time.perf_counter()
-    from weasyprint import HTML as WeasyHTML
+    import pdf_mupdf_html
+    if pdf_mupdf_html.is_selected():
+        from pdf_mupdf_html import HTML as WeasyHTML
+    else:
+        from weasyprint import HTML as WeasyHTML
 
     document = WeasyHTML(string=source, base_url=base_url).render()
     anchor_pages = {}
@@ -394,9 +400,7 @@ def render_workspace_bookmarks_rapid(
                 dict(write_kwargs or {}),
             ))
 
-        with ProcessPoolExecutor(
-            max_workers=worker_count,
-        ) as executor:
+        with mobile_runtime.make_pool_executor(worker_count) as executor:
             futures = {
                 executor.submit(_render_workspace_pdf_shard, job): job[0]
                 for job in process_jobs

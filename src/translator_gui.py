@@ -119,6 +119,18 @@ from language_options import TARGET_LANGUAGES
 from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS
 from epub_package import find_epub_opf_member, find_opf_path
 from title_tag_translation import DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
+from prompt_defaults import (
+    DEFAULT_ASSISTANT_PROMPT,
+    DEFAULT_IMAGE_CHUNK_PROMPT,
+    DEFAULT_ROLLING_SUMMARY_SYSTEM_PROMPT,
+    DEFAULT_ROLLING_SUMMARY_USER_PROMPT,
+    DEFAULT_TRANSLATION_CHUNK_PROMPT,
+    DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT,
+    DEFAULT_VISION_OCR_PROMPT,
+    DEFAULT_VISION_OCR_TRANSLATION_USER_PROMPT,
+    DEFAULT_VISION_OCR_USER_PROMPT,
+    sanitize_prompt_profiles,
+)
 
 
 _AUTHGROK_ADD_ACCOUNT_SENTINEL = "__authgrok_add_account__"
@@ -1312,69 +1324,13 @@ glossary_main = glossary_stop_flag = glossary_stop_check = None
 fallback_compile_epub = scan_html_folder = None
 
 # Resolve the application directory (where config.json, logs, etc. live).
-# In frozen (PyInstaller) builds, this is next to the executable.
-# In dev mode, this is next to the source file.
-if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
-    _APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
-else:
-    _APP_DIR = os.path.dirname(os.path.abspath(__file__))
-
-_ENV_APP_DIR = os.environ.get("GLOSSARION_APP_DIR")
-if _ENV_APP_DIR:
-    try:
-        os.makedirs(_ENV_APP_DIR, exist_ok=True)
-        _APP_DIR = os.path.abspath(_ENV_APP_DIR)
-    except OSError:
-        pass
-
-# On macOS .app bundles, App Translocation makes the bundle directory
-# read-only.  Detect this and redirect config/data to a writable location.
-if sys.platform == 'darwin' and getattr(sys, 'frozen', False):
-    try:
-        _test_path = os.path.join(_APP_DIR, ".write_test")
-        with open(_test_path, "w") as _f:
-            _f.write("ok")
-        os.remove(_test_path)
-    except OSError:
-        # Bundle dir is read-only — use ~/Library/Application Support/Glossarion
-        _mac_app_support = os.path.join(
-            os.path.expanduser("~"), "Library", "Application Support", "Glossarion"
-        )
-        os.makedirs(_mac_app_support, exist_ok=True)
-        # Migrate config from the bundle if it exists and hasn't been migrated yet
-        _bundle_config = os.path.join(_APP_DIR, "config.json")
-        _new_config = os.path.join(_mac_app_support, "config.json")
-        if os.path.isfile(_bundle_config) and not os.path.isfile(_new_config):
-            try:
-                import shutil as _shutil
-                _shutil.copy2(_bundle_config, _new_config)
-            except Exception:
-                pass
-        _APP_DIR = _mac_app_support
-
-CONFIG_FILE = os.path.join(_APP_DIR, "config.json")
+# The resolution (exe dir when frozen, script dir in dev, the GLOSSARION_APP_DIR
+# override and the macOS App Translocation fallback) lives in app_paths so
+# GUI-free code shares it; the names stay importable from translator_gui.
+from app_paths import CONFIG_FILE, _APP_DIR, _atomic_json_write, _get_app_dir
+from config_store import load_config, save_config_file
+from key_pools import apply_key_pools_to_runtime
 BASE_WIDTH, BASE_HEIGHT = 1920, 1080
-
-
-def _atomic_json_write(filepath, data):
-    """Write JSON atomically using write-to-temp-then-rename.
-
-    Prevents config corruption if the app crashes or power is lost mid-write.
-    os.replace is atomic on POSIX and near-atomic on Windows.
-    """
-    tmp_path = filepath + ".tmp"
-    try:
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, filepath)
-    except Exception:
-        # Fallback: direct write (better than losing data entirely)
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def _atomic_text_write(filepath, text):
@@ -1393,28 +1349,6 @@ def _atomic_text_write(filepath, text):
         except OSError:
             pass
         raise
-
-
-def _get_app_dir() -> str:
-    """Return the application's base directory.
-
-    On Windows the CWD can be Downloads/Desktop when launching a .exe,
-    so we always use the exe/script directory. On macOS/Linux we normally
-    keep the launcher's CWD, but packaged apps can start at "/" or another
-    unwritable directory. In that case, use the already-resolved writable
-    app data directory.
-    """
-    if platform.system() == 'Windows':
-        if getattr(sys, 'frozen', False):
-            return os.path.dirname(sys.executable)
-        return os.path.dirname(os.path.abspath(__file__))
-    try:
-        cwd = os.path.abspath(os.getcwd())
-        if cwd == os.path.abspath(os.sep) or not os.access(cwd, os.W_OK):
-            return _APP_DIR
-        return cwd
-    except Exception:
-        return _APP_DIR
 
 
 # --- Robust file logging and crash tracing setup ---
@@ -13292,43 +13226,12 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
     
     def _sanitize_config_prompts(self):
         """Auto-fix known issues in user prompts from older versions."""
-        if not hasattr(self, 'config') or 'prompt_profiles' not in self.config:
+        if not hasattr(self, 'config'):
             return
-
-        # Check if already ran
-        if self.config.get('sanitization_korean_quotes_fixed', False):
+        # Fix + flag in place (prompt_defaults.sanitize_prompt_profiles); None = nothing ran
+        updates_made = sanitize_prompt_profiles(self.config)
+        if updates_made is None:
             return
-
-        updates_made = False
-        profiles = self.config['prompt_profiles']
-        
-        # The specific broken pattern (missing the double quote pair)
-        # We look for the substring where " " is missing before the comma
-        broken_fragment = "Korean quotation marks (, ' ', 「」, 『』)"
-        fixed_fragment = "Korean quotation marks (\" \", ' ', 「」, 『』)"
-        
-        for profile_name, profile_data in profiles.items():
-            # profile_data can be a string or a dict
-            prompt_text = ""
-            if isinstance(profile_data, str):
-                prompt_text = profile_data
-            elif isinstance(profile_data, dict):
-                prompt_text = profile_data.get('prompt', '')
-            
-            if broken_fragment in prompt_text:
-                fixed_text = prompt_text.replace(broken_fragment, fixed_fragment)
-                
-                if isinstance(profile_data, str):
-                    profiles[profile_name] = fixed_text
-                elif isinstance(profile_data, dict):
-                    profiles[profile_name]['prompt'] = fixed_text
-                
-                updates_made = True
-                print(f"[Sanitizer] Fixed malformed Korean quotes in profile: {profile_name}")
-
-        # Always set flag to avoid re-running
-        self.config['sanitization_korean_quotes_fixed'] = True
-        self.config['prompt_profiles'] = profiles
 
         # Save if updates were made or just to persist the flag
         try:
@@ -13723,15 +13626,12 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.logo_img = None
         self.config_file_path = CONFIG_FILE
         
-        # Load config
+        # Load config (config_store.load_config reads and decrypts API keys)
         try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                self.config = json.load(f)
-                # Decrypt API keys
-                self.config = decrypt_config(self.config)
-                
-                # Auto-fix malformed prompts in config
-                self._sanitize_config_prompts()
+            self.config = load_config(CONFIG_FILE)
+
+            # Auto-fix malformed prompts in config
+            self._sanitize_config_prompts()
         except: 
             self.config = {}
             
@@ -14542,43 +14442,15 @@ Text to analyze:
         
         
         # Default prompts
-        self.default_translation_chunk_prompt = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned."
-        self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
+        self.default_translation_chunk_prompt = DEFAULT_TRANSLATION_CHUNK_PROMPT
+        self.default_image_chunk_prompt = DEFAULT_IMAGE_CHUNK_PROMPT
         self.default_image_only_title_tag_system_prompt = (
             DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
         )
-        self.default_vision_ocr_prompt = (
-            "Extract all readable text that is physically present in the image, in natural reading order. Return Markdown only, not HTML. "
-            "Output plain text by default. Use Markdown only to preserve visible source structure or styling when it is actually present in the image: paragraph breaks, meaningful line breaks, bullet lists, numbered lists, blockquotes, tables, bold, italic, strikethrough/deleted text, inline code/code blocks, or visibly printed Markdown characters. "
-            "Do not invent Markdown formatting. "
-            "If the image is primarily cover art, character art, scene illustration, splash art, decorative art, a poster, or a promotional image, reply exactly No when the only readable text is a logo, watermark, title/author/credit text, short decorative words, background writing, or other incidental non-story text. "
-            "Do not OCR incidental text from illustrated covers or splash images. "
-            "If the image is primarily a text page, title page, chapter title page, document/table/list page, speech-bubble comic page, or mostly blank page with readable non-decorative text, output the readable text. "
-            "Reply exactly No only when there is no readable text, or when the image is illustration/decorative/cover art whose readable text is only incidental. "
-            "Do not reproduce every visual wrap from the image; merge wrapped lines that belong to the same sentence or paragraph unless the line break is semantically intentional. "
-            "Preserve visible textual marks when possible, including brackets, parentheses, quote marks, symbols, and emotes/emoticons. "
-            "For Chinese/Japanese/Korean text with small pronunciation guides above or beside the main characters, OCR only the main/base characters and ignore the pronunciation guides. "
-            "For pinyin-over-Chinese images, output the Chinese characters only; do not output the pinyin unless the pinyin is standalone text with no matching Chinese base text. "
-            "Do not translate, summarize, explain, annotate, transliterate, romanize, or add pronunciation guides. "
-            "Do not output duplicate reading lines such as pinyin, romaji, furigana, Jyutping, or Latin readings when they are attached to the same base text."
-        )
-        self.default_vision_ocr_user_prompt = (
-            "OCR this image/chunk. Return Markdown only with the literal main/base source text. "
-            "If this is primarily cover/illustration/splash/decorative art and the readable text is only logo, watermark, title/author/credit text, short decorative words, or background writing, reply exactly No. "
-            "If this is primarily a text/title/chapter/document/comic page with readable non-decorative text, output it. Reply exactly No only when there is no readable text or only incidental cover/illustration text. "
-            "Ignore pinyin/romaji/furigana/Jyutping pronunciation guides attached to base characters. Do not translate."
-            "\n\nContext:\n{context}"
-        )
-        self.default_vision_ocr_combined_context_prompt = (
-            "The Markdown OCR text below was assembled from {chunk_count} tall-image chunk(s). "
-            "Translate it as one continuous passage, preserving narrative flow and Markdown structure. {ocr_overlap_instruction}"
-        )
-        self.default_vision_ocr_translation_user_prompt = (
-            "{context}\n\n"
-            "Translate the following Markdown OCR text according to the system prompt. "
-            "Return only the translated text. Preserve the Markdown paragraph, heading, list, table, blockquote, emphasis, and line-break structure.\n\n"
-            "<OCR_TEXT>\n{ocr_text}\n</OCR_TEXT>"
-        )
+        self.default_vision_ocr_prompt = DEFAULT_VISION_OCR_PROMPT
+        self.default_vision_ocr_user_prompt = DEFAULT_VISION_OCR_USER_PROMPT
+        self.default_vision_ocr_combined_context_prompt = DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT
+        self.default_vision_ocr_translation_user_prompt = DEFAULT_VISION_OCR_TRANSLATION_USER_PROMPT
         from subtitle_processor import DEFAULT_SUBTITLE_TRANSLATION_PROMPT
 
         self.default_prompts = {
@@ -16005,10 +15877,10 @@ Text to analyze:
             self.default_glossary_refinement_system_prompt = ""
             self.default_glossary_refinement_user_prompt = ""
         
-        self.default_rolling_summary_system_prompt = """You are a context summarization assistant. Create concise, informative summaries that preserve key story elements for translation continuity."""
+        self.default_rolling_summary_system_prompt = DEFAULT_ROLLING_SUMMARY_SYSTEM_PROMPT
         
         # Default assistant prompt (empty by default - user can optionally set this to prefill)
-        self.default_assistant_prompt = ""
+        self.default_assistant_prompt = DEFAULT_ASSISTANT_PROMPT
 
         self.default_refinement_system_prompt = DEFAULT_REFINEMENT_SYSTEM_PROMPT
         self.default_refinement_user_prompt = DEFAULT_REFINEMENT_USER_PROMPT
@@ -16026,21 +15898,7 @@ Text to analyze:
         self.default_refinement_partial_b2_system_prompt = DEFAULT_REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT
         self.default_refinement_partial_b2_user_prompt = DEFAULT_REFINEMENT_PARTIAL_B2_USER_PROMPT
         
-        self.default_rolling_summary_user_prompt = """Analyze the recent translation exchanges and create a structured summary for context continuity.
-
-Focus on extracting and preserving:
-1. **Character Information**: Names (with original forms), relationships, roles, and important character developments
-2. **Plot Points**: Key events, conflicts, and story progression
-3. **Locations**: Important places and settings
-4. **Terminology**: Special terms, abilities, items, or concepts (with original forms)
-5. **Tone & Style**: Writing style, mood, and any notable patterns
-6. **Unresolved Elements**: Questions, mysteries, or ongoing situations
-
-Format the summary clearly with sections. Be concise but comprehensive.
-
-Recent translations to summarize:
-{translations}
-        """
+        self.default_rolling_summary_user_prompt = DEFAULT_ROLLING_SUMMARY_USER_PROMPT
     
     # Named model aliases that should be treated as image / video generators
     # even though the word 'image'/'video' doesn't appear in the model name.
@@ -25133,7 +24991,7 @@ Recent translations to summarize:
 
     def _ollama_settings_env_json(self):
         """Serialize the shared local Ollama settings for every translation path."""
-        from ollama_settings_dialog import ollama_settings_json
+        from ollama_settings import ollama_settings_json
         return ollama_settings_json(self.config)
 
     def _sync_custom_prefix_routes_env(self):
@@ -35348,7 +35206,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Rename existing output files to match current retain-source-extension toggle
                 # This must run before translation starts so the progress tracker sees correct filenames
                 try:
-                    from other_settings import _rename_output_files_for_retain
+                    from output_naming import _rename_output_files_for_retain
                     retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
                     _rename_output_files_for_retain(self, retain, output_dir=output_dir)
                 except Exception as e:
@@ -35857,123 +35715,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             extraction_mode = 'enhanced'
             enhanced_filtering = filtering_level if hasattr(self, 'file_filtering_level_var') else getattr(self, 'enhanced_filtering_var', 'smart')
                     
-        # Ensure multi-key env toggles are set early for the main translation path as well
-        try:
-            if self.config.get('use_multi_api_keys', False):
-                os.environ['USE_MULTI_KEYS'] = '1'
-            else:
-                os.environ['USE_MULTI_KEYS'] = '0'
-            if self.config.get('use_fallback_keys', False):
-                os.environ['USE_FALLBACK_KEYS'] = '1'
-            else:
-                os.environ['USE_FALLBACK_KEYS'] = '0'
-            os.environ['FALLBACK_KEY_SHUFFLE'] = '1' if self.config.get('fallback_key_shuffle', False) else '0'
-            if self.config.get('use_glossary_keys', False):
-                os.environ['USE_GLOSSARY_KEYS'] = '1'
-            else:
-                os.environ['USE_GLOSSARY_KEYS'] = '0'
-            os.environ['USE_GLOSSARY_REFINEMENT_KEYS'] = '1' if self.config.get('use_glossary_refinement_keys', False) else '0'
-            os.environ['GLOSSARY_REFINEMENT_API_KEYS'] = json.dumps(self.config.get('glossary_refinement_keys', []))
-            os.environ['USE_METADATA_KEYS'] = '1' if self.config.get('use_metadata_keys', False) else '0'
-            os.environ['METADATA_API_KEYS'] = json.dumps(self.config.get('metadata_keys', []))
-            if self.config.get('use_qa_scan_keys', False):
-                os.environ['USE_VISION_KEYS'] = '1'
-                os.environ['USE_QA_SCAN_KEYS'] = '1'
-            else:
-                os.environ['USE_VISION_KEYS'] = '0'
-                os.environ['USE_QA_SCAN_KEYS'] = '0'
-            os.environ['VISION_API_KEYS'] = json.dumps(self.config.get('qa_scan_keys', []))
-            os.environ['QA_SCAN_API_KEYS'] = os.environ['VISION_API_KEYS']
-            os.environ['USE_AI_TRUNCATION_DETECTION_KEYS'] = '1' if self.config.get('use_ai_truncation_detection_keys', False) else '0'
-            os.environ['AI_TRUNCATION_DETECTION_API_KEYS'] = json.dumps(self.config.get('ai_truncation_detection_keys', []))
-            os.environ['USE_ROLLING_SUMMARY_KEYS'] = '1' if self.config.get('use_rolling_summary_keys', False) else '0'
-            os.environ['ROLLING_SUMMARY_API_KEYS'] = json.dumps(self.config.get('rolling_summary_keys', []))
-            os.environ['USE_TRUNCATION_RETRY_KEYS'] = '1' if self.config.get('use_truncation_retry_keys', False) else '0'
-            os.environ['TRUNCATION_RETRY_API_KEYS'] = json.dumps(self.config.get('truncation_retry_keys', []))
-        except Exception:
-            pass
-
-        # Configure multi-key list in memory (avoid Windows env var size limit for MULTI_API_KEYS)
-        try:
-            from unified_api_client import UnifiedClient
-            if self.config.get('use_multi_api_keys', False) and self.config.get('multi_api_keys', []):
-                UnifiedClient.set_in_memory_multi_keys(
-                    self.config.get('multi_api_keys', []),
-                    force_rotation=self.config.get('force_key_rotation', True),
-                    rotation_frequency=self.config.get('rotation_frequency', 1),
-                )
-            else:
-                UnifiedClient.clear_in_memory_multi_keys()
-            
-            # Configure glossary key pool in memory (mirrors multi-key setup)
-            if self.config.get('use_glossary_keys', False) and self.config.get('glossary_keys', []):
-                UnifiedClient.set_in_memory_glossary_keys(
-                    self.config.get('glossary_keys', []),
-                    force_rotation=self.config.get('force_key_rotation', True),
-                    rotation_frequency=self.config.get('rotation_frequency', 1),
-                )
-            else:
-                UnifiedClient.clear_in_memory_glossary_keys()
-            if self.config.get('use_glossary_refinement_keys', False) and self.config.get('glossary_refinement_keys', []):
-                UnifiedClient.set_in_memory_glossary_refinement_keys(
-                    self.config.get('glossary_refinement_keys', []),
-                    force_rotation=self.config.get('force_key_rotation', True),
-                    rotation_frequency=self.config.get('rotation_frequency', 1),
-                )
-            else:
-                UnifiedClient.clear_in_memory_glossary_refinement_keys()
-            
-            # Configure Vision key pool in memory (mirrors glossary-key setup)
-            if self.config.get('use_qa_scan_keys', False) and self.config.get('qa_scan_keys', []):
-                UnifiedClient.set_in_memory_vision_keys(
-                    self.config.get('qa_scan_keys', []),
-                    force_rotation=self.config.get('force_key_rotation', True),
-                    rotation_frequency=self.config.get('rotation_frequency', 1),
-                )
-            else:
-                UnifiedClient.clear_in_memory_vision_keys()
-
-            # Configure rolling summary key pool in memory (used by context='summary').
-            if self.config.get('use_rolling_summary_keys', False) and self.config.get('rolling_summary_keys', []):
-                UnifiedClient.set_in_memory_rolling_summary_keys(
-                    self.config.get('rolling_summary_keys', []),
-                    force_rotation=self.config.get('force_key_rotation', True),
-                    rotation_frequency=self.config.get('rotation_frequency', 1),
-                )
-            else:
-                UnifiedClient.clear_in_memory_rolling_summary_keys()
-
-            # Configure truncation retry key pool in memory (used by RETRY_TRUNCATED attempts)
-            if self.config.get('use_truncation_retry_keys', False) and self.config.get('truncation_retry_keys', []):
-                UnifiedClient.set_in_memory_truncation_retry_keys(
-                    self.config.get('truncation_retry_keys', []),
-                    force_rotation=self.config.get('force_key_rotation', True),
-                    rotation_frequency=self.config.get('rotation_frequency', 1),
-                )
-            else:
-                UnifiedClient.clear_in_memory_truncation_retry_keys()
-
-            # Configure Image gen/edit key pool for image output and manga custom-image-edit requests.
-            if self.config.get('use_inpainter_keys', False) and self.config.get('inpainter_keys', []):
-                UnifiedClient.set_in_memory_inpainter_keys(
-                    self.config.get('inpainter_keys', []),
-                    force_rotation=self.config.get('force_key_rotation', True),
-                    rotation_frequency=self.config.get('rotation_frequency', 1),
-                )
-            else:
-                UnifiedClient.clear_in_memory_inpainter_keys()
-
-            # Configure Audio / TTS key pool for audio output mode requests.
-            if self.config.get('use_tts_keys', False) and self.config.get('tts_keys', []):
-                UnifiedClient.set_in_memory_tts_keys(
-                    self.config.get('tts_keys', []),
-                    force_rotation=self.config.get('force_key_rotation', True),
-                    rotation_frequency=self.config.get('rotation_frequency', 1),
-                )
-            else:
-                UnifiedClient.clear_in_memory_tts_keys()
-        except Exception:
-            pass
+        # Ensure multi-key env toggles are set early for the main translation path as well,
+        # then configure the in-memory key pools (key_pools.apply_key_pools_to_runtime).
+        apply_key_pools_to_runtime(self.config)
 
         # CRITICAL: Use current GUI value for max_output_tokens, not the initial value
         # This ensures user changes via the button are reflected in image translation
@@ -48210,13 +47954,8 @@ Important rules:
                 self.append_log(f"🔍 [DEBUG] Set {len(env_vars_set)} environment variables.")
 
             # --- 5. Final Write to File ---
-            google_creds_path = self.config.get('google_cloud_credentials')
-            encrypted_config = encrypt_config(self.config)
-            if google_creds_path:
-                encrypted_config['google_cloud_credentials'] = google_creds_path
-            
-            json.dumps(encrypted_config, ensure_ascii=False, indent=2) # Validation check
-            _atomic_json_write(CONFIG_FILE, encrypted_config)
+            # Encrypt, validate and write atomically (config_store); the backup was made above.
+            save_config_file(self.config, CONFIG_FILE, backup=False)
 
             # --- 6. Post-Save Verification and Messaging ---
             if show_message and debug_enabled:

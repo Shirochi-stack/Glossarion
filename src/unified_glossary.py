@@ -32,6 +32,7 @@ import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 
+import mobile_runtime
 from glossary_paths import resolve_shared_glossary_dir, sanitize_glossary_folder_name
 
 UNIFIED_FOLDER_NAME = "Unified Glossary"
@@ -753,7 +754,8 @@ def _run_dedupe(kind, first, second=None, log=print):
     total = len(first) + len(second)
     if not total:
         return []
-    if total >= _subprocess_min_entries():
+    # Glossarion Mobile has no worker processes: dedupe in-process there.
+    if total >= _subprocess_min_entries() and mobile_runtime.processes_available():
         try:
             return _run_dedupe_in_subprocess(kind, first, second, total, log)
         except _DedupeStopped:

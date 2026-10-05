@@ -33,6 +33,7 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from glossarion_mobile import runtime_bootstrap as rb  # noqa: E402
+from glossarion_mobile.services import secure_keys  # noqa: E402
 from glossarion_mobile.ui.router import Router, parse_route  # noqa: E402
 
 CONTRACT_KEYS = (
@@ -71,8 +72,9 @@ _ENV_INPUTS = (
 
 @pytest.fixture
 def storage(tmp_path, monkeypatch):
-    """Temp FLET_APP_STORAGE_* dirs; bootstrap() is undone after the test."""
+    """Temp FLET_APP_STORAGE_* dirs; bootstrap() (and any installed encryption keys) undone after the test."""
     rb.reset(restore_env=True)
+    secure_keys.reset()
     dirs = {}
     for name in ("data", "cache", "temp"):
         d = tmp_path / "storage" / name
@@ -82,6 +84,7 @@ def storage(tmp_path, monkeypatch):
     for key in _ENV_INPUTS:
         monkeypatch.delenv(key, raising=False)
     yield dirs
+    secure_keys.reset()
     rb.reset(restore_env=True)
 
 
@@ -404,7 +407,7 @@ def test_router_accepts_whitelisted(raw, path, query):
         "glossarion://app:99/__selftest__",
         "/document/raw%3A%2Fstorage%2Femulated%2F0%2Fx.epub",  # Flet's path-only form of a content URI
         "/storage/emulated/0/Download/book.epub",  # path-only form of a file URI
-        "/library",
+        "/libraryx",  # unknown path ("/library" is whitelisted since U1)
         "/__selftest__/../settings",
         "/oauth%2Freturn",
         "//evil.example/oauth/return",
@@ -536,6 +539,14 @@ def _load_main_module():
     return module
 
 
+def _spike_main():
+    """The U0 device-checks screen run standalone (since U1 main.py's ``main`` is the chat
+    shell; tests_host/test_ui_foundations.py covers that and the embedded device checks)."""
+    from glossarion_mobile.ui import spike
+
+    return spike.main
+
+
 def _fake_session(platform: str):
     import msgpack
     from flet.controls.base_control import BaseControl
@@ -632,11 +643,12 @@ def test_app_page_builds_offline(app_env, capsys):
 
     main_module = _load_main_module()
     assert main_module.PATHS is rb.get_paths()  # main.py reused the existing bootstrap
+    spike_main = _spike_main()
 
     async def scenario():
         conn, session = _fake_session("windows")
         page = session.page
-        await main_module.main(page)
+        await spike_main(page)
         await session.after_event(page)
         app = page.data
         try:
@@ -677,12 +689,12 @@ def test_app_page_builds_offline(app_env, capsys):
 def test_app_oauth_loopback_flow_offline(app_env):
     import urllib.request
 
-    main_module = _load_main_module()
+    spike_main = _spike_main()
 
     async def scenario():
         conn, session = _fake_session("windows")
         page = session.page
-        await main_module.main(page)
+        await spike_main(page)
         await session.after_event(page)
         app = page.data
         try:
@@ -710,12 +722,12 @@ def test_app_with_native_extension_on_android(app_env, monkeypatch):
     if not (EXTENSION_SRC / "flet_glossarion_native" / "__init__.py").is_file():
         pytest.skip("flet_glossarion_native extension sources not present")
     monkeypatch.syspath_prepend(str(EXTENSION_SRC))
-    main_module = _load_main_module()
+    spike_main = _spike_main()
 
     async def scenario():
         conn, session = _fake_session("android")
         page = session.page
-        await main_module.main(page)
+        await spike_main(page)
         await session.after_event(page)
         app = page.data
         try:

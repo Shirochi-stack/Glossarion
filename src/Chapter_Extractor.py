@@ -43,6 +43,7 @@ except ImportError:
     pass
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from collections import Counter
+import mobile_runtime
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import fix_stray_p_gt_artifacts, unescape_valid_html_tag_entities
 from epub_metadata_utils import (
@@ -3561,7 +3562,18 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
 
         # Use ProcessPoolExecutor for true multi-process parallelism
         # Now that all functions are at module level and picklable, we can use processes
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        if mobile_runtime.processes_available():
+            _extraction_executor = ProcessPoolExecutor(max_workers=max_workers)
+        else:
+            # Glossarion Mobile has no worker processes. Run the same jobs on ONE
+            # worker thread: a process pool gives every task its own pickled
+            # enhanced_extractor (a single html2text instance with per-call
+            # state), which concurrent threads would share. Under the GIL more
+            # threads would not speed up this CPU-bound parsing anyway.
+            _extraction_executor = mobile_runtime.make_pool_executor(
+                1, thread_name_prefix="chapter-extract"
+            )
+        with _extraction_executor as executor:
             # Submit all files for processing
             future_to_file = {
                 executor.submit(

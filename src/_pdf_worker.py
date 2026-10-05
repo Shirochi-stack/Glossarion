@@ -11,9 +11,17 @@ Protocol:
 import sys
 import os
 import io
+from pathlib import Path
 
-# Force UTF-8 encoding for stdout/stderr on Windows (including when piped as subprocess)
-if hasattr(sys.stdout, 'buffer'):
+# Add parent directory to path for imports (before the first project import)
+sys.path.insert(0, str(Path(__file__).parent))
+
+import mobile_runtime
+
+# Force UTF-8 encoding for stdout/stderr on Windows (including when piped as subprocess).
+# Skipped where subprocesses are unavailable: there this module runs in-process
+# (pdf_generation_manager) and must not replace the host's streams.
+if hasattr(sys.stdout, 'buffer') and mobile_runtime.subprocesses_available():
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
@@ -25,25 +33,62 @@ import base64
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
 
 from pdf_bookmarks import (
     remove_pdf_source_page_break_markers,
     replace_with_chapter_bookmarks,
 )
 
+# In-process mode (run_pdf_generation(emit=..., should_stop=...), used by
+# pdf_generation_manager where subprocesses are unavailable): protocol lines
+# go to the emit callback instead of stdout. Module-wide rather than
+# thread-local because the heartbeat threads log too; _INPROCESS_LOCK keeps
+# in-process runs from overlapping. The subprocess protocol is unchanged.
+_EMIT = None
+_SHOULD_STOP = None
+_INPROCESS_LOCK = threading.Lock()
+
+
+class PdfGenerationStopped(Exception):
+    """Raised in in-process mode once ``should_stop()`` returns True."""
+
+
+def _write_line(line):
+    """Write one protocol line: stdout in the worker process, else the emit callback."""
+    emit = _EMIT
+    if emit is None:
+        print(line, flush=True)
+    else:
+        emit(line)
+
+
+def _stop_requested():
+    should_stop = _SHOULD_STOP
+    return bool(should_stop is not None and should_stop())
+
+
+def _raise_if_stopped():
+    if _stop_requested():
+        raise PdfGenerationStopped("PDF generation stopped by user")
+
+
+def failure_protocol_lines(exc, tb):
+    """The [ERROR]/[RESULT] lines the worker reports for an unhandled failure."""
+    return [
+        f"[ERROR] PDF generation failed: {exc}",
+        f"[ERROR] {tb}",
+        f'[RESULT] {json.dumps({"success": False, "error": str(exc), "traceback": tb})}',
+    ]
+
 
 def log(msg):
     """Output a progress message to stdout for the manager to read."""
-    print(f"[PROGRESS] {msg}", flush=True)
+    _write_line(f"[PROGRESS] {msg}")
 
 
 def info(msg):
     """Output an info message."""
-    print(f"[INFO] {msg}", flush=True)
+    _write_line(f"[INFO] {msg}")
 
 
 def _merge_rapid_pdf_shards(
@@ -219,8 +264,27 @@ def _build_pdf_toc_html(chapter_titles_info, settings, chapter_page_map):
     return toc_html
 
 
-def run_pdf_generation(config_path):
-    """Main PDF generation logic, extracted from epub_converter._generate_pdf."""
+def run_pdf_generation(config_path, emit=None, should_stop=None):
+    """Main PDF generation logic, extracted from epub_converter._generate_pdf.
+
+    With ``emit``/``should_stop`` (in-process mode, used where subprocesses
+    are unavailable) every protocol line is passed to ``emit(line)`` instead
+    of stdout, and ``should_stop()`` is polled between render phases
+    (PdfGenerationStopped is raised). Without them this is the subprocess
+    worker, unchanged.
+    """
+    if emit is None and should_stop is None:
+        return _run_pdf_generation(config_path)
+    global _EMIT, _SHOULD_STOP
+    with _INPROCESS_LOCK:
+        _EMIT, _SHOULD_STOP = emit, should_stop
+        try:
+            return _run_pdf_generation(config_path)
+        finally:
+            _EMIT, _SHOULD_STOP = None, None
+
+
+def _run_pdf_generation(config_path):
     with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
 
@@ -252,12 +316,17 @@ def run_pdf_generation(config_path):
         os.environ["FONTCONFIG_PATH"] = _fc_dir
         os.environ["FC_CONFIG_FILE"] = _fc_path
 
-    try:
-        from weasyprint import HTML as WeasyHTML
-    except ImportError:
-        log("⚠️ WeasyPrint not installed - PDF generation disabled.")
-        print(f'[RESULT] {json.dumps({"success": False, "error": "WeasyPrint not installed"})}', flush=True)
-        return
+    import pdf_mupdf_html
+    if pdf_mupdf_html.is_selected():
+        from pdf_mupdf_html import HTML as WeasyHTML
+        log(f"📄 PDF engine: {pdf_mupdf_html.ENGINE_NAME} (PyMuPDF Story, WeasyPrint subset)")
+    else:
+        try:
+            from weasyprint import HTML as WeasyHTML
+        except ImportError:
+            log("⚠️ WeasyPrint not installed - PDF generation disabled.")
+            _write_line(f'[RESULT] {json.dumps({"success": False, "error": "WeasyPrint not installed"})}')
+            return
 
     log("📄 Generating PDF...")
     start_time = time.time()
@@ -729,9 +798,11 @@ def run_pdf_generation(config_path):
 
 
     # --- Render bookmark sections ---
+    _raise_if_stopped()
     BATCH_SIZE = int(os.environ.get('PDF_RENDER_BATCH_SIZE', '50'))
     rapid_workspace_compiler = (
         os.environ.get('PDF_USE_RAPID_WORKSPACE_COMPILER', '1') == '1'
+        and mobile_runtime.processes_available()
     )
     rapid_render_bundle = None
     rapid_temp_dir = ""
@@ -842,6 +913,8 @@ def run_pdf_generation(config_path):
         _render_hb.start()
         _page_offset = 0
         for batch_idx in range(num_batches):
+            if _stop_requested():
+                break
             batch_start = batch_idx * BATCH_SIZE
             batch_end = min(batch_start + BATCH_SIZE, len(all_chapters_parts))
             batch_parts = all_chapters_parts[batch_start:batch_end]
@@ -881,9 +954,10 @@ def run_pdf_generation(config_path):
         log(f"  ✅ Standard rendering complete: {current_page} total page(s) "
             f"({time.time() - _render_start:.1f}s)")
 
+    _raise_if_stopped()
     if not documents and not rapid_render_bundle:
         log("⚠️ No chapters rendered for PDF")
-        print(f'[RESULT] {json.dumps({"success": False, "error": "No chapters rendered"})}', flush=True)
+        _write_line(f'[RESULT] {json.dumps({"success": False, "error": "No chapters rendered"})}')
         return
 
     # --- Final TOC ---
@@ -899,6 +973,7 @@ def run_pdf_generation(config_path):
             log(f"  ⚠️ TOC generation failed: {e}")
 
     # --- Merge and write ---
+    _raise_if_stopped()
     log("  🧩 Phase 3/3: merging rendered pages in source chapter order")
     try:
         if rapid_render_bundle:
@@ -949,7 +1024,7 @@ def run_pdf_generation(config_path):
     except BaseException as e:
         log(f"  ❌ write_pdf failed: {type(e).__name__}: {e}")
         log(f"  [DEBUG] {traceback.format_exc()}")
-        print(f'[RESULT] {json.dumps({"success": False, "error": str(e)})}', flush=True)
+        _write_line(f'[RESULT] {json.dumps({"success": False, "error": str(e)})}')
         return
     finally:
         # Clean up temp pre-converted images
@@ -967,10 +1042,10 @@ def run_pdf_generation(config_path):
         log(f"✅ PDF created: {pdf_path}")
         log(f"📊 PDF size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
         log(f"⏱️ PDF generation took {elapsed:.1f}s")
-        print(f'[RESULT] {json.dumps({"success": True, "pdf_path": pdf_path, "file_size": file_size, "elapsed": elapsed})}', flush=True)
+        _write_line(f'[RESULT] {json.dumps({"success": True, "pdf_path": pdf_path, "file_size": file_size, "elapsed": elapsed})}')
     else:
         log("❌ PDF file was not created")
-        print(f'[RESULT] {json.dumps({"success": False, "error": "PDF file was not created"})}', flush=True)
+        _write_line(f'[RESULT] {json.dumps({"success": False, "error": "PDF file was not created"})}')
 
 
 def main():
@@ -988,9 +1063,8 @@ def main():
         run_pdf_generation(config_path)
     except Exception as e:
         tb = traceback.format_exc()
-        print(f"[ERROR] PDF generation failed: {e}", flush=True)
-        print(f"[ERROR] {tb}", flush=True)
-        print(f'[RESULT] {json.dumps({"success": False, "error": str(e), "traceback": tb})}', flush=True)
+        for line in failure_protocol_lines(e, tb):
+            print(line, flush=True)
         sys.exit(1)
 
 

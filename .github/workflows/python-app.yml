@@ -56,10 +56,55 @@ jobs:
         python -c "import sys; sys.path.insert(0, 'src'); import unified_api_client"
         echo "Basic import test passed!"
 
+    - name: Mobile shared-module and backend patch tests (Python 3.10)
+      env:
+        # tests/conftest.py (which puts src/ on sys.path locally) is not tracked.
+        PYTHONPATH: ${{ github.workspace }}/src
+        QT_QPA_PLATFORM: offscreen
+      run: |
+        pip install --no-cache-dir pytest
+        python -m pytest -p no:cacheprovider -W ignore -o console_output_style=classic \
+          tests/test_mobile_runtime.py \
+          tests/test_mobile_compat_patches_core.py \
+          tests/test_mobile_compat_patches_io.py \
+          tests/test_mobile_compat_patches_api.py \
+          tests/test_mobile_compat_patches_manga.py \
+          tests/test_pdf_mupdf_html.py \
+          tests/test_shared_core_p1.py
+
+    - name: Import hygiene of the shared GUI-free modules (PySide6 blocked)
+      run: |
+        python - <<'PY'
+        import importlib
+        import sys
+
+        sys.path.insert(0, "src")
+        # Desktop and mobile share these modules, so they must import without the desktop GUI.
+        for name in ("PySide6", "shiboken6", "tkinter", "translator_gui", "dpi_setup"):
+            sys.modules[name] = None  # any import of these now raises ImportError
+        SHARED = (
+            "mobile_runtime", "pdf_mupdf_html", "app_paths", "config_store", "prompt_defaults",
+            "metadata_defaults", "ollama_settings", "key_pools", "output_naming",
+        )
+        failed = []
+        for name in SHARED:
+            try:
+                module = importlib.import_module(name)
+            except Exception as exc:
+                failed.append(f"{name}: {type(exc).__name__}: {exc}")
+            else:
+                print(f"ok    {name:18} {module.__file__}")
+        for line in failed:
+            print(f"FAIL  {line}")
+        sys.exit(1 if failed else 0)
+        PY
+
   mobile-backend-check:
     # Mobile backend closure: GUI-taint, excluded-module edges, process-spawn ratchet and pinned
-    # third-party imports (src/mobile/tools/collect_backend.py --check), plus a Python 3.13
-    # syntax check of the mobile app, tools and CI scripts.
+    # third-party imports (src/mobile/tools/collect_backend.py --check), a Python 3.13 syntax
+    # check of the mobile app, tools and CI scripts, and the host import smoke of the collected
+    # bundle (src/mobile/tools/host_smoke.py: read-only bundle, device env contract, process
+    # tripwires, blocked desktop packages, offline network).
     runs-on: ubuntu-latest
 
     steps:
@@ -69,7 +114,11 @@ jobs:
       uses: astral-sh/setup-uv@v10.2.0
       with:
         python-version: '3.13'
-        enable-cache: false
+        enable-cache: true
+        cache-dependency-glob: |
+          src/mobile/pyproject.toml
+          src/mobile/uv.lock
+        cache-suffix: mobile-backend-check
 
     - name: Collector check
       working-directory: src/mobile
@@ -82,3 +131,33 @@ jobs:
       env:
         PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
       run: uv run --no-project python -m compileall -q app tools ci tests_host
+
+    - name: Collect backend bundle
+      working-directory: src/mobile
+      env:
+        PYTHONUTF8: '1'
+      run: uv run --no-project python tools/collect_backend.py --out app/backend -q
+
+    - name: Prepare assets (tiktoken cache, self-test EPUB)
+      working-directory: src/mobile
+      env:
+        PYTHONUTF8: '1'
+        PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+      run: uv run --locked python tools/prepare_assets.py
+
+    - name: Host import smoke (Android simulation)
+      working-directory: src/mobile
+      env:
+        PYTHONUTF8: '1'
+        PYTHONIOENCODING: utf-8
+        PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+      run: uv run --locked python tools/host_smoke.py --simulate android --bundle app/backend --json build/host_smoke_android.json
+
+    - name: Upload host smoke report
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: mobile-host-smoke-report
+        path: src/mobile/build/host_smoke_android.json
+        if-no-files-found: ignore
+        retention-days: 14

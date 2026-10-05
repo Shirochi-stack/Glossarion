@@ -34,6 +34,8 @@ from pathlib import Path
 from statistics import median
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+import mobile_runtime
+
 
 FAST_EXTRACTOR_VERSION = 7
 FAST_MODES = {"fast_semantic", "fast_layout"}
@@ -388,7 +390,12 @@ def resolve_pdf_extraction_workers(
     ``auto`` means half of the available logical CPUs.  The legacy
     ``EXTRACTION_WORKERS`` value is only a compatibility fallback when the
     dedicated ``PDF_EXTRACTION_WORKERS`` variable has not been initialized.
+    Where processes are unavailable (Glossarion Mobile) this is always 1:
+    callers then take their sequential paths, and PyMuPDF is not
+    thread-safe, so a thread pool is no substitute.
     """
+    if not mobile_runtime.processes_available():
+        return 1
     try:
         available_cpus = max(
             1,

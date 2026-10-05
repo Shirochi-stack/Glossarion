@@ -24,6 +24,7 @@ from glossary_refinement import (
 )
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from epub_package import find_epub_opf_member
+import mobile_runtime
 
 # ---------------------------------------------------------------------------
 # Glossary CSV separator – Unit Separator (ASCII 31) replaces comma for
@@ -3302,7 +3303,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         
         # Use ProcessPoolExecutor for better parallelism on larger datasets
         # On Windows, we CAN use ProcessPoolExecutor in subprocess with spawn context
-        use_process_pool = len(sentences) > 5000  # Remove subprocess check!
+        # (Glossarion Mobile has no worker processes; this gate also keeps the
+        # sentence-scoring pool further down on threads.)
+        use_process_pool = len(sentences) > 5000 and mobile_runtime.processes_available()  # Remove subprocess check!
         
         if use_process_pool:
             # Check if we're in a daemonic process (can't spawn children)
@@ -3942,7 +3945,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             print(f"📑 Processing {len(check_batches)} batches of ~{check_batch_size} sentences")
             
             # Use ProcessPoolExecutor for true parallelism (if not already in subprocess)
-            use_process_pool_filtering = (not in_subprocess and len(check_batches) > 3)
+            use_process_pool_filtering = (not in_subprocess and len(check_batches) > 3
+                                          and mobile_runtime.processes_available())
             
             if use_process_pool_filtering:
                 print(f"📑 Using ProcessPoolExecutor for true parallel filtering")

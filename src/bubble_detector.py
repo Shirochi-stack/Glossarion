@@ -14,6 +14,7 @@ import hashlib
 from pathlib import Path
 import threading
 import time
+import mobile_runtime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -60,6 +61,92 @@ except ImportError as e:
         logger.warning(f"huggingface_hub not available: {e}")
         logger.warning("Install with: pip install -U huggingface_hub")
     hf_hub_download = None
+
+# P28: Glossarion Mobile ships without huggingface_hub (huggingface-hub 2.x needs
+# the native hf-xet wheel). There the model files are fetched from the public
+# "resolve" URL into the same local_dir that hf_hub_download(local_dir=...) uses.
+# Desktop keeps hf_hub_download, or its existing "not installed" error.
+_HF_DOWNLOAD_LOCK = threading.Lock()
+
+
+def hf_urllib_download(repo_id, filename, cache_dir=None, local_dir=None, revision=None,
+                       progress_callback=None, timeout=60.0, **_unused):
+    """Fetch ``{HF_ENDPOINT}/{repo_id}/resolve/{revision}/{filename}`` with urllib.
+
+    Stands in for hf_hub_download(local_dir=...): the file lands at
+    ``<local_dir or cache_dir>/<filename>`` and that path is returned. A
+    non-empty file already there is reused without network access. Bytes go
+    to ``<target>.part`` and are renamed into place only when the size matches
+    the server's Content-Length. ``progress_callback(percent, downloaded_mb,
+    total_mb, speed_mb)`` has local_inpainter.download_model's signature.
+    """
+    import urllib.parse
+    import urllib.request
+
+    base_dir = local_dir or cache_dir or 'models'
+    target = os.path.join(base_dir, *str(filename).split('/'))
+    with _HF_DOWNLOAD_LOCK:
+        if os.path.isfile(target) and os.path.getsize(target) > 0:
+            return target
+        os.makedirs(os.path.dirname(target) or '.', exist_ok=True)
+        endpoint = (os.environ.get('HF_ENDPOINT', '').strip() or 'https://huggingface.co').rstrip('/')
+        url = '{}/{}/resolve/{}/{}'.format(
+            endpoint,
+            urllib.parse.quote(str(repo_id), safe='/'),
+            urllib.parse.quote(str(revision or 'main'), safe=''),
+            urllib.parse.quote(str(filename), safe='/'),
+        )
+        part_path = target + '.part'
+        logger.info(f"📥 Downloading {filename} from {url}")
+        request = urllib.request.Request(url, headers={'User-Agent': 'Glossarion'})
+        written = 0
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                length = (response.headers.get('Content-Length') or '').strip()
+                expected = int(length) if length.isdigit() else None
+                total_mb = (expected or 0) / (1024 * 1024)
+                started = last_report = time.time()
+                with open(part_path, 'wb') as fh:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        written += len(chunk)
+                        now = time.time()
+                        if progress_callback is not None and expected and now - last_report >= 0.1:
+                            last_report = now
+                            speed_mb = written / max(now - started, 1e-6) / (1024 * 1024)
+                            try:
+                                progress_callback(int(written * 100 / expected), written / (1024 * 1024), total_mb, speed_mb)
+                            except Exception:
+                                pass
+            if written == 0 or (expected is not None and written != expected):
+                raise IOError(f"Incomplete download of {filename}: {written} bytes received, "
+                              f"{expected if expected is not None else 'more than 0'} expected")
+            os.replace(part_path, target)
+        except BaseException:
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
+            raise
+    if progress_callback is not None:
+        try:
+            progress_callback(100, written / (1024 * 1024), written / (1024 * 1024), 0)
+        except Exception:
+            pass
+    logger.info(f"✅ Downloaded {filename} to {target}")
+    return target
+
+
+def _hf_download_fn():
+    """hf_hub_download when installed; on mobile without it, hf_urllib_download (P28)."""
+    if hf_hub_download is not None:
+        return hf_hub_download
+    if mobile_runtime.is_mobile():
+        return hf_urllib_download
+    return None
 
 # Try to import YOLO dependencies with better error handling
 if IS_FROZEN:
@@ -166,6 +253,16 @@ except ImportError:
 # though only the parent's load_rtdetr_onnx_model() actually needs it.
 # Now the DLL is loaded once, on first use inside load_rtdetr_onnx_model().
 ONNX_CPP_AVAILABLE = False  # Kept for backward compat; real check is lazy
+
+
+def _rtdetr_python_onnx_allowed():
+    """P27: may RT-DETR fall back to a Python onnxruntime session?
+
+    Desktop keeps the C++-only policy. Glossarion Mobile has no onnx_cpp_backend
+    library, so there (or with RTDETR_ONNX_ALLOW_PYTHON=1) a CPU
+    onnxruntime session feeds detect_with_rtdetr_onnx()'s Python path.
+    """
+    return mobile_runtime.is_mobile() or os.environ.get('RTDETR_ONNX_ALLOW_PYTHON', '').strip() == '1'
 
 # PIL
 try:
@@ -443,13 +540,14 @@ class BubbleDetector:
             if model_path and (('/' in model_path) and not os.path.exists(model_path)):
                 try:
                     # Check if huggingface_hub is available
-                    if hf_hub_download is None:
+                    _hf_download = _hf_download_fn()
+                    if _hf_download is None:
                         logger.error("huggingface_hub not available. Please install with: pip install -U huggingface_hub")
                         return False
                     
                     os.makedirs(self.cache_dir, exist_ok=True)
                     logger.info(f"📥 Resolving repo '{model_path}' to detector.onnx in {self.cache_dir}...")
-                    resolved = hf_hub_download(repo_id=model_path, filename='detector.onnx', cache_dir=self.cache_dir, local_dir=self.cache_dir, local_dir_use_symlinks=False)
+                    resolved = _hf_download(repo_id=model_path, filename='detector.onnx', cache_dir=self.cache_dir, local_dir=self.cache_dir, local_dir_use_symlinks=False)
                     if resolved and os.path.exists(resolved):
                         model_path = resolved
                         logger.info(f"✅ Downloaded detector.onnx to: {model_path}")
@@ -1810,6 +1908,21 @@ class BubbleDetector:
             self.rtdetr_onnx_session = None  # No Python session needed
             return True
         
+        # P27 (mobile): reuse the shared Python onnxruntime session for the same export
+        if (
+            _rtdetr_python_onnx_allowed()
+            and not BubbleDetector._rtdetr_onnx_use_cpp
+            and BubbleDetector._rtdetr_onnx_loaded
+            and BubbleDetector._rtdetr_onnx_shared_session is not None
+            and BubbleDetector._rtdetr_onnx_model_key == requested_key
+            and not force_reload
+        ):
+            logger.info("✅ RT-DETR using existing Python ONNX Runtime session")
+            self.rtdetr_onnx_session = BubbleDetector._rtdetr_onnx_shared_session
+            self.rtdetr_onnx_loaded = True
+            self.rtdetr_onnx_filename = selected_onnx
+            return True
+        
         # Debug: Why didn't we skip?
         if not BubbleDetector._rtdetr_onnx_use_cpp:
             logger.debug(f"RT-DETR load: C++ flag not set (_rtdetr_onnx_use_cpp={BubbleDetector._rtdetr_onnx_use_cpp})")
@@ -1818,7 +1931,8 @@ class BubbleDetector:
         
         try:
 
-            if hf_hub_download is None:
+            _hf_download = _hf_download_fn()
+            if _hf_download is None:
                 logger.error("huggingface_hub required to fetch RT-DETR ONNX. Install with: pip install -U huggingface_hub")
                 return False
 
@@ -1828,11 +1942,11 @@ class BubbleDetector:
 
             # Download files into models/ and avoid symlinks so the file is visible there
             try:
-                _ = hf_hub_download(repo_id=repo, filename='config.json', cache_dir=cache_dir, local_dir=cache_dir, local_dir_use_symlinks=False)
+                _ = _hf_download(repo_id=repo, filename='config.json', cache_dir=cache_dir, local_dir=cache_dir, local_dir_use_symlinks=False)
             except Exception:
                 pass
             logger.info(f"Resolving RT-DETR ONNX export '{selected_onnx}' from {repo}...")
-            onnx_fp = hf_hub_download(repo_id=repo, filename=selected_onnx, cache_dir=cache_dir, local_dir=cache_dir, local_dir_use_symlinks=False)
+            onnx_fp = _hf_download(repo_id=repo, filename=selected_onnx, cache_dir=cache_dir, local_dir=cache_dir, local_dir_use_symlinks=False)
             BubbleDetector._rtdetr_onnx_model_path = onnx_fp
 
             # Pick providers: prefer CUDA if available; otherwise CPU. Do NOT use DML.
@@ -1857,6 +1971,10 @@ class BubbleDetector:
             try:
                 from onnx_cpp_backend import ONNXCppBackend
             except Exception as _imp_err:
+                if _rtdetr_python_onnx_allowed():
+                    logger.info(f"C++ backend not importable ({_imp_err}); using Python ONNX Runtime for RT-DETR")
+                    with BubbleDetector._rtdetr_onnx_init_lock:
+                        return self._attach_rtdetr_onnx_python_session(onnx_fp, so, requested_key, selected_onnx, force_reload)
                 logger.error(f"C++ backend not importable - RT-DETR unavailable: {_imp_err}")
                 return False
 
@@ -1888,7 +2006,13 @@ class BubbleDetector:
 
                 # Load C++ backend - NO FALLBACK
                 logger.info("🚀 Loading RT-DETR with C++ ONNX backend (Python fallback disabled)...")
-                cpp_backend = ONNXCppBackend()
+                try:
+                    cpp_backend = ONNXCppBackend()
+                except Exception as _cpp_err:
+                    if _rtdetr_python_onnx_allowed():
+                        logger.info(f"C++ backend unavailable ({_cpp_err}); using Python ONNX Runtime for RT-DETR")
+                        return self._attach_rtdetr_onnx_python_session(onnx_fp, so, requested_key, selected_onnx, force_reload)
+                    raise
                 if cpp_backend.load_model(onnx_fp, use_gpu=self.use_gpu):
                     BubbleDetector._rtdetr_onnx_cpp_backend = cpp_backend
                     BubbleDetector._rtdetr_onnx_use_cpp = True
@@ -1904,6 +2028,9 @@ class BubbleDetector:
                     logger.info("✅ RT-DETR C++ backend loaded successfully (Python ONNX never loaded, memory saved)")
                     return True
                 else:
+                    if _rtdetr_python_onnx_allowed():
+                        logger.info("C++ backend load failed; using Python ONNX Runtime for RT-DETR")
+                        return self._attach_rtdetr_onnx_python_session(onnx_fp, so, requested_key, selected_onnx, force_reload)
                     logger.error("C++ backend load failed - RT-DETR unavailable (Python fallback disabled)")
                     return False
         except Exception as e:
@@ -1911,6 +2038,35 @@ class BubbleDetector:
             self.rtdetr_onnx_session = None
             self.rtdetr_onnx_loaded = False
             return False
+
+    def _attach_rtdetr_onnx_python_session(self, onnx_fp, sess_options, requested_key, selected_onnx, force_reload=False) -> bool:
+        """P27: create or reuse the shared CPU onnxruntime session for RT-DETR.
+
+        Only reached when _rtdetr_python_onnx_allowed(). The caller holds
+        _rtdetr_onnx_init_lock. Sets the state detect_with_rtdetr_onnx() reads
+        for its Python path (instance session + shared session/providers).
+        """
+        session = BubbleDetector._rtdetr_onnx_shared_session
+        if (
+            session is None
+            or force_reload
+            or BubbleDetector._rtdetr_onnx_use_cpp
+            or BubbleDetector._rtdetr_onnx_model_key != requested_key
+        ):
+            providers = ['CPUExecutionProvider']
+            session = ort.InferenceSession(onnx_fp, sess_options, providers=providers)
+            BubbleDetector._rtdetr_onnx_shared_session = session
+            BubbleDetector._rtdetr_onnx_providers = providers
+            logger.info(f"✅ RT-DETR loaded with Python ONNX Runtime (CPU): {os.path.basename(str(onnx_fp))}")
+        BubbleDetector._rtdetr_onnx_use_cpp = False
+        BubbleDetector._rtdetr_onnx_loaded = True
+        BubbleDetector._rtdetr_onnx_model_path = onnx_fp
+        BubbleDetector._rtdetr_onnx_model_key = requested_key
+        BubbleDetector._rtdetr_onnx_filename = selected_onnx
+        self.rtdetr_onnx_session = session
+        self.rtdetr_onnx_loaded = True
+        self.rtdetr_onnx_filename = selected_onnx
+        return True
 
     def detect_with_rtdetr_onnx(self,
                                 image_path: str = None,

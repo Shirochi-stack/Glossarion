@@ -41,6 +41,7 @@ from pdf_bookmarks import (
     replace_with_chapter_bookmarks,
 )
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+import mobile_runtime
 
 # Import the lightweight compression worker for ProcessPoolExecutor.
 # Workers will import _compress_worker (~90 lines, only os+PIL) instead of
@@ -3398,6 +3399,12 @@ class EPUBCompiler:
                             if self.is_stopped():
                                 _pdf_mgr.stop()
                                 self.log("🛑 PDF generation stopped by user")
+                                if not mobile_runtime.subprocesses_available():
+                                    # In-process renderer (Glossarion Mobile): stop() is
+                                    # cooperative, so wait for its next checkpoint; no
+                                    # PyMuPDF render thread may outlive this compile.
+                                    while not _pdf_mgr.wait(timeout=10.0):
+                                        self.log("⏳ Waiting for the PDF renderer to reach a stop point...")
                                 break
                             _pdf_done.wait(timeout=1.0)
 
@@ -5638,7 +5645,7 @@ img {
                 app_dir = os.path.dirname(sys.executable)
             else:
                 app_dir = os.path.dirname(os.path.abspath(__file__))
-            return os.path.join(app_dir, 'custom_fonts')
+            return os.path.join(mobile_runtime.data_dir(app_dir), 'custom_fonts')
         except Exception:
             return os.path.join(os.getcwd(), 'custom_fonts')
 
@@ -8862,9 +8869,10 @@ img {
         _env = os.environ.copy()
         _env['PYTHONIOENCODING'] = 'utf-8'
         
-        # Spawn worker processes
+        # Spawn worker processes (none where subprocesses are unavailable:
+        # the sequential fallback below then compresses in-process)
         workers = []
-        for _ in range(num_workers):
+        for _ in range(num_workers if mobile_runtime.subprocesses_available() else 0):
             try:
                 p = _sp.Popen(
                     _worker_cmd, stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.DEVNULL,
@@ -9066,12 +9074,17 @@ img {
             os.environ["FONTCONFIG_PATH"] = _fc_dir
             os.environ["FC_CONFIG_FILE"] = _fc_path
         
-        try:
-            from weasyprint import HTML as WeasyHTML
-        except ImportError:
-            self.log("⚠️ WeasyPrint not installed - PDF generation disabled. Install with: pip install weasyprint")
-            self.log("   Also requires GTK libraries. See: https://doc.courtbouillon.org/weasyprint/stable/first_steps.html")
-            return
+        import pdf_mupdf_html
+        if pdf_mupdf_html.is_selected():
+            from pdf_mupdf_html import HTML as WeasyHTML
+            self.log(f"📄 PDF engine: {pdf_mupdf_html.ENGINE_NAME} (PyMuPDF Story, WeasyPrint subset)")
+        else:
+            try:
+                from weasyprint import HTML as WeasyHTML
+            except ImportError:
+                self.log("⚠️ WeasyPrint not installed - PDF generation disabled. Install with: pip install weasyprint")
+                self.log("   Also requires GTK libraries. See: https://doc.courtbouillon.org/weasyprint/stable/first_steps.html")
+                return
         
         self.log("\n📄 Generating PDF...")
         start_time = _time.time()

@@ -22,6 +22,8 @@ def _save_http_log(method, url, headers, body, response_status=None, response_he
     try:
         if not _log_folder:
             return
+        if _http_log_switched_off():
+            return
             
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         log_file = _log_folder / f"http_{timestamp}.json"
@@ -87,12 +89,27 @@ def _save_http_log(method, url, headers, body, response_status=None, response_he
     except Exception as e:
         pass  # Silently fail - we don't want to break the app
 
+def _http_log_switched_off():
+    """GLOSSARION_HTTP_LOG=0 turns HTTP logging off (Glossarion Mobile's default).
+
+    Desktop never sets it, so logging stays on there.
+    """
+    return os.environ.get("GLOSSARION_HTTP_LOG", "1").strip() == "0"
+
+
 def enable_detailed_http_logging(log_folder="http_requests"):
     """
     Enable HTTP request/response logging by monkey-patching requests.
     This captures EVERYTHING that goes over the wire.
+
+    GLOSSARION_HTTP_LOG=0 disables it entirely (returns None, patches
+    nothing). GLOSSARION_HTTP_LOG_DIR, when set, is the folder used instead
+    of a relative ``log_folder`` (an absolute ``log_folder`` still wins).
     """
     global _log_folder, _patched
+
+    if _http_log_switched_off():
+        return None
     
     if _patched:
         return _log_folder
@@ -100,8 +117,14 @@ def enable_detailed_http_logging(log_folder="http_requests"):
     # Create log folder — resolve relative paths against the script directory,
     # not CWD, to avoid issues on macOS/Linux where CWD may be / or $HOME.
     if not os.path.isabs(log_folder):
-        _base_dir = os.path.dirname(os.path.abspath(__file__))
-        _log_folder = Path(os.path.join(_base_dir, log_folder))
+        _override_dir = os.environ.get("GLOSSARION_HTTP_LOG_DIR", "").strip()
+        if _override_dir:
+            # Glossarion Mobile: the app dir is read-only (iOS) or replaced
+            # on every update (Android).
+            _log_folder = Path(_override_dir)
+        else:
+            _base_dir = os.path.dirname(os.path.abspath(__file__))
+            _log_folder = Path(os.path.join(_base_dir, log_folder))
     else:
         _log_folder = Path(log_folder)
     _log_folder.mkdir(parents=True, exist_ok=True)

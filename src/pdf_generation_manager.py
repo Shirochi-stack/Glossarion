@@ -2,6 +2,11 @@
 """
 PDF Generation Manager - Manages PDF generation in a subprocess to prevent GUI freezing.
 Follows the same pattern as ChapterExtractionManager.
+
+Where subprocesses are unavailable (Glossarion Mobile) the same _pdf_worker
+runs in-process on the manager's thread; its protocol lines are parsed by
+the same handler and stop() becomes cooperative: the caller then uses
+wait() so the render thread (and PyMuPDF) is done before it moves on.
 """
 
 import subprocess
@@ -10,7 +15,9 @@ import os
 import json
 import threading
 import time
+import traceback
 
+import mobile_runtime
 from shutdown_utils import subprocess_no_window_kwargs, terminate_subprocess_tree
 
 
@@ -23,6 +30,7 @@ class PdfGenerationManager:
         self.result = None
         self.is_running = False
         self.stop_requested = False
+        self._thread = None
 
     def _log(self, message):
         if self.log_callback:
@@ -49,12 +57,26 @@ class PdfGenerationManager:
         self.result = None
 
         thread = threading.Thread(
-            target=self._run_pdf_subprocess,
+            target=(self._run_pdf_subprocess if mobile_runtime.subprocesses_available()
+                    else self._run_pdf_inprocess),
             args=(config_path, completion_callback),
             daemon=True
         )
+        self._thread = thread
         thread.start()
         return True
+
+    def wait(self, timeout=None):
+        """Block until the generation thread has finished; True when it has.
+
+        Used after stop() where the worker runs in-process (stop is cooperative
+        there), so no render thread outlives the caller's compile step.
+        """
+        thread = self._thread
+        if thread is None or thread is threading.current_thread():
+            return True
+        thread.join(timeout)
+        return not thread.is_alive()
 
     def _run_pdf_subprocess(self, config_path, completion_callback):
         """Run the PDF generation subprocess and handle its output."""
@@ -126,23 +148,7 @@ class PdfGenerationManager:
                 # Stop startup heartbeat once we get real output
                 _got_first_output.set()
 
-                if line.startswith("[PROGRESS]"):
-                    message = line[10:].strip()
-                    self._log(message)
-                elif line.startswith("[INFO]"):
-                    message = line[6:].strip()
-                    self._log(f"ℹ️ {message}")
-                elif line.startswith("[ERROR]"):
-                    message = line[7:].strip()
-                    self._log(f"❌ {message}")
-                elif line.startswith("[RESULT]"):
-                    try:
-                        json_str = line[8:].strip()
-                        self.result = json.loads(json_str)
-                    except json.JSONDecodeError as e:
-                        self._log(f"⚠️ Failed to parse result: {e}")
-                elif not line.startswith("["):
-                    self._log(line)
+                self._handle_worker_line(line)
 
             # Stop startup heartbeat
             _hb_stop.set()
@@ -211,15 +217,79 @@ class PdfGenerationManager:
                     except Exception:
                         pass
 
-            if completion_callback:
-                success = self.result.get("success", False) if self.result else False
-                try:
-                    completion_callback(success, self.result or {"success": False, "error": "No result received"})
-                except Exception as e:
-                    self._log(f"⚠️ Completion callback error: {e}")
+            self._notify_completion(completion_callback)
+
+    def _handle_worker_line(self, line):
+        """Dispatch one stripped worker protocol line ([PROGRESS]/[INFO]/[ERROR]/[RESULT]/plain)."""
+        if line.startswith("[PROGRESS]"):
+            message = line[10:].strip()
+            self._log(message)
+        elif line.startswith("[INFO]"):
+            message = line[6:].strip()
+            self._log(f"ℹ️ {message}")
+        elif line.startswith("[ERROR]"):
+            message = line[7:].strip()
+            self._log(f"❌ {message}")
+        elif line.startswith("[RESULT]"):
+            try:
+                json_str = line[8:].strip()
+                self.result = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                self._log(f"⚠️ Failed to parse result: {e}")
+        elif not line.startswith("["):
+            self._log(line)
+
+    def _notify_completion(self, completion_callback):
+        if completion_callback:
+            success = self.result.get("success", False) if self.result else False
+            try:
+                completion_callback(success, self.result or {"success": False, "error": "No result received"})
+            except Exception as e:
+                self._log(f"⚠️ Completion callback error: {e}")
+
+    def _handle_worker_output(self, text):
+        """In-process emit callback: split into lines like the subprocess pipe reader."""
+        for line in str(text).split('\n'):
+            line = line.strip()
+            if not line or self.stop_requested:
+                continue
+            self._handle_worker_line(line)
+
+    def _run_pdf_inprocess(self, config_path, completion_callback):
+        """Run _pdf_worker on this thread (platforms without subprocesses).
+
+        Emits the same protocol lines as the subprocess, parsed by the same
+        handler; stop() is cooperative (checked between render phases).
+        """
+        try:
+            self._log("🚀 Starting PDF generation in-process (subprocesses unavailable)...")
+            import _pdf_worker
+            try:
+                _pdf_worker.run_pdf_generation(
+                    config_path,
+                    emit=self._handle_worker_output,
+                    should_stop=lambda: self.stop_requested,
+                )
+            except _pdf_worker.PdfGenerationStopped:
+                pass
+            except Exception as e:
+                for line in _pdf_worker.failure_protocol_lines(e, traceback.format_exc()):
+                    self._handle_worker_output(line)
+            if self.stop_requested:
+                self.result = {"success": False, "error": "PDF generation stopped by user"}
+        except Exception as e:
+            if not self.stop_requested:
+                self._log(f"❌ PDF in-process error: {e}")
+            self.result = {
+                "success": False,
+                "error": str(e) if not self.stop_requested else "PDF generation stopped by user"
+            }
+        finally:
+            self.is_running = False
+            self._notify_completion(completion_callback)
 
     def stop(self):
-        """Request stop of the PDF generation subprocess."""
+        """Request stop of the PDF generation subprocess (cooperative when in-process)."""
         self.stop_requested = True
         self._terminate_process()
 

@@ -279,12 +279,13 @@ jobs:
       - name: Host import smoke (Android and iOS simulation)
         working-directory: src/mobile
         run: |
-          if [ ! -f tools/host_smoke.py ]; then
-            echo "::notice title=host_smoke::tools/host_smoke.py is not in this tree yet; skipping the read-only bundle import smoke."
-            exit 0
-          fi
-          uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} python tools/host_smoke.py --bundle app/backend --simulate android
-          uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} python tools/host_smoke.py --bundle app/backend --simulate ios
+          # Read-only copy of app/backend under the device env contract, process tripwires, blocked
+          # desktop packages and an offline network (tools/host_smoke.py). The iOS run also ships the
+          # bundle as .pyc only, the way `flet build` packages it. Both run; either failing fails the step.
+          rc=0
+          uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} python tools/host_smoke.py --bundle app/backend --simulate android --json build/host_smoke_android.json || rc=1
+          uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} python tools/host_smoke.py --bundle app/backend --simulate ios --pyc --json build/host_smoke_ios.json || rc=1
+          exit "$rc"
 
       - name: Host tests (offline)
         run: uv run ${UV_LOCK_ARG:+"$UV_LOCK_ARG"} --directory src/mobile pytest tests_host extensions/flet_glossarion_native/tests -q -m "not online"
@@ -308,6 +309,8 @@ jobs:
           path: |
             src/mobile/build/backend_report.md
             src/mobile/build/wheels_report.md
+            src/mobile/build/host_smoke_android.json
+            src/mobile/build/host_smoke_ios.json
           if-no-files-found: warn
           retention-days: 14
 
