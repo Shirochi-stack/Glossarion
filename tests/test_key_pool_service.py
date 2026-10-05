@@ -82,7 +82,9 @@ def test_imports_without_qt_and_parses_as_python_310():
     assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr
     source = (SRC / "key_pool_service.py").read_text(encoding="utf-8")
     ast.parse(source, feature_version=(3, 10))
-    assert (SRC / "key_pool_service.py").read_bytes().count(b"\r\n") == source.count("\n")
+    # Line endings follow the checkout (CRLF on Windows with autocrlf, LF on Linux CI); never mixed.
+    data = (SRC / "key_pool_service.py").read_bytes()
+    assert data.count(b"\r\n") in (0, data.count(b"\n")), "mixed line endings"
 
 
 def test_pool_specs_cover_all_eleven_pools():
