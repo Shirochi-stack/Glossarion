@@ -986,7 +986,19 @@ def _prime_platform_processor() -> None:
         if "processor" not in getattr(result, "__dict__", {}):
             result.__dict__["processor"] = ""
     except Exception:
-        pass
+        return
+    # platform.platform() takes its generic branch on Android and calls
+    # architecture(sys.executable), which runs the `file` command through
+    # _syscmd_file. That only refines the linkage string, and CPython already
+    # returns the default on iOS, so answer with the default on Android too.
+    if sys.platform == "android" or os.environ.get("GLOSSARION_PLATFORM") == "android":
+        try:
+            def _no_file_command(target: Any, default: str = "") -> str:
+                return default
+
+            _platform._syscmd_file = _no_file_command
+        except Exception:
+            pass
 
 
 def _flet_version() -> Optional[str]:
