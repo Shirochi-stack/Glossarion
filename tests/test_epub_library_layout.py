@@ -6,10 +6,12 @@ import zipfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from _src_corpus import desktop_gui_source
 
 pytest.importorskip("PySide6")
 
 import epub_library
+import library_core
 from PySide6.QtCore import QEventLoop, QPoint, QRect, Qt
 from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
@@ -2836,10 +2838,7 @@ def test_other_settings_exposes_remote_image_download_toggle():
         os.path.join(source_root, "src", "Chapter_Extractor.py"),
         encoding="utf-8",
     ).read()
-    gui_source = open(
-        os.path.join(source_root, "src", "translator_gui.py"),
-        encoding="utf-8",
-    ).read()
+    gui_source = desktop_gui_source()
 
     assert '"Download remote image URLs"' in settings_source
     assert "self.config['download_remote_image_urls'] = enabled" in settings_source
@@ -2969,13 +2968,15 @@ def test_output_card_uses_source_epub_when_only_artifact_progress_exists(
         epub_library, "_resolve_output_roots",
         lambda _config=None: [str(output_root)],
     )
-    monkeypatch.setattr(
-        epub_library, "_origins_raw_sources_for_stem", lambda _stem: [],
-    )
-    monkeypatch.setattr(epub_library, "load_library_raw_inputs", lambda: [])
-    monkeypatch.setattr(
-        epub_library, "get_library_raw_dir", lambda: str(library_raw),
-    )
+    # the source-EPUB resolver moved to library_core (epub_library re-exports it)
+    for module in (epub_library, library_core):
+        monkeypatch.setattr(
+            module, "_origins_raw_sources_for_stem", lambda _stem: [],
+        )
+        monkeypatch.setattr(module, "load_library_raw_inputs", lambda: [])
+        monkeypatch.setattr(
+            module, "get_library_raw_dir", lambda: str(library_raw),
+        )
 
     rows = epub_library.scan_output_folders({})
 
@@ -3042,13 +3043,15 @@ def test_exact_named_partial_source_epub_remains_linked(
     monkeypatch.setattr(
         epub_library, "_resolve_output_roots", lambda _config=None: [str(output_root)],
     )
-    monkeypatch.setattr(
-        epub_library, "_origins_raw_sources_for_stem", lambda _stem: [],
-    )
-    monkeypatch.setattr(epub_library, "load_library_raw_inputs", lambda: [])
-    monkeypatch.setattr(
-        epub_library, "get_library_raw_dir", lambda: str(library_raw),
-    )
+    # the source-EPUB resolver moved to library_core (epub_library re-exports it)
+    for module in (epub_library, library_core):
+        monkeypatch.setattr(
+            module, "_origins_raw_sources_for_stem", lambda _stem: [],
+        )
+        monkeypatch.setattr(module, "load_library_raw_inputs", lambda: [])
+        monkeypatch.setattr(
+            module, "get_library_raw_dir", lambda: str(library_raw),
+        )
 
     assert epub_library._validate_source_epub_for_workspace(
         str(workspace), str(source_epub),

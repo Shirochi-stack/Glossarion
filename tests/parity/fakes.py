@@ -107,18 +107,23 @@ class FakeWidget(_FakeWidgetBase):
         return None
 
 
+def _qt_text(text):
+    """What a Qt text widget holds after ``setText(text)``: PySide6 turns ``None`` into ''."""
+    return "" if text is None else str(text)
+
+
 class FakeLineEdit(_FakeWidgetBase):
-    """QLineEdit: text()/setText()."""
+    """QLineEdit: text()/setText() (``None`` reads back as '', like Qt)."""
 
     def __init__(self, text=""):
         super().__init__()
-        self._text = str(text)
+        self._text = _qt_text(text)
 
     def text(self):
         return self._text
 
     def setText(self, text):
-        self._text = str(text)
+        self._text = _qt_text(text)
 
     def setPlaceholderText(self, _text):
         return None
@@ -155,20 +160,20 @@ class FakeCheck(_FakeWidgetBase):
 
 
 class FakeTextEdit(_FakeWidgetBase):
-    """QTextEdit / QPlainTextEdit: toPlainText()/setPlainText()."""
+    """QTextEdit / QPlainTextEdit: toPlainText()/setPlainText() (``None`` -> '', like Qt)."""
 
     def __init__(self, plain=""):
         super().__init__()
-        self._plain = str(plain)
+        self._plain = _qt_text(plain)
 
     def toPlainText(self):
         return self._plain
 
     def setPlainText(self, text):
-        self._plain = str(text)
+        self._plain = _qt_text(text)
 
     def setText(self, text):
-        self._plain = str(text)
+        self._plain = _qt_text(text)
 
     def describe(self):
         return {"__fake__": "FakeTextEdit", "plain": self._plain}
@@ -365,14 +370,16 @@ def make_recording_unified_client(recorder: CallRecorder):
 #:   setup_other_settings_methods (initialize_extraction_variables + method binding)
 #:   -> _setup_gui (GUI-backed state, widgets, startup handlers incl. the glossary
 #:   shortcut handler that runs save_config) -> watchdog dir ->
-#:   initialize_environment_variables -> MetadataBatchTranslatorUI (3rd).
-#: Verified against a real offscreen TranslatorGUI (fresh install + 2 configs):
-#: identical attrs/config/translation env except normalised cpu_count, sandbox
-#: paths, the executor and update-manager state.
+#:   initialize_environment_variables -> MetadataBatchTranslatorUI (3rd) + the
+#:   auto-encryption save_config (config with a plain api_key / replicate_api_key).
+#: Verified against a real offscreen TranslatorGUI (tests/parity/real_gui_probe.py, all
+#: scenarios): identical attrs/config/translation env/startup env except normalised
+#: cpu_count, sandbox paths, the executor and update-manager state.
 #: Not replayed (GUI/process only): window/splash setup, UpdateManager
 #: (config['last_update_check_time']), the real executor (_ensure_executor is a
 #: recorder), _attach_gui_logging_handlers, restoring last input files /
-#: Parallel EPUB pair, and the post-startup auto-encryption save_config.
+#: Parallel EPUB pair, and _create_model_section's AuthGem project restore (module
+#: cache + GOOGLE_CLOUD_PROJECT; no scenario sets authgem_project).
 LEGACY_BOOT_PHASES = (
     "pre_config",
     "init_block",
@@ -388,13 +395,82 @@ LEGACY_BOOT_PHASES = (
 )
 
 
+#: Live GUI-free modules whose path globals the owner factory points at the sandbox
+#: (they resolve CONFIG_FILE / _APP_DIR / __file__ at import time).
+SHARED_PATH_MODULES = ("app_paths", "owner_state", "run_env", "settings_persistence", "headless_owner")
+
+
+def shared_mixin_classes(bundle) -> tuple:
+    """The legacy oracle's shared mixin classes (U2+; empty before).
+
+    These are the FROZEN copies freeze_legacy saved at the oracle's commit, never the
+    live working-tree modules: otherwise a later milestone's edit to run_env /
+    owner_state / settings_persistence would be compared against itself.
+    """
+    return tuple(bundle.mixin_classes())
+
+
+def patch_frozen_mixin_paths(ctx, bundle) -> None:
+    """Sandbox the path globals and backend entry points of the frozen mixin modules."""
+    sb = ctx.sandbox
+    for module_name, module in (getattr(bundle, "mixins", None) or {}).items():
+        ns = vars(module)
+        ctx.patch_dict(ns, "__file__", str(sb.src_file(f"{module_name}.py")))
+        if "_APP_DIR" in ns:
+            ctx.patch_dict(ns, "_APP_DIR", str(sb.app_dir))
+        if "CONFIG_FILE" in ns:
+            ctx.patch_dict(ns, "CONFIG_FILE", str(sb.config_file))
+        for name, stub in ctx.backend_stubs.items():
+            if name in ns:
+                ctx.patch_dict(ns, name, stub)
+        config_file = ns.get("CONFIG_FILE")
+        if config_file is not None and not str(config_file).startswith(str(sb.root)):
+            raise RuntimeError(
+                f"refusing to run: frozen {module_name}.CONFIG_FILE {config_file!r} is outside the sandbox")
+
+
+def patch_shared_module_paths(ctx) -> None:
+    """Point the live shared modules' path globals at the capture sandbox."""
+    import importlib
+
+    sb = ctx.sandbox
+    for module_name in SHARED_PATH_MODULES:
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        ctx.patch(module, "__file__", str(sb.src_file(f"{module_name}.py")))
+        if hasattr(module, "_APP_DIR"):
+            ctx.patch(module, "_APP_DIR", str(sb.app_dir))
+        if hasattr(module, "CONFIG_FILE"):
+            ctx.patch(module, "CONFIG_FILE", str(sb.config_file))
+        config_file = getattr(module, "CONFIG_FILE", None)
+        if config_file is not None and not str(config_file).startswith(str(sb.root)):
+            raise RuntimeError(f"refusing to run: {module_name}.CONFIG_FILE {config_file!r} is outside the sandbox")
+
+
 def make_legacy_owner_factory(bundle):
-    """``owner_factory(scenario, ctx)`` building a LegacyMethods owner in a sandbox."""
+    """``owner_factory(scenario, ctx)`` building a LegacyMethods owner in a sandbox.
+
+    For a SHA where the shared GUI-free mixins exist (U2+) the frozen
+    TranslatorGUI body is combined with the frozen copies of the mixin classes
+    in the same precedence as the real class: ``(FakeState, <frozen TranslatorGUI
+    body>, SettingsPersistenceMixin, RunEnvMixin, ConfigStateMixin)``.
+    """
     from parity import scenarios as scenarios_mod
 
+    mixin_bases = shared_mixin_classes(bundle)
+    recorded = set(bundle.manifest["recorded_methods"])
+    shadowed = sorted(name for name in recorded for base in mixin_bases if name in vars(base))
+    if shadowed:
+        raise RuntimeError(f"recorder methods would shadow shared mixin methods: {shadowed}")
     owner_cls = make_owner_class(
-        "LegacyFake", (FakeState, bundle.methods), bundle.manifest["recorded_methods"]
+        "LegacyFake", (FakeState, bundle.methods) + mixin_bases, recorded
     )
+    if mixin_bases:
+        # Frozen code calls TranslatorGUI.<method>(self, ...) explicitly; moved
+        # methods resolve through the mixins exactly like the real MRO.
+        bundle.namespace["TranslatorGUI"] = owner_cls
     init_extraction_vars = bundle.external("other_settings", "initialize_extraction_variables")
     bound_methods = bundle.bound_methods()
 
@@ -427,6 +503,10 @@ def make_legacy_owner_factory(bundle):
             config_file = ext_ns.get("CONFIG_FILE")
             if config_file is not None and not str(config_file).startswith(str(sandbox.root)):
                 raise RuntimeError(f"refusing to run: CONFIG_FILE {config_file!r} is outside the sandbox")
+        # U1+ frozen code imports _get_app_dir/CONFIG_FILE from the live app_paths
+        # (and U2+ mixins live in their own modules): sandbox their path globals too.
+        patch_shared_module_paths(ctx)
+        patch_frozen_mixin_paths(ctx, bundle)
 
         owner = owner_cls(ctx.recorder)
         steps = {

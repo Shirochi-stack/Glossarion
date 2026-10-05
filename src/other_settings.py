@@ -158,19 +158,8 @@ from output_naming import (
 )
 
 
-def initialize_extraction_variables(gui_instance):
-    """Initialize extraction-related variables early so profile switching works"""
-    # Initialize text_extraction_method_var if it doesn't exist
-    if not hasattr(gui_instance, 'text_extraction_method_var'):
-        # Check config for saved value, or use default
-        if gui_instance.config.get('extraction_mode') == 'enhanced':
-            gui_instance.text_extraction_method_var = 'enhanced'
-        else:
-            gui_instance.text_extraction_method_var = gui_instance.config.get('text_extraction_method', 'standard')
-    
-    # Initialize file_filtering_level_var if it doesn't exist
-    if not hasattr(gui_instance, 'file_filtering_level_var'):
-        gui_instance.file_filtering_level_var = gui_instance.config.get('file_filtering_level', 'smart')
+# Moved to the shared GUI-free owner_state module (U2); re-exported for existing callers.
+from owner_state import initialize_extraction_variables  # noqa: E402,F401
 
 def setup_other_settings_methods(gui_instance):
     """Inject all other settings methods into the GUI instance"""

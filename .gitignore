@@ -173,5 +173,11 @@ tests/**
 !tests/test_mobile_compat_patches_manga.py
 !tests/test_pdf_mupdf_html.py
 !tests/test_shared_core_p1.py
+# Mobile rewrite (U2+): HeadlessOwner and the shared-core moves, the generated settings schema,
+# and the helpers tracked tests import (desktop source corpus, HeadlessOwner sandbox).
+!tests/test_headless_owner.py
+!tests/test_settings_schema.py
+!tests/_src_corpus.py
+!tests/_headless_env.py
 junktests/
 warp.md

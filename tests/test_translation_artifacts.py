@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import mock_open
 
 import pytest
+from _src_corpus import desktop_gui_source
 from bs4 import BeautifulSoup
 
 import other_settings
@@ -160,7 +161,7 @@ def test_dispatch_order_timeout_other_setting_is_shared_by_both_pipelines():
     other_settings_source = (root / "other_settings.py").read_text(
         encoding="utf-8"
     )
-    gui_source = (root / "translator_gui.py").read_text(encoding="utf-8")
+    gui_source = desktop_gui_source()
     glossary_source = (root / "extract_glossary_from_epub.py").read_text(
         encoding="utf-8"
     )
@@ -382,7 +383,10 @@ def test_glossary_queue_uses_api_preflight_at_provider_boundary():
 
 
 def test_direct_glossary_run_exports_live_api_preflight_field():
-    source = inspect.getsource(TranslatorGUI._extract_glossary_from_text_file)
+    # the env block was split out (U2): the run builds it via _build_glossary_extraction_env
+    source = inspect.getsource(TranslatorGUI._extract_glossary_from_text_file) + inspect.getsource(
+        TranslatorGUI._build_glossary_extraction_env
+    )
 
     assert (
         "'API_QUEUE_SIZE': self.api_queue_entry.text().strip() or '4'"
@@ -2454,9 +2458,7 @@ def test_pdf_title_skip_setting_is_persisted_and_defaults_off():
     settings_source = (root / "src" / "other_settings.py").read_text(
         encoding="utf-8"
     )
-    gui_source = (root / "src" / "translator_gui.py").read_text(
-        encoding="utf-8"
-    )
+    gui_source = desktop_gui_source()
     translator_source = (root / "src" / "TransateKRtoEN.py").read_text(
         encoding="utf-8"
     )

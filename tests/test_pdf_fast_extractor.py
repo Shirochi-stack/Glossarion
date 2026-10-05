@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _src_corpus import desktop_gui_source
 from bs4 import BeautifulSoup
 from chapter_chunk_progress import wrap_chunk_html
 
@@ -1020,7 +1021,7 @@ def test_pdf_worker_groups_fast_pages_into_bookmark_entries(tmp_path, monkeypatc
 def test_other_settings_exposes_new_modes_and_legacy_fallback():
     root = Path(__file__).resolve().parents[1]
     settings_source = (root / "src" / "other_settings.py").read_text(encoding="utf-8")
-    gui_source = (root / "src" / "translator_gui.py").read_text(encoding="utf-8")
+    gui_source = desktop_gui_source()
     translation_source = (root / "src" / "TransateKRtoEN.py").read_text(
         encoding="utf-8"
     )

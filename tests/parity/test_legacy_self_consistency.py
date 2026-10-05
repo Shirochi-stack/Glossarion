@@ -86,6 +86,28 @@ def test_frozen_methods_are_verbatim_copies(legacy):
             assert segment in blocks_text, f"{name} lines {a}-{b} not copied verbatim"
 
 
+def test_frozen_shared_mixins_are_verbatim_and_never_live(legacy):
+    """U2+ oracles: each shared mixin module is a verbatim copy of git show <sha>, loaded
+    privately (the legacy side must never run the live working-tree module)."""
+    bundle, _factory = legacy
+    manifest = bundle.manifest
+    listed = [module for module, _cls in manifest.get("shared_mixins", [])]
+    frozen = manifest.get("frozen_mixins") or {}
+    assert sorted(frozen) == sorted(listed)
+    for module, info in frozen.items():
+        path = Path(vars(bundle.mixins[module])["__frozen_path__"])
+        assert path.name == info["file"]
+        source = freeze_legacy.frozen_mixin_source(path, info)
+        assert source == freeze_legacy.git_show_text(manifest["sha"], info["source_file"])
+        assert freeze_legacy._sha256(source) == info["source_sha256"]
+        cls = getattr(bundle.mixins[module], info["class"])
+        live = sys.modules.get(module)
+        assert live is None or getattr(live, info["class"], None) is not cls
+        assert cls.__module__.startswith("parity_legacy_")
+    assert fakes.shared_mixin_classes(bundle) == tuple(
+        getattr(bundle.mixins[m], c) for m, c in manifest.get("shared_mixins", []))
+
+
 @pytest.mark.parametrize("name", NAMES)
 def test_capture_twice_is_identical(captures, name):
     first, second = captures

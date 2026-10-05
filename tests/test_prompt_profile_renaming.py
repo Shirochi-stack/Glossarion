@@ -84,7 +84,10 @@ method_names = {
     "_get_list_order", "_restore_list_order", "_move_profile_in_list",
     "_apply_combobox_mousewheel_lock", "_save_model_order",
 }
-methods = [n for n in gui_class.body if isinstance(n, ast.FunctionDef) and n.name in method_names]
+# (U2) built-in profile protection moved to owner_state.ConfigStateMixin: resolve each name the
+# way TranslatorGUI does (class body first, then the shared mixins).
+from _src_corpus import find_method  # noqa: E402
+methods = [find_method(name) for name in sorted(method_names)]
 namespace = {"Qt": Qt, "os": os}
 exec(compile(ast.Module(body=methods, type_ignores=[]), str(source_path), "exec"), namespace)
 for method_name in method_names:

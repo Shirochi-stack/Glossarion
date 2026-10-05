@@ -6,6 +6,7 @@ import types
 from pathlib import Path
 
 import pytest
+from _src_corpus import desktop_gui_source
 
 from pdf_bookmarks import (
     remove_pdf_source_page_break_markers,
@@ -804,7 +805,7 @@ def test_pdf_bookmark_uses_one_progress_entry_and_chunk_qa_mapping(
 
 def test_pdf_toc_setting_is_defaulted_exported_and_persisted():
     root = Path(__file__).resolve().parents[1]
-    gui_source = (root / "src" / "translator_gui.py").read_text(encoding="utf-8")
+    gui_source = desktop_gui_source()
     settings_source = (root / "src" / "other_settings.py").read_text(encoding="utf-8")
 
     assert "self.pdf_use_toc_sections_var = self.config.get('pdf_use_toc_sections', True)" in gui_source

@@ -36,15 +36,20 @@ modules = [
   # U1 shared GUI-free core (plan §2) and the runtime gates / PDF shim the patches use (§3).
   "mobile_runtime", "pdf_mupdf_html", "app_paths", "config_store", "prompt_defaults", "metadata_defaults",
   "ollama_settings", "key_pools", "output_naming",
+  # U2 shared core: the owner state/env/persistence mixins TranslatorGUI inherits, the
+  # HeadlessOwner the job thread builds, and the generated settings schema (plan §2).
+  "owner_state", "run_env", "settings_persistence", "headless_owner", "settings_schema", "settings_schema_data",
+  # GUI-free Library registry + source-EPUB resolver (run_env's EPUB compile env; the rest of
+  # the Library logic follows in U5).
+  "library_core",
 ]
 # New shared modules from the plan that do not exist yet. They become entries automatically
 # once the file exists (the report then asks to move them into `modules`).
-planned = ["owner_state", "run_env", "headless_owner", "settings_schema", "settings_schema_data", "settings_rules"]
+planned = ["settings_rules"]
 # Every `import X` of a src/ module inside the mobile app (files or package dirs, relative to
 # src/mobile) becomes an entry too; the app's third-party imports must be pinned as well.
 scan_package = ["app/main.py", "app/glossarion_mobile"]
-# Top-level names that belong to the app itself, not to src/ or PyPI ("main" is app/main.py,
-# not the excluded src/main.py).
+# Top-level names that belong to the app itself, not to src/ or PyPI ("main" is app/main.py).
 app_local = ["glossarion_mobile", "main", "flet_glossarion_native"]
 extra_modules = []
 
@@ -52,6 +57,13 @@ extra_modules = []
 [dynamic_imports]
 "model_options:_authenticated_catalog_has_session" = ["authgpt_auth", "authcd_auth", "authgem_auth", "glm_proxy"]
 "model_options:_fetch_authenticated_catalog" = ["authgpt_auth", "authcd_auth", "authgem_auth"]
+# Named settings_map converters (settings_schema._CALL_CONVERTERS).
+"settings_schema:_resolve_call" = ["run_env"]
+# {'$ref': 'module:NAME'} defaults in settings_schema_data (resolved lazily, off the UI loop).
+"settings_schema:_resolve_marker" = [
+  "emoticon_patterns", "extract_glossary_from_epub", "glossary_refinement", "prompt_defaults",
+  "refinement_prompts", "title_tag_translation",
+]
 
 # Never bundled (reason required). Every edge into them must be guarded or baselined.
 [exclude]
@@ -73,7 +85,6 @@ app = "Gradio web front end"
 splash_utils = "Qt splash screen / desktop warm-up"
 windows_version_info = "PyInstaller version resource"
 pyi_rth_win32_runtime = "PyInstaller runtime hook"
-main = "old Kivy Android entry point (deleted in U2)"
 
 [gui]
 # Importing one of these unguarded at module scope makes a module GUI-tainted (transitively).

@@ -10,6 +10,7 @@ import types
 import zipfile
 
 import pytest
+from _src_corpus import desktop_gui_source
 from bs4 import BeautifulSoup
 
 
@@ -701,9 +702,7 @@ def test_glossary_structural_skip_ui_and_default_toggle_are_wired():
     glossary_gui = (source_root / "GlossaryManager_GUI.py").read_text(
         encoding="utf-8"
     )
-    translator_gui = (source_root / "translator_gui.py").read_text(
-        encoding="utf-8"
-    )
+    translator_gui = desktop_gui_source()
     progress_gui = (source_root / "Retranslation_GUI.py").read_text(
         encoding="utf-8"
     )
@@ -3541,6 +3540,7 @@ def test_progress_manager_source_link_updates_epub_library_scan(
     tmp_path, monkeypatch
 ):
     import epub_library
+    import library_core
 
     library_dir = tmp_path / "Library"
     output_root = tmp_path / "Output"
@@ -3597,9 +3597,11 @@ def test_progress_manager_source_link_updates_epub_library_scan(
     )
 
     monkeypatch.delenv("TRANSLATE_SPECIAL_FILES", raising=False)
-    monkeypatch.setattr(
-        epub_library, "get_library_dir", lambda: str(library_dir)
-    )
+    # the Library registries moved to library_core (epub_library re-exports them)
+    for module in (epub_library, library_core):
+        monkeypatch.setattr(
+            module, "get_library_dir", lambda: str(library_dir)
+        )
     monkeypatch.setattr(
         epub_library,
         "_resolve_output_roots",

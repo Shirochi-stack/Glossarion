@@ -52,8 +52,12 @@ What it does (plan section 9, build-ci design section 7.4):
    ``key_material`` (Fernet round trip through ``api_key_encryption`` with the injected
    key, no key file written), ``chapter_extractor_pool`` (``extract_chapters`` on the
    13-file self-test EPUB, which takes the worker-pool path, in thread mode),
-   ``jaro_winkler`` (the RapidFuzz Jaro-Winkler path with jellyfish blocked) and
-   ``pdf_mupdf_html`` (the WeasyPrint-subset shim; skipped until it is bundled).
+   ``jaro_winkler`` (the RapidFuzz Jaro-Winkler path with jellyfish blocked),
+   ``pdf_mupdf_html`` (the WeasyPrint-subset shim; skipped until it is bundled) and
+   ``headless_owner_env`` (the app's Env preview path: a ``HeadlessOwner`` built from a
+   fresh-install config and ``run_env.build_translation_env``; the desktop defaults
+   ``authgpt/gpt-6-luna`` / ``AUTO_GLOSSARY_MODE=off`` must come out, and the process
+   env, cwd and config.json must be left as they were).
 6. **Verdict.** Fails (exit 1) on an import or check failure, on any tripwire event
    raised directly by bundled code (or one that propagated out of a phase), on any
    network attempt, and on any file created, changed or deleted outside the writable
@@ -133,7 +137,9 @@ _SPAWN_IMPL = frozenset({"subprocess.py", "os.py", "concurrent", "multiprocessin
 _HARNESS_FILE = os.path.normcase(os.path.abspath(__file__))
 
 # Selftest checks the CLI accepts besides the host checks below.
-HOST_CHECKS = ("key_material", "chapter_extractor_pool", "jaro_winkler", "pdf_mupdf_html")
+HOST_CHECKS = ("key_material", "chapter_extractor_pool", "jaro_winkler", "pdf_mupdf_html", "headless_owner_env")
+# What a desktop fresh install runs with (U0 oracle; HeadlessOwner replays the desktop startup).
+FRESH_INSTALL_ENV = {"MODEL": "authgpt/gpt-6-luna", "AUTO_GLOSSARY_MODE": "off"}
 
 
 class SetupError(Exception):
@@ -1041,11 +1047,50 @@ def make_host_checks(selftest: Any, keys: KeyState) -> Dict[str, Callable]:
         return {"pages": pages, "anchors": sorted(anchors), "bookmarks": bookmarks, "toc": len(toc),
                 "engine": getattr(shim, "ENGINE_NAME", None)}
 
+    def check_headless_owner_env(ctx) -> dict:
+        paths = ctx.require_bootstrap()
+        for module in ("headless_owner", "run_env"):
+            importlib.import_module(module)  # must come from the bundle (import phase checks the origin)
+        from glossarion_mobile.ui.screens import env_preview
+
+        config_file = Path(os.environ.get("CONFIG_FILE") or paths.data / "config.json")
+        config_before = config_file.read_bytes() if config_file.is_file() else None
+        env_before = dict(os.environ)
+        cwd_before = os.getcwd()
+        argv_before = list(sys.argv)
+        input_path = env_preview.preview_input_path("epub", str(paths.data))
+        # The app's Env preview: HeadlessOwner(fresh config) + run_env.build_translation_env,
+        # under the preview lock with the process env/argv/cwd restored afterwards.
+        result = env_preview.build_env_preview({}, input_path=input_path, api_key="")
+        if not result.ok:
+            raise AssertionError(f"build_env_preview failed: {result.error}")
+        env = {row.key: row.value for row in result.rows}
+        wrong = {k: env.get(k) for k, v in FRESH_INSTALL_ENV.items() if env.get(k) != v}
+        if wrong:
+            raise AssertionError(f"fresh-install run env differs from the desktop: {wrong} (expected {FRESH_INSTALL_ENV})")
+        if result.count < 300:
+            raise AssertionError(f"only {result.count} variables in the translation env (desktop builds ~400)")
+        changed = sorted(k for k in set(env_before) | set(os.environ) if env_before.get(k) != os.environ.get(k))
+        if changed:
+            raise AssertionError(f"the preview left process env changes behind: {changed[:20]}")
+        if os.getcwd() != cwd_before or sys.argv != argv_before:
+            raise AssertionError("the preview did not restore the working directory / sys.argv")
+        config_after = config_file.read_bytes() if config_file.is_file() else None
+        if config_after != config_before:
+            raise AssertionError(f"building a HeadlessOwner wrote {config_file} (owners never persist config)")
+        return {
+            "variables": result.count,
+            "redacted": sum(1 for row in result.rows if row.redacted),
+            "env": {k: env.get(k) for k in FRESH_INSTALL_ENV},
+            "secs": result.secs,
+        }
+
     return {
         "key_material": check_key_material,
         "chapter_extractor_pool": check_chapter_extractor_pool,
         "jaro_winkler": check_jaro_winkler,
         "pdf_mupdf_html": check_pdf_mupdf_html,
+        "headless_owner_env": check_headless_owner_env,
     }
 
 

@@ -290,7 +290,7 @@ def test_public_api():
 
 
 # --------------------------------------------------------------------------
-# Desktop packaging: every PyInstaller spec ships the U1 shared modules
+# Desktop packaging: every PyInstaller spec ships the U1 and U2 shared modules
 # --------------------------------------------------------------------------
 
 # Imported by core desktop modules (TransateKRtoEN, translator_gui, epub_converter, the PDF
@@ -298,6 +298,14 @@ def test_public_api():
 U1_SHARED_MODULES = (
     "mobile_runtime", "app_paths", "config_store", "prompt_defaults", "metadata_defaults",
     "ollama_settings", "key_pools", "output_naming", "pdf_mupdf_html",
+)
+# U2: TranslatorGUI inherits the owner_state/run_env/settings_persistence mixins and its Direct
+# Text dialog uses headless_owner.DirectTextRunOptions; the settings schema ships with them.
+U2_SHARED_MODULES = (
+    "owner_state", "run_env", "settings_persistence", "headless_owner", "settings_schema",
+    "settings_schema_data",
+    # run_env's EPUB compile env resolves the source EPUB through it (epub_library re-exports it)
+    "library_core",
 )
 
 
@@ -315,7 +323,7 @@ def test_u1_shared_modules_are_packaged_in_every_spec():
         source = spec.read_text(encoding="utf-8")
         files = [Path(entry[0]).stem for entry in _spec_list(source, "app_files")]
         modules = _spec_list(source, "app_modules")
-        for name in U1_SHARED_MODULES:
+        for name in U1_SHARED_MODULES + U2_SHARED_MODULES:
             assert (SRC_DIR / f"{name}.py").is_file(), name
             assert files.count(name) == 1, (spec.name, name, "app_files")
             assert modules.count(name) == 1, (spec.name, name, "app_modules")

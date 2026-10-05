@@ -8,6 +8,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from _src_corpus import desktop_gui_source
 from PIL import Image
 
 import Chapter_Extractor as chapter_extractor
@@ -1834,9 +1835,7 @@ def test_epub_optional_filter_settings_default_off_and_propagate():
     settings_source = (root / "src" / "other_settings.py").read_text(
         encoding="utf-8",
     )
-    gui_source = (root / "src" / "translator_gui.py").read_text(
-        encoding="utf-8",
-    )
+    gui_source = desktop_gui_source()
     async_source = (root / "src" / "async_api_processor.py").read_text(
         encoding="utf-8",
     )

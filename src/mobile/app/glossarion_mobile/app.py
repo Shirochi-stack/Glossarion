@@ -122,6 +122,10 @@ class GlossarionApp:
         self.chat_view: Optional[ChatView] = None
         self.drawer: Optional[ChatDrawer] = None
         self.shell: Optional[AppShell] = None
+        # Schema-driven Settings (U2); SettingsFeature.attach also sets config_store and prefs.
+        self.settings: Any = None
+        self.config_store: Any = None
+        self.prefs: Any = None
 
     @staticmethod
     def _make_secure_storage() -> Any:
@@ -196,6 +200,7 @@ class GlossarionApp:
 
         self.dispatcher.start()
         await self._install_backend_keys()  # before anything imports or uses the backend
+        await self._install_settings()  # decrypts config.json with those keys; before the first route
         rb.start_warm_import(on_done=lambda result: self.dispatcher.post(self._on_backend_ready, result))
         self.dispatcher.spawn(self._after_ready())
         await self.dispatch_route(page.route, source="initial")
@@ -207,6 +212,19 @@ class GlossarionApp:
             self.key_status = await secure_keys.setup(self.secure_storage, fallback_dir)
         finally:
             self.keys_ready.set()
+
+    async def _install_settings(self) -> None:
+        """MobileConfigStore + Prefs + the schema-driven settings screens (U2).
+
+        Installed before the initial route is dispatched, so a cold-start ``/settings``
+        deep link already gets the settings screens. If it fails the app keeps the hub.
+        """
+        try:
+            from glossarion_mobile.ui.settings.integration import SettingsFeature
+
+            await SettingsFeature.install(self)  # sets self.settings / config_store / prefs
+        except Exception:
+            log.exception("settings feature unavailable; /settings shows the hub")
 
     def _on_backend_ready(self, result: dict) -> None:
         self.state.backend.set(dict(result or {}))

@@ -5,7 +5,9 @@ The oracle is a byte-for-byte copy of the original method bodies, taken from
 ``git show <sha>:src/<file>`` (never from the working tree), written to::
 
     tests/parity/legacy/legacy_<sha12>.py               class LegacyMethods (TranslatorGUI)
-    tests/parity/legacy/legacy_<sha12>__<module>.py     frozen helpers from other modules
+    tests/parity/legacy/legacy_<sha12>__<module>.py     frozen helpers from other modules, and
+                                                        (U2+) whole shared mixin modules
+                                                        (owner_state, run_env, settings_persistence)
 
 ``load_legacy()`` executes those files into private namespaces whose globals
 come from the frozen imports/constants/functions of the original module. Names
@@ -53,7 +55,7 @@ REPO_ROOT = TESTS_DIR.parent
 SRC_DIR = REPO_ROOT / "src"
 LEGACY_DIR = PARITY_DIR / "legacy"
 
-FREEZER_VERSION = 1
+FREEZER_VERSION = 2  # v2: shared mixin modules frozen too (manifest 'frozen_mixins')
 
 TG_FILE = "translator_gui.py"
 TG_CLASS = "TranslatorGUI"
@@ -163,6 +165,20 @@ TG_RECORDED_METHODS = frozenset({
     "_update_compression_token_budget_label",
 })
 
+#: Shared GUI-free mixin modules (U2+). When they exist at the frozen SHA the
+#: TranslatorGUI body no longer holds the moved methods: the freezer then seeds
+#: its closure with the TranslatorGUI methods the mixins reference (hooks, GUI
+#: helpers), saves each module's source at that SHA as
+#: ``legacy_<sha12>__<module>.py`` (manifest ``frozen_mixins``) and the owner
+#: factory adds those FROZEN mixin classes as bases. The live modules are never
+#: used by the legacy side: imports of a frozen mixin module from frozen code
+#: resolve to its frozen copy.
+SHARED_MIXIN_MODULES = (
+    ("settings_persistence", "SettingsPersistenceMixin"),
+    ("run_env", "RunEnvMixin"),
+    ("owner_state", "ConfigStateMixin"),
+)
+
 #: (method, statement prefix) - GUI-backed *state* assignments made while _setup_gui builds widgets.
 GUI_STATE_STATEMENTS = (
     ("create_file_section", "self.vertex_location_var = "),
@@ -189,6 +205,26 @@ GUI_HANDLER_STATEMENTS = (
     ("_setup_gui", "if hasattr(self, 'profile_var') and self.profile_var in self.prompt_profiles:"),
     ("_setup_gui", "self._update_auto_compression_factor()"),
 )
+
+#: U2 layout: the GUI-backed state is ConfigStateMixin._init_gui_backed_state()
+#: (called by __init__ right before _setup_gui) and the startup handlers are
+#: shared mixin methods the section builders call at the same points.
+GUI_STATE_STATEMENTS_U2 = (
+    ("__init__", "self._init_gui_backed_state()"),
+)
+GUI_HANDLER_STATEMENTS_U2 = (
+    ("_create_settings_section", "self._on_disable_temperature_toggle()"),
+    ("_create_settings_section", "try:\n    self._on_auto_glossary_shortcut_changed("),
+    ("_create_settings_section", "self._on_context_mode_changed()"),
+    ("_create_prompt_section", "final_lang = self._resolve_startup_target_language()"),
+    ("_create_prompt_section", "self.update_target_language(final_lang)"),
+    ("_setup_gui", "self._init_active_profile_prompt()"),
+    ("_setup_gui", "self._update_auto_compression_factor()"),
+)
+
+#: Statement specs per layout, tried in order (the first that matches wins).
+GUI_STATE_LAYOUTS = (("legacy", GUI_STATE_STATEMENTS), ("u2", GUI_STATE_STATEMENTS_U2))
+GUI_HANDLER_LAYOUTS = (("legacy", GUI_HANDLER_STATEMENTS), ("u2", GUI_HANDLER_STATEMENTS_U2))
 
 
 @dataclass(frozen=True)
@@ -484,30 +520,37 @@ def build_init_blocks(src: ModuleSource, init: ast.FunctionDef) -> list:
                 return i
         raise SystemExit(f"freeze_legacy: __init__ anchor not found: {what}")
 
+    # pre-U1: ``with open(CONFIG_FILE ...)``; U1+: ``self.config = load_config(CONFIG_FILE)``
     config_load = find(
-        lambda s: isinstance(s, ast.Try) and "open(CONFIG_FILE" in ast.unparse(s),
-        what="config load try (open(CONFIG_FILE ...))",
+        lambda s: isinstance(s, ast.Try)
+        and ("open(CONFIG_FILE" in ast.unparse(s) or "load_config(CONFIG_FILE" in ast.unparse(s)),
+        what="config load try (open(CONFIG_FILE ...) / load_config(CONFIG_FILE))",
     )
     update_mgr = find(
         lambda s: isinstance(s, ast.Try) and "UpdateManager" in ast.unparse(s),
         start=config_load + 1,
         what="UpdateManager try",
     )
+    # pre-U2: ``self.default_prompts = {...}``; U2+: ``self._init_default_prompt_profiles()``
     default_prompts = find(
-        lambda s: isinstance(s, ast.Assign)
-        and any(ast.unparse(t) == "self.default_prompts" for t in s.targets),
+        lambda s: (
+            isinstance(s, ast.Assign)
+            and any(ast.unparse(t) == "self.default_prompts" for t in s.targets)
+        ) or (isinstance(s, ast.Expr) and ast.unparse(s) == "self._init_default_prompt_profiles()"),
         start=update_mgr + 1,
-        what="self.default_prompts = {...}",
+        what="self.default_prompts = {...} / self._init_default_prompt_profiles()",
     )
     init_vars = find(
         lambda s: isinstance(s, ast.Expr) and ast.unparse(s) == "self._init_variables()",
         start=default_prompts + 1,
         what="self._init_variables()",
     )
+    # pre-U2: the watchdog-dir try inline; U2+: ``self._init_watchdog_dir()``
     watchdog = find(
-        lambda s: isinstance(s, ast.Try) and "glossarion_watchdog" in ast.unparse(s),
+        lambda s: (isinstance(s, ast.Try) and "glossarion_watchdog" in ast.unparse(s))
+        or (isinstance(s, ast.Expr) and ast.unparse(s) == "self._init_watchdog_dir()"),
         start=init_vars + 1,
-        what="watchdog dir try",
+        what="watchdog dir try / self._init_watchdog_dir()",
     )
     startup_env = find(
         lambda s: isinstance(s, ast.Expr) and ast.unparse(s) == "self.initialize_environment_variables()",
@@ -524,6 +567,13 @@ def build_init_blocks(src: ModuleSource, init: ast.FunctionDef) -> list:
         and any(ast.unparse(t) == "self.metadata_batch_ui" for t in s.targets),
         start=post_import + 1,
         what="self.metadata_batch_ui = MetadataBatchTranslatorUI(self)",
+    )
+    # pre-U2: the auto-encryption try inline; U2+: ``self._auto_encrypt_api_keys()``
+    auto_encrypt = find(
+        lambda s: (isinstance(s, ast.Try) and "needs_encryption" in ast.unparse(s))
+        or (isinstance(s, ast.Expr) and ast.unparse(s) == "self._auto_encrypt_api_keys()"),
+        start=post_assign + 1,
+        what="auto-encryption save_config try / self._auto_encrypt_api_keys()",
     )
 
     # Pre-config: plain self-attribute assignments made before the config load
@@ -543,14 +593,15 @@ def build_init_blocks(src: ModuleSource, init: ast.FunctionDef) -> list:
     pre.append(body[config_load])
     init_block = body[config_load + 1:update_mgr]
     prompts_block = body[update_mgr + 1:default_prompts + 1]
-    post = [body[post_import], body[post_assign]]
+    post = [body[post_import], body[post_assign], body[auto_encrypt]]
     for stmts in (pre, init_block, prompts_block, [body[watchdog]], post):
         _check_indent(stmts)
     last_init = ast.unparse(init_block[-1])
-    if "use_markdown2_converter_var" not in last_init:
+    moved_init = [ast.unparse(s) for s in init_block] == ["self._init_config_state()"]
+    if "use_markdown2_converter_var" not in last_init and not moved_init:
         raise SystemExit(
-            "freeze_legacy: the __init__ config block no longer ends at use_markdown2_converter_var; "
-            "re-check the anchors"
+            "freeze_legacy: the __init__ config block no longer ends at use_markdown2_converter_var "
+            "(and is not the U2 self._init_config_state() call); re-check the anchors"
         )
     return [
         _block_from_statements(
@@ -575,8 +626,9 @@ def build_init_blocks(src: ModuleSource, init: ast.FunctionDef) -> list:
         ),
         _block_from_statements(
             src, "legacy_post_startup_block",
-            "__init__ after initialize_environment_variables: third MetadataBatchTranslatorUI init "
-            "(GUI log handlers and the auto-encryption save_config are not replayed).",
+            "__init__ after initialize_environment_variables: third MetadataBatchTranslatorUI init and "
+            "the auto-encryption save_config (runs when config holds a plain api_key / replicate_api_key; "
+            "GUI log handlers are not replayed).",
             post,
         ),
     ]
@@ -600,6 +652,17 @@ def build_statement_block(src: ModuleSource, methods: dict, name: str, doc: str,
         picked.append(matches[0])
     _check_indent(picked)
     return _block_from_statements(src, name, doc, picked)
+
+
+def build_layout_block(src: ModuleSource, methods: dict, name: str, doc: str, layouts) -> tuple:
+    """First layout whose statement spec matches completely -> (layout name, Block)."""
+    errors = []
+    for layout, spec in layouts:
+        try:
+            return layout, build_statement_block(src, methods, name, doc, spec)
+        except SystemExit as exc:
+            errors.append(f"{layout}: {exc}")
+    raise SystemExit(f"freeze_legacy: no statement layout matched for {name}: " + " | ".join(errors))
 
 
 # ---------------------------------------------------------------------------
@@ -890,7 +953,23 @@ def legacy_paths(sha: str) -> tuple:
     return LEGACY_DIR / f"legacy_{short}.py", short
 
 
-def freeze(rev: str = "HEAD", out_dir: Path = LEGACY_DIR) -> Path:
+def shared_mixin_sources(sha: str) -> dict:
+    """{module: (class_name, ModuleSource)} for the shared mixin modules present at *sha*."""
+    out = {}
+    for module, class_name in SHARED_MIXIN_MODULES:
+        try:
+            text = git_show_text(sha, f"src/{module}.py")
+        except (subprocess.CalledProcessError, OSError):
+            continue  # not extracted yet at this SHA
+        src = ModuleSource(f"{module}.py", text)
+        if class_name not in src.classes:
+            raise SystemExit(f"freeze_legacy: {module}.py has no class {class_name}")
+        out[module] = (class_name, src)
+    return out
+
+
+def freeze(rev: str = "HEAD", out_dir: Path = LEGACY_DIR, *, entry_methods=None) -> Path:
+    """Freeze TranslatorGUI @ *rev*; *entry_methods* overrides TG_ENTRY_METHODS (closure seeds)."""
     sha = resolve_sha(rev)
     short = sha[:12]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -906,27 +985,46 @@ def freeze(rev: str = "HEAD", out_dir: Path = LEGACY_DIR) -> Path:
     duplicates = {k: v for k, v in dup.items() if len(v) > 1}
 
     blocks = build_init_blocks(tg, methods["__init__"])
-    blocks.append(build_statement_block(
+    state_layout, state_block = build_layout_block(
         tg, methods, "legacy_gui_state_block",
         "_setup_gui section builders: GUI-backed state assignments (widgets are installed after this).",
-        GUI_STATE_STATEMENTS,
-    ))
-    blocks.append(build_statement_block(
+        GUI_STATE_LAYOUTS,
+    )
+    handler_layout, handler_block = build_layout_block(
         tg, methods, "legacy_gui_handlers_block",
         "_setup_gui startup handlers that run once widgets exist (desktop order).",
-        GUI_HANDLER_STATEMENTS,
-    ))
+        GUI_HANDLER_LAYOUTS,
+    )
+    blocks += [state_block, handler_block]
+
+    # ---- shared GUI-free mixins (U2+) ----
+    mixins = shared_mixin_sources(sha)
+    mixin_methods: dict[str, list] = {}
+    mixin_refs: dict[str, set] = {}
+    for module, (class_name, msrc) in mixins.items():
+        mcls = msrc.classes[class_name]
+        mixin_methods[module] = sorted(class_methods(mcls)) + sorted(class_attr_statements(mcls))
+        refs = self_references(mcls, class_name)
+        for fn in msrc.functions.values():  # module helpers taking the owner (owner/self param)
+            refs |= self_references(fn, class_name)
+        mixin_refs[module] = refs
+    mixin_provided = {name for names in mixin_methods.values() for name in names}
 
     # ---- method closure ----
     frozen: dict[str, str] = {}
     recorded: set = set()
     missing: dict[str, str] = {}
     needed_attrs: set = set()
-    queue = [(m, "entry") for m in TG_ENTRY_METHODS]
+    entries = tuple(TG_ENTRY_METHODS if entry_methods is None else entry_methods)
+    queue = [(m, "entry") for m in entries]
     for block in blocks:
         node = ast.parse(_wrap_statements_as_function(block.text))
         for ref in sorted(self_references(node, TG_CLASS)):
             queue.append((ref, f"block:{block.name}"))
+    for module, refs in mixin_refs.items():
+        # TranslatorGUI methods the shared mixins call (hook overrides, GUI helpers)
+        for ref in sorted(refs):
+            queue.append((ref, f"mixin:{module}"))
     while queue:
         name, why = queue.pop(0)
         if name in frozen or name in recorded:
@@ -944,13 +1042,18 @@ def freeze(rev: str = "HEAD", out_dir: Path = LEGACY_DIR) -> Path:
                 queue.append((ref, f"closure:{name}"))
             elif ref in attrs:
                 needed_attrs.add(ref)
-    for name in TG_ENTRY_METHODS:
-        if name not in methods:
+    moved_to_mixins = sorted(
+        name for name in set(entries) | set(TG_FREEZE_ONLY_METHODS)
+        if name not in methods and name in mixin_provided
+    )
+    for name in entries:
+        if name not in methods and name not in mixin_provided:
             missing[name] = "entry method not found in TranslatorGUI"
     unresolved_self_methods: dict[str, list] = {}
     for name in TG_FREEZE_ONLY_METHODS:
         if name not in methods:
-            missing[name] = "freeze-only method not found"
+            if name not in mixin_provided:
+                missing[name] = "freeze-only method not found"
             continue
         if name not in frozen:
             frozen[name] = "freeze_only"
@@ -1008,6 +1111,8 @@ def freeze(rev: str = "HEAD", out_dir: Path = LEGACY_DIR) -> Path:
         exercised_refs |= self_references(methods[m], TG_CLASS)
     for b in blocks:
         exercised_refs |= self_references(ast.parse(_wrap_statements_as_function(b.text)), TG_CLASS)
+    for refs in mixin_refs.values():
+        exercised_refs |= refs
     recorded_methods = sorted(
         r for r in exercised_refs
         if r in methods and r not in frozen
@@ -1016,6 +1121,10 @@ def freeze(rev: str = "HEAD", out_dir: Path = LEGACY_DIR) -> Path:
     exercised_strings = set()
     for m in exercised:
         for sub in ast.walk(methods[m]):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and sub.value.isidentifier():
+                exercised_strings.add(sub.value)
+    for module, (class_name, msrc) in mixins.items():
+        for sub in ast.walk(msrc.tree):
             if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and sub.value.isidentifier():
                 exercised_strings.add(sub.value)
     startup_widget_refs = sorted(set(startup_widgets) & (exercised_refs | exercised_strings))
@@ -1027,6 +1136,18 @@ def freeze(rev: str = "HEAD", out_dir: Path = LEGACY_DIR) -> Path:
         path, info = freeze_external(sha, short, spec, out_dir)
         external_files.append(path.name)
         externals_manifest[spec.module] = info
+    # ---- shared mixin modules: whole-module verbatim copies at this SHA (U2+) ----
+    frozen_mixins = {}
+    for module, (class_name, msrc) in mixins.items():
+        path = freeze_mixin_module(sha, module, msrc, out_dir)
+        frozen_mixins[module] = {
+            "class": class_name,
+            "source_file": f"src/{module}.py",
+            "source_sha256": _sha256(msrc.text),
+            "file": path.name,
+            "header_lines": len(_MIXIN_HEADER.format(sha=sha, file=f"{module}.py", version=FREEZER_VERSION)
+                                .split("\n")) - 1,
+        }
     bound = other_settings_bound_methods(sha)
     bound_frozen = {name: spec.module for spec in EXTERNALS for name in spec.bind}
     missing_bound = sorted(set(bound_frozen) - set(bound))
@@ -1054,12 +1175,23 @@ def freeze(rev: str = "HEAD", out_dir: Path = LEGACY_DIR) -> Path:
         "recorded_methods": recorded_methods,
         "unresolved_freeze_only_refs": {k: sorted(v) for k, v in sorted(unresolved_self_methods.items())},
         "missing": missing,
+        "layouts": {
+            "init_config_block": "u2" if any(
+                ast.unparse(s) == "self._init_config_state()" for s in blocks[1].stmts
+            ) else "legacy",
+            "gui_state": state_layout,
+            "gui_handlers": handler_layout,
+        },
+        "shared_mixins": [[module, mixins[module][0]] for module, _cls in SHARED_MIXIN_MODULES if module in mixins],
+        "frozen_mixins": frozen_mixins,
+        "mixin_methods": mixin_methods,
+        "moved_to_mixins": moved_to_mixins,
         "duplicate_method_definitions": duplicates,
         "startup_widget_attrs": startup_widget_refs,
         "gui_backed_audit": {
             "methods_reached_from_setup_gui": len(reached),
             "writes": gui_writes,
-            "replayed": [list(x) for x in GUI_STATE_STATEMENTS + GUI_HANDLER_STATEMENTS],
+            "replayed": [list(x) for x in dict(GUI_STATE_LAYOUTS)[state_layout] + dict(GUI_HANDLER_LAYOUTS)[handler_layout]],
         },
         "externals": externals_manifest,
         "external_files": external_files,
@@ -1109,13 +1241,43 @@ def _verify_globals(text: str, res: Resolution, *, extra_defined: set, where: st
     del tree
 
 
+_MIXIN_HEADER = '''# GENERATED by tests/parity/freeze_legacy.py - do not edit by hand.
+# Frozen copy of `git show {sha}:src/{file}` (freezer v{version}): the whole shared
+# mixin module as it was at the frozen commit, so the legacy oracle never runs the live
+# module. Load with tests/parity/freeze_legacy.load_legacy(); imports of the other frozen
+# mixin modules resolve to their frozen copies. The source follows this header verbatim.
+'''
+
+
+def freeze_mixin_module(sha: str, module: str, msrc: ModuleSource, out_dir: Path) -> Path:
+    """Write ``legacy_<sha12>__<module>.py`` = header + the module source at *sha* (verbatim)."""
+    out_path = out_dir / f"legacy_{sha[:12]}__{module}.py"
+    text = _MIXIN_HEADER.format(sha=sha, file=f"{module}.py", version=FREEZER_VERSION) + msrc.text
+    compile(text, str(out_path), "exec")
+    out_path.write_text(text, encoding="utf-8", newline="\n")
+    return out_path
+
+
+def frozen_mixin_source(path: Path, info: dict) -> str:
+    """The verbatim module source stored in a frozen mixin file (header stripped)."""
+    lines = path.read_text(encoding="utf-8").split("\n")
+    return "\n".join(lines[int(info["header_lines"]):])
+
+
 def freeze_external(sha: str, short: str, spec: ExternalSpec, out_dir: Path) -> tuple:
     relpath = f"{spec.module}.py"
     text = git_show_text(sha, f"src/{relpath}")
     src = ModuleSource(relpath, text)
     seeds, fn_nodes, class_parts = [], {}, {}
+    reexports = {}
     for name in spec.functions:
         node = src.functions.get(name)
+        if node is None and name in src.imports and name not in src.assigns:
+            # Moved to a shared GUI-free module and re-exported here (U1+): the
+            # frozen namespace imports it like the original module does.
+            stmt, alias = src.imports[name][0]
+            reexports[name] = _import_text(stmt, alias)
+            continue
         if node is None:
             raise SystemExit(f"freeze_legacy: {relpath}:{name} not found")
         fn_nodes[name] = node
@@ -1148,6 +1310,8 @@ def freeze_external(sha: str, short: str, spec: ExternalSpec, out_dir: Path) -> 
     # functions requested explicitly are emitted even when not referenced by each other
     for name, node in fn_nodes.items():
         res.functions[name] = node
+    for name, import_text in reexports.items():
+        res.imports[name] = import_text
     body = [_HEADER.format(sha=sha, file=relpath, version=FREEZER_VERSION)]
     info = {
         "source_file": f"src/{relpath}",
@@ -1161,6 +1325,7 @@ def freeze_external(sha: str, short: str, spec: ExternalSpec, out_dir: Path) -> 
             for c, parts in class_parts.items()
         },
         "runtime_globals": dict(sorted(res.runtime.items())),
+        "reexports": dict(sorted(reexports.items())),
         "patch": list(spec.patch),
     }
     body.append("FREEZE_MANIFEST = " + pprint.pformat(info, width=110, sort_dicts=False))
@@ -1194,10 +1359,28 @@ class LegacyBundle:
     namespace: dict
     externals: dict  # module -> namespace
     manifest: dict
+    mixins: dict = field(default_factory=dict)  # module -> frozen module object (U2+)
 
     @property
     def methods(self):
         return self.namespace["LegacyMethods"]
+
+    def mixin_classes(self) -> tuple:
+        """The FROZEN shared mixin classes, in desktop precedence order (empty before U2)."""
+        out = []
+        for module, class_name in self.manifest.get("shared_mixins", []) or []:
+            if module not in self.mixins:
+                raise RuntimeError(
+                    f"legacy oracle @ {self.sha[:12]} lists the shared mixin {module} without a frozen "
+                    "copy (frozen by freezer v1); re-run tests/parity/freeze_legacy.py --sha "
+                    f"{self.sha[:12]} so the oracle never falls back to the live module"
+                )
+            out.append(getattr(self.mixins[module], class_name))
+        return tuple(out)
+
+    def mixin_namespaces(self) -> list:
+        """Globals of the frozen mixin modules (for path/backend/Qt patches)."""
+        return [vars(module) for module in self.mixins.values()]
 
     def module_patches(self) -> list:
         """[(live_module_name, attribute, frozen_object)] to patch while legacy code runs."""
@@ -1232,12 +1415,64 @@ def latest_sha() -> str:
     return marker.read_text(encoding="utf-8").strip()
 
 
-def _exec_frozen(path: Path, module_name: str, live_module_name: str) -> dict:
+class _FrozenBuiltins(dict):
+    """``__builtins__`` of frozen code when the oracle has frozen mixin modules.
+
+    Only ``__import__`` is stored: ``import owner_state`` / ``from run_env import X`` in
+    frozen code return the frozen copies. Every other builtin is looked up live in
+    :mod:`builtins` (``__missing__``), so harness patches such as ``builtins.open`` apply.
+    """
+
+    def __missing__(self, key):
+        try:
+            return getattr(builtins, key)
+        except AttributeError:
+            raise KeyError(key) from None
+
+
+def _load_frozen_mixins(short: str, manifest: dict) -> tuple:
+    """({module: frozen module object}, builtins for frozen code) from manifest ``frozen_mixins``."""
+    frozen = manifest.get("frozen_mixins") or {}
+    modules: dict = {}
+    if not frozen:
+        return modules, builtins
+    real_import = builtins.__import__
+
+    def frozen_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if level == 0 and name in frozen:
+            return load(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    frozen_builtins = _FrozenBuiltins(__import__=frozen_import)
+
+    def load(module):
+        if module in modules:
+            return modules[module]
+        info = frozen[module]
+        path = LEGACY_DIR / info["file"]
+        mod = types.ModuleType(f"parity_legacy_{short}__{module}")
+        mod.__file__ = str(SRC_DIR / f"{module}.py")
+        mod.__builtins__ = frozen_builtins
+        mod.__frozen_path__ = str(path)
+        modules[module] = mod  # registered first: import cycles resolve like sys.modules
+        try:
+            exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), vars(mod))
+        except BaseException:
+            modules.pop(module, None)
+            raise
+        return mod
+
+    for module in frozen:
+        load(module)
+    return modules, frozen_builtins
+
+
+def _exec_frozen(path: Path, module_name: str, live_module_name: str, builtins_ns=builtins) -> dict:
     text = path.read_text(encoding="utf-8")
     ns: dict = {
         "__name__": module_name,
         "__file__": str(SRC_DIR / f"{live_module_name}.py"),
-        "__builtins__": builtins,
+        "__builtins__": builtins_ns,
         "__frozen_path__": str(path),
     }
     code = compile(text, str(path), "exec")
@@ -1275,13 +1510,33 @@ def load_legacy(sha: str | None = None) -> LegacyBundle:
     path, short = legacy_paths(sha)
     if not path.exists():
         raise FileNotFoundError(f"{path} missing; run freeze_legacy.py --sha {sha}")
-    ns = _exec_frozen(path, f"parity_legacy_{short}", "translator_gui")
+    manifest = _read_manifest(path)
+    # frozen mixin modules first: frozen code importing them must get the frozen copies
+    mixins, frozen_builtins = _load_frozen_mixins(short, manifest)
+    ns = _exec_frozen(path, f"parity_legacy_{short}", "translator_gui", frozen_builtins)
     manifest = ns["FREEZE_MANIFEST"]
     externals = {}
     for module in manifest["externals"]:
         ext_path = LEGACY_DIR / f"legacy_{short}__{module}.py"
-        externals[module] = _exec_frozen(ext_path, f"parity_legacy_{short}__{module}", module)
-    return LegacyBundle(sha=manifest["sha"], path=path, namespace=ns, externals=externals, manifest=manifest)
+        externals[module] = _exec_frozen(ext_path, f"parity_legacy_{short}__{module}", module, frozen_builtins)
+    return LegacyBundle(sha=manifest["sha"], path=path, namespace=ns, externals=externals, manifest=manifest,
+                        mixins=mixins)
+
+
+def _read_manifest(path: Path) -> dict:
+    """``FREEZE_MANIFEST`` literal of a frozen file, without executing it."""
+    text = path.read_text(encoding="utf-8")
+    end = text.find("\n# ---- frozen imports")  # the manifest is emitted right before the imports
+    try:
+        tree = ast.parse(text[:end] if end > 0 else text, filename=str(path))
+    except SyntaxError:
+        tree = ast.parse(text, filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "FREEZE_MANIFEST" for t in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise KeyError(f"FREEZE_MANIFEST not found in {path}")
 
 
 def main(argv=None) -> int:
@@ -1300,6 +1555,9 @@ def main(argv=None) -> int:
     print(f"  runtime globals (live fallback): {sorted(m['runtime_globals'])}")
     print(f"  recorded GUI methods: {m['recorded_methods']}")
     print(f"  externals: {', '.join(m['external_files'])}")
+    frozen_mixins = m.get("frozen_mixins") or {}
+    if frozen_mixins:
+        print(f"  frozen shared mixins: {', '.join(i['file'] for i in frozen_mixins.values())}")
     if m["missing"]:
         print(f"  MISSING: {m['missing']}")
     unresolved = bundle.namespace.get("__runtime_unresolved__", [])

@@ -91,6 +91,44 @@ def sandbox_base_dir() -> Path:
     return Path(tempfile.gettempdir()).resolve() / "glossarion_parity_sandbox"
 
 
+_SANDBOX_LOCKS: dict = {}
+
+
+def hold_sandbox_lock(base) -> None:
+    """Hold an exclusive cross-process lock on *base* until this process exits.
+
+    Every capture of a scenario/entry uses the same fixed sandbox path, so two test
+    processes capturing at once (e.g. test_shared_core_p1 and test_headless_owner in a
+    parallel suite run) would delete each other's sandboxes mid-run. The first capture
+    in a process waits for the lock; the OS releases it when the process ends.
+    """
+    base = Path(base)
+    key = os.path.normcase(str(base.resolve()))
+    if key in _SANDBOX_LOCKS:
+        return
+    base.mkdir(parents=True, exist_ok=True)
+    handle = open(base / ".capture.lock", "a+b")
+    deadline = time.monotonic() + 900  # never wait forever (e.g. a capturing child of a holder)
+    while True:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.monotonic() > deadline:
+                print(f"[parity] sandbox lock {base} still busy after 15 min; continuing", file=sys.__stderr__)
+                break
+            time.sleep(0.5)
+    _SANDBOX_LOCKS[key] = handle
+
+
 def _safe_name(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", str(text)) or "x"
 
@@ -294,11 +332,14 @@ class CaptureContext:
     """One scenario x entry run in a fresh sandbox with deterministic process state."""
 
     def __init__(self, scenario: dict, entry: str, *, record_checkpoints: bool = False,
-                 base_dir: str | None = None):
+                 base_dir: str | None = None, backend: bool = True):
         self.scenario = scenario
         self.entry = entry
         self.record_checkpoints = record_checkpoints
         self._base_dir = base_dir
+        #: False = no backend preimport / UnifiedClient recorder / backend stubs (toy harness
+        #: self-tests in test_parity_tiers.py run without the desktop import closure).
+        self.backend = backend
         self.recorder = fakes.CallRecorder()
         self.backend_calls: list = []
         self.checkpoints: list = []
@@ -383,10 +424,12 @@ class CaptureContext:
 
     # -- lifecycle ---------------------------------------------------------
     def __enter__(self):
-        preimport_backend_modules()
+        if self.backend:
+            preimport_backend_modules()
         # Deterministic sandbox location: some desktop helpers hash absolute
         # paths (e.g. subtitle work dirs), so the root must not be random.
         base = Path(self._base_dir) if self._base_dir else sandbox_base_dir()
+        hold_sandbox_lock(base)
         root = (base / _safe_name(self.scenario.get("name", "scenario")) / _safe_name(self.entry)).resolve()
         if root.exists():
             shutil.rmtree(root, ignore_errors=True)
@@ -420,11 +463,12 @@ class CaptureContext:
         self.patch(time, "time", lambda: FIXED_TIME)
         self.patch(uuid, "uuid4", self._fixed_uuid4)
         self.patch(tempfile, "tempdir", str(self.sandbox.tmp))
-        self.patch_module_attr(
-            "unified_api_client", "UnifiedClient", fakes.make_recording_unified_client(self.recorder)
-        )
-        for module_name, attr in MODULE_BACKEND_STUBS:
-            self.patch_module_attr(module_name, attr, self._make_backend_stub(f"{module_name}.{attr}"))
+        if self.backend:
+            self.patch_module_attr(
+                "unified_api_client", "UnifiedClient", fakes.make_recording_unified_client(self.recorder)
+            )
+            for module_name, attr in MODULE_BACKEND_STUBS:
+                self.patch_module_attr(module_name, attr, self._make_backend_stub(f"{module_name}.{attr}"))
         self._stdout = io.StringIO()
         self.patch(sys, "stdout", self._stdout)
         return self

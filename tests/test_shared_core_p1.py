@@ -89,7 +89,12 @@ def legacy_source(relpath: str) -> str:
                 check=True, capture_output=True,
             ).stdout
         except Exception as exc:  # pragma: no cover - environment dependent
-            pytest.skip(f"git show {BASE_SHA}:{relpath} unavailable: {exc}")
+            message = f"git show {BASE_SHA}:{relpath} unavailable: {exc}"
+            if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+                # CI checks out full history (fetch-depth: 0); skipping there would
+                # silently drop the desktop-parity checks of the U1 moves
+                pytest.fail(message + " (CI must fetch the base commit)")
+            pytest.skip(message)
         _LEGACY_CACHE[relpath] = data.decode("utf-8-sig").replace("\r\n", "\n")
     return _LEGACY_CACHE[relpath]
 
@@ -279,8 +284,11 @@ def test_key_pools_is_the_verbatim_get_environment_variables_section():
     assert len(new_env_try) == len(new_mem_try) == 1
     assert dump(new_env_try[0]) == dump(renamed(env_try))
     assert dump(new_mem_try[0]) == dump(renamed(mem_try))
-    # the desktop builder now delegates (and no longer contains the section)
-    method = class_method(current_tree("translator_gui"), "TranslatorGUI", "_get_environment_variables")
+    # the desktop builder now delegates (and no longer contains the section); U2 moved the
+    # builder itself to run_env.RunEnvMixin, which TranslatorGUI inherits
+    from _src_corpus import find_method
+
+    method = find_method("_get_environment_variables")
     text = ast.unparse(method)
     assert "apply_key_pools_to_runtime(self.config)" in text
     assert "set_in_memory_multi_keys" not in text and "USE_MULTI_KEYS" not in text
@@ -354,9 +362,13 @@ def test_prompt_default_values_are_unchanged(key):
     assert len(assigns) == 1
     legacy_value = ast.literal_eval(assigns[0].value)
     assert getattr(prompt_defaults, _PROMPT_CONSTANTS[key]) == legacy_value
-    # translator_gui assigns the constant to the same attribute in the same method
-    new_method = class_method(current_tree("translator_gui"), "TranslatorGUI", method_name)
-    new_assigns = [ast.unparse(s) for s in new_method.body if isinstance(s, ast.Assign)
+    # translator_gui assigns the constant to the same attribute in the same method (U2: the
+    # __init__ default-prompt block is ConfigStateMixin._init_default_prompt_profiles and
+    # _init_default_prompts moved to ConfigStateMixin; both are resolved through the corpus)
+    from _src_corpus import find_method, init_statements
+
+    new_body = init_statements() if method_name == "__init__" else find_method(method_name).body
+    new_assigns = [ast.unparse(s) for s in new_body if isinstance(s, ast.Assign)
                    and any(ast.unparse(t) == f"self.{attr}" for t in s.targets)]
     assert new_assigns == [f"self.{attr} = {_PROMPT_CONSTANTS[key]}"]
 
@@ -629,8 +641,14 @@ def test_sanitize_config_prompts_matches_legacy(tmp_path, case):
         "broken_dict": {"prompt_profiles": {"a": {"prompt": broken}}},
         "clean": {"prompt_profiles": {"a": "ok"}},
     }
+    from _src_corpus import find_method_with_owner, module_source
+
     legacy_node = class_method(legacy_tree("src/translator_gui.py"), "TranslatorGUI", "_sanitize_config_prompts")
-    new_node = class_method(current_tree("translator_gui"), "TranslatorGUI", "_sanitize_config_prompts")
+    # U2: the method moved to owner_state.ConfigStateMixin; its config.json write is the
+    # TranslatorGUI _hook_persist_sanitized_config override (the original code)
+    new_module, _cls, new_node = find_method_with_owner("_sanitize_config_prompts")
+    hook_module, _hcls, hook_node = find_method_with_owner("_hook_persist_sanitized_config")
+    assert (new_module, hook_module) == ("owner_state", "translator_gui")
     results = []
     for label, node, extra in (("old", legacy_node, {}),
                                ("new", new_node, {"sanitize_prompt_profiles": prompt_defaults.sanitize_prompt_profiles})):
@@ -638,9 +656,12 @@ def test_sanitize_config_prompts_matches_legacy(tmp_path, case):
         config_file.parent.mkdir()
         ns = {"_atomic_json_write": app_paths._atomic_json_write, "CONFIG_FILE": str(config_file), **extra}
         src = segment(legacy_source("src/translator_gui.py") if label == "old"
-                      else (SRC / "translator_gui.py").read_text(encoding="utf-8-sig").replace("\r\n", "\n"), node)
+                      else module_source(new_module), node)
         exec(src, ns)
         owner = types.SimpleNamespace(config=copy.deepcopy(configs[case]))
+        if label == "new":
+            exec(segment(module_source(hook_module), hook_node), ns)
+            owner._hook_persist_sanitized_config = lambda updates, _o=owner: ns["_hook_persist_sanitized_config"](_o, updates)
         buf = io.StringIO()
         with redirect_stdout(buf):
             ns["_sanitize_config_prompts"](owner)
@@ -964,7 +985,14 @@ def parity(tmp_path_factory):
     for name, module in (("load_config", "config_store"), ("save_config_file", "config_store"),
                          ("apply_key_pools_to_runtime", "key_pools"), ("_get_app_dir", "app_paths"),
                          ("sanitize_prompt_profiles", "prompt_defaults")):
-        assert imports.get(name) == f"from {module} import {name}", (name, imports.get(name))
+        if name in imports:
+            assert imports[name] == f"from {module} import {name}", (name, imports.get(name))
+        else:
+            # U2: the code using it moved to a shared mixin module, which imports it directly
+            from _src_corpus import module_source
+
+            assert any(f"from {module} import" in module_source(m) and name in module_source(m)
+                       for m in ("run_env", "owner_state", "settings_persistence")), name
 
     base_new = fakes.make_legacy_owner_factory(new_bundle)
 

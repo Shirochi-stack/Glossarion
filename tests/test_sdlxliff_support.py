@@ -7,6 +7,7 @@ import sys
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from _src_corpus import desktop_gui_source
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -195,7 +196,7 @@ def test_multipass_refinement_filter_uses_numbered_special_skip_predicate():
 
 
 def test_full_with_raw_mode_and_full_tab_are_exposed():
-    gui_source = (SRC / "translator_gui.py").read_text(encoding="utf-8")
+    gui_source = desktop_gui_source()
     worker_source = (SRC / "TransateKRtoEN.py").read_text(encoding="utf-8")
 
     assert '"full_with_raw"' in gui_source
@@ -636,7 +637,7 @@ def test_html_sdlxliff_sidecar_respects_output_toggle(tmp_path, monkeypatch):
 
 
 def test_sdlxliff_prompt_profile_is_bootstrapped_and_mirrored():
-    gui_source = (SRC / "translator_gui.py").read_text(encoding="utf-8")
+    gui_source = desktop_gui_source()
     app_source = (SRC / "app.py").read_text(encoding="utf-8")
     discord_source = (SRC / "discord_bot.py").read_text(encoding="utf-8")
 
@@ -660,7 +661,7 @@ def test_sdlxliff_prompt_profile_is_bootstrapped_and_mirrored():
 
 def test_sdlxliff_and_empty_attribute_settings_are_single_global_toggles():
     settings_source = (SRC / "other_settings.py").read_text(encoding="utf-8")
-    gui_source = (SRC / "translator_gui.py").read_text(encoding="utf-8")
+    gui_source = desktop_gui_source()
 
     assert "Fix Empty Attribute Tags (BeautifulSoup) - LLM Token Fix" not in settings_source
     assert settings_source.count("Fix Empty Attribute Tags (Extraction) - LLM Token Fix") == 1
@@ -3437,14 +3438,17 @@ def test_retranslation_show_model_info_defaults_on_but_respects_saved_false():
     assert mixin._get_retranslation_show_model_info_state() is False
 
 
-def test_dynamic_request_splitting_defaults_off():
+def test_dynamic_request_splitting_defaults_off(tmp_path, monkeypatch):
+    import settings_schema
+    from _headless_env import run_envs
+
     glossary_gui = (SRC / "GlossaryManager_GUI.py").read_text(encoding="utf-8")
-    translator_gui = (SRC / "translator_gui.py").read_text(encoding="utf-8")
+    translator_gui = desktop_gui_source()
     async_processor = (SRC / "async_api_processor.py").read_text(encoding="utf-8")
     txt_extractor = (SRC / "extract_glossary_from_txt.py").read_text(encoding="utf-8")
     epub_extractor = (SRC / "extract_glossary_from_epub.py").read_text(encoding="utf-8")
     glossary_manager = (SRC / "GlossaryManager.py").read_text(encoding="utf-8")
-    android_screen = (SRC / "android" / "extract_glossary_screen.py").read_text(encoding="utf-8")
+    schema_data = (SRC / "settings_schema_data.py").read_text(encoding="utf-8")
 
     assert "config.get('glossary_enable_chapter_split', False)" in glossary_gui
     assert "glossary_enable_chapter_split_checkbox.setChecked(False)" in glossary_gui
@@ -3455,7 +3459,15 @@ def test_dynamic_request_splitting_defaults_off():
     assert 'os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "0") == "1"' in txt_extractor
     assert 'os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "0") == "1"' in epub_extractor
     assert 'os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "0") == "1"' in glossary_manager
-    assert 'cfg.get("glossary_enable_chapter_split", False)' in android_screen
+    # The mobile settings schema (generated from the desktop) shows it off, and the mobile
+    # owner (HeadlessOwner running the desktop env code) exports it off on a fresh install.
+    assert settings_schema.spec("glossary_enable_chapter_split").default is False
+    assert settings_schema.effective_default("glossary_enable_chapter_split") is False
+    fresh = run_envs(tmp_path / "fresh", monkeypatch, {})
+    enabled = run_envs(tmp_path / "enabled", monkeypatch, {"glossary_enable_chapter_split": True})
+    for site in ("translation", "glossary"):
+        assert fresh[site]["GLOSSARY_ENABLE_CHAPTER_SPLIT"] == "0", site
+        assert enabled[site]["GLOSSARY_ENABLE_CHAPTER_SPLIT"] == "1", site
 
     combined = "\n".join([
         glossary_gui,
@@ -3464,7 +3476,7 @@ def test_dynamic_request_splitting_defaults_off():
         txt_extractor,
         epub_extractor,
         glossary_manager,
-        android_screen,
+        schema_data,
     ])
     assert "glossary_enable_chapter_split', True" not in combined
     assert 'glossary_enable_chapter_split", True' not in combined

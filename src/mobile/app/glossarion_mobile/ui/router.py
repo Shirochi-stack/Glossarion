@@ -88,7 +88,8 @@ _PATTERNS: dict[str, str] = {
     "cid": r"\d{1,12}|s[0-9a-fA-F]{8}(?:-?[0-9a-fA-F]{4}){3}-?[0-9a-fA-F]{12}|s[0-9a-fA-F]{8,32}",
     "id": r"[A-Za-z0-9_-]{1,64}",
     "slug": r"[a-z0-9_-]{1,64}",
-    "section": r"[a-z0-9_]{1,64}",
+    # settings_schema section ids are dotted ("other.anti_duplicate.core"); no empty segments
+    "section": r"(?=[a-z0-9_.]{1,64}\Z)[a-z0-9_]+(?:\.[a-z0-9_]+)*",
     "key": r"[A-Za-z0-9_.-]{1,96}",
     "token": r"[A-Za-z0-9_-]{1,64}",
     "group": r"[a-z_]{1,32}",
@@ -225,6 +226,8 @@ ROUTES: tuple[RouteSpec, ...] = (
     _settings_page("backup", "Backup & restore", "U2"),
     _settings_page("import", "Import from desktop", "U2"),
     _settings_page("logs", "Logs & diagnostics", "U1"),
+    # Diagnostic: the env the next translation run would get (HeadlessOwner + run_env), redacted.
+    RouteSpec("settings.env_preview", "/settings/logs/env", "Env preview", VIEW, "U2", parent="settings.logs"),
     _settings_page("updates", "Updates", "U9"),
     _settings_page("about", "About", "U2"),
     _settings_page("danger", "Danger zone", "U2"),

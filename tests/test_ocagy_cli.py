@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+from _src_corpus import desktop_gui_source
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
@@ -1748,7 +1749,7 @@ def test_explicit_unknown_finish_reason_is_not_treated_as_missing(
 
 
 def test_translation_environment_exports_disable_empty_safety_toggle():
-    gui_source = (SRC / "translator_gui.py").read_text(encoding="utf-8")
+    gui_source = desktop_gui_source()
     environment_builder = gui_source.split(
         "    def _get_environment_variables(self, epub_path, api_key):",
         1,
@@ -1756,8 +1757,9 @@ def test_translation_environment_exports_disable_empty_safety_toggle():
 
     assert "'DISABLE_EMPTY_SAFETY_HEURISTIC':" in environment_builder
 
+    # U2: the glossary run builds env_updates in the split-out _build_glossary_extraction_env
     glossary_environment_builder = gui_source.split(
-        "    def _extract_glossary_from_text_file(self, file_path, force_balanced_request_merging=False):",
+        "    def _build_glossary_extraction_env(",
         1,
     )[1].split("\n    def ", 1)[0]
 

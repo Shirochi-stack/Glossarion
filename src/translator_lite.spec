@@ -281,6 +281,15 @@ app_files = [
     ('key_pools.py', '.'),
     ('output_naming.py', '.'),
     ('pdf_mupdf_html.py', '.'),
+    # Mobile rewrite U2: owner state/env/persistence mixins, HeadlessOwner, settings schema
+    ('owner_state.py', '.'),
+    ('run_env.py', '.'),
+    ('settings_persistence.py', '.'),
+    ('headless_owner.py', '.'),
+    ('settings_schema.py', '.'),
+    ('settings_schema_data.py', '.'),
+    # GUI-free Library registry + source-EPUB resolver (epub_library re-exports it)
+    ('library_core.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -434,6 +443,15 @@ app_modules = [
     'key_pools',
     'output_naming',
     'pdf_mupdf_html',
+    # Mobile rewrite U2: owner state/env/persistence mixins, HeadlessOwner, settings schema
+    'owner_state',
+    'run_env',
+    'settings_persistence',
+    'headless_owner',
+    'settings_schema',
+    'settings_schema_data',
+    # GUI-free Library registry + source-EPUB resolver (epub_library re-exports it)
+    'library_core',
 ]
 # GUI Framework
 gui_modules = [

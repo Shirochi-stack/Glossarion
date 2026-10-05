@@ -1,6 +1,7 @@
 import json
 import time
 from pathlib import Path
+from _src_corpus import desktop_gui_source
 
 import fitz
 from bs4 import BeautifulSoup
@@ -1017,9 +1018,7 @@ def test_pdf_output_rapid_workspace_toggle_defaults_on_and_reaches_worker():
     settings_source = (root / "src" / "other_settings.py").read_text(
         encoding="utf-8"
     )
-    gui_source = (root / "src" / "translator_gui.py").read_text(
-        encoding="utf-8"
-    )
+    gui_source = desktop_gui_source()
     converter_source = (root / "src" / "epub_converter.py").read_text(
         encoding="utf-8"
     )

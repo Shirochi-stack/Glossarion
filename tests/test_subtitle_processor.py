@@ -5,6 +5,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from _src_corpus import desktop_gui_source
 
 from subtitle_processor import (
     DEFAULT_SUBTITLE_TRANSLATION_PROMPT,
@@ -1356,9 +1357,7 @@ def test_subtitle_watchdog_keeps_source_filename():
 
 
 def test_zip_selection_has_explicit_automatic_glossary_cleanup():
-    gui_source = (
-        Path(__file__).resolve().parents[1] / "src" / "translator_gui.py"
-    ).read_text(encoding="utf-8")
+    gui_source = desktop_gui_source()
     helper_start = gui_source.index(
         "def _clear_automatic_glossary_for_non_epub_selection"
     )
@@ -1541,7 +1540,7 @@ def test_preextracted_fallback_only_runs_when_gui_glossary_is_missing():
 def test_glossary_log_uses_gui_manual_or_auto_mapping_source():
     source_root = Path(__file__).resolve().parents[1] / "src"
     backend = (source_root / "TransateKRtoEN.py").read_text(encoding="utf-8")
-    gui = (source_root / "translator_gui.py").read_text(encoding="utf-8")
+    gui = desktop_gui_source()
 
     assert "Using {_glossary_mapping_label} glossary from:" in backend
     assert "'GLOSSARY_MAPPING_SOURCE': glossary_mapping_source" in gui
@@ -1568,7 +1567,7 @@ def test_subtitle_glossary_phase_log_reports_preextraction_not_skipping():
 
 def test_subtitle_prompt_profile_is_built_in_and_mirrored():
     source_root = Path(__file__).resolve().parents[1] / "src"
-    gui_source = (source_root / "translator_gui.py").read_text(encoding="utf-8")
+    gui_source = desktop_gui_source()
     app_source = (source_root / "app.py").read_text(encoding="utf-8")
     discord_source = (source_root / "discord_bot.py").read_text(encoding="utf-8")
 
@@ -1695,7 +1694,7 @@ def test_glossary_editor_collapses_zip_members_and_tracks_archive_switch(
 
 def test_subtitle_glossary_refresh_paths_are_wired_without_qt_imports():
     source_root = Path(__file__).resolve().parents[1] / "src"
-    gui_source = (source_root / "translator_gui.py").read_text(encoding="utf-8")
+    gui_source = desktop_gui_source()
     manager_source = (source_root / "GlossaryManager_GUI.py").read_text(
         encoding="utf-8"
     )
@@ -2587,9 +2586,7 @@ def test_direct_text_scroll_boundary_moves_render_window():
 
 
 def test_direct_text_settings_tab_uses_vertical_scroll_area():
-    gui_source = (
-        Path(__file__).resolve().parents[1] / "src" / "translator_gui.py"
-    ).read_text(encoding="utf-8")
+    gui_source = desktop_gui_source()
     settings_start = gui_source.index("self.settings_tab = QWidget()")
     settings_end = gui_source.index(
         'self.tabs.addTab(self.settings_tab, "Settings")',
@@ -2610,9 +2607,7 @@ def test_direct_text_settings_tab_uses_vertical_scroll_area():
 
 
 def test_direct_text_bookmark_popup_sizes_to_visible_rows_before_scrolling():
-    gui_source = (
-        Path(__file__).resolve().parents[1] / "src" / "translator_gui.py"
-    ).read_text(encoding="utf-8")
+    gui_source = desktop_gui_source()
     preview_start = gui_source.index(
         "def _show_message_bookmark_preview"
     )
@@ -2691,7 +2686,7 @@ def test_force_retranslation_routes_complete_subtitle_bundle_before_multifile(
 
 def test_subtitle_zip_grouping_is_exported_to_translation_backend():
     source_root = Path(__file__).resolve().parents[1] / "src"
-    gui_source = (source_root / "translator_gui.py").read_text(encoding="utf-8")
+    gui_source = desktop_gui_source()
     backend_source = (source_root / "TransateKRtoEN.py").read_text(encoding="utf-8")
 
     assert "'SUBTITLE_OUTPUT_GROUP_DIR'" in gui_source

@@ -15,6 +15,10 @@ jobs:
     
     steps:
     - uses: actions/checkout@v4
+      with:
+        # Full history: the desktop-parity tests (test_shared_core_p1 / test_headless_owner and
+        # tests/parity) read `git show <base sha>:src/...` and fail in CI when it is missing.
+        fetch-depth: 0
     
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -73,7 +77,9 @@ jobs:
           tests/test_mobile_compat_patches_api.py \
           tests/test_mobile_compat_patches_manga.py \
           tests/test_pdf_mupdf_html.py \
-          tests/test_shared_core_p1.py
+          tests/test_shared_core_p1.py \
+          tests/test_headless_owner.py \
+          tests/test_settings_schema.py
 
     - name: Import hygiene of the shared GUI-free modules (PySide6 blocked)
       run: |
@@ -88,6 +94,9 @@ jobs:
         SHARED = (
             "mobile_runtime", "pdf_mupdf_html", "app_paths", "config_store", "prompt_defaults",
             "metadata_defaults", "ollama_settings", "key_pools", "output_naming",
+            # U2: owner state/env/persistence mixins, HeadlessOwner, settings schema
+            "owner_state", "run_env", "settings_persistence", "headless_owner", "settings_schema",
+            "settings_schema_data", "library_core",
         )
         failed = []
         for name in SHARED:
@@ -96,7 +105,7 @@ jobs:
             except Exception as exc:
                 failed.append(f"{name}: {type(exc).__name__}: {exc}")
             else:
-                print(f"ok    {name:18} {module.__file__}")
+                print(f"ok    {name:20} {module.__file__}")
         for line in failed:
             print(f"FAIL  {line}")
         sys.exit(1 if failed else 0)
